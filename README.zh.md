@@ -1,5 +1,7 @@
 # HotKey
 
+[**English**](README.md)
+
 HotKey — 基于 [HeavyKeeper](https://github.com/go-kratos/aegis) 算法的 Top-K 热点 Key 检测 & Caffeine/Redis 多级缓存自动预热 Spring Boot Starter（低精度版本）
 
 

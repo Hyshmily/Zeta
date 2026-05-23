@@ -1,5 +1,7 @@
 # HotKey
 
+[**中文版**](README.zh.md)
+
 HotKey — [HeavyKeeper](https://github.com/go-kratos/aegis) top-k hot key detection & Caffeine/Redis multi-level cache auto-warming Spring Boot Starter (low-precision version)
 
 > [!Important]
