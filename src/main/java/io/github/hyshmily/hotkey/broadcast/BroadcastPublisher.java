@@ -38,6 +38,8 @@ public class BroadcastPublisher implements HotKeyBroadcaster {
       .build();
   }
 
+  // 基础校验 CacheKey
+  // Basic validation of cache key
   private Optional<String> validateCacheKey(String redisHashKey, String fieldKey) {
     if (redisHashKey == null || redisHashKey.isBlank() || fieldKey == null || fieldKey.isBlank()) {
       log.warn("Invalid args: hk={}, fk={}", redisHashKey, fieldKey);

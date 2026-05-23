@@ -1,8 +1,10 @@
 package io.github.hyshmily.hotkey;
 
 import jakarta.validation.constraints.Min;
+import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+@Data
 @ConfigurationProperties(prefix = "hotkey")
 public class HotKeyProperties {
 
@@ -15,28 +17,4 @@ public class HotKeyProperties {
   private int localCacheMaxSize = 1000;
   private int localCacheTtlMinutes = 5;
   private int decayPeriod = 20;
-
-  public int getTopK() { return topK; }
-  public void setTopK(int topK) { this.topK = topK; }
-
-  public int getWidth() { return width; }
-  public void setWidth(int width) { this.width = width; }
-
-  public int getDepth() { return depth; }
-  public void setDepth(int depth) { this.depth = depth; }
-
-  public double getDecay() { return decay; }
-  public void setDecay(double decay) { this.decay = decay; }
-
-  public int getMinCount() { return minCount; }
-  public void setMinCount(int minCount) { this.minCount = minCount; }
-
-  public int getLocalCacheMaxSize() { return localCacheMaxSize; }
-  public void setLocalCacheMaxSize(int localCacheMaxSize) { this.localCacheMaxSize = localCacheMaxSize; }
-
-  public int getLocalCacheTtlMinutes() { return localCacheTtlMinutes; }
-  public void setLocalCacheTtlMinutes(int localCacheTtlMinutes) { this.localCacheTtlMinutes = localCacheTtlMinutes; }
-
-  public int getDecayPeriod() { return decayPeriod; }
-  public void setDecayPeriod(int decayPeriod) { this.decayPeriod = decayPeriod; }
 }

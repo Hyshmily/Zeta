@@ -37,10 +37,14 @@ public class HotKeyCache {
     return redisHashKey + ":" + fieldKey;
   }
 
+  // 穿透 Caffeine、Redis，返回 null（可接受以便于查询 DataBase）
+  // Penetrate Caffeine and Redis, return null (acceptable for DB fallback)
   public Object get(String redisHashKey, String fieldKey) {
     String cacheKey = cacheKey(redisHashKey, fieldKey);
 
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
+      // 1. 查 Caffeine L1 缓存
+      // 1. Check Caffeine L1 cache
       .map(value -> {
         log.debug("Caffeine L1 hit: key={}", cacheKey);
         AddResult result = hotKeyDetector.add(cacheKey, 1);
@@ -51,6 +55,8 @@ public class HotKeyCache {
         return value;
       })
       .orElseGet(() -> {
+        // 2. 查 Redis L2
+        // 2. Check Redis L2
         Object redisValue = redisTemplate.opsForHash().get(redisHashKey, fieldKey);
 
         return Optional.ofNullable(redisValue)
@@ -58,7 +64,10 @@ public class HotKeyCache {
             AddResult addResult = hotKeyDetector.add(cacheKey, 1);
             if (addResult.isHotKey()) {
               caffeineCache.put(cacheKey, value);
-              broadcaster.ifPresent(p -> p.broadcastHotKey(redisHashKey, fieldKey));
+      broadcaster.ifPresentOrElse(
+        p -> p.broadcastHotKey(redisHashKey, fieldKey),
+        () -> log.debug("No broadcast publisher found,please enable Broadcast ")
+      );
               log.debug("HotKey detected and added to local caffeine cache: {}", cacheKey);
             }
             return redisValue;
@@ -75,7 +84,12 @@ public class HotKeyCache {
     runAfterCommit(() -> {
       redisTemplate.opsForHash().put(redisHashKey, fieldKey, value);
       caffeineCache.put(cacheKey, value);
-      broadcaster.ifPresent(p -> p.broadcastHotKey(redisHashKey, fieldKey));
+      // 需要开启 Broadcast 才会有广播功能
+      // Broadcast requires the Broadcast module to be enabled
+      broadcaster.ifPresentOrElse(
+        p -> p.broadcastHotKey(redisHashKey, fieldKey),
+        () -> log.debug("No broadcast publisher found,please enable Broadcast ")
+      );
     });
   }
 

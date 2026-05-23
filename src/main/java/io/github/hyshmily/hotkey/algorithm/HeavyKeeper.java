@@ -23,6 +23,9 @@ public class HeavyKeeper implements TopK {
   private final int minCount;
 
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount) {
+    if (k <= 0) {
+      throw new IllegalArgumentException("topK must be greater than 0, but got: " + k);
+    }
     this.k = k;
     this.width = width;
     this.depth = depth;
@@ -48,11 +51,15 @@ public class HeavyKeeper implements TopK {
   @Override
   @SuppressWarnings("ResultOfMethodCallIgnored")
   public AddResult add(String key, int increment) {
+    // 使用 Guava Murmur3_32 计算指纹（固定种子，保证相同 key 得到相同指纹）
+    // Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key -> same fingerprint)
     long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
     int maxCount = 0;
 
     Bucket[] touched = new Bucket[depth];
     for (int i = 0; i < depth; i++) {
+      // 每行使用不同种子计算桶索引，增加分散性
+      // Each row uses a different seed for bucket index to improve dispersion
       int bucketIndex = Math.abs((int) (itemFingerprint ^ (i * 0x9e3779b97f4a7c15L))) % width;
       Bucket bucket = buckets[i][bucketIndex];
       touched[i] = bucket;
@@ -66,6 +73,8 @@ public class HeavyKeeper implements TopK {
           bucket.count += increment;
           maxCount = Math.max(maxCount, bucket.count);
         } else {
+          // 冲突衰减
+          // Conflict decay
           for (int j = 0; j < increment; j++) {
             double decayProb = (bucket.count < LOOKUP_TABLE_SIZE)
               ? lookupTable[bucket.count]
@@ -103,6 +112,8 @@ public class HeavyKeeper implements TopK {
       }
       maxCount = actualMax;
 
+      // 判断当前 key 是否可以进入堆
+      // Determine whether the current key can enter the heap
       if (minHeap.size() < k || maxCount >= Objects.requireNonNull(minHeap.peek()).count) {
         Node newNode = new Node(key, maxCount);
         if (minHeap.size() >= k) {
