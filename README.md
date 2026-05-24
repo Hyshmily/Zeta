@@ -23,7 +23,7 @@ HotKey — [HeavyKeeper](https://github.com/go-kratos/aegis) top-k hot key detec
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey-spring-boot-starter</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
 </dependency>
 ```
 
@@ -50,18 +50,66 @@ hotkey:
 
 ### 3. Use
 
+> **Note:** v1.0.2 introduces a **breaking change** — `get(hk, fk)` and `putAndBroadcast(hk, fk, val)` are removed. The library is now decoupled from `RedisTemplate`; callers supply their own read/write callbacks via `Supplier<T>` / `Runnable`.
+
+**A. Pure local cache (no L2)**
+
 ```java
 @Autowired
 private HotKeyCache hotKeyCache;
 
-public Object getData(String hashKey, String fieldKey) {
-    return hotKeyCache.get(hashKey, fieldKey);
-}
+Optional<String> r = hotKeyCache.get("user:123"); // Caffeine L1 + hot key detection only
+```
 
-public void updateData(String hashKey, String fieldKey, Object value) {
-    // update database...
-    hotKeyCache.putAndBroadcast(hashKey, fieldKey, value);
+Calls `get(cacheKey, () -> null)` — returns `Optional.empty()` if L1 miss, skips secondary storage entirely.
+
+**B. Two-level cache (Redis or any backend)**
+
+```java
+@Autowired
+private HotKeyCache hotKeyCache;
+@Autowired
+private RedisTemplate<String, Object> redisTemplate;
+
+Optional<String> r = hotKeyCache.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+
+hotKeyCache.putAndBroadcast("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
+```
+
+**C. Database fallback**
+
+```java
+Optional<String> r = hotKeyCache.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+if (r.isEmpty()) {
+    String value = userService.getById(123);   // DB fallback
+    redisTemplate.opsForValue().set("user:123", value);
 }
+```
+
+**D. Helper bean to avoid repetitive lambdas**
+
+```java
+@Component
+public class RedisHotKeyHelper {
+    @Autowired private HotKeyCache hotKeyCache;
+    @Autowired private RedisTemplate<String, Object> redisTemplate;
+
+    public <T> Optional<T> get(String key) {
+        return hotKeyCache.get(key, () -> redisTemplate.opsForValue().get(key));
+    }
+
+    public void set(String key, Object value) {
+        hotKeyCache.putAndBroadcast(key, value, () -> redisTemplate.opsForValue().set(key, value));
+    }
+}
+```
+
+**E. Custom L2 (non-Redis)**
+
+```java
+// Use MySQL, remote API, or any data source as L2
+Optional<User> r = hotKeyCache.get("user:123", () -> userMapper.selectById(123));
+User user = r.orElseGet(() -> createDefaultUser());
 ```
 
 ### 4. With broadcast (multi-instance)
@@ -74,41 +122,30 @@ hotkey:
 
 Broadcast mode synchronizes hot keys across all instances via RabbitMQ fanout.
 
-### 5. Advanced
-
-`hotKeyCache.get()` returns `Object` — cast to your expected type:
-
-```java
-String value = (String) hotKeyCache.get(hashKey, fieldKey);
-```
-
-If `null` is returned, both Caffeine and Redis were missed (value does not exist in Redis). You can use this to trigger a database fallback, though this logic is **not yet implemented** (pending). It is left for the user to handle. Future versions will provide richer result types.
-
-
 ## Architecture
 
-The request flow: Caffeine L1 → Redis L2 → HeavyKeeper detection:
+The request flow: Caffeine L1 → L2 (pluggable) → HeavyKeeper detection:
 
 ```
 ┌──────────────┐   Caffeine hit?    ┌──────────────┐
 │   Request    │ ────────────────→  │  Caffeine L1 │
 │              │ ←────────────────  │   (local)    │
-└──────┬───────┘   return value     └──────┬───────┘
+└──────┬───────┘   Optional.of(v)   └──────┬───────┘
        │ Caffeine miss?                     │ Hot key?
        ↓                                   ↓
 ┌──────────────┐                   ┌───────────────┐
-│   Redis L2   │                   │ HeavyKeeper   │
-│  (global)    │                   │   Detector    │
+│  L2 Storage  │                   │ HeavyKeeper   │
+│  (pluggable) │                   │   Detector    │
 └──┬───────┬───┘                   └──────┬────────┘
-   │ hit   │ null (TODO)                  │ promoted?
+   │ hit   │ L2/Source null                │ promoted?
    ↓       ↓                               ↓
-refresh   return null ───→ DB fallback    Caffeine.put
-cache                                       + broadcast
+Optional   Optional.empty() ───→ DB        Caffeine.put
+.of(value)   r.isEmpty()      fallback     + broadcast
 ```
 
 Write path (user-initiated):
-`hotKeyCache.putAndBroadcast(redisHashKey, fieldKey, value)`
-├─ Redis Hash write
+`hotKeyCache.putAndBroadcast(cacheKey, value, writer)`
+├─ `writer.run()` — L2 write (caller-supplied Runnable)
 ├─ Caffeine local cache update
 └─ RabbitMQ fanout broadcast (if enabled)
 

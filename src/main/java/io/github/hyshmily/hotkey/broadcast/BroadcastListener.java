@@ -3,26 +3,27 @@ package io.github.hyshmily.hotkey.broadcast;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import org.springframework.data.redis.core.RedisTemplate;
 
 public class BroadcastListener {
 
   private static final Logger log = LoggerFactory.getLogger(BroadcastListener.class);
 
   private final Cache<String, Object> caffeineCache;
-  private final RedisTemplate<String, Object> redisTemplate;
+  private final Function<String, Object> redisLoader;
 
   public BroadcastListener(
     Cache<String, Object> caffeineCache,
-    RedisTemplate<String, Object> redisTemplate
+    Function<String, Object> redisLoader
   ) {
     this.caffeineCache = caffeineCache;
-    this.redisTemplate = redisTemplate;
+    this.redisLoader = redisLoader;
   }
 
   @RabbitListener(queues = "#{@broadcastProperties.queueName}", ackMode = "MANUAL")
@@ -38,21 +39,31 @@ public class BroadcastListener {
   }
 
   private void processBroadcast(Message msg) {
-    String redisHashKey = msg.getMessageProperties().getHeader("hk");
-    String fieldKey = msg.getMessageProperties().getHeader("fk");
-    String cacheKey = redisHashKey + ":" + fieldKey;
+    byte[] body = msg.getBody();
+    if (body == null || body.length == 0) {
+      log.warn("Received broadcast message with empty body");
+      return;
+    }
+    String cacheKey = new String(body, StandardCharsets.UTF_8);
+    String type = msg.getMessageProperties().getHeader("type");
 
-    Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).ifPresentOrElse(
-      _ -> log.debug("HotKey broadcast message skipped: local caffeine cache already exists: {}", cacheKey),
-      () -> {
-        Object value = redisTemplate.opsForHash().get(redisHashKey, fieldKey);
-        if (value != null) {
-          caffeineCache.put(cacheKey, value);
-          log.debug("HotKey broadcast loaded into local caffeine cache: {}", cacheKey);
-        } else {
-          log.warn("The broadcast HotKey does not exist in Redis: {}", cacheKey);
-        }
-      }
+    if (BroadcastPublisher.TYPE_INVALIDATE.equals(type)) {
+      caffeineCache.invalidate(cacheKey);
+      log.debug("HotKey invalidated by broadcast: {}", cacheKey);
+      return;
+    }
+
+    if (caffeineCache.getIfPresent(cacheKey) != null) {
+      log.debug("HotKey broadcast skipped: local caffeine cache already exists: {}", cacheKey);
+      return;
+    }
+
+    Optional.ofNullable(redisLoader.apply(cacheKey)).ifPresentOrElse(
+      value -> {
+        caffeineCache.put(cacheKey, value);
+        log.debug("HotKey broadcast loaded into local caffeine cache: {}", cacheKey);
+      },
+      () -> log.warn("The broadcast HotKey does not exist in Redis: {}", cacheKey)
     );
   }
 }

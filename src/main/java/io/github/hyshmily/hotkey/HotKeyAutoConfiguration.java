@@ -4,14 +4,11 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @AutoConfiguration
@@ -40,20 +37,4 @@ public class HotKeyAutoConfiguration {
       .build();
   }
 
-  @AutoConfiguration(after = HotKeyAutoConfiguration.class)
-  @ConditionalOnClass(RedisTemplate.class)
-  @EnableConfigurationProperties(HotKeyProperties.class)
-  public static class HotKeyRedisAutoConfiguration {
-
-    @Bean
-    @ConditionalOnMissingBean
-    public HotKeyCache hotKeyCache(
-      TopK hotKeyDetector,
-      Cache<String, Object> hotLocalCache,
-      RedisTemplate<String, Object> redisTemplate,
-      Optional<HotKeyBroadcaster> broadcaster
-    ) {
-      return new HotKeyCache(hotKeyDetector, hotLocalCache, redisTemplate, broadcaster);
-    }
-  }
 }

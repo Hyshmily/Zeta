@@ -1,8 +1,7 @@
 io\github\hyshmily\hotkey\algorithm\Item.class
 io\github\hyshmily\hotkey\HotKeyCache.class
-io\github\hyshmily\hotkey\HotKeyBroadcaster.class
 io\github\hyshmily\hotkey\algorithm\HeavyKeeper.class
-io\github\hyshmily\hotkey\HotKeyAutoConfiguration$HotKeyRedisAutoConfiguration.class
+io\github\hyshmily\hotkey\HotKeyRedisAutoConfiguration.class
 io\github\hyshmily\hotkey\broadcast\BroadcastPublisher.class
 io\github\hyshmily\hotkey\algorithm\HeavyKeeper$Bucket.class
 io\github\hyshmily\hotkey\HotKeyProperties.class

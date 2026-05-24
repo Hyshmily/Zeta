@@ -3,8 +3,8 @@ package io.github.hyshmily.hotkey.algorithm;
 import com.google.common.hash.Hashing;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -44,7 +44,7 @@ public class HeavyKeeper implements TopK {
     }
 
     this.minHeap = new PriorityQueue<>(Comparator.comparingInt(n -> n.count));
-    this.expelledQueue = new LinkedBlockingQueue<>();
+    this.expelledQueue = new ArrayBlockingQueue<>(10_000);
     this.total = new AtomicLong(0);
   }
 
@@ -55,8 +55,8 @@ public class HeavyKeeper implements TopK {
     // Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key -> same fingerprint)
     long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
     int maxCount = 0;
-
     Bucket[] touched = new Bucket[depth];
+
     for (int i = 0; i < depth; i++) {
       // 每行使用不同种子计算桶索引，增加分散性
       // Each row uses a different seed for bucket index to improve dispersion
@@ -95,6 +95,14 @@ public class HeavyKeeper implements TopK {
 
     total.addAndGet(increment);
 
+    int actualMax = 0;
+    for (int i = 0; i < depth; i++) {
+      synchronized (touched[i]) {
+        actualMax = Math.max(actualMax, touched[i].count);
+      }
+    }
+    maxCount = actualMax;
+
     if (maxCount < minCount) {
       return new AddResult(null, false, key);
     }
@@ -104,16 +112,6 @@ public class HeavyKeeper implements TopK {
       boolean isHot = false;
       String expelled = null;
 
-      int actualMax = 0;
-      for (int i = 0; i < depth; i++) {
-        synchronized (touched[i]) {
-          actualMax = Math.max(actualMax, touched[i].count);
-        }
-      }
-      maxCount = actualMax;
-
-      // 判断当前 key 是否可以进入堆
-      // Determine whether the current key can enter the heap
       if (minHeap.size() < k || maxCount >= Objects.requireNonNull(minHeap.peek()).count) {
         Node newNode = new Node(key, maxCount);
         if (minHeap.size() >= k) {

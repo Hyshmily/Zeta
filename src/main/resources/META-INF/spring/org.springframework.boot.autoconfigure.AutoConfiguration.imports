@@ -1,2 +1,3 @@
 io.github.hyshmily.hotkey.HotKeyAutoConfiguration
+io.github.hyshmily.hotkey.HotKeyRedisAutoConfiguration
 io.github.hyshmily.hotkey.broadcast.HotKeyBroadcastAutoConfiguration

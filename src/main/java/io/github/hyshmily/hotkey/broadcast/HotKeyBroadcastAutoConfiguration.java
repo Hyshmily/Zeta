@@ -55,6 +55,6 @@ public class HotKeyBroadcastAutoConfiguration {
     Cache<String, Object> hotLocalCache,
     RedisTemplate<String, Object> redisTemplate
   ) {
-    return new BroadcastListener(hotLocalCache, redisTemplate);
+    return new BroadcastListener(hotLocalCache, key -> redisTemplate.opsForValue().get(key));
   }
 }

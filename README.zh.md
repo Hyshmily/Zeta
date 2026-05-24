@@ -23,7 +23,7 @@ HotKey — 基于 [HeavyKeeper](https://github.com/go-kratos/aegis) 算法的 To
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey-spring-boot-starter</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.2</version>
 </dependency>
 ```
 
@@ -50,18 +50,66 @@ hotkey:
 
 ### 3. 使用
 
+> **注意：** v1.0.2 包含**破坏性变更** — `get(hk, fk)` 和 `putAndBroadcast(hk, fk, val)` 已移除。库已与 `RedisTemplate` 解耦，调用方通过 `Supplier<T>` / `Runnable` 自行提供读写回调。
+
+**A. 纯本地缓存（无二级存储）**
+
 ```java
 @Autowired
 private HotKeyCache hotKeyCache;
 
-public Object getData(String hashKey, String fieldKey) {
-    return hotKeyCache.get(hashKey, fieldKey);
-}
+Optional<String> r = hotKeyCache.get("user:123"); // 仅 Caffeine L1 + 热点检测
+```
 
-public void updateData(String hashKey, String fieldKey, Object value) {
-    // update database...
-    hotKeyCache.putAndBroadcast(hashKey, fieldKey, value);
+等价于 `get(cacheKey, () -> null)`，L1 未命中返回 `Optional.empty()`，完全跳过二级存储。
+
+**B. 两级缓存（Redis 或任意后端）**
+
+```java
+@Autowired
+private HotKeyCache hotKeyCache;
+@Autowired
+private RedisTemplate<String, Object> redisTemplate;
+
+Optional<String> r = hotKeyCache.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+
+hotKeyCache.putAndBroadcast("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
+```
+
+**C. 数据库兜底**
+
+```java
+Optional<String> r = hotKeyCache.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+if (r.isEmpty()) {
+    String value = userService.getById(123);   // DB 回退
+    redisTemplate.opsForValue().set("user:123", value);
 }
+```
+
+**D. 封装 Helper 避免重复 lambda**
+
+```java
+@Component
+public class RedisHotKeyHelper {
+    @Autowired private HotKeyCache hotKeyCache;
+    @Autowired private RedisTemplate<String, Object> redisTemplate;
+
+    public <T> Optional<T> get(String key) {
+        return hotKeyCache.get(key, () -> redisTemplate.opsForValue().get(key));
+    }
+
+    public void set(String key, Object value) {
+        hotKeyCache.putAndBroadcast(key, value, () -> redisTemplate.opsForValue().set(key, value));
+    }
+}
+```
+
+**E. 自定义二级存储（非 Redis）**
+
+```java
+// 使用 MySQL、远程 API 或任意数据源作为 L2
+Optional<User> r = hotKeyCache.get("user:123", () -> userMapper.selectById(123));
+User user = r.orElseGet(() -> createDefaultUser());
 ```
 
 ### 4. 启用广播（多实例）
@@ -74,41 +122,31 @@ hotkey:
 
 广播模式通过 RabbitMQ fanout 在所有实例间同步热点 key。
 
-### 5. 高级
-
-hotKeyCache.get返回类型为Object，用户可自行转换为具体类型：
-
-```java
-String value = (String) hotKeyCache.get(hashKey, fieldKey);
-```
-
-目前可通过null值判断是否击穿caffeine和Redis两级缓存以扩展业务的数据库回退操作,此逻辑尚未在库中实现（待完善），需用户自行处理。后续会增加更丰富的返回结果以区分不同情况。
-
-
 
 ## 架构
 
-请求流程：Caffeine L1 → Redis L2 → HeavyKeeper 检测：
+请求流程：Caffeine L1 → L2（可插拔）→ HeavyKeeper 检测：
 
 ```
 ┌──────────────┐   Caffeine 命中?   ┌──────────────┐
 │   Request    │ ────────────────→  │  Caffeine L1 │
 │              │ ←────────────────  │   (本地)     │
-└──────┬───────┘   返回值           └──────┬───────┘
+└──────┬───────┘   Optional.of(v)   └──────┬───────┘
        │ Caffeine 未命中?                   │ Hot key?
        ↓                                   ↓
 ┌──────────────┐                   ┌───────────────┐
-│   Redis L2   │                   │ HeavyKeeper   │
-│   (全局)     │                   │   检测器      │
+│  L2 Storage  │                   │ HeavyKeeper   │
+│  (可插拔)    │                   │   检测器      │
 └──┬───────┬───┘                   └──────┬────────┘
-   │ 找到值 │ null (待完善)                │ 被提升?
+   │ 找到值 │ L2/Source null               │ 被提升?
    ↓       ↓                               ↓
-刷新缓存  返回null ───→ DB回退    Caffeine.put + 广播
+Optional   Optional.empty() ───→ DB        Caffeine.put
+.of(value)   r.isEmpty()      回退          + 广播
 ```
 
 写路径（用户主动调用）：
-`hotKeyCache.putAndBroadcast(redisHashKey, fieldKey, value)`
-├─ Redis Hash 写入
+`hotKeyCache.putAndBroadcast(cacheKey, value, writer)`
+├─ `writer.run()` — L2 写入（调用方传入的 Runnable）
 ├─ Caffeine 本地缓存更新
 └─ RabbitMQ fanout 广播（如启用）
 

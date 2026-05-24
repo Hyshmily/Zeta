@@ -1,13 +1,18 @@
 package io.github.hyshmily.hotkey;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.algorithm.AddResult;
+import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.broadcast.BroadcastPublisher;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -18,77 +23,65 @@ public class HotKeyCache {
 
   private final TopK hotKeyDetector;
   private final Cache<String, Object> caffeineCache;
-  private final RedisTemplate<String, Object> redisTemplate;
-  private final Optional<HotKeyBroadcaster> broadcaster;
+  private final Optional<BroadcastPublisher> broadcastPublisher;
 
   public HotKeyCache(
     TopK hotKeyDetector,
     Cache<String, Object> caffeineCache,
-    RedisTemplate<String, Object> redisTemplate,
-    Optional<HotKeyBroadcaster> broadcaster
+    Optional<BroadcastPublisher> broadcastPublisher
   ) {
     this.hotKeyDetector = hotKeyDetector;
     this.caffeineCache = caffeineCache;
-    this.redisTemplate = redisTemplate;
-    this.broadcaster = broadcaster;
+    this.broadcastPublisher = broadcastPublisher;
   }
 
-  private String cacheKey(String redisHashKey, String fieldKey) {
-    return redisHashKey + ":" + fieldKey;
+  public static boolean invalidCacheKey(String cacheKey) {
+    return cacheKey == null || cacheKey.isBlank();
   }
 
-  // 穿透 Caffeine、Redis，返回 null（可接受以便于查询 DataBase）
-  // Penetrate Caffeine and Redis, return null (acceptable for DB fallback)
-  public Object get(String redisHashKey, String fieldKey) {
-    String cacheKey = cacheKey(redisHashKey, fieldKey);
+  public <T> Optional<T> get(String cacheKey) {
+    return get(cacheKey, () -> null);
+  }
 
-    return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
-      // 1. 查 Caffeine L1 缓存
-      // 1. Check Caffeine L1 cache
+  @SuppressWarnings("unchecked")
+  public <T> Optional<T> get(String cacheKey, Supplier<T> redisReader) {
+    if (invalidCacheKey(cacheKey)) {
+      log.warn("get: invalid cacheKey");
+      return Optional.empty();
+    }
+    Optional<T> cached = Optional.ofNullable((T) caffeineCache.getIfPresent(cacheKey));
+    if (cached.isPresent()) {
+      log.debug("Caffeine L1 hit: key={}", cacheKey);
+      T val = cached.get();
+      if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
+        caffeineCache.put(cacheKey, val);
+        log.debug("HotKey access, refresh local caffeine cache: {}", cacheKey);
+      }
+      return cached;
+    }
+
+    return Optional.ofNullable(redisReader.get())
       .map(value -> {
-        log.debug("Caffeine L1 hit: key={}", cacheKey);
-        AddResult result = hotKeyDetector.add(cacheKey, 1);
-        if (result.isHotKey()) {
+        if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
           caffeineCache.put(cacheKey, value);
-          log.debug("HotKey access, refresh local caffeine cache expiration time: {}", cacheKey);
+          broadcastPublisher.ifPresent(p -> p.broadcastHotKey(cacheKey));
+          log.debug("HotKey detected and loaded into local caffeine cache: {}", cacheKey);
         }
         return value;
-      })
-      .orElseGet(() -> {
-        // 2. 查 Redis L2
-        // 2. Check Redis L2
-        Object redisValue = redisTemplate.opsForHash().get(redisHashKey, fieldKey);
-
-        return Optional.ofNullable(redisValue)
-          .map(value -> {
-            AddResult addResult = hotKeyDetector.add(cacheKey, 1);
-            if (addResult.isHotKey()) {
-              caffeineCache.put(cacheKey, value);
-      broadcaster.ifPresentOrElse(
-        p -> p.broadcastHotKey(redisHashKey, fieldKey),
-        () -> log.debug("No broadcast publisher found,please enable Broadcast ")
-      );
-              log.debug("HotKey detected and added to local caffeine cache: {}", cacheKey);
-            }
-            return redisValue;
-          })
-          .orElseGet(() -> {
-            log.debug("Caffeine L1 miss,Redis L2 miss: key={}", cacheKey);
-            return null;
-          });
       });
   }
 
-  public void putAndBroadcast(String redisHashKey, String fieldKey, Object value) {
-    String cacheKey = cacheKey(redisHashKey, fieldKey);
+  public void putAndBroadcast(String cacheKey, Object value, Runnable redisWriter) {
+    if (invalidCacheKey(cacheKey)) {
+      log.warn("putAndBroadcast: invalid cacheKey");
+      return;
+    }
     runAfterCommit(() -> {
-      redisTemplate.opsForHash().put(redisHashKey, fieldKey, value);
+      redisWriter.run();
       caffeineCache.put(cacheKey, value);
-      // 需要开启 Broadcast 才会有广播功能
-      // Broadcast requires the Broadcast module to be enabled
-      broadcaster.ifPresentOrElse(
-        p -> p.broadcastHotKey(redisHashKey, fieldKey),
-        () -> log.debug("No broadcast publisher found,please enable Broadcast ")
+      broadcastPublisher.ifPresentOrElse(
+        p -> p.invalidateHotKey(cacheKey),
+        () -> log.debug("No broadcast publisher found, please enable Broadcast")
       );
     });
   }
@@ -105,12 +98,26 @@ public class HotKeyCache {
       );
       return;
     }
-    task.run();
+    log.warn("putAndBroadcast called outside transaction, submitting to async executor");
+    CompletableFuture.runAsync(task).exceptionally(e -> {
+      log.error("Async Redis write failed after non-transactional putAndBroadcast", e);
+      return null;
+    });
   }
 
   @Scheduled(fixedDelayString = "${hotkey.decay-period:20}", timeUnit = TimeUnit.SECONDS)
   public void cleanHotKeys() {
     hotKeyDetector.fading();
     log.debug("HeavyKeeper count has decayed");
+  }
+
+  @Scheduled(fixedDelay = 60_000)
+  public void drainExpelled() {
+    List<Item> items = new ArrayList<>();
+    hotKeyDetector.expelled().drainTo(items);
+    if (!items.isEmpty()) {
+      log.info("Drained {} expelled hot keys: {}", items.size(),
+        items.stream().map(Item::key).collect(Collectors.joining(",")));
+    }
   }
 }
