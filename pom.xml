@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>io.github.hyshmily</groupId>
-    <artifactId>hotkey-spring-boot-starter</artifactId>
+    <artifactId>hotkey</artifactId>
     <version>1.0.3</version>
     <packaging>jar</packaging>
 
@@ -112,4 +112,12 @@
             <artifactId>spring-tx</artifactId>
         </dependency>
     </dependencies>
+
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub Hyshmily Apache Maven Packages</name>
+            <url>https://maven.pkg.github.com/Hyshmily/HotKey</url>
+        </repository>
+    </distributionManagement>
 </project>

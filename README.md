@@ -106,7 +106,7 @@ Soft Expire Read Path (`getWithSoftExpire`):
 ```xml
 <dependency>
     <groupId>io.github.hyshmily</groupId>
-    <artifactId>hotkey-spring-boot-starter</artifactId>
+    <artifactId>hotkey</artifactId>
     <version>1.0.3</version>
 </dependency>
 ```
