@@ -8,20 +8,25 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.RedisTemplate;
 
 @AutoConfiguration
 @ConditionalOnClass({ RabbitTemplate.class, RedisTemplate.class })
 @ConditionalOnProperty(prefix = "hotkey.broadcast", name = "enabled", havingValue = "true")
-@EnableConfigurationProperties(BroadcastProperties.class)
 public class HotKeyBroadcastAutoConfiguration {
 
   private final BroadcastProperties properties;
 
   public HotKeyBroadcastAutoConfiguration(BroadcastProperties properties) {
     this.properties = properties;
+  }
+
+  @Bean
+  @ConfigurationProperties(prefix = "hotkey.broadcast")
+  public BroadcastProperties broadcastProperties() {
+    return new BroadcastProperties();
   }
 
   @Bean

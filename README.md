@@ -114,11 +114,11 @@ Soft Expire Read Path (`getStale`):
 <dependency>
     <groupId>com.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.0.4</version>
+    <version>1.0.5</version>
 </dependency>
 ```
 
-Use a Git tag as the version (e.g. `1.0.4`). Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
+Use a Git tag as the version (e.g. `1.0.5`). Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
 
 ### 2. Configure
 

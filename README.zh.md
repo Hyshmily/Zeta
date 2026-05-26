@@ -113,11 +113,11 @@ Optional   Optional.empty()        │ total()       │ ← 公开方法
 <dependency>
     <groupId>com.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.0.4</version>
+    <version>1.0.5</version>
 </dependency>
 ```
 
-版本号使用 Git tag（例如 `1.0.4`）。Redis 和 RabbitMQ 依赖均为可选——仅在使用对应功能时才需引入。
+版本号使用 Git tag（例如 `1.0.5`）。Redis 和 RabbitMQ 依赖均为可选——仅在使用对应功能时才需引入。
 
 ### 2. 配置
 
