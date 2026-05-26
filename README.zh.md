@@ -98,6 +98,30 @@ Optional   Optional.empty()        │ total()       │ ← 公开方法
            (参见上方正常读路径)
 ```
 
+## 降级
+
+HotKey 通过 `supplier` 回调形成三级降级链路：
+
+```
+hotKey.get(key, supplier)
+  ├─ L1(Caffeine) 命中 → 直接返回
+  ├─ L1 未命中 → supplier()
+  │    ├─ 返回数据 → 热 key？ → 写 L1 + 返回
+  │    ├─ 返回 null → Optional.empty() → 调用方 orElseGet/orElseThrow
+  │    └─ 抛出异常 → loadSingleflight 捕获 → Optional.empty() → 调用方兜底
+  └─ HotKey 自身异常 → 跳过 L1，直接调用 supplier
+```
+
+各组件故障表现：
+
+| 故障组件 | 影响 | 恢复方式 |
+|---------|------|---------|
+| HotKey 自身 | 跳过 L1，回退到 supplier | 应用重启 |
+| L2 后端 (Redis/DB/API) | 每次请求穿透到调用方兜底 | 后端恢复后自动恢复 |
+| L1 Caffeine OOM / 驱逐 | 单 key 被驱逐，下次读取重新回源 | 自动（Caffeine 内部） |
+
+> 调用方始终需要处理 `Optional.empty()` — HotKey 不会隐藏后端故障。
+
 ## 快速开始
 
 ### 1. 添加依赖（JitPack）

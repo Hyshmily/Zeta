@@ -99,6 +99,30 @@ Soft Expire Read Path (`getStale`):
            (see Normal Read Path above)
 ```
 
+## Degradation
+
+HotKey forms a three-level degradation chain through the `supplier` callback:
+
+```
+hotKey.get(key, supplier)
+  ├─ L1(Caffeine) HIT → return directly
+  ├─ L1 MISS → supplier()
+  │    ├─ Returns data → hot key? → write L1 + return
+  │    ├─ Returns null → Optional.empty() → caller's orElseGet/orElseThrow
+  │    └─ Throws → loadSingleflight catches → Optional.empty() → caller's fallback
+  └─ HotKey itself throws → skip L1, supplier called directly
+```
+
+Component failure behavior:
+
+| Failed component | Impact | Recovery |
+|-----------------|--------|----------|
+| HotKey itself | Skips L1, falls through to supplier directly | Restart app |
+| L2 backend (Redis/DB/API) | Every request hits caller's fallback | Auto-recover on backend restoration |
+| L1 Caffeine OOM / eviction | Individual keys evicted, next read re-fetches via supplier | Automatic (Caffeine internal) |
+
+> The caller is always responsible for handling `Optional.empty()` — HotKey never hides backend failures.
+
 ## Quick Start
 
 ### 1. Add dependency (JitPack)
