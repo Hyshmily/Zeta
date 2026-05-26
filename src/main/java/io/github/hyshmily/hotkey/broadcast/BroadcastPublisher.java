@@ -2,8 +2,8 @@ package io.github.hyshmily.hotkey.broadcast;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import static io.github.hyshmily.hotkey.HotKeyCache.invalidCacheKey;
-import static io.github.hyshmily.hotkey.HotKeyCache.invalidTypeKey;
+import static io.github.hyshmily.hotkey.hotkeycache.HotKeyCache.invalidCacheKey;
+import static io.github.hyshmily.hotkey.hotkeycache.HotKeyCache.invalidTypeKey;
 import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_HOT;
 import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_INVALIDATE;
 

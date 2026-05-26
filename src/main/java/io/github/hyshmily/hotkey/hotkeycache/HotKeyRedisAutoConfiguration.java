@@ -1,4 +1,4 @@
-package io.github.hyshmily.hotkey;
+package io.github.hyshmily.hotkey.hotkeycache;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.algorithm.TopK;
@@ -6,6 +6,7 @@ import io.github.hyshmily.hotkey.broadcast.BroadcastPublisher;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.Optional;
+
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;

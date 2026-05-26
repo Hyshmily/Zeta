@@ -13,7 +13,7 @@ Most local cache solutions store every accessed key in Caffeine. This works fine
 
 HotKey takes a different approach — **cache only the hot keys.**
 
-It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant) to probabilistically detect access frequency. Only keys that enter the Top-K set are promoted into the local Caffeine L1, and optionally synchronized across instances via RabbitMQ fanout. Non-hot key reads are delegated back to the caller via `Supplier<T>` / `Function<String, Object>` — the framework makes no assumption about your data source.
+It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant) to probabilistically detect access frequency. Only keys that enter the Top-K set are promoted into the local Caffeine L1, and optionally synchronized across instances via RabbitMQ fanout. Non-hot key reads are delegated back to the caller via `Supplier<T>` — the framework makes no assumption about your data source.
 
 ### When to use
 
@@ -37,7 +37,7 @@ It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch va
   > **Note:** Ensure `hotkey.inflight-ttl-seconds` exceeds the slowest Redis response time for your workload, or the cache entry may expire before the future completes, causing duplicate Redis reads.
   > Also ensure `hotkey.inflight-timeout-seconds` < `hotkey.inflight-ttl-seconds`. On timeout, `loadSingleflight` returns `Optional.empty()` — the caller should handle via DB fallback.
 - **Soft Expire** — return stale L1 value immediately while asynchronously refreshing in the background; lower p99 at the cost of short-lived staleness
-- **Redis Collections** — `writeInvalidate` for List/Set/ZSet incremental writes; no `writeThrough` needed
+- **Redis Collections** — `putInvalidate` for List/Set/ZSet incremental writes; no `putThrough` needed
 - **Hot Key Broadcast** — optional RabbitMQ fanout to synchronize hot keys across instances
 - **Configurable Thread Pool** — dedicated `TaskExecutor` with bounded queue
 - **Spring Boot Auto-Configuration** — drop-in dependency, zero boilerplate
@@ -69,18 +69,18 @@ Optional   Optional.empty()        │ total()       │ ← public
 ```
 
 Write path (user-initiated):
-`hotKeyCache.writeThrough(cacheKey, value, writer)`
+`putThrough(cacheKey, value, writer)`
 ├─ `writer.run()` — L2 write (caller-supplied Runnable)
 ├─ Caffeine local cache update
 └─ RabbitMQ fanout broadcast (if enabled)
 
 For incremental collection mutations (LPUSH, SADD, ZADD):
-`hotKeyCache.writeInvalidate(cacheKey, mutation)`
+`putInvalidate(cacheKey, mutation)`
 ├─ `mutation.run()` — L2 write (caller-supplied Runnable)
 ├─ Caffeine local cache **invalidate** (next read re-fetches)
 └─ RabbitMQ fanout broadcast (if enabled)
 
-Soft Expire Read Path (`getWithStale`):
+Soft Expire Read Path (`getStale`):
 
 ```
          ┌──────────────┐   L1 hit ┌───────────────┐
@@ -101,17 +101,24 @@ Soft Expire Read Path (`getWithStale`):
 
 ## Quick Start
 
-### 1. Add dependency
+### 1. Add dependency (JitPack)
 
 ```xml
+<repositories>
+    <repository>
+        <id>jitpack.io</id>
+        <url>https://jitpack.io</url>
+    </repository>
+</repositories>
+
 <dependency>
-    <groupId>io.github.hyshmily</groupId>
+    <groupId>com.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.0.3</version>
+    <version>1.0.4</version>
 </dependency>
 ```
 
-Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
+Use a Git tag as the version (e.g. `1.0.4`). Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
 
 ### 2. Configure
 
@@ -124,7 +131,6 @@ hotkey:
   min-count: 10
   local-cache-max-size: 1000
   local-cache-ttl-minutes: 5
-  decay-period: 20
   broadcast:
     enabled: false
     exchange-name: hotkey.broadcast.exchange
@@ -140,9 +146,9 @@ hotkey:
 
 ```java
 @Autowired
-private HotKeyCache hotKeyCache;
+private HotKey hotKey;
 
-Optional<String> r = hotKeyCache.peek("user:123"); // Caffeine L1 + hot key detection only
+Optional<String> r = hotKey.peek("user:123"); // Caffeine L1 + hot key detection only
 ```
 
 Calls `peek(cacheKey)` — returns `Optional.empty()` if L1 miss, skips secondary storage entirely.
@@ -151,19 +157,19 @@ Calls `peek(cacheKey)` — returns `Optional.empty()` if L1 miss, skips secondar
 
 ```java
 @Autowired
-private HotKeyCache hotKeyCache;
+private HotKey hotKey;
 @Autowired
 private RedisTemplate<String, Object> redisTemplate;
 
-Optional<String> r = hotKeyCache.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-hotKeyCache.writeThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
+hotKey.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 ```
 
 **C. Database fallback**
 
 ```java
-Optional<String> r = hotKeyCache.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 if (r.isEmpty()) {
     String value = userService.getById(123);   // DB fallback
     redisTemplate.opsForValue().set("user:123", value);
@@ -175,15 +181,15 @@ if (r.isEmpty()) {
 ```java
 @Component
 public class RedisHotKeyHelper {
-    @Autowired private HotKeyCache hotKeyCache;
+    @Autowired private HotKey hotKey;
     @Autowired private RedisTemplate<String, Object> redisTemplate;
 
     public <T> Optional<T> get(String key) {
-        return hotKeyCache.get(key, () -> redisTemplate.opsForValue().get(key));
+        return hotKey.get(key, () -> redisTemplate.opsForValue().get(key));
     }
 
     public void set(String key, Object value) {
-        hotKeyCache.writeThrough(key, value, () -> redisTemplate.opsForValue().set(key, value));
+        hotKey.putThrough(key, value, () -> redisTemplate.opsForValue().set(key, value));
     }
 }
 ```
@@ -192,44 +198,44 @@ public class RedisHotKeyHelper {
 
 ```java
 // Use MySQL, remote API, or any data source as L2
-Optional<User> r = hotKeyCache.get("user:123", () -> userMapper.selectById(123));
+Optional<User> r = hotKey.get("user:123", () -> userMapper.selectById(123));
 User user = r.orElseGet(() -> createDefaultUser());
 ```
 
 **F. Redis collections (List, Set, ZSet)**
 
-`writeThrough` requires the full new value for L1 update, but collection incremental operations (LPUSH, SADD, ZADD) modify only a single element — the caller cannot know the full collection state. Use `writeInvalidate` to invalidate L1 after the mutation; the next `get()` re-fetches from Redis, ensuring consistency.
+`putThrough` requires the full new value for L1 update, but collection incremental operations (LPUSH, SADD, ZADD) modify only a single element — the caller cannot know the full collection state. Use `putInvalidate` to invalidate L1 after the mutation; the next `get()` re-fetches from Redis, ensuring consistency.
 
 ```java
 @Component
 public class CollectionHotKeyCache {
-    @Autowired private HotKeyCache hotKeyCache;
+    @Autowired private HotKey hotKey;
     @Autowired private RedisTemplate<String, Object> redisTemplate;
 
     public Boolean sIsMember(String key, Object member) {
-        return hotKeyCache.get(key + "::member::" + member,
+        return hotKey.get(key + "::member::" + member,
             () -> redisTemplate.opsForSet().isMember(key, member));
     }
 
     @SuppressWarnings("unchecked")
     public Set<Object> sMembers(String key) {
-        return hotKeyCache.get(key,
+        return hotKey.get(key,
             () -> redisTemplate.opsForSet().members(key));
     }
 
     public void sAdd(String key, Object... members) {
-        hotKeyCache.writeInvalidate(key,
+        hotKey.putInvalidate(key,
             () -> redisTemplate.opsForSet().add(key, members));
     }
 
     public List<Object> lRange(String key, long start, long end) {
         String cacheKey = key + "::range::" + start + "::" + end;
-        return hotKeyCache.get(cacheKey,
+        return hotKey.get(cacheKey,
             () -> redisTemplate.opsForList().range(key, start, end));
     }
 
     public Double zScore(String key, Object member) {
-        return hotKeyCache.get(key + "::score::" + member,
+        return hotKey.get(key + "::score::" + member,
             () -> redisTemplate.opsForZSet().score(key, member));
     }
 }
@@ -240,7 +246,7 @@ public class CollectionHotKeyCache {
 Soft expire returns the stale L1 value immediately while asynchronously refreshing in the background. Use when short-lived staleness is acceptable in exchange for lower p99 latency.
 
 ```java
-Optional<String> r = hotKeyCache.getWithStale("user:123",
+Optional<String> r = hotKey.getStale("user:123",
     () -> redisTemplate.opsForValue().get("user:123"));
 // L1 hit + soft expired → returns stale value + triggers async refresh
 // L1 miss → singleflight load (same as get())
@@ -253,7 +259,20 @@ hotkey:
   refresh-concurrency: 50         # limit concurrent async refreshes
 ```
 
-### 4. With broadcast (multi-instance)
+## HotKey API Reference
+
+The recommended entry point is the `HotKey` facade (auto-configured as a Spring bean). Beyond the `get`/`peek`/`putThrough`/`putInvalidate` shown above, it exposes:
+
+| Method | Description |
+|--------|-------------|
+| `isHotKey(cacheKey)` | Check if a key is in the current Top-K hot set |
+| `invalidateAll(cacheKeys...)` | Varargs overload — invalidate multiple keys at once |
+| `invalidateAll(Collection)` | Collection overload |
+| `returnHotKeys()` | Snapshot of current Top-K entries (key + count) |
+| `returnExpelledHotKeys()` | Drain expelled hot key queue (recently evicted from Top-K) |
+| `returnTotalDataStreams()` | Total number of reads passed through HeavyKeeper |
+
+## Broadcast
 
 ```yaml
 hotkey:
@@ -263,7 +282,7 @@ hotkey:
 
 Each instance declares its own queue (`hotkey.broadcast:<pod-id>`) bound to a fanout exchange. When a hot key is promoted, the instance broadcasts the key. Peers load the value from Redis on first broadcast miss. Invalidations remove the local cache entry immediately.
 
-### 5. Monitoring (Actuator)
+## Monitoring
 
 When `spring-boot-starter-actuator` is on the classpath, the HotKey endpoint is automatically registered at `/actuator/hotkey`.
 
@@ -296,7 +315,7 @@ management:
 | `inflightSize` | Current in-flight dedup requests |
 | `recentlyExpelled` | Recently evicted keys from Top-K (up to 10) |
 
-### 6. Configuration Reference
+## Configuration Reference
 
 | Property | Default | Description |
 |---|---|---|

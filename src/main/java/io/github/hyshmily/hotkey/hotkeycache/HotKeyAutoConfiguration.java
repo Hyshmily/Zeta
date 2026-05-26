@@ -1,7 +1,8 @@
-package io.github.hyshmily.hotkey;
+package io.github.hyshmily.hotkey.hotkeycache;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import java.util.Optional;
@@ -60,6 +61,12 @@ public class HotKeyAutoConfiguration {
     executor.setThreadNamePrefix("hotkey-");
     executor.initialize();
     return executor;
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public HotKey hotKey(HotKeyCache hotKeyCache, TopK hotKeyDetector) {
+    return new HotKey(hotKeyCache, hotKeyDetector);
   }
 
   @Bean

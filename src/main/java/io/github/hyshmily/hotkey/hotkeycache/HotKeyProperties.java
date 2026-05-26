@@ -1,4 +1,4 @@
-package io.github.hyshmily.hotkey;
+package io.github.hyshmily.hotkey.hotkeycache;
 
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;

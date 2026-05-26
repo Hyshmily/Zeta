@@ -1,7 +1,6 @@
 package io.github.hyshmily.hotkey.algorithm;
 
 import com.google.common.hash.Hashing;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -53,9 +52,9 @@ public class HeavyKeeper implements TopK {
   @SuppressWarnings("ResultOfMethodCallIgnored")
   public AddResult add(String key, int increment) {
     // 使用 Guava Murmur3_32 计算指纹（固定种子，保证相同 key 得到相同指纹）
-    /**
-     * Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key ->same
-     * fingerprint)
+    /*
+      Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key ->same
+      fingerprint)
      */
     long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
     int maxCount = 0;

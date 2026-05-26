@@ -1,4 +1,4 @@
-io.github.hyshmily.hotkey.HotKeyAutoConfiguration
-io.github.hyshmily.hotkey.HotKeyRedisAutoConfiguration
+io.github.hyshmily.hotkey.hotkeycache.HotKeyAutoConfiguration
+io.github.hyshmily.hotkey.hotkeycache.HotKeyRedisAutoConfiguration
 io.github.hyshmily.hotkey.actuator.HotKeyActuatorAutoConfiguration
 io.github.hyshmily.hotkey.broadcast.HotKeyBroadcastAutoConfiguration

@@ -1,4 +1,4 @@
-package io.github.hyshmily.hotkey;
+package io.github.hyshmily.hotkey.hotkeycache;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -6,6 +6,7 @@ import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.BroadcastPublisher;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -83,8 +84,20 @@ public class HotKeyCache {
     return cacheKey == null || cacheKey.isBlank();
   }
 
+  public boolean isHotKey(String cacheKey) {
+    if (invalidCacheKey(cacheKey)) {
+      log.warn("isHotKey: invalid cacheKey");
+      return false;
+    }
+    return hotKeyDetector.list().stream().anyMatch(item -> item.key().equals(cacheKey));
+  }
+
   public <T> Optional<T> peek(String cacheKey) {
-    return get(cacheKey, () -> null);
+    if (invalidCacheKey(cacheKey)) {
+      log.warn("peek: invalid cacheKey");
+      return Optional.empty();
+    }
+    return Optional.ofNullable((T) caffeineCache.getIfPresent(cacheKey));
   }
 
   @SuppressWarnings("unchecked")
@@ -131,10 +144,43 @@ public class HotKeyCache {
 
     return loadSingleflight(cacheKey, redisReader);
   }
+  public void invalidateOrUpdate(String cacheKey) {
+      putInvalidate(cacheKey, () -> {
+        // No-op Redis mutation since we're only invalidating local cache
+      });
+  }
 
-  public void writeThrough(String cacheKey, Object value, Runnable redisWriter) {
+  public void invalidateAll(Collection<String> cacheKeys) {
+    List<String> validKeys = cacheKeys.stream()
+            .filter(k -> !invalidCacheKey(k))
+            .toList();
+    if (validKeys.isEmpty()) {
+      log.warn("invalidateAll: all cacheKeys are invalid");
+      return;
+    }
+    Runnable task = () -> {
+      caffeineCache.invalidateAll(validKeys);
+      validKeys.forEach(key ->
+              broadcastPublisher.ifPresentOrElse(
+                      p -> p.invalidateHotKey(key),
+                      () -> log.debug("No broadcast publisher found, please enable Broadcast")));
+    };
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      TransactionSynchronizationManager.registerSynchronization(
+              new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                  task.run();
+                }
+              });
+      return;
+    }
+    task.run();
+  }
+
+  public void putThrough(String cacheKey, Object value, Runnable redisWriter) {
     if (invalidCacheKey(cacheKey)) {
-      log.warn("writeThrough: invalid cacheKey");
+      log.warn("putThrough: invalid cacheKey");
       return;
     }
     runAfterCommit(() -> {
@@ -146,16 +192,16 @@ public class HotKeyCache {
     });
   }
 
-  public void writeInvalidate(String cacheKey, Runnable redisMutation) {
+  public void putInvalidate(String cacheKey, Runnable redisMutation) {
     if (invalidCacheKey(cacheKey)) {
-      log.warn("writeInvalidate: invalid cacheKey");
+      log.warn("putInvalidate: invalid cacheKey");
       return;
     }
     Runnable task = () -> {
       try {
         redisMutation.run();
       } catch (Exception e) {
-        log.error("writeInvalidate failed, skip local invalidate and broadcast: {}", cacheKey, e);
+        log.error("putInvalidate failed, skip local invalidate and broadcast: {}", cacheKey, e);
         return;
       }
       caffeineCache.invalidate(cacheKey);
@@ -239,21 +285,21 @@ public class HotKeyCache {
           });
       return;
     }
-    log.warn("writeThrough called outside transaction, submitting to async executor");
+    log.warn("putThrough called outside transaction, submitting to async executor");
     CompletableFuture.runAsync(task, hotKeyExecutor).exceptionally(e -> {
-      log.error("Async Redis write failed after non-transactional writeThrough", e);
+      log.error("Async Redis write failed after non-transactional putThrough", e);
       return null;
     });
   }
 
   @Scheduled(fixedDelayString = "${hotkey.decay-period:20}", timeUnit = TimeUnit.SECONDS)
-  public void cleanHotKeys() {
+  private void cleanHotKeys() {
     hotKeyDetector.fading();
     log.debug("HeavyKeeper count has decayed");
   }
 
   @Scheduled(fixedDelay = 60_000)
-  public void drainExpelled() {
+  private void drainExpelled() {
     List<Item> items = new ArrayList<>();
     hotKeyDetector.expelled().drainTo(items, 1000);
     if (!items.isEmpty()) {

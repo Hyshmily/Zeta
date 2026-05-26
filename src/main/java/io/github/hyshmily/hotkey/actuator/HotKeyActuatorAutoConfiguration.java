@@ -1,7 +1,7 @@
 package io.github.hyshmily.hotkey.actuator;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.HotKeyProperties;
+import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import java.util.concurrent.CompletableFuture;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
