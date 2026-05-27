@@ -25,4 +25,10 @@ public interface TopK {
   // 返回数据流总数
   // Return the total number of data streams
   long total();
+
+  // 判断 key 是否在 TopK 中
+  // Check whether the key is in the TopK set
+  default boolean contains(String key) {
+    return list().stream().anyMatch(item -> item.key().equals(key));
+  }
 }

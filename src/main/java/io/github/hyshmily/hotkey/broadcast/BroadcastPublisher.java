@@ -1,6 +1,7 @@
 package io.github.hyshmily.hotkey.broadcast;
 
-import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.*;
+import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_HOT;
+import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_INVALIDATE;
 import static io.github.hyshmily.hotkey.hotkeycache.HotKeyCache.invalidCacheKey;
 import static io.github.hyshmily.hotkey.hotkeycache.HotKeyCache.invalidTypeKey;
 
@@ -8,7 +9,6 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.annotation.PostConstruct;
 import java.nio.charset.StandardCharsets;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -52,28 +52,28 @@ public class BroadcastPublisher {
       return;
     }
     String compositeKey = type + ":" + cacheKey;
-    Long old = recentBroadcasts.asMap().putIfAbsent(compositeKey, version);
 
-    Optional.ofNullable(old)
-      .filter(existing -> existing >= version)
-      .ifPresentOrElse(
-        existing ->
-          log.info(
-            "Skip broadcast due to recent broadcast with same or newer version: cacheKey={}, type={}, existingVersion={}, newVersion={}",
-            cacheKey,
-            type,
-            existing,
-            version
-          ),
-        () -> {
-          if (old != null) {
-            recentBroadcasts.put(compositeKey, version);
+    boolean shouldSend =
+      recentBroadcasts
+        .asMap()
+        .compute(compositeKey, (_, oldVersion) -> {
+          if (oldVersion != null && oldVersion >= version) {
+            log.info(
+              "Skip broadcast due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
+              compositeKey,
+              oldVersion,
+              version
+            );
+            return oldVersion;
           }
+          return version;
+        }) ==
+      version;
 
-          Message message = buildVersionedMessage(cacheKey, type, version);
-          rabbitTemplate.send(properties.getExchangeName(), "", message);
-        }
-      );
+    if (shouldSend) {
+      Message message = buildVersionedMessage(cacheKey, type, version);
+      rabbitTemplate.send(properties.getExchangeName(), "", message);
+    }
   }
 
   private static Message buildVersionedMessage(String cacheKey, String type, long version) {

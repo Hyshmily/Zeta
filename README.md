@@ -30,13 +30,7 @@ It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch va
 > [!Important]
 > This is an experience module summarized by the author during development. Reliability and stability in production cannot be guaranteed. For a complete production-ready hot key auto-detection and higher-precision version, please refer to [hotkey](https://gitee.com/jd-platform-opensource/hotkey)
 
-## What's New in 1.0.6
-
-- **Versioned Cache Invalidation** — replaces broadcast-based invalidation with Redis INCR global version tracking. `putThrough` writes L2, updates local cache, and broadcasts with a monotonic version number. Peers compare versions before refreshing, eliminating redundant Redis loads.
-- **Exception-Safe Version Fallback** — `nextVersion()` catches Redis failures and falls back to `System.nanoTime()`, ensuring writes never block on version generation.
-- **Version Key TTL** — new `hotkey.version-key-ttl-minutes` (default 60) auto-expires Redis version keys to prevent unbounded memory growth.
-- **API Renames** — `getStale` renamed to `getRelaxed`, `putInvalidate` renamed to `putBeforeInvalidate`.
-- **`peek()` Version-Aware** — automatically unwraps `VersionedValue`, transparent to callers.
+> See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## Features
 
@@ -93,7 +87,9 @@ For incremental collection mutations (LPUSH, SADD, ZADD):
 ├─ Caffeine local cache **invalidate**
 └─ RabbitMQ fanout with version header (if enabled)
 
-Soft Expire Read Path (`getRelaxed`):
+> **Note:** Between `mutation.run()` and `caffeineCache.invalidate()` there is a ~1ms window where a concurrent `get()` may hit the L1 stale value. This is a deliberate trade-off — invalidating before the mutation would cause a worse race where `get()` re-populates L1 with old Redis data. The window is bounded to a single Redis round-trip (`nextVersion` call).
+
+Soft Expire Read Path (`getWithSoftExpire`):
 
 ```
          ┌──────────────┐   L1 hit ┌───────────────┐
@@ -152,11 +148,11 @@ Component failure behavior:
 <dependency>
     <groupId>com.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.0.6</version>
+    <version>1.0.7</version>
 </dependency>
 ```
 
-Use a Git tag as the version (e.g. `1.0.6`). Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
+Use a Git tag as the version (e.g. `1.0.7`). Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
 
 ### 2. Configure
 
@@ -284,7 +280,7 @@ public class CollectionHotKeyCache {
 Soft expire returns the stale L1 value immediately while asynchronously refreshing in the background. Use when short-lived staleness is acceptable in exchange for lower p99 latency.
 
 ```java
-Optional<String> r = hotKey.getRelaxed("user:123",
+Optional<String> r = hotKey.getWithSoftExpire("user:123",
     () -> redisTemplate.opsForValue().get("user:123"));
 // L1 hit + soft expired → returns stale value + triggers async refresh
 // L1 miss → singleflight load (same as get())
@@ -454,6 +450,11 @@ public class HotKeyConfig {
 | `hotkey.soft-expire-ttl-minutes` | `60` | Soft expire timestamp cache internal entry TTL (minutes) |
 | `hotkey.refresh-concurrency` | `100` | Max concurrent async refreshes for soft expire |
 | `hotkey.version-key-ttl-minutes` | `60` | Redis version key TTL (minutes), 0 = no expire |
+| `hotkey.local-cache-access-ttl-minutes` | `0` | Caffeine L1 access-based TTL (minutes), 0 = disabled. Supplements write-based TTL |
+| `hotkey.broadcast.concurrent-consumers` | `3` | Number of concurrent RabbitMQ consumers for broadcast queue |
+| `hotkey.broadcast.scheduler-pool-size` | `4` | Thread pool size for async broadcast jitter delay scheduling |
+| `hotkey.broadcast.warmup-jitter-ms` | `100` | Random jitter (ms) before processing broadcast messages to prevent thundering herd |
+| `hotkey.scheduling.enabled` | `true` | Enable internal scheduler for HeavyKeeper decay and expelled queue drain. Set to `false` if you use your own `@EnableScheduling` or don't need periodic decay |
 
 
 ## Modules

@@ -33,6 +33,9 @@ public class HotKeyProperties {
   @Min(1)
   private int localCacheTtlMinutes = 5;
 
+  @Min(0)
+  private int localCacheAccessTtlMinutes = 0;
+
   @Min(1)
   private int inflightMaxSize = 50_000;
 

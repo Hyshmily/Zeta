@@ -3,11 +3,19 @@ target/
 *.class
 *.jar
 *.war
+*.ear
+hs_err_pid*
+dependency-reduced-pom.xml
 
 # IDE
 .idea/
 *.iml
 .vscode/
+.classpath
+.project
+.settings/
+*.swp
+*~
 
 # OS
 .DS_Store
@@ -21,3 +29,6 @@ node_modules/
 
 # Maven wrapper
 .mvn/
+
+# Claude Code
+CLAUDE.md

@@ -8,7 +8,9 @@ import io.github.hyshmily.hotkey.algorithm.TopK;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -18,9 +20,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+@Slf4j
 @AutoConfiguration
 @EnableConfigurationProperties(HotKeyProperties.class)
-@EnableScheduling
 public class HotKeyAutoConfiguration {
 
   @Bean
@@ -37,10 +39,13 @@ public class HotKeyAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public Cache<String, Object> hotLocalCache(HotKeyProperties properties) {
-    return Caffeine.newBuilder()
+    Caffeine<Object, Object> builder = Caffeine.newBuilder()
         .maximumSize(properties.getLocalCacheMaxSize())
-        .expireAfterWrite(properties.getLocalCacheTtlMinutes(), TimeUnit.MINUTES)
-        .build();
+        .expireAfterWrite(properties.getLocalCacheTtlMinutes(), TimeUnit.MINUTES);
+    if (properties.getLocalCacheAccessTtlMinutes() > 0) {
+      builder.expireAfterAccess(properties.getLocalCacheAccessTtlMinutes(), TimeUnit.MINUTES);
+    }
+    return builder.build();
   }
 
   @Bean
@@ -60,6 +65,11 @@ public class HotKeyAutoConfiguration {
     executor.setMaxPoolSize(properties.getExecutorMaxPoolSize());
     executor.setQueueCapacity(properties.getExecutorQueueCapacity());
     executor.setThreadNamePrefix("hotkey-");
+    executor.setRejectedExecutionHandler((r, e) -> {
+      log.warn("HotKey executor task rejected: corePool={}, maxPool={}, queueCapacity={}",
+        properties.getExecutorCorePoolSize(), properties.getExecutorMaxPoolSize(), properties.getExecutorQueueCapacity());
+      throw new RejectedExecutionException("HotKey executor queue full");
+    });
     executor.initialize();
     return executor;
   }

@@ -8,7 +8,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
@@ -51,10 +50,11 @@ public class HotKeyEndpoint {
 
     info.put("inflightSize", inflightLoads.estimatedSize());
 
-    BlockingQueue<Item> expelledQueue = hotKeyDetector.expelled();
-    List<Item> expelledItems = new ArrayList<>();
-    expelledQueue.drainTo(expelledItems, 10);
-    info.put("recentlyExpelled", expelledItems.stream().map(Item::key).toList());
+    info.put("recentlyExpelled",
+      hotKeyDetector.expelled().stream()
+        .map(Item::key)
+        .limit(10)
+        .toList());
 
     return info;
   }

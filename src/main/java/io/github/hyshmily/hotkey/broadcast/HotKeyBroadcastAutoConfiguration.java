@@ -1,6 +1,8 @@
 package io.github.hyshmily.hotkey.broadcast;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -16,7 +18,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.RedisTemplate;
 
 @AutoConfiguration
-@ConditionalOnClass(name = { "org.springframework.amqp.rabbit.core.RabbitTemplate", "org.springframework.data.redis.core.RedisTemplate" })
+@ConditionalOnClass(
+  name = { "org.springframework.amqp.rabbit.core.RabbitTemplate", "org.springframework.data.redis.core.RedisTemplate" }
+)
 @ConditionalOnProperty(prefix = "hotkey.broadcast", name = "enabled", havingValue = "true")
 @EnableConfigurationProperties(BroadcastProperties.class)
 public class HotKeyBroadcastAutoConfiguration {
@@ -28,21 +32,17 @@ public class HotKeyBroadcastAutoConfiguration {
 
   @Bean
   public Queue hotkeyBroadcastQueue(BroadcastProperties properties) {
-    return QueueBuilder.durable(properties.getQueueName()).build();
+    return QueueBuilder.durable(properties.getQueueName()).withArgument("x-message-ttl", 60_000).build();
   }
 
   @Bean
-  public Binding hotkeyBroadcastBinding(
-      Queue hotkeyBroadcastQueue,
-      FanoutExchange hotkeyBroadcastExchange) {
+  public Binding hotkeyBroadcastBinding(Queue hotkeyBroadcastQueue, FanoutExchange hotkeyBroadcastExchange) {
     return BindingBuilder.bind(hotkeyBroadcastQueue).to(hotkeyBroadcastExchange);
   }
 
   @Bean
   @ConditionalOnMissingBean
-  public BroadcastPublisher broadcastPublisher(
-      RabbitTemplate rabbitTemplate,
-      BroadcastProperties properties) {
+  public BroadcastPublisher broadcastPublisher(RabbitTemplate rabbitTemplate, BroadcastProperties properties) {
     return new BroadcastPublisher(rabbitTemplate, properties);
   }
 
@@ -55,22 +55,36 @@ public class HotKeyBroadcastAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public BroadcastListener broadcastListener(
-      Cache<String, Object> hotLocalCache,
-      Function<String, Object> hotKeyRedisLoader,
-      BroadcastProperties properties) {
-    return new BroadcastListener(hotLocalCache, hotKeyRedisLoader, properties);
+    Cache<String, Object> hotLocalCache,
+    Function<String, Object> hotKeyRedisLoader,
+    BroadcastProperties properties,
+    ScheduledExecutorService hotKeyBroadcastScheduler
+  ) {
+    return new BroadcastListener(hotLocalCache, hotKeyRedisLoader, properties, hotKeyBroadcastScheduler);
   }
 
   @Bean
   public SimpleMessageListenerContainer broadcastListenerContainer(
-      ConnectionFactory connectionFactory,
-      BroadcastListener broadcastListener,
-      BroadcastProperties properties) {
+    ConnectionFactory connectionFactory,
+    BroadcastListener broadcastListener,
+    BroadcastProperties properties
+  ) {
     SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
     container.setQueueNames(properties.getQueueName());
     container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
-    container.setMessageListener((ChannelAwareMessageListener) (msg, channel) ->
-        broadcastListener.handleHotKeyMessage(channel, msg));
+    container.setConcurrentConsumers(properties.getConcurrentConsumers());
+    container.setMessageListener(
+      (ChannelAwareMessageListener) (msg, channel) -> broadcastListener.handleHotKeyMessage(channel, msg)
+    );
     return container;
+  }
+
+  @Bean(destroyMethod = "shutdown")
+  public ScheduledExecutorService hotKeyBroadcastScheduler(BroadcastProperties properties) {
+    return Executors.newScheduledThreadPool(properties.getSchedulerPoolSize(), r -> {
+      Thread t = new Thread(r, "hotkey-broadcast");
+      t.setDaemon(true);
+      return t;
+    });
   }
 }

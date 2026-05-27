@@ -2,11 +2,9 @@ package io.github.hyshmily.hotkey.hotkeycache;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.BroadcastPublisher;
 import io.github.hyshmily.hotkey.entity.VersionedValue;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -15,10 +13,9 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -111,12 +108,10 @@ public class HotKeyCache {
       log.warn("isHotKey: invalid cacheKey");
       return false;
     }
-    return hotKeyDetector
-      .list()
-      .stream()
-      .anyMatch(item -> item.key().equals(cacheKey));
+    return hotKeyDetector.contains(cacheKey);
   }
 
+  @SuppressWarnings("unchecked")
   public <T> Optional<T> peek(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
       log.warn("peek: invalid cacheKey");
@@ -138,11 +133,7 @@ public class HotKeyCache {
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
       .map(raw -> {
         T val = raw instanceof VersionedValue vv ? (T) vv.getValue() : (T) raw;
-
-        if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
-          caffeineCache.put(cacheKey, raw);
-          log.debug("HotKey access, refresh local caffeine cache: {}", cacheKey);
-        }
+        hotKeyDetector.add(cacheKey, 1);
 
         return val;
       })
@@ -150,7 +141,7 @@ public class HotKeyCache {
   }
 
   @SuppressWarnings("unchecked")
-  public <T> Optional<T> getWithStale(String cacheKey, Supplier<T> redisReader) {
+  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> redisReader) {
     if (invalidCacheKey(cacheKey)) {
       log.warn("getWithStale: invalid cacheKey");
       return Optional.empty();
@@ -169,20 +160,38 @@ public class HotKeyCache {
           triggerAsyncRefresh(cacheKey, redisReader);
         }
 
-        if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
-          caffeineCache.put(cacheKey, raw);
-          log.debug("HotKey access, refresh local caffeine cache: {}", cacheKey);
-        }
+        hotKeyDetector.add(cacheKey, 1);
 
         return cached;
       })
       .or(() -> loadSingleflight(cacheKey, redisReader));
   }
 
-  public void invalidateOrUpdate(String cacheKey) {
-    putInvalidate(cacheKey, () -> {
-      // No-op Redis mutation since we're only invalidating local cache,null
-    });
+  public void invalidate(String cacheKey) {
+    if (invalidCacheKey(cacheKey)) {
+      log.warn("invalidate: invalid cacheKey");
+      return;
+    }
+    Runnable task = () -> {
+      long version = nextVersion(cacheKey);
+      caffeineCache.invalidate(cacheKey);
+      broadcastPublisher.ifPresentOrElse(
+        p -> p.broadcastHotKeyWithVersion(cacheKey, version),
+        () -> log.debug("No broadcast publisher found, please enable Broadcast")
+      );
+    };
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      TransactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+          @Override
+          public void afterCommit() {
+            task.run();
+          }
+        }
+      );
+      return;
+    }
+    task.run();
   }
 
   public void invalidateAll(Collection<String> cacheKeys) {
@@ -217,14 +226,14 @@ public class HotKeyCache {
     task.run();
   }
 
-  public void putThrough(String cacheKey, Object value, Runnable redisWriter) {
+  public <T> void putThrough(String cacheKey, T value, Runnable redisWriter) {
     if (invalidCacheKey(cacheKey)) {
       log.warn("putThrough: invalid cacheKey");
       return;
     }
     runAfterCommit(() -> {
-      long version = nextVersion(cacheKey);
       redisWriter.run();
+      long version = nextVersion(cacheKey);
       caffeineCache.put(cacheKey, new VersionedValue(value, version));
       broadcastPublisher.ifPresentOrElse(
         p -> p.broadcastHotKeyWithVersion(cacheKey, version),
@@ -273,7 +282,12 @@ public class HotKeyCache {
       .computeIfAbsent(cacheKey, key ->
         CompletableFuture.supplyAsync(() -> (Object) redisReader.get(), hotKeyExecutor)
           .orTimeout(inflightTimeoutSeconds, TimeUnit.SECONDS)
-          .whenComplete((_, _) -> inflightLoads.invalidate(key))
+          .whenComplete((_, error) -> {
+            inflightLoads.invalidate(key);
+            if (error != null) {
+              log.warn("singleflight load failed: key={}, error={}", key, error.getMessage());
+            }
+          })
       );
 
     try {
@@ -321,12 +335,18 @@ public class HotKeyCache {
     return redisTemplate
       .map(t -> {
         try {
-          String versionKey = "hotkey:ver:" + cacheKey;
-          Long v = t.opsForValue().increment(versionKey);
-          if (v != null && versionKeyTtlMinutes > 0) {
-            t.expire(versionKey, versionKeyTtlMinutes, TimeUnit.MINUTES);
-          }
-          return v != null ? v : System.nanoTime();
+          String script =
+            "local v = redis.call('INCR', KEYS[1]) " +
+            "if tonumber(ARGV[1]) > 0 then " +
+            "    redis.call('EXPIRE', KEYS[1], ARGV[1]) " +
+            "end " +
+            "return v";
+
+          return t.execute(
+            new DefaultRedisScript<>(script, Long.class),
+            List.of("hotkey:ver:" + cacheKey),
+            String.valueOf(versionKeyTtlMinutes * 60L)
+          );
         } catch (Exception e) {
           log.warn("Redis version increment failed, fallback to nanoTime: {}", cacheKey, e);
           return System.nanoTime();
@@ -352,24 +372,5 @@ public class HotKeyCache {
       log.error("Async Redis write failed after non-transactional putThrough", e);
       return null;
     });
-  }
-
-  @Scheduled(fixedDelayString = "${hotkey.decay-period:20}", timeUnit = TimeUnit.SECONDS)
-  private void cleanHotKeys() {
-    hotKeyDetector.fading();
-    log.debug("HeavyKeeper count has decayed");
-  }
-
-  @Scheduled(fixedDelay = 60_000)
-  private void drainExpelled() {
-    List<Item> items = new ArrayList<>();
-    hotKeyDetector.expelled().drainTo(items, 1000);
-    if (!items.isEmpty()) {
-      log.info(
-        "Drained {} expelled hot keys: {}",
-        items.size(),
-        items.stream().map(Item::key).collect(Collectors.joining(","))
-      );
-    }
   }
 }
