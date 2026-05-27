@@ -19,6 +19,7 @@ public class BroadcastProperties {
   private int warmupJitterMs = 1_000;
   public static final String TYPE_INVALIDATE = "INVALIDATE";
   public static final String TYPE_HOT = "HOT";
+  public static final Long VERSIONED_HOT_KEY_DEFAULT_VERSION = 0L;
 
   public String getQueueName() {
     return queuePrefix + ":" + instanceId;

@@ -28,6 +28,14 @@ It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch va
 > [!Important]
 > This is an experience module summarized by the author during development. Reliability and stability in production cannot be guaranteed. For a complete production-ready hot key auto-detection and higher-precision version, please refer to [hotkey](https://gitee.com/jd-platform-opensource/hotkey)
 
+## What's New in 1.0.6
+
+- **Versioned Cache Invalidation** — replaces broadcast-based invalidation with Redis INCR global version tracking. `putThrough` writes L2, updates local cache, and broadcasts with a monotonic version number. Peers compare versions before refreshing, eliminating redundant Redis loads.
+- **Exception-Safe Version Fallback** — `nextVersion()` catches Redis failures and falls back to `System.nanoTime()`, ensuring writes never block on version generation.
+- **Version Key TTL** — new `hotkey.version-key-ttl-minutes` (default 60) auto-expires Redis version keys to prevent unbounded memory growth.
+- **API Renames** — `getStale` renamed to `getRelaxed`, `putInvalidate` renamed to `putBeforeInvalidate`.
+- **`peek()` Version-Aware** — automatically unwraps `VersionedValue`, transparent to callers.
+
 ## Features
 
 - **HeavyKeeper Algorithm** — probabilistic top-k detection with Count-Min Sketch + exponential conflict decay
@@ -37,7 +45,7 @@ It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch va
   > **Note:** Ensure `hotkey.inflight-ttl-seconds` exceeds the slowest Redis response time for your workload, or the cache entry may expire before the future completes, causing duplicate Redis reads.
   > Also ensure `hotkey.inflight-timeout-seconds` < `hotkey.inflight-ttl-seconds`. On timeout, `loadSingleflight` returns `Optional.empty()` — the caller should handle via DB fallback.
 - **Soft Expire** — return stale L1 value immediately while asynchronously refreshing in the background; lower p99 at the cost of short-lived staleness
-- **Redis Collections** — `putInvalidate` for List/Set/ZSet incremental writes; no `putThrough` needed
+- **Redis Collections** — `putBeforeInvalidate` for List/Set/ZSet incremental writes; no `putThrough` needed
 - **Hot Key Broadcast** — optional RabbitMQ fanout to synchronize hot keys across instances
 - **Configurable Thread Pool** — dedicated `TaskExecutor` with bounded queue
 - **Spring Boot Auto-Configuration** — drop-in dependency, zero boilerplate
@@ -48,39 +56,42 @@ It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch va
 ```
 ┌──────────────┐   L1 hit + add(key,1) ┌──────────────┐
 │   Request    │ ────────────────────→ │  Caffeine L1 │
-│              │ ←──────────────────── │   (local)    │
+│              │ ←──────────────────── │  (local)     │
 └──────┬───────┘   Optional.of(value)  └──────┬───────┘
-       │ L1 miss                              │ isHotKey()?
-       ↓ (inflight dedup)                     ↓
+       │ L1 miss           (auto unwrap       │ isHotKey()?
+       ↓ (inflight dedup)  VersionedValue)    ↓
 ┌──────────────┐   redisReader     ┌───────────────┐
 │  L2 Storage  │ ←───────────────  │     TopK      │
 │  (pluggable) │ ───────────────→  │  (interface)  │
 └──┬───────┬───┘  add(key,1)       ├───────────────┤
-   │ hit   │ null                  │ add()→Result  │ ← called on every read
-   ↓       ↓                       │ list()        │ ← public
-Optional   Optional.empty()        │ total()       │ ← public
-.of(value)   r.isEmpty() → DB      │ expelled()    │ ← internal (drainExpelled)
-                                   │ fading()      │ ← internal (cleanHotKeys)
+   │ hit   │ null                  │ add()→Result  │
+   ↓       ↓                       │ list()        │
+Optional   Optional.empty()        │ total()       │
+.of(value)   r.isEmpty() → DB      │ expelled()    │
+                                   │ fading()      │
                                    └───────┬───────┘
                                            │ isHotKey()
                                            ↓
-                                     Caffeine.put(key, value)
-                                     + broadcastHotKey(cacheKey)
+                              Caffeine.put(key,
+                                VersionedValue(value, version=0L))
+                              + broadcastHotKey with version header
 ```
 
 Write path (user-initiated):
 `putThrough(cacheKey, value, writer)`
 ├─ `writer.run()` — L2 write (caller-supplied Runnable)
-├─ Caffeine local cache update
-└─ RabbitMQ fanout broadcast (if enabled)
+├─ `nextVersion(cacheKey)` — Redis INCR → monotonic version
+├─ Caffeine.put(cacheKey, VersionedValue(value, version))
+└─ RabbitMQ fanout with version header (if enabled)
 
 For incremental collection mutations (LPUSH, SADD, ZADD):
-`putInvalidate(cacheKey, mutation)`
+`putBeforeInvalidate(cacheKey, mutation)`
 ├─ `mutation.run()` — L2 write (caller-supplied Runnable)
-├─ Caffeine local cache **invalidate** (next read re-fetches)
-└─ RabbitMQ fanout broadcast (if enabled)
+├─ `nextVersion(cacheKey)` — Redis INCR → monotonic version
+├─ Caffeine local cache **invalidate**
+└─ RabbitMQ fanout with version header (if enabled)
 
-Soft Expire Read Path (`getStale`):
+Soft Expire Read Path (`getRelaxed`):
 
 ```
          ┌──────────────┐   L1 hit ┌───────────────┐
@@ -93,10 +104,11 @@ Soft Expire Read Path (`getStale`):
            value +                     ├─ refreshLimiter.tryAcquire()
            check TopK                  └─ Async L2 → Caffeine.put
                 │                            + update softExpireAt
-                │ L1 miss (falls through to normal path)
-                ↓
-           loadSingleflight(cacheKey, redisReader)
-           (see Normal Read Path above)
+                 │ L1 miss (falls through to normal path)
+                 ↓
+            loadSingleflight(cacheKey, redisReader)
+            (see Normal Read Path above)
+            Caffeine.put(key, VersionedValue(value, 0L))
 ```
 
 ## Degradation
@@ -138,11 +150,11 @@ Component failure behavior:
 <dependency>
     <groupId>com.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.0.5</version>
+    <version>1.0.6</version>
 </dependency>
 ```
 
-Use a Git tag as the version (e.g. `1.0.5`). Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
+Use a Git tag as the version (e.g. `1.0.6`). Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
 
 ### 2. Configure
 
@@ -248,7 +260,7 @@ public class CollectionHotKeyCache {
     }
 
     public void sAdd(String key, Object... members) {
-        hotKey.putInvalidate(key,
+        hotKey.putBeforeInvalidate(key,
             () -> redisTemplate.opsForSet().add(key, members));
     }
 
@@ -270,7 +282,7 @@ public class CollectionHotKeyCache {
 Soft expire returns the stale L1 value immediately while asynchronously refreshing in the background. Use when short-lived staleness is acceptable in exchange for lower p99 latency.
 
 ```java
-Optional<String> r = hotKey.getStale("user:123",
+Optional<String> r = hotKey.getRelaxed("user:123",
     () -> redisTemplate.opsForValue().get("user:123"));
 // L1 hit + soft expired → returns stale value + triggers async refresh
 // L1 miss → singleflight load (same as get())
@@ -285,7 +297,7 @@ hotkey:
 
 ## HotKey API Reference
 
-The recommended entry point is the `HotKey` facade (auto-configured as a Spring bean). Beyond the `get`/`peek`/`putThrough`/`putInvalidate` shown above, it exposes:
+The recommended entry point is the `HotKey` facade (auto-configured as a Spring bean). Beyond the `get`/`peek`/`putThrough`/`putBeforeInvalidate` shown above, it exposes:
 
 | Method | Description |
 |--------|-------------|
@@ -367,6 +379,7 @@ management:
 | `hotkey.soft-expire-max-size` | `50000` | Soft expire timestamp cache max entries |
 | `hotkey.soft-expire-ttl-minutes` | `60` | Soft expire timestamp cache internal entry TTL (minutes) |
 | `hotkey.refresh-concurrency` | `100` | Max concurrent async refreshes for soft expire |
+| `hotkey.version-key-ttl-minutes` | `60` | Redis version key TTL (minutes), 0 = no expire |
 
 
 ## Modules

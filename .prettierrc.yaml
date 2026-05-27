@@ -1,0 +1,9 @@
+plugins:
+  - prettier-plugin-java
+  - '@prettier/plugin-xml'
+
+printWidth: 120
+
+# 可选：针对 XML 的个性化设置
+xmlWhitespaceSensitivity: ignore
+xmlQuoteAttributes: double

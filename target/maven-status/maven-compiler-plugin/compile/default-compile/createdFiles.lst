@@ -4,6 +4,7 @@ io\github\hyshmily\hotkey\actuator\HotKeyEndpoint.class
 io\github\hyshmily\hotkey\algorithm\HeavyKeeper.class
 io\github\hyshmily\hotkey\broadcast\BroadcastPublisher.class
 io\github\hyshmily\hotkey\hotkeycache\HotKeyRedisAutoConfiguration.class
+io\github\hyshmily\hotkey\entity\VersionedValue.class
 io\github\hyshmily\hotkey\algorithm\HeavyKeeper$Bucket.class
 META-INF\spring-configuration-metadata.json
 io\github\hyshmily\hotkey\broadcast\BroadcastProperties.class

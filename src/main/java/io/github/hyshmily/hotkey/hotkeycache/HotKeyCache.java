@@ -5,6 +5,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.BroadcastPublisher;
+import io.github.hyshmily.hotkey.entity.VersionedValue;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -15,60 +16,81 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+@Slf4j
 public class HotKeyCache {
-
-  private static final Logger log = LoggerFactory.getLogger(HotKeyCache.class);
 
   private final TopK hotKeyDetector;
   private final Cache<String, Object> caffeineCache;
   private final Cache<String, CompletableFuture<Object>> inflightLoads;
   private final Optional<BroadcastPublisher> broadcastPublisher;
   private final Executor hotKeyExecutor;
+  private final Optional<StringRedisTemplate> redisTemplate;
   private final int inflightTimeoutSeconds;
 
   // Soft expire
   private final Cache<String, Long> softExpireAt;
   private final long softTtlMs;
   private final Semaphore refreshLimiter;
+  private final int versionKeyTtlMinutes;
 
   public HotKeyCache(
-      TopK hotKeyDetector,
-      Cache<String, Object> caffeineCache,
-      Cache<String, CompletableFuture<Object>> inflightLoads,
-      Optional<BroadcastPublisher> broadcastPublisher,
-      Executor hotKeyExecutor) {
-    this(hotKeyDetector, caffeineCache, inflightLoads, broadcastPublisher, hotKeyExecutor, 0, 0, 0, 0, 0);
+    TopK hotKeyDetector,
+    Cache<String, Object> caffeineCache,
+    Cache<String, CompletableFuture<Object>> inflightLoads,
+    Optional<BroadcastPublisher> broadcastPublisher,
+    Executor hotKeyExecutor,
+    Optional<StringRedisTemplate> redisTemplate
+  ) {
+    this(
+      hotKeyDetector,
+      caffeineCache,
+      inflightLoads,
+      broadcastPublisher,
+      hotKeyExecutor,
+      redisTemplate,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    );
   }
 
   public HotKeyCache(
-      TopK hotKeyDetector,
-      Cache<String, Object> caffeineCache,
-      Cache<String, CompletableFuture<Object>> inflightLoads,
-      Optional<BroadcastPublisher> broadcastPublisher,
-      Executor hotKeyExecutor,
-      int inflightTimeoutSeconds,
-      long softTtlMs,
-      int refreshConcurrency,
-      int softExpireMaxSize,
-      int softExpireTtlMinutes) {
+    TopK hotKeyDetector,
+    Cache<String, Object> caffeineCache,
+    Cache<String, CompletableFuture<Object>> inflightLoads,
+    Optional<BroadcastPublisher> broadcastPublisher,
+    Executor hotKeyExecutor,
+    Optional<StringRedisTemplate> redisTemplate,
+    int inflightTimeoutSeconds,
+    long softTtlMs,
+    int refreshConcurrency,
+    int softExpireMaxSize,
+    int softExpireTtlMinutes,
+    int versionKeyTtlMinutes
+  ) {
     this.hotKeyDetector = hotKeyDetector;
     this.caffeineCache = caffeineCache;
     this.inflightLoads = inflightLoads;
     this.broadcastPublisher = broadcastPublisher;
     this.hotKeyExecutor = hotKeyExecutor;
+    this.redisTemplate = redisTemplate;
     this.inflightTimeoutSeconds = inflightTimeoutSeconds;
     this.softTtlMs = softTtlMs;
+    this.versionKeyTtlMinutes = versionKeyTtlMinutes;
     if (softTtlMs > 0) {
       this.softExpireAt = Caffeine.newBuilder()
-          .maximumSize(softExpireMaxSize > 0 ? softExpireMaxSize : 50_000)
-          .expireAfterWrite(softExpireTtlMinutes > 0 ? softExpireTtlMinutes : 60, TimeUnit.MINUTES)
-          .build();
+        .maximumSize(softExpireMaxSize > 0 ? softExpireMaxSize : 50_000)
+        .expireAfterWrite(softExpireTtlMinutes > 0 ? softExpireTtlMinutes : 60, TimeUnit.MINUTES)
+        .build();
       this.refreshLimiter = new Semaphore(refreshConcurrency > 0 ? refreshConcurrency : 100);
     } else {
       this.softExpireAt = null;
@@ -89,7 +111,10 @@ public class HotKeyCache {
       log.warn("isHotKey: invalid cacheKey");
       return false;
     }
-    return hotKeyDetector.list().stream().anyMatch(item -> item.key().equals(cacheKey));
+    return hotKeyDetector
+      .list()
+      .stream()
+      .anyMatch(item -> item.key().equals(cacheKey));
   }
 
   public <T> Optional<T> peek(String cacheKey) {
@@ -97,7 +122,10 @@ public class HotKeyCache {
       log.warn("peek: invalid cacheKey");
       return Optional.empty();
     }
-    return Optional.ofNullable((T) caffeineCache.getIfPresent(cacheKey));
+
+    return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).map(raw ->
+      raw instanceof VersionedValue vv ? (T) vv.getValue() : (T) raw
+    );
   }
 
   @SuppressWarnings("unchecked")
@@ -106,16 +134,19 @@ public class HotKeyCache {
       log.warn("get: invalid cacheKey");
       return Optional.empty();
     }
-    Optional<T> cached = Optional.ofNullable((T) caffeineCache.getIfPresent(cacheKey));
-    if (cached.isPresent()) {
-      T val = cached.get();
-      if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
-        caffeineCache.put(cacheKey, val);
-        log.debug("HotKey access, refresh local caffeine cache: {}", cacheKey);
-      }
-      return cached;
-    }
-    return loadSingleflight(cacheKey, redisReader);
+
+    return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
+      .map(raw -> {
+        T val = raw instanceof VersionedValue vv ? (T) vv.getValue() : (T) raw;
+
+        if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
+          caffeineCache.put(cacheKey, raw);
+          log.debug("HotKey access, refresh local caffeine cache: {}", cacheKey);
+        }
+
+        return val;
+      })
+      .or(() -> loadSingleflight(cacheKey, redisReader));
   }
 
   @SuppressWarnings("unchecked")
@@ -129,20 +160,23 @@ public class HotKeyCache {
       return get(cacheKey, redisReader);
     }
 
-    T cached = (T) caffeineCache.getIfPresent(cacheKey);
-    if (cached != null) {
-      Long expireAt = softExpireAt.getIfPresent(cacheKey);
-      if (expireAt == null || expireAt < System.currentTimeMillis()) {
-        triggerAsyncRefresh(cacheKey, redisReader);
-      }
-      if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
-        caffeineCache.put(cacheKey, cached);
-        log.debug("HotKey access, refresh local caffeine cache: {}", cacheKey);
-      }
-      return Optional.of(cached);
-    }
+    return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
+      .map(raw -> {
+        T cached = raw instanceof VersionedValue vv ? (T) vv.getValue() : (T) raw;
+        Long expireAt = softExpireAt.getIfPresent(cacheKey);
 
-    return loadSingleflight(cacheKey, redisReader);
+        if (expireAt == null || expireAt < System.currentTimeMillis()) {
+          triggerAsyncRefresh(cacheKey, redisReader);
+        }
+
+        if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
+          caffeineCache.put(cacheKey, raw);
+          log.debug("HotKey access, refresh local caffeine cache: {}", cacheKey);
+        }
+
+        return cached;
+      })
+      .or(() -> loadSingleflight(cacheKey, redisReader));
   }
 
   public void invalidateOrUpdate(String cacheKey) {
@@ -152,27 +186,32 @@ public class HotKeyCache {
   }
 
   public void invalidateAll(Collection<String> cacheKeys) {
-    List<String> validKeys = cacheKeys.stream()
-        .filter(k -> !invalidCacheKey(k))
-        .toList();
+    List<String> validKeys = cacheKeys
+      .stream()
+      .filter(k -> !invalidCacheKey(k))
+      .toList();
     if (validKeys.isEmpty()) {
       log.warn("invalidateAll: all cacheKeys are invalid");
       return;
     }
     Runnable task = () -> {
       caffeineCache.invalidateAll(validKeys);
-      validKeys.forEach(key -> broadcastPublisher.ifPresentOrElse(
+      validKeys.forEach(key ->
+        broadcastPublisher.ifPresentOrElse(
           p -> p.invalidateHotKey(key),
-          () -> log.debug("No broadcast publisher found, please enable Broadcast")));
+          () -> log.debug("No broadcast publisher found, please enable Broadcast")
+        )
+      );
     };
     if (TransactionSynchronizationManager.isSynchronizationActive()) {
       TransactionSynchronizationManager.registerSynchronization(
-          new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-              task.run();
-            }
-          });
+        new TransactionSynchronization() {
+          @Override
+          public void afterCommit() {
+            task.run();
+          }
+        }
+      );
       return;
     }
     task.run();
@@ -184,11 +223,13 @@ public class HotKeyCache {
       return;
     }
     runAfterCommit(() -> {
+      long version = nextVersion(cacheKey);
       redisWriter.run();
-      caffeineCache.put(cacheKey, value);
+      caffeineCache.put(cacheKey, new VersionedValue(value, version));
       broadcastPublisher.ifPresentOrElse(
-          p -> p.invalidateHotKey(cacheKey),
-          () -> log.debug("No broadcast publisher found, please enable Broadcast"));
+        p -> p.broadcastHotKeyWithVersion(cacheKey, version),
+        () -> log.debug("No broadcast publisher found, please enable Broadcast")
+      );
     });
   }
 
@@ -204,19 +245,22 @@ public class HotKeyCache {
         log.error("putInvalidate failed, skip local invalidate and broadcast: {}", cacheKey, e);
         return;
       }
+      long version = nextVersion(cacheKey);
       caffeineCache.invalidate(cacheKey);
       broadcastPublisher.ifPresentOrElse(
-          p -> p.invalidateHotKey(cacheKey),
-          () -> log.debug("No broadcast publisher found, please enable Broadcast"));
+        p -> p.broadcastHotKeyWithVersion(cacheKey, version),
+        () -> log.debug("No broadcast publisher found, please enable Broadcast")
+      );
     };
     if (TransactionSynchronizationManager.isSynchronizationActive()) {
       TransactionSynchronizationManager.registerSynchronization(
-          new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-              task.run();
-            }
-          });
+        new TransactionSynchronization() {
+          @Override
+          public void afterCommit() {
+            task.run();
+          }
+        }
+      );
       return;
     }
     task.run();
@@ -225,16 +269,17 @@ public class HotKeyCache {
   @SuppressWarnings("unchecked")
   private <T> Optional<T> loadSingleflight(String cacheKey, Supplier<T> redisReader) {
     CompletableFuture<Object> loadFuture = inflightLoads
-        .asMap()
-        .computeIfAbsent(cacheKey,
-            key -> CompletableFuture.supplyAsync(() -> (Object) redisReader.get(), hotKeyExecutor)
-                .orTimeout(inflightTimeoutSeconds, TimeUnit.SECONDS)
-                .whenComplete((_, _) -> inflightLoads.invalidate(key)));
+      .asMap()
+      .computeIfAbsent(cacheKey, key ->
+        CompletableFuture.supplyAsync(() -> (Object) redisReader.get(), hotKeyExecutor)
+          .orTimeout(inflightTimeoutSeconds, TimeUnit.SECONDS)
+          .whenComplete((_, _) -> inflightLoads.invalidate(key))
+      );
 
     try {
       return Optional.ofNullable((T) loadFuture.join()).map(value -> {
         if (hotKeyDetector.add(cacheKey, 1).isHotKey()) {
-          caffeineCache.put(cacheKey, value);
+          caffeineCache.put(cacheKey, new VersionedValue(value, 0L));
           if (softExpireAt != null) {
             softExpireAt.put(cacheKey, System.currentTimeMillis() + softTtlMs);
           }
@@ -256,33 +301,50 @@ public class HotKeyCache {
       return;
     }
 
-    CompletableFuture
-        .supplyAsync(() -> (Object) redisReader.get(), hotKeyExecutor)
-        .whenComplete((value, error) -> {
-          try {
-            if (error != null) {
-              log.warn("Async soft refresh failed: {}", cacheKey, error);
-              return;
-            }
-            if (value != null) {
-              caffeineCache.put(cacheKey, value);
-              softExpireAt.put(cacheKey, System.currentTimeMillis() + softTtlMs);
-            }
-          } finally {
-            refreshLimiter.release();
+    CompletableFuture.supplyAsync(() -> (Object) redisReader.get(), hotKeyExecutor).whenComplete((value, error) -> {
+      try {
+        if (error != null) {
+          log.warn("Async soft refresh failed: {}", cacheKey, error);
+          return;
+        }
+        if (value != null) {
+          caffeineCache.put(cacheKey, new VersionedValue(value, 0L));
+          softExpireAt.put(cacheKey, System.currentTimeMillis() + softTtlMs);
+        }
+      } finally {
+        refreshLimiter.release();
+      }
+    });
+  }
+
+  private long nextVersion(String cacheKey) {
+    return redisTemplate
+      .map(t -> {
+        try {
+          String versionKey = "hotkey:ver:" + cacheKey;
+          Long v = t.opsForValue().increment(versionKey);
+          if (v != null && versionKeyTtlMinutes > 0) {
+            t.expire(versionKey, versionKeyTtlMinutes, TimeUnit.MINUTES);
           }
-        });
+          return v != null ? v : System.nanoTime();
+        } catch (Exception e) {
+          log.warn("Redis version increment failed, fallback to nanoTime: {}", cacheKey, e);
+          return System.nanoTime();
+        }
+      })
+      .orElse(System.nanoTime());
   }
 
   private void runAfterCommit(Runnable task) {
     if (TransactionSynchronizationManager.isSynchronizationActive()) {
       TransactionSynchronizationManager.registerSynchronization(
-          new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-              task.run();
-            }
-          });
+        new TransactionSynchronization() {
+          @Override
+          public void afterCommit() {
+            task.run();
+          }
+        }
+      );
       return;
     }
     log.warn("putThrough called outside transaction, submitting to async executor");
@@ -303,8 +365,11 @@ public class HotKeyCache {
     List<Item> items = new ArrayList<>();
     hotKeyDetector.expelled().drainTo(items, 1000);
     if (!items.isEmpty()) {
-      log.info("Drained {} expelled hot keys: {}", items.size(),
-          items.stream().map(Item::key).collect(Collectors.joining(",")));
+      log.info(
+        "Drained {} expelled hot keys: {}",
+        items.size(),
+        items.stream().map(Item::key).collect(Collectors.joining(","))
+      );
     }
   }
 }

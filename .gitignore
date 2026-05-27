@@ -15,3 +15,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Node (prettier / tooling)
+node_modules/
+
+# Maven wrapper
+.mvn/

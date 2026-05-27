@@ -5,34 +5,24 @@ import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_INVAL
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
+import io.github.hyshmily.hotkey.entity.VersionedValue;
 import java.io.IOException;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 
+@Slf4j
+@RequiredArgsConstructor
 public class BroadcastListener {
-
-  private static final Logger log = LoggerFactory.getLogger(BroadcastListener.class);
 
   private final Cache<String, Object> caffeineCache;
   private final Function<String, Object> redisLoader;
   private final BroadcastProperties properties;
-
-  public BroadcastListener(
-    Cache<String, Object> caffeineCache,
-    Function<String, Object> redisLoader,
-    BroadcastProperties properties
-  ) {
-    this.caffeineCache = caffeineCache;
-    this.redisLoader = redisLoader;
-    this.properties = properties;
-  }
 
   @RabbitListener(queues = "#{@broadcastProperties.queueName}", ackMode = "MANUAL")
   public void handleHotKeyMessage(Channel channel, Message msg) throws IOException {
@@ -52,25 +42,19 @@ public class BroadcastListener {
       log.warn("Received broadcast message with empty body");
       return;
     }
-    String cacheKey = new String(body, (Charset) StandardCharsets.UTF_8);
+
+    String cacheKey = new String(body, StandardCharsets.UTF_8);
     String type = msg.getMessageProperties().getHeader("type");
 
-    if (TYPE_HOT.equals(type)) {
-      handleHotKey(cacheKey);
-      return;
-    } else if (TYPE_INVALIDATE.equals(type)) {
-      handleInvalidateCacheKey(cacheKey);
-      return;
+    switch (type) {
+      case TYPE_HOT -> {
+        Object verObj = msg.getMessageProperties().getHeader("version");
+        long version = verObj instanceof Number n ? n.longValue() : 0L;
+        handleVersionedHotKey(cacheKey, version);
+      }
+      case TYPE_INVALIDATE -> handleInvalidateCacheKey(cacheKey);
+      case null, default -> log.warn("Unknown broadcast type: {}, cacheKey: {}", type, cacheKey);
     }
-
-    floatTimeDelay();
-    Optional.ofNullable(redisLoader.apply(cacheKey)).ifPresentOrElse(
-      value -> {
-        caffeineCache.put(cacheKey, value);
-        log.debug("HotKey broadcast loaded into local caffeine cache: {}", cacheKey);
-      },
-      () -> log.warn("The broadcast HotKey does not exist in Redis: {}", cacheKey)
-    );
   }
 
   private void handleInvalidateCacheKey(String cacheKey) {
@@ -79,18 +63,20 @@ public class BroadcastListener {
     log.debug("HotKey invalidated by broadcast: {}", cacheKey);
   }
 
-  private void handleHotKey(String cacheKey) {
+  private void handleVersionedHotKey(String cacheKey, long version) {
     floatTimeDelay();
-    if (caffeineCache.getIfPresent(cacheKey) != null) {
-      log.debug("HotKey broadcast skipped: local caffeine cache already exists: {}", cacheKey);
+
+    Object existing = caffeineCache.getIfPresent(cacheKey);
+    if (existing instanceof VersionedValue vv && vv.getVersion() >= version) {
       return;
     }
+
     Optional.ofNullable(redisLoader.apply(cacheKey)).ifPresentOrElse(
       value -> {
-        caffeineCache.put(cacheKey, value);
-        log.debug("HotKey broadcast loaded into local caffeine cache: {}", cacheKey);
+        caffeineCache.put(cacheKey, new VersionedValue(value, version));
+        log.debug("Versioned broadcast loaded: {} version={}", cacheKey, version);
       },
-      () -> log.warn("The broadcast HotKey does not exist in Redis: {}", cacheKey)
+      () -> log.warn("Versioned broadcast key not in Redis: {}", cacheKey)
     );
   }
 

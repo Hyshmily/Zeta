@@ -1,36 +1,30 @@
 package io.github.hyshmily.hotkey.broadcast;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
+import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.*;
 import static io.github.hyshmily.hotkey.hotkeycache.HotKeyCache.invalidCacheKey;
 import static io.github.hyshmily.hotkey.hotkeycache.HotKeyCache.invalidTypeKey;
-import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_HOT;
-import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_INVALIDATE;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.annotation.PostConstruct;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
+@Slf4j
+@RequiredArgsConstructor
 public class BroadcastPublisher {
 
-  private static final Logger log = LoggerFactory.getLogger(BroadcastPublisher.class);
+  private static final long VERSIONED_HOT_KEY_DEFAULT_VERSION = 0L;
 
   private final RabbitTemplate rabbitTemplate;
   private final BroadcastProperties properties;
-
-  private Cache<String, Boolean> recentBroadcasts;
-
-  public BroadcastPublisher(RabbitTemplate rabbitTemplate, BroadcastProperties properties) {
-    this.rabbitTemplate = rabbitTemplate;
-    this.properties = properties;
-  }
+  private Cache<String, Long> recentBroadcasts;
 
   @PostConstruct
   public void init() {
@@ -41,42 +35,51 @@ public class BroadcastPublisher {
   }
 
   public void broadcastHotKey(String cacheKey) {
-    sendDeduped(cacheKey, TYPE_HOT);
+    sendDeduped(cacheKey, TYPE_HOT, VERSIONED_HOT_KEY_DEFAULT_VERSION);
   }
 
   public void invalidateHotKey(String cacheKey) {
-    sendDeduped(cacheKey, TYPE_INVALIDATE);
+    sendDeduped(cacheKey, TYPE_INVALIDATE, VERSIONED_HOT_KEY_DEFAULT_VERSION);
   }
 
-  private void sendDeduped(String cacheKey, String type) {
+  public void broadcastHotKeyWithVersion(String cacheKey, long version) {
+    sendDeduped(cacheKey, TYPE_HOT, version);
+  }
+
+  private void sendDeduped(String cacheKey, String type, long version) {
     if (invalidCacheKey(cacheKey) || invalidTypeKey(type)) {
       log.warn("Invalid cacheKey or type, skip broadcast: cacheKey={}, type={}", cacheKey, type);
       return;
     }
-    String compositeCacheKey = type + ":" + cacheKey;
+    String compositeKey = type + ":" + cacheKey;
+    Long old = recentBroadcasts.asMap().putIfAbsent(compositeKey, version);
 
-    Optional.ofNullable(recentBroadcasts.getIfPresent(compositeCacheKey)).ifPresentOrElse(
-      _ -> log.debug("Skip duplicate broadcast: {}", cacheKey),
-      () ->
-        Optional.ofNullable(recentBroadcasts.asMap().putIfAbsent(compositeCacheKey, Boolean.TRUE)).ifPresentOrElse(
-          _ -> log.debug("Concurrent broadcast already handled by another thread, skip: {}", cacheKey),
-          () -> {
-            try {
-              Message msg = buildMessage(cacheKey, type);
-              rabbitTemplate.send(properties.getExchangeName(), "", msg);
-              log.debug("HotKey broadcast: {} type={}", cacheKey, type);
-            } catch (Exception e) {
-              recentBroadcasts.invalidate(compositeCacheKey);
-              log.error("Failed to broadcast hot key: {}", cacheKey, e);
-            }
+    Optional.ofNullable(old)
+      .filter(existing -> existing >= version)
+      .ifPresentOrElse(
+        existing ->
+          log.info(
+            "Skip broadcast due to recent broadcast with same or newer version: cacheKey={}, type={}, existingVersion={}, newVersion={}",
+            cacheKey,
+            type,
+            existing,
+            version
+          ),
+        () -> {
+          if (old != null) {
+            recentBroadcasts.put(compositeKey, version);
           }
-        )
-    );
+
+          Message message = buildVersionedMessage(cacheKey, type, version);
+          rabbitTemplate.send(properties.getExchangeName(), "", message);
+        }
+      );
   }
 
-  private static Message buildMessage(String cacheKey, String type) {
+  private static Message buildVersionedMessage(String cacheKey, String type, long version) {
     MessageProperties props = new MessageProperties();
     props.setHeader("type", type);
-    return new Message(cacheKey.getBytes((Charset) StandardCharsets.UTF_8), props);
+    props.setHeader("version", version);
+    return new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
   }
 }

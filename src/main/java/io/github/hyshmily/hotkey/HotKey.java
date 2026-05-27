@@ -10,16 +10,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.function.Supplier;
+import lombok.RequiredArgsConstructor;
 
+@RequiredArgsConstructor
 public class HotKey {
 
     private final HotKeyCache hotKeyCache;
     private final TopK topKAlgorithm;
-
-    public HotKey(HotKeyCache hotKeyCache,TopK topKAlgorithm) {
-        this.hotKeyCache = hotKeyCache;
-        this.topKAlgorithm =topKAlgorithm;
-    }
 
     public boolean isHotKey(String cacheKey) {
         return hotKeyCache.isHotKey(cacheKey);
@@ -45,7 +42,7 @@ public class HotKey {
         return hotKeyCache.get(cacheKey, redisReader);
     }
 
-    public <T> Optional<T> getStale(String cacheKey, Supplier<T> redisReader) {
+    public <T> Optional<T> getRelaxed(String cacheKey, Supplier<T> redisReader) {
         return hotKeyCache.getWithStale(cacheKey, redisReader);
     }
 
@@ -65,7 +62,7 @@ public class HotKey {
         hotKeyCache.putThrough(cacheKey, value, redisWriter);
     }
 
-    public void putInvalidate(String cacheKey, Runnable redisMutation) {
+    public void putBeforeInvalidate(String cacheKey, Runnable redisMutation) {
         hotKeyCache.putInvalidate(cacheKey, redisMutation);
     }
 }

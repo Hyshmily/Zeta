@@ -10,6 +10,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -65,12 +66,13 @@ public class HotKeyAutoConfiguration {
 
   @Bean
   @ConditionalOnMissingBean
+  @ConditionalOnBean(HotKeyCache.class)
   public HotKey hotKey(HotKeyCache hotKeyCache, TopK hotKeyDetector) {
     return new HotKey(hotKeyCache, hotKeyDetector);
   }
 
   @Bean
-  @ConditionalOnMissingBean
+  @ConditionalOnMissingBean(type = "org.springframework.data.redis.core.RedisTemplate")
   public HotKeyCache hotKeyCache(
       TopK hotKeyDetector,
       Cache<String, Object> hotLocalCache,
@@ -80,11 +82,13 @@ public class HotKeyAutoConfiguration {
       HotKeyProperties properties) {
     return new HotKeyCache(
         hotKeyDetector, hotLocalCache, inflightLoads, broadcastPublisher, hotKeyExecutor,
+        Optional.empty(),
         properties.getInflightTimeoutSeconds(),
         properties.getSoftTtlMs(),
         properties.getRefreshConcurrency(),
         properties.getSoftExpireMaxSize(),
-        properties.getSoftExpireTtlMinutes());
+        properties.getSoftExpireTtlMinutes(),
+        properties.getVersionKeyTtlMinutes());
   }
 
 }

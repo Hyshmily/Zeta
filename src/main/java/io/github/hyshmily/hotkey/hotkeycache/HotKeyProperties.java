@@ -66,4 +66,7 @@ public class HotKeyProperties {
   @Min(1)
   private int refreshConcurrency = 100;
 
+  @Min(0)
+  private int versionKeyTtlMinutes = 60;
+
 }
