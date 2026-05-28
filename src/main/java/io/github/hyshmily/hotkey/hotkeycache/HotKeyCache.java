@@ -302,10 +302,12 @@ public class HotKeyCache {
       .computeIfAbsent(cacheKey, key ->
         CompletableFuture.supplyAsync(() -> (Object) redisReader.get(), hotKeyExecutor)
           .orTimeout(inflightTimeoutSeconds, TimeUnit.SECONDS)
-          .whenComplete((_, error) -> {
+          .whenComplete((value, error) -> {
             inflightLoads.invalidate(key);
             if (error != null) {
-              log.warn("singleflight load failed: key={}, error={}", key, error.getMessage());
+              log.debug("singleflight load failed: key={}", key, error);
+            } else if (value == null) {
+              log.debug("singleflight returned null: key={}", key);
             }
           })
       );
@@ -324,6 +326,7 @@ public class HotKeyCache {
       });
     } catch (Exception e) {
       inflightLoads.invalidate(cacheKey);
+      log.warn("singleflight join failed: key={}", cacheKey, e);
       return Optional.empty();
     }
   }
