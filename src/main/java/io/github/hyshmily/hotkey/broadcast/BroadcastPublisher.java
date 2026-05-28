@@ -48,7 +48,7 @@ public class BroadcastPublisher {
 
   private void sendDeduped(String cacheKey, String type, long version) {
     if (invalidCacheKey(cacheKey) || invalidTypeKey(type)) {
-      log.warn("Invalid cacheKey or type, skip broadcast: cacheKey={}, type={}", cacheKey, type);
+      log.debug("Invalid cacheKey or type, skip broadcast: cacheKey={}, type={}", cacheKey, type);
       return;
     }
     String compositeKey = type + ":" + cacheKey;
@@ -58,7 +58,7 @@ public class BroadcastPublisher {
         .asMap()
         .compute(compositeKey, (_, oldVersion) -> {
           if (oldVersion != null && oldVersion >= version) {
-            log.info(
+            log.debug(
               "Skip broadcast due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
               compositeKey,
               oldVersion,

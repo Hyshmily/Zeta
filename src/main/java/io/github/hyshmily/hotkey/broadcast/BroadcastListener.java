@@ -39,7 +39,7 @@ public class BroadcastListener {
   private void processBroadcast(Message msg) {
     byte[] body = msg.getBody();
     if (body == null || body.length == 0) {
-      log.warn("Received broadcast message with empty body");
+      log.debug("Received broadcast message with empty body");
       return;
     }
 
@@ -69,7 +69,7 @@ public class BroadcastListener {
 
     Object value = redisLoader.apply(cacheKey);
     if (value == null) {
-      log.warn("Versioned broadcast key not in Redis: {}", cacheKey);
+      log.debug("Versioned broadcast key not in Redis: {}", cacheKey);
       return;
     }
 

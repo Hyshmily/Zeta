@@ -34,10 +34,12 @@ public class HotKeySchedulingConfiguration {
     List<Item> items = new ArrayList<>();
     hotKeyDetector.expelled().drainTo(items, 1000);
     if (!items.isEmpty()) {
+      String keys = items.stream().map(Item::key).limit(20).collect(Collectors.joining(","));
       log.info(
-        "Drained {} expelled hot keys: {}",
+        "Drained {} expelled hot keys: {}{}",
         items.size(),
-        items.stream().map(Item::key).collect(Collectors.joining(","))
+        keys,
+        items.size() > 20 ? "..." : ""
       );
     }
   }

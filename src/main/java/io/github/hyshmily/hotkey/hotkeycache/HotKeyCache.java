@@ -155,11 +155,11 @@ public class HotKeyCache {
   @SuppressWarnings("unchecked")
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long softTtlMs) {
     if (invalidCacheKey(cacheKey)) {
-      log.warn("getWithStale: invalid cacheKey");
+      log.warn("getWithSoftExpire: invalid cacheKey");
       return Optional.empty();
     }
     if (softExpireAt == null) {
-      log.warn("Soft expire not enabled (softTtlMs=0), fallback to get()");
+      log.debug("Soft expire not enabled (softTtlMs=0), fallback to get()");
       return get(cacheKey, reader);
     }
 
@@ -212,17 +212,17 @@ public class HotKeyCache {
       .filter(k -> !invalidCacheKey(k))
       .toList();
     if (validKeys.isEmpty()) {
-      log.warn("invalidateAll: all cacheKeys are invalid");
+      log.debug("invalidateAll: all cacheKeys are invalid");
       return;
     }
     Runnable task = () -> {
       caffeineCache.invalidateAll(validKeys);
-      validKeys.forEach(key ->
-        broadcastPublisher.ifPresentOrElse(
-          p -> p.invalidateHotKey(key),
-          () -> log.debug("No broadcast publisher found, please enable Broadcast")
-        )
-      );
+      if (broadcastPublisher.isPresent()) {
+        BroadcastPublisher p = broadcastPublisher.get();
+        validKeys.forEach(p::invalidateHotKey);
+      } else {
+        log.debug("No broadcast publisher found, skip broadcast for {} keys", validKeys.size());
+      }
     };
     if (TransactionSynchronizationManager.isSynchronizationActive()) {
       TransactionSynchronizationManager.registerSynchronization(
@@ -391,7 +391,7 @@ public class HotKeyCache {
       );
       return;
     }
-    log.warn("putThrough called outside transaction, submitting to async executor");
+    log.debug("putThrough called outside transaction, submitting to async executor");
     CompletableFuture.runAsync(task, hotKeyExecutor).exceptionally(e -> {
       log.error("Async Redis write failed after non-transactional putThrough", e);
       return null;
