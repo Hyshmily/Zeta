@@ -1,4 +1,4 @@
-package io.github.hyshmily.hotkey.hotkeycache;
+package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -6,9 +6,13 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.broadcast.BroadcastPublisher;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
+import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
+import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.SoftExpireManager;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -77,11 +81,30 @@ public class HotKeyAutoConfiguration {
 
   @Bean
   @ConditionalOnMissingBean
-  public Cache<String, CompletableFuture<Object>> inflightLoads(HotKeyProperties properties) {
-    return Caffeine.newBuilder()
-      .maximumSize(properties.getInflightMaxSize())
-      .expireAfterWrite(properties.getInflightTtlSeconds(), TimeUnit.SECONDS)
-      .build();
+  public SingleFlight singleFlight(HotKeyProperties properties, @Qualifier("hotKeyExecutor") Executor hotKeyExecutor) {
+    return new SingleFlight(
+      properties.getInflightMaxSize(),
+      properties.getInflightTtlSeconds(),
+      properties.getInflightTimeoutSeconds(),
+      hotKeyExecutor
+    );
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public SoftExpireManager softExpireManager(
+    Cache<String, Object> hotLocalCache,
+    @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
+    HotKeyProperties properties
+  ) {
+    return new SoftExpireManager(
+      hotLocalCache,
+      hotKeyExecutor,
+      properties.getSoftTtlMs(),
+      properties.getRefreshConcurrency(),
+      properties.getSoftExpireMaxSize(),
+      properties.getSoftExpireTtlMinutes()
+    );
   }
 
   @Bean("hotKeyExecutor")
@@ -117,23 +140,20 @@ public class HotKeyAutoConfiguration {
   public HotKeyCache hotKeyCache(
     TopK hotKeyDetector,
     Cache<String, Object> hotLocalCache,
-    Cache<String, CompletableFuture<Object>> inflightLoads,
-    Optional<io.github.hyshmily.hotkey.broadcast.BroadcastPublisher> broadcastPublisher,
+    SingleFlight singleFlight,
+    SoftExpireManager softExpireManager,
+    Optional<BroadcastPublisher> broadcastPublisher,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     HotKeyProperties properties
   ) {
     return new HotKeyCache(
       hotKeyDetector,
       hotLocalCache,
-      inflightLoads,
+      singleFlight,
+      softExpireManager,
       broadcastPublisher,
       hotKeyExecutor,
       Optional.empty(),
-      properties.getInflightTimeoutSeconds(),
-      properties.getSoftTtlMs(),
-      properties.getRefreshConcurrency(),
-      properties.getSoftExpireMaxSize(),
-      properties.getSoftExpireTtlMinutes(),
       properties.getVersionKeyTtlMinutes()
     );
   }

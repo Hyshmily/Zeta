@@ -15,7 +15,7 @@ Most local cache solutions store every accessed key in Caffeine. This works fine
 
 HotKey takes a different approach — **cache only the hot keys.**
 
-It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant) to probabilistically detect access frequency. Only keys that enter the Top-K set are promoted into the local Caffeine L1, and optionally synchronized across instances via RabbitMQ fanout. Non-hot key reads are delegated back to the caller via `Supplier<T>` — the framework makes no assumption about your data source.
+It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant) to probabilistically detect access frequency. On the **read path**, only keys that enter the Top-K set are promoted into the local Caffeine L1, and optionally synchronized across instances via RabbitMQ fanout. On the **write path**, `putThrough` writes directly to L1 and broadcasts regardless of hot key status — the caller explicitly owns the write. Non-hot key reads still return values via the caller-supplied `Supplier<T>` — they are simply not cached in L1. The framework makes no assumption about your data source.
 
 ### When to use
 
@@ -35,11 +35,11 @@ It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch va
 ## Features
 
 - **HeavyKeeper Algorithm** — probabilistic top-k detection with Count-Min Sketch + exponential conflict decay
-- **Three-Level Cache** — Caffeine (L1) → Redis (L2, optional) → DB fallback, with automatic hot-key promotion
-- **In-Flight Dedup** — concurrent L1 miss requests share a single Redis read via `Caffeine<key, CompletableFuture>`
+- **Multi-Level Cache** — Caffeine (L1) → optional reader callback (L2, e.g., Redis) + caller-side DB fallback via `Optional.orElseGet()`, with automatic hot-key promotion
+- **In-Flight Dedup** — concurrent L1 miss requests share a single L2 read via a dedicated `SingleFlight` bean
 
-  > **Note:** Ensure `hotkey.inflight-ttl-seconds` exceeds the slowest Redis response time for your workload, or the cache entry may expire before the future completes, causing duplicate Redis reads.
-  > Also ensure `hotkey.inflight-timeout-seconds` < `hotkey.inflight-ttl-seconds`. On timeout, `loadSingleflight` returns `Optional.empty()` — the caller should handle via DB fallback.
+  > **Note:** Ensure `hotkey.inflight-ttl-seconds` exceeds the slowest L2 response time for your workload, or the cache entry may expire before the future completes, causing duplicate L2 reads.
+  > Also ensure `hotkey.inflight-timeout-seconds` < `hotkey.inflight-ttl-seconds`. On timeout, `SingleFlight.load()` returns `Optional.empty()` — the caller should handle via DB fallback.
 
 - **Soft Expire (Logical Expiration)** — return stale L1 value immediately while asynchronously refreshing in the background; lower p99 at the cost of short-lived staleness. **Fully replaces traditional Redis-side logical expiration** (`RedisData{data, expireTime}` wrapper pattern) — Redis stores raw values, HotKey manages staleness at the L1 Caffeine level
 - **Redis Collections** — `putBeforeInvalidate` for List/Set/ZSet incremental writes; no `putThrough` needed
@@ -56,37 +56,45 @@ It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch va
 └──────┬───────┘   Optional.of(value)  └──────┬───────┘
        │ L1 miss           (auto unwrap       │ isHotKey()?
        ↓ (inflight dedup)  CacheEntry)        ↓
-┌──────────────┐    reader         ┌───────────────┐
-│  L2 Storage  │ ←───────────────  │     TopK      │
-│  (pluggable) │ ───────────────→  │  (interface)  │
-└──┬───────┬───┘  add(key,1)       ├───────────────┤
-   │ hit   │ null                  │ add()→Result  │
-   ↓       ↓                       │ list()        │
-Optional   Optional.empty()        │ total()       │
-.of(value)   r.isEmpty() → DB      │ contains()    │
-                                   │ expelled()    │
-                                   │ fading()      │
-                                   └───────┬───────┘
-                                           │ isHotKey()
-                                           ↓
+┌──────────────┐  ──── reader ────→ ┌───────────────┐
+│  L2 Storage  │  ───add(key,1)───→ │     TopK      │
+│  (pluggable) │                    │  (interface)  │
+└──┬───────┬───┘                    ├───────────────┤
+   │ hit   │ null                   │ add()→Result  │
+   ↓       ↓                        │ list()        │
+Optional   Optional.empty()         │ total()       │
+.of(value)   r.isEmpty() → DB       │ contains()    │
+                                    │ expelled()    │
+                                    │ fading()      │
+                                    └───────┬───────┘
+                                            │ isHotKey()
+                                            ↓
                               Caffeine.put(key,
-                                CacheEntry(value, version=0L, expireAtMs))
+                                 CacheEntry(value, version=0L, isVersionDegraded=false, expireAtMs))
                               + broadcastHotKey with version header
 ```
 
 Write path (user-initiated):
 `putThrough(cacheKey, value, writer)`
+├─ (deferred to afterCommit if inside a Spring transaction)
 ├─ `writer.run()` — L2 write (caller-supplied Runnable)
-├─ `nextVersion(cacheKey)` — Redis INCR → monotonic version
-├─ Caffeine.put(cacheKey, CacheEntry(value, version, expireAtMs))
-└─ RabbitMQ fanout with version header (if enabled)
+├─ `nextVersion(cacheKey)` — Redis INCR → `VersionResult(version, isVersionDegraded)`
+├─ `SoftExpireManager.refresh()` — update soft TTL timestamp
+├─ Caffeine.put(cacheKey, CacheEntry(value, version, isVersionDegraded, expireAtMs))
+└─ RabbitMQ fanout with version + `isVersionDegraded` headers (if enabled)
+
+**Write path — transaction deferral:** `putThrough`, `putBeforeInvalidate`, `invalidate`, and `invalidateAll` all defer execution to `afterCommit` when called inside a Spring transaction.
+
+> **Note:** `putThrough` behaves differently from the other write methods when called **outside** a transaction — it executes asynchronously on `hotKeyExecutor` (the caller returns immediately while the writer, version bump, L1 update, and broadcast run on a background thread). Outside a transaction, the other methods (`invalidate`, `invalidateAll`, `putBeforeInvalidate`) run synchronously on the caller's thread.
 
 For incremental collection mutations (LPUSH, SADD, ZADD):
 `putBeforeInvalidate(cacheKey, mutation)`
+├─ (deferred to afterCommit if inside a Spring transaction)
 ├─ `mutation.run()` — L2 write (caller-supplied Runnable)
-├─ `nextVersion(cacheKey)` — Redis INCR → monotonic version
+│ └─ On exception → skip local invalidate and broadcast, log error
+├─ `nextVersion(cacheKey)` — Redis INCR → `VersionResult(version, isVersionDegraded)`
 ├─ Caffeine local cache **invalidate**
-└─ RabbitMQ fanout with version header (if enabled)
+└─ RabbitMQ fanout with version + `isVersionDegraded` headers (if enabled)
 
 > **Note:** Between `mutation.run()` and L1 cache invalidation there is a ~1ms window where a concurrent `get()` may hit the L1 stale value. This is a deliberate trade-off — invalidating before the mutation would cause a worse race where `get()` re-populates L1 with old Redis data. The window is bounded to a single Redis round-trip (`nextVersion` call).
 
@@ -103,11 +111,11 @@ Soft Expire Read Path (`getWithSoftExpire`):
            value +                     ├─ refreshLimiter.tryAcquire()
            check TopK                  └─ Async L2 → Caffeine.put
                 │                            + update softExpireAt
-                 │ L1 miss (falls through to normal path)
-                 ↓
-            loadSingleflight(cacheKey, reader)
+                │ L1 miss (falls through to normal path)
+                ↓
+            SingleFlight.load(cacheKey, reader)
             (see Normal Read Path above)
-            Caffeine.put(key, CacheEntry(value, 0L, keepExpireAt))
+            Caffeine.put(key, CacheEntry(value, 0L, false, expireAt(hardTtlMs)))
 ```
 
 ## Degradation
@@ -120,19 +128,28 @@ hotKey.get(key, supplier)
   ├─ L1 MISS → supplier()
   │    ├─ Returns data → hot key? → write L1 + return
   │    ├─ Returns null → Optional.empty() → caller's orElseGet/orElseThrow
-  │    └─ Throws → loadSingleflight catches → Optional.empty() → caller's fallback
-  └─ HotKey itself throws → skip L1, supplier called directly
+  │    └─ Throws → SingleFlight.load() catches → Optional.empty() → caller's fallback
+  └─ HotKey itself fails → exception propagates to caller (no auto fallback)
 ```
 
 Component failure behavior:
 
 | Failed component           | Impact                                                     | Recovery                            |
 | -------------------------- | ---------------------------------------------------------- | ----------------------------------- |
-| HotKey itself              | Skips L1, falls through to supplier directly               | Restart app                         |
+| HotKey itself              | L1 unavailable; exception propagates to caller             | Restart app                         |
 | L2 backend (Redis/DB/API)  | Every request hits caller's fallback                       | Auto-recover on backend restoration |
 | L1 Caffeine OOM / eviction | Individual keys evicted, next read re-fetches via supplier | Automatic (Caffeine internal)       |
 
 > The caller is always responsible for handling `Optional.empty()` — HotKey never hides backend failures.
+
+Write path failure behavior:
+
+| Write method                                        | Failure scenario                 | Behavior                                                                     |
+| --------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------- |
+| `putThrough`                                        | Executor queue full (outside tx) | `RejectedExecutionException` propagates to caller                            |
+| `putThrough`                                        | `writer.run()` / Redis fails     | Error logged on `hotKeyExecutor`, L1 version not updated, no broadcast       |
+| `putBeforeInvalidate`                               | `mutation.run()` throws          | Mutation exception caught and logged; local invalidate and broadcast skipped |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to `System.nanoTime()` (monotonic but non-persistent version)     |
 
 ## Quick Start
 
@@ -149,11 +166,11 @@ Component failure behavior:
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.0.8-SNAPSHOT</version>
+    <version>1.0.9</version>
 </dependency>
 ```
 
-Use a Git tag as the version (e.g. `1.0.8-SNAPSHOT`). Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
+Use `1.0.9` as the version. Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
 
 ### 2. Configure
 
@@ -182,7 +199,7 @@ hotkey:
 @Autowired
 private HotKey hotKey;
 
-Optional<String> r = hotKey.peek("user:123"); // Caffeine L1 + hot key detection only
+Optional<String> r = hotKey.peek("user:123"); // Caffeine L1 peek only (no hot key tracking)
 ```
 
 Calls `peek(cacheKey)` — returns `Optional.empty()` if L1 miss, skips secondary storage entirely.
@@ -283,13 +300,13 @@ public class CollectionHotKeyCache {
 
 Soft expire returns the stale L1 value immediately while asynchronously refreshing (stale-while-revalidate). Unlike traditional logical expiration (which embeds `expireTime` in Redis values), HotKey manages staleness purely at the L1 Caffeine level — **Redis stores raw values, no wrappers needed**.
 
-| Aspect | Traditional Logical Expiration | HotKey Soft Expire |
-|---|---|---|
-| Expiry storage | Embedded in Redis value (`RedisData{data, expireTime}`) | L1 Caffeine metadata (`softExpireAt`) |
-| Stale delivery | Returns old data | Returns old L1 value |
-| Async rebuild | Redis distributed lock + custom thread pool | Singleflight (local) + `hotKeyExecutor` + `refreshLimiter` |
-| Redis format | Wrapped JSON | Raw value (clean, no wrapper) |
-| DB fallback | Manual locking logic | Native `orElseGet` / `orElseThrow` |
+| Aspect         | Traditional Logical Expiration                          | HotKey Soft Expire                                         |
+| -------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
+| Expiry storage | Embedded in Redis value (`RedisData{data, expireTime}`) | L1 Caffeine metadata (`softExpireAt`)                      |
+| Stale delivery | Returns old data                                        | Returns old L1 value                                       |
+| Async rebuild  | Redis distributed lock + custom thread pool             | Singleflight (local) + `hotKeyExecutor` + `refreshLimiter` |
+| Redis format   | Wrapped JSON                                            | Raw value (clean, no wrapper)                              |
+| DB fallback    | Manual locking logic                                    | Native `orElseGet` / `orElseThrow`                         |
 
 ```java
 // Traditional approach (no longer needed):
@@ -297,36 +314,35 @@ Soft expire returns the stale L1 value immediately while asynchronously refreshi
 //   stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
 
 // HotKey: Redis stores raw value, soft expire managed at L1
-Optional<String> r = hotKey.getWithSoftExpire("user:123",
-    () -> redisTemplate.opsForValue().get("user:123"));
+Optional<String> r = hotKey.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+
 // L1 hit + soft expired → returns stale value + triggers async refresh
 // L1 miss → singleflight load (same as get())
 
 // Per-call custom soft TTL (overrides global hotkey.soft-ttl-ms)
-Optional<String> r2 = hotKey.getWithSoftExpire("user:456",
-    () -> redisTemplate.opsForValue().get("user:456"), 3000);
+Optional<String> r2 = hotKey.getWithSoftExpire("user:456", () -> redisTemplate.opsForValue().get("user:456"), 3000);
 ```
 
 Database fallback (no distributed lock required):
 
 ```java
-User user = hotKey.getWithSoftExpire("shop:" + shopId,
-        () -> redisTemplate.opsForValue().get("shop:" + shopId))
-    .orElseGet(() -> {
-        User u = userMapper.selectById(shopId);
-        if (u != null) {
-            redisTemplate.opsForValue().set("shop:" + shopId, JSONUtil.toJsonStr(u));
-        }
-        return u;
-    });
+User user = hotKey
+  .getWithSoftExpire("shop:" + shopId, () -> redisTemplate.opsForValue().get("shop:" + shopId))
+  .orElseGet(() -> {
+    User u = userMapper.selectById(shopId);
+    if (u != null) {
+      redisTemplate.opsForValue().set("shop:" + shopId, JSONUtil.toJsonStr(u));
+    }
+    return u;
+  });
 ```
 
 Configuration:
 
 ```yaml
 hotkey:
-  soft-ttl-ms: 5000               # enable soft expire with 5s soft TTL (default 0 = disabled)
-  refresh-concurrency: 50         # limit concurrent async refreshes
+  soft-ttl-ms: 5000 # enable soft expire with 5s soft TTL (default 0 = disabled)
+  refresh-concurrency: 50 # limit concurrent async refreshes
 ```
 
 **H. Per-entry hard TTL**
@@ -351,33 +367,43 @@ hotKey.putThrough("weather:" + city, weatherData,
 
 The recommended entry point is the `HotKey` facade (auto-configured as a Spring bean). Beyond the `get`/`peek`/`putThrough`/`putBeforeInvalidate` shown above, it exposes:
 
-| Method                                      | Description                                                                                                 |
-| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `get(key, reader, ttlMs)`                   | Read with per-entry Caffeine hard TTL (ms)                                                                  |
-| `putThrough(key, value, writer, ttlMs)`     | Write-through with per-entry Caffeine hard TTL (ms)                                                         |
-| `putBeforeInvalidate(key, mutation)`        | Write-then-invalidate for collection ops (LPUSH, SADD, ZADD)                                                |
-| `getWithSoftExpire(key, reader, softTtlMs)` | Soft expire with per-call soft TTL (ms)                                                                     |
-| `isHotKey(cacheKey)`                        | Check if a key is in the current Top-K hot set (O(1))                                                       |
-| `invalidate(cacheKey)`                      | Invalidate a single key from all cache layers                                                               |
-| `invalidateAll(cacheKeys...)`               | Varargs overload — invalidate multiple keys at once                                                         |
-| `invalidateAll(Collection)`                 | Collection overload                                                                                         |
-| `returnHotKeys()`                           | Snapshot of current Top-K entries (key + count)                                                             |
-| `returnExpelledHotKeys()`                   | Access the expelled hot key queue (recently evicted from Top-K); drained periodically by internal scheduler |
-| `returnTotalDataStreams()`                  | Total number of reads passed through HeavyKeeper                                                            |
+| Method                                                 | Description                                                                                                 |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `peek(key)`                                            | Peek at L1 only — no frequency tracking, no L2 read                                                         |
+| `get(key, reader)`                                     | Read from L1 or L2 via reader; hot keys auto-promoted to L1                                                 |
+| `get(key, reader, hardTtlMs)`                          | Same with per-entry Caffeine hard TTL (ms)                                                                  |
+| `getWithSoftExpire(key, reader)`                       | Soft expire — returns stale value + triggers async refresh; uses global `soft-ttl-ms`                       |
+| `getWithSoftExpire(key, reader, softTtlMs)`            | Same with per-call soft TTL override (ms)                                                                   |
+| `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | Same with both per-entry hard TTL and per-call soft TTL (ms)                                                |
+| `putThrough(key, value, writer)`                       | Write-through: writer.run(), nextVersion(), L1 update, optional broadcast                                   |
+| `putThrough(key, value, writer, hardTtlMs)`            | Same with per-entry Caffeine hard TTL (ms)                                                                  |
+| `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | Same with both per-entry hard TTL and soft TTL (ms)                                                         |
+| `putBeforeInvalidate(key, mutation)`                   | Write-then-invalidate for collection ops (LPUSH, SADD, ZADD)                                                |
+| `isHotKey(cacheKey)`                                   | Check if a key is in the current Top-K hot set (O(1))                                                       |
+| `invalidate(cacheKey)`                                 | Invalidate a single key from all cache layers                                                               |
+| `invalidateAll(cacheKeys...)`                          | Varargs overload — invalidate multiple keys at once                                                         |
+| `invalidateAll(Collection)`                            | Collection overload                                                                                         |
+| `returnHotKeys()`                                      | Snapshot of current Top-K entries (key + count)                                                             |
+| `returnExpelledHotKeys()`                              | Access the expelled hot key queue (recently evicted from Top-K); drained periodically by internal scheduler |
+| `returnTotalDataStreams()`                             | Total number of reads passed through HeavyKeeper                                                            |
 
-> **Note:** `invalidate()` generates a monotonic version via Redis `INCR` and broadcasts with it, allowing version-aware peers to skip stale updates. `invalidateAll()` does **not** call `INCR` — it broadcasts with version `0L`, so all peers apply it regardless of their current version.
+> **Note:** `invalidate()` generates a monotonic version via Redis `INCR` and broadcasts as `TYPE_HOT` with that version — peers reload the value from Redis via `handleVersionedHotKey`, skipping stale versions. `invalidateAll()` does **not** call `INCR` — it broadcasts as `TYPE_INVALIDATE` with version `0L`, so all peers unconditionally remove the key from L1.
 
 ## TTL Reference
 
-| Method | TTL means | Default |
-|---|---|---|
-| `get(key, reader, ttlMs)` | Caffeine hard TTL — entry evicted after this time | 3rd param required |
-| `getWithSoftExpire(key, reader)` | Caffeine soft TTL — stale value returned, async refresh triggered | global `hotkey.soft-ttl-ms` |
-| `getWithSoftExpire(key, reader, softTtlMs)` | Same as above, per-call override | caller supplied |
-| `putThrough(key, value, writer, ttlMs)` | Caffeine hard TTL for written entry | 4th param optional, falls back to global `local-cache-ttl-minutes` |
-| Global `hotkey.local-cache-ttl-minutes` | Default hard TTL for all entries without per-call TTL | `5` minutes |
-| Global `hotkey.soft-ttl-ms` | Default soft TTL when no per-call value given | `0` (disabled) |
-| Global `hotkey.local-cache-access-ttl-minutes` | Access-based hard TTL (resets on every read), supplements `local-cache-ttl-minutes` | `0` (disabled) |
+| Method                                                 | TTL means                                                                           | Default                                        |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `get(key, reader)`                                     | No Caffeine hard TTL override (effectively `Long.MAX_VALUE`)                        | N/A                                            |
+| `get(key, reader, hardTtlMs)`                          | Caffeine hard TTL — entry evicted after this time                                   | 3rd param required                             |
+| `getWithSoftExpire(key, reader)`                       | Caffeine soft TTL — stale value returned, async refresh triggered                   | global `hotkey.soft-ttl-ms`                    |
+| `getWithSoftExpire(key, reader, softTtlMs)`            | Same as above, per-call override                                                    | caller supplied                                |
+| `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | Both hard TTL (Caffeine eviction) and soft TTL (async refresh)                      | 3rd & 4th params required                      |
+| `putThrough(key, value, writer)`                       | No per-entry hard TTL override (effectively `Long.MAX_VALUE`)                       | N/A                                            |
+| `putThrough(key, value, writer, hardTtlMs)`            | Caffeine hard TTL for written entry                                                 | 4th param required                             |
+| `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | Both hard TTL and soft TTL for written entry                                        | 4th & 5th params required                      |
+| Global `hotkey.local-cache-ttl-minutes`                | Default hard TTL for all entries without per-call TTL                               | `5` minutes                                    |
+| Global `hotkey.soft-ttl-ms`                            | Default soft TTL when no per-call value given                                       | `0` (disabled)                                 |
+| Global `hotkey.local-cache-access-ttl-minutes`         | Access-based hard TTL (resets on every read), supplements `local-cache-ttl-minutes` | `0` (disabled)                                 |
 
 ## Broadcast
 
@@ -387,7 +413,13 @@ hotkey:
     enabled: true
 ```
 
-Each instance declares its own queue (`hotkey.broadcast:<pod-id>`) bound to a fanout exchange. When a hot key is promoted, the instance broadcasts the key. Peers load the value from Redis on first broadcast miss. Invalidations remove the local cache entry immediately.
+Each instance declares its own queue (`hotkey.broadcast:<pod-id>`) bound to a fanout exchange. Two message types:
+
+- **`TYPE_HOT`** — Hot key promotion or versioned single-key invalidation. Peers reload the value from Redis via `handleVersionedHotKey`, respecting the version header to skip stale updates.
+  - Messages carry an `isVersionDegraded` header. When the version was generated from a degraded source (`System.nanoTime()` fallback after Redis failure), peers will accept it even over a previously non-degraded entry, preventing version-number-based rejection of valid updates.
+- **`TYPE_INVALIDATE`** — Bulk invalidation (`invalidateAll`). Peers immediately remove the key from L1 without reloading.
+
+Peers load the value from Redis on first broadcast miss.
 
 ## Monitoring
 
@@ -459,12 +491,13 @@ management:
 
 ## Modules
 
-| Module                 | Dependency                                                    | Auto-Config                      |
-| ---------------------- | ------------------------------------------------------------- | -------------------------------- |
-| `algorithm`            | none                                                          | always                           |
-| `cache` (Redis)        | `spring-boot-starter-data-redis`                              | `@ConditionalOnClass`            |
-| `broadcast` (RabbitMQ) | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis` | `@ConditionalOnClass` + property |
-| `actuator`             | `spring-boot-starter-actuator`                                | `@ConditionalOnClass`            |
+| Module                 | Dependency                                                    | Auto-Config                                            |
+| ---------------------- | ------------------------------------------------------------- | ------------------------------------------------------ |
+| `algorithm`            | none                                                          | always                                                 |
+| `cache` (Redis)        | `spring-boot-starter-data-redis`                              | `@ConditionalOnClass`                                  |
+| `broadcast` (RabbitMQ) | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis` | `@ConditionalOnClass` + property                       |
+| `actuator`             | `spring-boot-starter-actuator`                                | `@ConditionalOnClass`                                  |
+| `scheduling`           | none                                                          | always (disable via `hotkey.scheduling.enabled=false`) |
 
 ## License
 

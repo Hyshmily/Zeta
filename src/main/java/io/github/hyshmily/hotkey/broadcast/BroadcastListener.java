@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.github.hyshmily.hotkey.broadcast;
 
 import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_HOT;
@@ -7,13 +22,13 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.amqp.core.Message;
 
 @Slf4j
@@ -37,23 +52,22 @@ public class BroadcastListener {
   }
 
   private void processBroadcast(Message msg) {
-    byte[] body = msg.getBody();
-    if (body == null || body.length == 0) {
+    BroadcastMessage bm = BroadcastMessage.from(msg);
+    if (bm == null) {
       log.debug("Received broadcast message with empty body");
       return;
     }
 
-    String cacheKey = new String(body, StandardCharsets.UTF_8);
-    String type = msg.getMessageProperties().getHeader("type");
-    long version = msg.getMessageProperties().getHeader("version") instanceof Number n ? n.longValue() : 0L;
-
-    Runnable task = switch (type) {
-      case TYPE_HOT -> () -> handleVersionedHotKey(cacheKey, version);
-      case TYPE_INVALIDATE -> () -> handleInvalidateCacheKey(cacheKey);
-      default -> () -> log.warn("Unknown broadcast type: {}, cacheKey: {}", type, cacheKey);
-    };
-
+    Runnable task = () -> broadcastMessageTypeRouter(bm);
     floatTimeDelay(task);
+  }
+
+  private void broadcastMessageTypeRouter(BroadcastMessage msg) {
+    switch (msg.type()) {
+      case TYPE_HOT -> handleVersionedHotKey(msg.cacheKey(), msg.version(), msg.isVersionDegraded());
+      case TYPE_INVALIDATE -> handleInvalidateCacheKey(msg.cacheKey());
+      default -> log.warn("Unknown broadcast type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
+    }
   }
 
   private void handleInvalidateCacheKey(String cacheKey) {
@@ -61,9 +75,9 @@ public class BroadcastListener {
     log.debug("HotKey invalidated by broadcast: {}", cacheKey);
   }
 
-  private void handleVersionedHotKey(String cacheKey, long version) {
-    Object existing = caffeineCache.getIfPresent(cacheKey);
-    if (existing instanceof CacheEntry vv && vv.getVersion() >= version) {
+  private void handleVersionedHotKey(String cacheKey, long version, boolean degraded) {
+    if (broadcastVersionGradeGuard(cacheKey, version, degraded) != null) {
+      log.debug("Versioned broadcast key already up-to-date in Caffeine: {}", cacheKey);
       return;
     }
 
@@ -73,14 +87,18 @@ public class BroadcastListener {
       return;
     }
 
+    final boolean degradedFinal = degraded;
+    final long versionFinal = version;
     caffeineCache
       .asMap()
-      .compute(cacheKey, (_, cur) -> {
-        if (cur instanceof CacheEntry vv && vv.getVersion() >= version) {
-          return cur;
+      .compute(cacheKey, (_, existingCacheEntry) -> {
+        if (broadcastVersionGradeGuard(cacheKey, versionFinal, degradedFinal) != null) {
+          log.debug("Versioned broadcast key already up-to-date in Caffeine during compute: {}", cacheKey);
+          return existingCacheEntry;
         }
-        long keepExpireAt = (cur instanceof CacheEntry ce) ? ce.getExpireAtMs() : Long.MAX_VALUE;
-        return new CacheEntry(value, version, keepExpireAt);
+
+        long keepExpireAt = (existingCacheEntry instanceof CacheEntry ce) ? ce.getExpireAtMs() : Long.MAX_VALUE;
+        return new CacheEntry(value, versionFinal, degradedFinal, keepExpireAt);
       });
   }
 
@@ -94,5 +112,29 @@ public class BroadcastListener {
       }
     }
     task.run();
+  }
+
+  private @Nullable Object broadcastVersionGradeGuard(String cacheKey, long version, boolean degraded) {
+    Object existingCacheEntry = caffeineCache.getIfPresent(cacheKey);
+
+    if (existingCacheEntry instanceof CacheEntry cacheEntry) {
+      boolean existingDegraded = cacheEntry.isVersionDegraded();
+
+      if (!existingDegraded && !degraded) {
+        if (cacheEntry.getVersion() >= version) {
+          return existingCacheEntry;
+        }
+      }
+      if (!existingDegraded && degraded) {
+        return existingCacheEntry;
+      }
+
+      if (existingDegraded && degraded) {
+        if (cacheEntry.getVersion() >= version) {
+          return existingCacheEntry;
+        }
+      }
+    }
+    return null;
   }
 }

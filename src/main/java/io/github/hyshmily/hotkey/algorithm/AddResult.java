@@ -1,12 +1,23 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.github.hyshmily.hotkey.algorithm;
 
-// TopK.add() 的返回结果
 // Result of TopK.add()
 //
-// @param expelledKey 本次操作被挤出 TopK 的 key，没有则为 null
-// @param expelledKey The key evicted from TopK by this operation, or null
-// @param isHotKey    当前 key 是否进入了 TopK 热点集合
+// @param expelledKey The key evicted from TopK by this operation, or null if none
 // @param isHotKey    Whether the current key entered the TopK hot set
-// @param currentKey  本次操作的 key
 // @param currentKey  The key of this operation
 public record AddResult(String expelledKey, boolean isHotKey, String currentKey) {}

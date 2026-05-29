@@ -1,9 +1,10 @@
-package io.github.hyshmily.hotkey.actuator;
+package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.algorithm.TopK;
-import java.util.concurrent.CompletableFuture;
+import io.github.hyshmily.hotkey.actuator.HotKeyEndpoint;
+import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -19,8 +20,8 @@ public class HotKeyActuatorAutoConfiguration {
   public HotKeyEndpoint hotKeyEndpoint(
       TopK hotKeyDetector,
       Cache<String, Object> hotLocalCache,
-      Cache<String, CompletableFuture<Object>> inflightLoads,
+      SingleFlight singleFlight,
       HotKeyProperties properties) {
-    return new HotKeyEndpoint(hotKeyDetector, hotLocalCache, inflightLoads, properties);
+    return new HotKeyEndpoint(hotKeyDetector, hotLocalCache, singleFlight, properties);
   }
 }

@@ -2,9 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
-## 1.0.8-SNAPSHOT
+## 1.0.9
+
+- **Degraded Version Tracking** — `CacheEntry` now carries `isVersionDegraded` flag. `VersionResult` record replaces raw `long` return from `nextVersion()`. `BroadcastListener` uses 4-case comparison: normal-vs-normal (numeric), normal-vs-degraded (reject), degraded-vs-normal (accept), degraded-vs-degraded (numeric). `BroadcastPublisher` passes `isVersionDegraded` header in messages.
+- **`BroadcastMessage` Record** — new record for type-safe message parsing, replacing inline header extraction in `BroadcastListener`.
+- **Package Restructuring** — auto-configuration classes moved to `autoconfigure/` package. `AutoConfiguration.imports` updated accordingly.
+- **`SingleFlight` Extraction** — singleflight dedup logic extracted from `HotKeyCache` into standalone `SingleFlight` class.
+- **`SoftExpireManager` Extraction** — soft-expire tracking and async refresh extracted from `HotKeyCache` into standalone `SoftExpireManager` class.
+- **`TransactionSupport` Utility** — transaction deferral logic extracted into `TransactionSupport.runAfterCommit()` and `runNowOrAfterCommit()`.
+- **`CacheKeysPolicy` Utility** — `invalidCacheKey()` / `invalidTypeKey()` extracted from `HotKeyCache` into `CacheKeysPolicy`.
+- **`loadSingleflight` softTtlMs Fix** — L1 miss path in `getWithSoftExpire` now correctly passes per-call `softTtlMs` to singleflight load, instead of always using the global default.
+- **TTL Reference Table Fix** — corrected `putThrough(key, value, writer)` default from "falls back to `local-cache-ttl-minutes`" to `Long.MAX_VALUE` (no hard TTL override).
 
 - **HotKey Bean Race Condition Fix** — `HotKeyRedisAutoConfiguration` now has `@AutoConfiguration(after = {HotKeyAutoConfiguration.class, RedisAutoConfiguration.class})` and its own `hotKey()` bean, ensuring `HotKey` is always created when Redis is on classpath regardless of auto-config ordering.
+- **Combined Hard + Soft TTL** — new `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` and `putThrough(key, value, writer, hardTtlMs, softTtlMs)` allow setting both Caffeine hard TTL and soft-expire TTL in a single call.
+- **Parameter Rename** — `ttlMs` → `hardTtlMs`, `redisWriter` → `writer`, `redisMutation` → `mutation` for clarity.
+- **`@since` Tags** — all public methods in `HotKey` facade now have `@since` Javadoc tags indicating the version they were introduced.
+- **Javadoc Comments** — all public methods in `HotKey` facade now have English Javadoc comments explaining usage.
+- **License Header** — all Java source files now carry Apache 2.0 copyright header (`Copyright 2026 Hyshmily`).
+- **Typo Fix** — fixed `purThrough` → `putThrough` in `HotKey` facade.
+- **Core Extraction Refactor** — extracted `CacheKeysPolicy`, `TransactionSupport`, `SingleFlight`, `SoftExpireManager`, `BroadcastMessage` into dedicated classes. `HotKeyCache` simplified from ~426 to ~277 lines.
+- **SingleFlight Dedicated Bean** — `SingleFlight` owns the inflight dedup Cache internally; `HotKeyEndpoint` uses `SingleFlight.estimatedInflightSize()`.
+- **Auto-Configuration Reorganization** — all 5 auto-configuration classes moved under `io.github.hyshmily.hotkey.autoconfigure` package.
+- **BroadcastMessage Record** — new record `BroadcastMessage.from(Message)` encapsulates RabbitMQ parsing with `isVersionDegraded` header extraction.
+- **Algorithms & Entity Packages Unchanged** — `HeavyKeeper`, `TopK`, `CacheEntry`, `HotKeyProperties` retain original packages.
 
 ## 1.0.8
 

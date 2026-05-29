@@ -1,11 +1,14 @@
-package io.github.hyshmily.hotkey.hotkeycache;
+package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.BroadcastPublisher;
+import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
+import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.SoftExpireManager;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -28,7 +31,8 @@ public class HotKeyRedisAutoConfiguration {
   public HotKeyCache hotKeyCache(
     TopK hotKeyDetector,
     Cache<String, Object> hotLocalCache,
-    Cache<String, CompletableFuture<Object>> inflightLoads,
+    SingleFlight singleFlight,
+    SoftExpireManager softExpireManager,
     Optional<BroadcastPublisher> broadcastPublisher,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     StringRedisTemplate redisTemplate,
@@ -37,15 +41,11 @@ public class HotKeyRedisAutoConfiguration {
     return new HotKeyCache(
       hotKeyDetector,
       hotLocalCache,
-      inflightLoads,
+      singleFlight,
+      softExpireManager,
       broadcastPublisher,
       hotKeyExecutor,
       Optional.of(redisTemplate),
-      properties.getInflightTimeoutSeconds(),
-      properties.getSoftTtlMs(),
-      properties.getRefreshConcurrency(),
-      properties.getSoftExpireMaxSize(),
-      properties.getSoftExpireTtlMinutes(),
       properties.getVersionKeyTtlMinutes()
     );
   }

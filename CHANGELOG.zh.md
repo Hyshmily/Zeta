@@ -2,9 +2,20 @@
 
 所有重要变更均记录在此文件中。
 
-## 1.0.8-SNAPSHOT
+## 1.0.9
 
 - **HotKey Bean 竞态条件修复** — `HotKeyRedisAutoConfiguration` 新增 `@AutoConfiguration(after = {HotKeyAutoConfiguration.class, RedisAutoConfiguration.class})` 和 `hotKey()` bean，确保 Redis 在 classpath 时 `HotKey` 无论自动配置顺序都正常创建。
+- **组合硬 + 软 TTL** — 新增 `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` 和 `putThrough(key, value, writer, hardTtlMs, softTtlMs)`，一次调用同时设置 Caffeine 硬 TTL 和软过期 TTL。
+- **参数重命名** — `ttlMs` → `hardTtlMs`、`redisWriter` → `writer`、`redisMutation` → `mutation`，语义更清晰。
+- **`@since` 标签** — `HotKey` 门面所有公开方法添加 `@since` Javadoc 标签，标明引入版本。
+- **Javadoc 注释** — `HotKey` 门面所有公开方法添加英文 Javadoc 注释说明用法。
+- **许可证头** — 所有 Java 源文件添加 Apache 2.0 版权声明头（`Copyright 2026 Hyshmily`）。
+- **拼写修复** — 修复 `HotKey` 门面中 `purThrough` → `putThrough` 拼写错误。
+- **核心提取重构** — 从 `HotKeyCache` 和 `BroadcastListener` 中提取出 `CacheKeysPolicy`、`TransactionSupport`、`SingleFlight`、`SoftExpireManager`、`BroadcastMessage` 等独立类。`HotKeyCache` 从约 426 行简化为 277 行。
+- **SingleFlight 独立 Bean** — `SingleFlight` 内部持有 inflight dedup Cache；`HotKeyEndpoint` 通过 `SingleFlight.estimatedInflightSize()` 监控。
+- **自动配置重组** — 5 个自动配置类统一移到 `io.github.hyshmily.hotkey.autoconfigure` 包下。
+- **BroadcastMessage 记录** — 新增 `BroadcastMessage.from(Message)` record 封装 RabbitMQ 消息解析，提取 `isVersionDegraded` 头部。
+- **算法与实体包未变动** — `HeavyKeeper`、`TopK`、`CacheEntry`、`HotKeyProperties` 保持原包路径，消费者二进制兼容。
 
 ## 1.0.8
 

@@ -1,9 +1,24 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.github.hyshmily.hotkey.broadcast;
 
 import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_HOT;
 import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_INVALIDATE;
-import static io.github.hyshmily.hotkey.hotkeycache.HotKeyCache.invalidCacheKey;
-import static io.github.hyshmily.hotkey.hotkeycache.HotKeyCache.invalidTypeKey;
+import static io.github.hyshmily.hotkey.hotkeycache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.hotkeycache.CacheKeysPolicy.invalidTypeKey;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -43,10 +58,18 @@ public class BroadcastPublisher {
   }
 
   public void broadcastHotKeyWithVersion(String cacheKey, long version) {
-    sendDeduped(cacheKey, TYPE_HOT, version);
+    sendDeduped(cacheKey, TYPE_HOT, version, false);
+  }
+
+  public void broadcastHotKeyWithVersion(String cacheKey, long version, boolean degraded) {
+    sendDeduped(cacheKey, TYPE_HOT, version, degraded);
   }
 
   private void sendDeduped(String cacheKey, String type, long version) {
+    sendDeduped(cacheKey, type, version, false);
+  }
+
+  private void sendDeduped(String cacheKey, String type, long version, boolean degraded) {
     if (invalidCacheKey(cacheKey) || invalidTypeKey(type)) {
       log.debug("Invalid cacheKey or type, skip broadcast: cacheKey={}, type={}", cacheKey, type);
       return;
@@ -71,15 +94,16 @@ public class BroadcastPublisher {
       version;
 
     if (shouldSend) {
-      Message message = buildVersionedMessage(cacheKey, type, version);
+      Message message = buildVersionedMessage(cacheKey, type, version, degraded);
       rabbitTemplate.send(properties.getExchangeName(), "", message);
     }
   }
 
-  private static Message buildVersionedMessage(String cacheKey, String type, long version) {
+  private static Message buildVersionedMessage(String cacheKey, String type, long version, boolean degraded) {
     MessageProperties props = new MessageProperties();
     props.setHeader("type", type);
     props.setHeader("version", version);
+    props.setHeader("isVersionDegraded", degraded);
     return new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
   }
 }

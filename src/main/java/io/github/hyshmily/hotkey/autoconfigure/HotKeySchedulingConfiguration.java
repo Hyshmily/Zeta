@@ -1,4 +1,4 @@
-package io.github.hyshmily.hotkey.hotkeycache;
+package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
