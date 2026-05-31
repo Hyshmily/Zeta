@@ -27,49 +27,91 @@ import java.util.Map;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 
+/**
+ * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics.
+ *
+ * <p>The response includes both app-side and Worker-side TopK rankings, L1
+ * cache metrics, SingleFlight in-flight sizes, and recently expelled keys.
+ * Each section is produced only when the corresponding service is available
+ * in the current deployment mode, making the endpoint safe in App-only,
+ * Worker-only, and coexistence modes.
+ */
 @Endpoint(id = "hotkey")
 public class HotKeyEndpoint {
 
   private final TopK hotKeyDetector;
+  private final TopK workerTopK;
   private final Cache<String, Object> caffeineCache;
   private final SingleFlight singleFlight;
-  private final int l1MaxSize;
+  private final HotKeyProperties properties;
 
   public HotKeyEndpoint(
-      TopK hotKeyDetector,
-      Cache<String, Object> caffeineCache,
-      SingleFlight singleFlight,
-      HotKeyProperties properties) {
+    TopK hotKeyDetector,
+    TopK workerTopK,
+    Cache<String, Object> caffeineCache,
+    SingleFlight singleFlight,
+    HotKeyProperties properties
+  ) {
     this.hotKeyDetector = hotKeyDetector;
+    this.workerTopK = workerTopK;
     this.caffeineCache = caffeineCache;
     this.singleFlight = singleFlight;
-    this.l1MaxSize = properties.getLocalCacheMaxSize();
+    this.properties = properties;
   }
 
+  private int l1MaxSize() {
+    return properties.getLocalCacheMaxSize();
+  }
+
+  /**
+   * Collect all diagnostic metrics into a single response map.
+   *
+   * @return a {@link LinkedHashMap} with TopK, cache, and SingleFlight metrics
+   */
   @ReadOperation
   public Map<String, Object> hotKeyInfo() {
     Map<String, Object> info = new LinkedHashMap<>();
 
-    List<Item> topKList = hotKeyDetector.list();
-    List<Map<String, Object>> topKKeys = new ArrayList<>(topKList.size());
-    for (Item item : topKList) {
-      topKKeys.add(Map.of("key", item.key(), "count", item.count()));
+    if (hotKeyDetector != null) {
+      List<Item> topKList = hotKeyDetector.list();
+      List<Map<String, Object>> topKKeys = new ArrayList<>(topKList.size());
+      for (Item item : topKList) {
+        topKKeys.add(Map.of("key", item.key(), "count", item.count()));
+      }
+      info.put("topK", topKKeys);
+      info.put("topKCount", topKList.size());
+      info.put("totalRequests", hotKeyDetector.total());
+      info.put("recentlyExpelled",
+        hotKeyDetector.expelled().stream()
+          .map(Item::key)
+          .limit(10)
+          .toList());
     }
-    info.put("topK", topKKeys);
-    info.put("topKCount", topKList.size());
 
-    info.put("totalRequests", hotKeyDetector.total());
+    if (workerTopK != null) {
+      List<Item> topKList = workerTopK.list();
+      List<Map<String, Object>> topKKeys = new ArrayList<>(topKList.size());
+      for (Item item : topKList) {
+        topKKeys.add(Map.of("key", item.key(), "count", item.count()));
+      }
+      info.put("workerTopK", topKKeys);
+      info.put("workerTopKCount", topKList.size());
+      info.put("workerTotalRequests", workerTopK.total());
+      info.put("workerRecentlyExpelled",
+        workerTopK.expelled().stream()
+          .map(Item::key)
+          .limit(10)
+          .toList());
+    }
 
-    info.put("l1CacheSize", caffeineCache.estimatedSize());
-    info.put("l1MaxSize", l1MaxSize);
+    if (caffeineCache != null) {
+      info.put("l1CacheSize", caffeineCache.estimatedSize());
+      info.put("l1MaxSize", l1MaxSize());
+    }
 
-    info.put("inflightSize", singleFlight.estimatedInflightSize());
-
-    info.put("recentlyExpelled",
-      hotKeyDetector.expelled().stream()
-        .map(Item::key)
-        .limit(10)
-        .toList());
+    if (singleFlight != null) {
+      info.put("inflightSize", singleFlight.estimatedInflightSize());
+    }
 
     return info;
   }

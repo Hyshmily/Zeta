@@ -22,7 +22,21 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
 
+/**
+ * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking.
+ *
+ * <p>Uses a 2D count array with fingerprint verification and probabilistic
+ * decay to estimate the most frequent keys with bounded memory.  The
+ * algorithm excels at filtering out low-frequency items while preserving
+ * high-frequency key rankings with low error rates.
+ *
+ * <p>This implementation is thread-safe: per-bucket {@code synchronized}
+ * blocks for sketch updates and a shared lock for the sorted TopK heap.
+ */
+@Slf4j
 public class HeavyKeeper implements TopK {
 
   private static final int LOOKUP_TABLE_SIZE = 256;
@@ -42,9 +56,18 @@ public class HeavyKeeper implements TopK {
   private final LongAdder total;
   private final int minCount;
 
+  /**
+   * Construct a HeavyKeeper instance.
+   *
+   * @param k        maximum number of hot keys to track
+   * @param width    width of the Count-Min Sketch (number of columns per row)
+   * @param depth    depth of the Count-Min Sketch (number of rows / hash functions)
+   * @param decay    probabilistic decay factor (0.0–1.0); higher values preserve counts longer
+   * @param minCount minimum count threshold before a key can enter the TopK set
+   */
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount) {
     if (k <= 0) {
-      throw new IllegalArgumentException("topK must be greater than 0, but got: " + k);
+      throw new IllegalArgumentException("TopK must be greater than 0, but got: " + k);
     }
     this.k = k;
     this.width = width;
@@ -73,10 +96,7 @@ public class HeavyKeeper implements TopK {
 
   @Override
   public AddResult add(String key, int increment) {
-    /*
-      Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key ->same
-      fingerprint)
-     */
+    /* Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key -> same fingerprint) */
     long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
     int maxCount = 0;
 
@@ -135,7 +155,9 @@ public class HeavyKeeper implements TopK {
           Node removed = sortedTopK.pollFirstEntry().getKey();
           expelled = removed.key;
           heapIndex.remove(removed.key);
-          expelledQueue.offer(new Item(expelled, removed.count));
+          if (!expelledQueue.offer(new Item(expelled, removed.count))) {
+            log.warn("Expelled queue full, dropping key: {}", expelled);
+          }
         }
         sortedTopK.put(newNode, Boolean.TRUE);
         heapIndex.put(key, newNode);
@@ -163,11 +185,19 @@ public class HeavyKeeper implements TopK {
     }
   }
 
+  /**
+   * Return the blocking queue holding items that have been evicted from the TopK set.
+   */
   @Override
   public BlockingQueue<Item> expelled() {
     return expelledQueue;
   }
 
+  /**
+   * Halve all frequency counters in the sketch and the sorted heap,
+   * removing entries whose count drops to zero.  Also halves the
+   * running total.
+   */
   @Override
   public void fading() {
     for (int i = 0; i < depth; i++) {
@@ -201,9 +231,27 @@ public class HeavyKeeper implements TopK {
     }
   }
 
+  /**
+   * Return the total number of data streams tracked since startup or last reset.
+   */
   @Override
   public long total() {
     return total.sum();
+  }
+
+  /**
+   * Return the top {@code n} hot keys.
+   */
+  @Override
+  public List<Item> listTopN(int n) {
+    synchronized (sortedTopK) {
+      return sortedTopK
+        .descendingKeySet()
+        .stream()
+        .limit(n)
+        .map(node -> new Item(node.key, node.count))
+        .collect(Collectors.toList());
+    }
   }
 
   private static class Node {

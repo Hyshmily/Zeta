@@ -1,0 +1,125 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.hyshmily.hotkey.worker;
+
+import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.report.ReportMessage;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+
+import java.util.Map;
+
+import static io.github.hyshmily.hotkey.constant.HotKeyConstants.SOURCE_SLIDING_WINDOW;
+
+/**
+ * Worker‑side message consumer that receives batched per‑key access counts
+ * reported by application instances.
+ *
+ * <p>For every key in the batch the consumer:
+ * <ol>
+ *   <li>Feeds the count into the {@link SlidingWindowDetector} to update the
+ *       sliding‑window sum and obtain a binary hot‑or‑not verdict for the
+ *       current window.</li>
+ *   <li>Passes that verdict to the {@link HotKeyStateMachine} which tracks
+ *       consecutive hot/cold windows and decides whether a state transition
+ *       (COLD → CONFIRMED_HOT → PRE_COOLING → COLD) has occurred.</li>
+ *   <li>If the state machine returns a {@code HOT} decision, the consumer
+ *       broadcasts a {@code HOT} message to all application instances and
+ *       records the confirmation in the {@link TopKValidator}.</li>
+ *   <li>If the state machine returns a {@code COOL} decision, it broadcasts
+ *       a {@code COOL} message and marks the key as cooled in the
+ *       {@link TopKValidator}.</li>
+ * </ol>
+ *
+ * <p>Messages older than 5 seconds are silently discarded to prevent stale
+ * data from distorting the sliding‑window view.
+ *
+ * <p>Because clients use consistent‑hash routing, every report for a given
+ * key always reaches the same worker, guaranteeing correct per‑key state
+ * without cross‑worker coordination.
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class ReportConsumer {
+
+  private final SlidingWindowDetector detector;
+  private final HotKeyStateMachine stateMachine;
+  private final WorkerBroadcaster broadcaster;
+  private final TopKValidator topKValidator;
+  private final TopK workerTopK;
+
+  /**
+   * Main entry point for batched report messages.
+   *
+   * @param message the deserialized message containing counts for multiple keys
+   */
+  @RabbitListener(queues = "#{@reportQueue.name}")
+  public void onReport(ReportMessage message) {
+    long now = System.currentTimeMillis();
+
+    // Discard reports that are more than 5 seconds old.
+    // This guards against delayed or re‑delivered messages that would
+    // feed outdated counts into the sliding window.
+    if (now - message.timestamp() > 5000) {
+      log.debug("Stale report message, skip: appName={}, age={}ms", message.appName(), now - message.timestamp());
+      return;
+    }
+
+    // Process each key independently
+    for (Map.Entry<String, Long> entry : message.counts().entrySet()) {
+      String key = entry.getKey();
+      long count = entry.getValue();
+
+      // Feed the global Worker TopK with the aggregated report count.
+      // This populates the Worker-side HeavyKeeper so TopKValidator can
+      // pre-warm keys based on cross-instance frequency.
+      workerTopK.add(key, (int) Math.min(count, Integer.MAX_VALUE));
+
+      // addCount atomically increments the current time slice and returns
+      // true if the sum of the last windowSize slices exceeds the threshold.
+      boolean isHot = detector.addCount(key, count);
+
+      // The state machine tracks consecutive hot/cold windows and applies
+      // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
+      // and PRE_COOLING.
+      HotKeyDecision decision = stateMachine.evaluate(key, isHot);
+
+      switch (decision.type()) {
+        case HOT -> {
+          // A new hot key has been confirmed.
+          // Broadcast HOT to all app instances so they can pre‑warm
+          // their local caches and enable soft expiration.
+          broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW);
+          // Record the confirmation in TopK for historical ranking.
+          topKValidator.markConfirmed(key);
+        }
+        case COOL -> {
+          // The key has fully cooled down.
+          // Broadcast COOL so instances can disable soft expiration
+          // and let the entry be evicted naturally.
+          broadcaster.broadcastCool(key);
+          // Update the TopK tracking accordingly.
+          topKValidator.markCooled(key);
+        }
+        case NONE -> {
+          // No state transition occurred – the key remains in its
+          // current lifecycle stage.  Nothing to do.
+        }
+      }
+    }
+  }
+}

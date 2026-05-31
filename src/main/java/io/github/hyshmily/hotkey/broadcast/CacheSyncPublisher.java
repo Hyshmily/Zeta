@@ -15,10 +15,8 @@
  */
 package io.github.hyshmily.hotkey.broadcast;
 
-import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_HOT;
-import static io.github.hyshmily.hotkey.broadcast.BroadcastProperties.TYPE_INVALIDATE;
+import static io.github.hyshmily.hotkey.constant.HotKeyConstants.*;
 import static io.github.hyshmily.hotkey.hotkeycache.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.hotkey.hotkeycache.CacheKeysPolicy.invalidTypeKey;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -31,14 +29,18 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
+/**
+ * Publishes cache synchronization messages (INVALIDATE / REFRESH) to peer instances
+ * via {@code hotkey.sync.exchange} (FanoutExchange).
+ * <p>
+ * Does NOT handle HOT/COOL — those are Worker's responsibility via {@code WorkerBroadcaster}.
+ */
 @Slf4j
 @RequiredArgsConstructor
-public class BroadcastPublisher {
-
-  private static final long VERSIONED_HOT_KEY_DEFAULT_VERSION = 0L;
+public class CacheSyncPublisher {
 
   private final RabbitTemplate rabbitTemplate;
-  private final BroadcastProperties properties;
+  private final CacheSyncProperties properties;
   private Cache<String, Long> recentBroadcasts;
 
   @PostConstruct
@@ -49,29 +51,32 @@ public class BroadcastPublisher {
       .build();
   }
 
-  public void broadcastHotKey(String cacheKey) {
-    sendDeduped(cacheKey, TYPE_HOT, VERSIONED_HOT_KEY_DEFAULT_VERSION);
+  /**
+   * Send a REFRESH sync message to all peers,
+   * deduplicating against recent broadcasts of the same type+key with a higher version.
+   */
+  public void broadcastRefresh(String cacheKey, long version, boolean degraded) {
+    sendDeduped(cacheKey, SyncMessage.TYPE_REFRESH, version, degraded);
   }
 
-  public void invalidateHotKey(String cacheKey) {
-    sendDeduped(cacheKey, TYPE_INVALIDATE, VERSIONED_HOT_KEY_DEFAULT_VERSION);
+  /**
+   * Send an INVALIDATE sync message to all peers,
+   * deduplicating against recent broadcasts of the same type+key with a higher version.
+   */
+  public void broadcastInvalidate(String cacheKey, long version, boolean degraded) {
+    sendDeduped(cacheKey, SyncMessage.TYPE_INVALIDATE, version, degraded);
   }
 
-  public void broadcastHotKeyWithVersion(String cacheKey, long version) {
-    sendDeduped(cacheKey, TYPE_HOT, version, false);
-  }
-
-  public void broadcastHotKeyWithVersion(String cacheKey, long version, boolean degraded) {
-    sendDeduped(cacheKey, TYPE_HOT, version, degraded);
-  }
-
-  private void sendDeduped(String cacheKey, String type, long version) {
-    sendDeduped(cacheKey, type, version, false);
-  }
-
+  /**
+   * Deduplicated send: only publishes if no recent broadcast of the same type+key with a greater version exists.
+   * <p>
+   * Uses a Caffeine cache keyed by {@code type:cacheKey} with the version as value.
+   * Within the dedup window ({@link CacheSyncProperties#getDedupWindowSeconds}),
+   * subsequent calls with a stale version are silently dropped.
+   */
   private void sendDeduped(String cacheKey, String type, long version, boolean degraded) {
-    if (invalidCacheKey(cacheKey) || invalidTypeKey(type)) {
-      log.debug("Invalid cacheKey or type, skip broadcast: cacheKey={}, type={}", cacheKey, type);
+    if (invalidCacheKey(cacheKey) || invalidCacheKey(type)) {
+      log.debug("Invalid cacheKey or type, skip sync: cacheKey={}, type={}", cacheKey, type);
       return;
     }
     String compositeKey = type + ":" + cacheKey;
@@ -80,9 +85,9 @@ public class BroadcastPublisher {
       recentBroadcasts
         .asMap()
         .compute(compositeKey, (_, oldVersion) -> {
-          if (oldVersion != null && oldVersion >= version) {
+          if (oldVersion != null && oldVersion > version) {
             log.debug(
-              "Skip broadcast due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
+              "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
               compositeKey,
               oldVersion,
               version
@@ -94,16 +99,15 @@ public class BroadcastPublisher {
       version;
 
     if (shouldSend) {
-      Message message = buildVersionedMessage(cacheKey, type, version, degraded);
+      MessageProperties props = new MessageProperties();
+
+      props.setHeader(AMQP_HEADER_TYPE, type);
+      props.setHeader(AMQP_HEADER_VERSION, version);
+      props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, degraded);
+
+      Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
+
       rabbitTemplate.send(properties.getExchangeName(), "", message);
     }
-  }
-
-  private static Message buildVersionedMessage(String cacheKey, String type, long version, boolean degraded) {
-    MessageProperties props = new MessageProperties();
-    props.setHeader("type", type);
-    props.setHeader("version", version);
-    props.setHeader("isVersionDegraded", degraded);
-    return new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
   }
 }

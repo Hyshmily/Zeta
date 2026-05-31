@@ -15,9 +15,11 @@
  */
 package io.github.hyshmily.hotkey.algorithm;
 
-// Result of TopK.add()
-//
-// @param expelledKey The key evicted from TopK by this operation, or null if none
-// @param isHotKey    Whether the current key entered the TopK hot set
-// @param currentKey  The key of this operation
+/**
+ * Result of a single {@link TopK#add} operation.
+ *
+ * @param expelledKey the key evicted from the TopK set by this operation, or {@code null} if none
+ * @param isHotKey    whether the current key entered the TopK hot set
+ * @param currentKey  the key that was added
+ */
 public record AddResult(String expelledKey, boolean isHotKey, String currentKey) {}

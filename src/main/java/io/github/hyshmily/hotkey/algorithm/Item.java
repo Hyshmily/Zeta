@@ -15,5 +15,10 @@
  */
 package io.github.hyshmily.hotkey.algorithm;
 
-// Hot item, containing key and count
+/**
+ * A hot-key item with its tracked access count.
+ *
+ * @param key   the hot key
+ * @param count the estimated access count
+ */
 public record Item(String key, int count) {}

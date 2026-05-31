@@ -18,6 +18,17 @@ package io.github.hyshmily.hotkey.entity;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 
+/**
+ * A value stored in the L1 cache together with its version, TTL metadata,
+ * and hot-key state.
+ *
+ * <p>{@code isVersionDegraded} indicates whether the version was obtained
+ * from Redis INCR (normal) or fell back to {@link System#nanoTime}
+ * (degraded) — see {@code VersionResult} for the degraded-detection logic
+ * used during broadcast reception.
+ * <p>The normal-state TTLs recorded at entry creation are preserved across state
+ * transitions in {@code normalHardTtlMs} and {@code normalSoftTtlMs}.
+ */
 @Getter
 @AllArgsConstructor
 public class CacheEntry {
@@ -25,5 +36,13 @@ public class CacheEntry {
   private final Object value;
   private final long version;
   private final boolean isVersionDegraded;
-  private final long expireAtMs;
+  private final long hardTtlMs;
+  private final long hardExpireAtMs;
+  private final long softTtlMs;
+  private final long softExpireAtMs;
+  private final KeyState keyState;
+  /** Normal-state hard TTL recorded at entry creation, preserved across HOT/COOL transitions. */
+  private final long normalHardTtlMs;
+  /** Normal-state soft TTL recorded at entry creation, preserved across HOT/COOL transitions. */
+  private final long normalSoftTtlMs;
 }

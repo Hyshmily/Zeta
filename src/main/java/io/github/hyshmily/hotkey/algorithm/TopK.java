@@ -18,25 +18,69 @@ package io.github.hyshmily.hotkey.algorithm;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 
-// Hot key detection
+/**
+ * Top‑K hot key detection interface.
+ *
+ * <p>Implementations track the most frequently accessed keys using a
+ * sketch-based algorithm (e.g. HeavyKeeper) and provide access to the
+ * current ranking, expelled items, and total request count.
+ */
 public interface TopK {
-  // Add one access and return the result (whether it becomes hot, whether old hot key is evicted)
+
+  /**
+   * Record one or more accesses for the given key.
+   *
+   * @param key       the accessed key
+   * @param increment the number of accesses to record
+   * @return the add result indicating whether the key became hot and whether another key was evicted
+   */
   AddResult add(String key, int increment);
 
-  // Get the current TopK list (descending by count)
+  /**
+   * Return the current TopK list sorted by frequency (descending).
+   *
+   * @return list of {@link Item} entries, never {@code null}
+   */
   List<Item> list();
 
-  // Get the queue of items evicted from TopK for external async processing
+  /**
+   * Return the top N hot keys.
+   *
+   * @param n maximum number of keys to return
+   * @return list of at most {@code n} {@link Item} entries
+   */
+  List<Item> listTopN(int n);
+
+  /**
+   * Return the queue of items that have been evicted from the TopK set.
+   * Consumers should drain this queue periodically for asynchronous processing.
+   *
+   * @return a blocking queue of evicted items
+   */
   BlockingQueue<Item> expelled();
 
-  // Decay all counts (for aging historical data)
+  /**
+   * Decay all frequency counts to age out historical data.
+   * Typically called periodically by a scheduler.
+   */
   void fading();
 
-  // Return the total number of data streams
+  /**
+   * Return the total number of data streams (accesses) tracked since startup.
+   *
+   * @return total access count
+   */
   long total();
 
-  // Check whether the key is in the TopK set
+  /**
+   * Check whether the given key is currently in the TopK set.
+   *
+   * @param key the key to check
+   * @return {@code true} if the key is present in the current TopK ranking
+   */
   default boolean contains(String key) {
-    return list().stream().anyMatch(item -> item.key().equals(key));
+    return list()
+      .stream()
+      .anyMatch(item -> item.key().equals(key));
   }
 }
