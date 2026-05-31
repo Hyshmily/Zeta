@@ -7,13 +7,14 @@
 ```
 ┌──────────────┐   L1 hit               ┌──────────────┐
 │   Request    │ ─── add(key,1) ─────→  │  Caffeine L1 │
-│              │ ←────────────────────  │  (local)     │
+│              │ ─── record(key) ────→  │  (local)     │
+│              │ ←────────────────────  │              │
 └──────┬───────┘   Optional.of(value)   └──────┬───────┘
        │ L1 miss          (auto unwrap         │ isHotKey()?
        ↓ (inflight dedup) CacheEntry)          ↓
 ┌──────────────┐  ──── reader ────→  ┌───────────────┐
 │  L2 Storage  │  ──add(key,1)───→   │     TopK      │
-│  (pluggable) │                     │  (interface)  │
+│  (pluggable) │  ──record(key)──→   │  (interface)  │
 └──┬───────┬───┘                     ├───────────────┤
     │ hit   │ null                   │ add()→Result  │
     ↓       ↓                        │ list()        │
@@ -112,9 +113,9 @@ invalidateAll(cacheKeys)
                  ↓ true                     ↓ yes
             Return stale          triggerAsyncRefresh
             value +                ├─ refreshLimiter.tryAcquire()
-            check TopK             │  (Semaphore, max concurrency)
-                                   │  └─ On busy → skip (retry next get)
-                                   └─ Async (hotKeyExecutor):
+            add(key,1) +          │  (Semaphore, max concurrency)
+            record(key)           │  └─ On busy → skip (retry next get)
+                                    └─ Async (hotKeyExecutor):
                                          L2 read → Caffeine.put
                                          + update softExpireAt
                                          + preserve hardTtlMs

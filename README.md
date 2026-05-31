@@ -67,7 +67,7 @@ For **cluster-wide detection**, deploy a dedicated Worker node that aggregates a
 - **Redis Collections** — `putBeforeInvalidate` for List/Set/ZSet incremental writes; no `putThrough` needed
 - **Hot Key Sync** — optional RabbitMQ fanout (via `hotkey.sync.*`) to synchronize cache invalidations across instances; separate worker-listener (via `hotkey.worker-listener.*`) for receiving Worker-originated HOT/COOL decisions
 - **Worker Mode** — dedicated cluster-wide hot key detection node; sliding-window + state-machine pipeline for cross-instance consensus; see [README.WORKER.md](README.WORKER.md)
-- **Report Aggregation** — app instances periodically report local access counts to Worker node via RabbitMQ for cluster-wide hot key detection
+- **Report Aggregation** — every `get()` / `getWithSoftExpire()` call reports to local `HotKeyReporter`, which periodically batches access counts to Worker node via RabbitMQ for cluster-wide hot key detection
 - **Configurable Thread Pool** — dedicated `TaskExecutor` with bounded queue
 - **Spring Boot Auto-Configuration** — drop-in dependency, zero boilerplate
 
@@ -341,10 +341,10 @@ The recommended entry point is the `HotKey` facade (auto-configured as a Spring 
 
 | Method                                                 | Description                                                                                              |
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `peek(key)`                                            | Peek at L1 only — no frequency tracking, no L2 read                                                      |
-| `get(key, reader)`                                     | Read from L1 or L2 via reader; hot keys promoted to L1 with hot TTLs, normal keys with normal TTLs       |
+| `peek(key)`                                            | Peek at L1 only — no frequency tracking, no L2 read, no reporting                                        |
+| `get(key, reader)`                                     | Read from L1 or L2 via reader; triggers local TopK tracking + app-to-Worker report on every access; hot keys promoted to L1 with hot TTLs, normal keys with normal TTLs |
 | `get(key, reader, hardTtlMs, softTtlMs)`               | Same with per-entry hard and soft TTL overrides (pass 0 to use configured default)                       |
-| `getWithSoftExpire(key, reader)`                       | Soft expire — returns stale value + triggers async refresh; uses global defaults per key state           |
+| `getWithSoftExpire(key, reader)`                       | Soft expire — returns stale value + triggers async refresh; triggers local TopK tracking + app-to-Worker report on every access; uses global defaults per key state |
 | `getWithSoftExpire(key, reader, softTtlMs)`            | Same with per-call soft TTL override (ms)                                                                |
 | `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | Same with both per-entry hard TTL and per-call soft TTL override (ms)                                    |
 | `putThrough(key, value, writer)`                       | Write-through: writer.run(), nextVersion(), L1 update (with effective TTLs per key state), optional sync |

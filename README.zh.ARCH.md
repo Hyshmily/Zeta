@@ -7,13 +7,14 @@
 ```
 ┌──────────────┐   L1 命中              ┌──────────────┐
 │   请求       │ ─── add(key,1) ─────→  │  Caffeine L1 │
-│             │ ←────────────────────   │  (本地)      │
+│             │ ─── record(key) ────→   │  (本地)      │
+│             │ ←────────────────────   │              │
 └──────┬───────┘   Optional.of(value)   └──────┬───────┘
        │ L1 未命中        (自动解包           │ isHotKey()?
        ↓ (inflight 去重)  CacheEntry)          ↓
 ┌──────────────┐  ──── reader ────→   ┌───────────────┐
 │  L2 存储     │  ──add(key,1)───→    │     TopK      │
-│  (可插拔)    │                      │  (接口)        │
+│  (可插拔)    │  ──record(key)──→    │  (接口)        │
 └──┬───────┬───┘                      ├───────────────┤
     │ 命中  │ null                    │ add()→Result  │
     ↓       ↓                         │ list()        │
@@ -104,15 +105,15 @@ invalidateAll(cacheKeys)
 ### 软过期读路径（`getWithSoftExpire`）
 
 ```
-         ┌──────────────┐   L1 命中┌-──────────────┐
-         │   请求       │ ───────→ │ softExpireAt  │
-         │             │ ←───────  │  时间检查      |
-         └──────┬───────┘  过期    └───────┬───────┘
-                │ 软过期？                │ 过期？
-                ↓ true                     ↓ yes
-           返回过期旧值          triggerAsyncRefresh
-           + 检查 TopK            ├─ refreshLimiter.tryAcquire()
-                                  │  （信号量，最大 refresh-concurrency）
+          ┌──────────────┐   L1 命中┌-──────────────┐
+          │   请求       │ ───────→ │ softExpireAt  │
+          │             │ ←───────  │  时间检查      |
+          └──────┬───────┘  过期    └───────┬───────┘
+                 │ 软过期？                │ 过期？
+                 ↓ true                     ↓ yes
+            返回过期旧值          triggerAsyncRefresh
+            + add(key,1) +        ├─ refreshLimiter.tryAcquire()
+            record(key)           │  （信号量，最大 refresh-concurrency）
                                   │  └─ 繁忙时跳过（下次 get 重试）
                                   └─ 异步（hotKeyExecutor）:
                                        L2 reader → Caffeine.put

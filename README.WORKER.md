@@ -43,9 +43,9 @@ This approach solves the **single-instance blind spot** — an app instance's lo
 
 ## Report Flow
 
-1. Each app instance runs a `HotKeyReporter` that periodically (every `reportIntervalMs`, default 100ms) batches local HeavyKeeper data into `ReportMessage` records.
-2. Reports are published to the `hotkey.report.exchange` RabbitMQ exchange, routed by `app-name` and `shard-index`.
-3. The Worker node's `ReportConsumer` receives reports and feeds access counts into the `SlidingWindowDetector`.
+1. Every `get()` / `getWithSoftExpire()` call triggers `hotKeyReporter.record(key)` on both L1 hit and L2 miss paths.
+2. `HotKeyReporter` aggregates per-key counts locally (Caffeine, 30s expiry, max 100k keys) and periodically publishes `ReportMessage` records to the `hotkey.report.exchange` RabbitMQ exchange, routed by `app-name` and `shard-index`.
+3. The Worker node's `ReportConsumer` receives reports and feeds access counts into `workerTopK.add()`, discarding stale reports (>5s old).
 4. The Worker processes reports asynchronously — it does not block app instances.
 
 ### Sharding

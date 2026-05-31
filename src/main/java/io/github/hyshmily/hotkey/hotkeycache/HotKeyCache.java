@@ -115,7 +115,10 @@ public class HotKeyCache {
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
       .map(raw -> {
         T val = raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw;
+
         hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
+        hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+
         return val;
       })
       .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs));
@@ -157,24 +160,28 @@ public class HotKeyCache {
     }
     Object raw = caffeineCache.getIfPresent(cacheKey);
     return Optional.ofNullable(raw)
-      .map(r -> {
-        T cached = r instanceof CacheEntry vv ? (T) vv.getValue() : (T) r;
+      .map(v -> {
+        T cached = v instanceof CacheEntry vv ? (T) vv.getValue() : (T) v;
 
-        if (r instanceof CacheEntry ce && (KeyState.HOT == ce.getKeyState() || KeyState.COOL == ce.getKeyState())) {
+        if (
+          v instanceof CacheEntry cacheEntry &&
+          (KeyState.HOT == cacheEntry.getKeyState() || KeyState.COOL == cacheEntry.getKeyState())
+        ) {
           if (expireManager.isSoftExpired(cacheKey)) {
             long effectiveSoft =
               softTtlMs > 0
                 ? softTtlMs
-                : (KeyState.HOT == ce.getKeyState()
+                : (KeyState.HOT == cacheEntry.getKeyState()
                     ? expireManager.getEffectiveHotSoftTtlMs()
-                    : ce.getNormalSoftTtlMs() > 0
-                      ? ce.getNormalSoftTtlMs()
+                    : cacheEntry.getNormalSoftTtlMs() > 0
+                      ? cacheEntry.getNormalSoftTtlMs()
                       : expireManager.getEffectiveSoftTtlMs());
 
             expireManager.triggerBackgroundRefresh(cacheKey, reader, effectiveSoft);
           }
         }
         hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
+        hotKeyReporter.ifPresent(r -> r.record(cacheKey));
 
         return cached;
       })
@@ -215,7 +222,6 @@ public class HotKeyCache {
               effectiveSoft
             )
           );
-
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
           log.debug("HotKey detected, promoted to L1 and reported: {}", cacheKey);
         } else {
@@ -234,6 +240,7 @@ public class HotKeyCache {
               effectiveSoft
             )
           );
+          hotKeyReporter.ifPresent(r -> r.record(cacheKey));
           log.debug("Normal key, cached with configured TTL: {}", cacheKey);
         }
         return value;

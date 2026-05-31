@@ -67,7 +67,7 @@ HotKey 的做法不同——**只缓存真正热门的 key。**
 - **Redis 集合类型** — 通过 `putBeforeInvalidate` 支持 List/Set/ZSet 增量写入，无需 `putThrough`
 - **热点同步** — 可选 RabbitMQ fanout（通过 `hotkey.sync.*`）跨实例同步缓存失效；独立的 worker-listener（通过 `hotkey.worker-listener.*`）接收 Worker 发出的 HOT/COOL 决策
 - **Worker 模式** — 专用集群维度热点检测节点；基于滑动窗口 + 状态机管道实现跨实例共识；详见 [README.zh.WORKER.md](README.zh.WORKER.md)
-- **报告聚合** — App 实例通过 RabbitMQ 定期向 Worker 节点报告本地访问计数，用于集群维度热点检测
+- **报告聚合** — 每次 `get()` / `getWithSoftExpire()` 调用上报到本地 `HotKeyReporter`，再由 Reporter 周期性地将访问计数批量发送到 Worker 节点（RabbitMQ），用于集群维度热点检测
 - **可配置线程池** — 专用 `TaskExecutor`，有界队列
 - **Spring Boot 自动配置** — 引入依赖即用，零样板代码
 
@@ -341,12 +341,12 @@ hotKey.putThrough("weather:" + city, weatherData,
 
 | 方法                                                   | 说明                                                                                |
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `peek(key)`                                            | 仅查 L1，不做频率追踪，不读 L2                                                      |
-| `get(key, reader)`                                     | 从 L1 或 L2 reader 读取；热点 key 提升到 L1（使用热点 TTL），普通 key 使用普通 TTL  |
-| `get(key, reader, hardTtlMs, softTtlMs)`               | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                         |
-| `getWithSoftExpire(key, reader)`                       | 软失效——返回过期旧值+触发异步刷新；根据 key 状态使用全局默认 TTL                    |
-| `getWithSoftExpire(key, reader, softTtlMs)`            | 同上，带 per-call 软 TTL 覆盖（毫秒）                                               |
-| `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | 同上，同时带 per-entry 硬 TTL 和 per-call 软 TTL 覆盖（毫秒）                       |
+| `peek(key)`                                            | 仅查 L1，不做频率追踪，不读 L2，不上报                                                        |
+| `get(key, reader)`                                     | 从 L1 或 L2 reader 读取；每次访问触发本地 TopK 追踪 + App→Worker 上报；热点 key 提升到 L1（使用热点 TTL），普通 key 使用普通 TTL |
+| `get(key, reader, hardTtlMs, softTtlMs)`               | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                       |
+| `getWithSoftExpire(key, reader)`                       | 软失效——返回过期旧值+触发异步刷新；每次访问触发本地 TopK 追踪 + App→Worker 上报；根据 key 状态使用全局默认 TTL |
+| `getWithSoftExpire(key, reader, softTtlMs)`            | 同上，带 per-call 软 TTL 覆盖（毫秒）                                                             |
+| `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | 同上，同时带 per-entry 硬 TTL 和 per-call 软 TTL 覆盖（毫秒）                                     |
 | `putThrough(key, value, writer)`                       | 写穿透：writer.run()、nextVersion()、L1 更新（根据 key 状态使用有效 TTL）、可选同步 |
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                         |
 | `putBeforeInvalidate(key, mutation)`                   | 先写后失效，用于集合增量操作（LPUSH、SADD、ZADD）                                   |
