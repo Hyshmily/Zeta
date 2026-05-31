@@ -4,6 +4,12 @@
 
 [**中文版**](README.zh.md)
 
+### TODO
+
+1. Resolve the Redis version downgrade issue
+
+2. Introduce the @hotkey annotation to simplify hotspot cache method calls
+
 ### Foreword: Why HotKey?
 
 In real-world development, I frequently faced the challenge of managing a large number of cache keys. Manually maintaining Caffeine, Redis, and database multi-level caching, configuring logical expiration, and pre-computing and pre-warming hot keys — every step was tedious. Even more challenging, in a distributed cluster environment, ensuring hot keys are correctly shared across nodes and avoiding cache stampedes under high concurrency became a pain point that every developer must address.
