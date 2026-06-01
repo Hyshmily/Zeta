@@ -62,6 +62,7 @@ public class ReportConsumer {
   private final WorkerBroadcaster broadcaster;
   private final TopKValidator topKValidator;
   private final TopK workerTopK;
+  private final GlobalQpsEstimator globalQpsEstimator;
 
   /**
    * Main entry point for batched report messages.
@@ -71,6 +72,7 @@ public class ReportConsumer {
   @RabbitListener(queues = "#{@reportQueue.name}")
   public void onReport(ReportMessage message) {
     long now = System.currentTimeMillis();
+    long totalQps = 0;
 
     // Discard reports that are more than 5 seconds old.
     // This guards against delayed or re‑delivered messages that would
@@ -85,6 +87,7 @@ public class ReportConsumer {
       String key = entry.getKey();
       long count = entry.getValue();
 
+      totalQps += count;
       // Feed the global Worker TopK with the aggregated report count.
       // This populates the Worker-side HeavyKeeper so TopKValidator can
       // pre-warm keys based on cross-instance frequency.
@@ -122,5 +125,6 @@ public class ReportConsumer {
         }
       }
     }
+    globalQpsEstimator.addTotal(totalQps);
   }
 }

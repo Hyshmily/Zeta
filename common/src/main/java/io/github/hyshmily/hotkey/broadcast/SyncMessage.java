@@ -56,7 +56,7 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
     long version =
       msg.getMessageProperties().getHeader(AMQP_HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
     boolean isVersionDegraded =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_IS_VERSION_DEGRADED) instanceof Boolean b ? b : true;
+      msg.getMessageProperties().getHeader(AMQP_HEADER_IS_VERSION_DEGRADED) instanceof Boolean b ? b : false;
 
     return new SyncMessage(cacheKey, type, version, isVersionDegraded);
   }

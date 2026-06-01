@@ -95,15 +95,17 @@
 | `hotkey.worker.sliding-window.duration-ms`                                | `1000`                     | Sliding window duration (milliseconds)                               |
 | `hotkey.worker.sliding-window.slices`                                     | `10`                       | Number of time slices within one window                              |
 | **`hotkey.worker.threshold.*`**                                           |                            | **Hot Threshold**                                                    |
-| `hotkey.worker.threshold.hot-threshold`                                   | `-1`                       | Absolute hot-key threshold; `-1` = use ratio-based                   |
+| `hotkey.worker.threshold.hot-threshold`                                   | `1000`                     | Absolute hot-key threshold; `-1` = use ratio-based                   |
 | `hotkey.worker.threshold.hot-threshold-ratio`                             | `0.01`                     | Hot-key threshold as fraction of estimated global QPS (1%)           |
 | **`hotkey.worker.state-machine.*`**                                       |                            | **State Machine**                                                    |
 | `hotkey.worker.state-machine.confirm-duration-ms`                         | `2000`                     | Duration key must stay above threshold to be confirmed HOT           |
 | `hotkey.worker.state-machine.cool-duration-ms`                            | `15000`                    | Duration key must stay below threshold to be considered COLD         |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`                           | `5000`                     | Grace period at end of cool-down for silent revival                  |
-| **`hotkey.worker.dynamic-threshold.*`**                                   |                            | **Dynamic Threshold**                                                |
-| `hotkey.worker.dynamic-threshold.recalculate-interval-ms`                 | `60000`                    | Interval for dynamic threshold recalculation                         |
-| `hotkey.worker.dynamic-threshold.qps-change-tolerance`                    | `0.5`                      | QPS change tolerance before threshold update (±50%)                  |
+| **`hotkey.worker.global-qps-dynamic-threshold.*`**                        |                            | **Dynamic Threshold (Global QPS)**                                    |
+| `hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms`      | `60000`                    | Interval for dynamic threshold recalculation                         |
+| `hotkey.worker.global-qps-dynamic-threshold.qps-change-tolerance`         | `0.5`                      | QPS change tolerance before threshold update (±50%)                  |
+| `hotkey.worker.global-qps-dynamic-threshold.learning-period-ms`           | `30000`                    | Learning period for QPS estimation                                   |
+| `hotkey.worker.global-qps-dynamic-threshold.hot-threshold-ratio`          | `0.01`                     | Hot threshold as fraction of estimated global QPS                    |
 | **`hotkey.worker.topk-validation.*`**                                     |                            | **TopK Validation**                                                  |
 | `hotkey.worker.topk-validation.validate-interval-ms`                      | `60000`                    | Interval between Top-K cross-validation runs                         |
 | `hotkey.worker.topk-validation.pre-warm-count`                            | `5`                        | Number of top-ranked keys eligible for pre-warming                   |

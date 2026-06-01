@@ -258,4 +258,4 @@ CacheEntry 维护**两个独立的版本空间**：
                               └─────────────────────────────────────┘
 ```
 
-> 详细 Worker 模式搭建、状态机转换和配置见 [README.zh.WORKER.md](README.zh.WORKER.md)。
+> 详细 Worker 模式搭建、状态机转换和配置见 [WORKER.zh.md](WORKER.zh.md)。

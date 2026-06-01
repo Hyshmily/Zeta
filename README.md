@@ -16,6 +16,12 @@ That's the context in which HotKey was born: a lightweight, portable, ready-to-u
 
 It will remain open source — past, present, and future.
 
+> [!TIP]
+> **Before you start, have questions?** See [FAQ.md](docs/FAQ.md) for answers to common questions about local vs central detection, Worker delay, MQ throughput, and more.
+
+> [!Important]
+> Due to the author's limited capabilities, the reliability and stability in production cannot be fully guaranteed.
+
 ### Introduction
 
 HotKey — HeavyKeeper Top-K hot key detection + multi-level cache auto-warming + distributed cache sync & cluster-wide Worker mode Spring Boot Starter
@@ -44,9 +50,6 @@ For **cluster-wide detection**, deploy a dedicated Worker node that aggregates a
 | Optional Redis + optional RabbitMQ (multi-instance) |                                                  |
 | Optional Worker node for cluster-wide detection     |                                                  |
 
-> [!Important]
-> Due to the author's limited capabilities, the reliability and stability in production cannot be fully guaranteed.
-
 ## Features
 
 - **HeavyKeeper Algorithm** — probabilistic top-k detection with Count-Min Sketch + exponential conflict decay
@@ -60,7 +63,7 @@ For **cluster-wide detection**, deploy a dedicated Worker node that aggregates a
 - **Soft Expire (Logical Expiration)** — return stale L1 value immediately while asynchronously refreshing in the background; lower p99 at the cost of short-lived staleness. **Fully replaces traditional Redis-side logical expiration** (`RedisData{data, expireTime}` wrapper pattern) — Redis stores raw values, HotKey manages staleness at the L1 Caffeine level
 - **Redis Collections** — `putBeforeInvalidate` for List/Set/ZSet incremental writes; no `putThrough` needed
 - **Hot Key Sync** — optional RabbitMQ fanout (via `hotkey.sync.*`) to synchronize cache invalidations across instances; separate worker-listener (via `hotkey.worker-listener.*`) for receiving Worker-originated HOT/COOL decisions
-- **Worker Mode** — dedicated cluster-wide hot key detection node; sliding-window + state-machine pipeline for cross-instance consensus; see [README.WORKER.md](README.WORKER.md)
+- **Worker Mode** — dedicated cluster-wide hot key detection node; sliding-window + state-machine pipeline for cross-instance consensus; see [WORKER.md](docs/WORKER.md)
 - **Report Aggregation** — every `get()` / `getWithSoftExpire()` call reports to local `HotKeyReporter`, which periodically batches access counts to Worker node via RabbitMQ for cluster-wide hot key detection
 - **Configurable Thread Pool** — dedicated `TaskExecutor` with bounded queue
 - **Spring Boot Auto-Configuration** — drop-in dependency, zero boilerplate
@@ -96,7 +99,7 @@ Write path failure behavior:
 | `putThrough`                                        | Executor queue full (outside tx) | `RejectedExecutionException` propagates to caller                            |
 | `putThrough`                                        | `writer.run()` / Redis fails     | Error logged on `hotKeyExecutor`, L1 version not updated, no broadcast       |
 | `putBeforeInvalidate`                               | `mutation.run()` throws          | Mutation exception caught and logged; local invalidate and broadcast skipped |
-| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to node-local counter (`nodeId << 32 OR counter`, non-persistent, `degraded=true`) |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to node-local counter (`(nodeId << 32) | counter`, non-persistent, `degraded=true`) |
 
 Worker mode failure behavior:
 
@@ -152,7 +155,7 @@ hotkey:
 | `@HotKey` Annotation | `hotkey.annotation.enabled=true` + AspectJ | Declarative caching |
 | Reporting | `hotkey.report.enabled=true` (default) | Report access counts to Worker |
 
-See [Configuration](#configuration) for all options and [README.CONFIG.md](README.CONFIG.md) for the complete property reference.
+See [Configuration](#configuration) for all options and [CONFIG.md](docs/CONFIG.md) for the complete property reference.
 
 ### 3. Use
 
@@ -333,7 +336,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 
 **I. Worker mode**
 
-For cluster-wide hot key detection across multiple instances, see [README.WORKER.md](README.WORKER.md).
+For cluster-wide hot key detection across multiple instances, see [WORKER.md](docs/WORKER.md).
 
 **J. @HotKey annotation**
 
@@ -427,7 +430,7 @@ The recommended entry point is the `HotKey` facade (auto-configured as a Spring 
 
 ## Configuration
 
-Minimal setup shown in [Quick Start](#2-configure). For the complete property list, see [README.CONFIG.md](README.CONFIG.md). For Worker mode, see [README.WORKER.md](README.WORKER.md).
+Minimal setup shown in [Quick Start](#2-configure). For the complete property list, see [CONFIG.md](docs/CONFIG.md). For Worker mode, see [WORKER.md](docs/WORKER.md).
 
 ### TTL Override Properties
 
@@ -445,7 +448,7 @@ hotkey:
 
 ### Worker Mode
 
-Enable `hotkey.worker.enabled=true`. Two deployment modes — see [Worker Mode](#worker-mode) and [README.WORKER.md](README.WORKER.md).
+Enable `hotkey.worker.enabled=true`. Two deployment modes — see [Worker Mode](#worker-mode) and [WORKER.md](docs/WORKER.md).
 
 ### Monitoring
 
@@ -486,14 +489,14 @@ Enable via `hotkey.sync.enabled=true`.
 
 Each instance declares its own queue (`hotkey.sync:<instance-id>`) bound to a fanout exchange. Two message types:
 
-- **`TYPE_REFRESH`** — Versioned invalidation. Peers reload the value from Redis via `CacheSyncListener.handleRefresh()`, respecting the {@code dataVersion} header to skip stale updates. The 4-case comparison (normal-vs-normal, normal-vs-degraded, degraded-vs-normal, degraded-vs-degraded) guarantees that a normal (Redis INCR) dataVersion always wins over a degraded (node-local) one.
+- **`TYPE_REFRESH`** — Versioned invalidation. Peers reload the value from Redis via `CacheSyncListener.handleRefresh()`, respecting the `dataVersion` header to skip stale updates. The 4-case comparison (normal-vs-normal, normal-vs-degraded, degraded-vs-normal, degraded-vs-degraded) guarantees that a normal (Redis INCR) dataVersion always wins over a degraded (node-local) one.
 - **`TYPE_INVALIDATE`** — Bulk invalidation (`invalidateAll`). Peers immediately remove the key from L1 without reloading.
 
 ### Worker Listener
 
 For receiving HOT/COOL decisions from a dedicated Worker node, enable `hotkey.worker-listener.enabled=true`.
 
-See [README.WORKER.md](README.WORKER.md) for detailed Worker mode setup.
+See [WORKER.md](docs/WORKER.md) for detailed Worker mode setup.
 
 ## Worker Mode
 
@@ -508,7 +511,7 @@ Two deployment modes:
 
 In **Worker-only** mode, cache operations throw `UnsupportedOperationException`.
 
-For full documentation on Worker setup, state machine, sliding window, and configuration, see [README.WORKER.md](README.WORKER.md).
+For full documentation on Worker setup, state machine, sliding window, and configuration, see [WORKER.md](docs/WORKER.md).
 
 ## Monitoring
 
@@ -547,7 +550,11 @@ Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
 
 ## Architecture
 
-See [README.ARCH.md](README.ARCH.md) for detailed read/write path diagrams (also available in Chinese: [README.zh.ARCH.md](README.zh.ARCH.md)).
+See [ARCH.md](docs/ARCH.md) for detailed read/write path diagrams (also available in Chinese: [ARCH.zh.md](docs/ARCH.zh.md)).
+
+## Method Call Chain
+
+See [METHODS.md](docs/METHODS.md) for detailed method call chain diagrams (also available in Chinese: [METHODS.zh.md](docs/METHODS.zh.md)).
 
 ## License
 

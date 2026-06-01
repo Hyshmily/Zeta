@@ -107,9 +107,32 @@ public class CacheSyncListener {
 
   /**
    * Atomically removes the specified key from the local cache.
+   * <p>
+   * Uses the same version guard as {@link #handleRefresh}: when the existing
+   * entry is normal and the incoming INVALIDATE is degraded, the invalidation
+   * is skipped (case 2).  An unconditional path
+   * ({@code version == 0L && !isVersionDegraded}) bypasses the guard for
+   * bulk invalidations from {@code invalidateAll}.
+   * <p>
+   * A second DCL check inside the atomic {@code compute} body prevents a
+   * concurrent refresh from being wiped by a stale degraded INVALIDATE.
    */
   private void handleInvalidate(SyncMessage sm) {
-    caffeineCache.asMap().compute(sm.cacheKey(), (_, _) -> null);
+    boolean unconditional = sm.version() == 0L && !sm.isVersionDegraded();
+
+    if (!unconditional
+      && VersionGuard.shouldSkipForSync(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded())) {
+      log.debug("Stale invalidate ignored: key={}, incomingVersion={}", sm.cacheKey(), sm.version());
+      return;
+    }
+
+    caffeineCache.asMap().compute(sm.cacheKey(), (key, existing) -> {
+      if (!unconditional
+        && VersionGuard.shouldSkipForSync(caffeineCache, key, sm.version(), sm.isVersionDegraded())) {
+        return existing;
+      }
+      return null;
+    });
     log.debug("Invalidated by sync: {}", sm.cacheKey());
   }
 

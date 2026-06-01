@@ -259,4 +259,4 @@ For cluster-wide hot key detection, app instances periodically report access cou
                                └─────────────────────────────────────┘
 ```
 
-> See [README.WORKER.md](README.WORKER.md) for detailed Worker mode setup, state machine transitions, and configuration.
+> See [WORKER.md](WORKER.md) for detailed Worker mode setup, state machine transitions, and configuration.

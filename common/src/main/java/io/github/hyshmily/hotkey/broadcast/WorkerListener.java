@@ -124,11 +124,23 @@ public class WorkerListener {
       return;
     }
 
-    Object value = redisLoader.apply(wm.cacheKey());
-    if (value == null) {
+    Object rawValue = redisLoader.apply(wm.cacheKey());
+
+    if (rawValue == null) {
+      // Redis unavailable — promote a degraded L1 entry if one exists,
+      // so the Worker's HOT decision is not permanently lost.
+      Object existing = caffeineCache.getIfPresent(wm.cacheKey());
+      if (existing instanceof CacheEntry ce && ce.isVersionDegraded()) {
+        rawValue = ce.getValue();
+        log.debug("handleHot: Promoting degraded L1 entry for key: {}", wm.cacheKey());
+      }
+    }
+    if (rawValue == null) {
       log.debug("handleHot: HotKey value not found in Redis: {}", wm.cacheKey());
       return;
     }
+
+    Object value = rawValue;
 
     caffeineCache
       .asMap()

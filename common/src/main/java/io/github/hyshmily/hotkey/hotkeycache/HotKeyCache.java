@@ -60,12 +60,6 @@ public class HotKeyCache {
   private final Optional<HotKeyReporter> hotKeyReporter;
 
   /**
-   * JVM-local node identifier used in fallback version encoding to prevent
-   * cross-JVM ordering conflicts when Redis is unavailable.
-   */
-  private final int nodeId = InstanceIdGenerator.getNodeId();
-
-  /**
    * Monotonically increasing counter for fallback versions.
    * Only used when {@link #redisTemplate} is empty or Redis INCR fails.
    */
@@ -422,13 +416,14 @@ public class HotKeyCache {
   }
 
   /**
-   * Build a degraded version from a JVM-local node ID and a monotonically
-   * increasing counter.  {@code nodeId} occupies the upper 32 bits so that
-   * degraded versions from different JVMs never collide in the
-   * degraded-vs-degraded comparison.
+   * Build a degraded version in negative {@code long} space so that all
+   * degraded versions sort below any normal (positive) Redis INCR version.
+   * This guarantees the {@code sendDeduped} numeric comparison in
+   * {@link io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher} correctly
+   * prefers normal broadcasts over degraded ones without flag-aware logic.
    */
   private VersionResult fallbackVersion() {
-    long version = ((long) nodeId << 32) | (fallbackVersionCounter.incrementAndGet() & 0xFFFFFFFFL);
+    long version = Long.MIN_VALUE + fallbackVersionCounter.incrementAndGet();
     return new VersionResult(version, true);
   }
 }

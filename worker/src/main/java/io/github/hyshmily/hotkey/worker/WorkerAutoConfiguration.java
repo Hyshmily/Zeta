@@ -22,6 +22,7 @@ import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.*;
@@ -76,9 +77,10 @@ public class WorkerAutoConfiguration {
   void validateWindowConfig() {
     if (properties.getSlidingWindow().getDurationMs() % properties.getSlidingWindow().getSlices() != 0) {
       log.warn(
-        "windowDurationMs ({}) is not evenly divisible by windowSlices ({}). "
-          + "This introduces rounding inaccuracies in window calculations.",
-        properties.getSlidingWindow().getDurationMs(), properties.getSlidingWindow().getSlices()
+        "windowDurationMs ({}) is not evenly divisible by windowSlices ({}). " +
+          "This introduces rounding inaccuracies in window calculations.",
+        properties.getSlidingWindow().getDurationMs(),
+        properties.getSlidingWindow().getSlices()
       );
     }
   }
@@ -97,7 +99,11 @@ public class WorkerAutoConfiguration {
     if (threshold <= 0) {
       threshold = Long.MAX_VALUE;
     }
-    return new SlidingWindowDetector(properties.getSlidingWindow().getDurationMs(), properties.getSlidingWindow().getSlices(), threshold);
+    return new SlidingWindowDetector(
+      properties.getSlidingWindow().getDurationMs(),
+      properties.getSlidingWindow().getSlices(),
+      threshold
+    );
   }
 
   /** Creates the per‑key lifecycle state machine. */
@@ -159,15 +165,20 @@ public class WorkerAutoConfiguration {
     HotKeyStateMachine stateMachine,
     WorkerBroadcaster broadcaster,
     TopKValidator topKValidator,
-    @Qualifier("workerTopK") TopK workerTopK
+    @Qualifier("workerTopK") TopK workerTopK,
+    GlobalQpsEstimator globalQpsEstimator
   ) {
-    return new ReportConsumer(detector, stateMachine, broadcaster, topKValidator, workerTopK);
+    return new ReportConsumer(detector, stateMachine, broadcaster, topKValidator, workerTopK, globalQpsEstimator);
   }
 
   /** Broadcasts HOT / COOL decisions to all application instances. */
   @Bean
   public WorkerBroadcaster workerBroadcaster(RabbitTemplate rabbitTemplate, WorkerProperties properties) {
-    return new WorkerBroadcaster(rabbitTemplate, properties.getMessaging().getBroadcastExchange(), properties.getRouting().getAppName());
+    return new WorkerBroadcaster(
+      rabbitTemplate,
+      properties.getMessaging().getBroadcastExchange(),
+      properties.getRouting().getAppName()
+    );
   }
 
   /**
@@ -199,14 +210,22 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public Queue reportQueue(WorkerProperties properties) {
-    String queueName = HotKeyConstants.QUEUE_PREFIX_REPORT + properties.getRouting().getAppName() + "." + properties.getRouting().getShardIndex();
+    String queueName =
+      HotKeyConstants.QUEUE_PREFIX_REPORT +
+      properties.getRouting().getAppName() +
+      "." +
+      properties.getRouting().getShardIndex();
     return QueueBuilder.durable(queueName).build();
   }
 
   /** Binds the shard queue to the report exchange with the matching routing key. */
   @Bean
   public Binding reportBinding(Queue reportQueue, DirectExchange reportExchange, WorkerProperties properties) {
-    String routingKey = HotKeyConstants.ROUTING_KEY_REPORT + properties.getRouting().getAppName() + "." + properties.getRouting().getShardIndex();
+    String routingKey =
+      HotKeyConstants.ROUTING_KEY_REPORT +
+      properties.getRouting().getAppName() +
+      "." +
+      properties.getRouting().getShardIndex();
     return BindingBuilder.bind(reportQueue).to(reportExchange).with(routingKey);
   }
 
@@ -247,7 +266,7 @@ public class WorkerAutoConfiguration {
    * Periodically runs Top‑K cross‑validation to detect slow‑warming hot
    * keys that the sliding window might miss.
    *
-     * <p>Interval is controlled by {@code hotkey.worker.topk-validation.validate-interval-ms}
+   * <p>Interval is controlled by {@code hotkey.worker.topk-validation.validate-interval-ms}
    * (default 60 seconds).
    */
   @Bean
@@ -264,5 +283,37 @@ public class WorkerAutoConfiguration {
     public void validate() {
       topKValidator.validate();
     }
+  }
+
+  @Bean
+  public GlobalQpsEstimator globalQpsEstimator(WorkerProperties properties) {
+    return new GlobalQpsEstimator(
+      properties.getSlidingWindow().getDurationMs(),
+      properties.getSlidingWindow().getSlices()
+    );
+  }
+
+  @Bean
+  public ThresholdLearner thresholdLearner(
+    GlobalQpsEstimator estimator,
+    SlidingWindowDetector detector,
+    WorkerProperties properties
+  ) {
+    return new ThresholdLearner(estimator, detector, properties);
+  }
+
+  @Bean
+  public Object thresholdLearningTask(
+    ThresholdLearner learner,
+    WorkerProperties properties,
+    @Qualifier("hotKeyWorkerScheduler") ScheduledExecutorService scheduler
+  ) {
+    scheduler.scheduleAtFixedRate(
+      learner,
+      properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
+      properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
+      TimeUnit.MILLISECONDS
+    );
+    return new Object(); // placeholder bean
   }
 }

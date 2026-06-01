@@ -15,12 +15,11 @@
  */
 package io.github.hyshmily.hotkey.worker;
 
-import lombok.Data;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import lombok.Data;
 
 /**
  * A high‑performance, lock‑free sliding‑window detector for real‑time hot‑key
@@ -144,19 +143,6 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Returns the total access count within the current sliding window for the
-   * given key, or {@code 0} if the key is unknown.
-   */
-  public long getWindowSum(String key) {
-    AtomicLong[] slices = windows.get(key);
-    if (slices == null) {
-      return 0;
-    }
-    int currentIndex = (int) ((System.currentTimeMillis() / timeMillisPerSlice) % slices.length);
-    return getWindowSum(slices, currentIndex);
-  }
-
-  /**
    * Evicts stale tracking data for keys that have not been accessed within the
    * given timeout.  Unlike a simple two‑step {@code removeIf}, this implementation
    * uses atomic re‑verification to eliminate a race window between the two maps:
@@ -239,6 +225,19 @@ public class SlidingWindowDetector {
       }
     }
     return sum;
+  }
+
+  /**
+   * Returns the total access count within the current sliding window for the
+   * given key, or {@code 0} if the key is unknown.
+   */
+  public long getWindowSum(String key) {
+    AtomicLong[] slices = windows.get(key);
+    if (slices == null) {
+      return 0;
+    }
+    int currentIndex = (int) ((System.currentTimeMillis() / timeMillisPerSlice) % slices.length);
+    return getWindowSum(slices, currentIndex);
   }
 
   /** Returns the number of keys currently being tracked by this detector. */

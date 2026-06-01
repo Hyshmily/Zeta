@@ -95,15 +95,17 @@
 | `hotkey.worker.sliding-window.duration-ms`                                | `1000`                      | 滑动窗口时长（毫秒）                                       |
 | `hotkey.worker.sliding-window.slices`                                     | `10`                        | 每个窗口的时间片数                                         |
 | **`hotkey.worker.threshold.*`**                                           |                             | **热点阈值**                                               |
-| `hotkey.worker.threshold.hot-threshold`                                   | `-1`                        | 绝对热点阈值；`-1` = 使用比例阈值                          |
+| `hotkey.worker.threshold.hot-threshold`                                   | `1000`                      | 绝对热点阈值；`-1` = 使用比例阈值                          |
 | `hotkey.worker.threshold.hot-threshold-ratio`                             | `0.01`                      | 热点阈值占估计全局 QPS 的比例（1%）                        |
 | **`hotkey.worker.state-machine.*`**                                       |                             | **状态机**                                                 |
 | `hotkey.worker.state-machine.confirm-duration-ms`                         | `2000`                      | key 持续超过阈值才确认 HOT 的时长                          |
 | `hotkey.worker.state-machine.cool-duration-ms`                            | `15000`                     | key 持续低于阈值才确认 COLD 的时长                         |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`                           | `5000`                      | COOL 结束时的宽限期，允许静默恢复                          |
-| **`hotkey.worker.dynamic-threshold.*`**                                   |                             | **动态阈值**                                               |
-| `hotkey.worker.dynamic-threshold.recalculate-interval-ms`                 | `60000`                     | 动态阈值重新计算的时间间隔                                 |
-| `hotkey.worker.dynamic-threshold.qps-change-tolerance`                    | `0.5`                       | 触发阈值更新的 QPS 变化容忍度（±50%）                      |
+| **`hotkey.worker.global-qps-dynamic-threshold.*`**                        |                             | **动态阈值（全局 QPS）**                                   |
+| `hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms`      | `60000`                     | 动态阈值重新计算的时间间隔                                 |
+| `hotkey.worker.global-qps-dynamic-threshold.qps-change-tolerance`         | `0.5`                       | 触发阈值更新的 QPS 变化容忍度（±50%）                      |
+| `hotkey.worker.global-qps-dynamic-threshold.learning-period-ms`           | `30000`                     | QPS 估算的学习周期                                        |
+| `hotkey.worker.global-qps-dynamic-threshold.hot-threshold-ratio`          | `0.01`                      | 热阈值占估计全局 QPS 的比例                               |
 | **`hotkey.worker.topk-validation.*`**                                     |                             | **TopK 验证**                                              |
 | `hotkey.worker.topk-validation.validate-interval-ms`                      | `60000`                     | Top-K 交叉验证的运行间隔                                   |
 | `hotkey.worker.topk-validation.pre-warm-count`                            | `5`                         | 有资格预热的 Top-K 数量                                   |

@@ -95,13 +95,13 @@ Each tracked key follows a lifecycle managed by `HotKeyStateMachine`:
 
 | Property                                                  | Default | Description                                            |
 | --------------------------------------------------------- | ------- | ------------------------------------------------------ |
-| `hotkey.worker.threshold.hot-threshold`                   | `-1`    | Absolute hot threshold (use `-1` to use ratio instead) |
+| `hotkey.worker.threshold.hot-threshold`                   | `1000`  | Absolute hot threshold (use `-1` to use ratio instead) |
 | `hotkey.worker.threshold.hot-threshold-ratio`             | `0.01`  | Hot threshold as fraction of estimated global QPS      |
 | `hotkey.worker.state-machine.confirm-duration-ms`         | `2000`  | Duration above threshold to confirm HOT (2s)           |
 | `hotkey.worker.state-machine.cool-duration-ms`            | `15000` | Duration below threshold to confirm COOL (15s)         |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`           | `5000`  | Grace period for silent re-heat (5s)                   |
 
-## Dynamic Threshold
+## Dynamic Threshold (Global QPS)
 
 The Worker adapts to traffic patterns by periodically recalculating the hot threshold based on estimated global QPS:
 
@@ -109,10 +109,12 @@ The Worker adapts to traffic patterns by periodically recalculating the hot thre
 hotThreshold = max(minCount, estimatedGlobalQPS * hotThresholdRatio)
 ```
 
-| Property                                                        | Default | Description                                          |
-| --------------------------------------------------------------- | ------- | ---------------------------------------------------- |
-| `hotkey.worker.dynamic-threshold.recalculate-interval-ms`       | `60000` | Recalculation interval (60s)                         |
-| `hotkey.worker.dynamic-threshold.qps-change-tolerance`          | `0.5`   | ±50% QPS change required to trigger threshold update |
+| Property                                                                     | Default  | Description                                          |
+| ---------------------------------------------------------------------------- | -------- | ---------------------------------------------------- |
+| `hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms`         | `60000`  | Recalculation interval (60s)                         |
+| `hotkey.worker.global-qps-dynamic-threshold.qps-change-tolerance`            | `0.5`    | ±50% QPS change required to trigger threshold update |
+| `hotkey.worker.global-qps-dynamic-threshold.learning-period-ms`              | `30000`  | Learning period for QPS estimation                   |
+| `hotkey.worker.global-qps-dynamic-threshold.hot-threshold-ratio`             | `0.01`   | Hot threshold as fraction of estimated global QPS    |
 
 The `qps-change-tolerance` prevents threshold churn during normal traffic fluctuations — only significant QPS shifts trigger a recalculation.
 
@@ -164,9 +166,11 @@ hotkey:
       cool-duration-ms: 15000
       pre-cool-grace-ms: 5000
 
-    dynamic-threshold:
+    global-qps-dynamic-threshold:
       recalculate-interval-ms: 60000
       qps-change-tolerance: 0.5
+      learning-period-ms: 30000
+      hot-threshold-ratio: 0.01
 
     topk-validation:
       validate-interval-ms: 60000
