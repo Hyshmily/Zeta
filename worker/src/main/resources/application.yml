@@ -1,0 +1,105 @@
+spring:
+  application:
+    name: hotkey-worker
+
+
+  # ── Messaging (RabbitMQ) ──
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    virtual-host: /
+
+  # ── Data (Redis) ──
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+hotkey:
+  # ── App-side Detection ──
+  annotation:
+    enabled: true
+  local:
+    ## HeavyKeeper Algorithm
+    top-k: 100
+    width: 50000
+    depth: 5
+    decay: 0.92
+    min-count: 10
+
+    ## L1 Cache (Caffeine)
+    local-cache-max-size: 1000
+    local-cache-ttl-minutes: 5
+
+    ## TTL — Normal vs Hot
+    default-hard-ttl-ms: 300000
+    default-hot-hard-ttl-ms: 3600000
+    default-soft-ttl-ms: 30000
+    default-hot-soft-ttl-ms: 300000
+
+    ## Version Tracking
+    version-key-ttl-minutes: 60
+
+    ## App-to-Worker Reporting
+    app-name: default
+    report-exchange: hotkey.report.exchange
+    report-interval-ms: 100
+    shard-count: 1
+
+  # ── Worker Node ──
+  worker:
+    ## Must explicitly set to true to activate Worker mode
+    enabled: true
+
+    ## Routing
+    routing:
+      app-name: default
+      shard-count: 1
+      shard-index: 0
+
+    ## Messaging
+    messaging:
+      report-exchange: hotkey.report.exchange
+      broadcast-exchange: hotkey.broadcast.exchange
+
+    ## Sliding Window
+    sliding-window:
+      duration-ms: 1000
+      slices: 10
+
+    ## Hot Threshold
+    threshold:
+      hot-threshold: -1
+      hot-threshold-ratio: 0.01
+
+    ## State Machine
+    state-machine:
+      confirm-duration-ms: 2000
+      cool-duration-ms: 15000
+      pre-cool-grace-ms: 5000
+      learning-period-ms: 30000
+
+    ## Dynamic Threshold
+    dynamic-threshold:
+      recalculate-interval-ms: 60000
+      qps-change-tolerance: 0.5
+
+    ## TopK Validation
+    topk-validation:
+      validate-interval-ms: 60000
+      pre-warm-count: 5
+      pre-warm-min-appearances: 2
+
+    ## HeavyKeeper (Worker-scoped)
+    heavy-keeper:
+      top-k: 100
+      width: 20000
+      depth: 10
+      decay: 0.9
+      min-count: 10
+
+logging:
+  level:
+    io.github.hyshmily: INFO

@@ -1,0 +1,10 @@
+{
+  "properties": [
+    {
+      "name": "hotkey.annotation.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable @HotKey annotation AOP support.",
+      "defaultValue": false
+    }
+  ]
+}

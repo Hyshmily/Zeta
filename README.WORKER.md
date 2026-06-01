@@ -56,10 +56,10 @@ When `shard-count > 1`, reports are distributed across multiple Worker instances
 
 The `SlidingWindowDetector` is a lock-free time-series counter that tracks per-key access counts within a configurable window.
 
-| Property                           | Default | Description                                   |
-| ---------------------------------- | ------- | --------------------------------------------- |
-| `hotkey.worker.window-duration-ms` | `1000`  | Total window duration (1 second)              |
-| `hotkey.worker.window-slices`      | `10`    | Number of time slices per window (100ms each) |
+| Property                                           | Default | Description                                   |
+| -------------------------------------------------- | ------- | --------------------------------------------- |
+| `hotkey.worker.sliding-window.duration-ms`         | `1000`  | Total window duration (1 second)              |
+| `hotkey.worker.sliding-window.slices`              | `10`    | Number of time slices per window (100ms each) |
 
 Each key maintains an array of `long` counters indexed by time slice. On each report tick, the oldest slice is recycled and the effective count for each key is recomputed as the sum across all slices. This gives an accurate QPS estimate without per-access locking.
 
@@ -93,13 +93,13 @@ Each tracked key follows a lifecycle managed by `HotKeyStateMachine`:
 
 ### State Machine Configuration
 
-| Property                            | Default | Description                                            |
-| ----------------------------------- | ------- | ------------------------------------------------------ |
-| `hotkey.worker.hot-threshold`       | `-1`    | Absolute hot threshold (use `-1` to use ratio instead) |
-| `hotkey.worker.hot-threshold-ratio` | `0.01`  | Hot threshold as fraction of estimated global QPS      |
-| `hotkey.worker.confirm-duration-ms` | `2000`  | Duration above threshold to confirm HOT (2s)           |
-| `hotkey.worker.cool-duration-ms`    | `15000` | Duration below threshold to confirm COOL (15s)         |
-| `hotkey.worker.pre-cool-grace-ms`   | `5000`  | Grace period for silent re-heat (5s)                   |
+| Property                                                  | Default | Description                                            |
+| --------------------------------------------------------- | ------- | ------------------------------------------------------ |
+| `hotkey.worker.threshold.hot-threshold`                   | `-1`    | Absolute hot threshold (use `-1` to use ratio instead) |
+| `hotkey.worker.threshold.hot-threshold-ratio`             | `0.01`  | Hot threshold as fraction of estimated global QPS      |
+| `hotkey.worker.state-machine.confirm-duration-ms`         | `2000`  | Duration above threshold to confirm HOT (2s)           |
+| `hotkey.worker.state-machine.cool-duration-ms`            | `15000` | Duration below threshold to confirm COOL (15s)         |
+| `hotkey.worker.state-machine.pre-cool-grace-ms`           | `5000`  | Grace period for silent re-heat (5s)                   |
 
 ## Dynamic Threshold
 
@@ -109,10 +109,10 @@ The Worker adapts to traffic patterns by periodically recalculating the hot thre
 hotThreshold = max(minCount, estimatedGlobalQPS * hotThresholdRatio)
 ```
 
-| Property                                | Default | Description                                          |
-| --------------------------------------- | ------- | ---------------------------------------------------- |
-| `hotkey.worker.recalculate-interval-ms` | `60000` | Recalculation interval (60s)                         |
-| `hotkey.worker.qps-change-tolerance`    | `0.5`   | ±50% QPS change required to trigger threshold update |
+| Property                                                        | Default | Description                                          |
+| --------------------------------------------------------------- | ------- | ---------------------------------------------------- |
+| `hotkey.worker.dynamic-threshold.recalculate-interval-ms`       | `60000` | Recalculation interval (60s)                         |
+| `hotkey.worker.dynamic-threshold.qps-change-tolerance`          | `0.5`   | ±50% QPS change required to trigger threshold update |
 
 The `qps-change-tolerance` prevents threshold churn during normal traffic fluctuations — only significant QPS shifts trigger a recalculation.
 
@@ -120,21 +120,22 @@ The `qps-change-tolerance` prevents threshold churn during normal traffic fluctu
 
 The Worker periodically validates the app-side HeavyKeeper Top-K against its own cluster-wide Top-K, ensuring consistency and enabling pre-warming.
 
-| Property                                      | Default | Description                              |
-| --------------------------------------------- | ------- | ---------------------------------------- |
-| `hotkey.worker.topk-validate-interval-ms`     | `60000` | Cross-validation interval (60s)          |
-| `hotkey.worker.topk-pre-warm-count`           | `5`     | Top-K entries eligible for pre-warming   |
-| `hotkey.worker.topk-pre-warm-min-appearances` | `2`     | Min consecutive appearances for pre-warm |
+| Property                                                      | Default | Description                              |
+| ------------------------------------------------------------- | ------- | ---------------------------------------- |
+| `hotkey.worker.topk-validation.validate-interval-ms`          | `60000` | Cross-validation interval (60s)          |
+| `hotkey.worker.topk-validation.pre-warm-count`                | `5`     | Top-K entries eligible for pre-warming   |
+| `hotkey.worker.topk-validation.pre-warm-min-appearances`      | `2`     | Min consecutive appearances for pre-warm |
 
 Top-K entries appearing in the Worker's Top-K across consecutive validation intervals are candidates for pre-warming. The Worker can proactively push these keys to app instances before they would naturally be detected locally.
 
 ## Deployment Modes
 
-| Mode        | `worker.enabled`  | `worker.exclusive-mode` | Active Beans                                                           |
-| ----------- | ----------------- | ----------------------- | ---------------------------------------------------------------------- |
-| App-only    | `false` (default) | —                       | `HotKeyCache`, TopK detector, actuator, sync                           |
-| Worker-only | `true`            | `true` (default)        | Worker-only (SlidingWindow, StateMachine, ReportConsumer, Broadcaster) |
-| Coexistence | `true`            | `false`                 | All beans (App + Worker) — useful for dev/testing                      |
+Two deployment modes:
+
+| Mode                     | `worker.enabled` | Active Beans                                                                          |
+| ------------------------ | ---------------- | ------------------------------------------------------------------------------------- |
+| App-only                 | `false` (default)| `HotKeyCache`, TopK detector, reporter, actuator, sync                                |
+| Worker-only              | `true`           | Worker-only (SlidingWindow, StateMachine, ReportConsumer, Broadcaster)                |
 
 In **Worker-only** mode, `HotKey.isHotKey()` / `get()` / `putThrough()` throw `UnsupportedOperationException` — these operations require the app-side cache. Worker-TopK queries (`returnWorkerHotKeys()`) remain available.
 
@@ -143,29 +144,41 @@ In **Worker-only** mode, `HotKey.isHotKey()` / `get()` / `putThrough()` throw `U
 ```yaml
 hotkey:
   worker:
+    # Must explicitly set to true to activate Worker mode
     enabled: true
-    app-name: my-service
-    shard-count: 1
-    shard-index: 0
 
-    window-duration-ms: 1000
-    window-slices: 10
-    hot-threshold-ratio: 0.01
-    confirm-duration-ms: 2000
-    cool-duration-ms: 15000
-    pre-cool-grace-ms: 5000
-    recalculate-interval-ms: 60000
-    qps-change-tolerance: 0.5
+    routing:
+      app-name: my-service
+      shard-count: 1
+      shard-index: 0
 
-    topk-validate-interval-ms: 60000
-    topk-pre-warm-count: 5
-    topk-pre-warm-min-appearances: 2
+    sliding-window:
+      duration-ms: 1000
+      slices: 10
 
-    worker-top-k: 100
-    worker-width: 20000
-    worker-depth: 10
-    worker-decay: 0.9
-    worker-min-count: 10
+    threshold:
+      hot-threshold-ratio: 0.01
+
+    state-machine:
+      confirm-duration-ms: 2000
+      cool-duration-ms: 15000
+      pre-cool-grace-ms: 5000
+
+    dynamic-threshold:
+      recalculate-interval-ms: 60000
+      qps-change-tolerance: 0.5
+
+    topk-validation:
+      validate-interval-ms: 60000
+      pre-warm-count: 5
+      pre-warm-min-appearances: 2
+
+    heavy-keeper:
+      top-k: 100
+      width: 20000
+      depth: 10
+      decay: 0.9
+      min-count: 10
 
 spring:
   rabbitmq:
@@ -187,9 +200,10 @@ Each app instance must enable the `worker-listener` to receive HOT/COOL decision
 
 ```yaml
 hotkey:
-  app-name: my-service
-  report-interval-ms: 100
-  shard-count: 1
+  local:
+    app-name: my-service
+    report-interval-ms: 100
+    shard-count: 1
 ```
 
 ## Failure Behavior
