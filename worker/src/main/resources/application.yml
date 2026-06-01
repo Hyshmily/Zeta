@@ -79,10 +79,9 @@ hotkey:
       confirm-duration-ms: 2000
       cool-duration-ms: 15000
       pre-cool-grace-ms: 5000
-      learning-period-ms: 30000
 
     ## Dynamic Threshold
-    dynamic-threshold:
+    global-qps-dynamic-threshold:
       recalculate-interval-ms: 60000
       qps-change-tolerance: 0.5
 

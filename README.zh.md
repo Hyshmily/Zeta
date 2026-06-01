@@ -157,6 +157,75 @@ hotkey:
 
 所有选项见[配置](#配置)，完整属性参考见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
 
+<details>
+<summary><b>一键部署 YAML 模板</b>（懒人模式——只写必须改的）</summary>
+
+**纯本地** — 引入 `hotkey` 依赖，无需 YAML 配置
+
+```yaml
+# 无需 YAML 配置，全部走默认值。
+```
+
+**+ Redis 二级缓存** — 添加 `spring-boot-starter-data-redis`
+
+```yaml
+# 无需额外 hotkey 配置——自动检测 RedisTemplate。
+```
+
+**+ 跨实例同步** — 添加 `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`
+
+```yaml
+hotkey:
+  sync:
+    enabled: true
+    # exchange-name、queue-prefix、dedup 等均走默认值
+```
+
+**+ Worker 监听器** — 添加 `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`
+
+```yaml
+hotkey:
+  sync:
+    enabled: true            # 提供 hotKeyRedisLoader Bean
+  worker-listener:
+    enabled: true
+    # exchange-name、queue-prefix 等均走默认值
+```
+
+**+ @HotKey 注解** — 添加 `spring-boot-starter-aop`
+
+```yaml
+hotkey:
+  annotation:
+    enabled: true
+```
+
+**Worker 节点（独立部署）** — 添加 `spring-boot-starter-amqp`
+
+```yaml
+hotkey:
+  worker:
+    enabled: true
+    routing:
+      app-name: myapp              # 必须与 App 端 hotkey.local.app-name 一致
+      # shard-count: 1             # 默认 1，单分片可省略
+      # shard-index: 0             # 默认 0，单分片可省略
+```
+
+**全能 App（Redis + 同步 + Worker 监听 + @HotKey）**
+
+```yaml
+hotkey:
+  sync:
+    enabled: true
+  worker-listener:
+    enabled: true
+  annotation:
+    enabled: true
+```
+
+</details>
+
 ### 3. 使用
 
 > **注意：** 自v1.0.2起包含**破坏性变更** — `get(hk, fk)` 和 `putAndBroadcast(hk, fk, val)` 已移除。库已与 `RedisTemplate` 解耦，调用方通过 `Supplier<T>` / `Runnable` 自行提供读写回调。

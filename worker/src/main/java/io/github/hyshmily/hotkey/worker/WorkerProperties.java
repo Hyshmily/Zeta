@@ -66,10 +66,9 @@ public class WorkerProperties {
   public static class GlobalQpsDynamicThreshold {
 
     private double qpsChangeTolerance = 0.5;
-    private double LearningPeriodMs = 30_000;
-    private double HotThresholdRatio = 0.01;
-    private double QpsChangeTolerance = 0.5;
-    private long RecalculateIntervalMs = 60_000;
+    private double learningPeriodMs = 30_000;
+    private double hotThresholdRatio = 0.01;
+    private long recalculateIntervalMs = 60_000;
   }
 
   @Data

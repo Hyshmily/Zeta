@@ -157,6 +157,75 @@ hotkey:
 
 See [Configuration](#configuration) for all options and [CONFIG.md](docs/CONFIG.md) for the complete property reference.
 
+<details>
+<summary><b>Quick-deploy YAML templates</b> (lazy mode — only required overrides)</summary>
+
+**Pure local** — add the `hotkey` dependency, no YAML config needed
+
+```yaml
+# No YAML config required — defaults apply.
+```
+
+**+ Redis L2** — add `spring-boot-starter-data-redis`
+
+```yaml
+# No extra hotkey config needed — RedisTemplate is auto-detected.
+```
+
+**+ Cross-instance sync** — add `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`
+
+```yaml
+hotkey:
+  sync:
+    enabled: true
+    # exchange-name, queue-prefix, dedup all use defaults
+```
+
+**+ Worker Listener** — add `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`
+
+```yaml
+hotkey:
+  sync:
+    enabled: true            # provides hotKeyRedisLoader bean
+  worker-listener:
+    enabled: true
+    # exchange-name, queue-prefix all use defaults
+```
+
+**+ @HotKey annotation** — add `spring-boot-starter-aop`
+
+```yaml
+hotkey:
+  annotation:
+    enabled: true
+```
+
+**Worker node (standalone)** — add `spring-boot-starter-amqp`
+
+```yaml
+hotkey:
+  worker:
+    enabled: true
+    routing:
+      app-name: myapp              # must match hotkey.local.app-name on the app side
+      # shard-count: 1             # default 1, omit for single shard
+      # shard-index: 0             # default 0, omit for single shard
+```
+
+**Full combo (App + Redis + Sync + Worker Listener + @HotKey)**
+
+```yaml
+hotkey:
+  sync:
+    enabled: true
+  worker-listener:
+    enabled: true
+  annotation:
+    enabled: true
+```
+
+</details>
+
 ### 3. Use
 
 > **Note:** From v1.0.2 includes a **breaking change** — `get(hk, fk)` and `putAndBroadcast(hk, fk, val)` are removed. The library is now decoupled from `RedisTemplate`; callers supply their own read/write callbacks via `Supplier<T>` / `Runnable`.
