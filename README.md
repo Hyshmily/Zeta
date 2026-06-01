@@ -92,7 +92,7 @@ Component failure behavior:
 Write path failure behavior:
 
 | Write method                                        | Failure scenario                 | Behavior                                                                     |
-| --------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------ |
+| --------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------- |
 | `putThrough`                                        | Executor queue full (outside tx) | `RejectedExecutionException` propagates to caller                            |
 | `putThrough`                                        | `writer.run()` / Redis fails     | Error logged on `hotKeyExecutor`, L1 version not updated, no broadcast       |
 | `putBeforeInvalidate`                               | `mutation.run()` throws          | Mutation exception caught and logged; local invalidate and broadcast skipped |
