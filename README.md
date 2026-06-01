@@ -96,7 +96,7 @@ Write path failure behavior:
 | `putThrough`                                        | Executor queue full (outside tx) | `RejectedExecutionException` propagates to caller                            |
 | `putThrough`                                        | `writer.run()` / Redis fails     | Error logged on `hotKeyExecutor`, L1 version not updated, no broadcast       |
 | `putBeforeInvalidate`                               | `mutation.run()` throws          | Mutation exception caught and logged; local invalidate and broadcast skipped |
-| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to node-local counter (nodeId << 32 &#124; counter, non-persistent version with `degraded=true`) |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to node-local counter (`nodeId << 32 OR counter`, non-persistent, `degraded=true`) |
 
 Worker mode failure behavior:
 

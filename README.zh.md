@@ -96,7 +96,7 @@ hotKey.get(key, supplier)
 | `putThrough`                                        | 线程池队列满（非事务）      | `RejectedExecutionException` 传播到调用方   |
 | `putThrough`                                        | `writer.run()` / Redis 失败 | 错误记录到日志，L1 版本号未更新，不发送广播 |
 | `putBeforeInvalidate`                               | `mutation.run()` 抛出异常   | 捕获突变异常并记录日志；跳过本地失效和广播  |
-| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis 失败  | 回退到节点本地计数器（nodeId << 32 &#124; counter，非持久化，标记 `degraded=true`） |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis 失败  | 回退到节点本地计数器（`nodeId << 32 OR counter`，非持久化，`degraded=true`） |
 
 Worker 模式故障表现：
 
