@@ -124,13 +124,19 @@ public class CacheExpireManager {
     return ttlConfig.effectiveHotSoftTtlMs();
   }
 
-  private static long toExpireTimestamp(long ttlMs) {
+  static long toExpireTimestamp(long ttlMs) {
+    if (ttlMs == Long.MAX_VALUE) {
+      return Long.MAX_VALUE;
+    }
     return ttlMs > 0 ? System.currentTimeMillis() + ttlMs : Long.MAX_VALUE;
   }
 
   private long toSoftExpireTimestamp(long softTtlMs) {
     if (!isSoftExpireEnabled() || softTtlMs <= 0) {
       return 0L;
+    }
+    if (softTtlMs == Long.MAX_VALUE) {
+      return Long.MAX_VALUE;
     }
     return System.currentTimeMillis() + softTtlMs;
   }

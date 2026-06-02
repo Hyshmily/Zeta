@@ -19,8 +19,6 @@ It will remain open source — past, present, and future.
 > [!TIP]
 > **Before you start, have questions?** See [FAQ.md](docs/FAQ.md) for answers to common questions about local vs central detection, Worker delay, MQ throughput, and more.
 
-> [!Important]
-> Due to the author's limited capabilities, the reliability and stability in production cannot be fully guaranteed.
 
 ### Introduction
 
@@ -401,6 +399,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 >
 > - A per-call `hardTtlMs`/`softTtlMs` applies to this invocation only. The next call without these parameters falls back to the configured defaults (which differ for hot vs normal keys).
 > - Pass `0` for either TTL to use the configured default for the key's current state (hot vs normal).
+> - Pass `Long.MAX_VALUE` for `hardTtlMs` to make the entry effectively permanent — it will never be evicted by TTL (only by Caffeine `maximumSize` eviction).
 > - When combined with `getWithSoftExpire`, the per-entry hard TTL is preserved across background refreshes.
 
 **I. Worker mode**

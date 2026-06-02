@@ -19,8 +19,6 @@
 > [!TIP]
 > **开始之前，有疑问？** 参见 [FAQ.zh.md](docs/FAQ.zh.md) —— 关于本地 vs 中央检测、Worker 延迟、MQ 吞吐量等常见问题的解答。
 
-> [!Important]
-> 受制于作者能力有限，不能完全确保生产过程中的可靠性与稳定性。
 
 ### 简介
 
@@ -401,6 +399,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 >
 > - per-call 的 `hardTtlMs`/`softTtlMs` 仅对本次调用生效。下次调用不传参数时，回退到 key 当前状态（热点或普通）对应的默认 TTL。
 > - 传入 `0` 表示使用该 key 状态的配置默认值。
+> - 传入 `Long.MAX_VALUE` 作为 `hardTtlMs` 可实现永久缓存——该条目永不会被 TTL 淘汰（仅受 Caffeine `maximumSize` 淘汰约束）。
 > - 与 `getWithSoftExpire` 配合使用时，per-entry 硬 TTL 在后台刷新中会被保留。
 
 **I. Worker 模式**
