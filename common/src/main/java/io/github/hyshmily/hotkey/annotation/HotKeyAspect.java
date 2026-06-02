@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
+import lombok.RequiredArgsConstructor;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
@@ -53,16 +54,13 @@ import org.springframework.expression.spel.support.StandardEvaluationContext;
  * is absent.
  */
 @Aspect
+@RequiredArgsConstructor
 public class HotKeyAspect {
 
   private final io.github.hyshmily.hotkey.HotKey hotKeyFacade;
   private final SpelExpressionParser parser = new SpelExpressionParser();
   private final ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();
   private final Map<Method, String[]> paramNamesCache = new ConcurrentHashMap<>();
-
-  public HotKeyAspect(io.github.hyshmily.hotkey.HotKey hotKeyFacade) {
-    this.hotKeyFacade = hotKeyFacade;
-  }
 
   /**
    * Around advice for {@link HotKey @HotKey} methods.
@@ -94,7 +92,7 @@ public class HotKeyAspect {
       } catch (RuntimeException | Error e) {
         throw e;
       } catch (Throwable e) {
-        throw new RuntimeException(e);
+        throw sneakyThrow(e);
       }
     };
 
@@ -133,7 +131,7 @@ public class HotKeyAspect {
         if (t instanceof RuntimeException) {
           throw (RuntimeException) t;
         }
-        throw new RuntimeException(t);
+        throw sneakyThrow(t);
       }
     });
 
@@ -182,5 +180,10 @@ public class HotKeyAspect {
       context.setVariable(paramNames[i], args[i]);
     }
     return parser.parseExpression(expression).getValue(context, String.class);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <T extends Throwable> RuntimeException sneakyThrow(Throwable t) throws T {
+    throw (T) t;
   }
 }

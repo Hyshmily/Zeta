@@ -52,7 +52,7 @@ public class WorkerBroadcaster {
    * for this worker.  Combined with consistent‑hash sharding (one key → one
    * worker) this guarantees a total order of decisions per key.
    */
-  private final AtomicLong decisionVersionCounter = new AtomicLong(0);
+  private final AtomicLong decisionVersionCounter = new AtomicLong(System.currentTimeMillis());
 
   /**
    * Broadcasts a HOT decision for the given key.

@@ -17,11 +17,11 @@
 
 **源码中的协作流程：**
 
-1. **突发流量打到实例 A：** `HotKeyCache.get()`（第 127–131 行） L1 未命中 → `loadAndCache()`（第 216 行）调用 `hotKeyDetector.add(key, 1).isHotKey()` → 若为热 Key，以 `hotHardTtlMs`（默认 1 小时）缓存。实例 A 瞬间得到保护。
+1. **突发流量打到实例 A：** `HotKeyCache.get()` L1 未命中 → `loadAndCache()` 调用 `hotKeyDetector.add(key, 1).isHotKey()` → 若为热 Key，以 `hotHardTtlMs`（默认 1 小时）缓存。实例 A 瞬间得到保护。
 
-2. **同时，** 同一次 `get()` 调用 `hotKeyReporter.record(key)`（第 130 行）→ `HotKeyReporter` 在本地 Caffeine 计数器中累加（第 58–59 行）→ 每 `reportIntervalMs`（默认 100ms）批量刷新到 RabbitMQ（第 92–93 行）。
+2. **同时，** 同一次 `get()` 调用 `hotKeyReporter.record(key)` → `HotKeyReporter` 在本地 Caffeine 计数器中累加 → 每 `reportIntervalMs`（默认 100ms）批量刷新到 RabbitMQ。
 
-3. **Worker 收到上报** → `ReportConsumer.onReport()`（第 98 行）调用 `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()`（第 109 行）追踪连续热点窗口 → 持续 `confirmDurationMs`（默认 2s）后，向 **所有实例** 广播 HOT。
+3. **Worker 收到上报** → `ReportConsumer.onReport()` 调用 `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` 追踪连续热点窗口 → 持续 `confirmDurationMs`（默认 2s）后，向 **所有实例** 广播 HOT。
 
 4. **实例 B、C、D** 通过 `WorkerListener` 收到 HOT 广播 → 提前从 Redis 加载该 Key 到本地 Caffeine，在流量到达之前就完成预热。
 
@@ -48,7 +48,7 @@ t=+300ms 节点 B、C、D 收到 HOT → 从 Redis 加载 → 以热 TTL 缓存
 
 **如果是仅仅 100ms 的脉冲呢？** 那不算是集群级别的热 Key——只是一个本地毛刺。本地 HeavyKeeper 用稍长的 TTL 处理它，Worker 完全不需要广播。作者把两者分开，就是为此。
 
-`SingleFlight` 层（`SingleFlight.java` 第 70–95 行）提供了额外保障：同一 Key 的并发 L1 未命中共享一个 `CompletableFuture`，在本地 HeavyKeeper 激活前的短暂窗口内防止对后端造成雪崩。
+`SingleFlight.java` 提供了额外保障：同一 Key 的并发 L1 未命中共享一个 `CompletableFuture`，在本地 HeavyKeeper 激活前的短暂窗口内防止对后端造成雪崩。
 
 ---
 
@@ -80,9 +80,9 @@ Worker 检测到 Key X 是全局热 Key → 广播 HOT
 **除了预热，中央 Worker 还提供：**
 
 - **统一冷却：** 只有 Worker 能决定一个 Key 何时不再是热 Key。没有它，各节点会各自冷却，导致缓存状态不一致。
-- **决策版本仲裁：** 每条 HOT/COOL 广播携带单调递增的 `decisionVersion`（`WorkerBroadcaster.java` 第 55、64 行）。接收端据此丢弃乱序消息，确保每个 Key 的全局有序。
-- **TopK 慢热检测：** `TopKValidator`（`TopKValidator.java` 第 91–113 行）定期扫描全局频率排行榜。逐渐累积高总访问量（但从不脉冲）的 Key 会被预热——这是本地 HeavyKeeper 做不到的。
+- **决策版本仲裁：** 每条 HOT/COOL 广播携带单调递增的 `decisionVersion`（`WorkerBroadcaster.java`）。接收端据此丢弃乱序消息，确保每个 Key 的全局有序。
 
+- **TopK 慢热检测：** `TopKValidator`（`TopKValidator.java`）定期扫描全局频率排行榜。逐渐累积高总访问量（但从不脉冲）的 Key 会被预热——这是本地 HeavyKeeper 做不到的。
 ---
 
 ## Q4: RabbitMQ 吞吐有限（~1万–10万 msg/s），上报流量会不会压垮它？
@@ -91,13 +91,13 @@ Worker 检测到 Key X 是全局热 Key → 广播 HOT
 
 ### 1. 批量聚合大幅减少消息量
 
-`HotKeyReporter`（`HotKeyReporter.java` 第 75–94 行）不是每次访问都发送一条消息。它在本地 Caffeine 计数器中累积，每 `reportIntervalMs`（默认 100ms）批量刷新。一条 `ReportMessage` 可以携带成百上千个 Key-Count 对。
+`HotKeyReporter`（`HotKeyReporter.java`）不是每次访问都发送一条消息。它在本地 Caffeine 计数器中累积，每 `reportIntervalMs`（默认 100ms）批量刷新。一条 `ReportMessage` 可以携带成百上千个 Key-Count 对。
 
 **公式：** 每秒消息数 = `1000 / reportIntervalMs` = 每个分片 10 msg/s，与访问总量无关。
 
 ### 2. 一致性哈希分片分散负载
 
-每个 Key 通过 `Math.abs(key.hashCode()) % shardCount`（`HotKeyReporter.java` 第 87 行）路由到唯一分片。若 `shardCount = N`，上报负载被分到 N 个队列/消费者上。每个 Worker 消费者只处理分配到的 Key。
+每个 Key 通过 `Math.abs(key.hashCode()) % shardCount`（`HotKeyReporter.java`）路由到唯一分片。若 `shardCount = N`，上报负载被分到 N 个队列/消费者上。每个 Worker 消费者只处理分配到的 Key。
 
 ### 3. 控制通道与数据通道分离
 
@@ -106,7 +106,7 @@ Worker 检测到 Key X 是全局热 Key → 广播 HOT
 | **上报**（应用 → Worker） | `hotkey.report.exchange`    | 每 100ms 批量发送 | 稳定，与应用数量成比例 |
 | **广播**（Worker → 应用） | `hotkey.broadcast.exchange` | HOT/COOL 决策     | 极低——仅状态转换时     |
 
-广播是 **控制信号**，不是数据流。一个 Key 在其生命周期内最多经历 COLD → CONFIRMED_HOT → PRE_COOLING → COLD 的完整状态转换。`HotKeyStateMachine`（`HotKeyStateMachine.java` 第 60–72 行）的 `confirmCount`/`coolCount` 滞回机制确保不会出现抖动/广播风暴。
+广播是 **控制信号**，不是数据流。一个 Key 在其生命周期内最多经历 COLD → CONFIRMED_HOT → PRE_COOLING → COLD 的完整状态转换。`HotKeyStateMachine`（`HotKeyStateMachine.java`）的 `confirmCount`/`coolCount` 滞回机制确保不会出现抖动/广播风暴。
 
 **如果你的集群大到需要担心 MQ 吞吐：** 增加 `shardCount`，这会按比例减少每个队列的消息量。每个新增分片都会在 Worker 上增加一个消费者线程。
 
@@ -118,7 +118,7 @@ Worker 检测到 Key X 是全局热 Key → 广播 HOT
 
 **它捕捉什么：** 有些 Key 从不"脉冲"，但会在数分钟到数小时内逐渐累积高总流量——例如慢慢吸引更多访客的活动落地页，或被许多用户以稳定速率查询的仪表盘组件。
 
-这些 Key **永远无法**触发滑动窗口阈值（默认 1s 窗口内 1000 QPS），但它们每日的总访问量排在全局 TopK 里。`TopKValidator.validate()`（`TopKValidator.java` 第 91 行）每 `validateIntervalMs`（默认 60s）运行一次，检查：
+这些 Key **永远无法**触发滑动窗口阈值（默认 1s 窗口内 1000 QPS），但它们每日的总访问量排在全局 TopK 里。`TopKValidator.validate()`（`TopKValidator.java`）每 `validateIntervalMs`（默认 60s）运行一次，检查：
 
 1. 这个 Key 是否稳定出现在全局 TopK 中？
 2. 它是否连续 `preWarmMinAppearances`（默认 2）次验证周期都在 TopK 里？
@@ -142,7 +142,7 @@ Worker 检测到 Key X 是全局热 Key → 广播 HOT
 
 1. **t=0：** Key X，从未被访问过，在全部 10 个节点上同时遭遇并发请求。
 
-2. **t=+1μs：** 每个节点的 `SingleFlight`（`SingleFlight.java` 第 70–95 行）激活。在每个节点上，只有 **第一个** 请求真正执行 reader（L2 加载）。该节点上的所有其他并发请求阻塞在同一个 `CompletableFuture.join()` 上。后端（Redis/DB）最多收到 N 个并发请求（每节点一个），而不是 `N × 并发数`。
+2. **t=+1μs：** 每个节点的 `SingleFlight`（`SingleFlight.java`）激活。在每个节点上，只有 **第一个** 请求真正执行 reader（L2 加载）。该节点上的所有其他并发请求阻塞在同一个 `CompletableFuture.join()` 上。后端（Redis/DB）最多收到 N 个并发请求（每节点一个），而不是 `N × 并发数`。
 
 3. **t+~5ms：** 每个节点上的第一个请求完成。数据返回给该节点上所有等待的调用方。值以 **普通** TTL（默认 5min）缓存在 L1 中——本地 HeavyKeeper 尚未触发。
 

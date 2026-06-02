@@ -19,7 +19,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 
 /**
  * A high‑performance, lock‑free sliding‑window detector for real‑time hot‑key
@@ -57,7 +58,8 @@ import lombok.Data;
  * few seconds) by a scheduler.  It removes any key that has not been accessed
  * within the given timeout, freeing the associated array and map entries.
  */
-@Data
+@Getter
+@Setter
 public class SlidingWindowDetector {
 
   /** Number of time slices that form one complete window. */

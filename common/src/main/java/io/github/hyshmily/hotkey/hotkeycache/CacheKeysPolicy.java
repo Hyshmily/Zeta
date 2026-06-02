@@ -21,6 +21,8 @@ package io.github.hyshmily.hotkey.hotkeycache;
 public final class CacheKeysPolicy {
 
   /**
+   * Checks whether the given cache key is invalid (null or blank).
+   *
    * @param cacheKey the key to validate
    * @return {@code true} if the key is {@code null} or blank
    */

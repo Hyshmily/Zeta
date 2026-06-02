@@ -124,7 +124,7 @@ Worker mode failure behavior:
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.1</version>
+    <version>1.1.2</version>
 </dependency>
 ```
 
@@ -560,6 +560,22 @@ Each instance declares its own queue (`hotkey.sync:<instance-id>`) bound to a fa
 
 - **`TYPE_REFRESH`** — Versioned invalidation. Peers reload the value from Redis via `CacheSyncListener.handleRefresh()`, respecting the `dataVersion` header to skip stale updates. The 4-case comparison (normal-vs-normal, normal-vs-degraded, degraded-vs-normal, degraded-vs-degraded) guarantees that a normal (Redis INCR) dataVersion always wins over a degraded (node-local) one.
 - **`TYPE_INVALIDATE`** — Bulk invalidation (`invalidateAll`). Peers immediately remove the key from L1 without reloading.
+
+> [!SECURITY]
+> All three RabbitMQ exchanges (`hotkey.sync.exchange`, `hotkey.report.exchange`, `hotkey.worker.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*` properties:
+>
+> ```yaml
+> spring:
+>   rabbitmq:
+>     ssl:
+>       enabled: true
+>       key-store: classpath:client.p12
+>       key-store-password: changeit
+>       trust-store: classpath:truststore.jks
+>       trust-store-password: changeit
+> ```
+>
+> See [Spring Boot RabbitMQ SSL docs](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title) for details.
 
 ### Worker Listener
 

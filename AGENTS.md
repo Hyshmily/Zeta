@@ -6,14 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 HotKey is a Spring Boot Starter for automatic hot key detection and multi-level cache warming. It combines the HeavyKeeper algorithm (Count-Min Sketch variant) with Caffeine L1 caching, optional Redis L2 caching, and optional RabbitMQ broadcast for cross-instance synchronization.
 
-**Coordinates:** `io.github.hyshmily:hotkey:1.1.1`
+**Coordinates:** `io.github.hyshmily:hotkey:1.1.2`
 
-## Module Structure
+The project is split into 2 Maven modules under parent `hotkey-parent:1.1.2`:
 
-The project is split into 2 Maven modules under parent `hotkey-parent:1.1.1`:
-
-- **`common/`** (`io.github.hyshmily:hotkey:1.1.1`) — Spring Boot Starter published to Maven Central; all cache logic, auto-configuration, algorithm, broadcast, report, entity types
-- **`worker/`** (`io.github.hyshmily:hotkey-worker:1.1.1`) — standalone Spring Boot app (never published); cluster-wide hot key detection via RabbitMQ reports; parent `spring-boot-starter-parent:3.5.3`
+- **`common/`** (`io.github.hyshmily:hotkey:1.1.2`) — Spring Boot Starter published to Maven Central; all cache logic, auto-configuration, algorithm, broadcast, report, entity types
+- **`worker/`** (`io.github.hyshmily:hotkey-worker:1.1.2`) — standalone Spring Boot app (never published); cluster-wide hot key detection via RabbitMQ reports; parent `spring-boot-starter-parent:3.5.3`
 
 ## Build Commands
 
@@ -40,7 +38,7 @@ mvn source:jar                       # Generate source JAR (common only)
 4. **`report`** — App-to-Worker reporting (`HotKeyReporter`, `ReportPublisher`, `ReportMessage`)
 5. **`entity`** — Shared data types (`CacheEntry` with `dataVersion` + `isVersionDegraded` + `decisionVersion`, `KeyState`, `HotKeyDecision`)
 6. **`detection`** — Worker-side state machine (`HotKeyStateMachine`)
-7. **`annotation`** — `@HotCache` annotation with SpEL key, three operation types (READ/WRITE/INVALIDATE), per-annotation TTL overrides
+7. **`annotation`** — `@HotKey` annotation with SpEL key, three operation types (READ/WRITE/INVALIDATE), per-annotation TTL overrides
 8. **`autoconfigure`** — All Spring Boot auto-configuration classes
 9. **`actuator`** — `/actuator/hotkey` monitoring endpoint
 
@@ -53,7 +51,7 @@ Worker-only components live in the `worker/` module under `io.github.hyshmily.ho
 
 Key methods: `get()`, `putThrough()`, `putBeforeInvalidate()`, `invalidate()`, `isHotKey()`, `returnHotKeys()`, `getWithSoftExpire()`, `peek()`
 
-`@HotCache` is the annotation-based entry point, handled by `HotKeyAspect` which injects the `HotKey` facade.
+`@HotKey` is the annotation-based entry point, handled by `HotKeyAspect` which injects the `HotKey` facade.
 
 ### Auto-Configuration
 
@@ -66,7 +64,7 @@ All in `autoconfigure/` package, registered in `META-INF/spring/org.springframew
 - `HotKeySyncAutoConfiguration` — activates when `RabbitTemplate` + `RedisTemplate` present AND `hotkey.sync.enabled=true`
 - `HotKeyWorkerListenerAutoConfiguration` — activates when `RabbitTemplate` + `RedisTemplate` present AND `hotkey.worker-listener.enabled=true`
 - `HotKeyReportAutoConfiguration` — activates when `RabbitTemplate` present AND `hotkey.local.report.enabled=true` (default)
-- `HotKeySchedulingConfiguration` — periodic decay + expelled drain; controlled via `hotkey.local.scheduling.enabled` + requires TopK bean
+- `HotKeySchedulingConfiguration` — periodic decay + expelled drain; controlled via `hotkey.scheduling.enabled` + requires TopK bean
 - `HotKeyAnnotationAutoConfiguration` — activates when `Aspect.class` on classpath AND `HotKey` bean present; registers `HotKeyAspect`
 
 **Worker module** has its own `WorkerAutoConfiguration` (not in the shared imports file) — activated by `@SpringBootApplication` scan in `WorkerApplication.java` when `hotkey.worker.enabled=true`.
@@ -105,7 +103,7 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
 - **Two-version space design:** `dataVersion` (Redis INCR, may degrade to node-local counter) for cross-instance cache sync; `decisionVersion` (Worker `AtomicLong`, never degraded) for HOT/COOL decision ordering. Versions are orthogonal — data mutation does not affect `decisionVersion`, and Worker decision does not affect `dataVersion`.
 - **Degraded version comparison:** Broadcast peers use 4-case comparison on `dataVersion` to prevent degraded versions from overwriting normal ones
 - **`spring-amqp` is optional** in common module — app-only users don't pull AMQP; worker gets it via `spring-boot-starter-amqp`
-- **`spring-boot-starter-aop` is optional** — only pulled when `@HotCache` annotation is used
+- **`spring-boot-starter-aop` is optional** — only pulled when `@HotKey` annotation is used
 
 ## Code Style
 
@@ -130,6 +128,20 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
 3. **Re-read before change.** Before modifying code or discussing a plan, re-read all related source files. Evaluate from multiple angles: performance, memory footprint, high concurrency, distributed broadcast correctness, caller UX. Produce a structured review (suggestion, reason, impact, source location, modification approach) before proposing changes.
 4. **Consider all cases before change.** Before any code modification, consider edge cases, race conditions, failure modes, backward compatibility. Verify with tests or reasoning that the change is safe. Reference rules 2 and 3.
 5. **No git without asking.** Never use `git checkout`, `git restore`, `git reset`, or any destructive git commands. Ask the author first.
+
+6. **Stress test every core change.** Any code change affecting `TopK`, `SingleFlight`, `HotKeyCache`, `VersionGuard`, `CacheSyncPublisher/Listener`, `WorkerListener`, `HotKeyStateMachine`, `CacheExpireManager`, or `HotKeyReporter` must pass `HotKeyStressTest` (13 scenarios). The stress test covers:
+   - **TopK**: no duplicate keys under 20-thread contention, bounded size ≤ K
+   - **SingleFlight**: extreme dedup (50 threads, 1 execution), no `Recursive update` race
+   - **HotKeyCache**: concurrent get/invalidate/peek consistency; logical expiry (B path, pure logical expiry)
+   - **CacheSyncPublisher**: concurrent dedup (20 threads, exactly 1 send), version ordering correctness
+   - **VersionGuard**: concurrent shouldSkipForSync/Worker under 10-thread load
+   - **HotKeyStateMachine**: independent keys + same-key concurrent evaluations
+   - **HotKeyReporter**: 10 threads × 50k high-frequency record
+   - **CacheSyncListener**: concurrent invalidate/refresh (10 threads × 100 ops each)
+   - **WorkerListener**: concurrent HOT/COOL decision race, final state sanity
+   - **Distributed**: 3 nodes, each 5 workers × 300 ops, simulated Redis + broadcast bus
+
+   Test pattern: `CountDownLatch` for synchronization, `AtomicInteger errors` for exception tracking, `CachedThreadPool`/`FixedThreadPool` for concurrency, `Optional` + `Supplier` for Cold/Hot access, `Runnable::run` executor to expose inline CompletionStage races. Assert `errors.get() == 0` and component-level invariants.
 
 ## Reference Implementation
 

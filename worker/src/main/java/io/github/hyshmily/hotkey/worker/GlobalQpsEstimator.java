@@ -31,6 +31,13 @@ public class GlobalQpsEstimator {
   private final long timeMillisPerSlice;
   private final AtomicLong[] slices;
 
+  /**
+   * Creates a global QPS estimator with a sliding window partitioned into the given number of
+   * slices.
+   *
+   * @param windowDurationMs total duration of the sliding window in milliseconds
+   * @param slices           number of slices within the window
+   */
   public GlobalQpsEstimator(long windowDurationMs, int slices) {
     this.windowSize = slices;
     this.timeMillisPerSlice = windowDurationMs / slices;

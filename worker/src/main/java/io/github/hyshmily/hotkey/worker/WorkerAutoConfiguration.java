@@ -65,14 +65,15 @@ import org.springframework.scheduling.annotation.Scheduled;
 @ConditionalOnProperty(prefix = "hotkey.worker", name = "enabled", havingValue = "true")
 @EnableConfigurationProperties(WorkerProperties.class)
 @EnableScheduling
+@RequiredArgsConstructor
 public class WorkerAutoConfiguration {
 
   private final WorkerProperties properties;
 
-  public WorkerAutoConfiguration(WorkerProperties properties) {
-    this.properties = properties;
-  }
-
+  /**
+   * Validates that the sliding-window duration is evenly divisible by the
+   * number of slices to avoid rounding inaccuracies.
+   */
   @PostConstruct
   void validateWindowConfig() {
     if (properties.getSlidingWindow().getDurationMs() % properties.getSlidingWindow().getSlices() != 0) {
@@ -246,6 +247,10 @@ public class WorkerAutoConfiguration {
     return new EvictStaleTask(detector, stateMachine, properties);
   }
 
+  /**
+   * Scheduled task that evicts stale keys from the sliding-window detector
+   * and state machine.
+   */
   @RequiredArgsConstructor
   public static class EvictStaleTask {
 
@@ -253,6 +258,9 @@ public class WorkerAutoConfiguration {
     private final HotKeyStateMachine stateMachine;
     private final WorkerProperties properties;
 
+    /**
+     * Evicts keys that have not been accessed within {@code 2 * coolDurationMs}.
+     */
     @Scheduled(fixedDelayString = "${hotkey.worker.state-machine.cool-duration-ms:15000}")
     public void evictStale() {
       long staleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
@@ -274,11 +282,17 @@ public class WorkerAutoConfiguration {
     return new TopKValidationTask(topKValidator);
   }
 
+  /**
+   * Scheduled task that inspects the Worker TopK and pre-warms stable hot keys.
+   */
   @RequiredArgsConstructor
   public static class TopKValidationTask {
 
     private final TopKValidator topKValidator;
 
+    /**
+     * Runs TopK validation and pre-warm logic.
+     */
     @Scheduled(fixedDelayString = "${hotkey.worker.topk-validation.validate-interval-ms:60000}")
     public void validate() {
       topKValidator.validate();

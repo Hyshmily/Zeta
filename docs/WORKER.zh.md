@@ -191,6 +191,22 @@ spring:
     port: 5672
 ```
 
+> [!SECURITY]
+> 以上示例使用明文 AMQP 连接。生产环境中应通过 `spring.rabbitmq.ssl.*` 启用 TLS：
+>
+> ```yaml
+> spring:
+>   rabbitmq:
+>     ssl:
+>       enabled: true
+>       key-store: classpath:client.p12
+>       key-store-password: changeit
+>       trust-store: classpath:truststore.jks
+>       trust-store-password: changeit
+> ```
+>
+> 详见 [Spring Boot RabbitMQ SSL 文档](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title)。
+
 ### Worker Listener（App 实例端配置）
 
 ```yaml

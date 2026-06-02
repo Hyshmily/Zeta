@@ -17,11 +17,11 @@
 
 **How they cooperate in code:**
 
-1. **Burst hits instance A:** `HotKeyCache.get()` (line 127–131) hits L1 miss → `loadAndCache()` (line 216) calls `hotKeyDetector.add(key, 1).isHotKey()` → if true, caches with `hotHardTtlMs` (1h default). Instance A is protected instantly.
+1. **Burst hits instance A:** `HotKeyCache.get()` hits L1 miss → `loadAndCache()` calls `hotKeyDetector.add(key, 1).isHotKey()` → if true, caches with `hotHardTtlMs` (1h default). Instance A is protected instantly.
 
-2. **Meanwhile,** the same `get()` calls `hotKeyReporter.record(key)` (line 130) → `HotKeyReporter` accumulates counts in a Caffeine counter (line 58–59) → every `reportIntervalMs` (default 100ms) it flushes to RabbitMQ (line 92–93).
+2. **Meanwhile,** the same `get()` calls `hotKeyReporter.record(key)` → `HotKeyReporter` accumulates counts in a Caffeine counter → every `reportIntervalMs` (default 100ms) it flushes to RabbitMQ.
 
-3. **Worker receives the report** → `ReportConsumer.onReport()` (line 98) feeds `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` (line 109) tracks consecutive hot windows → after `confirmDurationMs` (default 2s) of sustained heat, broadcasts HOT to **all instances**.
+3. **Worker receives the report** → `ReportConsumer.onReport()` feeds `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` tracks consecutive hot windows → after `confirmDurationMs` (default 2s) of sustained heat, broadcasts HOT to **all instances**.
 
 4. **Instances B, C, D** receive the HOT broadcast via `WorkerListener` → pre-warm their local Caffeine with the key before traffic ever reaches them.
 
@@ -48,7 +48,7 @@ The key insight: **a real hot key stays hot for minutes or hours**, not millisec
 
 **What about a brief 100ms spike?** That's not a cluster-level hot key — it's a local blip. The local HeavyKeeper handles it with a slightly longer TTL, and the Worker never needs to broadcast. The author split the two precisely for this reason.
 
-The SingleFlight layer (line 70–95 of `SingleFlight.java`) provides additional safety: concurrent L1 misses for the same key share a single `CompletableFuture`, preventing a thundering-herd against the backend even during the brief window before local HeavyKeeper activates.
+The `SingleFlight.java` layer provides additional safety: concurrent L1 misses for the same key share a single `CompletableFuture`, preventing a thundering-herd against the backend even during the brief window before local HeavyKeeper activates.
 
 ---
 
@@ -80,9 +80,9 @@ Worker detects Key X is globally hot → broadcasts HOT
 **Beyond pre-warming, the central Worker also provides:**
 
 - **Unified cool-down:** Only the Worker decides when a key is no longer hot. Without it, nodes would independently decide to cool down at different times, creating inconsistent cache states.
-- **Decision version ordering:** Each HOT/COOL broadcast carries a monotonically increasing `decisionVersion` (`WorkerBroadcaster.java` line 55, 64). Receivers use this to discard out-of-order messages, ensuring total ordering per key.
-- **Slow-heat detection via TopK:** The `TopKValidator` (`TopKValidator.java` line 91–113) periodically scans the global frequency ranking. Keys that gradually accumulate high total counts (but never spike) are pre-warmed — something local HeavyKeeper cannot do.
+- **Decision version ordering:** Each HOT/COOL broadcast carries a monotonically increasing `decisionVersion` (`WorkerBroadcaster.java`). Receivers use this to discard out-of-order messages, ensuring total ordering per key.
 
+- **Slow-heat detection via TopK:** The `TopKValidator` (`TopKValidator.java`) periodically scans the global frequency ranking. Keys that gradually accumulate high total counts (but never spike) are pre-warmed — something local HeavyKeeper cannot do.
 ---
 
 ## Q4: RabbitMQ has limited throughput (~10K–100K msg/s). Won't reporting traffic overwhelm it?
@@ -91,13 +91,13 @@ Worker detects Key X is globally hot → broadcasts HOT
 
 ### 1. Batching dramatically reduces message count
 
-`HotKeyReporter` (`HotKeyReporter.java` line 75–94) does not send one message per access. It accumulates counts in a local Caffeine counter and flushes **batched** reports every `reportIntervalMs` (default 100ms). A single `ReportMessage` carries hundreds or thousands of key-count pairs.
+`HotKeyReporter` (`HotKeyReporter.java`) does not send one message per access. It accumulates counts in a local Caffeine counter and flushes **batched** reports every `reportIntervalMs` (default 100ms). A single `ReportMessage` carries hundreds or thousands of key-count pairs.
 
 **Formula:** Messages per second = `1000 / reportIntervalMs` = 10 msg/s _per shard_, regardless of access volume.
 
 ### 2. Consistent-hash sharding distributes load
 
-Each key is routed to exactly one shard via `Math.abs(key.hashCode()) % shardCount` (`HotKeyReporter.java` line 87). With `shardCount = N`, the reporting load is split across N queues/consumers. Each Worker consumer only sees its assigned keys.
+Each key is routed to exactly one shard via `Math.abs(key.hashCode()) % shardCount` (`HotKeyReporter.java`). With `shardCount = N`, the reporting load is split across N queues/consumers. Each Worker consumer only sees its assigned keys.
 
 ### 3. The control channel is separate from the data channel
 
@@ -106,7 +106,7 @@ Each key is routed to exactly one shard via `Math.abs(key.hashCode()) % shardCou
 | **Report** (app → Worker)     | `hotkey.report.exchange`    | Batched counts, every 100ms per app | Stable, proportional to app count    |
 | **Broadcast** (Worker → apps) | `hotkey.broadcast.exchange` | HOT/COOL decisions                  | Very low — only on state transitions |
 
-Broadcasts are **control signals**, not data streams. A key transitions from COLD → CONFIRMED_HOT → PRE_COOLING → COLD at most once per lifecycle. The `HotKeyStateMachine` (`HotKeyStateMachine.java` lines 60–72) with its `confirmCount`/`coolCount` hysteresis ensures no flapping/bursts of broadcast messages.
+Broadcasts are **control signals**, not data streams. A key transitions from COLD → CONFIRMED_HOT → PRE_COOLING → COLD at most once per lifecycle. The `HotKeyStateMachine` (`HotKeyStateMachine.java`) with its `confirmCount`/`coolCount` hysteresis ensures no flapping/bursts of broadcast messages.
 
 **If your cluster is large enough to worry about MQ throughput:** increase `shardCount`, which reduces per-queue message volume proportionally. Each additional shard adds a consumer thread on the Worker.
 
@@ -118,7 +118,7 @@ Broadcasts are **control signals**, not data streams. A key transitions from COL
 
 **What it catches:** Some keys never "spike" but accumulate high total traffic over minutes or hours — e.g., a landing page that gradually attracts more visitors, a dashboard widget queried by many users at a steady rate.
 
-These keys would **never** trigger the sliding-window threshold (default 1000 QPS in 1s window), but their total daily access count ranks in the global TopK. The `TopKValidator.validate()` (`TopKValidator.java` line 91) runs every `validateIntervalMs` (default 60s) and checks:
+These keys would **never** trigger the sliding-window threshold (default 1000 QPS in 1s window), but their total daily access count ranks in the global TopK. The `TopKValidator.validate()` (`TopKValidator.java`) runs every `validateIntervalMs` (default 60s) and checks:
 
 1. Is this key consistently in the global TopK?
 2. Has it appeared in the TopK for `preWarmMinAppearances` (default 2) consecutive validation cycles?
@@ -142,7 +142,7 @@ These keys would **never** trigger the sliding-window threshold (default 1000 QP
 
 1. **t=0:** Key X, never seen before, suddenly receives concurrent requests on all 10 nodes simultaneously.
 
-2. **t=+1μs:** Every node's `SingleFlight` (`SingleFlight.java` line 70–95) activates. On each node, only the **first** request executes the reader (L2 load). All other concurrent requests on that node block on the same `CompletableFuture.join()`. The backend (Redis/DB) receives at most `N` concurrent requests (one per node), not `N × concurrent_requests`.
+2. **t=+1μs:** Every node's `SingleFlight` (`SingleFlight.java`) activates. On each node, only the **first** request executes the reader (L2 load). All other concurrent requests on that node block on the same `CompletableFuture.join()`. The backend (Redis/DB) receives at most `N` concurrent requests (one per node), not `N × concurrent_requests`.
 
 3. **t+~5ms:** The first request on each node completes. Data is returned to all waiting callers on that node. The value is cached in L1 with **normal** TTL (5min default) — local HeavyKeeper has not yet triggered.
 

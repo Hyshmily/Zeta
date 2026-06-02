@@ -43,6 +43,14 @@ public class CacheExpireManager {
   private final HotKeyProperties ttlConfig;
   private final Semaphore refreshLimiter;
 
+  /**
+   * Creates a CacheExpireManager with the given Caffeine cache, executor, and TTL config.
+   *
+   * @param caffeineCache   the underlying L1 Caffeine cache
+   * @param executor        async executor for background refresh
+   * @param ttlConfig       TTL configuration (normal and hot-key variants)
+   * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
+   */
   public CacheExpireManager(
     Cache<String, Object> caffeineCache,
     Executor executor,

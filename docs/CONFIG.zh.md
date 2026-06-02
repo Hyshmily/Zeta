@@ -36,6 +36,9 @@
 | `hotkey.local.app-name`                           | `"default"`       | 逻辑应用名，用于 Worker 路由的租户区分                                   |
 | `hotkey.local.shard-count`                        | `1`               | Worker 侧处理的分片总数                                                  |
 | `hotkey.local.instance-id`                        | `""`（自动检测）    | 用于队列命名的显式实例 ID；为空时自动检测为 `server.port-HOSTNAME`（或 `server.port-UUID`） |
+| `hotkey.local.queue-capacity`                     | `10000`             | 报告分发器队列容量（每个分片内部有界队列） |
+| `hotkey.local.queue-offer-timeout-ms`             | `100`               | 报告队列写入超时（毫秒）——阻塞此时长后丢弃 |
+| `hotkey.local.consumer-count`                     | `0`                 | 每个分片的报告消费者线程数；0 = 自动（max(1, shardCount / 2)） |
 
 ### 上报配置（`hotkey.report.*`）
 
@@ -129,5 +132,22 @@
 | `sync`（RabbitMQ）      | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`  | `@ConditionalOnClass({RabbitTemplate.class, RedisTemplate.class})` + 属性（`hotkey.sync.enabled`） |
 | `worker-listener`       | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`  | `@ConditionalOnClass(RabbitTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` + 属性（`hotkey.worker-listener.enabled`） |
 | `worker`                | `spring-boot-starter-amqp`（+ `spring-boot-starter-data-redis`）| `@ConditionalOnBean(RabbitTemplate.class)` + 属性（`hotkey.worker.enabled`） |
-| `actuator`              | `spring-boot-starter-actuator`                                 | `@ConditionalOnClass(Endpoint.class)`                                   |
-| `scheduling`            | 无                                                             | `@ConditionalOnProperty` + `@ConditionalOnBean(TopK.class)` |
+| `actuator`             | `spring-boot-starter-actuator`                                 | `@ConditionalOnClass(Endpoint.class)`                                   |
+| `scheduling`           | 无                                                             | `@ConditionalOnProperty` + `@ConditionalOnBean(TopK.class)` |
+
+## 安全性
+
+所有基于 RabbitMQ 的交换机（`sync`、`report`、`worker/broadcast`）默认使用明文 AMQP 连接。生产环境中应通过 Spring Boot 的 `spring.rabbitmq.ssl.*` 配置 TLS：
+
+```yaml
+spring:
+  rabbitmq:
+    ssl:
+      enabled: true
+      key-store: classpath:client.p12
+      key-store-password: changeit
+      trust-store: classpath:truststore.jks
+      trust-store-password: changeit
+```
+
+详见 [Spring Boot RabbitMQ SSL 文档](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title)。

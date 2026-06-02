@@ -27,6 +27,8 @@ import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
@@ -58,6 +60,7 @@ public class HotKeyCache {
   private final Optional<StringRedisTemplate> redisTemplate;
   private final int versionKeyTtlMinutes;
   private final Optional<HotKeyReporter> hotKeyReporter;
+  private final Set<String> blacklist = ConcurrentHashMap.newKeySet();
 
   /**
    * Monotonically increasing counter for fallback versions.
@@ -66,6 +69,19 @@ public class HotKeyCache {
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
 
   private static final String NO_SYNC_PUBLISHER = HotKeyConstants.NO_SYNC_PUBLISHER;
+
+  /**
+   * Check whether a {@link CacheEntry} has logically expired based on its
+   * {@code hardExpireAtMs}.  Entries with {@code hardExpireAtMs == Long.MAX_VALUE}
+   * are treated as permanent (never logically expire).
+   *
+   * @param entry the cache entry to inspect
+   * @return {@code true} if the entry has logically expired
+   */
+  static boolean isLogicallyExpired(CacheEntry entry) {
+    return entry.getHardExpireAtMs() != Long.MAX_VALUE
+      && System.currentTimeMillis() >= entry.getHardExpireAtMs();
+  }
 
   /**
    * Check whether a key is currently tracked as a hot key in L1.
@@ -79,7 +95,11 @@ public class HotKeyCache {
       return false;
     }
     Object entry = caffeineCache.getIfPresent(cacheKey);
-    return entry instanceof CacheEntry ce && KeyState.HOT == ce.getKeyState();
+    if (entry instanceof CacheEntry ce) {
+      if (isLogicallyExpired(ce)) return false;
+      return KeyState.HOT == ce.getKeyState();
+    }
+    return false;
   }
 
   /**
@@ -123,13 +143,18 @@ public class HotKeyCache {
     }
 
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
-      .map(raw -> {
+      .flatMap(raw -> {
+        if (raw instanceof CacheEntry ce && isLogicallyExpired(ce)) {
+          caffeineCache.invalidate(cacheKey);
+          log.debug("get: logically expired, reloading: {}", cacheKey);
+          return Optional.empty();
+        }
         T val = raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw;
 
         hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
         hotKeyReporter.ifPresent(r -> r.record(cacheKey));
 
-        return val;
+        return Optional.of(val);
       })
       .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs));
   }
@@ -170,7 +195,13 @@ public class HotKeyCache {
     }
     Object raw = caffeineCache.getIfPresent(cacheKey);
     return Optional.ofNullable(raw)
-      .map(v -> {
+      .flatMap(v -> {
+        if (v instanceof CacheEntry ce && isLogicallyExpired(ce)) {
+          caffeineCache.invalidate(cacheKey);
+          log.debug("getWithSoftExpire: logically expired, reloading: {}", cacheKey);
+          return Optional.empty();
+        }
+
         T cached = v instanceof CacheEntry vv ? (T) vv.getValue() : (T) v;
 
         if (
@@ -193,7 +224,7 @@ public class HotKeyCache {
         hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
         hotKeyReporter.ifPresent(r -> r.record(cacheKey));
 
-        return cached;
+        return Optional.of(cached);
       })
       .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs));
   }

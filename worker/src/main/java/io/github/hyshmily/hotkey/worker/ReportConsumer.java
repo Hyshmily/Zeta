@@ -84,45 +84,55 @@ public class ReportConsumer {
 
     // Process each key independently
     for (Map.Entry<String, Long> entry : message.counts().entrySet()) {
-      String key = entry.getKey();
-      long count = entry.getValue();
+      try {
+        String key = entry.getKey();
+        long count = entry.getValue();
 
-      totalQps += count;
-      // Feed the global Worker TopK with the aggregated report count.
-      // This populates the Worker-side HeavyKeeper so TopKValidator can
-      // pre-warm keys based on cross-instance frequency.
-      workerTopK.add(key, (int) Math.min(count, Integer.MAX_VALUE));
+        totalQps += count;
+        // Feed the global Worker TopK with the aggregated report count.
+        // This populates the Worker-side HeavyKeeper so TopKValidator can
+        // pre-warm keys based on cross-instance frequency.
+        workerTopK.add(key, (int) Math.min(count, Integer.MAX_VALUE));
 
-      // addCount atomically increments the current time slice and returns
-      // true if the sum of the last windowSize slices exceeds the threshold.
-      boolean isHot = detector.addCount(key, count);
+        // addCount atomically increments the current time slice and returns
+        // true if the sum of the last windowSize slices exceeds the threshold.
+        boolean isHot = detector.addCount(key, count);
 
-      // The state machine tracks consecutive hot/cold windows and applies
-      // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
-      // and PRE_COOLING.
-      HotKeyDecision decision = stateMachine.evaluate(key, isHot);
+        // The state machine tracks consecutive hot/cold windows and applies
+        // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
+        // and PRE_COOLING.
+        HotKeyDecision decision = stateMachine.evaluate(key, isHot);
 
-      switch (decision.type()) {
-        case HOT -> {
-          // A new hot key has been confirmed.
-          // Broadcast HOT to all app instances so they can pre‑warm
-          // their local caches and enable soft expiration.
-          broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW);
-          // Record the confirmation in TopK for historical ranking.
-          topKValidator.markConfirmed(key);
+        switch (decision.type()) {
+          case HOT -> {
+            // A new hot key has been confirmed.
+            // Broadcast HOT to all app instances so they can pre‑warm
+            // their local caches and enable soft expiration.
+            broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW);
+            // Record the confirmation in TopK for historical ranking.
+            topKValidator.markConfirmed(key);
+          }
+          case COOL -> {
+            // The key has fully cooled down.
+            // Broadcast COOL so instances can disable soft expiration
+            // and let the entry be evicted naturally.
+            broadcaster.broadcastCool(key);
+            // Update the TopK tracking accordingly.
+            topKValidator.markCooled(key);
+          }
+          case NONE -> {
+            // No state transition occurred – the key remains in its
+            // current lifecycle stage.  Nothing to do.
+          }
         }
-        case COOL -> {
-          // The key has fully cooled down.
-          // Broadcast COOL so instances can disable soft expiration
-          // and let the entry be evicted naturally.
-          broadcaster.broadcastCool(key);
-          // Update the TopK tracking accordingly.
-          topKValidator.markCooled(key);
-        }
-        case NONE -> {
-          // No state transition occurred – the key remains in its
-          // current lifecycle stage.  Nothing to do.
-        }
+      } catch (Exception e) {
+        log.error(
+          "Error processing report entry: appName={}, key={}, count={}",
+          message.appName(),
+          entry.getKey(),
+          entry.getValue(),
+          e
+        );
       }
     }
     globalQpsEstimator.addTotal(totalQps);

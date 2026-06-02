@@ -21,6 +21,7 @@ import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.InstanceIdGenerator;
 import jakarta.annotation.PostConstruct;
+import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -44,13 +45,10 @@ import org.springframework.context.annotation.Bean;
  * override is set before any queue-creating auto-configuration runs.
  */
 @AutoConfiguration
+@RequiredArgsConstructor
 public class HotKeyFacadeAutoConfiguration {
 
   private final HotKeyProperties properties;
-
-  public HotKeyFacadeAutoConfiguration(HotKeyProperties properties) {
-    this.properties = properties;
-  }
 
   /**
    * Initialize the explicit instance ID override, if configured, so that

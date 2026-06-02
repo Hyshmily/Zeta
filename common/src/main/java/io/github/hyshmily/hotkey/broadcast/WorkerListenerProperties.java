@@ -37,6 +37,11 @@ public class WorkerListenerProperties {
   private int concurrentConsumers = 2;
   private int schedulerPoolSize = 2;
 
+  /**
+   * Returns the unique per-instance queue name for Worker decision listener.
+   *
+   * @return {@code {queuePrefix}:{instanceId}}
+   */
   public String getQueueName() {
     return queuePrefix + ":" + InstanceIdGenerator.get();
   }

@@ -23,6 +23,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
+import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -254,14 +255,10 @@ public class HeavyKeeper implements TopK {
     }
   }
 
+  @AllArgsConstructor
   private static class Node {
 
     final String key;
     final int count;
-
-    Node(String key, int count) {
-      this.key = key;
-      this.count = count;
-    }
   }
 }

@@ -71,6 +71,15 @@ public @interface HotKey {
    */
   boolean softExpire() default true;
 
+  /**
+   * The type of cache operation.
+   *
+   * <ul>
+   *   <li>{@link #READ} — reads from L1 or loads via method invocation</li>
+   *   <li>{@link #WRITE} — executes the mutation and invalidates the cache afterward</li>
+   *   <li>{@link #INVALIDATE} — removes the entry from L1 and broadcasts to peers</li>
+   * </ul>
+   */
   enum OperationType {
     READ,
     WRITE,

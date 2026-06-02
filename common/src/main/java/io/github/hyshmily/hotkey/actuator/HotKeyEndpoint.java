@@ -20,10 +20,12 @@ import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import lombok.RequiredArgsConstructor;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 
@@ -37,6 +39,7 @@ import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
  * Worker-only, and coexistence modes.
  */
 @Endpoint(id = "hotkey")
+@RequiredArgsConstructor
 public class HotKeyEndpoint {
 
   private final TopK hotKeyDetector;
@@ -44,20 +47,7 @@ public class HotKeyEndpoint {
   private final Cache<String, Object> caffeineCache;
   private final SingleFlight singleFlight;
   private final HotKeyProperties properties;
-
-  public HotKeyEndpoint(
-    TopK hotKeyDetector,
-    TopK workerTopK,
-    Cache<String, Object> caffeineCache,
-    SingleFlight singleFlight,
-    HotKeyProperties properties
-  ) {
-    this.hotKeyDetector = hotKeyDetector;
-    this.workerTopK = workerTopK;
-    this.caffeineCache = caffeineCache;
-    this.singleFlight = singleFlight;
-    this.properties = properties;
-  }
+  private final HotKeyReporter hotKeyReporter;
 
   private int l1MaxSize() {
     return properties.getLocalCacheMaxSize();
@@ -111,6 +101,13 @@ public class HotKeyEndpoint {
 
     if (singleFlight != null) {
       info.put("inflightSize", singleFlight.estimatedInflightSize());
+    }
+
+    if (hotKeyReporter != null) {
+      info.put("reportQueueDepth", hotKeyReporter.dispatcherDepth());
+      info.put("reportQueueCapacity", hotKeyReporter.dispatcherCapacity());
+      info.put("reportExpiredCount", hotKeyReporter.dispatcherExpired());
+      info.put("reportQueueFullCount", hotKeyReporter.dispatcherDropped());
     }
 
     return info;

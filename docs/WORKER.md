@@ -190,6 +190,22 @@ spring:
     port: 5672
 ```
 
+> [!SECURITY]
+> The example above uses a plain AMQP connection. In production, enable TLS via `spring.rabbitmq.ssl.*`:
+>
+> ```yaml
+> spring:
+>   rabbitmq:
+>     ssl:
+>       enabled: true
+>       key-store: classpath:client.p12
+>       key-store-password: changeit
+>       trust-store: classpath:truststore.jks
+>       trust-store-password: changeit
+> ```
+>
+> See [Spring Boot RabbitMQ SSL docs](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title).
+
 ### Worker Listener (on app instances)
 
 ```yaml

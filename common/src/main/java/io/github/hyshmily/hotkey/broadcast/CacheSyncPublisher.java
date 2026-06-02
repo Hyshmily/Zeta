@@ -23,6 +23,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.annotation.PostConstruct;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -43,6 +44,9 @@ public class CacheSyncPublisher {
   private final CacheSyncProperties properties;
   private Cache<String, Long> recentBroadcasts;
 
+  /**
+   * Initializes the dedup cache. Called by Spring after construction.
+   */
   @PostConstruct
   public void init() {
     this.recentBroadcasts = Caffeine.newBuilder()
@@ -85,24 +89,24 @@ public class CacheSyncPublisher {
     }
     String compositeKey = type + ":" + cacheKey;
 
-    boolean shouldSend =
-      recentBroadcasts
-        .asMap()
-        .compute(compositeKey, (_, oldVersion) -> {
-          if (oldVersion != null && oldVersion > version) {
-            log.debug(
-              "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
-              compositeKey,
-              oldVersion,
-              version
-            );
-            return oldVersion;
-          }
-          return version;
-        }) ==
-      version;
+    AtomicBoolean skipped = new AtomicBoolean(false);
+    recentBroadcasts
+      .asMap()
+      .compute(compositeKey, (_, oldVersion) -> {
+        if (oldVersion != null && oldVersion >= version) {
+          log.debug(
+            "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
+            compositeKey,
+            oldVersion,
+            version
+          );
+          skipped.set(true);
+          return oldVersion;
+        }
+        return version;
+      });
 
-    if (shouldSend) {
+    if (!skipped.get()) {
       MessageProperties props = new MessageProperties();
 
       props.setHeader(AMQP_HEADER_TYPE, type);

@@ -19,8 +19,6 @@ import io.github.hyshmily.hotkey.constant.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.report.ReportPublisher;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -29,6 +27,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * Autoconfiguration for hot key reporting (app instance → Worker).
@@ -56,7 +57,7 @@ public class HotKeyReportAutoConfiguration {
    * Create the {@link HotKeyReporter} that aggregates per-key counts and flushes them
    * at the configured interval.
    */
-  @Bean(initMethod = "start")
+  @Bean(initMethod = "start", destroyMethod = "stop")
   @ConditionalOnMissingBean
   public HotKeyReporter hotKeyReporter(
     ReportPublisher reportPublisher,
@@ -68,7 +69,11 @@ public class HotKeyReportAutoConfiguration {
       hotKeyReportScheduler,
       properties.getReportIntervalMs(),
       properties.getShardCount(),
-      properties.getAppName()
+      properties.getAppName(),
+      properties.getQueueCapacity(),
+      properties.getQueueOfferTimeoutMs(),
+      properties.effectiveConsumerCount()
+
     );
   }
 

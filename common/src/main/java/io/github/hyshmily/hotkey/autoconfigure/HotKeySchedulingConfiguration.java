@@ -46,6 +46,11 @@ public class HotKeySchedulingConfiguration {
 
   private final List<TopK> topKInstances;
 
+  /**
+   * Creates the scheduling configuration with all available TopK instances.
+   *
+   * @param topKInstances list of TopK beans (app-side and/or Worker-side)
+   */
   public HotKeySchedulingConfiguration(List<TopK> topKInstances) {
     this.topKInstances = topKInstances;
   }

@@ -23,7 +23,6 @@ import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
-import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
@@ -32,13 +31,11 @@ import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -46,7 +43,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 /**
- * App-side auto-configuration for the HotKey library.
+ * App-side autoconfiguration for the HotKey library.
  *
  * <p>Creates the app-side {@link TopK} detector (HeavyKeeper), L1 Caffeine
  * cache, {@link SingleFlight} deduplication layer, executor, and the
@@ -79,26 +76,23 @@ public class HotKeyAutoConfiguration {
   }
 
   /**
-   * Create the L1 Caffeine cache with expiry driven by {@code getHardExpireAtMs()}.
+   * Create the L1 Caffeine cache with purely logical expiry.
+   * <p>
+   * Caffeine handles <em>only</em> size-based eviction ({@code maximumSize}).
+   * Hard TTL expiry is checked at read time in {@link HotKeyCache} — if
+   * {@code CacheEntry.hardExpireAtMs} has passed, the entry is invalidated and
+   * reloaded by the next {@code get()} call.
    */
   @Bean
   @ConditionalOnMissingBean
   public Cache<String, Object> hotLocalCache(HotKeyProperties properties) {
-    long defaultTtlNanos = TimeUnit.MINUTES.toNanos(properties.getLocalCacheTtlMinutes());
     Caffeine<Object, Object> builder = Caffeine.newBuilder()
       .maximumSize(properties.getLocalCacheMaxSize())
       .expireAfter(
         new Expiry<>() {
           @Override
           public long expireAfterCreate(@NonNull Object key, @NonNull Object value, long currentTimeNanos) {
-            if (value instanceof CacheEntry entry) {
-              if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
-                return defaultTtlNanos;
-              }
-              long remaining = TimeUnit.MILLISECONDS.toNanos(entry.getHardExpireAtMs() - System.currentTimeMillis());
-              return Math.max(1, remaining);
-            }
-            return defaultTtlNanos;
+            return Long.MAX_VALUE;
           }
 
           @Override
@@ -108,7 +102,7 @@ public class HotKeyAutoConfiguration {
             long currentTimeNanos,
             long currentDuration
           ) {
-            return expireAfterCreate(key, value, currentTimeNanos);
+            return Long.MAX_VALUE;
           }
 
           @Override
@@ -118,7 +112,7 @@ public class HotKeyAutoConfiguration {
             long currentTimeNanos,
             long currentDuration
           ) {
-            return currentDuration;
+            return Long.MAX_VALUE;
           }
         }
       );
@@ -211,7 +205,7 @@ public class HotKeyAutoConfiguration {
    * <p>Only active when a {@link HotKeyCache} bean exists but no {@link HotKey}
    * has been defined yet.  The primary {@link HotKey} creator is
    * {@link HotKeyFacadeAutoConfiguration} — this fallback covers the case where
-   * that auto-configuration is excluded or its bean is overridden.
+   * that autoconfiguration is excluded or its bean is overridden.
    */
   @Bean
   @ConditionalOnBean(HotKeyCache.class)

@@ -144,6 +144,20 @@ public class HotKeyProperties {
   private long reportIntervalMs = 100;
   private int shardCount = 1;
 
+  @Min(1)
+  private int queueCapacity = 10_000;
+
+  @Min(1)
+  private int queueOfferTimeoutMs = 100;
+
+  @Min(0)
+  private int consumerCount = 0;
+
+  /** Effective consumer thread count: configured value, or max(1, shardCount/2). */
+  public int effectiveConsumerCount() {
+    return consumerCount > 0 ? consumerCount : Math.max(1, shardCount / 2);
+  }
+
   /** Explicit instance ID for queue naming. Falls back to {@code server.port-HOSTNAME} (or {@code server.port-UUID} if {@code HOSTNAME} is unset) if empty. */
   private String instanceId = "";
 }

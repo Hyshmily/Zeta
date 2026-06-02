@@ -39,6 +39,11 @@ public class CacheSyncProperties {
   private int concurrentConsumers = 3;
   private int schedulerPoolSize = 4;
 
+  /**
+   * Returns the unique per-instance queue name.
+   *
+   * @return {@code {queuePrefix}:{instanceId}}
+   */
   public String getQueueName() {
     return queuePrefix + ":" + InstanceIdGenerator.get();
   }

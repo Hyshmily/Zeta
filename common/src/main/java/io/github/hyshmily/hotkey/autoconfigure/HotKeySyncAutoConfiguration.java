@@ -30,6 +30,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -115,6 +116,7 @@ public class HotKeySyncAutoConfiguration {
    * Create the AMQP message listener container that drives the sync listener.
    */
   @Bean
+  @ConditionalOnBean(ConnectionFactory.class)
   public SimpleMessageListenerContainer syncListenerContainer(
     ConnectionFactory connectionFactory,
     CacheSyncListener cacheSyncListener,

@@ -36,6 +36,9 @@
 | `hotkey.local.app-name`                           | `"default"`      | Logical application name used as tenant discriminator for Worker routing                   |
 | `hotkey.local.shard-count`                        | `1`              | Total number of shards for Worker-side processing                                          |
 | `hotkey.local.instance-id`                        | `""` (auto)      | Explicit instance ID for queue naming; auto-detected as `server.port-HOSTNAME` (or `server.port-UUID`) if empty |
+| `hotkey.local.queue-capacity`                     | `10000`          | Report dispatcher queue capacity (internal bounded queue per shard) |
+| `hotkey.local.queue-offer-timeout-ms`             | `100`            | Report queue offer timeout (ms) — blocks up to this duration before dropping |
+| `hotkey.local.consumer-count`                     | `0`              | Report consumer thread count per shard; 0 = auto (max(1, shardCount / 2)) |
 
 ### Reporting (`hotkey.report.*`)
 
@@ -131,3 +134,20 @@
 | `worker`               | `spring-boot-starter-amqp` (+ `spring-boot-starter-data-redis`) | `@ConditionalOnBean(RabbitTemplate.class)` + property (`hotkey.worker.enabled`) |
 | `actuator`             | `spring-boot-starter-actuator`                                | `@ConditionalOnClass(Endpoint.class)`                                  |
 | `scheduling`           | none                                                          | `@ConditionalOnProperty` + `@ConditionalOnBean(TopK.class)` |
+
+## Security
+
+All RabbitMQ-based exchanges (`sync`, `report`, `worker/broadcast`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*`:
+
+```yaml
+spring:
+  rabbitmq:
+    ssl:
+      enabled: true
+      key-store: classpath:client.p12
+      key-store-password: changeit
+      trust-store: classpath:truststore.jks
+      trust-store-password: changeit
+```
+
+See [Spring Boot RabbitMQ SSL docs](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title) for details.

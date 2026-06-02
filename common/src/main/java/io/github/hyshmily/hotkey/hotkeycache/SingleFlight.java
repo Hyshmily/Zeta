@@ -37,8 +37,12 @@ public class SingleFlight {
   private final Cache<String, CompletableFuture<Object>> inflightLoads;
   private final Executor executor;
   private final int timeoutSeconds;
+  private final int inflightMaxSize;
 
   /**
+   * Creates a SingleFlight deduplicator that prevents concurrent in-flight loads
+   * for the same key.
+   *
    * @param maxSize        maximum number of concurrent in-flight keys tracked
    * @param ttlSec         time-to-live for dedup entries after write
    * @param timeoutSeconds per-supplier timeout before the future is completed exceptionally
@@ -48,6 +52,7 @@ public class SingleFlight {
     this.inflightLoads = Caffeine.newBuilder().maximumSize(maxSize).expireAfterWrite(ttlSec, TimeUnit.SECONDS).build();
     this.executor = executor;
     this.timeoutSeconds = timeoutSeconds;
+    this.inflightMaxSize = maxSize;
   }
 
   /**
@@ -68,27 +73,29 @@ public class SingleFlight {
    */
   @SuppressWarnings("unchecked")
   public <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
+    if (estimatedInflightSize() > inflightMaxSize * 0.8) {
+      log.warn("SingleFlight inflight queue is high: {}/{}", estimatedInflightSize(), inflightMaxSize);
+    }
+
     CompletableFuture<Object> future = inflightLoads
       .asMap()
-      .computeIfAbsent(cacheKey, key ->
-        CompletableFuture.supplyAsync(() -> (Object) reader.get(), executor)
-          .orTimeout(timeoutSeconds, TimeUnit.SECONDS)
-          .whenComplete((v, e) -> {
-            inflightLoads.invalidate(key);
-
-            if (e != null) {
-              log.debug("singleflight load failed: key={}", key, e);
-            } else if (v == null) {
-              log.debug("singleflight returned null: key={}", key);
-            }
-          })
+      .computeIfAbsent(cacheKey, _ ->
+        CompletableFuture.supplyAsync(() -> (Object) reader.get(), executor).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
       );
+
+    future.whenComplete((v, e) -> {
+      inflightLoads.invalidate(cacheKey);
+
+      if (e != null) {
+        log.debug("singleflight load failed: key={}", cacheKey, e);
+      } else if (v == null) {
+        log.debug("singleflight returned null: key={}", cacheKey);
+      }
+    });
 
     try {
       return Optional.ofNullable((T) future.join());
     } catch (Exception e) {
-      inflightLoads.invalidate(cacheKey);
-
       log.warn("singleflight join failed: key={}", cacheKey, e);
       return Optional.empty();
     }
