@@ -134,7 +134,7 @@ invalidateAll(cacheKeys)
                  normalHardTtlMs, normalSoftTtlMs))
 ```
 
-> **注意：** 软过期行为由存储方式决定，而非 key 状态。通过 `getWithSoftExpire()` 存储的条目无论当前是 HOT/NORMAL/COOL 状态，都会执行 stale-while-revalidate。唯一的例外是 L1 未命中（过期或驱逐），此时会回退到正常读路径。异步刷新保留原始 per-entry 硬 TTL。
+> **注意：** 软过期适用于 HOT 和 COOL 条目。NORMAL 条目总是直接返回，不会触发异步刷新——它们会在硬 TTL 过期后通过 `loadAndCache` 重新加载。
 
 ### 实例间缓存同步
 
@@ -236,9 +236,9 @@ CacheEntry 维护**两个独立的版本空间**：
                                       │   →NORMAL）                  │
                                       │         │                    │
                                       │         ↓                    │
-                                      │  WorkerBroadcaster           │
+                                       │  WorkerBroadcaster           │
                                       │  （HOT/COOL 决策 via         │
-                                      │   hotkey.worker.exchange）   │
+                                      │   hotkey.broadcast.exchange） │
                                       │         │                    │
                                       └─────────┼────────────────────┘
                                                 │ RabbitMQ fanout

@@ -399,7 +399,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 >
 > - per-call 的 `hardTtlMs`/`softTtlMs` 仅对本次调用生效。下次调用不传参数时，回退到 key 当前状态（热点或普通）对应的默认 TTL。
 > - 传入 `0` 表示使用该 key 状态的配置默认值。
-> - 传入 `Long.MAX_VALUE` 作为 `hardTtlMs` 可实现永久缓存——该条目永不会被 TTL 淘汰（仅受 Caffeine `maximumSize` 淘汰约束）。
+> - 传入 `Long.MAX_VALUE` 作为 `hardTtlMs` 可实现永久缓存——该条目永不会被 TTL 淘汰（仅受 Caffeine `maximumSize` 淘汰约束）。Caffeine 的 `Expiry` JavaDoc 官方明确支持此用法：*"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."* ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
 > - 与 `getWithSoftExpire` 配合使用时，per-entry 硬 TTL 在后台刷新中会被保留。
 
 **I. Worker 模式**

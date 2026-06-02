@@ -399,7 +399,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 >
 > - A per-call `hardTtlMs`/`softTtlMs` applies to this invocation only. The next call without these parameters falls back to the configured defaults (which differ for hot vs normal keys).
 > - Pass `0` for either TTL to use the configured default for the key's current state (hot vs normal).
-> - Pass `Long.MAX_VALUE` for `hardTtlMs` to make the entry effectively permanent — it will never be evicted by TTL (only by Caffeine `maximumSize` eviction).
+> - Pass `Long.MAX_VALUE` for `hardTtlMs` to make the entry effectively permanent — it will never be evicted by TTL (only by Caffeine `maximumSize` eviction). This is officially supported by Caffeine's `Expiry` JavaDoc: *"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."* ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
 > - When combined with `getWithSoftExpire`, the per-entry hard TTL is preserved across background refreshes.
 
 **I. Worker mode**

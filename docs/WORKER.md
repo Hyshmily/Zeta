@@ -30,7 +30,7 @@ This approach solves the **single-instance blind spot** — an app instance's lo
                                                  │  └────────┬───────┘  │
                                                  └───────────┼──────────┘
                                                              │
-                        RabbitMQ fanout (hotkey.worker.exchange)
+                         RabbitMQ (hotkey.broadcast.exchange)
                                                              │
                                                              ↓
                           ┌──────────────────────────────────────────┐

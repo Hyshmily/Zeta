@@ -93,7 +93,7 @@
 | `hotkey.worker.routing.shard-index`                                       | `0`                         | 当前 Worker 消费的零基分片索引                             |
 | **`hotkey.worker.messaging.*`**                                           |                             | **消息**                                                   |
 | `hotkey.worker.messaging.report-exchange`                                 | `hotkey.report.exchange`    | App 报告消息的直接交换机                                   |
-| `hotkey.worker.messaging.broadcast-exchange`                              | `hotkey.broadcast.exchange` | HOT/COOL 广播的 Fanout 交换机（可能需要与 worker-listener.exchange-name 对齐） |
+| `hotkey.worker.messaging.broadcast-exchange`                              | `hotkey.broadcast.exchange` | HOT/COOL 广播的交换机（Worker 使用路由键发布；可能需要与 worker-listener.exchange-name 对齐） |
 | **`hotkey.worker.sliding-window.*`**                                      |                             | **滑动窗口**                                               |
 | `hotkey.worker.sliding-window.duration-ms`                                | `1000`                      | 滑动窗口时长（毫秒）                                       |
 | `hotkey.worker.sliding-window.slices`                                     | `10`                        | 每个窗口的时间片数                                         |

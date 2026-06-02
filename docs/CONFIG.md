@@ -93,7 +93,7 @@
 | `hotkey.worker.routing.shard-index`                                       | `0`                        | Zero-based shard index this Worker consumes                          |
 | **`hotkey.worker.messaging.*`**                                           |                            | **Messaging**                                                        |
 | `hotkey.worker.messaging.report-exchange`                                 | `hotkey.report.exchange`   | Direct exchange for app report messages                              |
-| `hotkey.worker.messaging.broadcast-exchange`                              | `hotkey.broadcast.exchange`| Fanout exchange for HOT/COOL broadcasts (may need alignment with worker-listener.exchange-name) |
+| `hotkey.worker.messaging.broadcast-exchange`                              | `hotkey.broadcast.exchange`| Exchange for HOT/COOL broadcasts (Worker publishes with routing keys; may need alignment with worker-listener.exchange-name) |
 | **`hotkey.worker.sliding-window.*`**                                      |                            | **Sliding Window**                                                   |
 | `hotkey.worker.sliding-window.duration-ms`                                | `1000`                     | Sliding window duration (milliseconds)                               |
 | `hotkey.worker.sliding-window.slices`                                     | `10`                       | Number of time slices within one window                              |

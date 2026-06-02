@@ -237,9 +237,9 @@ For cluster-wide hot key detection, app instances periodically report access cou
                                       │   →NORMAL)                   │
                                       │         │                    │
                                       │         ↓                    │
-                                      │  WorkerBroadcaster           │
+                                       │  WorkerBroadcaster           │
                                       │  (HOT/COOL decisions via     │
-                                      │   hotkey.worker.exchange)    │
+                                      │   hotkey.broadcast.exchange)  │
                                       │         │                    │
                                       └─────────┼────────────────────┘
                                                 │ RabbitMQ fanout

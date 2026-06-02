@@ -23,6 +23,7 @@ import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
+import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
@@ -31,6 +32,7 @@ import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -73,50 +75,6 @@ public class HotKeyAutoConfiguration {
       properties.getDecay(),
       properties.getMinCount()
     );
-  }
-
-  /**
-   * Create the L1 Caffeine cache with purely logical expiry.
-   * <p>
-   * Caffeine handles <em>only</em> size-based eviction ({@code maximumSize}).
-   * Hard TTL expiry is checked at read time in {@link HotKeyCache} — if
-   * {@code CacheEntry.hardExpireAtMs} has passed, the entry is invalidated and
-   * reloaded by the next {@code get()} call.
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public Cache<String, Object> hotLocalCache(HotKeyProperties properties) {
-    Caffeine<Object, Object> builder = Caffeine.newBuilder()
-      .maximumSize(properties.getLocalCacheMaxSize())
-      .expireAfter(
-        new Expiry<>() {
-          @Override
-          public long expireAfterCreate(@NonNull Object key, @NonNull Object value, long currentTimeNanos) {
-            return Long.MAX_VALUE;
-          }
-
-          @Override
-          public long expireAfterUpdate(
-            @NonNull Object key,
-            @NonNull Object value,
-            long currentTimeNanos,
-            long currentDuration
-          ) {
-            return Long.MAX_VALUE;
-          }
-
-          @Override
-          public long expireAfterRead(
-            @NonNull Object key,
-            @NonNull Object value,
-            long currentTimeNanos,
-            long currentDuration
-          ) {
-            return Long.MAX_VALUE;
-          }
-        }
-      );
-    return builder.build();
   }
 
   /**
@@ -205,12 +163,72 @@ public class HotKeyAutoConfiguration {
    * <p>Only active when a {@link HotKeyCache} bean exists but no {@link HotKey}
    * has been defined yet.  The primary {@link HotKey} creator is
    * {@link HotKeyFacadeAutoConfiguration} — this fallback covers the case where
-   * that autoconfiguration is excluded or its bean is overridden.
+   * that auto-configuration is excluded or its bean is overridden.
    */
   @Bean
   @ConditionalOnBean(HotKeyCache.class)
   @ConditionalOnMissingBean
   public HotKey hotKey(HotKeyCache hotKeyCache, @Qualifier("hotKeyDetector") TopK hotKeyDetector) {
     return new HotKey(hotKeyCache, hotKeyDetector);
+  }
+
+  /**
+   * Create the L1 Caffeine cache instance.
+   *
+   * <p>
+   * Time-based expiry operates at the <em>Caffeine</em> level, computing
+   * remaining nanoseconds from {@code CacheEntry.hardExpireAtMs}. Entries
+   * with {@code hardExpireAtMs == Long.MAX_VALUE} are purely logical-expiry
+   * — Caffeine never evicts them by time; they live until size eviction or
+   * manual invalidation.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public Cache<String, Object> hotLocalCache(HotKeyProperties properties) {
+    Caffeine<Object, Object> builder = Caffeine.newBuilder()
+      .maximumSize(properties.getLocalCacheMaxSize())
+      .expireAfter(
+        new Expiry<>() {
+          @Override
+          public long expireAfterCreate(@NonNull Object key, @NonNull Object value, long currentTimeNanos) {
+            if (value instanceof CacheEntry entry) {
+              if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
+                return Long.MAX_VALUE;
+              }
+              long remainingMs = entry.getHardExpireAtMs() - System.currentTimeMillis();
+              return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
+            }
+            return TimeUnit.MINUTES.toNanos(properties.getLocalCacheTtlMinutes());
+          }
+
+          @Override
+          public long expireAfterUpdate(
+            @NonNull Object key,
+            @NonNull Object value,
+            long currentTimeNanos,
+            long currentDuration
+          ) {
+            if (value instanceof CacheEntry entry) {
+              if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
+                return Long.MAX_VALUE;
+              }
+              long remainingMs = entry.getHardExpireAtMs() - System.currentTimeMillis();
+              return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
+            }
+            return currentDuration;
+          }
+
+          @Override
+          public long expireAfterRead(
+            @NonNull Object key,
+            @NonNull Object value,
+            long currentTimeNanos,
+            long currentDuration
+          ) {
+            return currentDuration;
+          }
+        }
+      );
+    return builder.build();
   }
 }

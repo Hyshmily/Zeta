@@ -79,8 +79,7 @@ public class HotKeyCache {
    * @return {@code true} if the entry has logically expired
    */
   static boolean isLogicallyExpired(CacheEntry entry) {
-    return entry.getHardExpireAtMs() != Long.MAX_VALUE
-      && System.currentTimeMillis() >= entry.getHardExpireAtMs();
+    return entry.getHardExpireAtMs() != Long.MAX_VALUE && System.currentTimeMillis() >= entry.getHardExpireAtMs();
   }
 
   /**
@@ -96,7 +95,9 @@ public class HotKeyCache {
     }
     Object entry = caffeineCache.getIfPresent(cacheKey);
     if (entry instanceof CacheEntry ce) {
-      if (isLogicallyExpired(ce)) return false;
+      if (isLogicallyExpired(ce)) {
+        return false;
+      }
       return KeyState.HOT == ce.getKeyState();
     }
     return false;
