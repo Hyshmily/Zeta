@@ -16,6 +16,9 @@ import org.aspectj.lang.reflect.MethodSignature;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HotKeyAspect} covering READ/WRITE/INVALIDATE annotation operations.
+ */
 class HotKeyAspectTest {
 
   private io.github.hyshmily.hotkey.HotKey hotKeyFacade;

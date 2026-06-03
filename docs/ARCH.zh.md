@@ -58,7 +58,7 @@ putThrough(cacheKey, value, writer)
 ├─ Caffeine.put(cacheKey, CacheEntry(
 │    value,
 │    dataVersion, isVersionDegraded,
-│    decisionVersion=existingEntry.decisionVersion（保留）,
+│    decisionVersion=0L（写穿透时始终重置）,
 │    hardTtlMs, hardExpireAtMs,
 │    softTtlMs, softExpireAtMs,
 │    keyState,
@@ -85,7 +85,7 @@ putBeforeInvalidate(cacheKey, mutation)
 ├─ Caffeine 本地缓存失效
 └─ CacheSyncPublisher.send()
      └─ RabbitMQ fanout (hotkey.sync.exchange)
-          └─ TYPE_REFRESH 带 dataVersion 和 isVersionDegraded 头部
+          └─ TYPE_INVALIDATE 带 dataVersion 和 isVersionDegraded 头部
 ```
 
 > **注意：** `mutation.run()` 与 L1 缓存失效之间存在约 1ms 窗口，并发 `get()` 可能命中 L1 旧值。这是刻意的取舍——在修改前失效会导致更严重的竞态（`get()` 用旧 Redis 数据重新填充 L1）。该窗口受限于一次 Redis 往返（`nextVersion` 调用）。
@@ -101,8 +101,9 @@ invalidate(cacheKey)
 
 invalidateAll(cacheKeys)
 ├─ Caffeine 本地缓存失效（所有 key）
-└─ CacheSyncPublisher.send() — 每个 key
-     └─ TYPE_INVALIDATE with dataVersion=0L（对端无条件移除）
+└─ CacheSyncPublisher.broadcastLocalInvalidateAll(keys)
+     └─ 单条 AMQP 消息，body = JSON key 数组
+          └─ TYPE_INVALIDATE_ALL（对端批量失效 L1）
 ```
 
 ### 软过期读路径（`getWithSoftExpire`）
@@ -190,7 +191,8 @@ CacheEntry 维护**两个独立的版本空间**：
 - `dataVersion` 跟踪实际数据变更版本，用于跨实例缓存同步。Redis 不可用时退化到节点本地计数器。
 - `decisionVersion` 跟踪 Worker HOT/COOL 决策顺序。始终是 Worker 上干净的 `AtomicLong`——永不退化。
 - 两个版本**正交**：数据变更不影响 `decisionVersion`，Worker 决策不影响 `dataVersion`。
-- `putThrough` 保留 L1 条目的现有 `decisionVersion`。`loadAndCache` 设置 `decisionVersion=0L`（尚无 Worker 决策）。
+- `putThrough` 始终设置 `decisionVersion=0L`（不保留——写穿透替换了值，任何之前的 Worker 决策均失效）。
+- `loadAndCache` 也同样设置 `decisionVersion=0L`（首次加载尚无 Worker 决策）。
 - `CacheSyncListener` 在跨实例同步刷新期间保留现有条目的 `decisionVersion`。
 - **`isVersionDegraded` 安全网：** 当现有 entry 的 `isVersionDegraded=true`（创建于 Redis 宕机期），`shouldSkipForWorker` 将无条件接受 Worker 决策，跳过 `decisionVersion` 比较。这防止了 Worker 重启（AtomicLong 重置）后被退化期 entry 的旧 `decisionVersion` 阻挡——退化期 entry 产生于不稳定期，应让位于更新的 Worker 决策。
 

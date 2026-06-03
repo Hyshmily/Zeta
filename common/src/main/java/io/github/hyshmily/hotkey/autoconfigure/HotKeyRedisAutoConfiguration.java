@@ -77,7 +77,7 @@ public class HotKeyRedisAutoConfiguration {
    /**
      * Create the Redis-enhanced {@link HotKeyCache} with version-based stale detection.
      * {@link StringRedisTemplate} is optional — if absent, version tracking falls back
-     * to a node-local counter ({@code nodeId << 32 | counter}).
+     * to a node-local counter ({@code Long.MIN_VALUE + counter}).
      */
   @Bean
   @ConditionalOnMissingBean

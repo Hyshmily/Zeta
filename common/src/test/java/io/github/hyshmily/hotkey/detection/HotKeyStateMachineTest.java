@@ -7,6 +7,10 @@ import io.github.hyshmily.hotkey.entity.HotKeyDecision.DecisionType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HotKeyStateMachine} covering cold-to-hot, hot-to-cool, pre-cooling revive, reset, and eviction
+ * transitions.
+ */
 class HotKeyStateMachineTest {
 
   private HotKeyStateMachine machine;

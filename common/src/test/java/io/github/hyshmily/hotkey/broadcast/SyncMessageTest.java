@@ -10,6 +10,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
+/**
+ * Tests for {@link SyncMessage} parsing from AMQP messages, covering valid messages, empty/blank
+ * body handling, default header values, and type constants.
+ */
 class SyncMessageTest {
 
   @Test

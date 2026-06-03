@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link Item}, the immutable key-count pair record used by the HeavyKeeper algorithm.
+ */
 class ItemTest {
 
   @Test

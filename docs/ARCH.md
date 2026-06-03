@@ -58,7 +58,7 @@ putThrough(cacheKey, value, writer)
 ├─ Caffeine.put(cacheKey, CacheEntry(
 │    value,
 │    dataVersion, isVersionDegraded,
-│    decisionVersion=existingEntry.decisionVersion (preserved),
+│    decisionVersion=0L (always reset on write-through),
 │    hardTtlMs, hardExpireAtMs,
 │    softTtlMs, softExpireAtMs,
 │    keyState,
@@ -85,7 +85,7 @@ putBeforeInvalidate(cacheKey, mutation)
 ├─ Caffeine local cache invalidate
 └─ CacheSyncPublisher.send()
      └─ RabbitMQ fanout (hotkey.sync.exchange)
-          └─ TYPE_REFRESH with dataVersion + isVersionDegraded headers
+          └─ TYPE_INVALIDATE with dataVersion + isVersionDegraded headers
 ```
 
 > **Note:** Between `mutation.run()` and L1 cache invalidation there is a ~1ms window where a concurrent `get()` may hit the L1 stale value. This is a deliberate trade-off — invalidating before the mutation would cause a worse race where `get()` re-populates L1 with old Redis data. The window is bounded to a single Redis round-trip (`nextVersion` call).
@@ -101,8 +101,9 @@ invalidate(cacheKey)
 
 invalidateAll(cacheKeys)
 ├─ Caffeine local cache invalidate (all keys)
-└─ CacheSyncPublisher.send() — per key
-     └─ TYPE_INVALIDATE with dataVersion=0L (peers remove unconditionally)
+└─ CacheSyncPublisher.broadcastLocalInvalidateAll(keys)
+     └─ Single AMQP message, body = JSON array of keys
+          └─ TYPE_INVALIDATE_ALL (peers invalidateAll in L1)
 ```
 
 ### Soft Expire Read Path (`getWithSoftExpire`)
@@ -191,7 +192,8 @@ CacheEntry maintains **two independent version spaces** with different semantics
 - `dataVersion` tracks the actual data mutation version for cross-instance cache sync. It can degrade to a node-local counter if Redis is unavailable.
 - `decisionVersion` tracks Worker HOT/COOL decision ordering. It is always a clean `AtomicLong` on the Worker — never degraded.
 - These versions are **orthogonal**: a data mutation does not affect `decisionVersion`, and a Worker decision does not affect `dataVersion`.
-- `putThrough` preserves the existing `decisionVersion` from the L1 entry. `loadAndCache` sets `decisionVersion=0L` (no Worker decision yet).
+- `putThrough` always sets `decisionVersion=0L` (never preserves — the write-through replaces the value so any prior Worker decision is invalidated).
+- `loadAndCache` also sets `decisionVersion=0L` (no Worker decision on first load).
 - `CacheSyncListener` preserves `decisionVersion` from the existing entry during cross-instance sync refreshes.
 - **`isVersionDegraded` safety net in `shouldSkipForWorker`:** When an existing entry has `isVersionDegraded=true` (i.e. it was created during a Redis outage), Worker decisions are unconditionally accepted regardless of `decisionVersion`. This prevents Worker restart (which resets `AtomicLong`) from being blocked by degraded entries — the degraded entry was created in an unstable period and should yield to any newer Worker decision.
 

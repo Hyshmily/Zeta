@@ -31,9 +31,9 @@ Most local cache solutions store every accessed key in Caffeine. This works fine
 - **Memory waste** — most keys are read once and never accessed again
 - **Broadcast storm** — full cache invalidation requires full broadcast at scale
 
-HotKey takes a different approach — **cache only the hot keys.**
+HotKey takes a different approach — **cache with differentiated TTLs.**
 
-It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant) to probabilistically detect access frequency. On the **read path**, only keys that enter the Top-K set are promoted into the local Caffeine L1, and optionally synchronized across instances via RabbitMQ. Hot keys and normal keys get **differentiated TTLs** — hot keys are cached longer (1h default), normal keys expire faster (5min). On the **write path**, `putThrough` writes directly to L1 and broadcasts regardless of hot key status — the caller explicitly owns the write. Non-hot key reads still return values via the caller-supplied `Supplier<T>` — they are simply not cached with long TTLs in L1.
+It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant) to probabilistically detect access frequency. On the **read path**, all loaded keys enter the local Caffeine L1, but with **differentiated TTLs** — hot keys are cached longer (1h default), normal keys expire faster (5min). Optionally, hot keys can be synchronized across instances via RabbitMQ. On the **write path**, `putThrough` writes directly to L1 and broadcasts regardless of hot key status — the caller explicitly owns the write. Non-hot key reads still return values via the caller-supplied `Supplier<T>` — they are simply cached with shorter TTLs in L1.
 
 For **cluster-wide detection**, deploy a dedicated Worker node that aggregates access reports from all instances — solving the single-instance blind spot where "accessed 100 times by one pod" and "accessed once by 100 pods" are indistinguishable locally.
 
@@ -61,6 +61,7 @@ For **cluster-wide detection**, deploy a dedicated Worker node that aggregates a
 - **Soft Expire (Logical Expiration)** — return stale L1 value immediately while asynchronously refreshing in the background; lower p99 at the cost of short-lived staleness. **Fully replaces traditional Redis-side logical expiration** (`RedisData{data, expireTime}` wrapper pattern) — Redis stores raw values, HotKey manages staleness at the L1 Caffeine level
 - **Redis Collections** — `putBeforeInvalidate` for List/Set/ZSet incremental writes; no `putThrough` needed
 - **Hot Key Sync** — optional RabbitMQ fanout (via `hotkey.sync.*`) to synchronize cache invalidations across instances; separate worker-listener (via `hotkey.worker-listener.*`) for receiving Worker-originated HOT/COOL decisions
+- **Rule System (Blacklist / Whitelist)** — pattern-based `BLOCK` (throw `HotKeyBlockedException`) and `ALLOW_NO_REPORT` (skip Worker report) rules; auto-persisted to Redis or broadcast to cluster peers; sync across instances via RabbitMQ `TYPE_RULES_SYNC`
 - **Worker Mode** — dedicated cluster-wide hot key detection node; sliding-window + state-machine pipeline for cross-instance consensus; see [WORKER.md](docs/WORKER.md)
 - **Report Aggregation** — every `get()` / `getWithSoftExpire()` call reports to local `HotKeyReporter`, which periodically batches access counts to Worker node via RabbitMQ for cluster-wide hot key detection
 - **Configurable Thread Pool** — dedicated `TaskExecutor` with bounded queue
@@ -97,7 +98,7 @@ Write path failure behavior:
 | `putThrough`                                        | Executor queue full (outside tx) | `RejectedExecutionException` propagates to caller                            |
 | `putThrough`                                        | `writer.run()` / Redis fails     | Error logged on `hotKeyExecutor`, L1 version not updated, no broadcast       |
 | `putBeforeInvalidate`                               | `mutation.run()` throws          | Mutation exception caught and logged; local invalidate and broadcast skipped |
-| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to node-local counter (`(nodeId << 32) | counter`, non-persistent, `degraded=true`) |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to node-local counter (`Long.MIN_VALUE + counter`, non-persistent, `degraded=true`) |
 
 Worker mode failure behavior:
 
@@ -474,6 +475,8 @@ Requires `spring-boot-starter-aop` on the classpath (provides AspectJ). Requires
 
 The recommended entry point is the `HotKey` facade (auto-configured as a Spring bean). Beyond the `get`/`peek`/`putThrough`/`putBeforeInvalidate` shown above, it exposes:
 
+### Cache Operations
+
 | Method                                                 | Description                                                                                                                                                             |
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `peek(key)`                                            | Peek at L1 only — no frequency tracking, no L2 read, no reporting                                                                                                       |
@@ -485,19 +488,37 @@ The recommended entry point is the `HotKey` facade (auto-configured as a Spring 
 | `putThrough(key, value, writer)`                       | Write-through: writer.run(), nextVersion(), L1 update (with effective TTLs per key state), optional sync                                                                |
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | Same with per-entry hard and soft TTL overrides (pass 0 to use configured default)                                                                                      |
 | `putBeforeInvalidate(key, mutation)`                   | Write-then-invalidate for collection ops (LPUSH, SADD, ZADD)                                                                                                            |
-| `isLocalHotKey(cacheKey)`                                   | Check if a key is in HOT state in L1 (O(1))                                                                                                                             |
-| `isWorkerHotKey(cacheKey)`                                  | Check if a key is a cluster-wide hot key in the Worker TopK (O(n))                                                                                                       |
 | `invalidate(cacheKey)`                                 | Invalidate a single key from all cache layers                                                                                                                           |
 | `invalidateAll(cacheKeys...)`                          | Varargs overload — invalidate multiple keys at once                                                                                                                     |
 | `invalidateAll(Collection)`                            | Collection overload                                                                                                                                                     |
-| `returnHotKeys()`                                      | Snapshot of current app-side Top-K entries (key + count)                                                                                                                |
-| `returnExpelledHotKeys()`                              | Access the app-side expelled hot key queue; drained periodically by internal scheduler                                                                                  |
-| `returnTotalDataStreams()`                             | Total number of reads passed through app-side HeavyKeeper                                                                                                               |
-| `returnWorkerHotKeys()`                                | Snapshot of current Worker-side (cluster-wide) Top-K entries                                                                                                            |
-| `returnWorkerExpelledHotKeys()`                        | Access the Worker-side expelled hot key queue                                                                                                                           |
-| `returnWorkerTotalDataStreams()`                       | Total number of reads tracked by Worker-side HeavyKeeper                                                                                                                |
 
-> **Note:** `invalidate()` generates a monotonic version via Redis `INCR` and broadcasts as `TYPE_REFRESH` with that version — peers reload the value from Redis via `CacheSyncListener`, skipping stale versions. `invalidateAll()` does **not** call `INCR` — it broadcasts as `TYPE_INVALIDATE` with version `0L`, so all peers unconditionally remove the key from L1.
+### Hot Key Inspection
+
+| Method                          | Description                                                                        |
+| ------------------------------- | ---------------------------------------------------------------------------------- |
+| `isLocalHotKey(cacheKey)`       | Check if a key is in HOT state in L1 (O(1))                                        |
+| `isWorkerHotKey(cacheKey)`      | Check if a key is a cluster-wide hot key in the Worker TopK (O(n))                 |
+| `returnLocalHotKeys()`          | Snapshot of current app-side Top-K entries (key + count)                           |
+| `returnLocalExpelledHotKeys()`  | Access the app-side expelled hot key queue; drained periodically by scheduler      |
+| `returnLocalTotalDataStreams()` | Total number of reads passed through app-side HeavyKeeper                          |
+| `returnWorkerHotKeys()`         | Snapshot of current Worker-side (cluster-wide) Top-K entries                       |
+| `returnWorkerExpelledHotKeys()` | Access the Worker-side expelled hot key queue                                      |
+| `returnWorkerTotalDataStreams()`| Total number of reads tracked by Worker-side HeavyKeeper                           |
+
+### Rule System
+
+| Method                           | Description                                                                                                |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `addBlacklist(keyPattern)`       | Add a block rule — pattern auto-detected (exact, prefix, wildcard, regex). Throws `HotKeyBlockedException` |
+| `removeBlacklist(keyPattern)`    | Remove a block rule by pattern                                                                             |
+| `addWhitelist(keyPattern)`       | Add an allow-no-report rule — matched keys skip Worker report but still participate in local detection     |
+| `removeWhitelist(keyPattern)`    | Remove an allow-no-report rule by pattern                                                                  |
+| `getAllRules()`                  | Return a snapshot of all current rules in evaluation order                                                 |
+| `clearAllRules()`                | Remove all rules (both blacklist and whitelist)                                                            |
+| `evaluateRule(cacheKey)`         | Return the `RuleAction` for a key without throwing — for programmatic inspection                           |
+| `broadcastAllLocalRulesManually()`| Force-broadcast the current rule set to all peers (useful when Redis is absent)                            |
+
+> **Note:** `invalidate()` generates a monotonic version via Redis `INCR` and broadcasts as `TYPE_REFRESH` with that version — peers reload the value from Redis via `CacheSyncListener`, skipping stale versions. `invalidateAll()` does **not** call `INCR` — it broadcasts as `TYPE_INVALIDATE_ALL` (no version header), so all peers unconditionally remove all listed keys from L1.
 
 ## Configuration
 
@@ -558,10 +579,12 @@ Method-level TTL behavior:
 
 Enable via `hotkey.sync.enabled=true`.
 
-Each instance declares its own queue (`hotkey.sync:<instance-id>`) bound to a fanout exchange. Two message types:
+Each instance declares its own queue (`hotkey.sync:<instance-id>`) bound to a fanout exchange. Four message types:
 
-- **`TYPE_REFRESH`** — Versioned invalidation. Peers reload the value from Redis via `CacheSyncListener.handleRefresh()`, respecting the `dataVersion` header to skip stale updates. The 4-case comparison (normal-vs-normal, normal-vs-degraded, degraded-vs-normal, degraded-vs-degraded) guarantees that a normal (Redis INCR) dataVersion always wins over a degraded (node-local) one.
-- **`TYPE_INVALIDATE`** — Bulk invalidation (`invalidateAll`). Peers immediately remove the key from L1 without reloading.
+- **`TYPE_REFRESH`** — Versioned refresh. Peers reload the value from Redis via `CacheSyncListener.handleRefresh()`, respecting the `dataVersion` header to skip stale updates. The 4-case comparison (normal-vs-normal, normal-vs-degraded, degraded-vs-normal, degraded-vs-degraded) guarantees that a normal (Redis INCR) dataVersion always wins over a degraded (node-local) one. Sent by `invalidate()` and `putThrough()`.
+- **`TYPE_INVALIDATE`** — Single-key invalidation with version guard. Peers remove the key from L1 only when the incoming `dataVersion` is not stale. Sent by `putBeforeInvalidate()`.
+- **`TYPE_INVALIDATE_ALL`** — Batch invalidation (no version guard). Peers immediately remove all keys from L1 without reloading. Sent by `invalidateAll()`.
+- **`TYPE_RULES_SYNC`** — Rule set replacement. The body is a JSON-serialized `List<Rule>`; the receiver calls `RuleMatcher.syncRules()` to atomically swap the local rule list. No broadcast storm: `syncRules` saves to Redis if available but does **not** re-broadcast.
 
 > [!SECURITY]
 > All three RabbitMQ exchanges (`hotkey.sync.exchange`, `hotkey.report.exchange`, `hotkey.worker.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*` properties:
@@ -578,6 +601,52 @@ Each instance declares its own queue (`hotkey.sync:<instance-id>`) bound to a fa
 > ```
 >
 > See [Spring Boot RabbitMQ SSL docs](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title) for details.
+
+## Rule System
+
+Enable via `hotkey.sync.enabled=true` for cross-instance rule sync. The rule system provides two actions:
+
+| Action            | Effect on matched keys                                                                 |
+| ----------------- | -------------------------------------------------------------------------------------- |
+| `BLOCK`           | `get()` / `getWithSoftExpire()` throws `HotKeyBlockedException`; `putThrough()` skips  |
+| `ALLOW_NO_REPORT` | Proceed normally but skip Worker report (reduces noise for frequently-accessed keys)   |
+
+### Pattern Types
+
+Rules are auto-detected by `RuleMatcher.of(pattern, action)`:
+
+| Pattern             | Type      | Matches                          |
+| ------------------- | --------- | -------------------------------- |
+| `"user:123"`        | `EXACT`   | Exact key                        |
+| `"temp:*"`          | `PREFIX`  | Keys starting with `temp:`       |
+| `"order:*-detail"`  | `WILDCARD`| Glob-style (`*` / `?`) matching  |
+| `"regex:user:\\d+"` | `REGEX`   | Java regex                       |
+
+### Persistence & Broadcast
+
+- **With Redis:** every `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `HotKeyConstants.REDIS_KEY_RULES` (`"hotkey:rules"`). On startup, `RuleMatcher.initRules()` loads from Redis. Changes also broadcast via `TYPE_RULES_SYNC` — peers atomically swap via `RuleMatcher.syncRules()` without re-broadcasting (avoids storms).
+- **Without Redis:** same operations broadcast to all peers via the `CacheSyncPublisher` fanout exchange. Each peer holds the full rule set in memory.
+- **Manual broadcast:** `hotKey.broadcastAllLocalRulesManually()` loads from Redis (if available) and re-broadcasts the current rule set to all peers.
+
+### Programmatic Usage
+
+```java
+// Block access to sensitive keys
+hotKey.addBlacklist("secret:*");
+hotKey.addBlacklist("regex:token-\\d+");
+
+// Whitelist keys to skip Worker reporting
+hotKey.addWhitelist("health:*");
+hotKey.addWhitelist("metrics:*");
+
+// Inspect rules
+List<Rule> rules = hotKey.getAllRules();
+RuleAction action = hotKey.evaluateRule("user:123"); // BLOCK / ALLOW_NO_REPORT / ALLOW
+
+// Remove rules
+hotKey.removeBlacklist("secret:*");
+hotKey.clearAllRules();
+```
 
 ### Worker Listener
 

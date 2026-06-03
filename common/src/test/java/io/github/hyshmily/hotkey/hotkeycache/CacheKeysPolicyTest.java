@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link CacheKeysPolicy}, covering null, blank, and valid cache key validation.
+ */
 class CacheKeysPolicyTest {
 
   @Test

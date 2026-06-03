@@ -137,8 +137,7 @@ public class HotKeyAutoConfiguration {
    * Wired with an empty Redis and sync publisher since no Redis is available in this variant.
    */
   @Bean
-  @ConditionalOnMissingBean
-  @ConditionalOnMissingBean(type = "org.springframework.data.redis.core.StringRedisTemplate")
+  @ConditionalOnMissingBean({RuleMatcher.class, org.springframework.data.redis.core.StringRedisTemplate.class})
   public RuleMatcher ruleMatcher(ObjectProvider<CacheSyncPublisher> publisherProvider) {
     return new RuleMatcher(Optional.empty(), Optional.ofNullable(publisherProvider.getIfAvailable()));
   }

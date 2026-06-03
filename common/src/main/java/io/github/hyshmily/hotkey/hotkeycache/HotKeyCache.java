@@ -347,7 +347,7 @@ public class HotKeyCache {
     TransactionSupport.runNowOrAfterCommit(() -> {
       caffeineCache.invalidateAll(validKeys);
       cacheSyncPublisher.ifPresentOrElse(
-        p -> p.broadcastLoaclInvalidateAll(validKeys),
+        p -> p.broadcastLocalInvalidateAll(validKeys),
         () -> log.debug("No sync publisher found, skip broadcast for {} keys", validKeys.size())
       );
     });
@@ -442,6 +442,11 @@ public class HotKeyCache {
   }
 
   //-------------------------------------------------------------------------
+
+  /**
+   * Add a key pattern to the blacklist.
+   * Subsequent accesses to matching keys will throw {@link HotKeyBlockedException}.
+   */
   public void addBlacklist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
       log.debug("blacklist: invalid cacheKey");
@@ -450,6 +455,10 @@ public class HotKeyCache {
     TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.addRule(RuleMatcher.of(cacheKey, RuleAction.BLOCK)));
   }
 
+  /**
+   * Add a key pattern to the whitelist.
+   * Matching keys are allowed but bypass app-to-Worker reporting.
+   */
   public void addWhitelist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
       log.debug("whitelist: invalid cacheKey");
@@ -460,6 +469,9 @@ public class HotKeyCache {
     );
   }
 
+  /**
+   * Remove a key pattern from the blacklist.
+   */
   public void unBlacklist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
       log.debug("unblacklist: invalid cacheKey");
@@ -468,6 +480,9 @@ public class HotKeyCache {
     TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.removeRule(cacheKey, RuleAction.BLOCK));
   }
 
+  /**
+   * Remove a key pattern from the whitelist.
+   */
   public void unWhitelist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
       log.debug("unwhitelist: invalid cacheKey");
@@ -476,22 +491,45 @@ public class HotKeyCache {
     TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.removeRule(cacheKey, RuleAction.ALLOW_NO_REPORT));
   }
 
+  /**
+   * Evaluate all rules against the given key and return the first matching action.
+   *
+   * @param cacheKey the key to evaluate
+   * @return the matching {@link RuleAction}, or {@code ALLOW} if no rule matches
+   */
   public RuleAction evaluateRule(String cacheKey) {
     return ruleMatcher.evaluateRule(cacheKey);
   }
 
+  /**
+   * Return a snapshot of all current rules in evaluation order.
+   *
+   * @return list of rules (immutable snapshot)
+   */
   public List<Rule> getAllRules() {
     return ruleMatcher.getAllRules();
   }
 
+  /**
+   * Remove all blacklist and whitelist rules.
+   */
   public void clearAllRules() {
     TransactionSupport.runNowOrAfterCommit(ruleMatcher::clearRules);
   }
 
+  /**
+   * Broadcast all local rules to peer instances via the sync exchange.
+   * Useful for initial synchronisation when a new instance joins the cluster.
+   */
   public void broadcastAllLocalRulesManually() {
     ruleMatcher.broadcastAllLocalRulesManually();
   }
 
+  /**
+   * Check whether a key is blocked; throws {@link HotKeyBlockedException} if so.
+   *
+   * @return {@code true} if the key is on the ALLOW_NO_REPORT list
+   */
   private boolean checkAndThrowIfBlocked(String cacheKey, String operation) {
     var result = ruleMatcher.isAllowNoReport(cacheKey, operation);
     if (result.isEmpty()) {

@@ -116,6 +116,11 @@ public class HeavyKeeper implements TopK {
           counts[index] += increment;
           maxCount = Math.max(maxCount, counts[index]);
         } else {
+          // HeavyKeeper probabilistic decay: each of the `increment` steps
+          // has a `decayProb` chance of decrementing the existing counter.
+          // decayProb grows with the counter value (via the pre-computed lookup
+          // table), so larger counters are more likely to be decremented.
+          // When the counter reaches 0, the slot is claimed for the new item.
           for (int j = 0; j < increment; j++) {
             double decayProb = (counts[index] < LOOKUP_TABLE_SIZE)
               ? lookupTable[counts[index]]
@@ -211,6 +216,9 @@ public class HeavyKeeper implements TopK {
       }
     }
 
+    // Rebuild the TopK set: halve all counts and discard entries that drop to 0.
+    // Halving (rather than decaying proportionally) keeps the relative ordering
+    // while giving new keys a chance to enter the TopK set.
     synchronized (sortedTopK) {
       TreeMap<Node, Boolean> newMap = new TreeMap<>(sortedTopK.comparator());
       heapIndex.clear();
@@ -225,6 +233,8 @@ public class HeavyKeeper implements TopK {
       sortedTopK.clear();
       sortedTopK.putAll(newMap);
 
+      // Also halve the global stream counter so newly emitted keys are not
+      // immediately disadvantaged against the historical total.
       long half = total.sumThenReset() >> 1;
       if (half > 0) {
         total.add(half);
@@ -255,10 +265,13 @@ public class HeavyKeeper implements TopK {
     }
   }
 
+  /** A key-count pair used as an entry in the sorted TopK tree. */
   @AllArgsConstructor
   private static class Node {
 
+    /** The cache key. */
     final String key;
+    /** Its current estimated count. */
     final int count;
   }
 }

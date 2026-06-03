@@ -4,6 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link CacheSyncProperties} verifying default configuration values and queue name
+ * prefix behavior.
+ */
 class CacheSyncPropertiesTest {
 
   @Test

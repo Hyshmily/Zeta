@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link ReportMessage} record creation and field access.
+ */
 class ReportMessageTest {
 
   @Test

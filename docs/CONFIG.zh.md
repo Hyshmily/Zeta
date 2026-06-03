@@ -63,7 +63,7 @@
 | 属性                                           | 默认值                     | 说明                                               |
 | ---------------------------------------------- | -------------------------- | -------------------------------------------------- |
 | `hotkey.sync.enabled`                          | `false`                    | 启用跨实例缓存同步（RabbitMQ）                     |
-| `hotkey.sync.exchange-name`                    | `hotkey.sync.exchange`     | 同步消息 Fanout 交换机名称（INVALIDATE / REFRESH） |
+| `hotkey.sync.exchange-name`                    | `hotkey.sync.exchange`     | 同步消息 Fanout 交换机名称（REFRESH / INVALIDATE / INVALIDATE_ALL / RULES_SYNC） |
 | `hotkey.sync.queue-prefix`                     | `hotkey.sync`              | 队列名前缀；完整名称 = `{prefix}:{instanceId}`     |
 | `hotkey.sync.dedup-window-seconds`             | `10`                       | 接收同步消息的去重窗口（秒）                       |
 | `hotkey.sync.dedup-max-size`                   | `10000`                    | 去重缓存最大条目数                                  |

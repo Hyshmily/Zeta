@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link KeyState} enum verifying its expected values.
+ */
 class KeyStateTest {
 
   @Test

@@ -9,6 +9,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link DelayUtil} verifying immediate execution for zero/negative jitter and eventual
+ * execution for positive jitter values.
+ */
 class DelayUtilTest {
 
   @Test

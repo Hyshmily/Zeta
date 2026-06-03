@@ -25,6 +25,9 @@ import java.util.concurrent.Executor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HotKeyCache}, covering peek, get, invalidate, and blacklist behaviors.
+ */
 class HotKeyCacheTest {
 
   private TopK hotKeyDetector;

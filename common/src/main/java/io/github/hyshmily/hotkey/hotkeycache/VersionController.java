@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.github.hyshmily.hotkey.hotkeycache;
 
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
@@ -9,20 +24,48 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Manages per-key version numbers using either Redis INCR (primary) or a
+ * local {@link AtomicLong} fallback. When Redis is unavailable, versions
+ * are assigned in the negative {@code long} space so they always sort below
+ * normal (positive) Redis versions — this guarantees correct broadcast
+ * ordering without flag-aware comparison logic.
+ */
 @Slf4j
 public class VersionController {
 
+  /**
+   * Result of a version allocation.
+   *
+   * @param dataVersion the allocated version number
+   * @param degraded    {@code true} if this version came from the local
+   *                    fallback (Redis was unavailable)
+   */
   public record VersionResult(long dataVersion, boolean degraded) {}
 
   private final Optional<StringRedisTemplate> redisTemplate;
   private final int versionKeyTtlMinutes;
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
 
+  /**
+   * Construct a VersionController backed by the given Redis template.
+   *
+   * @param redisTemplate        optional Redis template (empty = always fallback)
+   * @param versionKeyTtlMinutes TTL in minutes for the Redis version key
+   */
   public VersionController(Optional<StringRedisTemplate> redisTemplate, int versionKeyTtlMinutes) {
     this.redisTemplate = redisTemplate;
     this.versionKeyTtlMinutes = versionKeyTtlMinutes;
   }
 
+  /**
+   * Atomically increment the version counter for the given cache key.
+   * Uses a Lua script for atomic INCR + EXPIRE in Redis.
+   * Falls back to {@link #fallbackVersion()} on any Redis failure.
+   *
+   * @param cacheKey the key to version
+   * @return a {@link VersionResult} containing the new version and degraded flag
+   */
   public VersionResult nextVersion(String cacheKey) {
     return redisTemplate
       .map(t -> {

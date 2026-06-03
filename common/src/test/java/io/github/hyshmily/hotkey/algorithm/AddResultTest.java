@@ -4,6 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link AddResult}, the result record returned by HeavyKeeper.add() covering hot-key,
+ * non-hot, and expelled-key scenarios.
+ */
 class AddResultTest {
 
   @Test

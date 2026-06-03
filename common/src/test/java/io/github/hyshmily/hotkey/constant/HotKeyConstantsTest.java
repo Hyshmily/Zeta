@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HotKeyConstants} verifying constant values for AMQP, threading, and routing.
+ */
 class HotKeyConstantsTest {
 
   @Test

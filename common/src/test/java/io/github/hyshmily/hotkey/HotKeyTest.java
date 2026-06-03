@@ -19,6 +19,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for the {@link HotKey} facade verifying delegation to HotKeyCache, TopK, and worker mode.
+ */
 class HotKeyTest {
 
   private HotKeyCache hotKeyCache;

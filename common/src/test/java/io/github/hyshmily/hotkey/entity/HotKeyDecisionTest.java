@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.github.hyshmily.hotkey.entity.HotKeyDecision.DecisionType;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HotKeyDecision} record covering factory methods and decision type enum.
+ */
 class HotKeyDecisionTest {
 
   @Test

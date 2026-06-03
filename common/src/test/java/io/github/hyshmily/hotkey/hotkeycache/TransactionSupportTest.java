@@ -9,6 +9,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link TransactionSupport}, verifying sync and async execution outside transaction context.
+ */
 class TransactionSupportTest {
 
   @Test

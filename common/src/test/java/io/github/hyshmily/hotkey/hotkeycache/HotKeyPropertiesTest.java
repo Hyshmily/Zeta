@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HotKeyProperties}, verifying default values and effective TTL computation.
+ */
 class HotKeyPropertiesTest {
 
   private HotKeyProperties props() {

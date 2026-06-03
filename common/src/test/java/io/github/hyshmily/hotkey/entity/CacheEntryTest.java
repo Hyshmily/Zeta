@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link CacheEntry} builder covering full, normal, and degraded entry construction.
+ */
 class CacheEntryTest {
 
   @Test

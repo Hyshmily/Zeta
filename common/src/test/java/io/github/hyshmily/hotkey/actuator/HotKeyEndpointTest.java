@@ -21,6 +21,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HotKeyEndpoint} verifying monitoring endpoint structure and null-safety.
+ */
 class HotKeyEndpointTest {
 
   private TopK hotKeyDetector;

@@ -83,7 +83,7 @@ public class CacheSyncPublisher {
    * The body is a JSON array of key strings; the receiver calls
    * {@code caffeineCache.invalidateAll()} once.
    */
-  public void broadcastLoaclInvalidateAll(Collection<String> keys) {
+  public void broadcastLocalInvalidateAll(Collection<String> keys) {
     if (keys == null || keys.isEmpty()) {
       return;
     }

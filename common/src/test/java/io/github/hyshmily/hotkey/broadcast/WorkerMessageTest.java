@@ -9,6 +9,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
+/**
+ * Tests for {@link WorkerMessage} parsing from AMQP messages, covering HOT/COOL type parsing,
+ * empty body rejection, default version handling, and type constants.
+ */
 class WorkerMessageTest {
 
   @Test

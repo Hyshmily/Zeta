@@ -55,18 +55,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 高并发、分布式场景的生产级压力测试。
- * 每个测试模拟生产环境负载，验证热点探测、缓存、广播等核心组件在极端条件下的正确性。
+ * Production-level stress tests for high-concurrency and distributed scenarios.
+ * Each test simulates production load to verify correctness of hot-key detection,
+ * caching, broadcast, and related core components under extreme conditions.
  */
 class HotKeyStressTest {
 
   private static final Logger log = LoggerFactory.getLogger(HotKeyStressTest.class);
 
-  // ─────────────────────────────────────────────────────────────
-  // 1. HeavyKeeper 高并发测试
-  // ─────────────────────────────────────────────────────────────
-
-  /** 验证 HeavyKeeper 在高并发下不出现重复 key。 */
+  /**
+   * HeavyKeeper concurrent tests.
+   */
+  /** HeavyKeeper must not produce duplicate keys under high concurrency. */
   @Test
   void heavyKeeper_shouldNotHaveDuplicateKeysUnderHighConcurrency() throws InterruptedException {
     int threadCount = 20;
@@ -115,7 +115,7 @@ class HotKeyStressTest {
     }
   }
 
-  /** 验证 TopK 大小不超过 k。 */
+  /** TopK size must not exceed k under concurrent contention. */
   @Test
   void heavyKeeper_topKSizeShouldNotExceedKUnderContention() throws InterruptedException {
     int k = 10;
@@ -143,11 +143,7 @@ class HotKeyStressTest {
     assertThat(keeper.list().size()).isLessThanOrEqualTo(k);
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 2. SingleFlight 并发去重测试
-  // ─────────────────────────────────────────────────────────────
-
-  /** 验证极端并发下 supplier 执行次数远小于请求数。 */
+  /** Supplier must execute far fewer times than the number of concurrent requesters. */
   @Test
   void singleFlight_shouldDeduplicateUnderExtremeContention() throws InterruptedException {
     ExecutorService asyncExec = Executors.newCachedThreadPool();
@@ -180,11 +176,7 @@ class HotKeyStressTest {
     assertThat(successCount.get()).isEqualTo(threadCount);
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 3. HotKeyCache 并发读写测试
-  // ─────────────────────────────────────────────────────────────
-
-  /** HotKeyCache 高并发读写下数据一致。 */
+  /** HotKeyCache must remain consistent under concurrent reads and writes. */
   @Test
   void hotKeyCache_shouldMaintainConsistencyUnderConcurrentAccess() throws InterruptedException {
     TopK detector = new HeavyKeeper(100, 50000, 5, 0.92, 10);
@@ -237,11 +229,7 @@ class HotKeyStressTest {
     assertThat(errors.get()).isZero();
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 4. CacheSyncPublisher 并发去重测试
-  // ─────────────────────────────────────────────────────────────
-
-  /** 验证 dedup 在并发下的正确性：相同 key+version 只有第一个通过。 */
+  /** Only the first broadcast must pass dedup for the same key+version under concurrency. */
   @Test
   void cacheSyncPublisher_shouldDeduplicateConcurrentBroadcasts() throws InterruptedException {
     CacheSyncProperties props = new CacheSyncProperties();
@@ -278,7 +266,7 @@ class HotKeyStressTest {
     assertThat(sendCount.get()).isEqualTo(1);
   }
 
-  /** 验证版本递增时新版本覆盖旧版本。 */
+  /** A newer version must be accepted after an older one was already seen. */
   @Test
   void cacheSyncPublisher_shouldAllowNewerVersionAfterOlder() {
     com.github.benmanes.caffeine.cache.Cache<String, Long> dedupCache = Caffeine.newBuilder()
@@ -304,9 +292,7 @@ class HotKeyStressTest {
     assertThat(skipped3.get()).isFalse();
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 5. VersionGuard 并发测试
-  // ─────────────────────────────────────────────────────────────
+  /** VersionGuard must handle concurrent shouldSkipForSync / shouldSkipForWorker calls correctly. */
 
   @Test
   void versionGuard_shouldHandleConcurrentAccess() throws InterruptedException {
@@ -343,9 +329,7 @@ class HotKeyStressTest {
     assertThat(errors.get()).isZero();
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 6. HotKeyStateMachine 并发测试
-  // ─────────────────────────────────────────────────────────────
+  /** HotKeyStateMachine must handle concurrent evaluations for independent keys and the same key. */
 
   @Test
   void stateMachine_shouldHandleConcurrentEvaluations() throws InterruptedException {
@@ -380,7 +364,7 @@ class HotKeyStressTest {
     assertThat(errors.get()).isZero();
   }
 
-  /** 所有线程操作相同 key，验证不会产生重复状态。 */
+  /** All threads operating on the same key must not produce duplicate states. */
   @Test
   void stateMachine_sameKeyConcurrentEvaluations_shouldNotThrow() throws InterruptedException {
     HotKeyStateMachine sm = new HotKeyStateMachine(2, 5, 2);
@@ -405,9 +389,7 @@ class HotKeyStressTest {
     assertThat(errors.get()).isZero();
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 7. HotKeyReporter 并发测试
-  // ─────────────────────────────────────────────────────────────
+  /** HotKeyReporter must handle high-frequency concurrent record calls correctly. */
 
   @Test
   void reporter_highFrequencyRecord_shouldNotThrow() throws InterruptedException {
@@ -447,17 +429,13 @@ class HotKeyStressTest {
       reporter.dispatcherDepth(), reporter.dispatcherExpired(), reporter.dispatcherDropped());
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 8. CacheSyncListener 并发测试
-  // ─────────────────────────────────────────────────────────────
-
-  /** 模拟 CacheSyncListener 在并发接收信息时的正确性。 */
+  /** CacheSyncListener must handle concurrent invalidate and refresh messages correctly. */
   @Test
   void cacheSyncListener_concurrentInvalidateAndRefresh_shouldNotCorruptCache()
     throws InterruptedException {
     Cache<String, Object> cache = Caffeine.newBuilder().maximumSize(1000).build();
 
-    // 预填充
+    // Pre-populate L1 with entries
     for (int i = 0; i < 50; i++) {
       cache.put("sync-key-" + i, CacheEntry.builder()
         .value("v" + i).dataVersion(10).isVersionDegraded(false).decisionVersion(5)
@@ -478,7 +456,7 @@ class HotKeyStressTest {
         try {
           for (int i = 0; i < 100; i++) {
             String key = "sync-key-" + (i % 50);
-            // 模拟 handleInvalidate
+            // Simulate handleInvalidate
             if (i % 2 == 0) {
               cache.asMap().compute(key, (_, existing) -> {
                 if (existing == null) return null;
@@ -486,7 +464,7 @@ class HotKeyStressTest {
                 return null;
               });
             } else {
-              // 模拟 handleRefresh
+              // Simulate handleRefresh
               cache.asMap().compute(key, (_, existing) -> {
                 if (existing == null) return null;
                 if (VersionGuard.shouldSkipForSync(cache, key, 8, false)) return existing;
@@ -518,11 +496,7 @@ class HotKeyStressTest {
     assertThat(errors.get()).isZero();
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 9. WorkerListener HOT/COOL 并发测试
-  // ─────────────────────────────────────────────────────────────
-
-  /** WorkerListener 在并发 HOT/COOL 决策下不损坏缓存。 */
+  /** WorkerListener must not corrupt the cache under concurrent HOT/COOL decisions. */
   @Test
   void workerListener_concurrentHotCool_shouldNotCorruptCache() throws InterruptedException {
     Cache<String, Object> cache = Caffeine.newBuilder().maximumSize(1000).build();
@@ -545,7 +519,7 @@ class HotKeyStressTest {
         try {
           for (int i = 0; i < 50; i++) {
             if (i < 25) {
-              // 模拟 HOT
+              // Simulate HOT decision
               cache.asMap().compute("wc-key", (_, existing) -> {
                 if (VersionGuard.shouldSkipForWorker(cache, "wc-key", decisionVer)) return existing;
                 if (existing instanceof CacheEntry ce) {
@@ -562,7 +536,7 @@ class HotKeyStressTest {
                 return existing;
               });
             } else {
-              // 模拟 COOL
+              // Simulate COOL decision
               cache.asMap().compute("wc-key", (_, existing) -> {
                 if (VersionGuard.shouldSkipForWorker(cache, "wc-key", decisionVer)) return existing;
                 if (existing instanceof CacheEntry ce) {
@@ -590,7 +564,7 @@ class HotKeyStressTest {
     pool.shutdown();
     assertThat(errors.get()).isZero();
 
-    // 最终 state 必须是 COOL 或 NORMAL（高 decisionVersion 的 COOL 会覆盖 HOT）
+    // Final state must be COOL or NORMAL (higher-decisionVersion COOL overrides HOT)
     Object finalEntry = cache.getIfPresent("wc-key");
     assertThat(finalEntry).isInstanceOf(CacheEntry.class);
     CacheEntry ce = (CacheEntry) finalEntry;
@@ -598,13 +572,10 @@ class HotKeyStressTest {
     assertThat(ce.getDecisionVersion()).isPositive();
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // 10. 综合分布式场景压力测试
-  // ─────────────────────────────────────────────────────────────
-
   /**
-   * 模拟分布式多节点场景：每个节点有独立的 HotKeyCache，共享一个 simulated Redis
-   * (Caffeine cache)。同时读写、使缓存保证基本可用。
+   * Simulate a distributed multi-node scenario: each node has its own
+   * HotKeyCache and shares a simulated Redis (Caffeine cache).
+   * Concurrent reads/writes must keep the cache basically usable.
    */
   @Test
   void distributedScenario_shouldNotThrowUnderLoad() throws InterruptedException {
@@ -612,25 +583,25 @@ class HotKeyStressTest {
     int keyCount = 20;
     int opsPerNode = 300;
 
-    // 共享 Redis (模拟)
+    // Shared simulated Redis
     Cache<String, Object> simulatedRedis = Caffeine.newBuilder().maximumSize(10000).build();
     for (int i = 0; i < keyCount; i++) {
       simulatedRedis.put("ds-key-" + i, "redis-value-" + i);
     }
 
-    // 广播消息队列 (模拟 RabbitMQ fanout)
+    // Broadcast message queue (simulates RabbitMQ fanout)
     BlockingQueue<Runnable> broadcastQueue = new LinkedBlockingQueue<>();
 
     ExecutorService nodePool = Executors.newFixedThreadPool(nodeCount);
     CountDownLatch nodeLatch = new CountDownLatch(nodeCount);
     AtomicInteger totalErrors = new AtomicInteger(0);
 
-    // 每个节点启动一个线程池
+    // Each node gets its own thread pool
     for (int n = 0; n < nodeCount; n++) {
       int nodeId = n;
       nodePool.submit(() -> {
         try {
-          // 创建节点的独立组件
+          // Create each node's independent components
           TopK detector = new HeavyKeeper(100, 50000, 5, 0.92, 10);
           Cache<String, Object> l1 = Caffeine.newBuilder().maximumSize(1000).build();
           Executor syncExec = Runnable::run;
@@ -644,7 +615,7 @@ class HotKeyStressTest {
             new VersionController(Optional.empty(), 60)
           );
 
-          // 节点的内部并发操作
+          // Internal concurrent operations within each node
           int workerThreads = 5;
           ExecutorService workerPool = Executors.newFixedThreadPool(workerThreads);
           CountDownLatch workerLatch = new CountDownLatch(workerThreads);
@@ -658,20 +629,20 @@ class HotKeyStressTest {
                   int opType = (op + workerId + nodeId) % 4;
                   switch (opType) {
                     case 0 -> {
-                      // READ: 从 L1 读，miss 则从模拟 Redis 加载
+                      // READ: read from L1, fall back to simulated Redis on miss
                       hotKeyCache.get(key, () -> simulatedRedis.getIfPresent(key));
                     }
                     case 1 -> {
                       // INVALIDATE
                       hotKeyCache.invalidate(key);
-                      // 广播到其他节点的模拟消息
+                      // Broadcast simulated messages to other nodes
                       broadcastQueue.offer(() ->
                         l1.invalidate(key)
                       );
                     }
                     case 2 -> hotKeyCache.peek(key);
                     case 3 -> {
-                      // WRITE: 模拟写入
+                      // WRITE: simulate write
                       simulatedRedis.put(key, "new-value-" + nodeId + "-" + op);
                     }
                   }
@@ -687,7 +658,7 @@ class HotKeyStressTest {
           assertThat(workerLatch.await(30, TimeUnit.SECONDS)).isTrue();
           workerPool.shutdown();
 
-          // 处理广播消息
+          // Process broadcast messages
           List<Runnable> broadcasts = new ArrayList<>();
           broadcastQueue.drainTo(broadcasts);
           for (Runnable r : broadcasts) {

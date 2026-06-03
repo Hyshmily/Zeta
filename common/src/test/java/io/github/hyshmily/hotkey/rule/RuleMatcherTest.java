@@ -8,6 +8,9 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link RuleMatcher} covering pattern detection, rule evaluation, and rule management.
+ */
 class RuleMatcherTest {
 
   private RuleMatcher ruleMatcher;

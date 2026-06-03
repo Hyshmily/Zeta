@@ -12,6 +12,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HeavyKeeper}, covering construction validation, single-key and multi-key tracking,
+ * expulsion behavior, minimum-count thresholds, ordering, containment queries, total accumulation,
+ * decay fading, and concurrency safety.
+ */
 class HeavyKeeperTest {
 
   private static final int TOP_K = 3;

@@ -15,6 +15,9 @@ import java.util.concurrent.Executor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link CacheExpireManager}, covering soft-expire logic, TTL computation, and background refresh.
+ */
 class CacheExpireManagerTest {
 
   private CacheExpireManager expireManager;

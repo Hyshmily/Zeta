@@ -6,6 +6,9 @@ import io.github.hyshmily.hotkey.entity.HotKeyDecision;
 import io.github.hyshmily.hotkey.entity.HotKeyDecision.DecisionType;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Edge case tests for {@link HotKeyStateMachine} covering single window, immediate cooling, and interleaved keys.
+ */
 class HotKeyStateMachineEdgeTest {
 
   @Test

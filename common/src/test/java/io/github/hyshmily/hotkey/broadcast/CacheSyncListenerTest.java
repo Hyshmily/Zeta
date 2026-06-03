@@ -31,6 +31,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
+/**
+ * Tests for {@link CacheSyncListener} verifying correct ACK/NACK behavior for invalidate and
+ * refresh sync messages, including error handling and null-type edge cases.
+ */
 class CacheSyncListenerTest {
 
   private Cache<String, Object> cache;

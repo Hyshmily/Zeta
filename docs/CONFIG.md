@@ -63,7 +63,7 @@
 | Property                                    | Default                     | Description                                                         |
 | ------------------------------------------- | --------------------------- | ------------------------------------------------------------------- |
 | `hotkey.sync.enabled`                       | `false`                     | Enable cross-instance cache sync via RabbitMQ                       |
-| `hotkey.sync.exchange-name`                 | `hotkey.sync.exchange`      | Fanout exchange name for sync messages (INVALIDATE / REFRESH)       |
+| `hotkey.sync.exchange-name`                 | `hotkey.sync.exchange`      | Fanout exchange name for sync messages (REFRESH / INVALIDATE / INVALIDATE_ALL / RULES_SYNC) |
 | `hotkey.sync.queue-prefix`                  | `hotkey.sync`               | Queue name prefix; full name = `{prefix}:{instanceId}`              |
 | `hotkey.sync.dedup-window-seconds`          | `10`                        | Dedup window for received sync messages (seconds)                   |
 | `hotkey.sync.dedup-max-size`                | `10000`                     | Dedup cache max entries                                             |

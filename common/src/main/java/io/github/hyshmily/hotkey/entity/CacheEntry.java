@@ -24,7 +24,7 @@ import lombok.Getter;
  * and hot-key state.
  *
  * <p>{@code isVersionDegraded} indicates whether the {@code dataVersion} was obtained
- * from Redis INCR (normal) or fell back to node-local counter ({@code nodeId << 32 | counter})
+ * from Redis INCR (normal) or fell back to node-local counter ({@code Long.MIN_VALUE + counter})
  * (degraded) — see {@code VersionResult} for the degraded-detection logic
  * used during broadcast reception.
  * <p>{@code decisionVersion} tracks Worker HOT/COOL decisions and is always

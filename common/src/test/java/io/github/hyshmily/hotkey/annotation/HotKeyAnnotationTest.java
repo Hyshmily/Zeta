@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.github.hyshmily.hotkey.annotation.HotKey.OperationType;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link HotKey} annotation {@link HotKey.OperationType} enum values.
+ */
 class HotKeyAnnotationTest {
 
   @Test

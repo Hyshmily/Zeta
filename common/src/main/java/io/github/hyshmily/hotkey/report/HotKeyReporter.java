@@ -255,22 +255,27 @@ public class HotKeyReporter {
       );
     }
 
+    /** Current number of batches waiting in the queue. */
     int depth() {
       return queue.size();
     }
 
+    /** Maximum number of batches the queue can hold. */
     int capacity() {
       return queueCapacity;
     }
 
+    /** Number of active consumer threads. */
     int consumerCount() {
       return consumers.size();
     }
 
+    /** Total batches expired (removed after TTL) since startup. */
     long expired() {
       return expiredCount.get();
     }
 
+    /** Total batches dropped (queue full) since startup. */
     long dropped() {
       return droppedCount.get();
     }
@@ -299,6 +304,8 @@ public class HotKeyReporter {
           reportPublisher.publish(batch.shard(), new ReportMessage(appName, batch.timestamp(), batch.counts()));
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
+        } catch (RuntimeException e) {
+          log.error("Report publish failed, continuing", e);
         }
       }
     }

@@ -11,6 +11,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
+/**
+ * Tests for {@link CacheSyncPublisher} covering message sending, blank-key skipping, and
+ * deduplication of broadcast refresh and invalidate messages.
+ */
 class CacheSyncPublisherTest {
 
   private RabbitTemplate rabbitTemplate;

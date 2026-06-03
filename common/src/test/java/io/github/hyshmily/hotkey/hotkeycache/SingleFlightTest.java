@@ -11,6 +11,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link SingleFlight}, verifying request deduplication, error handling, and inflight tracking.
+ */
 class SingleFlightTest {
 
   private SingleFlight singleFlight;

@@ -4,6 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link WorkerListenerProperties} verifying default configuration values and queue name
+ * prefix behavior.
+ */
 class WorkerListenerPropertiesTest {
 
   @Test

@@ -19,15 +19,16 @@ HotKey.get(cacheKey, reader[, hardTtlMs, softTtlMs])
      └─ 未命中 → SingleFlight.execute(key, supplier)          [并发合并]
           ├─ supplier.get() → reader.get()                    [用户提供的 L2/DB 读取]
           ├─ hotKeyDetector.add(key, 1)
-          ├─ hotKeyReporter.record(key)
-          ├─ 若 hotKeyDetector.isHot(key)
-          │    └─ caffeineCache.put(key, new CacheEntry(...), hotTtl)
-          │         [CacheEntry: value, dataVersion=0L, decisionVersion=0L,
-          │          keyState=HOT, hardTtlMs, softTtlMs, ...]
-          └─ return Optional.of(value)
+           ├─ hotKeyReporter.record(key)
+           ├─ caffeineCache.put(key, new CacheEntry(...), ttl)
+           │    ├─ hot  → keyState=HOT, hot TTLs (hotHardTtl/hotSoftTtl)
+           │    │        [dataVersion=0L, decisionVersion=0L]
+           │    └─ not hot → keyState=NORMAL, normal TTLs
+           │                 [dataVersion=0L, decisionVersion=0L]
+           └─ return Optional.of(value)
 ```
 
-> **Note:** L1 命中时 `CacheEntry` 由 sync 广播（REFRESH）或 Worker 决策（HOT/COOL）写入，其中的 `dataVersion` 和 `decisionVersion` 由发送方决定。L1 未命中由 `loadAndCache` 创建，版本字段均为 0。
+> **Note:** L1 命中时 `CacheEntry` 由 sync 广播（REFRESH/INVALIDATE/INVALIDATE_ALL）或 Worker 决策（HOT/COOL）写入，其中的 `dataVersion` 和 `decisionVersion` 由发送方决定。L1 未命中由 `loadAndCache` 创建，版本字段均为 0。`loadAndCache` 缓存所有加载的 key（不仅仅是热点），根据 `KeyState` 区分 TTL。
 
 ### Soft Expire Read Path — `getWithSoftExpire`
 
@@ -86,8 +87,8 @@ HotKey.putThrough(key, value, writer[, hardTtlMs, softTtlMs])
      │
      ├─ caffeineCache.put(key, CacheEntry(
      │      value, dataVersion, degraded,
-     │      decisionVersion=existingEntry.decisionVersion,     [保留已有决策版本]
-     │      keyState=NORMAL,                                   [始终写入 NORMAL]
+      │      decisionVersion=0L,                                 [写穿透始终重置]
+      │      keyState=NORMAL,                                   [始终写入 NORMAL]
      │      hardTtlMs, softTtlMs, ...))
      │
      └─ CacheSyncPublisher.broadcastRefresh(key, version, degraded)
@@ -115,8 +116,8 @@ HotKey.putBeforeInvalidate(key, mutation)
      │
      ├─ nextVersion(key)                                      [同 putThrough]
      ├─ caffeineCache.invalidate(key)                         [L1 移除，非 put]
-     └─ CacheSyncPublisher.broadcastRefresh(key, version, degraded)
-          └─ 同 putThrough
+      └─ CacheSyncPublisher.broadcastLocalInvalidate(key, version, degraded)
+           └─ 同 putThrough (但 type=INVALIDATE instead of REFRESH)
 ```
 
 > **Note:** `mutation.run()` 和 L1 失效之间存在约 1ms 窗口，并发 `get()` 可能命中旧值。这是故意的权衡——先失效再变更会导致 `get()` 读取到老数据并重新填充 L1，窗口更长。
@@ -168,20 +169,18 @@ HotKey.invalidateAll(keys...) / invalidateAll(Collection)
      │    ├─ (事务内) → 延后到 afterCommit
      │    └─ (非事务) → 同步执行
      │
-     ├─ caffeineCache.invalidateAll(validKeys)                 [L1 批量移除]
-     │
-     └─ (有 syncPublisher)
-          └─ validKeys.forEach(key →
-               CacheSyncPublisher.broadcastInvalidate(key, 0L, false))
-               └─ sendDeduped(key, "INVALIDATE", 0L, false)
-                    ├─ recentBroadcasts.compute(...)
-                    │    └─ version=0L 总是被更高版本覆盖
-                    └─ rabbitTemplate.send()
-                         ↓
-                    ┌─ 对端: CacheSyncListener.handleInvalidate(msg)
-                    │    └─ caffeineCache.invalidate(key)       [无条件 L1 移除]
-                    │    [⚠ 不调 Redis 重新加载，不检查版本号]
-                    └─
+      ├─ caffeineCache.invalidateAll(validKeys)                 [L1 批量移除]
+      │
+      └─ (有 syncPublisher)
+           └─ CacheSyncPublisher.broadcastLocalInvalidateAll(validKeys)
+                └─ 单条 AMQP 消息
+                     │    body = JSON 数组 [key1, key2, ...]
+                     │    header: type=INVALIDATE_ALL
+                     ↓
+                ┌─ 对端: CacheSyncListener.handleInvalidateAll(msg)
+                │    └─ caffeineCache.invalidateAll(keys)       [批量 L1 移除]
+                │    [⚠ 不调 Redis 重新加载，不检查版本号]
+                └─
 ```
 
 ### State Query — `isLocalHotKey`
@@ -239,21 +238,72 @@ HotKey.returnWorkerTotalDataStreams()
      └─ no  → 0L
 ```
 
-> **TopK null safety:** 以上 6 个查询方法在对应 TopK 不可用时（Worker-only 模式或未配置）返回空值/0，不会抛出异常。这与 `get`/`putThrough` 等方法不同（后者在 Worker-only 模式下调用 `requireCache()` 抛出 `UnsupportedOperationException`）。
+> **TopK null safety:** All 6 query methods above return empty/0 when the corresponding TopK is unavailable (Worker-only mode or not configured). This differs from `get`/`putThrough` etc., which throw `UnsupportedOperationException` in Worker-only mode via `requireCache()`.
+
+### Rule Management API
+
+```
+HotKey.addBlacklist(keyPattern)
+└─ HotKeyCache.addBlacklist(keyPattern)
+     └─ ruleMatcher.addRule(Rule.of(keyPattern, BLOCK))
+          └─ [if Redis] → persist to Redis
+          └─ [if syncPublisher] → broadcastAllLocalRules()
+          [auto-detects pattern type: exact, prefix (* suffix), wildcard, regex]
+
+HotKey.removeBlacklist(keyPattern)
+└─ HotKeyCache.unBlacklist(keyPattern)
+     └─ ruleMatcher.removeRule(keyPattern, BLOCK)
+          └─ [if Redis] → persist to Redis
+          └─ [if syncPublisher] → broadcastAllLocalRules()
+
+HotKey.addWhitelist(keyPattern)
+└─ HotKeyCache.addWhitelist(keyPattern)
+     └─ ruleMatcher.addRule(Rule.of(keyPattern, ALLOW_NO_REPORT))
+          └─ [if Redis] → persist to Redis
+          └─ [if syncPublisher] → broadcastAllLocalRules()
+
+HotKey.removeWhitelist(keyPattern)
+└─ HotKeyCache.unWhitelist(keyPattern)
+     └─ ruleMatcher.removeRule(keyPattern, ALLOW_NO_REPORT)
+          └─ [if Redis] → persist to Redis
+          └─ [if syncPublisher] → broadcastAllLocalRules()
+
+HotKey.evaluateRule(cacheKey)
+└─ ruleMatcher.evaluateRule(cacheKey)
+     └─ returns BLOCK / ALLOW_NO_REPORT / ALLOW
+     [called internally by get/putThrough/putBeforeInvalidate; public for manual check]
+
+HotKey.getAllRules()
+└─ HotKeyCache.getAllRules()
+     └─ ruleMatcher.getAllRules() → List<Rule>
+     [snapshot of current rules in evaluation order; empty if no cache]
+
+HotKey.clearAllRules()
+└─ HotKeyCache.clearAllRules()
+     └─ ruleMatcher.clearAllRules()
+          └─ [if Redis] → delete from Redis
+          └─ [if syncPublisher] → broadcastAllLocalRules()
+     [removes both blacklist and whitelist rules]
+
+HotKey.broadcastAllLocalRulesManually()
+└─ HotKeyCache.broadcastAllLocalRulesManually()
+     └─ ruleMatcher.exportRulesJson()
+          └─ CacheSyncPublisher.broadcastAllLocalRules(json)
+               └─ Single AMQP message, body = JSON rule array
+                    header: type=RULES_SYNC
+     [manual trigger for initial cluster sync]
+```
 
 ### Design Notes
 
-**为什么 `invalidate` 发 REFRESH 而 `invalidateAll` 发 INVALIDATE？**
-单 key 失效通常意味着该 key 很快会被读取，发送 REFRESH 让对端主动从 Redis 重新加载，减少下一次 `get()` 的延迟。批量失效可能涉及大量 key 且不一定立即被访问，INVALIDATE 让对端惰性加载（在下次 `get()` 时）。
+**Why does `invalidate` send REFRESH while `invalidateAll` sends INVALIDATE_ALL?**
+Single-key invalidation typically means the key will be read soon — REFRESH tells peers to actively reload from Redis, reducing the next `get()` latency. Batch invalidation may involve many keys not immediately accessed — `invalidateAll` uses a single TYPE_INVALIDATE_ALL message (JSON array of keys) to let peers lazily reload on next `get()`.
 
-**为什么 `invalidateAll` 不走 INCR？**
-每次 INCR 是一次 Redis 调用。`invalidateAll` 设计用于批量清理（如缓存过期、数据变更通知），性能优先于版本一致性。如每个 key 都需要版本控制，应循环调用 `invalidate()`。
+**Why doesn't `invalidateAll` call INCR?**
+Each INCR is a Redis call. `invalidateAll` is designed for bulk cleanup (cache expiration, batch data change notifications), prioritizing performance over version consistency. For per-key version control, loop over `invalidate()` instead.
 
-**为什么 `fallbackVersion` 用 `Long.MIN_VALUE + counter`？**
-确保所有降级版本（负数）在 `sendDeduped` 的 `> version` 比较中始终低于正常版本（正数）。这样正常 Redis INCR 版本永远优先于降级本地版本，无需额外的 `degraded` 标志判断逻辑。
+**Why does `fallbackVersion` use `Long.MIN_VALUE + counter`?**
+All degraded versions are negative, sorting below normal (positive) Redis INCR versions in `sendDeduped`'s `> version` comparison. This ensures normal versions always win over degraded local versions without extra `degraded` flag logic.
 
-**为什么 `invalidateAll` 发送 `version=0L, degraded=false`？**
-因为不产生版本号，`0L` 保证在任何已有缓存版本面前都会被去重覆盖。`degraded` 字段在 INVALIDATE 消息中不对端检查版本，因此不需要有意义的值。
-
-**`putThrough` 非事务时为什么异步，而其他写方法同步？**
-`putThrough` 的 `writer.run()` 可能涉及 L2/DB 网络 IO，异步执行避免阻塞调用者。`invalidate`/`invalidateAll`/`putBeforeInvalidate` 预期轻量（仅缓存操作+广播），同步执行保证调用者返回时广播已发出。
+**Why does `putThrough` run async (non-transactional) while other write methods run sync?**
+`putThrough`'s `writer.run()` may involve L2/DB network I/O — async execution avoids blocking the caller. `invalidate`/`invalidateAll`/`putBeforeInvalidate` are lightweight (cache operation + broadcast), so synchronous execution guarantees the broadcast is sent by the time the caller returns.

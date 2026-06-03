@@ -9,6 +9,9 @@ import io.github.hyshmily.hotkey.entity.KeyState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Tests for {@link VersionGuard}, covering degraded/normal version comparison in sync and worker paths.
+ */
 class VersionGuardTest {
 
   private Cache<String, Object> cache;

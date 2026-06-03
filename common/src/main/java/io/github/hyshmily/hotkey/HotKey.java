@@ -347,6 +347,13 @@ public class HotKey {
     hotKeyCache.unWhitelist(keyPattern);
   }
 
+  /**
+   * Evaluate all rules against the given key and return the first matching action.
+   *
+   * @param cacheKey the key to evaluate
+   * @return the matching {@link Rule.RuleAction}, or {@code ALLOW} if no rule matches
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
   public Rule.RuleAction evaluateRule(String cacheKey) {
     return hotKeyCache.evaluateRule(cacheKey);
   }
@@ -373,6 +380,12 @@ public class HotKey {
     hotKeyCache.clearAllRules();
   }
 
+  /**
+   * Broadcast all local rules to peer instances via the sync exchange.
+   * Useful for initial synchronization when a new instance joins the cluster.
+   *
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
   public void broadcastAllLocalRulesManually() {
     hotKeyCache.broadcastAllLocalRulesManually();
   }

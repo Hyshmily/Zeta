@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.github.hyshmily.hotkey.rule;
 
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.REDIS_KEY_RULES;
@@ -132,6 +147,7 @@ public class RuleMatcher {
   public void removeRule(int index) {
     if (index >= 0 && index < rulesList.size()) {
       rulesList.remove(index);
+      persistAndBroadcastRules();
     }
   }
 
@@ -214,12 +230,11 @@ public class RuleMatcher {
   private void persistAndBroadcastRules() {
     try {
       String json = OBJECT_MAPPER.writeValueAsString(rulesList);
-      redisTemplate.ifPresent(r -> r.opsForValue().set(REDIS_KEY_RULES, json));
-      cacheSyncPublisher.ifPresent(p -> {
-        // TODO: broadcast rules to peers via p.broadcastRulesSync(json)
-        // Requires CacheSyncPublisher.broadcastRulesSync() + CacheSyncListener.handleRulesSync()
-        log.debug("Broadcast not yet wired, rules only persisted to Redis");
-      });
+      redisTemplate.ifPresentOrElse(
+        r -> r.opsForValue().set(REDIS_KEY_RULES, json),
+        () -> cacheSyncPublisher.ifPresent(p -> p.broadcastAllLocalRules(json))
+      );
+
       log.debug("Rules persisted, total: {}", rulesList.size());
     } catch (Exception e) {
       log.error("Failed to persist rules", e);
@@ -238,6 +253,7 @@ public class RuleMatcher {
       try {
         String json = OBJECT_MAPPER.writeValueAsString(rulesList);
         cacheSyncPublisher.get().broadcastAllLocalRules(json);
+
         log.info("Rules serialized ({} bytes), broadcast not yet wired", json.length());
       } catch (Exception e) {
         log.error("Failed to serialize rules", e);
@@ -253,6 +269,7 @@ public class RuleMatcher {
           List<Rule> saved = OBJECT_MAPPER.readValue(json, new TypeReference<>() {});
           saved.forEach(Rule::prepare);
           rulesList.addAll(saved);
+
           log.info("Rules loaded from Redis: {} rules", saved.size());
         }
       } catch (Exception e) {

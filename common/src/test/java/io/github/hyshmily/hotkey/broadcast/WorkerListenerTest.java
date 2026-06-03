@@ -28,6 +28,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
+/**
+ * Tests for {@link WorkerListener} verifying HOT/COOL decision handling, cache state promotion and
+ * downgrade, and error NACK behavior.
+ */
 class WorkerListenerTest {
 
   private Cache<String, Object> cache;

@@ -11,6 +11,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
+/**
+ * Tests for {@link ReportPublisher} verifying correct routing key and exchange usage.
+ */
 class ReportPublisherTest {
 
   private RabbitTemplate rabbitTemplate;
