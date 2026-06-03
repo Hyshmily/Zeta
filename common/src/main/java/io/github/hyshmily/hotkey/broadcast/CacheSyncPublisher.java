@@ -18,10 +18,13 @@ package io.github.hyshmily.hotkey.broadcast;
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.*;
 import static io.github.hyshmily.hotkey.hotkeycache.CacheKeysPolicy.invalidCacheKey;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.annotation.PostConstruct;
 import java.nio.charset.StandardCharsets;
+import java.util.Collection;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.RequiredArgsConstructor;
@@ -71,8 +74,43 @@ public class CacheSyncPublisher {
    *
    * @param version the {@code dataVersion} at which the operation occurred
    */
-  public void broadcastInvalidate(String cacheKey, long version, boolean degraded) {
+  public void broadcastLocalInvalidate(String cacheKey, long version, boolean degraded) {
     sendDeduped(cacheKey, SyncMessage.TYPE_INVALIDATE, version, degraded);
+  }
+
+  /**
+   * Batch-invalidate multiple keys in a single AMQP message.
+   * The body is a JSON array of key strings; the receiver calls
+   * {@code caffeineCache.invalidateAll()} once.
+   */
+  public void broadcastLoaclInvalidateAll(Collection<String> keys) {
+    if (keys == null || keys.isEmpty()) {
+      return;
+    }
+    try {
+      String json = new ObjectMapper().writeValueAsString(keys);
+      MessageProperties props = new MessageProperties();
+      props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+      Message message = new Message(json.getBytes(StandardCharsets.UTF_8), props);
+
+      rabbitTemplate.send(properties.getExchangeName(), "", message);
+    } catch (JsonProcessingException e) {
+      log.error("Failed to serialize keys for batch invalidate", e);
+    }
+  }
+
+  /**
+   * Broadcast a full rules-JSON payload to all peers.
+   * Receivers replace their entire rule set to keep cross-instance consistency.
+   */
+  public void broadcastAllLocalRules(String rulesJson) {
+    if (rulesJson == null || rulesJson.isBlank()) {
+      return;
+    }
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
+    Message message = new Message(rulesJson.getBytes(StandardCharsets.UTF_8), props);
+    rabbitTemplate.send(properties.getExchangeName(), "", message);
   }
 
   /**

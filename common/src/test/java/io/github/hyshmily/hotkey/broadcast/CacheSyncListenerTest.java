@@ -7,9 +7,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
@@ -19,8 +19,10 @@ import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.entity.KeyState;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
@@ -46,7 +48,7 @@ class CacheSyncListenerTest {
     HotKeyProperties ttlConfig = new HotKeyProperties();
     CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
 
-    listener = new CacheSyncListener(cache, redisLoader, properties, scheduler, expireManager);
+    listener = new CacheSyncListener(cache, redisLoader, properties, scheduler, expireManager, mock(RuleMatcher.class));
     channel = mock(Channel.class);
   }
 

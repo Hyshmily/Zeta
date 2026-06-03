@@ -32,8 +32,8 @@ class CacheSyncPublisherTest {
   }
 
   @Test
-  void broadcastInvalidate_shouldSendMessage() {
-    publisher.broadcastInvalidate("key1", 1L, false);
+  void broadcastLocalInvalidate_shouldSendMessage() {
+    publisher.broadcastLocalInvalidate("key1", 1L, false);
     verify(rabbitTemplate).send(anyString(), anyString(), any());
   }
 
@@ -44,10 +44,10 @@ class CacheSyncPublisherTest {
   }
 
   @Test
-  void broadcastInvalidate_shouldDeduplicate() {
-    publisher.broadcastInvalidate("key1", 5L, false);
-    publisher.broadcastInvalidate("key1", 3L, false);
-    publisher.broadcastInvalidate("key1", 5L, false);
+  void broadcastLocalInvalidate_shouldDeduplicate() {
+    publisher.broadcastLocalInvalidate("key1", 5L, false);
+    publisher.broadcastLocalInvalidate("key1", 3L, false);
+    publisher.broadcastLocalInvalidate("key1", 5L, false);
     verify(rabbitTemplate).send(anyString(), anyString(), any());
   }
 }

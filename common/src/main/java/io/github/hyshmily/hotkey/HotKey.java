@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey;
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
+import io.github.hyshmily.hotkey.rule.Rule;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
@@ -69,17 +70,7 @@ public class HotKey {
     this.workerTopKAlgorithm = workerTopKAlgorithm;
   }
 
-
-  /**
-   * Check whether a key is currently tracked as a hot key.
-   *
-   * @return {@code true} if the key exists in L1 with {@link io.github.hyshmily.hotkey.entity.KeyState#HOT}
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   */
-  public boolean isHotKey(String cacheKey) {
-    requireCache();
-    return hotKeyCache.isHotKey(cacheKey);
-  }
+  //-----------------------------------------------------------------------------
 
   /**
    * Look up a cached value without loading or triggering hot-key detection.
@@ -97,6 +88,7 @@ public class HotKey {
    * Hot keys are promoted to L1 with configured hot TTLs; normal keys use default TTLs.
    *
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader) {
     requireCache();
@@ -107,9 +99,10 @@ public class HotKey {
    * Get with explicit TTL overrides.
    * Pass 0 to use the configured default for that TTL type.
    *
-   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
    * @param softTtlMs soft TTL override (0 = use configured default)
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
     requireCache();
@@ -121,6 +114,7 @@ public class HotKey {
    * even if soft TTL expired, while triggering async refresh in background.
    *
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader) {
     requireCache();
@@ -132,6 +126,7 @@ public class HotKey {
    *
    * @param softTtlMs soft TTL override (0 = use configured default)
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long softTtlMs) {
     requireCache();
@@ -141,13 +136,11 @@ public class HotKey {
   /**
    * Get with soft-expire and explicit hard/soft TTL overrides.
    *
-   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry — entry never hard-evicted, only soft-expire or Caffeine {@code maximumSize})
    * @param softTtlMs soft TTL override (0 = use configured default)
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
-  public <T> Optional<T> getWithSoftExpire(
-    String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs
-  ) {
+  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
     requireCache();
     return hotKeyCache.getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs);
   }
@@ -198,7 +191,7 @@ public class HotKey {
    * Write-through with explicit TTL overrides.
    * Pass 0 to use the configured default for that TTL type.
    *
-   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
    * @param softTtlMs soft TTL override (0 = use configured default)
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
@@ -218,6 +211,33 @@ public class HotKey {
     hotKeyCache.putBeforeInvalidate(cacheKey, mutation);
   }
 
+  //------------------------------------------------------------------------
+  /**
+   * Check whether a key is currently tracked as a local hot key in L1.
+   *
+   * @return {@code true} if the key exists in L1 with {@link io.github.hyshmily.hotkey.entity.KeyState#HOT}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public boolean isLocalHotKey(String cacheKey) {
+    requireCache();
+    return hotKeyCache.isLocalHotKey(cacheKey);
+  }
+
+  /**
+   * Check whether a key is currently tracked as a cluster-wide hot key by the
+   * Worker-side global detector.
+   *
+   * @return {@code true} if the key appears in the Worker TopK list
+   */
+  public boolean isWorkerHotKey(String cacheKey) {
+    return (
+      workerTopKAlgorithm != null &&
+      workerTopKAlgorithm
+        .list()
+        .stream()
+        .anyMatch(item -> item.key().equals(cacheKey))
+    );
+  }
 
   /**
    * Return the current top-K hot keys (key + count) from the local detector,
@@ -225,7 +245,7 @@ public class HotKey {
    *
    * @return the local top-K list, or an empty list if no detector is available
    */
-  public List<Item> returnHotKeys() {
+  public List<Item> returnLocalHotKeys() {
     return topKAlgorithm != null ? topKAlgorithm.list() : List.of();
   }
 
@@ -235,7 +255,7 @@ public class HotKey {
    *
    * @return the expelled queue, or an empty queue if no detector is available
    */
-  public BlockingQueue<Item> returnExpelledHotKeys() {
+  public BlockingQueue<Item> returnLocalExpelledHotKeys() {
     return topKAlgorithm != null ? topKAlgorithm.expelled() : new LinkedBlockingQueue<>();
   }
 
@@ -244,11 +264,9 @@ public class HotKey {
    *
    * @return the total count, or {@code 0} if no detector is available
    */
-  public long returnTotalDataStreams() {
+  public long returnLocalTotalDataStreams() {
     return topKAlgorithm != null ? topKAlgorithm.total() : 0L;
   }
-
-  // ── Worker-side TopK queries (cluster-wide aggregated data) ─────────
 
   /**
    * Return the current top-K hot keys from the Worker-side global detector,
@@ -269,9 +287,7 @@ public class HotKey {
    * @return the expelled queue, or an empty queue if no Worker is active
    */
   public BlockingQueue<Item> returnWorkerExpelledHotKeys() {
-    return workerTopKAlgorithm != null
-      ? workerTopKAlgorithm.expelled()
-      : new LinkedBlockingQueue<>();
+    return workerTopKAlgorithm != null ? workerTopKAlgorithm.expelled() : new LinkedBlockingQueue<>();
   }
 
   /**
@@ -284,12 +300,87 @@ public class HotKey {
     return workerTopKAlgorithm != null ? workerTopKAlgorithm.total() : 0L;
   }
 
+  /**
+   * Add a key pattern to the blacklist. Keys matching this pattern will be
+   * blocked from cache get/put operations (returns {@link Optional#empty()}).
+   * <p>The pattern is auto-detected by {@link RuleMatcher#of}: exact match,
+   * prefix (trailing {@code *}), wildcard (containing {@code *} or {@code ?}),
+   * or regex (prefixed with {@code regex:}).
+   *
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void addBlacklist(String keyPattern) {
+    requireCache();
+    hotKeyCache.addBlacklist(keyPattern);
+  }
+
+  /**
+   * Remove a key pattern from the blacklist.
+   *
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void removeBlacklist(String keyPattern) {
+    requireCache();
+    hotKeyCache.unBlacklist(keyPattern);
+  }
+
+  /**
+   * Add a key pattern to the whitelist. Keys matching this pattern will
+   * skip report recording (no Worker report sent) but still participate in
+   * normal cache get/put and local hot-key detection.
+   * <p>The pattern is auto-detected by {@link RuleMatcher#of}.
+   *
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void addWhitelist(String keyPattern) {
+    requireCache();
+    hotKeyCache.addWhitelist(keyPattern);
+  }
+
+  /**
+   * Remove a key pattern from the whitelist.
+   *
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void removeWhitelist(String keyPattern) {
+    requireCache();
+    hotKeyCache.unWhitelist(keyPattern);
+  }
+
+  public Rule.RuleAction evaluateRule(String cacheKey) {
+    return hotKeyCache.evaluateRule(cacheKey);
+  }
+
+  /**
+   * Return a snapshot of all current rules in evaluation order.
+   *
+   * @return list of rules, or an empty list if no cache is available
+   */
+  public List<Rule> getAllRules() {
+    if (hotKeyCache == null) {
+      return List.of();
+    }
+    return hotKeyCache.getAllRules();
+  }
+
+  /**
+   * Remove all blacklist and whitelist rules.
+   *
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void clearAllRules() {
+    requireCache();
+    hotKeyCache.clearAllRules();
+  }
+
+  public void broadcastAllLocalRulesManually() {
+    hotKeyCache.broadcastAllLocalRulesManually();
+  }
 
   private void requireCache() {
     if (hotKeyCache == null) {
       throw new UnsupportedOperationException(
-        "HotKey cache is not available in Worker-only mode. "
-           + "Run the Worker as a separate Spring Boot process."
+        "HotKey cache is not available in Worker-only mode. " + "Run the Worker as a separate Spring Boot process."
       );
     }
   }

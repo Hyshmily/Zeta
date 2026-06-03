@@ -17,7 +17,7 @@
 
 **源码中的协作流程：**
 
-1. **突发流量打到实例 A：** `HotKeyCache.get()` L1 未命中 → `loadAndCache()` 调用 `hotKeyDetector.add(key, 1).isHotKey()` → 若为热 Key，以 `hotHardTtlMs`（默认 1 小时）缓存。实例 A 瞬间得到保护。
+1. **突发流量打到实例 A：** `HotKeyCache.get()` L1 未命中 → `loadAndCache()` 调用 `hotKeyDetector.add(key, 1).isLocalHotKey()` → 若为热 Key，以 `hotHardTtlMs`（默认 1 小时）缓存。实例 A 瞬间得到保护。
 
 2. **同时，** 同一次 `get()` 调用 `hotKeyReporter.record(key)` → `HotKeyReporter` 在本地 Caffeine 计数器中累加 → 每 `reportIntervalMs`（默认 100ms）批量刷新到 RabbitMQ。
 

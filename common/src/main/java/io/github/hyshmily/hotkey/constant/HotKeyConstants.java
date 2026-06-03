@@ -64,6 +64,7 @@ public final class HotKeyConstants {
   public static final int TOPK_INCR = 1;
 
   /** Warning message logged when sync publisher is not available. */
-  public static final String NO_SYNC_PUBLISHER =
-    "No sync publisher found, please enable hotkey.sync";
+  public static final String NO_SYNC_PUBLISHER = "No sync publisher found, please enable hotkey.sync";
+
+  public static final String REDIS_KEY_RULES = "hotkey:rules";
 }

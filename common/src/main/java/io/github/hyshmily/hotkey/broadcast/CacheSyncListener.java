@@ -15,15 +15,18 @@
  */
 package io.github.hyshmily.hotkey.broadcast;
 
-import static io.github.hyshmily.hotkey.broadcast.SyncMessage.TYPE_INVALIDATE;
-import static io.github.hyshmily.hotkey.broadcast.SyncMessage.TYPE_REFRESH;
+import static io.github.hyshmily.hotkey.broadcast.SyncMessage.*;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.VersionGuard;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
@@ -49,11 +52,14 @@ import org.springframework.amqp.core.Message;
 @RequiredArgsConstructor
 public class CacheSyncListener {
 
+  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
   private final Cache<String, Object> caffeineCache;
   private final Function<String, Object> redisLoader;
   private final CacheSyncProperties properties;
   private final ScheduledExecutorService scheduler;
   private final CacheExpireManager expireManager;
+  private final RuleMatcher ruleMatcher;
 
   /**
    * RabbitMQ message callback for sync messages. Acknowledges immediately after parsing;
@@ -99,8 +105,10 @@ public class CacheSyncListener {
       return;
     }
     switch (msg.type()) {
-      case TYPE_INVALIDATE -> handleInvalidate(msg);
+      case TYPE_INVALIDATE -> handleLocalInvalidate(msg);
+      case TYPE_INVALIDATE_ALL -> handleLocalInvalidateAll(msg);
       case TYPE_REFRESH -> handleRefresh(msg);
+      case TYPE_RULES_SYNC -> handleRulesSync(msg);
       default -> log.warn("Unknown sync type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
     }
   }
@@ -117,23 +125,51 @@ public class CacheSyncListener {
    * A second DCL check inside the atomic {@code compute} body prevents a
    * concurrent refresh from being wiped by a stale degraded INVALIDATE.
    */
-  private void handleInvalidate(SyncMessage sm) {
+  private void handleLocalInvalidate(SyncMessage sm) {
     boolean unconditional = sm.version() == 0L && !sm.isVersionDegraded();
 
-    if (!unconditional
-      && VersionGuard.shouldSkipForSync(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded())) {
+    if (
+      !unconditional &&
+      VersionGuard.shouldSkipForSync(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded())
+    ) {
       log.debug("Stale invalidate ignored: key={}, incomingVersion={}", sm.cacheKey(), sm.version());
       return;
     }
 
-    caffeineCache.asMap().compute(sm.cacheKey(), (key, existing) -> {
-      if (!unconditional
-        && VersionGuard.shouldSkipForSync(caffeineCache, key, sm.version(), sm.isVersionDegraded())) {
-        return existing;
-      }
-      return null;
-    });
+    caffeineCache
+      .asMap()
+      .compute(sm.cacheKey(), (key, existing) -> {
+        if (
+          !unconditional && VersionGuard.shouldSkipForSync(caffeineCache, key, sm.version(), sm.isVersionDegraded())
+        ) {
+          return existing;
+        }
+        return null;
+      });
     log.debug("Invalidated by sync: {}", sm.cacheKey());
+  }
+
+  /**
+   * Batch-invalidate all keys contained in the JSON-array body.
+   * This method bypasses version guards intentionally — the publisher
+   * from {@code invalidateAll} sends clean (version=0L, not degraded)
+   * and all keys in the batch are invalidated unconditionally.
+   */
+  private void handleLocalInvalidateAll(SyncMessage sm) {
+    try {
+      List<String> keys = OBJECT_MAPPER.readValue(sm.cacheKey(), new TypeReference<>() {});
+      caffeineCache.invalidateAll(keys);
+      log.debug("Batch invalidated {} keys", keys.size());
+    } catch (Exception e) {
+      log.error("Failed to deserialize batch invalidate keys", e);
+    }
+  }
+
+  /**
+   * Replace the entire rule set with the incoming JSON payload.
+   */
+  private void handleRulesSync(SyncMessage sm) {
+    ruleMatcher.syncRules(sm.cacheKey());
   }
 
   /**

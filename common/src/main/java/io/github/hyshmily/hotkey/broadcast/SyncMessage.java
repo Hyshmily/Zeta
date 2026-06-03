@@ -19,6 +19,7 @@ import static io.github.hyshmily.hotkey.constant.HotKeyConstants.*;
 import static io.github.hyshmily.hotkey.hotkeycache.CacheKeysPolicy.invalidCacheKey;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import org.springframework.amqp.core.Message;
 
 /**
@@ -33,6 +34,8 @@ import org.springframework.amqp.core.Message;
 public record SyncMessage(String cacheKey, String type, long version, boolean isVersionDegraded) {
   public static final String TYPE_INVALIDATE = "INVALIDATE";
   public static final String TYPE_REFRESH = "REFRESH";
+  public static final String TYPE_INVALIDATE_ALL = "INVALIDATE_ALL";
+  public static final String TYPE_RULES_SYNC = "RULES_SYNC";
 
   /**
    * Deserialize a {@code SyncMessage} from an AMQP message body and headers.
@@ -41,18 +44,20 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
    * @param msg the incoming AMQP message
    * @return a parsed {@link SyncMessage}, or {@code null}
    */
+  private static final List<String> BATCH_TYPES = List.of(TYPE_INVALIDATE_ALL, TYPE_RULES_SYNC);
+
   public static SyncMessage from(Message msg) {
     byte[] body = msg.getBody();
     if (body == null || body.length == 0) {
       return null;
     }
 
+    String type = msg.getMessageProperties().getHeader(AMQP_HEADER_TYPE);
     String cacheKey = new String(body, StandardCharsets.UTF_8);
-    if (invalidCacheKey(cacheKey)) {
+    if ((type == null || !BATCH_TYPES.contains(type)) && invalidCacheKey(cacheKey)) {
       return null;
     }
 
-    String type = msg.getMessageProperties().getHeader(AMQP_HEADER_TYPE);
     long version =
       msg.getMessageProperties().getHeader(AMQP_HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
     boolean isVersionDegraded =

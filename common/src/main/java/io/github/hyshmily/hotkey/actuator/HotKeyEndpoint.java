@@ -21,6 +21,9 @@ import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.rule.Rule;
+import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,15 +31,20 @@ import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
+import org.springframework.boot.actuate.endpoint.annotation.WriteOperation;
 
 /**
- * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics.
+ * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics
+ * and rule management operations.
  *
  * <p>The response includes both app-side and Worker-side TopK rankings, L1
  * cache metrics, SingleFlight in-flight sizes, and recently expelled keys.
  * Each section is produced only when the corresponding service is available
  * in the current deployment mode, making the endpoint safe in App-only,
  * Worker-only, and coexistence modes.
+ *
+ * <p>Write operations ({@code POST / DELETE /actuator/hotkey/rules}) allow
+ * runtime blacklist/whitelist management without restarting the application.
  */
 @Endpoint(id = "hotkey")
 @RequiredArgsConstructor
@@ -48,6 +56,7 @@ public class HotKeyEndpoint {
   private final SingleFlight singleFlight;
   private final HotKeyProperties properties;
   private final HotKeyReporter hotKeyReporter;
+  private final RuleMatcher ruleMatcher;
 
   private int l1MaxSize() {
     return properties.getLocalCacheMaxSize();
@@ -110,6 +119,76 @@ public class HotKeyEndpoint {
       info.put("reportQueueFullCount", hotKeyReporter.dispatcherDropped());
     }
 
+    if (ruleMatcher != null) {
+      info.put("rules", ruleMatcher.getAllRules().stream().map(this::ruleToMap).toList());
+    }
+
     return info;
+  }
+
+  /**
+   * Add a blacklist or whitelist rule at runtime.
+   *
+   * @param pattern the key pattern (auto-detected: exact, prefix {@code *}, wildcard, or {@code regex:})
+   * @param action  {@code BLOCK} or {@code ALLOW_NO_REPORT}
+   * @return a map with operation status
+   */
+  @WriteOperation
+  public Map<String, Object> addRule(String pattern, String action) {
+    if (ruleMatcher == null) {
+      return Map.of("error", "RuleMatcher not available");
+    }
+    try {
+      RuleAction ruleAction = RuleAction.valueOf(action.toUpperCase());
+      ruleMatcher.addRule(RuleMatcher.of(pattern, ruleAction));
+      return Map.of("status", "ok", "pattern", pattern, "action", action);
+    } catch (IllegalArgumentException e) {
+      return Map.of("error", "Invalid action: " + action + ". Use BLOCK or ALLOW_NO_REPORT");
+    }
+  }
+
+  /**
+   * Remove a blacklist or whitelist rule by pattern and action.
+   *
+   * @param pattern the key pattern to remove
+   * @param action  the rule action to match
+   * @return a map with operation status
+   */
+  @WriteOperation
+  public Map<String, Object> removeRule(String pattern, String action) {
+    if (ruleMatcher == null) {
+      return Map.of("error", "RuleMatcher not available");
+    }
+    try {
+      RuleAction ruleAction = RuleAction.valueOf(action.toUpperCase());
+      boolean removed = ruleMatcher.removeRule(pattern, ruleAction);
+      return removed
+        ? Map.of("status", "ok", "removed", true)
+        : Map.of("status", "ok", "removed", false, "message", "Rule not found");
+    } catch (IllegalArgumentException e) {
+      return Map.of("error", "Invalid action: " + action + ". Use BLOCK or ALLOW_NO_REPORT");
+    }
+  }
+
+  /**
+   * Remove all rules.
+   *
+   * @return a map with operation status
+   */
+  @WriteOperation
+  public Map<String, Object> clearRules() {
+    if (ruleMatcher == null) {
+      return Map.of("error", "RuleMatcher not available");
+    }
+    ruleMatcher.clearRules();
+    return Map.of("status", "ok", "removed", true);
+  }
+
+  private Map<String, String> ruleToMap(Rule rule) {
+    Map<String, String> m = new LinkedHashMap<>();
+    m.put("type", rule.getType().name());
+    m.put("pattern", rule.getPattern());
+    m.put("action", rule.getAction().name());
+    return m;
   }
 }

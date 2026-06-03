@@ -21,6 +21,7 @@ import io.github.hyshmily.hotkey.actuator.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
@@ -60,6 +61,7 @@ public class HotKeyActuatorAutoConfiguration {
       ObjectProvider<Cache<String, Object>> hotLocalCacheProvider,
       ObjectProvider<SingleFlight> singleFlightProvider,
       ObjectProvider<HotKeyReporter> hotKeyReporterProvider,
+      ObjectProvider<RuleMatcher> ruleMatcherProvider,
       HotKeyProperties properties) {
     return new HotKeyEndpoint(
       hotKeyDetectorProvider.getIfAvailable(),
@@ -67,6 +69,7 @@ public class HotKeyActuatorAutoConfiguration {
       hotLocalCacheProvider.getIfAvailable(),
       singleFlightProvider.getIfAvailable(),
       properties,
-      hotKeyReporterProvider.getIfAvailable());
+      hotKeyReporterProvider.getIfAvailable(),
+      ruleMatcherProvider.getIfAvailable());
   }
 }

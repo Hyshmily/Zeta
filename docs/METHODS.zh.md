@@ -184,15 +184,25 @@ HotKey.invalidateAll(keys...) / invalidateAll(Collection)
                     └─
 ```
 
-### 状态查询 — `isHotKey`
+### 状态查询 — `isLocalHotKey`
 
 ```
-HotKey.isHotKey(cacheKey)
-└─ HotKeyCache.isHotKey(cacheKey)
+HotKey.isLocalHotKey(cacheKey)
+└─ HotKeyCache.isLocalHotKey(cacheKey)
      └─ caffeineCache.getIfPresent(key)
           ├─ 存在且 keyState == HOT → true
           └─ 其他 → false
           [⚠ 纯 L1 查询，无任何副作用]
+```
+
+### 状态查询 — `isWorkerHotKey`
+
+```
+HotKey.isWorkerHotKey(cacheKey)
+└─ workerTopKAlgorithm.list().stream().anyMatch(item -> item.key().equals(cacheKey))
+     ├─ key 在 Worker TopK 中 → true
+     └─ 不在 → false
+     [⚠ 遍历 Worker TopK 列表，O(n)；无网络调用]
 ```
 
 ### TopK 查询方法

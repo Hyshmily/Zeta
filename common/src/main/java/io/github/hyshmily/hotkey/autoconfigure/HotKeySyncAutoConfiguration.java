@@ -21,6 +21,7 @@ import io.github.hyshmily.hotkey.broadcast.CacheSyncProperties;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
@@ -107,9 +108,10 @@ public class HotKeySyncAutoConfiguration {
     Function<String, Object> hotKeyRedisLoader,
     CacheSyncProperties properties,
     ScheduledExecutorService hotKeySyncScheduler,
-    CacheExpireManager expireManager
+    CacheExpireManager expireManager,
+    RuleMatcher ruleMatcher
   ) {
-    return new CacheSyncListener(hotLocalCache, hotKeyRedisLoader, properties, hotKeySyncScheduler, expireManager);
+    return new CacheSyncListener(hotLocalCache, hotKeyRedisLoader, properties, hotKeySyncScheduler, expireManager, ruleMatcher);
   }
 
   /**

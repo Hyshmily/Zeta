@@ -23,12 +23,15 @@ import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
+import org.springframework.beans.factory.ObjectProvider;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.hotkeycache.VersionController;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -39,6 +42,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -57,7 +61,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
  * Worker is disabled or the property is absent.
  */
 @Slf4j
-@AutoConfiguration
+@AutoConfiguration(after = RedisAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "hotkey.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
 @EnableConfigurationProperties(HotKeyProperties.class)
 public class HotKeyAutoConfiguration {
@@ -129,6 +133,17 @@ public class HotKeyAutoConfiguration {
   }
 
   /**
+   * Create the {@link RuleMatcher} for key matching against user-defined rules.
+   * Wired with an empty Redis and sync publisher since no Redis is available in this variant.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  @ConditionalOnMissingBean(type = "org.springframework.data.redis.core.StringRedisTemplate")
+  public RuleMatcher ruleMatcher(ObjectProvider<CacheSyncPublisher> publisherProvider) {
+    return new RuleMatcher(Optional.empty(), Optional.ofNullable(publisherProvider.getIfAvailable()));
+  }
+
+  /**
    * Create the {@link HotKeyCache} (non-Redis variant).  Only active when {@code RedisTemplate}
    * is absent; otherwise {@link HotKeyRedisAutoConfiguration#hotKeyCache} takes over.
    */
@@ -142,7 +157,8 @@ public class HotKeyAutoConfiguration {
     Optional<CacheSyncPublisher> syncPublisher,
     Optional<HotKeyReporter> hotKeyReporter,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
-    HotKeyProperties properties
+    HotKeyProperties properties,
+    RuleMatcher ruleMatcher
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -151,9 +167,9 @@ public class HotKeyAutoConfiguration {
       expireManager,
       hotKeyExecutor,
       syncPublisher,
-      Optional.empty(),
-      properties.getVersionKeyTtlMinutes(),
-      hotKeyReporter
+      hotKeyReporter,
+      ruleMatcher,
+      new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes())
     );
   }
 
@@ -193,6 +209,8 @@ public class HotKeyAutoConfiguration {
           public long expireAfterCreate(@NonNull Object key, @NonNull Object value, long currentTimeNanos) {
             if (value instanceof CacheEntry entry) {
               if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
+                // Pure logical expiry: Caffeine never time-evicts this entry.
+                // See Expiry JavaDoc: Long.MAX_VALUE signals "no expiration".
                 return Long.MAX_VALUE;
               }
               long remainingMs = entry.getHardExpireAtMs() - System.currentTimeMillis();
@@ -210,6 +228,7 @@ public class HotKeyAutoConfiguration {
           ) {
             if (value instanceof CacheEntry entry) {
               if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
+                // Preserve pure logical expiry across updates (e.g. broadcast refresh).
                 return Long.MAX_VALUE;
               }
               long remainingMs = entry.getHardExpireAtMs() - System.currentTimeMillis();

@@ -1,6 +1,8 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding assistants (Claude Code, Copilot CLI, Gemini CLI, Cursor, etc.) when working with code in this repository.
+
+**Skill system:** This project uses the **mattpocock/skills** system for specialized AI workflows. Skills are available at `$HOME/.agents/skills/`. The AI MUST load the relevant skill(s) before performing any substantive operation — planning, code modification, debugging, code review, refactoring, testing, or sub-agent dispatch. See Workflow Rules section for the per-operation skill loading matrix.
 
 ## Project Overview
 
@@ -33,23 +35,24 @@ mvn source:jar                       # Generate source JAR (common only)
 ### Core Layers
 
 1. **`algorithm`** — Hot key detection engine (HeavyKeeper implementation of TopK interface)
-2. **`hotkeycache`** — Cache orchestration (`HotKeyCache`, `SingleFlight`, `CacheExpireManager`, `TransactionSupport`, `CacheKeysPolicy`, `VersionGuard`)
+2. **`hotkeycache`** — Cache orchestration (`HotKeyCache`, `SingleFlight`, `CacheExpireManager`, `TransactionSupport`, `CacheKeysPolicy`, `VersionGuard`, `InstanceIdGenerator`)
 3. **`broadcast`** — RabbitMQ cross-instance sync (`CacheSyncPublisher`, `CacheSyncListener`, `SyncMessage`) + Worker listener (`WorkerListener`, `WorkerMessage`)
 4. **`report`** — App-to-Worker reporting (`HotKeyReporter`, `ReportPublisher`, `ReportMessage`)
 5. **`entity`** — Shared data types (`CacheEntry` with `dataVersion` + `isVersionDegraded` + `decisionVersion`, `KeyState`, `HotKeyDecision`)
 6. **`detection`** — Worker-side state machine (`HotKeyStateMachine`)
-7. **`annotation`** — `@HotKey` annotation with SpEL key, three operation types (READ/WRITE/INVALIDATE), per-annotation TTL overrides
+7. **`annotation`** — `@HotKey` annotation with SpEL key, three operation types (READ/WRITE/INVALIDATE), per-annotation TTL overrides, `softExpire()` toggle (default true) to choose between `getWithSoftExpire` vs `get`
 8. **`autoconfigure`** — All Spring Boot auto-configuration classes
 9. **`actuator`** — `/actuator/hotkey` monitoring endpoint
+10. **`constant`** — Shared constants (`HotKeyConstants`: AMQP headers, thread prefixes, routing keys)
 
 Worker-only components live in the `worker/` module under `io.github.hyshmily.hotkey.worker`:
-- `SlidingWindowDetector`, `TopKValidator`, `WorkerBroadcaster`, `ReportConsumer`, `WorkerAutoConfiguration`, `WorkerProperties`
+- `SlidingWindowDetector`, `TopKValidator`, `WorkerBroadcaster`, `ReportConsumer`, `WorkerAutoConfiguration`, `WorkerProperties`, `GlobalQpsEstimator`, `ThresholdLearner`, `WorkerApplication`
 
 ### Public API
 
 `HotKey` is the sole public entry point (facade pattern). All cache operations go through this bean. `HotKeyCache` is internal.
 
-Key methods: `get()`, `putThrough()`, `putBeforeInvalidate()`, `invalidate()`, `isHotKey()`, `returnHotKeys()`, `getWithSoftExpire()`, `peek()`
+Key methods: `get()`, `get(key, supplier, hardTtlMs, softTtlMs)`, `putThrough()`, `putThrough(key, value, runnable, hardTtlMs, softTtlMs)`, `putBeforeInvalidate()`, `invalidate()`, `invalidateAll()`, `isLocalHotKey()`, `isWorkerHotKey()`, `returnHotKeys()`, `returnExpelledHotKeys()`, `returnTotalDataStreams()`, `returnWorkerHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnWorkerTotalDataStreams()`, `getWithSoftExpire()`, `getWithSoftExpire(key, supplier, softTtlMs)`, `getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs)`, `peek()`
 
 `@HotKey` is the annotation-based entry point, handled by `HotKeyAspect` which injects the `HotKey` facade.
 
@@ -63,9 +66,9 @@ All in `autoconfigure/` package, registered in `META-INF/spring/org.springframew
 - `HotKeyActuatorAutoConfiguration` — activates when `Endpoint.class` on classpath
 - `HotKeySyncAutoConfiguration` — activates when `RabbitTemplate` + `RedisTemplate` present AND `hotkey.sync.enabled=true`
 - `HotKeyWorkerListenerAutoConfiguration` — activates when `RabbitTemplate` + `RedisTemplate` present AND `hotkey.worker-listener.enabled=true`
-- `HotKeyReportAutoConfiguration` — activates when `RabbitTemplate` present AND `hotkey.local.report.enabled=true` (default)
+- `HotKeyReportAutoConfiguration` — activates when `RabbitTemplate` present AND `hotkey.report.enabled=true` (default)
 - `HotKeySchedulingConfiguration` — periodic decay + expelled drain; controlled via `hotkey.scheduling.enabled` + requires TopK bean
-- `HotKeyAnnotationAutoConfiguration` — activates when `Aspect.class` on classpath AND `HotKey` bean present; registers `HotKeyAspect`
+- `HotKeyAnnotationAutoConfiguration` — activates when `Aspect.class` on classpath AND `HotKey` bean present AND `hotkey.annotation.enabled=true`; registers `HotKeyAspect`
 
 **Worker module** has its own `WorkerAutoConfiguration` (not in the shared imports file) — activated by `@SpringBootApplication` scan in `WorkerApplication.java` when `hotkey.worker.enabled=true`.
 
@@ -73,11 +76,11 @@ All in `autoconfigure/` package, registered in `META-INF/spring/org.springframew
 
 ### Data Flow
 
-**Read path:** Caffeine L1 hit -> `hotKeyDetector.add(key,1)` + `hotKeyReporter.record(key)` -> return CacheEntry, OR L1 miss -> SingleFlight dedup -> async supplier (e.g., Redis) -> `hotKeyDetector.add(key,1)` + `hotKeyReporter.record(key)` -> cache as CacheEntry if hot -> optional broadcast
+**Read path:** Caffeine L1 hit -> `hotKeyDetector.add(key,1)` + `hotKeyReporter.record(key)` -> return CacheEntry, OR L1 miss -> SingleFlight dedup -> async supplier (e.g., Redis) -> `hotKeyDetector.add(key,1)` + `hotKeyReporter.record(key)` -> cache as CacheEntry if hot
 
-**Write path:** TransactionSupport deferral -> Redis INCR for dataVersion (VersionResult with degraded flag) -> run mutation -> update L1 (preserves existing decisionVersion) -> broadcast with dataVersion + degraded flag
+**Write path:** TransactionSupport deferral -> run mutation -> Redis INCR for dataVersion (VersionResult with degraded flag) -> update L1 (preserves existing decisionVersion) -> broadcast with dataVersion + degraded flag
 
-**Broadcast reception:** CacheSyncListener uses 4-case degraded version comparison on `dataVersion` (normal-vs-normal, normal-vs-degraded, degraded-vs-normal, degraded-vs-degraded). WorkerListener uses simple compare on `decisionVersion` (no degraded logic — decisionVersion is always clean `AtomicLong`).
+**Broadcast reception:** CacheSyncListener uses 4-case degraded version comparison on `dataVersion` (normal-vs-normal, normal-vs-degraded, degraded-vs-normal, degraded-vs-degraded). WorkerListener uses compare on `decisionVersion` — if existing entry is degraded, incoming decision is unconditionally accepted; otherwise simple `>=` comparison. `decisionVersion` itself is always clean (never degraded).
 
 **Report flow (App -> Worker):** Every `get()`/`getWithSoftExpire()` triggers `hotKeyReporter.record(key)` on both L1 hit and L2 miss paths -> `HotKeyReporter` aggregates locally (Caffeine, 30s, 100k max) -> `ReportPublisher` batches to RabbitMQ every `hotkey.local.report-interval-ms` -> Worker `ReportConsumer` feeds `workerTopK.add()` (separate TopK instance) -> Worker emits HOT/COOL decisions back to apps via `WorkerListener`
 
@@ -96,7 +99,7 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
 - **`@ConditionalOnMissingBean`** on every bean — consumers can override any component
 - **Supplier/Runnable callbacks:** Library decoupled from `RedisTemplate`; callers supply their own read/write lambdas
 - **Config prefix split:** `hotkey.local.*` for app-side detection config (`HotKeyProperties`), `hotkey.worker.*` for worker config (`WorkerProperties`)
-- **Java records** for immutable data carriers (`Item`, `AddResult`, `VersionResult`, `SyncMessage`, `ReportMessage`, `WorkerMessage`, `HotKeyDecision`)
+- **Java records** for immutable data carriers (`Item`, `AddResult`, `SyncMessage`, `ReportMessage`, `WorkerMessage`, `HotKeyDecision`)
 - **Lombok** for boilerplate (`@Data`, `@RequiredArgsConstructor`, `@Slf4j`, `@Getter`)
 - **Jakarta Validation** on `HotKeyProperties` fields
 - **Git tag-based releases** — JitPack uses tags; Maven Central via `-P release` profile; both `hotkey-parent` and `hotkey` published; worker skipped via `<maven.deploy.skip>true</maven.deploy.skip>`
@@ -118,12 +121,19 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
   - Prefer Javadoc (`/** ... */`) on all public classes and methods
   - **Do NOT delete existing comments** — only add or improve them
   - **When modifying code, update the related comments accordingly** — if a method signature, behavior, or parameter changes, the comment must reflect the new state
-  - English comments are preferred for new code; preserve existing Chinese comments as-is
+   - All comments must be in English
   - Section dividers (e.g. `// ── Section Name ──`) are acceptable for organizing long classes
 
 ## Workflow Rules
 
-1. **Skill usage per conversation:** Load `brainstorm` skill for discussion/planning. Use `grill-me` and `code-review` skills before any code modification. If task involves database, Redis, or other infrastructure, use the relevant MCP tools (e.g., `mcp__mysql`, `mcp__redis`).
+1. **Skill usage per conversation:**
+   - **Mandatory check:** Before any substantive operation (planning, code modification, debugging, code review, refactoring, testing, sub-agent dispatch), the AI MUST check the available skills at `$HOME/.agents/skills/` and load the relevant skill(s) first. Consult each skill's description in its `SKILL.md` to determine applicability.
+   - **Planning/discussion:** Load `brainstorm` + `grill-with-docs` + `improve-codebase-architecture` + `grill-me` + `zoom-out` before any planning session.
+   - **Before code modification:** Load `code-review` + `grill-me`.
+   - **Testing/debugging:** Load `diagnose` for bug investigation.
+   - **Sub-agent dispatch:** Invoke `zoom-out` to provide broader context for sub-agent tasks.
+   - **Infrastructure tasks:** Use relevant MCP tools (e.g., `mcp__mysql`, `mcp__redis`).
+   - **Platform adaptation:** Non-Claude-Code AIs should substitute their platform's skill-loading mechanism (e.g., Copilot CLI `skill` tool, Gemini CLI `activate_skill` tool, Cursor rules) — the skill content is the same regardless of how it is loaded.
 2. **Do not modify code lightly.** Only change code when the change does not affect HotKey's core functionality (HeavyKeeper algorithm, cache orchestration, broadcast sync, auto-configuration). If in doubt, discuss first.
 3. **Re-read before change.** Before modifying code or discussing a plan, re-read all related source files. Evaluate from multiple angles: performance, memory footprint, high concurrency, distributed broadcast correctness, caller UX. Produce a structured review (suggestion, reason, impact, source location, modification approach) before proposing changes.
 4. **Consider all cases before change.** Before any code modification, consider edge cases, race conditions, failure modes, backward compatibility. Verify with tests or reasoning that the change is safe. Reference rules 2 and 3.

@@ -10,8 +10,13 @@ import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -35,7 +40,7 @@ class HotKeyEndpointTest {
     singleFlight = mock(SingleFlight.class);
     properties = new HotKeyProperties();
     hotKeyReporter = mock(HotKeyReporter.class);
-    endpoint = new HotKeyEndpoint(hotKeyDetector, workerTopK, caffeineCache, singleFlight, properties, hotKeyReporter);
+    endpoint = new HotKeyEndpoint(hotKeyDetector, workerTopK, caffeineCache, singleFlight, properties, hotKeyReporter, new RuleMatcher(Optional.empty(), Optional.empty()));
   }
 
   @Test
@@ -66,7 +71,7 @@ class HotKeyEndpointTest {
 
   @Test
   void hotKeyInfo_shouldHandleNullComponents() {
-    HotKeyEndpoint minimal = new HotKeyEndpoint(null, null, null, null, properties, null);
+    HotKeyEndpoint minimal = new HotKeyEndpoint(null, null, null, null, properties, null, null);
     Map<String, Object> info = minimal.hotKeyInfo();
     assertThat(info).doesNotContainKey("topK");
     assertThat(info).doesNotContainKey("workerTopK");

@@ -25,6 +25,7 @@ import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -65,16 +66,18 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
+    ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
     doReturn(workerTopK).when(workerProvider).getIfAvailable();
     doReturn(localCache).when(cacheProvider).getIfAvailable();
     doReturn(singleFlight).when(sfProvider).getIfAvailable();
     doReturn(reporter).when(reporterProvider).getIfAvailable();
+    doReturn(null).when(ruleMatcherProvider).getIfAvailable();
 
     HotKeyActuatorAutoConfiguration config = new HotKeyActuatorAutoConfiguration();
     HotKeyEndpoint endpoint = config.hotKeyEndpoint(
-      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, properties
+      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, ruleMatcherProvider, properties
     );
 
     assertThat(endpoint).isNotNull();
@@ -87,6 +90,7 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
+    ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
     HotKeyProperties properties = new HotKeyProperties();
 
     doReturn(null).when(detectorProvider).getIfAvailable();
@@ -94,10 +98,11 @@ class HotKeyActuatorAutoConfigurationTest {
     doReturn(null).when(cacheProvider).getIfAvailable();
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
+    doReturn(null).when(ruleMatcherProvider).getIfAvailable();
 
     HotKeyActuatorAutoConfiguration config = new HotKeyActuatorAutoConfiguration();
     HotKeyEndpoint endpoint = config.hotKeyEndpoint(
-      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, properties
+      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, ruleMatcherProvider, properties
     );
 
     assertThat(endpoint).isNotNull();
@@ -111,6 +116,7 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
+    ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
     HotKeyProperties properties = new HotKeyProperties();
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
@@ -118,10 +124,11 @@ class HotKeyActuatorAutoConfigurationTest {
     doReturn(null).when(cacheProvider).getIfAvailable();
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
+    doReturn(null).when(ruleMatcherProvider).getIfAvailable();
 
     HotKeyActuatorAutoConfiguration config = new HotKeyActuatorAutoConfiguration();
     HotKeyEndpoint endpoint = config.hotKeyEndpoint(
-      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, properties
+      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, ruleMatcherProvider, properties
     );
 
     assertThat(endpoint).isNotNull();

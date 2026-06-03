@@ -17,7 +17,7 @@
 
 **How they cooperate in code:**
 
-1. **Burst hits instance A:** `HotKeyCache.get()` hits L1 miss → `loadAndCache()` calls `hotKeyDetector.add(key, 1).isHotKey()` → if true, caches with `hotHardTtlMs` (1h default). Instance A is protected instantly.
+1. **Burst hits instance A:** `HotKeyCache.get()` hits L1 miss → `loadAndCache()` calls `hotKeyDetector.add(key, 1).isLocalHotKey()` → if true, caches with `hotHardTtlMs` (1h default). Instance A is protected instantly.
 
 2. **Meanwhile,** the same `get()` calls `hotKeyReporter.record(key)` → `HotKeyReporter` accumulates counts in a Caffeine counter → every `reportIntervalMs` (default 100ms) it flushes to RabbitMQ.
 

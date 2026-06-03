@@ -25,6 +25,7 @@ import io.github.hyshmily.hotkey.broadcast.CacheSyncProperties;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
@@ -36,8 +37,10 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import static org.mockito.Mockito.mock;
 
 /**
  * Tests for {@link HotKeySyncAutoConfiguration}.
@@ -141,7 +144,7 @@ class HotKeySyncAutoConfigurationTest {
 
     HotKeySyncAutoConfiguration config = new HotKeySyncAutoConfiguration();
     CacheSyncListener listener = config.cacheSyncListener(
-      localCache, redisLoader, props, scheduler, expireManager
+      localCache, redisLoader, props, scheduler, expireManager, mock(RuleMatcher.class)
     );
 
     assertThat(listener).isNotNull();

@@ -1,6 +1,7 @@
 package io.github.hyshmily.hotkey.hotkeycache;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -15,6 +16,8 @@ import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.entity.KeyState;
+import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -42,7 +45,9 @@ class HotKeyCacheTest {
 
     hotKeyCache = new HotKeyCache(
       hotKeyDetector, caffeineCache, singleFlight, expireManager, executor,
-      Optional.empty(), Optional.empty(), 60, Optional.empty()
+      Optional.empty(), Optional.empty(),
+      new RuleMatcher(Optional.empty(), Optional.empty()),
+      new VersionController(Optional.empty(), 60)
     );
   }
 
@@ -72,7 +77,7 @@ class HotKeyCacheTest {
   }
 
   @Test
-  void isHotKey_shouldReturnTrueForHotEntry() {
+  void isLocalHotKey_shouldReturnTrueForHotEntry() {
     caffeineCache.put("hotKey", CacheEntry.builder()
       .value("v")
       .dataVersion(0)
@@ -87,11 +92,11 @@ class HotKeyCacheTest {
       .normalSoftTtlMs(30_000)
       .build());
 
-    assertThat(hotKeyCache.isHotKey("hotKey")).isTrue();
+    assertThat(hotKeyCache.isLocalHotKey("hotKey")).isTrue();
   }
 
   @Test
-  void isHotKey_shouldReturnFalseForNormalEntry() {
+  void isLocalHotKey_shouldReturnFalseForNormalEntry() {
     caffeineCache.put("normalKey", CacheEntry.builder()
       .value("v")
       .dataVersion(0)
@@ -106,17 +111,17 @@ class HotKeyCacheTest {
       .normalSoftTtlMs(30_000)
       .build());
 
-    assertThat(hotKeyCache.isHotKey("normalKey")).isFalse();
+    assertThat(hotKeyCache.isLocalHotKey("normalKey")).isFalse();
   }
 
   @Test
-  void isHotKey_shouldReturnFalseForMissingKey() {
-    assertThat(hotKeyCache.isHotKey("missing")).isFalse();
+  void isLocalHotKey_shouldReturnFalseForMissingKey() {
+    assertThat(hotKeyCache.isLocalHotKey("missing")).isFalse();
   }
 
   @Test
-  void isHotKey_shouldReturnFalseForInvalidKey() {
-    assertThat(hotKeyCache.isHotKey(null)).isFalse();
+  void isLocalHotKey_shouldReturnFalseForInvalidKey() {
+    assertThat(hotKeyCache.isLocalHotKey(null)).isFalse();
   }
 
   @Test
@@ -168,5 +173,19 @@ class HotKeyCacheTest {
     caffeineCache.put("k1", "v1");
     hotKeyCache.invalidateAll(Arrays.asList("k1", null, ""));
     assertThat(caffeineCache.getIfPresent("k1")).isNull();
+  }
+
+  @Test
+  void get_shouldThrowHotKeyBlockedExceptionForBlacklistedKey() {
+    hotKeyCache.addBlacklist("secret");
+    assertThatThrownBy(() -> hotKeyCache.get("secret", () -> "db"))
+      .isInstanceOf(HotKeyBlockedException.class);
+  }
+
+  @Test
+  void getWithSoftExpire_shouldThrowHotKeyBlockedExceptionForBlacklistedKey() {
+    hotKeyCache.addBlacklist("secret");
+    assertThatThrownBy(() -> hotKeyCache.getWithSoftExpire("secret", () -> "db"))
+      .isInstanceOf(HotKeyBlockedException.class);
   }
 }

@@ -375,6 +375,8 @@ String json = hotKey
 User user = JSONUtil.toBean(json, User.class);
 ```
 
+> **注意：** 彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：向 `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` 传入 `hardTtlMs = Long.MAX_VALUE`。entry 永久驻留 Caffeine——硬 TTL 永不会将其移除。`softExpireAt` 过期后，读取立即返回旧值并触发异步刷新（软过期**不会**淘汰 entry）。不传 `Long.MAX_VALUE` 时，默认硬 TTL 可能先将 entry 淘汰出 Caffeine（L1 未命中 → 更高延迟），而非走旧值 + 异步刷新路径。
+
 见[配置](#配置)中的 TTL 属性选项。
 
 **H. 自定义 per-entry 硬 TTL**
@@ -400,7 +402,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 > - per-call 的 `hardTtlMs`/`softTtlMs` 仅对本次调用生效。下次调用不传参数时，回退到 key 当前状态（热点或普通）对应的默认 TTL。
 > - 传入 `0` 表示使用该 key 状态的配置默认值。
 > - 传入 `Long.MAX_VALUE` 作为 `hardTtlMs` 可实现永久缓存——该条目永不会被 TTL 淘汰（仅受 Caffeine `maximumSize` 淘汰约束）。Caffeine 的 `Expiry` JavaDoc 官方明确支持此用法：*"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."* ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
-> - 与 `getWithSoftExpire` 配合使用时，per-entry 硬 TTL 在后台刷新中会被保留。
+> - 与 `getWithSoftExpire` 配合使用时，per-entry 硬 TTL 在后台刷新中会被保留。配合 `hardTtlMs = Long.MAX_VALUE`，即为彻底逻辑过期：仅 Caffeine `maximumSize` 可淘汰 entry——软过期永不移除 entry，仅返回旧值并异步刷新。
 
 **I. Worker 模式**
 
@@ -483,7 +485,8 @@ hotkey:
 | `putThrough(key, value, writer)`                       | 写穿透：writer.run()、nextVersion()、L1 更新（根据 key 状态使用有效 TTL）、可选同步                                              |
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                      |
 | `putBeforeInvalidate(key, mutation)`                   | 先写后失效，用于集合增量操作（LPUSH、SADD、ZADD）                                                                                |
-| `isHotKey(cacheKey)`                                   | 检查 key 是否在 L1 中为 HOT 状态（O(1)）                                                                                         |
+| `isLocalHotKey(cacheKey)`                                   | 检查 key 是否在 L1 中为 HOT 状态（O(1)）                                                                                         |
+| `isWorkerHotKey(cacheKey)`                                  | 检查 key 是否在 Worker TopK 中为集群热点（O(n)）                                                                                  |
 | `invalidate(cacheKey)`                                 | 使单个 key 在所有缓存层失效                                                                                                      |
 | `invalidateAll(cacheKeys...)`                          | 可变参数重载 — 批量失效多个 key                                                                                                  |
 | `invalidateAll(Collection)`                            | Collection 重载                                                                                                                  |

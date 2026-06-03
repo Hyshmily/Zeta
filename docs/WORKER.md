@@ -139,7 +139,7 @@ Two deployment modes:
 | App-only                 | `false` (default)| `HotKeyCache`, TopK detector, reporter, actuator, sync                                |
 | Worker-only              | `true`           | Worker-only (SlidingWindow, StateMachine, ReportConsumer, Broadcaster)                |
 
-In **Worker-only** mode, `HotKey.isHotKey()` / `get()` / `putThrough()` throw `UnsupportedOperationException` — these operations require the app-side cache. Worker-TopK queries (`returnWorkerHotKeys()`) remain available.
+In **Worker-only** mode, `HotKey.isLocalHotKey()` / `get()` / `putThrough()` throw `UnsupportedOperationException` — these operations require the app-side cache. Worker-TopK queries (`returnWorkerHotKeys()`) remain available.
 
 ## Configuration Example
 

@@ -20,13 +20,15 @@ import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
+import org.springframework.beans.factory.ObjectProvider;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.VersionController;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Optional;
 import java.util.concurrent.Executor;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -58,10 +60,25 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 public class HotKeyRedisAutoConfiguration {
 
    /**
-    * Create the Redis-enhanced {@link HotKeyCache} with version-based stale detection.
-    * {@link StringRedisTemplate} is optional — if absent, version tracking falls back
-    * to a node-local counter ({@code nodeId << 32 | counter}).
-    */
+     * Create the {@link RuleMatcher} with Redis persistence and broadcast support.
+     */
+  @Bean
+  @ConditionalOnMissingBean
+  public RuleMatcher ruleMatcher(
+    ObjectProvider<StringRedisTemplate> redisTemplateProvider,
+    ObjectProvider<CacheSyncPublisher> publisherProvider
+  ) {
+    return new RuleMatcher(
+      Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
+      Optional.ofNullable(publisherProvider.getIfAvailable())
+    );
+  }
+
+   /**
+     * Create the Redis-enhanced {@link HotKeyCache} with version-based stale detection.
+     * {@link StringRedisTemplate} is optional — if absent, version tracking falls back
+     * to a node-local counter ({@code nodeId << 32 | counter}).
+     */
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean(RedisTemplate.class)
@@ -74,7 +91,8 @@ public class HotKeyRedisAutoConfiguration {
     Optional<HotKeyReporter> hotKeyReporter,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
-    HotKeyProperties properties
+    HotKeyProperties properties,
+    RuleMatcher ruleMatcher
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -83,9 +101,9 @@ public class HotKeyRedisAutoConfiguration {
       expireManager,
       hotKeyExecutor,
       syncPublisher,
-      Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
-      properties.getVersionKeyTtlMinutes(),
-      hotKeyReporter
+      hotKeyReporter,
+      ruleMatcher,
+      new VersionController(Optional.ofNullable(redisTemplateProvider.getIfAvailable()), properties.getVersionKeyTtlMinutes())
     );
   }
 

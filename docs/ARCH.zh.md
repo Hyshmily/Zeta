@@ -10,7 +10,7 @@
 │             │ ─── record(key) ────→   │  (本地)      │
 │             │ ←────────────────────   │              │
 └──────┬───────┘   Optional.of(value)   └──────┬───────┘
-       │ L1 未命中        (自动解包           │ isHotKey()?
+       │ L1 未命中        (自动解包           │ isLocalHotKey()?
        ↓ (inflight 去重)  CacheEntry)          ↓
 ┌──────────────┐  ──── reader ────→   ┌───────────────┐
 │  L2 存储     │  ──add(key,1)───→    │     TopK      │
@@ -24,7 +24,7 @@
                                       │ expelled()    │
                                       │ fading()      │
                                       └───────┬───────┘
-                                             │ isHotKey()?
+                                             │ isLocalHotKey()?
                                              ↓
                                   ┌─────────────────────┐
                                   │  根据 KeyState 选择  │
@@ -45,7 +45,7 @@
                                    （读路径不触发同步）
 ```
 
-> **注意：** `isHotKey()` 检查 L1 中 key 的 `KeyState` 是否为 HOT。key 以 `CacheEntry` 包装形式存储，包含完整 TTL 元数据——`get()` 路径自动解包为原始值。
+> **注意：** `isLocalHotKey()` 检查 L1 中 key 的 `KeyState` 是否为 HOT。key 以 `CacheEntry` 包装形式存储，包含完整 TTL 元数据——`get()` 路径自动解包为原始值。
 
 ### 写路径 — `putThrough`
 
@@ -134,7 +134,7 @@ invalidateAll(cacheKeys)
                  normalHardTtlMs, normalSoftTtlMs))
 ```
 
-> **注意：** 软过期适用于 HOT 和 COOL 条目。NORMAL 条目总是直接返回，不会触发异步刷新——它们会在硬 TTL 过期后通过 `loadAndCache` 重新加载。
+> **注意：** 软过期适用于 HOT 和 COOL 条目。NORMAL 条目总是直接返回，不会触发异步刷新——它们会在硬 TTL 过期后通过 `loadAndCache` 重新加载。如需纯粹的逻辑过期（硬 TTL 永不淘汰），向 `getWithSoftExpire` 传入 `hardTtlMs = Long.MAX_VALUE`——entry 永久驻留 Caffeine；仅 Caffeine `maximumSize` 可淘汰它，软过期永不移除 entry（只返回旧值并异步刷新）。
 
 ### 实例间缓存同步
 

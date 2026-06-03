@@ -375,6 +375,8 @@ String json = hotKey
 User user = JSONUtil.toBean(json, User.class);
 ```
 
+> **Note:** Pure logical expiry (soft-expire-only, no hard TTL eviction): pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)`. The entry stays in Caffeine permanently — hard TTL never removes it. When `softExpireAt` passes, reads return the stale value immediately and trigger an async refresh (soft expire **never** evicts the entry). Without `Long.MAX_VALUE`, the default hard TTL may evict the entry from Caffeine first, causing a full L1 miss (higher latency) instead of the stale-hit + async-refresh path.
+
 See [Configuration](#configuration) for TTL property options.
 
 **H. Per-entry hard TTL**
@@ -400,7 +402,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 > - A per-call `hardTtlMs`/`softTtlMs` applies to this invocation only. The next call without these parameters falls back to the configured defaults (which differ for hot vs normal keys).
 > - Pass `0` for either TTL to use the configured default for the key's current state (hot vs normal).
 > - Pass `Long.MAX_VALUE` for `hardTtlMs` to make the entry effectively permanent — it will never be evicted by TTL (only by Caffeine `maximumSize` eviction). This is officially supported by Caffeine's `Expiry` JavaDoc: *"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."* ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
-> - When combined with `getWithSoftExpire`, the per-entry hard TTL is preserved across background refreshes.
+> - When combined with `getWithSoftExpire`, the per-entry hard TTL is preserved across background refreshes. With `hardTtlMs = Long.MAX_VALUE`, this becomes pure logical expiry: only Caffeine `maximumSize` can evict the entry — soft expire never removes it, it only returns stale values and asynchronously refreshes.
 
 **I. Worker mode**
 
@@ -483,7 +485,8 @@ The recommended entry point is the `HotKey` facade (auto-configured as a Spring 
 | `putThrough(key, value, writer)`                       | Write-through: writer.run(), nextVersion(), L1 update (with effective TTLs per key state), optional sync                                                                |
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | Same with per-entry hard and soft TTL overrides (pass 0 to use configured default)                                                                                      |
 | `putBeforeInvalidate(key, mutation)`                   | Write-then-invalidate for collection ops (LPUSH, SADD, ZADD)                                                                                                            |
-| `isHotKey(cacheKey)`                                   | Check if a key is in HOT state in L1 (O(1))                                                                                                                             |
+| `isLocalHotKey(cacheKey)`                                   | Check if a key is in HOT state in L1 (O(1))                                                                                                                             |
+| `isWorkerHotKey(cacheKey)`                                  | Check if a key is a cluster-wide hot key in the Worker TopK (O(n))                                                                                                       |
 | `invalidate(cacheKey)`                                 | Invalidate a single key from all cache layers                                                                                                                           |
 | `invalidateAll(cacheKeys...)`                          | Varargs overload — invalidate multiple keys at once                                                                                                                     |
 | `invalidateAll(Collection)`                            | Collection overload                                                                                                                                                     |

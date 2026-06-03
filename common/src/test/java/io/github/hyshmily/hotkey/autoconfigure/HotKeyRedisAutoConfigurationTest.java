@@ -18,8 +18,6 @@ package io.github.hyshmily.hotkey.autoconfigure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
-import org.springframework.beans.factory.ObjectProvider;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.TopK;
@@ -29,14 +27,16 @@ import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Optional;
 import java.util.concurrent.Executor;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * Tests for {@link HotKeyRedisAutoConfiguration}.
@@ -65,11 +65,12 @@ class HotKeyRedisAutoConfigurationTest {
     Executor executor = mock(Executor.class);
 
     ObjectProvider<StringRedisTemplate> redisTemplateProvider = mock(ObjectProvider.class);
+    RuleMatcher ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
       detector, localCache, singleFlight, expireManager,
       Optional.empty(), Optional.empty(), executor,
-      redisTemplateProvider, properties
+      redisTemplateProvider, properties, ruleMatcher
     );
 
     assertThat(cache).isNotNull();
@@ -86,12 +87,13 @@ class HotKeyRedisAutoConfigurationTest {
     CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
     HotKeyReporter reporter = mock(HotKeyReporter.class);
     ObjectProvider<StringRedisTemplate> redisTemplateProvider = mock(ObjectProvider.class);
+    RuleMatcher ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
 
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
       detector, localCache, singleFlight, expireManager,
       Optional.of(publisher), Optional.of(reporter), executor,
-      redisTemplateProvider, properties
+      redisTemplateProvider, properties, ruleMatcher
     );
 
     assertThat(cache).isNotNull();

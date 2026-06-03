@@ -25,10 +25,12 @@ import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.VersionController;
 import io.github.hyshmily.hotkey.hotkeycache.VersionGuard;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.report.ReportMessage;
 import io.github.hyshmily.hotkey.report.ReportPublisher;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -193,7 +195,9 @@ class HotKeyStressTest {
     SingleFlight sf = new SingleFlight(50000, 10, 5, executor);
     HotKeyCache cache = new HotKeyCache(
       detector, caffeine, sf, expireMgr, executor,
-      Optional.empty(), Optional.empty(), 60, Optional.empty()
+      Optional.empty(), Optional.empty(),
+      new RuleMatcher(Optional.empty(), Optional.empty()),
+      new VersionController(Optional.empty(), 60)
     );
 
     for (int i = 0; i < 20; i++) {
@@ -635,7 +639,9 @@ class HotKeyStressTest {
           SingleFlight sf = new SingleFlight(50000, 10, 5, syncExec);
           HotKeyCache hotKeyCache = new HotKeyCache(
             detector, l1, sf, expMgr, syncExec,
-            Optional.empty(), Optional.empty(), 60, Optional.empty()
+            Optional.empty(), Optional.empty(),
+            new RuleMatcher(Optional.empty(), Optional.empty()),
+            new VersionController(Optional.empty(), 60)
           );
 
           // 节点的内部并发操作

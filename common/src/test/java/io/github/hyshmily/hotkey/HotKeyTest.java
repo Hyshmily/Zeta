@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import java.util.List;
 import java.util.Optional;
@@ -35,10 +36,10 @@ class HotKeyTest {
   }
 
   @Test
-  void isHotKey_shouldDelegateToCache() {
-    when(hotKeyCache.isHotKey("key1")).thenReturn(true);
-    assertThat(hotKey.isHotKey("key1")).isTrue();
-    verify(hotKeyCache).isHotKey("key1");
+  void isLocalHotKey_shouldDelegateToCache() {
+    when(hotKeyCache.isLocalHotKey("key1")).thenReturn(true);
+    assertThat(hotKey.isLocalHotKey("key1")).isTrue();
+    verify(hotKeyCache).isLocalHotKey("key1");
   }
 
   @Test
@@ -94,15 +95,15 @@ class HotKeyTest {
   }
 
   @Test
-  void returnHotKeys_shouldReturnFromTopK() {
+  void returnHotKeys_shouldReturnLocalFromTopK() {
     when(topK.list()).thenReturn(List.of(new Item("k1", 10)));
-    assertThat(hotKey.returnHotKeys()).hasSize(1);
+    assertThat(hotKey.returnLocalHotKeys()).hasSize(1);
   }
 
   @Test
-  void returnHotKeys_shouldReturnEmptyWhenTopKNull() {
+  void returnHotKeys_shouldReturnLocalEmptyWhenTopKNull() {
     HotKey hk = new HotKey(hotKeyCache, null);
-    assertThat(hk.returnHotKeys()).isEmpty();
+    assertThat(hk.returnLocalHotKeys()).isEmpty();
   }
 
   @Test
@@ -117,22 +118,22 @@ class HotKeyTest {
   }
 
   @Test
-  void returnTotalDataStreams_shouldReturnFromTopK() {
+  void returnTotalDataStreams_shouldReturnLocalFromTopK() {
     when(topK.total()).thenReturn(100L);
-    assertThat(hotKey.returnTotalDataStreams()).isEqualTo(100L);
+    assertThat(hotKey.returnLocalTotalDataStreams()).isEqualTo(100L);
   }
 
   @Test
-  void returnTotalDataStreams_shouldReturnZeroWhenTopKNull() {
-    assertThat(new HotKey(hotKeyCache, null).returnTotalDataStreams()).isZero();
+  void returnTotalDataStreams_shouldReturnLocalZeroWhenTopKNull() {
+    assertThat(new HotKey(hotKeyCache, null).returnLocalTotalDataStreams()).isZero();
   }
 
   @Test
-  void returnExpelledHotKeys_shouldReturnFromTopK() {
+  void returnExpelledHotKeys_shouldReturnLocalFromTopK() {
     LinkedBlockingQueue<Item> queue = new LinkedBlockingQueue<>();
     queue.add(new Item("k1", 5));
     when(topK.expelled()).thenReturn(queue);
-    assertThat(hotKey.returnExpelledHotKeys()).hasSize(1);
+    assertThat(hotKey.returnLocalExpelledHotKeys()).hasSize(1);
   }
 
   @Test
@@ -140,7 +141,7 @@ class HotKeyTest {
     HotKey workerOnly = new HotKey(null, topK);
     assertThatThrownBy(() -> workerOnly.get("k", () -> "v"))
       .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> workerOnly.isHotKey("k"))
+    assertThatThrownBy(() -> workerOnly.isLocalHotKey("k"))
       .isInstanceOf(UnsupportedOperationException.class);
     assertThatThrownBy(() -> workerOnly.peek("k"))
       .isInstanceOf(UnsupportedOperationException.class);
@@ -150,5 +151,13 @@ class HotKeyTest {
       .isInstanceOf(UnsupportedOperationException.class);
     assertThatThrownBy(() -> workerOnly.putBeforeInvalidate("k", () -> {}))
       .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  @Test
+  void get_shouldPropagateHotKeyBlockedException() {
+    when(hotKeyCache.get(anyString(), any()))
+      .thenThrow(new HotKeyBlockedException("secret"));
+    assertThatThrownBy(() -> hotKey.get("secret", () -> "v"))
+      .isInstanceOf(HotKeyBlockedException.class);
   }
 }

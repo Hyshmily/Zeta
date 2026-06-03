@@ -23,19 +23,18 @@ import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.entity.KeyState;
+import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.rule.Rule;
+import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -56,17 +55,10 @@ public class HotKeyCache {
   private final SingleFlight singleFlight;
   private final CacheExpireManager expireManager;
   private final Executor hotKeyExecutor;
-  private final Optional<CacheSyncPublisher> syncPublisher;
-  private final Optional<StringRedisTemplate> redisTemplate;
-  private final int versionKeyTtlMinutes;
+  private final Optional<CacheSyncPublisher> cacheSyncPublisher;
   private final Optional<HotKeyReporter> hotKeyReporter;
-  private final Set<String> blacklist = ConcurrentHashMap.newKeySet();
-
-  /**
-   * Monotonically increasing counter for fallback versions.
-   * Only used when {@link #redisTemplate} is empty or Redis INCR fails.
-   */
-  private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
+  private final RuleMatcher ruleMatcher;
+  private final VersionController versionController;
 
   private static final String NO_SYNC_PUBLISHER = HotKeyConstants.NO_SYNC_PUBLISHER;
 
@@ -83,14 +75,14 @@ public class HotKeyCache {
   }
 
   /**
-   * Check whether a key is currently tracked as a hot key in L1.
+   * Check whether a key is currently tracked as a local hot key in L1.
    *
    * @param cacheKey the key to inspect
    * @return {@code true} if the key exists in L1 with {@link KeyState#HOT}
    */
-  public boolean isHotKey(String cacheKey) {
+  public boolean isLocalHotKey(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
-      log.debug("isHotKey: invalid cacheKey");
+      log.debug("isLocalHotKey: invalid cacheKey");
       return false;
     }
     Object entry = caffeineCache.getIfPresent(cacheKey);
@@ -133,7 +125,7 @@ public class HotKeyCache {
    * Get with explicit TTL overrides.
    * Pass 0 to use the configured default for that TTL type.
    *
-   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
    * @param softTtlMs soft TTL override (0 = use configured default)
    */
   @SuppressWarnings("unchecked")
@@ -142,6 +134,8 @@ public class HotKeyCache {
       log.debug("get: invalid cacheKey");
       return Optional.empty();
     }
+
+    boolean skipReport = checkAndThrowIfBlocked(cacheKey, "get");
 
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
       .flatMap(raw -> {
@@ -153,11 +147,13 @@ public class HotKeyCache {
         T val = raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw;
 
         hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
-        hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+        if (!skipReport) {
+          hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+        }
 
         return Optional.of(val);
       })
-      .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs));
+      .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
   }
 
   /**
@@ -181,7 +177,7 @@ public class HotKeyCache {
   /**
    * Get with soft-expire and explicit hard/soft TTL overrides.
    *
-   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry — entry never hard-evicted, only soft-expire or Caffeine {@code maximumSize})
    * @param softTtlMs soft TTL override (0 = use configured default)
    */
   @SuppressWarnings("unchecked")
@@ -190,6 +186,9 @@ public class HotKeyCache {
       log.debug("getWithSoftExpire: invalid cacheKey");
       return Optional.empty();
     }
+
+    boolean skipReport = checkAndThrowIfBlocked(cacheKey, "getWithSoftExpire");
+
     if (!expireManager.isSoftExpireEnabled()) {
       log.debug("getWithSoftExpire: soft expire not enabled, fallback to get()");
       return get(cacheKey, reader, hardTtlMs, softTtlMs);
@@ -223,25 +222,38 @@ public class HotKeyCache {
           }
         }
         hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
-        hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+        if (!skipReport) {
+          hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+        }
 
         return Optional.of(cached);
       })
-      .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs));
+      .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
   }
 
   /**
    * Load via SingleFlight, detect hot key, cache with HOT or NORMAL TTL, and return value.
    *
-   * @param cacheKey  the key to load
-   * @param reader    the value supplier
-   * @param hardTtlMs hard TTL override (0 = use configured default)
-   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param cacheKey   the key to load
+   * @param reader     the value supplier
+   * @param hardTtlMs  hard TTL override (0 = use configured default)
+   * @param softTtlMs  soft TTL override (0 = use configured default)
+   * @param skipReport if {@code true}, skip reporting to Worker
    */
-  private <T> Optional<T> loadAndCache(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
+  private <T> Optional<T> loadAndCache(
+    String cacheKey,
+    Supplier<T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean skipReport
+  ) {
     return singleFlight
       .load(cacheKey, reader)
       .map(value -> {
+        if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
+          throw new HotKeyBlockedException(cacheKey);
+        }
+
         long effectiveHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHardTtlMs();
         long effectiveSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveSoftTtlMs();
 
@@ -265,8 +277,10 @@ public class HotKeyCache {
               .normalSoftTtlMs(effectiveSoft)
               .build()
           );
-          hotKeyReporter.ifPresent(r -> r.record(cacheKey));
-          log.debug("HotKey detected, promoted to L1 and reported: {}", cacheKey);
+          if (!skipReport) {
+            hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+          }
+          log.debug("HotKey detected, promoted to L1{}: {}", skipReport ? " (no report)" : " and reported", cacheKey);
         } else {
           caffeineCache.put(
             cacheKey,
@@ -284,7 +298,9 @@ public class HotKeyCache {
               .normalSoftTtlMs(effectiveSoft)
               .build()
           );
-          hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+          if (!skipReport) {
+            hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+          }
           log.debug("Normal key, cached with configured TTL: {}", cacheKey);
         }
         return value;
@@ -304,9 +320,9 @@ public class HotKeyCache {
       return;
     }
     TransactionSupport.runNowOrAfterCommit(() -> {
-      VersionResult vr = nextVersion(cacheKey);
+      var vr = versionController.nextVersion(cacheKey);
       caffeineCache.invalidate(cacheKey);
-      syncPublisher.ifPresentOrElse(
+      cacheSyncPublisher.ifPresentOrElse(
         p -> p.broadcastRefresh(cacheKey, vr.dataVersion(), vr.degraded()),
         () -> log.debug("invalidate: " + NO_SYNC_PUBLISHER)
       );
@@ -330,13 +346,10 @@ public class HotKeyCache {
     }
     TransactionSupport.runNowOrAfterCommit(() -> {
       caffeineCache.invalidateAll(validKeys);
-      if (syncPublisher.isPresent()) {
-        CacheSyncPublisher p = syncPublisher.get();
-        validKeys.forEach(key -> p.broadcastInvalidate(key, 0L, false));
-        log.debug("invalidateAll: broadcast {} keys", validKeys.size());
-      } else {
-        log.debug("No sync publisher found, skip broadcast for {} keys", validKeys.size());
-      }
+      cacheSyncPublisher.ifPresentOrElse(
+        p -> p.broadcastLoaclInvalidateAll(validKeys),
+        () -> log.debug("No sync publisher found, skip broadcast for {} keys", validKeys.size())
+      );
     });
   }
 
@@ -352,18 +365,22 @@ public class HotKeyCache {
    * Write-through with explicit TTL overrides.
    * Pass 0 to use the configured default for that TTL type.
    *
-   * @param hardTtlMs hard TTL override (0 = use configured default)
-   * @param softTtlMs soft TTL override (0 = use configured default, 0 if disabled)
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
+   * @param softTtlMs soft TTL override (0 = use configured default)
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs, long softTtlMs) {
     if (invalidCacheKey(cacheKey)) {
       log.debug("putThrough: invalid cacheKey");
       return;
     }
+    if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
+      log.debug("putThrough: blocked by rule: {}", cacheKey);
+      return;
+    }
     TransactionSupport.runAsyncAfterCommit(
       () -> {
         writer.run();
-        VersionResult vr = nextVersion(cacheKey);
+        var vr = versionController.nextVersion(cacheKey);
 
         long effectiveHardTtl = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHardTtlMs();
         long effectiveSoftTtl = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveSoftTtlMs();
@@ -385,7 +402,7 @@ public class HotKeyCache {
             .build()
         );
 
-        syncPublisher.ifPresentOrElse(
+        cacheSyncPublisher.ifPresentOrElse(
           p -> p.broadcastRefresh(cacheKey, vr.dataVersion(), vr.degraded()),
           () -> log.debug("putThrough: {}", NO_SYNC_PUBLISHER)
         );
@@ -403,6 +420,10 @@ public class HotKeyCache {
       log.debug("putBeforeInvalidate: invalid cacheKey");
       return;
     }
+    if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
+      log.debug("putBeforeInvalidate: blocked by rule: {}", cacheKey);
+      return;
+    }
     TransactionSupport.runNowOrAfterCommit(() -> {
       try {
         mutation.run();
@@ -410,52 +431,72 @@ public class HotKeyCache {
         log.error("putBeforeInvalidate failed, skip local invalidate and broadcast: {}", cacheKey, e);
         return;
       }
-      VersionResult vr = nextVersion(cacheKey);
+      var vr = versionController.nextVersion(cacheKey);
       caffeineCache.invalidate(cacheKey);
 
-      syncPublisher.ifPresentOrElse(
-        p -> p.broadcastInvalidate(cacheKey, vr.dataVersion(), vr.degraded()),
+      cacheSyncPublisher.ifPresentOrElse(
+        p -> p.broadcastLocalInvalidate(cacheKey, vr.dataVersion(), vr.degraded()),
         () -> log.debug("putBeforeInvalidate: {}", NO_SYNC_PUBLISHER)
       );
     });
   }
 
-  private record VersionResult(long dataVersion, boolean degraded) {}
-
-  private VersionResult nextVersion(String cacheKey) {
-    return redisTemplate
-      .map(t -> {
-        try {
-          String script =
-            "local v = redis.call('INCR', KEYS[1]) " +
-            "if tonumber(ARGV[1]) > 0 then " +
-            "    redis.call('EXPIRE', KEYS[1], ARGV[1]) " +
-            "end " +
-            "return v";
-
-          Long v = t.execute(
-            new DefaultRedisScript<>(script, Long.class),
-            List.of(HotKeyConstants.REDIS_VERSION_KEY_PREFIX + cacheKey),
-            String.valueOf(versionKeyTtlMinutes * 60L)
-          );
-          return new VersionResult(v, false);
-        } catch (Exception e) {
-          log.warn("Redis version increment failed, fallback to local counter: {}", cacheKey, e);
-          return fallbackVersion();
-        }
-      })
-      .orElse(fallbackVersion());
+  //-------------------------------------------------------------------------
+  public void addBlacklist(String cacheKey) {
+    if (invalidCacheKey(cacheKey)) {
+      log.debug("blacklist: invalid cacheKey");
+      return;
+    }
+    TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.addRule(RuleMatcher.of(cacheKey, RuleAction.BLOCK)));
   }
 
-  /**
-   * Build a degraded version in negative {@code long} space so that all
-   * degraded versions sort below any normal (positive) Redis INCR version.
-   * This guarantees the {@code sendDeduped} numeric comparison in
-   * {@link io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher} correctly
-   * prefers normal broadcasts over degraded ones without flag-aware logic.
-   */
-  private VersionResult fallbackVersion() {
-    long version = Long.MIN_VALUE + fallbackVersionCounter.incrementAndGet();
-    return new VersionResult(version, true);
+  public void addWhitelist(String cacheKey) {
+    if (invalidCacheKey(cacheKey)) {
+      log.debug("whitelist: invalid cacheKey");
+      return;
+    }
+    TransactionSupport.runNowOrAfterCommit(() ->
+      ruleMatcher.addRule(RuleMatcher.of(cacheKey, RuleAction.ALLOW_NO_REPORT))
+    );
+  }
+
+  public void unBlacklist(String cacheKey) {
+    if (invalidCacheKey(cacheKey)) {
+      log.debug("unblacklist: invalid cacheKey");
+      return;
+    }
+    TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.removeRule(cacheKey, RuleAction.BLOCK));
+  }
+
+  public void unWhitelist(String cacheKey) {
+    if (invalidCacheKey(cacheKey)) {
+      log.debug("unwhitelist: invalid cacheKey");
+      return;
+    }
+    TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.removeRule(cacheKey, RuleAction.ALLOW_NO_REPORT));
+  }
+
+  public RuleAction evaluateRule(String cacheKey) {
+    return ruleMatcher.evaluateRule(cacheKey);
+  }
+
+  public List<Rule> getAllRules() {
+    return ruleMatcher.getAllRules();
+  }
+
+  public void clearAllRules() {
+    TransactionSupport.runNowOrAfterCommit(ruleMatcher::clearRules);
+  }
+
+  public void broadcastAllLocalRulesManually() {
+    ruleMatcher.broadcastAllLocalRulesManually();
+  }
+
+  private boolean checkAndThrowIfBlocked(String cacheKey, String operation) {
+    var result = ruleMatcher.isAllowNoReport(cacheKey, operation);
+    if (result.isEmpty()) {
+      throw new HotKeyBlockedException(cacheKey);
+    }
+    return result.get();
   }
 }

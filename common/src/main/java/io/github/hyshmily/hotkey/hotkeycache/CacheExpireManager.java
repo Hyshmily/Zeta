@@ -124,6 +124,11 @@ public class CacheExpireManager {
     return ttlConfig.effectiveHotSoftTtlMs();
   }
 
+  /**
+   * Convert a TTL duration (ms) to an absolute epoch-ms expiration timestamp.
+   * Propagates {@link Long#MAX_VALUE} unchanged — used to signal permanent entries
+   * (pure logical expiry with no hard TTL eviction).
+   */
   static long toExpireTimestamp(long ttlMs) {
     if (ttlMs == Long.MAX_VALUE) {
       return Long.MAX_VALUE;

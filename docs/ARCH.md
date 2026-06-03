@@ -10,7 +10,7 @@
 │              │ ─── record(key) ────→  │  (local)     │
 │              │ ←────────────────────  │              │
 └──────┬───────┘   Optional.of(value)   └──────┬───────┘
-       │ L1 miss          (auto unwrap         │ isHotKey()?
+       │ L1 miss          (auto unwrap         │ isLocalHotKey()?
        ↓ (inflight dedup) CacheEntry)          ↓
 ┌──────────────┐  ──── reader ────→  ┌───────────────┐
 │  L2 Storage  │  ──add(key,1)───→   │     TopK      │
@@ -24,7 +24,7 @@
                                      │ expelled()    │
                                      │ fading()      │
                                      └───────┬───────┘
-                                             │ isHotKey()?
+                                             │ isLocalHotKey()?
                                              ↓
                                   ┌─────────────────────┐
                                   │  Choose TTL by      │
@@ -45,7 +45,7 @@
                                    (no sync on read path)
 ```
 
-> **Note:** `isHotKey()` checks for HOT `KeyState` in L1. Keys are stored as `CacheEntry` wrappers with full TTL metadata — the `get()` path automatically unwraps to the raw value.
+> **Note:** `isLocalHotKey()` checks for HOT `KeyState` in L1. Keys are stored as `CacheEntry` wrappers with full TTL metadata — the `get()` path automatically unwraps to the raw value.
 
 ### Write Path — `putThrough`
 
@@ -134,7 +134,7 @@ invalidateAll(cacheKeys)
                  normalHardTtlMs, normalSoftTtlMs))
 ```
 
-> **Note:** Soft expire applies to both HOT and COOL entries. Normal entries are always loaded fresh. The async refresh preserves the original per-entry hard TTL across background refreshes.
+> **Note:** Soft expire applies to both HOT and COOL entries. Normal entries are always loaded fresh. The async refresh preserves the original per-entry hard TTL across background refreshes. For pure logical expiry (hard TTL never evicts), pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire` — the entry stays in Caffeine permanently; only Caffeine `maximumSize` can evict it, while soft expire never removes the entry (it only returns stale values and refreshes asynchronously).
 
 ### Instance-to-Instance Cache Sync
 

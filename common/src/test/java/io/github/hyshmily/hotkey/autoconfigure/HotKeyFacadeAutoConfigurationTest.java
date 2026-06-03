@@ -27,8 +27,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 /**
  * Tests for {@link HotKeyFacadeAutoConfiguration}.
@@ -49,7 +49,7 @@ class HotKeyFacadeAutoConfigurationTest {
   void hotKeyBeanIsCreatedWithMinimalDependencies() {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(HotKey.class);
-      assertThat(ctx.getBean(HotKey.class).returnHotKeys()).isEmpty();
+      assertThat(ctx.getBean(HotKey.class).returnLocalHotKeys()).isEmpty();
     });
   }
 
