@@ -1,0 +1,95 @@
+{
+  "summary" : {
+    "totalOps" : 80000,
+    "overallThroughputOpsPerSec" : 4279,
+    "totalDurationMs" : 18693.86
+  },
+  "config" : {
+    "coldKeyCount" : 40000,
+    "opsPerThread" : 2500,
+    "threadCount" : 8,
+    "softTtlMs" : 300000,
+    "hardTtlMs" : 600000,
+    "hotKeyCount" : 10000
+  },
+  "phases" : [ {
+    "durationMs" : 63.004,
+    "totalOps" : 50000,
+    "name" : "warmup",
+    "throughputOpsPerSec" : 793600,
+    "errors" : 0
+  }, {
+    "l1HitRate" : 0.5079,
+    "l1Hits" : 10158,
+    "name" : "hot-read-only",
+    "totalOps" : 20000,
+    "throughputOpsPerSec" : 1497,
+    "durationMs" : 13361.68,
+    "l2Calls" : 9842,
+    "errors" : 0,
+    "latencyMs" : {
+      "p99" : 1.466,
+      "p50" : 0.711,
+      "p999" : 3002.18,
+      "mean" : 5.323,
+      "max" : 3009.846,
+      "p90" : 1.007
+    }
+  }, {
+    "l1HitRate" : 0.0116,
+    "l1Hits" : 232,
+    "name" : "cold-read-only",
+    "totalOps" : 20000,
+    "throughputOpsPerSec" : 10958,
+    "durationMs" : 1825.12,
+    "l2Calls" : 19768,
+    "errors" : 0,
+    "latencyMs" : {
+      "p99" : 1.462,
+      "p50" : 0.678,
+      "p999" : 2.5,
+      "mean" : 0.714,
+      "max" : 6.774,
+      "p90" : 0.97
+    }
+  }, {
+    "l1HitRate" : 0.0089,
+    "invalidations" : 2000,
+    "l1Hits" : 177,
+    "name" : "mixed-with-sync",
+    "reads" : 16000,
+    "totalOps" : 20000,
+    "throughputOpsPerSec" : 10838,
+    "writes" : 2000,
+    "durationMs" : 1845.29,
+    "l2Calls" : 15823,
+    "errors" : 0,
+    "latencyMs" : {
+      "p99" : 2.169,
+      "p50" : 0.707,
+      "p999" : 6.125,
+      "mean" : 0.721,
+      "max" : 12.869,
+      "p90" : 1.25
+    }
+  }, {
+    "l1HitRate" : 0.5056,
+    "l1Hits" : 10112,
+    "name" : "hot-read-after-sync",
+    "totalOps" : 20000,
+    "throughputOpsPerSec" : 12035,
+    "durationMs" : 1661.77,
+    "l2Calls" : 9888,
+    "errors" : 0,
+    "latencyMs" : {
+      "p99" : 1.176,
+      "p50" : 0.63,
+      "p999" : 1.587,
+      "mean" : 0.654,
+      "max" : 5.554,
+      "p90" : 0.88
+    }
+  } ],
+  "testName" : "HotKey Distributed Benchmark",
+  "timestamp" : "2026-06-04T13:16:16.975441400Z"
+}

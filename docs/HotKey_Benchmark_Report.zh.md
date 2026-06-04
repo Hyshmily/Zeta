@@ -113,7 +113,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ## 3. 集成测试
 
-**数据源**：[`integration-tests/target/failsafe-reports/failsafe-summary.xml`](../integration-tests/target/failsafe-reports/failsafe-summary.xml)
+**数据源**：[`integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json)（31 场景压力测试）
 
 ```
 测试运行: 97, 失败: 0, 错误: 0, 跳过: 9
@@ -304,4 +304,4 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ---
 
-*所有数据来源于 `integration-tests/target/testresult/` 下的测试执行输出。完整 XML 报告见 `integration-tests/target/failsafe-reports/`。源码默认值已与 `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java` 逐一核对。*
+*所有数据来源于 `integration-tests/target/testresult/` 下的测试执行输出。源码默认值已与 `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java` 逐一核对。*

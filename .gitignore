@@ -1,5 +1,7 @@
 # Java
-target/
+**/target/**
+!**/target/testresult/
+!**/target/testresult/**
 *.class
 *.jar
 *.war

@@ -113,7 +113,7 @@ High-frequency reporter processes 2M records in 650ms with **zero data loss**. B
 
 ## 3. Integration Tests
 
-**Data source**: [`integration-tests/target/failsafe-reports/failsafe-summary.xml`](../integration-tests/target/failsafe-reports/failsafe-summary.xml)
+**Data source**: [`integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json) (31 stress scenarios)
 
 ```
 Tests run: 97, Failures: 0, Errors: 0, Skipped: 9
@@ -313,4 +313,4 @@ Verified against `HotKeyProperties.java`:
 
 ---
 
-*All data sourced from test execution outputs in `integration-tests/target/testresult/`. Full XML reports available in `integration-tests/target/failsafe-reports/`. Source code defaults verified against `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java`.*
+*All data sourced from test execution outputs in `integration-tests/target/testresult/`. Source code defaults verified against `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java`.*
