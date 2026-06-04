@@ -25,7 +25,7 @@
 
 ## 2. 压力测试结果
 
-**数据源**：`integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json`
+**数据源**：[`integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json)
 
 31 个测试用例，总耗时 3,620 ms，**0 错误**，总计 2,695,450 次操作。
 
@@ -113,7 +113,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ## 3. 集成测试
 
-**数据源**：`integration-tests/target/failsafe-reports/failsafe-summary.xml`
+**数据源**：[`integration-tests/target/failsafe-reports/failsafe-summary.xml`](../integration-tests/target/failsafe-reports/failsafe-summary.xml)
 
 ```
 测试运行: 97, 失败: 0, 错误: 0, 跳过: 9
@@ -160,7 +160,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 4.1 分布式基准
 
-**数据文件**：`integration-tests/target/testresult/benchmark-distributed-2026-06-04T13-16-16.983238300Z.json`
+**数据文件**：[`integration-tests/target/testresult/benchmark-distributed-2026-06-04T13-16-16.983238300Z.json`](../integration-tests/target/testresult/benchmark-distributed-2026-06-04T13-16-16.983238300Z.json)
 
 **配置**：冷 key=40,000, 热 key=10,000, 操作/线程=2,500, 线程=8, softTtl=300s, hardTtl=600s.
 
@@ -178,7 +178,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 4.2 多实例基准
 
-**数据文件**：`integration-tests/target/testresult/benchmark-multi-instance-2026-06-04T13-17-06.124390600Z.json`
+**数据文件**：[`integration-tests/target/testresult/benchmark-multi-instance-2026-06-04T13-17-06.124390600Z.json`](../integration-tests/target/testresult/benchmark-multi-instance-2026-06-04T13-17-06.124390600Z.json)
 
 **配置**：线程=8, 热 key=10,000, 冷 key=40,000, 操作/线程=2,500, softTtl=300s, hardTtl=600s, worker 热阈值=50.
 
@@ -198,7 +198,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 4.3 浸泡测试
 
-**数据文件**：`integration-tests/target/testresult/benchmark-soak-2026-06-04T13-22-42.288525400Z.json`
+**数据文件**：[`integration-tests/target/testresult/benchmark-soak-2026-06-04T13-22-42.288525400Z.json`](../integration-tests/target/testresult/benchmark-soak-2026-06-04T13-22-42.288525400Z.json)
 
 时长：5 分钟（5 个快照，每 60 秒采样一次）。
 
@@ -220,7 +220,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 4.4 Worker 决策投递
 
-**数据文件**：`integration-tests/target/testresult/benchmark-worker-decision-2026-06-04T13-24-00.460923700Z.json`
+**数据文件**：[`integration-tests/target/testresult/benchmark-worker-decision-2026-06-04T13-24-00.460923700Z.json`](../integration-tests/target/testresult/benchmark-worker-decision-2026-06-04T13-24-00.460923700Z.json)
 
 **配置**：决策数=5,000, 冷 key=500, 线程=4, versionOrderBatch=1,000, 等待时间=15s.
 

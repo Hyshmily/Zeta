@@ -25,7 +25,7 @@ Infrastructure: Testcontainers-managed Docker containers on single machine. Dist
 
 ## 2. Stress Test Results
 
-**Data source**: `integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json`
+**Data source**: [`integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-04T13-24-22.627897800Z.json)
 
 31 test cases, 3,620 ms total, **0 errors**, 2,695,450 total operations.
 
@@ -113,7 +113,7 @@ High-frequency reporter processes 2M records in 650ms with **zero data loss**. B
 
 ## 3. Integration Tests
 
-**Data source**: `integration-tests/target/failsafe-reports/failsafe-summary.xml`
+**Data source**: [`integration-tests/target/failsafe-reports/failsafe-summary.xml`](../integration-tests/target/failsafe-reports/failsafe-summary.xml)
 
 ```
 Tests run: 97, Failures: 0, Errors: 0, Skipped: 9
@@ -160,7 +160,7 @@ Tests run: 97, Failures: 0, Errors: 0, Skipped: 9
 
 ### 4.1 Distributed Benchmark
 
-**File**: `integration-tests/target/testresult/benchmark-distributed-2026-06-04T13-16-16.983238300Z.json`
+**File**: [`integration-tests/target/testresult/benchmark-distributed-2026-06-04T13-16-16.983238300Z.json`](../integration-tests/target/testresult/benchmark-distributed-2026-06-04T13-16-16.983238300Z.json)
 
 **Config**: cold keys=40,000, hot keys=10,000, ops/thread=2,500, threads=8, softTtl=300s, hardTtl=600s.
 
@@ -178,7 +178,7 @@ Hot read L1 hit rate ~50.8% confirms accurate hot key detection. Cold read rate 
 
 ### 4.2 Multi-Instance Benchmark
 
-**File**: `integration-tests/target/testresult/benchmark-multi-instance-2026-06-04T13-17-06.124390600Z.json`
+**File**: [`integration-tests/target/testresult/benchmark-multi-instance-2026-06-04T13-17-06.124390600Z.json`](../integration-tests/target/testresult/benchmark-multi-instance-2026-06-04T13-17-06.124390600Z.json)
 
 **Config**: threads=8, hot keys=10,000, cold keys=40,000, ops/thread=2,500, softTtl=300s, hardTtl=600s, worker hot threshold=50.
 
@@ -198,7 +198,7 @@ Cross-instance sync P50=0.38ms confirms RabbitMQ fanout is not a bottleneck. Com
 
 ### 4.3 Soak Test
 
-**File**: `integration-tests/target/testresult/benchmark-soak-2026-06-04T13-22-42.288525400Z.json`
+**File**: [`integration-tests/target/testresult/benchmark-soak-2026-06-04T13-22-42.288525400Z.json`](../integration-tests/target/testresult/benchmark-soak-2026-06-04T13-22-42.288525400Z.json)
 
 Duration: 5 minutes (5 snapshots at 60s intervals).
 
@@ -220,7 +220,7 @@ Memory stable between 68-295 MB across 5 minutes. Zero GC pressure (413 collecti
 
 ### 4.4 Worker Decision Delivery
 
-**File**: `integration-tests/target/testresult/benchmark-worker-decision-2026-06-04T13-24-00.460923700Z.json`
+**File**: [`integration-tests/target/testresult/benchmark-worker-decision-2026-06-04T13-24-00.460923700Z.json`](../integration-tests/target/testresult/benchmark-worker-decision-2026-06-04T13-24-00.460923700Z.json)
 
 **Config**: decisions=5,000, cool keys=500, threadCount=4, versionOrderBatch=1,000, collectiveWait=15s.
 
