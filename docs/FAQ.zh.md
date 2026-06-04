@@ -38,13 +38,13 @@
 ```
 t=0ms    Key X 首次在节点 A 被访问
 t=+1μs   本地 HeavyKeeper："看起来热" → 以 1h 热 TTL 缓存在节点 A
-t=+100ms HotKeyReporter 刷新：计数通过 RabbitMQ 发送到 Worker
-t=+200ms Worker 滑动窗口：累积足够 → 状态机：CONFIRMED_HOT
-t=+250ms Worker 向所有节点广播 HOT（topic exchange，路由 "hot.<appName>"）
-t=+300ms 节点 B、C、D 收到 HOT → 从 Redis 加载 → 以热 TTL 缓存
+t=+100ms HotKeyReporter 刷新 → Worker 收到第一批计数，key 超过阈值 → tick 1
+t=+2.0s   连续 20 个热 tick（共 2000ms，confirmCount=20）→ CONFIRMED_HOT
+t=+2.0s   广播发送到所有节点（同一 tick 内 AMQP 发出）
+t=+2.1s   节点 B、C、D 收到 HOT → 从 Redis 加载 → 以热 TTL 缓存
 ```
 
-**真正的热 Key 会持续热几分钟甚至几小时**，而不是几百毫秒。Worker 的 300ms 延迟与总热期相比可以忽略不计。而接到第一波冲击的节点，早在微秒级就已被保护。
+**真正的热 Key 会持续热几分钟甚至几小时**，而不是几百毫秒。Worker 的约 2s 延迟（默认 `confirmDurationMs=2000`，每 100ms 评估一次 = 20 个 tick）与总热期相比可以忽略不计。而接到第一波冲击的节点，早在微秒级就已被保护。
 
 **如果是仅仅 100ms 的脉冲呢？** 那不算是集群级别的热 Key——只是一个本地毛刺。本地 HeavyKeeper 用稍长的 TTL 处理它，Worker 完全不需要广播。作者把两者分开，就是为此。
 

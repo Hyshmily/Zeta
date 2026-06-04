@@ -38,13 +38,13 @@
 ```
 t=0ms    Key X first accessed on Node A
 t=+1μs   Local HeavyKeeper: "looks hot" → cached with 1h hot TTL on Node A
-t=+100ms HotKeyReporter flush: counts sent to Worker via RabbitMQ
-t=+200ms Worker sliding window: accumulated enough → state machine: CONFIRMED_HOT
-t=+250ms Worker broadcasts HOT to all nodes (topic exchange, routing "hot.<appName>")
-t=+300ms Node B, C, D receive HOT → pre-warm from Redis → cached with hot TTL
+t=+100ms HotKeyReporter flush → Worker receives first batch, key above threshold → tick 1
+t=+2.0s   20 consecutive hot ticks (2000ms total, confirmCount=20 per WorkerProperties) → CONFIRMED_HOT
+t=+2.0s   Broadcast sent to all nodes (AMQP, same tick)
+t=+2.1s   Nodes B, C, D receive HOT → pre-warm from Redis → cached with hot TTL
 ```
 
-The key insight: **a real hot key stays hot for minutes or hours**, not milliseconds. The 300ms Worker latency is negligible compared to the total hot duration. Meanwhile, the node that got the first punch was already protected in microseconds.
+The key insight: **a real hot key stays hot for minutes or hours**, not milliseconds. The ~2s Worker latency (default `confirmDurationMs=2000` / 100ms per evaluation tick = 20 ticks) is negligible compared to the total hot duration. Meanwhile, the node that got the first punch was already protected in microseconds.
 
 **What about a brief 100ms spike?** That's not a cluster-level hot key — it's a local blip. The local HeavyKeeper handles it with a slightly longer TTL, and the Worker never needs to broadcast. The author split the two precisely for this reason.
 
