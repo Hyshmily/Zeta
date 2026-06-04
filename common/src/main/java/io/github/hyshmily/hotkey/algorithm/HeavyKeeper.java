@@ -67,6 +67,10 @@ public class HeavyKeeper implements TopK {
    * @param minCount minimum count threshold before a key can enter the TopK set
    */
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount) {
+    this(k, width, depth, decay, minCount, 50_000);
+  }
+
+  public HeavyKeeper(int k, int width, int depth, double decay, int minCount, int expelledQueueCapacity) {
     if (k <= 0) {
       throw new IllegalArgumentException("TopK must be greater than 0, but got: " + k);
     }
@@ -91,7 +95,7 @@ public class HeavyKeeper implements TopK {
 
     this.sortedTopK = new TreeMap<>(Comparator.comparingInt((Node a) -> a.count).thenComparing(a -> a.key));
     this.heapIndex = new HashMap<>();
-    this.expelledQueue = new ArrayBlockingQueue<>(10_000);
+    this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
     this.total = new LongAdder();
   }
 

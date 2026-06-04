@@ -3,9 +3,11 @@ package io.github.hyshmily.hotkey.broadcast;
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.AMQP_HEADER_IS_VERSION_DEGRADED;
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.AMQP_HEADER_TYPE;
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.AMQP_HEADER_VERSION;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -41,6 +43,7 @@ class CacheSyncListenerTest {
   private CacheSyncListener listener;
   private Channel channel;
   private ScheduledExecutorService scheduler;
+  private RuleMatcher ruleMatcher;
 
   @BeforeEach
   void setUp() throws IOException {
@@ -51,8 +54,9 @@ class CacheSyncListenerTest {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
     CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ruleMatcher = mock(RuleMatcher.class);
 
-    listener = new CacheSyncListener(cache, redisLoader, properties, scheduler, expireManager, mock(RuleMatcher.class));
+    listener = new CacheSyncListener(cache, redisLoader, properties, scheduler, expireManager, ruleMatcher);
     channel = mock(Channel.class);
   }
 
@@ -86,6 +90,58 @@ class CacheSyncListenerTest {
     Message msg = new Message("key1".getBytes(StandardCharsets.UTF_8), props);
     listener.handleSyncMessage(channel, msg);
     verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  @Test
+  void handleSyncMessage_withRulesSync_shouldCallRuleMatcher() throws IOException {
+    Message msg = syncMessage("rule-payload", SyncMessage.TYPE_RULES_SYNC, 0L, false);
+    listener.handleSyncMessage(channel, msg);
+    verify(ruleMatcher).syncRules("rule-payload");
+    verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  @Test
+  void handleSyncMessage_withStringValueInsteadOfCacheEntry_shouldNotCrash() throws IOException {
+    cache.put("key1", "plain-string");
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  @Test
+  void handleSyncMessage_withRefreshAndNullRedisValue_shouldLogAndReturn() throws IOException {
+    cache.put("key1", entry(1, false, 0));
+    Function<String, Object> nullLoader = k -> null;
+    CacheSyncProperties properties = new CacheSyncProperties();
+    properties.setWarmupJitterMs(0);
+    HotKeyProperties ttlConfig = new HotKeyProperties();
+    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    CacheSyncListener nullListener = new CacheSyncListener(cache, nullLoader, properties, scheduler, expireManager, ruleMatcher);
+
+    nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  @Test
+  void handleSyncMessage_unknownType_shouldAckAndReturn() throws IOException {
+    Message msg = syncMessage("key1", "UNKNOWN_TYPE", 1L, false);
+    listener.handleSyncMessage(channel, msg);
+    verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  @Test
+  void invalidate_withVersion0AndNotDegraded_shouldBeUnconditional() throws IOException {
+    cache.put("key1", entry(5, false, 0));
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("key1")).isNull();
+  }
+
+  @Test
+  void invalidate_whenExistingNotCacheEntry_shouldNotThrow() throws IOException {
+    cache.put("key1", "plain-string");
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 1L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("key1")).isNull();
   }
 
   private static Message syncMessage(String key, String type, long version, boolean degraded) {

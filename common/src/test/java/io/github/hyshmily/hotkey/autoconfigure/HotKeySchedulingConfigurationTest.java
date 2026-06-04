@@ -107,8 +107,8 @@ class HotKeySchedulingConfigurationTest {
     HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(List.of(topK));
     config.drainExpelled();
 
-    // drainTo(collection, 1000) should have drained only 1000
-    assertThat(queue).hasSize(500);
+    // drainTo(collection, 100_000) should have drained all 1500 items
+    assertThat(queue).isEmpty();
   }
 
   @Test

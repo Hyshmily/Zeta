@@ -69,13 +69,13 @@ public class HotKeySchedulingConfiguration {
    * Periodically drain expelled hot keys from all registered TopK instances.
    * Logs a truncated summary of up to 20 sample keys.  Runs every 60 seconds.
    */
-  @Scheduled(fixedDelay = 60_000)
+  @Scheduled(fixedDelay = 10_000)
   public void drainExpelled() {
     int totalDrained = 0;
     List<String> sampleKeys = new ArrayList<>();
     for (TopK topK : topKInstances) {
       List<Item> items = new ArrayList<>();
-      topK.expelled().drainTo(items, 1000);
+      topK.expelled().drainTo(items, 100_000);
       totalDrained += items.size();
       items.stream().map(Item::key).limit(20).forEach(sampleKeys::add);
     }

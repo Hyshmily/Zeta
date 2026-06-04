@@ -22,7 +22,9 @@ It will remain open source — past, present, and future.
 
 ### Introduction
 
-HotKey — HeavyKeeper Top-K hot key detection + multi-level cache auto-warming + distributed cache sync & cluster-wide Worker mode Spring Boot Starter
+HotKey is a high-performance[^bench], low-cost, lightweight distributed multi-level caching framework
+
+[^bench]: Performance data from [Benchmark Report (EN)](docs/HotKey_Benchmark_Report.en.md) / [基准报告 (中文)](docs/HotKey_Benchmark_Report.zh.md): L1 read **714,286 ops/s**, HeavyKeeper **4.76M ops/s**, 5-min soak **611M ops / 0 errors**, cross-instance sync **P50=0.38ms**.
 
 HotKey is not a general-purpose local cache — it's a lightweight hot key auto-detection & multi-level cache warming framework with optional distributed sync and an optional dedicated Worker node for cluster-wide hot key consensus.
 

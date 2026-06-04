@@ -77,7 +77,8 @@ public class HotKeyAutoConfiguration {
       properties.getWidth(),
       properties.getDepth(),
       properties.getDecay(),
-      properties.getMinCount()
+      properties.getMinCount(),
+      properties.getExpelledQueueCapacity()
     );
   }
 

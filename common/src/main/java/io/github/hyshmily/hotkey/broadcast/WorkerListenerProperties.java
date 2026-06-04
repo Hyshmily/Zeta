@@ -33,6 +33,7 @@ public class WorkerListenerProperties {
   private String exchangeName = "hotkey.worker.exchange";
   private String queuePrefix = "hotkey.worker";
 
+  private boolean autoStartup = true;
   private int warmupJitterMs = 100;
   private int concurrentConsumers = 2;
   private int schedulerPoolSize = 2;

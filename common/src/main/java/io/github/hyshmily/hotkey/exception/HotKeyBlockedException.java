@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.exception;
 
+import lombok.Getter;
+
 /**
  * Thrown when a cache get operation is blocked by a blacklist rule.
  * <p>
@@ -23,21 +25,18 @@ package io.github.hyshmily.hotkey.exception;
  * {@link java.util.Optional#orElseGet}.  The calling code must either
  * catch this exception or let it propagate.
  */
+@Getter
 public class HotKeyBlockedException extends RuntimeException {
 
+  /**
+   * -- GETTER --
+   *  Return the key that was blocked.
+   *
+   */
   private final String cacheKey;
 
   public HotKeyBlockedException(String cacheKey) {
     super("Cache key blocked by rule: " + cacheKey);
     this.cacheKey = cacheKey;
-  }
-
-  /**
-   * Return the key that was blocked.
-   *
-   * @return the blocked cache key
-   */
-  public String getCacheKey() {
-    return cacheKey;
   }
 }

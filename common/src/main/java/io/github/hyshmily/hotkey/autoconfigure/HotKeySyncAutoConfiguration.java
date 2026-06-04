@@ -31,13 +31,15 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
-import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * Autoconfiguration for instance-to-instance cache synchronization (INVALIDATE / REFRESH).
@@ -47,7 +49,7 @@ import org.springframework.data.redis.core.RedisTemplate;
  * Exchange: {@code hotkey.sync.exchange} (FanoutExchange)
  * Queue: {@code hotkey.sync:{instanceId}}
  */
-@AutoConfiguration
+@AutoConfiguration(after = { RedisAutoConfiguration.class, RabbitAutoConfiguration.class })
 @ConditionalOnClass(
   name = { "org.springframework.amqp.rabbit.core.RabbitTemplate", "org.springframework.data.redis.core.RedisTemplate" }
 )
@@ -94,8 +96,8 @@ public class HotKeySyncAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean(name = "hotKeyRedisLoader")
-  public Function<String, Object> hotKeyRedisLoader(RedisTemplate<String, Object> redisTemplate) {
-    return key -> redisTemplate.opsForValue().get(key);
+  public Function<String, Object> hotKeyRedisLoader(StringRedisTemplate stringRedisTemplate) {
+    return key -> stringRedisTemplate.opsForValue().get(key);
   }
 
   /**
@@ -126,6 +128,7 @@ public class HotKeySyncAutoConfiguration {
   ) {
     SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
     container.setQueueNames(properties.getQueueName());
+    container.setAutoStartup(properties.isAutoStartup());
     container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
     container.setConcurrentConsumers(properties.getConcurrentConsumers());
     container.setMessageListener(

@@ -20,8 +20,10 @@ import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.report.ReportPublisher;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.core.FanoutExchange;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -38,11 +40,21 @@ import java.util.concurrent.ScheduledExecutorService;
  * Creates {@link ReportPublisher} (RabbitMQ sender) and {@link HotKeyReporter} (batch aggregator).
  */
 @Slf4j
-@AutoConfiguration
+@AutoConfiguration(after = RabbitAutoConfiguration.class)
 @ConditionalOnBean(RabbitTemplate.class)
 @ConditionalOnProperty(prefix = "hotkey.report", name = "enabled", havingValue = "true", matchIfMissing = true)
 @EnableConfigurationProperties(HotKeyProperties.class)
 public class HotKeyReportAutoConfiguration {
+
+  /**
+   * Declare the FanoutExchange for report broadcasting (app → Worker).
+   * Every app instance publishes to this exchange; the Worker binds a queue
+   * to consume all report messages.
+   */
+  @Bean
+  public FanoutExchange hotkeyReportExchange(HotKeyProperties properties) {
+    return new FanoutExchange(properties.getReportExchange(), true, false);
+  }
 
   /**
    * Create the {@link ReportPublisher} for sending batched access-count reports to the Worker.

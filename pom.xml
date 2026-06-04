@@ -46,6 +46,8 @@
     <java.version>25</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <spring-boot.version>3.5.3</spring-boot.version>
+    <testcontainers.version>1.21.4</testcontainers.version>
+    <skipITs>true</skipITs>
   </properties>
 
   <dependencyManagement>
@@ -150,6 +152,15 @@
           </plugin>
         </plugins>
       </build>
+    </profile>
+    <profile>
+      <id>integration</id>
+      <properties>
+        <skipITs>false</skipITs>
+      </properties>
+      <modules>
+        <module>integration-tests</module>
+      </modules>
     </profile>
   </profiles>
 </project>

@@ -33,7 +33,7 @@ import lombok.Getter;
  * transitions in {@code normalHardTtlMs} and {@code normalSoftTtlMs}.
  */
 @Getter
-@Builder
+@Builder(toBuilder = true)
 public class CacheEntry {
 
   private final Object value;

@@ -33,6 +33,7 @@ public class CacheSyncProperties {
   private String exchangeName = "hotkey.sync.exchange";
   private String queuePrefix = "hotkey.sync";
 
+  private boolean autoStartup = true;
   private int dedupWindowSeconds = 10;
   private int dedupMaxSize = 10_000;
   private int warmupJitterMs = 100;

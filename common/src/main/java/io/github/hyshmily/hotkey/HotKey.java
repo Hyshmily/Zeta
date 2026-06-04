@@ -387,6 +387,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void broadcastAllLocalRulesManually() {
+    requireCache();
     hotKeyCache.broadcastAllLocalRulesManually();
   }
 

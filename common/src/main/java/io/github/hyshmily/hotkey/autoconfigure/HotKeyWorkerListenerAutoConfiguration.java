@@ -33,10 +33,12 @@ import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -49,7 +51,7 @@ import org.springframework.data.redis.core.RedisTemplate;
  * Exchange: {@code hotkey.worker.exchange} (FanoutExchange)
  * Queue: {@code hotkey.worker:{instanceId}}
  */
-@AutoConfiguration
+@AutoConfiguration(after = { RedisAutoConfiguration.class, RabbitAutoConfiguration.class })
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @ConditionalOnBean(RedisTemplate.class)
 @ConditionalOnProperty(prefix = "hotkey.worker-listener", name = "enabled", havingValue = "true")
@@ -113,6 +115,7 @@ public class HotKeyWorkerListenerAutoConfiguration {
   ) {
     SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
     container.setQueueNames(properties.getQueueName());
+    container.setAutoStartup(properties.isAutoStartup());
     container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
     container.setConcurrentConsumers(properties.getConcurrentConsumers());
     container.setMessageListener(

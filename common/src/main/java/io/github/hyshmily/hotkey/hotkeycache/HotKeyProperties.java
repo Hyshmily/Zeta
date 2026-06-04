@@ -77,6 +77,9 @@ public class HotKeyProperties {
   @Min(1)
   private int executorQueueCapacity = 2000;
 
+  @Min(1)
+  private int expelledQueueCapacity = 50_000;
+
   @Deprecated
   private int decayPeriod = 20;
 
