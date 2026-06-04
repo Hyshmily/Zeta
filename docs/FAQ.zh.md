@@ -142,24 +142,24 @@ Worker 检测到 Key X 是全局热 Key → 广播 HOT
 
 1. **t=0：** Key X，从未被访问过，在全部 10 个节点上同时遭遇并发请求。
 
-2. **t=+1μs：** 每个节点的 `SingleFlight`（`SingleFlight.java`）激活。在每个节点上，只有 **第一个** 请求真正执行 reader（L2 加载）。该节点上的所有其他并发请求阻塞在同一个 `CompletableFuture.join()` 上。后端（Redis/DB）最多收到 N 个并发请求（每节点一个），而不是 `N × 并发数`。
+2. **t=+1μs：** 每个节点的 `SingleFlight`（`SingleFlight.java`）激活。压力测试中 `singleFlight_extremeDedup` 实现 **99.0% 去重**（100 线程 → 1 次执行），`singleFlight_cacheStampede` 实现 **93.7% 去重**（50 key × 20 线程 → 63 次执行，数据：`hotkey-stress-*.json`）。后端最多收到 ~N 个并发请求（每节点一个），而非 `N × 并发数`。
 
-3. **t+~5ms：** 每个节点上的第一个请求完成。数据返回给该节点上所有等待的调用方。值以 **普通** TTL（默认 5min）缓存在 L1 中——本地 HeavyKeeper 尚未触发。
+3. **t+~5ms 至 t+~20ms：** 各节点首个请求完成（取决于 L2 延迟）。数据返回给所有等待调用方。值以 **普通 TTL**（默认 5min，详见 `HotKeyProperties.java:87`）缓存在 L1——本地 HeavyKeeper 尚未触发。
 
-4. **t+100ms：** `HotKeyReporter` 刷新第一批计数到 Worker。
+4. **t+100ms：** `HotKeyReporter` 刷新第一批计数到 Worker（`reportIntervalMs=100`，详见 `HotKeyProperties.java:148`）。`reporter_highFrequency` 压力测试确认 **3M ops/s 吞吐，零数据丢失**。
 
-5. **t+~1100ms：** 累积足够数据后，Worker 的滑动窗口触发 → 状态机 → 广播 HOT。
+5. **t+~2.1s：** 连续 20 个热评估 tick（confirmCount=20 × 100ms/tick = 2000ms，详见 `WorkerProperties.java:74,124`），状态机转为 CONFIRMED_HOT 并广播。
 
-6. **t+~1200ms：** 所有节点收到 HOT → 立即将 Key 升级为热 TTL（1h）并开启软过期。
+6. **t+~2.2s：** 所有节点收到 HOT（Worker 决策投递基准测试显示传播 P50=62.6ms，数据：`benchmark-worker-decision-*.json`）→ 升级 Key 为热 TTL（1h，详见 `HotKeyProperties.java:91`）并开启软过期。
 
 **影响分析：**
 
 | 组件             | 状态                                                |
 | ---------------- | --------------------------------------------------- |
-| 后端（Redis/DB） | 安全——`SingleFlight` 将并发读取限制在 ≤ N（节点数） |
-| L1 Caffeine      | 每个节点都以普通 TTL 缓存了值                       |
-| p99 延迟         | 第一波请求看到正常的 L2 延迟。不会超时级联。        |
-| 热 Key 保护      | 延迟约 1.2s，但普通 TTL 提供了基线保护              |
+| 后端（Redis/DB） | 安全——SingleFlight 限制读取 ≤ N（实测去重率 93.7-99.0%） |
+| L1 Caffeine      | 每个节点都以普通 TTL（5min）缓存了值                  |
+| p99 延迟         | 第一波请求见单次 L2 延迟。`timeoutContention` 测试：50 线程下 0 超时 |
+| 热 Key 保护      | 延迟约 2s，但普通 TTL 提供了基线保护                  |
 
 **没有 SingleFlight，** 这个场景会向后端发送 `N × 并发数` 的请求量，可能引发级联故障。SingleFlight 是关键安全网——通过 `hotkey.local.inflight-*` 属性配置（默认值：`max-size=50000`, `ttl=5s`, `timeout=3s`）。
 

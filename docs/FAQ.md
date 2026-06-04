@@ -142,24 +142,24 @@ These keys would **never** trigger the sliding-window threshold (default 1000 QP
 
 1. **t=0:** Key X, never seen before, suddenly receives concurrent requests on all 10 nodes simultaneously.
 
-2. **t=+1μs:** Every node's `SingleFlight` (`SingleFlight.java`) activates. On each node, only the **first** request executes the reader (L2 load). All other concurrent requests on that node block on the same `CompletableFuture.join()`. The backend (Redis/DB) receives at most `N` concurrent requests (one per node), not `N × concurrent_requests`.
+2. **t=+1μs:** Every node's `SingleFlight` (`SingleFlight.java`) activates. In stress tests, `singleFlight_extremeDedup` achieves **99.0% dedup** (100 threads → 1 execution) and `singleFlight_cacheStampede` achieves **93.7% dedup** (50 keys × 20 threads → 63 executions, data: `hotkey-stress-*.json`). The backend receives ~N concurrent requests (one per node), not `N × concurrent_requests`.
 
-3. **t+~5ms:** The first request on each node completes. Data is returned to all waiting callers on that node. The value is cached in L1 with **normal** TTL (5min default) — local HeavyKeeper has not yet triggered.
+3. **t+~5ms to t+~20ms:** The first request on each node completes (L2 latency dependent). Data returned to all waiting callers. Value cached in L1 with **normal TTL** (5min default per `HotKeyProperties.java:87`) — local HeavyKeeper not yet triggered.
 
-4. **t+100ms:** `HotKeyReporter` flushes the first batch of counts to the Worker.
+4. **t+100ms:** `HotKeyReporter` flushes the first batch of counts to the Worker (`reportIntervalMs=100` per `HotKeyProperties.java:148`). Stress test `reporter_highFrequency` confirms **3M ops/s throughput with zero data loss**.
 
-5. **t+~1100ms:** After accumulating enough data, the Worker's sliding window triggers → state machine → broadcasts HOT.
+5. **t+~2.1s:** After 20 consecutive hot evaluations (confirmCount=20 × 100ms per tick = 2000ms, per `WorkerProperties.java:74,124`), state machine transitions to CONFIRMED_HOT and broadcasts.
 
-6. **t+~1200ms:** All nodes receive HOT → immediately upgrade the key to hot TTL (1h) and enable soft expiration.
+6. **t+~2.2s:** All nodes receive HOT (Worker decision benchmark shows propagation P50=62.6ms, data: `benchmark-worker-decision-*.json`) → upgrade key to hot TTL (1h per `HotKeyProperties.java:91`) and enable soft expiration.
 
 **Impact analysis:**
 
 | Component          | Status                                                            |
 | ------------------ | ----------------------------------------------------------------- |
-| Backend (Redis/DB) | Safe — `SingleFlight` limits concurrent reads to ≤ N (node count) |
-| L1 Caffeine        | Each node has the value cached with normal TTL                    |
-| p99 latency        | First-wave requests see normal L2 latency. No timeout cascade.    |
-| Hot-key protection | Delayed by ~1.2s, but normal TTL provides baseline protection     |
+| Backend (Redis/DB) | Safe — SingleFlight limits reads to ≤ N (proven 93.7-99.0% dedup) |
+| L1 Caffeine        | Each node has the value cached with normal TTL (5min)             |
+| p99 latency        | First-wave requests see single L2 latency. `timeoutContention` test: 0 timeouts under 50-thread load |
+| Hot-key protection | Delayed by ~2s, but normal TTL provides baseline protection       |
 
 **Without SingleFlight**, this scenario would send `N × concurrent_requests` to the backend, which could cause a cascading failure. SingleFlight is the critical safety net here — it is configured via `hotkey.local.inflight-*` properties (default: `max-size=50000`, `ttl=5s`, `timeout=3s`).
 
