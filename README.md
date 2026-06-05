@@ -1,7 +1,7 @@
 # HotKey
 
 <p align="center">
-  <img src="img/HotKey.png" alt="HotKey" width="500">
+  <img src="img/HotKey.png" alt="HotKey" width="300">
 </p>
 
 <p align="center">
@@ -551,7 +551,7 @@ public User getUser(Long id) { ... }
 Supports `READ` / `WRITE` / `INVALIDATE` operations with SpEL dynamic cache keys.
 Enable by adding `spring-boot-starter-aop` and setting `hotkey.annotation.enabled=true`.
 
-**Fallback on hot key:** When `fallbackEnabled=true` and HeavyKeeper detects the key as hot (in Top-K), the aspect calls the fallback *before* the normal cache path — bypassing the supplier entirely. Falls back on `RuntimeException` too. Two resolution modes: SpEL (`fallback` attribute) or naming convention (`{methodName}Fallback`).
+**Fallback on hot key:** When `fallbackEnabled=true` and HeavyKeeper detects the key as hot (in Top-K), the aspect calls the fallback _before_ the normal cache path — bypassing the supplier entirely. Falls back on `RuntimeException` too. Two resolution modes: SpEL (`fallback` attribute) or naming convention (`{methodName}Fallback`).
 
 **Key config**
 

@@ -1,7 +1,7 @@
 # HotKey
 
 <p align="center">
-  <img src="img/HotKey.png" alt="HotKey" width="500">
+  <img src="img/HotKey.png" alt="HotKey" width="300">
 </p>
 
 <p align="center">
@@ -103,11 +103,11 @@ hotKey.get(key, supplier)
 
 各组件故障表现：
 
-| 故障组件               | 影响                            | 恢复方式              |
-| ---------------------- | ------------------------------- | --------------------- |
+| 故障组件               | 影响                                | 恢复方式              |
+| ---------------------- | ----------------------------------- | --------------------- |
 | HotKey 自身            | L1 不可用；异常或热点降级（若启用） | 应用重启              |
-| L2 后端 (Redis/DB/API) | 每次请求穿透到调用方兜底        | 后端恢复后自动恢复    |
-| L1 Caffeine OOM / 驱逐 | 单 key 被驱逐，下次读取重新回源 | 自动（Caffeine 内部） |
+| L2 后端 (Redis/DB/API) | 每次请求穿透到调用方兜底            | 后端恢复后自动恢复    |
+| L1 Caffeine OOM / 驱逐 | 单 key 被驱逐，下次读取重新回源     | 自动（Caffeine 内部） |
 
 > 调用方始终需要处理 `Optional.empty()` — HotKey 不会隐藏后端故障。
 
@@ -589,15 +589,15 @@ public User getUser(Long id) { ... }
 
 **注解属性：**
 
-| 属性         | 类型            | 默认值 | 说明                                                                                                             |
-| ------------ | --------------- | ------ | ---------------------------------------------------------------------------------------------------------------- |
-| `key`        | `String`        | 必填   | SpEL 表达式，方法参数通过 `#paramName` 引用。需要 `-parameters` 编译标志；无调试信息时回退到 `arg0, arg1, ...`。 |
-| `operation`  | `OperationType` | `READ` | `READ` / `WRITE` / `INVALIDATE`                                                                                  |
-| `hardTtlMs`  | `long`          | `0`    | 硬 TTL 覆盖（毫秒）。`0` = 使用配置默认值。                                                                      |
-| `softTtlMs`  | `long`          | `0`    | 软 TTL 覆盖（毫秒）。`0` = 使用配置默认值。                                                                      |
-| `softExpire`      | `boolean` | `true`   | 是否在 READ 时启用 stale-while-revalidate。`false` 时等同于 `get()`。                                            |
-| `fallbackEnabled` | `boolean` | `false`  | 是否启用降级。触发条件：HeavyKeeper 判为热点 key 或 `RuntimeException`。                                        |
-| `fallback`         | `String`  | `""`     | SpEL 降级表达式。为空 → `{methodName}Fallback` 命名约定（同一 Bean 上查找方法）。                               |
+| 属性              | 类型            | 默认值  | 说明                                                                                                             |
+| ----------------- | --------------- | ------- | ---------------------------------------------------------------------------------------------------------------- |
+| `key`             | `String`        | 必填    | SpEL 表达式，方法参数通过 `#paramName` 引用。需要 `-parameters` 编译标志；无调试信息时回退到 `arg0, arg1, ...`。 |
+| `operation`       | `OperationType` | `READ`  | `READ` / `WRITE` / `INVALIDATE`                                                                                  |
+| `hardTtlMs`       | `long`          | `0`     | 硬 TTL 覆盖（毫秒）。`0` = 使用配置默认值。                                                                      |
+| `softTtlMs`       | `long`          | `0`     | 软 TTL 覆盖（毫秒）。`0` = 使用配置默认值。                                                                      |
+| `softExpire`      | `boolean`       | `true`  | 是否在 READ 时启用 stale-while-revalidate。`false` 时等同于 `get()`。                                            |
+| `fallbackEnabled` | `boolean`       | `false` | 是否启用降级。触发条件：HeavyKeeper 判为热点 key 或 `RuntimeException`。                                         |
+| `fallback`        | `String`        | `""`    | SpEL 降级表达式。为空 → `{methodName}Fallback` 命名约定（同一 Bean 上查找方法）。                                |
 
 > **热点降级说明：** 当 `fallbackEnabled=true` 且 HeavyKeeper 检测到 key 为热点时，Aspect 在缓存路径前调用降级——跳过 supplier 直接返回。`RuntimeException` 同样触发降级。两种解析模式：SpEL（`fallback` 属性）优先，其次为命名约定 `{methodName}Fallback`。
 
