@@ -28,7 +28,8 @@ import java.util.Collection;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -39,9 +40,10 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * <p>
  * Does NOT handle HOT/COOL — those are Worker's responsibility via {@code WorkerBroadcaster}.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class CacheSyncPublisher {
+
+  private static final HotKeyLogger log = new DefaultLogger(CacheSyncPublisher.class);
 
   private final RabbitTemplate rabbitTemplate;
   private final CacheSyncProperties properties;

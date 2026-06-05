@@ -24,7 +24,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -35,6 +34,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Auto‑configuration for the <b>hot‑key Worker</b>.
@@ -59,7 +60,6 @@ import org.springframework.scheduling.annotation.Scheduled;
  *   <li>Scheduled tasks for stale‑state eviction and Top‑K validation.</li>
  * </ul>
  */
-@Slf4j
 @AutoConfiguration
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @ConditionalOnProperty(prefix = "hotkey.worker", name = "enabled", havingValue = "true")
@@ -67,6 +67,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 @EnableScheduling
 @RequiredArgsConstructor
 public class WorkerAutoConfiguration {
+  private static final HotKeyLogger log = new DefaultLogger(WorkerAutoConfiguration.class);
 
   private final WorkerProperties properties;
 

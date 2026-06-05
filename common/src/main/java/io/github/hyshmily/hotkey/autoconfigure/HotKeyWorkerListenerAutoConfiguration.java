@@ -48,7 +48,8 @@ import org.springframework.data.redis.core.RedisTemplate;
  * <p>
  * Activates when RedisTemplate is present and {@code hotkey.worker-listener.enabled=true}.
  * <p>
- * Exchange: {@code hotkey.worker.exchange} (FanoutExchange)
+ * Exchange: {@code hotkey.broadcast.exchange} (FanoutExchange) — must match
+ * {@code hotkey.worker.messaging.broadcast-exchange} on the Worker side.
  * Queue: {@code hotkey.worker:{instanceId}}
  */
 @AutoConfiguration(after = { RedisAutoConfiguration.class, RabbitAutoConfiguration.class })

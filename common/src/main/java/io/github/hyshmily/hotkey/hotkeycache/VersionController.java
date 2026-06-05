@@ -16,13 +16,14 @@
 package io.github.hyshmily.hotkey.hotkeycache;
 
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
-
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 /**
  * Manages per-key version numbers using either Redis INCR (primary) or a
@@ -31,8 +32,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * normal (positive) Redis versions — this guarantees correct broadcast
  * ordering without flag-aware comparison logic.
  */
-@Slf4j
+@RequiredArgsConstructor
 public class VersionController {
+
+  private static final HotKeyLogger log = new DefaultLogger(VersionController.class);
 
   /**
    * Result of a version allocation.
@@ -46,17 +49,6 @@ public class VersionController {
   private final Optional<StringRedisTemplate> redisTemplate;
   private final int versionKeyTtlMinutes;
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
-
-  /**
-   * Construct a VersionController backed by the given Redis template.
-   *
-   * @param redisTemplate        optional Redis template (empty = always fallback)
-   * @param versionKeyTtlMinutes TTL in minutes for the Redis version key
-   */
-  public VersionController(Optional<StringRedisTemplate> redisTemplate, int versionKeyTtlMinutes) {
-    this.redisTemplate = redisTemplate;
-    this.versionKeyTtlMinutes = versionKeyTtlMinutes;
-  }
 
   /**
    * Atomically increment the version counter for the given cache key.

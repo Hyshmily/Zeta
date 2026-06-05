@@ -17,8 +17,10 @@ package io.github.hyshmily.hotkey;
 
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import io.github.hyshmily.hotkey.rule.Rule;
+import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
@@ -300,6 +302,7 @@ public class HotKey {
     return workerTopKAlgorithm != null ? workerTopKAlgorithm.total() : 0L;
   }
 
+  //-------------------------------------------------------------------------------------
   /**
    * Add a key pattern to the blacklist. Keys matching this pattern will be
    * blocked from cache get/put operations (returns {@link Optional#empty()}).

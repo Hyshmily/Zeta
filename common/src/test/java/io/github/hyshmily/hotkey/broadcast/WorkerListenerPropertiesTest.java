@@ -14,7 +14,7 @@ class WorkerListenerPropertiesTest {
   void shouldHaveDefaultValues() {
     WorkerListenerProperties props = new WorkerListenerProperties();
     assertThat(props.isEnabled()).isFalse();
-    assertThat(props.getExchangeName()).isEqualTo("hotkey.worker.exchange");
+    assertThat(props.getExchangeName()).isEqualTo("hotkey.broadcast.exchange");
     assertThat(props.getQueuePrefix()).isEqualTo("hotkey.worker");
     assertThat(props.getWarmupJitterMs()).isEqualTo(100);
   }

@@ -26,7 +26,8 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
 import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Manages hard and soft TTL computation for {@link CacheEntry} instances.
@@ -34,9 +35,10 @@ import lombok.extern.slf4j.Slf4j;
  * Hard TTL controls Caffeine eviction; soft TTL controls stale-while-revalidate background refresh.
  * Each has a normal-key and hot-key variant, with an optional override taking precedence over the default.
  */
-@Slf4j
 @Getter
 public class CacheExpireManager {
+
+  private static final HotKeyLogger log = new DefaultLogger(CacheExpireManager.class);
 
   private final Cache<String, Object> caffeineCache;
   private final Executor executor;

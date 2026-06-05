@@ -76,7 +76,7 @@
 | 属性                                                  | 默认值                     | 说明                                                   |
 | ----------------------------------------------------- | -------------------------- | ------------------------------------------------------ |
 | `hotkey.worker-listener.enabled`                      | `false`                    | 启用接收 Worker HOT/COOL 决策                          |
-| `hotkey.worker-listener.exchange-name`                | `hotkey.worker.exchange`   | Worker 广播 Fanout 交换机名称                           |
+| `hotkey.worker-listener.exchange-name`                | `hotkey.broadcast.exchange`   | Worker 广播 Fanout 交换机名称                           |
 | `hotkey.worker-listener.queue-prefix`                 | `hotkey.worker`            | 队列名前缀；完整名称 = `{prefix}:{instanceId}`         |
 | `hotkey.worker-listener.warmup-jitter-ms`             | `100`                      | 处理 Worker 消息前的随机 jitter（防止惊群效应）         |
 | `hotkey.worker-listener.concurrent-consumers`         | `2`                        | Worker 监听队列 RabbitMQ 消费者并发数                    |

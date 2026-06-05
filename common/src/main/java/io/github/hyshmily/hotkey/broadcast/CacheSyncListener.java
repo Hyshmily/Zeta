@@ -30,7 +30,8 @@ import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import org.springframework.amqp.core.Message;
 
 /**
@@ -48,9 +49,10 @@ import org.springframework.amqp.core.Message;
  * Ack is decoupled from the cache mutation (the mutation is jittered) to prevent message
  * redelivery and to avoid thundering herds on Redis.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class CacheSyncListener {
+
+  private static final HotKeyLogger log = new DefaultLogger(CacheSyncListener.class);
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 

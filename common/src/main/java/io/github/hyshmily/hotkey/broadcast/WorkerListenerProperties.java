@@ -22,7 +22,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 /**
  * Configuration for listening to Worker hot/cool decisions.
  * <p>
- * Exchange: {@code hotkey.worker.exchange} (FanoutExchange)
+ * Exchange: {@code hotkey.broadcast.exchange} (FanoutExchange) — must match
+ * {@code hotkey.worker.messaging.broadcast-exchange} on the Worker side.
  * Queue: {@code hotkey.worker:{instanceId}}
  */
 @Data
@@ -30,7 +31,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class WorkerListenerProperties {
 
   private boolean enabled = false;
-  private String exchangeName = "hotkey.worker.exchange";
+  private String exchangeName = "hotkey.broadcast.exchange";
   private String queuePrefix = "hotkey.worker";
 
   private boolean autoStartup = true;

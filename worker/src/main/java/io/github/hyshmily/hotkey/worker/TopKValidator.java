@@ -20,7 +20,6 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
 import java.util.Map;
@@ -31,6 +30,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.SOURCE_TOPK_PRE_WARM;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Validates Top-K candidates and triggers pre-warming broadcasts for stable hot keys.
@@ -42,9 +43,9 @@ import static io.github.hyshmily.hotkey.constant.HotKeyConstants.SOURCE_TOPK_PRE
  * <p>This hysteresis prevents flapping: a key that briefly enters and leaves the Top-K won't
  * trigger unnecessary broadcasts.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class TopKValidator {
+  private static final HotKeyLogger log = new DefaultLogger(TopKValidator.class);
 
   /** Algorithm that tracks approximate Top-K frequencies. */
   private final TopK topK;

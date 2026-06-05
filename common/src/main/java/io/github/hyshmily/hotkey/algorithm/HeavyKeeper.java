@@ -24,7 +24,8 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 import lombok.AllArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking.
@@ -37,8 +38,9 @@ import lombok.extern.slf4j.Slf4j;
  * <p>This implementation is thread-safe: per-bucket {@code synchronized}
  * blocks for sketch updates and a shared lock for the sorted TopK heap.
  */
-@Slf4j
 public class HeavyKeeper implements TopK {
+
+  private static final HotKeyLogger log = new DefaultLogger(HeavyKeeper.class);
 
   private static final int LOOKUP_TABLE_SIZE = 256;
   private static final int LOCK_STRIPES = 256;

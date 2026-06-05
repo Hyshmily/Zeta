@@ -77,6 +77,17 @@ hotKey.get(key, supplier)
   ├─ L1 MISS → supplier()
   │    ├─ Returns data → hot key? → write L1 (with appropriate TTL) + return
   │    ├─ Returns null → Optional.empty() → caller's orElseGet/orElseThrow
+  │    │                     (null = miss — HotKey follows Caffeine's convention.
+  │    │                      If your backend stores nullable values, wrap them
+  │    │                      with a sentinel Object at the caller layer.)
+  │    │
+  │    │                      Example: Redis stores a nullable value
+  │    │                      private static final Object NULL_SENTINEL = new Object();
+  │    │                      Optional<Object> r = hotKey.get("k", () -> {
+  │    │                          Object val = redisTemplate.opsForValue().get("k");
+  │    │                          return val != null ? val : NULL_SENTINEL;
+  │    │                      });
+  │    │                      Object actual = r.orElse(null); // sentinel back to null
   │    └─ Throws → SingleFlight.load() catches → Optional.empty() → caller's fallback
   └─ HotKey itself fails → exception propagates to caller (no auto fallback)
 ```
@@ -587,7 +598,7 @@ Each instance declares its own queue (`hotkey.sync:<instance-id>`) bound to a fa
 - **`TYPE_RULES_SYNC`** — Rule set replacement. The body is a JSON-serialized `List<Rule>`; the receiver calls `RuleMatcher.syncRules()` to atomically swap the local rule list. No broadcast storm: `syncRules` saves to Redis if available but does **not** re-broadcast.
 
 > [!SECURITY]
-> All three RabbitMQ exchanges (`hotkey.sync.exchange`, `hotkey.report.exchange`, `hotkey.worker.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*` properties:
+> All three RabbitMQ exchanges (`hotkey.sync.exchange`, `hotkey.report.exchange`, `hotkey.broadcast.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*` properties:
 >
 > ```yaml
 > spring:

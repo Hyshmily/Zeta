@@ -28,7 +28,8 @@ import java.io.IOException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import org.springframework.amqp.core.Message;
 
 /**
@@ -43,9 +44,10 @@ import org.springframework.amqp.core.Message;
  * Acknowledge is sent before the cache update (the update is jittered to spread
  * Redis load), so ack and data mutation are decoupled.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class WorkerListener {
+
+  private static final HotKeyLogger log = new DefaultLogger(WorkerListener.class);
 
   private final Cache<String, Object> caffeineCache;
   private final Function<String, Object> redisLoader;

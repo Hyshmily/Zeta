@@ -21,10 +21,11 @@ import io.github.hyshmily.hotkey.broadcast.WorkerMessage;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Publishes HOT and COOL decisions to all application instances via the
@@ -34,13 +35,15 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * <b>decision version</b> (worker‑local counter) that is used by receivers to
  * discard stale or out‑of‑order messages.
  *
- * <p>HOT messages are delivered to every instance's dedicated queue through a
- * topic exchange; the routing key follows the pattern {@code hot.<appName>}.
- * COOL messages use {@code cool.<appName>}.
+ * <p>Messages are delivered to every instance's dedicated queue through a
+ * fanout exchange ({@code hotkey.broadcast.exchange}).  Routing keys follow
+ * the patterns {@code hot.<appName>} and {@code cool.<appName>} but are
+ * ignored by the fanout exchange — the receiver differentiates message type
+ * via the {@code AMQP_HEADER_TYPE} header.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class WorkerBroadcaster {
+  private static final HotKeyLogger log = new DefaultLogger(WorkerBroadcaster.class);
 
   private final RabbitTemplate rabbitTemplate;
   private final String broadcastExchange;

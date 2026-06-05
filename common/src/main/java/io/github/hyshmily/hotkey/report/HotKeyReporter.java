@@ -29,7 +29,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Periodically aggregates per-key access counts and publishes them
@@ -45,9 +46,10 @@ import lombok.extern.slf4j.Slf4j;
  * batches after a configurable timeout, and the Caffeine eviction
  * provides natural rate-limiting.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class HotKeyReporter {
+
+  private static final HotKeyLogger log = new DefaultLogger(HotKeyReporter.class);
 
   private final Cache<String, LongAdder> counters = Caffeine.newBuilder()
     .expireAfterAccess(30, TimeUnit.SECONDS)

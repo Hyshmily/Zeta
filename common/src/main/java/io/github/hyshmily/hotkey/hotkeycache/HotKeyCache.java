@@ -34,7 +34,8 @@ import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -46,9 +47,10 @@ import lombok.extern.slf4j.Slf4j;
  * cross-instance synchronization via {@link CacheSyncPublisher}.
  * All write operations are transaction-aware via {@link TransactionSupport}.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class HotKeyCache {
+
+  private static final HotKeyLogger log = new DefaultLogger(HotKeyCache.class);
 
   private final TopK hotKeyDetector;
   private final Cache<String, Object> caffeineCache;

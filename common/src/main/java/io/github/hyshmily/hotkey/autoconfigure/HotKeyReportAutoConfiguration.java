@@ -19,8 +19,9 @@ import io.github.hyshmily.hotkey.constant.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.report.ReportPublisher;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.core.FanoutExchange;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
@@ -30,16 +31,12 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-
 /**
  * Autoconfiguration for hot key reporting (app instance → Worker).
  * <p>
  * Activates when RabbitTemplate is present and {@code hotkey.report.enabled} is true (default).
  * Creates {@link ReportPublisher} (RabbitMQ sender) and {@link HotKeyReporter} (batch aggregator).
  */
-@Slf4j
 @AutoConfiguration(after = RabbitAutoConfiguration.class)
 @ConditionalOnBean(RabbitTemplate.class)
 @ConditionalOnProperty(prefix = "hotkey.report", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -47,13 +44,13 @@ import java.util.concurrent.ScheduledExecutorService;
 public class HotKeyReportAutoConfiguration {
 
   /**
-   * Declare the FanoutExchange for report broadcasting (app → Worker).
-   * Every app instance publishes to this exchange; the Worker binds a queue
-   * to consume all report messages.
+   * Declare the DirectExchange for report routing (app → Worker).
+   * Routing keys ({@code report.<appName>.<shardIndex>}) ensure each shard's
+   * messages land on the correct worker queue.
    */
   @Bean
-  public FanoutExchange hotkeyReportExchange(HotKeyProperties properties) {
-    return new FanoutExchange(properties.getReportExchange(), true, false);
+  public DirectExchange hotkeyReportExchange(HotKeyProperties properties) {
+    return new DirectExchange(properties.getReportExchange(), true, false);
   }
 
   /**
@@ -85,7 +82,6 @@ public class HotKeyReportAutoConfiguration {
       properties.getQueueCapacity(),
       properties.getQueueOfferTimeoutMs(),
       properties.effectiveConsumerCount()
-
     );
   }
 

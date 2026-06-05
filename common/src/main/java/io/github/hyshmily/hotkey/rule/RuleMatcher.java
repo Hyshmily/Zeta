@@ -27,8 +27,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -43,9 +44,10 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * survive as long as at least one node holds them and can be re‑broadcast
  * through the {@link CacheSyncPublisher}.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class RuleMatcher {
+
+  private static final HotKeyLogger log = new DefaultLogger(RuleMatcher.class);
 
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().configure(
     DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,

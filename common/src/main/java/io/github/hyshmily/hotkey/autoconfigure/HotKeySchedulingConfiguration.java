@@ -20,7 +20,8 @@ import io.github.hyshmily.hotkey.algorithm.TopK;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -37,12 +38,13 @@ import org.springframework.scheduling.annotation.Scheduled;
  *
  * <p>Enabled by default; controlled via {@code hotkey.scheduling.enabled}.
  */
-@Slf4j
 @AutoConfiguration(after = HotKeyAutoConfiguration.class)
 @ConditionalOnProperty(name = "hotkey.scheduling.enabled", havingValue = "true", matchIfMissing = true)
 @ConditionalOnBean(TopK.class)
 @EnableScheduling
 public class HotKeySchedulingConfiguration {
+
+  private static final HotKeyLogger log = new DefaultLogger(HotKeySchedulingConfiguration.class);
 
   private final List<TopK> topKInstances;
 

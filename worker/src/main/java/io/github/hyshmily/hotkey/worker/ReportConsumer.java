@@ -23,8 +23,9 @@ import io.github.hyshmily.hotkey.entity.HotKeyDecision;
 import io.github.hyshmily.hotkey.report.ReportMessage;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Worker‑side message consumer that receives batched per‑key access counts
@@ -53,9 +54,9 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * key always reaches the same worker, guaranteeing correct per‑key state
  * without cross‑worker coordination.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class ReportConsumer {
+  private static final HotKeyLogger log = new DefaultLogger(ReportConsumer.class);
 
   private final SlidingWindowDetector detector;
   private final HotKeyStateMachine stateMachine;

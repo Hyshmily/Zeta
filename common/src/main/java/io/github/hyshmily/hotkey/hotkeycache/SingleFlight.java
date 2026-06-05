@@ -22,7 +22,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
+
 
 /**
  * Deduplicates concurrent in-flight loads for the same key.
@@ -31,8 +33,9 @@ import lombok.extern.slf4j.Slf4j;
  * the same {@link CompletableFuture}. Upon completion (or timeout), the
  * dedup entry is evicted so the next caller can retry.
  */
-@Slf4j
 public class SingleFlight {
+
+  private static final HotKeyLogger log = new DefaultLogger(SingleFlight.class);
 
   private final Cache<String, CompletableFuture<Object>> inflightLoads;
   private final Executor executor;
@@ -84,12 +87,14 @@ public class SingleFlight {
       );
 
     future.whenComplete((v, e) -> {
-      inflightLoads.invalidate(cacheKey);
-
-      if (e != null) {
-        log.debug("singleflight load failed: key={}", cacheKey, e);
-      } else if (v == null) {
-        log.debug("singleflight returned null: key={}", cacheKey);
+      try {
+        if (e != null) {
+          log.debug("singleflight load failed: key={}", cacheKey, e);
+        } else if (v == null) {
+          log.debug("singleflight returned null: key={}", cacheKey);
+        }
+      } finally {
+        inflightLoads.invalidate(cacheKey);
       }
     });
 

@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.rule;
 
+import java.util.UUID;
 import java.util.regex.Pattern;
 import lombok.Data;
 
@@ -40,7 +41,7 @@ public class Rule {
 
   /** Action to take when a key matches a rule. */
   public enum RuleAction {
-    /** Reject access and throw {@link io.github.hyshmily.hotkey.HotKeyBlockedException}. */
+    /** Reject access and throw {@link io.github.hyshmily.hotkey.exception.HotKeyBlockedException}. */
     BLOCK,
     /** Allow access but skip app-to-Worker reporting. */
     ALLOW_NO_REPORT,
@@ -48,6 +49,8 @@ public class Rule {
     ALLOW,
   }
 
+  private String id;
+  private long createdAt;
   private RuleType type;
   private String pattern;
   private RuleAction action;
@@ -61,6 +64,8 @@ public class Rule {
    * Pre-compiles the regex immediately for REGEX type rules.
    */
   public Rule(RuleType type, String pattern, RuleAction action) {
+    this.id = UUID.randomUUID().toString();
+    this.createdAt = System.currentTimeMillis();
     this.type = type;
     this.pattern = pattern;
     this.action = action;

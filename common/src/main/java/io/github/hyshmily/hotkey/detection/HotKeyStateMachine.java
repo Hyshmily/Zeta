@@ -27,7 +27,7 @@ import lombok.RequiredArgsConstructor;
  *   COLD
  *    │  hotStreak >= confirmCount  (consecutive hot windows)
  *    ▼
- *   CONFIRMED_HOT  ─────────────────────────────┐
+ *   CONFIRMED_HOT   ─────────────────────────────┐
  *    │                                           │
  *    │  coolStreak >= (coolCount - grace)        │ hotStreak > 0 (revive during pre-cool)
  *    ▼                                           │

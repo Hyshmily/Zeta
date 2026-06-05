@@ -76,7 +76,7 @@
 | Property                                           | Default                     | Description                                                            |
 | -------------------------------------------------- | --------------------------- | ---------------------------------------------------------------------- |
 | `hotkey.worker-listener.enabled`                   | `false`                     | Enable listening for Worker HOT/COOL decisions                         |
-| `hotkey.worker-listener.exchange-name`             | `hotkey.worker.exchange`    | Fanout exchange name for Worker broadcasts                             |
+| `hotkey.worker-listener.exchange-name`             | `hotkey.broadcast.exchange` | Fanout exchange name for Worker broadcasts                             |
 | `hotkey.worker-listener.queue-prefix`              | `hotkey.worker`             | Queue name prefix; full name = `{prefix}:{instanceId}`                 |
 | `hotkey.worker-listener.warmup-jitter-ms`          | `100`                       | Random jitter before processing Worker messages (prevents herd)        |
 | `hotkey.worker-listener.concurrent-consumers`      | `2`                         | Number of concurrent RabbitMQ consumers for Worker listener queue      |

@@ -36,7 +36,8 @@ import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -60,11 +61,12 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
  * Worker is active ({@code hotkey.worker.enabled=true}). It runs when
  * Worker is disabled or the property is absent.
  */
-@Slf4j
 @AutoConfiguration(after = RedisAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "hotkey.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
 @EnableConfigurationProperties(HotKeyProperties.class)
 public class HotKeyAutoConfiguration {
+
+  private static final HotKeyLogger log = new DefaultLogger(HotKeyAutoConfiguration.class);
 
   /**
    * Create the app-side TopK detector (HeavyKeeper).

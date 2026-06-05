@@ -17,9 +17,11 @@ package io.github.hyshmily.hotkey.hotkeycache;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import lombok.extern.slf4j.Slf4j;
+
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Executes tasks with awareness of Spring transaction boundaries.
@@ -31,8 +33,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *   <li>{@link #runNowOrAfterCommit} executes synchronously on the caller's thread</li>
  * </ul>
  */
-@Slf4j
 public final class TransactionSupport {
+
+  private static final HotKeyLogger log = new DefaultLogger(TransactionSupport.class);
 
   private TransactionSupport() {}
 

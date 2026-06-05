@@ -18,7 +18,8 @@ package io.github.hyshmily.hotkey.report;
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.ROUTING_KEY_REPORT;
 
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
@@ -26,9 +27,10 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * Each report is routed to the shard-specific queue via the
  * {@code report.<appName>.<shardIndex>} routing key.
  */
-@Slf4j
 @RequiredArgsConstructor
 public class ReportPublisher {
+
+  private static final HotKeyLogger log = new DefaultLogger(ReportPublisher.class);
 
   private final RabbitTemplate rabbitTemplate;
   private final String reportExchange;
