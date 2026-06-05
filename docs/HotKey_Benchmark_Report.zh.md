@@ -192,7 +192,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 **总计**：120,000 操作, 5,316 OPS, 22,574 ms 总时长。
 
-> † `decisions_sent=0`：该阶段 4.8s 窗口内无 key 跨过 HOT/COOL 阈值（Worker 确认时长默认 2s，加上 100ms 上报间隔，不足以完成持续热点检测）。`failed=3`：3 条陈旧报告（超过 5s）被 `ReportConsumer` 按设计丢弃。JSON 中 `errors=0` 确认并非测试失败。
+> † `decisions_sent=0`：该阶段模拟 Worker 使用 HeavyKeeper(K=200) 独立计数。20,000 次读取分散在 10,000 个热 key 上，每个 key 仅被读约 2 次，远低于阈值 50，因此无 key 达到 HOT 判定条件。`failed=3`：模拟 Worker 内 `workerTopK.add()` 与 `workerTopK.list()` 迭代间的 3 次非线程安全异常（catch 捕获计入 `workerDecisionsFailed`，未影响主测试断言）。JSON 中 `errors=0` 确认并非测试失败。
 
 跨实例同步 P50=0.38ms 验证 RabbitMQ Fanout 非性能瓶颈。混合压力（读+写+同步+Worker 决策）下 L1 命中率 13.4% 符合预期——并发写入导致频繁缓存失效。
 

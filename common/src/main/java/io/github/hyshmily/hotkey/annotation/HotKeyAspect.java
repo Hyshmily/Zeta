@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.hotkey.annotation;
 
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.Optional;
@@ -57,6 +60,8 @@ import org.springframework.expression.spel.support.StandardEvaluationContext;
 @RequiredArgsConstructor
 public class HotKeyAspect {
 
+  private static final HotKeyLogger log = new DefaultLogger(HotKeyAspect.class);
+
   private final io.github.hyshmily.hotkey.HotKey hotKeyFacade;
   private final SpelExpressionParser parser = new SpelExpressionParser();
   private final ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();
@@ -85,7 +90,14 @@ public class HotKeyAspect {
    * {@link Optional}, the result is passed through directly; otherwise the
    * optional is unwrapped.
    */
-  private Object handleRead(ProceedingJoinPoint pjp, String cacheKey, HotKey hotKey) {
+  private Object handleRead(ProceedingJoinPoint pjp, String cacheKey, HotKey hotKey) throws Throwable {
+    if (hotKeyFacade.isLocalHotKey(cacheKey) && hotKey.fallbackEnabled()) {
+      Object fb = resolveFallback(pjp, hotKey);
+      if (fb != null) {
+        return fb;
+      }
+    }
+
     Supplier<Object> loader = () -> {
       try {
         return pjp.proceed();
@@ -97,10 +109,29 @@ public class HotKeyAspect {
     };
 
     Optional<Object> result;
-    if (hotKey.softExpire()) {
-      result = hotKeyFacade.getWithSoftExpire(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
+    if (!hotKey.fallbackEnabled()) {
+      if (hotKey.softExpire()) {
+        result = hotKeyFacade.getWithSoftExpire(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
+      } else {
+        result = hotKeyFacade.get(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
+      }
     } else {
-      result = hotKeyFacade.get(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
+      try {
+        if (hotKey.softExpire()) {
+          result = hotKeyFacade.getWithSoftExpire(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
+        } else {
+          result = hotKeyFacade.get(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
+        }
+      } catch (RuntimeException e) {
+        log.warn("[HotKey] fallback triggered for key={}, operation=READ", cacheKey);
+        Object fallbackValue;
+        try {
+          fallbackValue = resolveFallback(pjp, hotKey);
+        } catch (Throwable ignored) {
+          throw e;
+        }
+        result = Optional.ofNullable(fallbackValue);
+      }
     }
 
     MethodSignature sig = (MethodSignature) pjp.getSignature();
@@ -185,5 +216,66 @@ public class HotKeyAspect {
   @SuppressWarnings("unchecked")
   private static <T extends Throwable> RuntimeException sneakyThrow(Throwable t) throws T {
     throw (T) t;
+  }
+
+  private Object resolveFallback(ProceedingJoinPoint pjp, HotKey hotKey) throws Throwable {
+    if (!hotKey.fallback().isEmpty()) {
+      return resolveSpelFallback(pjp, hotKey.fallback());
+    }
+    return invokeFallbackMethod(pjp);
+  }
+
+  private Object resolveSpelFallback(ProceedingJoinPoint pjp, String expression) {
+    Method method = ((MethodSignature) pjp.getSignature()).getMethod();
+    String[] paramNames = paramNamesCache.computeIfAbsent(method, m -> {
+      String[] names = parameterNameDiscoverer.getParameterNames(m);
+      if (names == null) {
+        names = new String[m.getParameterCount()];
+        for (int i = 0; i < names.length; i++) {
+          names[i] = "arg" + i;
+        }
+      }
+      return names;
+    });
+    Object[] args = pjp.getArgs();
+    StandardEvaluationContext context = new StandardEvaluationContext();
+    for (int i = 0; i < args.length; i++) {
+      context.setVariable(paramNames[i], args[i]);
+    }
+    return parser.parseExpression(expression).getValue(context);
+  }
+
+  private Object invokeFallbackMethod(ProceedingJoinPoint pjp) throws Throwable {
+    MethodSignature sig = (MethodSignature) pjp.getSignature();
+    Method originalMethod = sig.getMethod();
+    String fallbackMethodName = originalMethod.getName() + "Fallback";
+    Object target = pjp.getTarget();
+    Object[] args = pjp.getArgs();
+
+    Method fallbackMethod = findFallbackMethod(
+      target.getClass(),
+      fallbackMethodName,
+      originalMethod.getParameterTypes()
+    );
+    if (fallbackMethod == null) {
+      return null;
+    }
+    try {
+      return fallbackMethod.invoke(target, args);
+    } catch (InvocationTargetException e) {
+      throw e.getCause();
+    }
+  }
+
+  private Method findFallbackMethod(Class<?> clazz, String name, Class<?>... paramTypes) {
+    try {
+      return clazz.getMethod(name, paramTypes);
+    } catch (NoSuchMethodException e) {
+      Class<?> superclass = clazz.getSuperclass();
+      if (superclass != null && superclass != Object.class) {
+        return findFallbackMethod(superclass, name, paramTypes);
+      }
+      return null;
+    }
   }
 }

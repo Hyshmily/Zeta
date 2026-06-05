@@ -27,7 +27,7 @@
                                              │ isLocalHotKey()?
                                              ↓
                                   ┌─────────────────────┐
-                                  │  根据 KeyState 选择  │
+                                  │  根据 KeyState 选择 │
                                   │  TTL:               │
                                   │  HOT   → 热点 TTL   │
                                   │  other → 普通 TTL   │
@@ -111,7 +111,7 @@ invalidateAll(cacheKeys)
 ```
           ┌──────────────┐   L1 命中┌-──────────────┐
           │   请求       │ ───────→ │ softExpireAt  │
-          │             │ ←───────  │  时间检查     |
+          │              │ ←─────── │  时间检查     |
           └──────┬───────┘  过期    └───────┬───────┘
                  │ 软过期？                │ 过期？
                  ↓ true                     ↓ yes
@@ -238,15 +238,15 @@ CacheEntry 维护**两个独立的版本空间**：
                                       │   →NORMAL）                  │
                                       │         │                    │
                                       │         ↓                    │
-                                       │  WorkerBroadcaster           │
+                                      │  WorkerBroadcaster           │
                                       │  （HOT/COOL 决策 via         │
-                                      │   hotkey.broadcast.exchange） │
+                                      │   hotkey.broadcast.exchange）│
                                       │         │                    │
                                       └─────────┼────────────────────┘
                                                 │ RabbitMQ fanout
                                                 ↓
                               ┌─────────────────────────────────────┐
-                              │  所有 App 实例                       │
+                              │  所有 App 实例                      │
                               │                                     │
                               │  WorkerListener（hotkey.worker-     │
                               │  listener.*）处理 HOT/COOL：        │

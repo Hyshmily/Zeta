@@ -68,6 +68,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     hotKey.invalidate("anno:invalidate:static");
     hotKey.invalidate("anno:read:nosoft");
     hotKey.invalidate("anno:spel:" + TEST_ARG);
+    hotKey.invalidate("anno:write:nosoft");
+    hotKey.invalidate("anno:invalidate:nosoft");
+    hotKey.invalidate("anno:read:ttl0");
   }
 
   private static final String TEST_ARG = "spelValue";
@@ -138,6 +141,48 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek("anno:spel:key-b")).isPresent();
   }
 
+  @Test
+  void writeOperation_withZeroTtl_shouldUseDefaults() {
+    String result = annotatedService.writeWithStaticKey("ttl0-value");
+    assertThat(result).isEqualTo("ttl0-value");
+
+    assertThat(hotKey.peek("anno:write:static")).isEmpty();
+  }
+
+  @Test
+  void writeOperation_withSoftExpireFalse_shouldIgnore() {
+    String result = annotatedService.writeWithoutSoftExpire("nosoft-write");
+    assertThat(result).isEqualTo("nosoft-write");
+
+    assertThat(hotKey.peek("anno:write:nosoft")).isEmpty();
+  }
+
+  @Test
+  void invalidateOperation_withSoftExpireFalse_shouldIgnore() {
+    hotKey.putThrough("anno:invalidate:nosoft", "pre-value", () -> {});
+    await().atMost(Duration.ofSeconds(5))
+      .untilAsserted(() ->
+        assertThat(hotKey.peek("anno:invalidate:nosoft")).isPresent());
+
+    String result = annotatedService.invalidateWithoutSoftExpire("post-value");
+    assertThat(result).isEqualTo("post-value");
+
+    assertThat(hotKey.peek("anno:invalidate:nosoft")).isEmpty();
+  }
+
+  @Test
+  void readOperation_withZeroTtl_shouldFallbackToDefaults() {
+    String result = annotatedService.readWithZeroTtl(SUPPLIER_RESULT);
+    assertThat(result).isEqualTo(SUPPLIER_RESULT);
+
+    String cached = annotatedService.readWithZeroTtl("should-not-execute");
+    assertThat(cached).isEqualTo(SUPPLIER_RESULT);
+
+    hotKey.invalidate("anno:read:ttl0");
+    String reloaded = annotatedService.readWithZeroTtl("fresh-value");
+    assertThat(reloaded).isEqualTo("fresh-value");
+  }
+
   @Service
   public static class AnnotatedService {
 
@@ -189,6 +234,34 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
       softTtlMs = 30000
     )
     public String readWithSpelKey(String arg, String supplierResult) {
+      return supplierResult;
+    }
+
+    @io.github.hyshmily.hotkey.annotation.HotKey(
+      key = "'anno:write:nosoft'",
+      operation = OperationType.WRITE,
+      softExpire = false
+    )
+    public String writeWithoutSoftExpire(String value) {
+      return value;
+    }
+
+    @io.github.hyshmily.hotkey.annotation.HotKey(
+      key = "'anno:invalidate:nosoft'",
+      operation = OperationType.INVALIDATE,
+      softExpire = false
+    )
+    public String invalidateWithoutSoftExpire(String value) {
+      return value;
+    }
+
+    @io.github.hyshmily.hotkey.annotation.HotKey(
+      key = "'anno:read:ttl0'",
+      operation = OperationType.READ,
+      hardTtlMs = 0,
+      softTtlMs = 0
+    )
+    public String readWithZeroTtl(String supplierResult) {
       return supplierResult;
     }
   }

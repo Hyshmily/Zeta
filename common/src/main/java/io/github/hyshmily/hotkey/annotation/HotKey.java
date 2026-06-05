@@ -37,6 +37,18 @@ import java.lang.annotation.Target;
  * parameter-driven cache keys such as {@code 'user:' + #id}. The <tt>-parameters</tt>
  * compiler flag is required (enabled by default in the parent POM).
  * <p>
+ * When {@link #fallbackEnabled} is {@code true}, READ operations that throw
+ * {@link RuntimeException} (e.g. blacklist block, supplier failure) are
+ * intercepted and a fallback value is returned instead.  Two fallback modes
+ * are supported:
+ * <ul>
+ *   <li><b>SpEL expression</b> — set {@link #fallback} to a SpEL expression;
+ *       method parameters are available as {@code #paramName} variables.</li>
+ *   <li><b>Naming convention</b> — when {@link #fallback} is empty, the aspect
+ *       looks for a method named {@code {originalMethodName}Fallback} on the
+ *       same bean with identical parameter types.</li>
+ * </ul>
+ * <p>
  * Requires {@code hotkey.annotation.enabled=true} to activate.
  */
 @Target(ElementType.METHOD)
@@ -70,6 +82,25 @@ public @interface HotKey {
    * Defaults to {@code true}. When disabled, behaves as a plain {@code get()}.
    */
   boolean softExpire() default true;
+
+  /**
+   * Whether to enable fallback handling for READ operations.
+   * <p>
+   * When {@code true}, {@link RuntimeException} thrown during cache get
+   * (including blacklist block, supplier failure) is intercepted and
+   * a fallback value is returned.  Defaults to {@code false}.
+   */
+  boolean fallbackEnabled() default false;
+
+  /**
+   * SpEL expression for the fallback value.
+   * <p>
+   * When non-empty, evaluated as the fallback value.
+   * When empty and {@link #fallbackEnabled} is {@code true},
+   * discovers {@code {methodName}Fallback} on the same bean.
+   */
+  String fallback() default "";
+
 
   /**
    * The type of cache operation.

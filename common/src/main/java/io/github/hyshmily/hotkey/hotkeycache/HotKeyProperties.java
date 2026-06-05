@@ -163,4 +163,6 @@ public class HotKeyProperties {
 
   /** Explicit instance ID for queue naming. Falls back to {@code server.port-HOSTNAME} (or {@code server.port-UUID} if {@code HOSTNAME} is unset) if empty. */
   private String instanceId = "";
+
+
 }

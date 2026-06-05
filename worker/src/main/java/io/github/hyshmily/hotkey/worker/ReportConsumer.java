@@ -20,12 +20,12 @@ import static io.github.hyshmily.hotkey.constant.HotKeyConstants.SOURCE_SLIDING_
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.entity.HotKeyDecision;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import io.github.hyshmily.hotkey.report.ReportMessage;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Worker‑side message consumer that receives batched per‑key access counts
@@ -56,6 +56,7 @@ import io.github.hyshmily.hotkey.log.HotKeyLogger;
  */
 @RequiredArgsConstructor
 public class ReportConsumer {
+
   private static final HotKeyLogger log = new DefaultLogger(ReportConsumer.class);
 
   private final SlidingWindowDetector detector;
@@ -120,6 +121,10 @@ public class ReportConsumer {
             broadcaster.broadcastCool(key);
             // Update the TopK tracking accordingly.
             topKValidator.markCooled(key);
+          }
+          case PING -> {
+            // No state change, but we can use this opportunity to refresh the
+            // key's position in TopK based on the latest access count.
           }
           case NONE -> {
             // No state transition occurred – the key remains in its

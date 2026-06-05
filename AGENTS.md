@@ -139,7 +139,7 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
 4. **Consider all cases before change.** Before any code modification, consider edge cases, race conditions, failure modes, backward compatibility. Verify with tests or reasoning that the change is safe. Reference rules 2 and 3.
 5. **No git without asking.** Never use `git checkout`, `git restore`, `git reset`, or any destructive git commands. Ask the author first.
 
-6. **Stress test every core change.** Any code change affecting `TopK`, `SingleFlight`, `HotKeyCache`, `VersionGuard`, `CacheSyncPublisher/Listener`, `WorkerListener`, `HotKeyStateMachine`, `CacheExpireManager`, or `HotKeyReporter` must pass `HotKeyStressTest` (13 scenarios). The stress test covers:
+6. **Stress test every core change.** Any code change affecting `TopK`, `SingleFlight`, `HotKeyCache`, `VersionGuard`, `CacheSyncPublisher/Listener`, `WorkerListener`, `HotKeyStateMachine`, `CacheExpireManager`, or `HotKeyReporter` must pass `HotKeyStressTest` (31 scenarios). The stress test covers:
    - **TopK**: no duplicate keys under 20-thread contention, bounded size ≤ K
    - **SingleFlight**: extreme dedup (50 threads, 1 execution), no `Recursive update` race
    - **HotKeyCache**: concurrent get/invalidate/peek consistency; logical expiry (B path, pure logical expiry)
@@ -166,3 +166,22 @@ Original hotkey project (v0.0.4) is available at `D:\hotkey-master-v0.0.4` for c
 - **Hot path rule:** Never log at WARN/INFO in per-request code paths. Use DEBUG or TRACE.
 - **Loop rule:** Never log inside `forEach` loops — aggregate and log once after the loop
 - **String rule:** Truncate unbounded `Collectors.joining()` output with `.limit(N)` + `...` suffix
+
+## Annotation @HotKey Integration Tests
+
+Located in `HotKeyAnnotationIntegrationIT` (Testcontainers, tagged `docker`):
+
+| Test | Verifies |
+|------|----------|
+| `readOperation_shouldCacheViaGetWithSoftExpire` | READ caches via `getWithSoftExpire`, invalidate forces reload |
+| `readOperation_withSoftExpireFalse_shouldUseGet` | `softExpire=false` uses `get()` not `getWithSoftExpire` |
+| `writeOperation_shouldMutateAndInvalidate` | WRITE + default TTLs, L1 cleared after mutation |
+| `invalidateOperation_shouldClearCacheAndProceed` | INVALIDATE clears L1 then executes method |
+| `readOperation_shouldUseSpelKey` | SpEL key resolves to correct cache key |
+| `readOperation_differentSpelArgs_shouldUseDifferentKeys` | Different SpEL args → different keys |
+| `writeOperation_withZeroTtl_shouldUseDefaults` | WRITE silently ignores `hardTtlMs=0, softTtlMs=0` (no error) |
+| `writeOperation_withSoftExpireFalse_shouldIgnore` | WRITE silently ignores `softExpire=false` |
+| `invalidateOperation_withSoftExpireFalse_shouldIgnore` | INVALIDATE silently ignores `softExpire=false` |
+| `readOperation_withZeroTtl_shouldFallbackToDefaults` | READ `hardTtlMs=0, softTtlMs=0` falls back to `HotKeyProperties` default TTLs, cache hit works |
+
+**Known limitations:** `handleWrite` (line 122) ignores `HotKey.hardTtlMs()` and `HotKey.softExpire()`; `handleInvalidate` (line 150) ignores `HotKey.softExpire()`. These are by design — WRITE always uses `putBeforeInvalidate` (no TTL params), INVALIDATE always calls `invalidate(key)`.

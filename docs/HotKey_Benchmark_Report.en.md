@@ -192,7 +192,7 @@ Hot read L1 hit rate ~50.8% confirms accurate hot key detection. Cold read rate 
 
 **Total**: 120,000 ops, 5,316 overall OPS, 22,574 ms total duration.
 
-> † `decisions_sent=0`: no keys crossed the HOT/COOL threshold within this phase's 4.8s window (Worker confirm-duration defaults to 2s, plus 100ms report interval — insufficient time for sustained heat detection). `failed=3`: 3 stale reports (>5s old) discarded by `ReportConsumer` as designed. `errors=0` in the JSON confirms this is not a test failure.
+> † `decisions_sent=0`: the simulated Worker uses its own HeavyKeeper(K=200). 20,000 reads across 10,000 hot keys yields ~2 reads per key — well below the threshold of 50, so no key reaches HOT condition. `failed=3`: 3 non-thread-safe exceptions between `workerTopK.add()` and `workerTopK.list()` iteration caught by the simulated Worker's catch block (counted in `workerDecisionsFailed`, does not affect test assertion). `errors=0` in the JSON confirms this is not a test failure.
 
 Cross-instance sync P50=0.38ms confirms RabbitMQ fanout is not a bottleneck. Combined stress (reads + writes + sync + Worker decisions) shows 13.4% L1 hit rate — expected under concurrent write-heavy invalidation.
 

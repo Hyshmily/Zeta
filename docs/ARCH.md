@@ -117,9 +117,9 @@ invalidateAll(cacheKeys)
                  ↓ true                     ↓ yes
             Return stale          triggerAsyncRefresh
             value +                ├─ refreshLimiter.tryAcquire()
-            add(key,1) +          │  (Semaphore, max concurrency)
-            record(key)           │  └─ On busy → skip (retry next get)
-                                    └─ Async (hotKeyExecutor):
+            add(key,1) +           │  (Semaphore, max concurrency)
+            record(key)            │  └─ On busy → skip (retry next get)
+                                   └─ Async (hotKeyExecutor):
                                          L2 read → Caffeine.put
                                          + update softExpireAt
                                          + preserve hardTtlMs
@@ -146,9 +146,9 @@ When `hotkey.sync.enabled=true`, all write operations (`putThrough`, `putBeforeI
 │  Instance A  │ ──── CacheSyncPublisher ─────→ │ hotkey.sync       │
 │  (writer)    │                                │  (fanout exchange)│
 └──────────────┘                                └────────┬──────────┘
-                                                          │
-                                          ┌─────────────┼─────────────┐
-                                          ↓             ↓             ↓
+                                                         │
+                                           ┌─────────────┼─────────────┐
+                                           ↓             ↓             ↓
                                      ┌──────────┐  ┌──────────┐  ┌──────────┐
                                      │Instance B│  │Instance C│  │   ...    │
                                      │Listener  │  │Listener  │  │Listener  │
@@ -239,9 +239,9 @@ For cluster-wide hot key detection, app instances periodically report access cou
                                       │   →NORMAL)                   │
                                       │         │                    │
                                       │         ↓                    │
-                                       │  WorkerBroadcaster           │
+                                      │  WorkerBroadcaster           │
                                       │  (HOT/COOL decisions via     │
-                                      │   hotkey.broadcast.exchange)  │
+                                      │   hotkey.broadcast.exchange) │
                                       │         │                    │
                                       └─────────┼────────────────────┘
                                                 │ RabbitMQ fanout

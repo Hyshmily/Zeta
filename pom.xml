@@ -48,6 +48,7 @@
     <spring-boot.version>3.5.3</spring-boot.version>
     <testcontainers.version>1.21.4</testcontainers.version>
     <skipITs>true</skipITs>
+
   </properties>
 
   <dependencyManagement>

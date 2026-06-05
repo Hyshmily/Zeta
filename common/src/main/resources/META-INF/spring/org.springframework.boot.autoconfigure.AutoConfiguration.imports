@@ -7,3 +7,4 @@ io.github.hyshmily.hotkey.autoconfigure.HotKeyWorkerListenerAutoConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeyReportAutoConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeySchedulingConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeyAnnotationAutoConfiguration
+

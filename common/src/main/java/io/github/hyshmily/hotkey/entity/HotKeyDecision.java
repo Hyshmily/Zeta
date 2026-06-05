@@ -30,6 +30,7 @@ public record HotKeyDecision(DecisionType type, String cacheKey) {
   public enum DecisionType {
     HOT,
     COOL,
+    PING,
     NONE,
   }
 

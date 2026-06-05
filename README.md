@@ -1,8 +1,18 @@
 # HotKey
 
-[![JitPack](https://jitpack.io/v/Hyshmily/HotKey.svg)](https://jitpack.io/#Hyshmily/HotKey) [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Java](https://img.shields.io/badge/Java-25-orange)](https://openjdk.java.net/) [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen)](https://spring.io/projects/spring-boot)
+<p align="center">
+  <img src="img/HotKey.png" alt="HotKey" width="500">
+</p>
+
+<p align="center">
+  <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-25-orange" alt="Java"></a>
+  <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
+</p>
 
 [**中文版**](README.zh.md)
+
 // TO-DO: Worker Ping Heartbeat Mechanism
 
 ### Foreword: Why HotKey?
@@ -89,14 +99,14 @@ hotKey.get(key, supplier)
   │    │                      });
   │    │                      Object actual = r.orElse(null); // sentinel back to null
   │    └─ Throws → SingleFlight.load() catches → Optional.empty() → caller's fallback
-  └─ HotKey itself fails → exception propagates to caller (no auto fallback)
+  └─ HotKey itself fails → exception → fallback (if @HotKey fallbackEnabled=true) → caller
 ```
 
 Component failure behavior:
 
 | Failed component           | Impact                                                     | Recovery                            |
 | -------------------------- | ---------------------------------------------------------- | ----------------------------------- |
-| HotKey itself              | L1 unavailable; exception propagates to caller             | Restart app                         |
+| HotKey itself              | L1 unavailable; exception or hot-key fallback (if enabled) | Restart app                         |
 | L2 backend (Redis/DB/API)  | Every request hits caller's fallback                       | Auto-recover on backend restoration |
 | L1 Caffeine OOM / eviction | Individual keys evicted, next read re-fetches via supplier | Automatic (Caffeine internal)       |
 
@@ -540,6 +550,8 @@ public User getUser(Long id) { ... }
 
 Supports `READ` / `WRITE` / `INVALIDATE` operations with SpEL dynamic cache keys.
 Enable by adding `spring-boot-starter-aop` and setting `hotkey.annotation.enabled=true`.
+
+**Fallback on hot key:** When `fallbackEnabled=true` and HeavyKeeper detects the key as hot (in Top-K), the aspect calls the fallback *before* the normal cache path — bypassing the supplier entirely. Falls back on `RuntimeException` too. Two resolution modes: SpEL (`fallback` attribute) or naming convention (`{methodName}Fallback`).
 
 **Key config**
 

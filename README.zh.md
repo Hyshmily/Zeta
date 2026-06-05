@@ -1,8 +1,18 @@
 # HotKey
 
-[![JitPack](https://jitpack.io/v/Hyshmily/HotKey.svg)](https://jitpack.io/#Hyshmily/HotKey) [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Java](https://img.shields.io/badge/Java-25-orange)](https://openjdk.java.net/) [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen)](https://spring.io/projects/spring-boot)
+<p align="center">
+  <img src="img/HotKey.png" alt="HotKey" width="500">
+</p>
+
+<p align="center">
+  <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-25-orange" alt="Java"></a>
+  <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
+</p>
 
 [**English**](README.md)
+
 // TO-DO: Worker Ping心跳机制
 
 ### 写在最前面:为什么我(以下称作者)会创建HotKey？
@@ -88,14 +98,14 @@ hotKey.get(key, supplier)
   │    │                      });
   │    │                      Object actual = r.orElse(null); // sentinel 转回 null
   │    └─ 抛出异常 → SingleFlight.load() 捕获 → Optional.empty() → 调用方兜底
-  └─ HotKey 自身异常 → 异常传播到调用方（无自动兜底）
+  └─ HotKey 自身异常 → 异常 → 降级（@HotKey fallbackEnabled=true 时）→ 调用方
 ```
 
 各组件故障表现：
 
 | 故障组件               | 影响                            | 恢复方式              |
 | ---------------------- | ------------------------------- | --------------------- |
-| HotKey 自身            | L1 不可用；异常传播到调用方     | 应用重启              |
+| HotKey 自身            | L1 不可用；异常或热点降级（若启用） | 应用重启              |
 | L2 后端 (Redis/DB/API) | 每次请求穿透到调用方兜底        | 后端恢复后自动恢复    |
 | L1 Caffeine OOM / 驱逐 | 单 key 被驱逐，下次读取重新回源 | 自动（Caffeine 内部） |
 
@@ -585,7 +595,11 @@ public User getUser(Long id) { ... }
 | `operation`  | `OperationType` | `READ` | `READ` / `WRITE` / `INVALIDATE`                                                                                  |
 | `hardTtlMs`  | `long`          | `0`    | 硬 TTL 覆盖（毫秒）。`0` = 使用配置默认值。                                                                      |
 | `softTtlMs`  | `long`          | `0`    | 软 TTL 覆盖（毫秒）。`0` = 使用配置默认值。                                                                      |
-| `softExpire` | `boolean`       | `true` | 是否在 READ 时启用 stale-while-revalidate。`false` 时等同于 `get()`。                                            |
+| `softExpire`      | `boolean` | `true`   | 是否在 READ 时启用 stale-while-revalidate。`false` 时等同于 `get()`。                                            |
+| `fallbackEnabled` | `boolean` | `false`  | 是否启用降级。触发条件：HeavyKeeper 判为热点 key 或 `RuntimeException`。                                        |
+| `fallback`         | `String`  | `""`     | SpEL 降级表达式。为空 → `{methodName}Fallback` 命名约定（同一 Bean 上查找方法）。                               |
+
+> **热点降级说明：** 当 `fallbackEnabled=true` 且 HeavyKeeper 检测到 key 为热点时，Aspect 在缓存路径前调用降级——跳过 supplier 直接返回。`RuntimeException` 同样触发降级。两种解析模式：SpEL（`fallback` 属性）优先，其次为命名约定 `{methodName}Fallback`。
 
 **三种操作模式：**
 
