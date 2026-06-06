@@ -825,34 +825,7 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 
 当 classpath 包含 `spring-boot-starter-actuator` 时，HotKey Endpoint 自动注册在 `/actuator/hotkey`。通过 `management.endpoints.web.exposure.include=health,info,hotkey` 启用。
 
-```json
-{
-  "topK": [{ "key": "cache:shop:17", "count": 1523 }],
-  "topKCount": 1,
-  "totalRequests": 158392,
-  "l1CacheSize": 87,
-  "l1MaxSize": 1000,
-  "inflightSize": 3,
-  "recentlyExpelled": ["cache:shop:5", "cache:shop:99"],
-  "workerTopK": [{ "key": "cache:shop:17", "count": 8921 }],
-  "workerTopKCount": 1,
-  "workerTotalRequests": 784512,
-  "workerRecentlyExpelled": ["cache:shop:3"]
-}
-```
-
-| 字段                        | 说明                                    |
-| --------------------------- | --------------------------------------- |
-| `topK`                      | 应用端 TopK 热点 key 列表（按计数降序） |
-| `topKCount`                 | 应用端热点 key 数量                     |
-| `totalRequests`             | 应用端累计经过检测的请求总数            |
-| `l1CacheSize` / `l1MaxSize` | L1 Caffeine 当前大小 / 最大限制         |
-| `inflightSize`              | 当前 inflight dedup 中的请求数          |
-| `recentlyExpelled`          | 应用端最近被挤出 TopK 的 key            |
-| `workerTopK`                | Worker 端（集群维度）TopK 热点 key      |
-| `workerTopKCount`           | Worker 端热点 key 数量                  |
-| `workerTotalRequests`       | Worker 端累计检测请求总数               |
-| `workerRecentlyExpelled`    | Worker 端最近被挤出 TopK 的 key         |
+响应分为三个板块 — **local**（应用端检测、缓存、上报、规则、TTL、版本）、**worker**（集群 TopK、健康状态、状态机）和 **sync**（广播去重）。完整响应格式和字段说明见 [MONITOR.zh.md](docs/MONITOR.zh.md)（[英文版](docs/MONITOR.md)）。
 
 ## 架构和设计细节
 
