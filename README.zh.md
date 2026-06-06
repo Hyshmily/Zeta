@@ -15,35 +15,33 @@
 
 ### 写在最前面:为什么我(以下称作者)会创建HotKey？
 
-在实际开发中，作者曾频繁面对大量缓存 Key 的处理问题。Caffeine、Redis、数据库多级缓存的手动维护，逻辑过期的设定，热点 Key 的提前统计与预热——每一个环节都极其繁琐。更棘手的是，在分布式集群环境下，如何让热点 Key 在各个节点间正确共享、避免高并发下的缓存穿透，成了每个开发者绕不开的痛点。
+在实际开发中，作者曾频繁面对大量缓存 Key 的处理问题。Caffeine、Redis、数据库多级缓存的手动维护，逻辑过期的设定，热点 Key 的提前统计与预热——每一个环节都极其繁琐。甚至在分布式集群环境下，如何让热点 Key 在各个节点间正确共享、避免高并发下的缓存穿透，成为了分布式系统老生常谈的问题。
 
 我最初的想法很简单：找一个开箱即用的解决方案，或者至少封装一个顺手的多级缓存工具类。
 
 遗憾的是，现有的方案要么过于复杂、部署运维成本极高，要么已经停止维护（如京东 [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 项目，截止 2026 年 5 月早已已不再更新），难以满足轻量、易用的实际需求。尽管作者许多想法与其不谋而合，但其庞大复杂的架构让我决心另辟蹊径。
 
-这就是 HotKey 诞生的背景:一个致力于轻量、便携、开箱即用的热点 Key 缓存框架。
+这就是 HotKey 诞生的背景:一个致力于轻量、便携、开箱即用的分布式热点 Key 缓存框架。
 
 过去、现在、未来，它都将保持开源。
 
 > [!TIP]
-> **开始之前，有疑问？** 参见 [FAQ.zh.md](docs/FAQ.zh.md) —— 关于本地 vs 中央检测、Worker 延迟、MQ 吞吐量等常见问题的解答。
+> **开始之前，有疑问？** 参见 [FAQ.zh.md](docs/FAQ.zh.md) —— 作者将关于本地 vs 中央检测、Worker 延迟、MQ 吞吐量等常见问题的解答。
 
 ### 简介
 
-HotKey 是一个[高性能](docs/HotKey_Benchmark_Report.zh.md)、低成本、轻量级的分布式多级缓存框架
+HotKey 是一个[高性能](docs/HotKey_Benchmark_Report.zh.md)、低成本、轻量级的分布式多级缓存框架。
 
-HotKey 不是一个通用的本地缓存——它是一个轻量级热点 key 自动检测与多级缓存预热框架，附带可选的分布式同步和可选的专用 Worker 节点以实现集群维度的热点共识。
+大多数本地缓存将所有条目一律存入 Caffeine。但在海量 key 下：
 
-大多数本地缓存方案会把每个访问过的 key 都存入 Caffeine。数据量小时没问题，但在海量 key 场景下：
+- **内存浪费** — 大多数 key 只读一次
+- **广播风暴** — 全量缓存 = 全量失效，广播随 key 数线性增长
 
-- **内存浪费** — 绝大多数 key 只读一次就再也不会访问
-- **广播风暴** — 全量缓存要求全量失效，广播量随 key 数线性增长
+而HotKey 的策略：**仅缓存真正的热点数据。**
 
-HotKey 的做法不同——**只缓存真正热门的 key。**
+通过 [HeavyKeeper](https://github.com/go-kratos/aegis)（Count-Min Sketch 变体）概率检测频率。**读路径**：所有加载的 key 进 L1，但**差异化 TTL**——热点 key 缓存更久（1h），普通 key 更快过期（5min）。**写路径**：`putThrough` 无论是否热点，直接写 L1 并广播——调用方拥有写入权。
 
-通过 [HeavyKeeper](https://github.com/go-kratos/aegis)（Count-Min Sketch 变体）概率检测访问频率。**读路径**上，所有加载的 key 都会进入本地 Caffeine L1，但使用**差异化 TTL**——热点 key 缓存更久（默认 1h），普通 key 更快过期（5min）。可选通过 RabbitMQ 跨实例同步热点 key。**写路径**上，`putThrough` 无论 key 是否为热点，都直接写入 L1 并广播——调用方显式拥有写入权。非热点 key 的读取仍然通过调用方提供的 `Supplier<T>` 获取并返回值——只是在 L1 中使用较短 TTL。
-
-如需**集群维度热点检测**，可部署专用 Worker 节点聚合所有实例的访问报告——解决单实例盲区问题（"被同一个 pod 访问 100 次"与"被 100 个 pod 各访问 1 次"在本地无法区分）。
+**集群维度热点检测**：部署 Worker 节点聚合所有实例的访问报告——解决"被同一 pod 访问 100 次"与"被 100 个 pod 各访问 1 次"在本地无法区分的问题。
 
 ### 适用场景
 
@@ -74,57 +72,58 @@ HotKey 的做法不同——**只缓存真正热门的 key。**
 - **可配置线程池** — 专用 `TaskExecutor`，有界队列
 - **Spring Boot 自动配置** — 引入依赖即用，零样板代码
 
-## 降级
+## 延迟与性能
 
-HotKey 通过 `supplier` 回调形成三级降级链路：
+<details>
+<summary><b>点击展开——完整全链路延迟分解表及极限调优说明</b></summary>
 
-```
-hotKey.get(key, supplier)
-  ├─ L1(Caffeine) 命中 → 直接返回
-  ├─ L1 未命中 → supplier()
-  │    ├─ 返回数据 → 热 key？ → 写 L1（使用相应 TTL）+ 返回
-  │    ├─ 返回 null → Optional.empty() → 调用方 orElseGet/orElseThrow
-  │    │                     (null = miss。HotKey 遵循 Caffeine 的约定；
-  │    │                      如果你的后端存储了可空值，
-  │    │                      请在调用方用 sentinel 对象包装。)
-  │    │
-  │    │                      示例：Redis 中存放了可空值
-  │    │                      private static final Object NULL_SENTINEL = new Object();
-  │    │                      Optional<Object> r = hotKey.get("k", () -> {
-  │    │                          Object val = redisTemplate.opsForValue().get("k");
-  │    │                          return val != null ? val : NULL_SENTINEL;
-  │    │                      });
-  │    │                      Object actual = r.orElse(null); // sentinel 转回 null
-  │    └─ 抛出异常 → SingleFlight.load() 捕获 → Optional.empty() → 调用方兜底
-  └─ HotKey 自身异常 → 异常 → 降级（@HotKey fallbackEnabled=true 时）→ 调用方
-```
+详见[基准测试报告](docs/HotKey_Benchmark_Report.zh.md)。每跳延迟（Redis + RabbitMQ 容器，10 阶段，4.5 万 ops，0 错误）：
 
-各组件故障表现：
+| 路径                                | 说明                                                | P50           | P95           | P99           |
+| ----------------------------------- | --------------------------------------------------- | ------------- | ------------- | ------------- |
+| L1 命中（Caffeine 查找）            | 纯内存查找，无网络 I/O                              | **0.001 ms**  | 0.004 ms      | 0.018 ms      |
+| L1 未命中 → Redis → L1              | Redis GET RTT + SingleFlight 去重 + L1 回填         | 0.51 ms       | 0.94 ms       | 2.26 ms       |
+| AMQP 发布                           | RabbitMQ 通道写入（内存到内存）                     | 0.02 ms       | 0.11 ms       | 0.27 ms       |
+| AMQP 端到端投递                     | 发布 + 代理路由 + 消费者投递                        | 0.07 ms       | 0.27 ms       | 0.48 ms       |
+| Redis GET 往返                      | 纯网络往返                                          | 0.62 ms       | 1.60 ms       | 4.01 ms       |
+| Worker 决策（不开状态机）           | 滑动窗口检测 → 直接广播 HOT，含 jitter+AMQP+L1 轮询 | **51.64 ms**  | 97.75 ms      | 104.16 ms     |
+| 状态机流水线（开状态机，20 确认窗） | 20 确认窗(2s) + AMQP 决策广播 + L1 提升             | **1,983 ms**  | 2,015 ms      | 2,015 ms      |
+| **全链路（不开状态机）**            | **分步构成见下方**                                  | **155.81 ms** | **202.14 ms** | **212.69 ms** |
+| ┣ L1 未命中 → Redis → L1            | 与 Phase 6 同路径                                   | 0.51 ms       | —             | —             |
+| ┣ 上报批处理等待                    | `report-interval-ms=100ms` 半区间平均               | ~50 ms        | —             | —             |
+| ┣ AMQP 上报投递（App→Worker）       | flush() → Report Exchange → Worker 消费             | ~1 ms         | —             | —             |
+| ┣ Worker 滑动窗口 + TopK            | 内存操作                                            | <1 ms         | —             | —             |
+| ┣ AMQP 决策广播（Worker→App）       | WorkerListener 收到决定                             | ~1 ms         | —             | —             |
+| ┗ 余量（调度 + 轮询 + 噪音）        | 两段 AMQP 调度 + isLocalHotKey() 轮询 + 方差        | ~52 ms        | —             | —             |
+| **全链路 + 状态机（20 确认窗）**    | 全链路 + 2s 确认窗口，10/10 键提升                  | **2,038 ms**  | **2,055 ms**  | **2,055 ms**  |
 
-| 故障组件               | 影响                                | 恢复方式              |
-| ---------------------- | ----------------------------------- | --------------------- |
-| HotKey 自身            | L1 不可用；异常或热点降级（若启用） | 应用重启              |
-| L2 后端 (Redis/DB/API) | 每次请求穿透到调用方兜底            | 后端恢复后自动恢复    |
-| L1 Caffeine OOM / 驱逐 | 单 key 被驱逐，下次读取重新回源     | 自动（Caffeine 内部） |
+> [!WARNING]
+> **极限参数调整**
+>
+> 将以下参数设为极限值可将全链路延迟压缩至 **~8ms**（P50，配合 `sliceMs` 同步缩小时），但作者**不推荐**生产环境使用。HotKey 的默认参数设计偏向保守，应该优先保证分布式集群的可靠性而非极致延迟。
+>
+> | 参数                                              | 极限值      | 效果                                                  | 限制                                       |
+> | ------------------------------------------------- | ----------- | ----------------------------------------------------- | ------------------------------------------ |
+> | `hotkey.local.report-interval-ms`                 | 0 → 最小 1  | 近似禁用上报批处理，`record()` 后几乎即时 flush       | `ScheduledExecutorService` 要求 period > 0 |
+> | `hotkey.worker.warmup-jitter-ms`                  | 0           | 禁用预热抖动（羊群效应防护失效），Worker 决策即时执行 | —                                          |
+> | `hotkey.worker.state-machine.confirm-duration-ms` | 0           | 禁用状态机确认窗口，首个热窗口即广播 HOT              | —                                          |
+> | `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 → 100/100 | 缩小时间片，缩短 tick 等待（avg~50ms→~5ms）    | 窗口统计精度显著降低                       |
+>
+> **极端场景理论延迟：**
+>
+> | 场景                 | 默认 P50  | 极限 P50 | 节省      |
+> | -------------------- | --------- | -------- | --------- |
+> | 全链路（不开状态机） | 155.81 ms | ~8 ms    | ~148 ms   |
+> | 全链路 + 状态机      | 2,038 ms  | ~8 ms    | ~2,030 ms |
+>
+> **代价：**
+>
+> - 上报 AMQP 消息量从 ~10 批/秒飙升到 ~1000 批/秒（`report-interval-ms=1`），RabbitMQ 压力剧增
+> - 禁用预热抖动后，毫秒级流量毛刺即可触发 HOT 广播，误报率升高
+> - 禁用确认窗口后，任何短暂突发都立即升级为全局热 Key，放大误判
+> - 缩小滑动窗口时间片（`sliceMs`）会损失统计精度，短暂的突发更易触发误判
 
-> 调用方始终需要处理 `Optional.empty()` — HotKey 不会隐藏后端故障。
-
-写路径故障表现：
-
-| 写方法                                              | 故障场景                    | 表现                                                                          |
-| --------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------- |
-| `putThrough`                                        | 线程池队列满（非事务）      | `RejectedExecutionException` 传播到调用方                                     |
-| `putThrough`                                        | `writer.run()` / Redis 失败 | 错误记录到日志，L1 版本号未更新，不发送广播                                   |
-| `putBeforeInvalidate`                               | `mutation.run()` 抛出异常   | 捕获突变异常并记录日志；跳过本地失效和广播                                    |
-| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis 失败  | 回退到节点本地计数器（`Long.MIN_VALUE + counter`，非持久化，`degraded=true`） |
-
-Worker 模式故障表现：
-
-| 故障组件        | 影响                                   | 恢复方式                  |
-| --------------- | -------------------------------------- | ------------------------- |
-| Worker 崩溃     | App 实例继续使用本地 TopK；无集群共识  | 重启 Worker；实例自动重连 |
-| 报告通道故障    | 报告排队/缓冲（RabbitMQ）              | RabbitMQ 恢复后自动恢复   |
-| Worker 广播故障 | 无跨实例 HOT/COOL 同步；本地 TopK 正常 | 重启 Worker broadcaster   |
+</details>
 
 ## 快速开始
 
@@ -151,6 +150,9 @@ Worker 模式故障表现：
 
 默认local本地配置（适用于大多数场景)
 
+> [!IMPORTANT]
+> 虽然hotkey本身并不严格外部依赖,但是在分布式部署情况下,除了RabbitMQ,作者强烈建议引入Redis以达到最佳效果,尽管作者在核心调用链条上做了很多降级处理。
+
 **可选功能配置：**
 
 | 功能            | 启用方式                                   | 说明                         |
@@ -165,7 +167,7 @@ Worker 模式故障表现：
 所有选项见[配置](#配置)，完整属性参考见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
 
 <details>
-<summary><b>一键部署 YAML 模板</b>（懒人模式——只写必须改的）</summary>
+<summary><b>快速部署 YAML 模板</b>（最小配置——仅需修改必要的配置项）</summary>
 
 **本地 Local（App 侧）** — 引入 `hotkey` 依赖即可运行，可按需取消注释
 
@@ -215,19 +217,11 @@ hotkey:
 
 ```yaml
 hotkey:
-  # 跨节点强制一致（App 侧与 Worker 侧必须对齐，不一致会导致消息路由失败）
   local:
+    # ——— 跨节点强制一致（App 侧与 Worker 侧必须对齐） ———
     app-name: "default"                     # 必须与 worker.routing.app-name 一致
     shard-count: 1                          # 必须与 worker.routing.shard-count 一致
 
-  worker:
-    routing:
-      app-name: "default"                   # 必须与 local.app-name 一致
-      shard-count: 1                        # 必须与 local.shard-count 一致
-      shard-index: 0                        # 本实例分片号 [0, shard-count-1]
-
-  # App 侧 — 本地缓存 + 算法
-  local:
     # ——— 实例标识 ———
     instance-id: ""                         # 显式实例 ID（空=自动生成）
 
@@ -265,15 +259,13 @@ hotkey:
     refresh-max-pools: 100                  # 刷新线程池上限
     version-key-ttl-minutes: 60             # Redis 版本 key TTL
 
-  # TTL 配置（普通 key & 热 key）
-  local:
-    # ——— 普通 key ———
+    # ——— 普通 key TTL ———
     default-hard-ttl-ms: 300000             # 默认硬过期 (5min)
     hard-ttl-ms: 0                          # 覆盖值 (0=使用 default)
     default-soft-ttl-ms: 30000              # 默认软过期 (30s)
     soft-ttl-ms: 0                          # 覆盖值 (0=使用 default)
 
-    # ——— 热 key（Worker 标记 HOT 后生效） ———
+    # ——— 热 key TTL（Worker 标记 HOT 后生效） ———
     default-hot-hard-ttl-ms: 3600000        # 默认热 key 硬过期 (1h)
     hot-hard-ttl-ms: 0                      # 覆盖值 (0=使用 default)
     default-hot-soft-ttl-ms: 300000         # 默认热 key 软过期 (5min)
@@ -315,6 +307,11 @@ hotkey:
   # Worker 侧 — 独立部署节点
   worker:
     enabled: false
+
+    routing:
+      app-name: "default"                   # 必须与 local.app-name 一致
+      shard-count: 1                        # 必须与 local.shard-count 一致
+      shard-index: 0                        # 本实例分片号 [0, shard-count-1]
 
     messaging:
       report-exchange: "hotkey.report.exchange"
@@ -359,9 +356,7 @@ hotkey:
 
 ### 3. 使用
 
-> **注意：** 自v1.0.2起包含**破坏性变更** — `get(hk, fk)` 和 `putAndBroadcast(hk, fk, val)` 已移除。库已与 `RedisTemplate` 解耦，调用方通过 `Supplier<T>` / `Runnable` 自行提供读写回调。
-
-**A. 纯本地缓存（无二级存储）**
+**A. 纯本地缓存（无二级缓存）**
 
 ```java
 @Autowired
@@ -455,7 +450,7 @@ public class RedisHotKeyHelper {
 }
 ```
 
-**E. 自定义二级存储（非 Redis）**
+**E. 自定义二级缓存（非 Redis）**
 
 ```java
 // 使用 MySQL、远程 API 或任意数据源作为 L2
@@ -645,6 +640,58 @@ hotkey:
 
 > **注意：** `@HotKey(operation=READ)` 将原始方法调用包装为 L2 supplier——方法体同时充当缓存读取和数据库回退。这对读密集型端点很方便，但会绕过 `peek()` 语义。`softExpire=true`（默认）启用 stale-while-revalidate：过期值立即返回，后台线程异步刷新。`softExpire=false` 时，缓存未命中总是同步调用方法。
 
+### 4. 降级
+
+HotKey 通过 `supplier` 回调形成三级降级链路：
+
+```
+hotKey.get(key, supplier)
+  ├─ L1(Caffeine) 命中 → 直接返回
+  ├─ L1 未命中 → supplier()
+  │    ├─ 返回数据 → 热 key？ → 写 L1（使用相应 TTL）+ 返回
+  │    ├─ 返回 null → Optional.empty() → 调用方 orElseGet/orElseThrow
+  │    │                     (null = miss。HotKey 遵循 Caffeine 的约定；
+  │    │                      如果你的后端存储了可空值，
+  │    │                      请在调用方用 sentinel 对象包装。)
+  │    │
+  │    │                      示例：Redis 中存放了可空值
+  │    │                      private static final Object NULL_SENTINEL = new Object();
+  │    │                      Optional<Object> r = hotKey.get("k", () -> {
+  │    │                          Object val = redisTemplate.opsForValue().get("k");
+  │    │                          return val != null ? val : NULL_SENTINEL;
+  │    │                      });
+  │    │                      Object actual = r.orElse(null); // sentinel 转回 null
+  │    └─ 抛出异常 → SingleFlight.load() 捕获 → Optional.empty() → 调用方兜底
+  └─ HotKey 自身异常 → 异常 → 降级（@HotKey fallbackEnabled=true 时）→ 调用方
+```
+
+各组件故障表现：
+
+| 故障组件               | 影响                                | 恢复方式              |
+| ---------------------- | ----------------------------------- | --------------------- |
+| HotKey 自身            | L1 不可用；异常或热点降级（若启用） | 应用重启              |
+| L2 后端 (Redis/DB/API) | 每次请求穿透到调用方兜底            | 后端恢复后自动恢复    |
+| L1 Caffeine OOM / 驱逐 | 单 key 被驱逐，下次读取重新回源     | 自动（Caffeine 内部） |
+
+> 调用方始终需要处理 `Optional.empty()` — HotKey 不会隐藏后端故障。
+
+写路径故障表现：
+
+| 写方法                                              | 故障场景                    | 表现                                                                          |
+| --------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------- |
+| `putThrough`                                        | 线程池队列满（非事务）      | `RejectedExecutionException` 传播到调用方                                     |
+| `putThrough`                                        | `writer.run()` / Redis 失败 | 错误记录到日志，L1 版本号未更新，不发送广播                                   |
+| `putBeforeInvalidate`                               | `mutation.run()` 抛出异常   | 捕获突变异常并记录日志；跳过本地失效和广播                                    |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis 失败  | 回退到节点本地计数器（`Long.MIN_VALUE + counter`，非持久化，`degraded=true`） |
+
+Worker 模式故障表现：
+
+| 故障组件        | 影响                                   | 恢复方式                  |
+| --------------- | -------------------------------------- | ------------------------- |
+| Worker 崩溃     | App 实例继续使用本地 TopK；无集群共识  | 重启 Worker；实例自动重连 |
+| 报告通道故障    | 报告排队/缓冲（RabbitMQ）              | RabbitMQ 恢复后自动恢复   |
+| Worker 广播故障 | 无跨实例 HOT/COOL 同步；本地 TopK 正常 | 重启 Worker broadcaster   |
+
 ## HotKey 门面 API 参考
 
 推荐入口是 `HotKey` 门面（已自动配置为 Spring Bean）。除了上面展示的 `get`/`peek`/`putThrough`/`putBeforeInvalidate` 之外，还提供：
@@ -676,7 +723,7 @@ hotkey:
 
 ## 配置
 
-快速入门配置见[### 2. 配置](#2-配置)。完整属性列表见 [CONFIG.zh.md](docs/CONFIG.zh.md)。Worker 模式见 [WORKER.zh.md](docs/WORKER.zh.md)。
+快速入门配置见[配置](#2-配置)。完整属性列表见 [CONFIG.zh.md](docs/CONFIG.zh.md)。Worker 模式见 [WORKER.zh.md](docs/WORKER.zh.md)。
 
 ### TTL 覆盖属性
 

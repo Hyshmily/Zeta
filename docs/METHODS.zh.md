@@ -87,7 +87,7 @@ HotKey.putThrough(key, value, writer[, hardTtlMs, softTtlMs])
      │
      ├─ caffeineCache.put(key, CacheEntry(
      │      value, dataVersion, degraded,
-      │      decisionVersion=0L,                                 [写穿透始终重置]
+     │      decisionVersion=0L,                                 [写穿透始终重置]
      │      keyState=NORMAL,                                   [始终写入 NORMAL]
      │      hardTtlMs, softTtlMs, ...))
      │
@@ -171,7 +171,7 @@ HotKey.invalidateAll(keys...) / invalidateAll(Collection)
      │
      ├─ caffeineCache.invalidateAll(validKeys)                 [L1 批量移除]
      │
-      └─ (有 syncPublisher)
+     └─ (有 syncPublisher)
            └─ CacheSyncPublisher.broadcastLocalInvalidateAll(validKeys)
                 └─ 单条 AMQP 消息
                      │    body = JSON 数组 [key1, key2, ...]

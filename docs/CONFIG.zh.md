@@ -20,7 +20,7 @@
 | `hotkey.local.executor-core-pool-size`            | `8`               | 线程池核心大小                                                           |
 | `hotkey.local.executor-max-pool-size`             | `32`              | 线程池最大大小                                                           |
 | `hotkey.local.executor-queue-capacity`            | `2000`            | 线程池队列容量                                                           |
-| `hotkey.local.decay-period`                       | `20`              | （已废弃）HeavyKeeper 衰减周期（秒），仅向后兼容                         |
+| `hotkey.local.expelled-queue-capacity`            | `50000`           | 被驱逐热 key 暂存队列容量（防止 TopK 溢出）                              |
 | `hotkey.local.default-hard-ttl-ms`                | `300000`（5分钟） | 普通 key 默认硬 TTL（Caffeine 驱逐）                                    |
 | `hotkey.local.hard-ttl-ms`                        | `0`               | 普通 key 每次调用的硬 TTL 覆盖；0 = 使用 `default-hard-ttl-ms`          |
 | `hotkey.local.default-hot-hard-ttl-ms`            | `3600000`（1小时）| 热点 key 默认硬 TTL                                                      |
@@ -46,11 +46,12 @@
 | ---------------------------- | -------- | ---------------------------------------------------- |
 | `hotkey.report.enabled`     | `true`    | 启用 App 到 Worker 的报告聚合（需要 `RabbitTemplate` Bean） |
 
-### 调度配置（`hotkey.scheduling.*`）
+### 调度配置（`hotkey.scheduling.*`，`hotkey.decay-period`）
 
 | 属性                           | 默认值   | 说明                                                      |
 | ------------------------------ | -------- | --------------------------------------------------------- |
 | `hotkey.scheduling.enabled`   | `true`    | 启用内部定时器（HeavyKeeper 衰减 + 挤出队列清空）         |
+| `hotkey.decay-period`         | `20`      | HeavyKeeper 衰减周期（秒），通过 `@Scheduled` 直接解析，不在 `hotkey.local.*` 下 |
 
 ### 注解配置（`hotkey.annotation.*`）
 
@@ -70,6 +71,7 @@
 | `hotkey.sync.warmup-jitter-ms`                 | `100`                      | 处理同步消息前的随机 jitter（防止惊群效应）        |
 | `hotkey.sync.concurrent-consumers`             | `3`                        | 同步队列 RabbitMQ 消费者并发数                      |
 | `hotkey.sync.scheduler-pool-size`              | `4`                        | 同步 jitter 延迟的线程池大小                        |
+| `hotkey.sync.auto-startup`                    | `true`                     | 同步监听器容器是否随应用自动启动                    |
 
 ### Worker 监听器（`hotkey.worker-listener.*`）
 
@@ -81,6 +83,7 @@
 | `hotkey.worker-listener.warmup-jitter-ms`             | `100`                      | 处理 Worker 消息前的随机 jitter（防止惊群效应）         |
 | `hotkey.worker-listener.concurrent-consumers`         | `2`                        | Worker 监听队列 RabbitMQ 消费者并发数                    |
 | `hotkey.worker-listener.scheduler-pool-size`          | `2`                        | Worker 监听器延迟 Redis 读取的线程池大小                 |
+| `hotkey.worker-listener.auto-startup`                 | `true`                     | Worker 监听器容器是否随应用自动启动                     |
 
 ### Worker 节点（`hotkey.worker.*`）
 

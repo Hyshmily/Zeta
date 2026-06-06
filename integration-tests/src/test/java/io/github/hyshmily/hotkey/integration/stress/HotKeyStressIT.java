@@ -33,6 +33,7 @@ import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncProperties;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.entity.HotKeyDecision;
 import io.github.hyshmily.hotkey.entity.KeyState;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
@@ -217,7 +218,8 @@ class HotKeyStressIT {
       detector, caffeine, sf, expireMgr, executor,
       Optional.empty(), Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
-      new VersionController(Optional.empty(), 60));
+      new VersionController(Optional.empty(), 60),
+      new WorkerHealthMonitor());
   }
 
   interface ThrowingConsumer {
@@ -815,7 +817,7 @@ class HotKeyStressIT {
     ReportPublisher publisher = mock(ReportPublisher.class);
     doAnswer(inv -> null).when(publisher).publish(anyInt(), any());
     HotKeyReporter reporter = new HotKeyReporter(
-      publisher, scheduler, 100, 1, "stress-test", 10000, 100, 2);
+      new WorkerHealthMonitor(), publisher, scheduler, 100, 1, "stress-test", 10000, 100, 2);
     reporter.start();
     concurrentRun("highFreq-reporter", 20, 100_000, (idx) -> {
       reporter.record("freq-key-" + (idx & 0xFF));
@@ -841,7 +843,7 @@ class HotKeyStressIT {
     doAnswer(inv -> null).when(publisher).publish(anyInt(), any());
     int queueCapacity = 1000;
     HotKeyReporter reporter = new HotKeyReporter(
-      publisher, scheduler, 100, 1, "backpressure-test",
+      new WorkerHealthMonitor(), publisher, scheduler, 100, 1, "backpressure-test",
       queueCapacity, 1, 1);
     reporter.start();
     int threadCount = 10;
@@ -877,7 +879,7 @@ class HotKeyStressIT {
     doAnswer(inv -> null).when(publisher).publish(anyInt(), any());
     int shardCount = 4;
     HotKeyReporter reporter = new HotKeyReporter(
-      publisher, scheduler, 100, shardCount, "shard-test",
+      new WorkerHealthMonitor(), publisher, scheduler, 100, shardCount, "shard-test",
       10000, 50, shardCount);
     reporter.start();
     int threadCount = 8;

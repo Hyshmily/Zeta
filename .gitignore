@@ -32,6 +32,3 @@ node_modules/
 # Maven wrapper
 .mvn/
 
-# Claude Code
-CLAUDE.md
-AGENTS.md

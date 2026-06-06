@@ -1,10 +1,10 @@
 # FAQ: Common Questions
 
-> Before you start — the author answers common questions about HotKey's architecture and design choices.
+> Common questions about HotKey's architecture and design choices.
 
 ---
 
-## Q1: Why both local HeavyKeeper AND a central Worker? Isn't local detection enough?
+## Q1: Why both local HeavyKeeper AND a central Worker?
 
 **Short answer:** Local detection is for _self-preservation_ (nanosecond-level); the central Worker is for _cluster coordination_ (100ms-level). They serve different time scales and purposes.
 
@@ -17,15 +17,15 @@
 
 **How they cooperate in code:**
 
-1. **Burst hits instance A:** `HotKeyCache.get()` hits L1 miss → `loadAndCache()` calls `hotKeyDetector.add(key, 1).isLocalHotKey()` → if true, caches with `hotHardTtlMs` (1h default). Instance A is protected instantly.
+1. **Burst hits instance A:** `HotKeyCache.get()` L1 miss → `loadAndCache()` calls `hotKeyDetector.add(key, 1).isLocalHotKey()` → if hot, caches with `hotHardTtlMs` (1h default). Instance A is protected instantly.
 
-2. **Meanwhile,** the same `get()` calls `hotKeyReporter.record(key)` → `HotKeyReporter` accumulates counts in a Caffeine counter → every `reportIntervalMs` (default 100ms) it flushes to RabbitMQ.
+2. **Meanwhile,** `get()` also calls `hotKeyReporter.record(key)` → `HotKeyReporter` accumulates in a Caffeine counter → every `reportIntervalMs` (100ms) flushes to RabbitMQ.
 
-3. **Worker receives the report** → `ReportConsumer.onReport()` feeds `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` tracks consecutive hot windows → after `confirmDurationMs` (default 2s) of sustained heat, broadcasts HOT to **all instances**.
+3. **Worker receives the report** → `ReportConsumer.onReport()` feeds `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` tracks consecutive hot windows → after `confirmDurationMs` (2s) of sustained heat, broadcasts HOT to **all instances**.
 
-4. **Instances B, C, D** receive the HOT broadcast via `WorkerListener` → pre-warm their local Caffeine with the key before traffic ever reaches them.
+4. **Instances B, C, D** receive HOT via `WorkerListener` → pre-warm Caffeine before traffic reaches them.
 
-**Without the central Worker:** instance A survives, but traffic that load-balances to B moments later finds an empty cache. The Worker solves this "hot-spot drift" problem.
+**Without the central Worker:** instance A survives, but traffic load-balanced to B moments later finds an empty cache. That's "hot-spot drift".
 
 ---
 
@@ -46,7 +46,21 @@ t=+2.1s   Nodes B, C, D receive HOT → pre-warm from Redis → cached with hot 
 
 The key insight: **a real hot key stays hot for minutes or hours**, not milliseconds. The ~2s Worker latency (default `confirmDurationMs=2000` / 100ms per evaluation tick = 20 ticks) is negligible compared to the total hot duration. Meanwhile, the node that got the first punch was already protected in microseconds.
 
-**What about a brief 100ms spike?** That's not a cluster-level hot key — it's a local blip. The local HeavyKeeper handles it with a slightly longer TTL, and the Worker never needs to broadcast. The author split the two precisely for this reason.
+**Measured latencies** (from `PropagationDelayIT`, 10 phases, 45k ops, 0 errors):
+
+| Scenario | P50 | P95 | P99 |
+|---|---|---|---|
+| Worker Decision (w/o state machine) | **51.64 ms** | 97.75 ms | 104.16 ms |
+| State Machine Pipeline (w/ state machine) | **1,983 ms** | 2,015 ms | 2,015 ms |
+| Full Chain (w/o state machine) | **155.81 ms** | 202.14 ms | 212.69 ms |
+| Full Chain w/ SM (20 confirm windows) | **2,038 ms** | 2,055 ms | 2,055 ms |
+
+- **Without state machine** (Phase 7): Worker broadcasts HOT immediately after detection. P50=51.6ms includes `warmupJitterMs=100ms` + AMQP + L1 polling.
+- **With state machine** (Phase 8): 2.0s is dominated by confirm windows (20 × 100ms = 2,000ms min). After confirmation, same AMQP path (~52ms). Configurable via `hotkey.worker.state-machine.*`.
+- **Full Chain without SM** (Phase 9A): Full end-to-end path — local Caffeine miss → report aggregation (100ms batch) → AMQP report delivery → SlidingWindowDetector → AMQP decision broadcast → L1 promotion. Adds ~104ms over Phase 7 due to report batching + two AMQP hops.
+- **Full Chain with SM** (Phase 9B): Same as 9A but with 20 confirm windows on the Worker side. Total latency dominated by the 2s confirm floor.
+
+**What about a brief 100ms spike?** That's a local blip, not a cluster-level hot key. Local HeavyKeeper handles it with a longer TTL. Worker never needs to broadcast — that's why they're separate.
 
 The `SingleFlight.java` layer provides additional safety: concurrent L1 misses for the same key share a single `CompletableFuture`, preventing a thundering-herd against the backend even during the brief window before local HeavyKeeper activates.
 
@@ -87,7 +101,7 @@ Worker detects Key X is globally hot → broadcasts HOT
 
 ## Q4: RabbitMQ has limited throughput (~10K–100K msg/s). Won't reporting traffic overwhelm it?
 
-**Short answer:** No. The author did three things in the reporting channel to keep things under control:
+**Short answer:** No. The reporting channel uses three design measures to control traffic:
 
 ### 1. Batching dramatically reduces message count
 
@@ -114,7 +128,7 @@ Broadcasts are **control signals**, not data streams. A key transitions from COL
 
 ## Q5: The TopKValidator pre-warms keys based on historical ranking — does this actually get used?
 
-**Short answer:** It is a safety net for the 1% case the sliding window cannot catch. It is used rarely — the author kept it as a fallback, not a primary path.
+**Short answer:** It serves as a safety net for the 1% of cases the sliding window cannot catch. It is used infrequently — designed as a supplementary detection mechanism rather than a primary path.
 
 **What it catches:** Some keys never "spike" but accumulate high total traffic over minutes or hours — e.g., a landing page that gradually attracts more visitors, a dashboard widget queried by many users at a steady rate.
 
@@ -136,13 +150,13 @@ These keys would **never** trigger the sliding-window threshold (default 1000 QP
 
 ## Q6: Could a brand-new key, never accessed before, hit ALL instances simultaneously faster than the Worker can broadcast HOT?
 
-**Short answer:** Can this happen? Honestly — yes. The author can only do their best in the design to keep the cluster safe, but cannot fully guarantee the HotKey framework is bulletproof.
+**Short answer:** Yes, this is theoretically possible. The framework is designed to minimize the risk but cannot guarantee absolute protection against every extreme edge case.
 
 **What happens step by step:**
 
 1. **t=0:** Key X, never seen before, suddenly receives concurrent requests on all 10 nodes simultaneously.
 
-2. **t=+1μs:** Every node's `SingleFlight` (`SingleFlight.java`) activates. In stress tests, `singleFlight_extremeDedup` achieves **99.0% dedup** (100 threads → 1 execution) and `singleFlight_cacheStampede` achieves **93.7% dedup** (50 keys × 20 threads → 63 executions, data: `hotkey-stress-*.json`). The backend receives ~N concurrent requests (one per node), not `N × concurrent_requests`.
+2. **t=+1μs:** Every node's `SingleFlight` (`SingleFlight.java`) activates. In stress tests, `singleFlight_extremeDedup` achieves **99.0% dedup** (100 threads → 1 execution) and `singleFlight_cacheStampede` achieves **91.5% dedup** (50 keys × 20 threads → 85 executions, data: `hotkey-stress-*.json`). The backend receives ~N concurrent requests (one per node), not `N × concurrent_requests`.
 
 3. **t+~5ms to t+~20ms:** The first request on each node completes (L2 latency dependent). Data returned to all waiting callers. Value cached in L1 with **normal TTL** (5min default per `HotKeyProperties.java:87`) — local HeavyKeeper not yet triggered.
 
@@ -150,21 +164,21 @@ These keys would **never** trigger the sliding-window threshold (default 1000 QP
 
 5. **t+~2.1s:** After 20 consecutive hot evaluations (confirmCount=20 × 100ms per tick = 2000ms, per `WorkerProperties.java:74,124`), state machine transitions to CONFIRMED_HOT and broadcasts.
 
-6. **t+~2.2s:** All nodes receive HOT (Worker decision benchmark shows propagation P50=62.6ms, data: `benchmark-worker-decision-*.json`) → upgrade key to hot TTL (1h per `HotKeyProperties.java:91`) and enable soft expiration.
+6. **t+~2.15s:** All nodes receive HOT (propagation benchmark shows P50=51.64ms, P95=97.75ms, P99=104.16ms, data: `propagation-delay-*.json`) → upgrade key to hot TTL (1h per `HotKeyProperties.java:91`) and enable soft expiration.
 
 **Impact analysis:**
 
 | Component          | Status                                                            |
 | ------------------ | ----------------------------------------------------------------- |
-| Backend (Redis/DB) | Safe — SingleFlight limits reads to ≤ N (proven 93.7-99.0% dedup) |
+| Backend (Redis/DB) | Safe — SingleFlight limits reads to ≤ N (proven 91.5-99.0% dedup) |
 | L1 Caffeine        | Each node has the value cached with normal TTL (5min)             |
 | p99 latency        | First-wave requests see single L2 latency. `timeoutContention` test: 0 timeouts under 50-thread load |
-| Hot-key protection | Delayed by ~2s, but normal TTL provides baseline protection       |
+| Hot-key protection | W/o SM: ~74ms from Worker detection to L1 upgrade. W/ SM: ~2.1s (20 confirm windows). Normal TTL provides baseline protection during the gap |
 
 **Without SingleFlight**, this scenario would send `N × concurrent_requests` to the backend, which could cause a cascading failure. SingleFlight is the critical safety net here — it is configured via `hotkey.local.inflight-*` properties (default: `max-size=50000`, `ttl=5s`, `timeout=3s`).
 
 The Worker broadcast solves the _second_ and subsequent waves — ensuring that when traffic continues (as real hot keys do), all nodes have the optimal hot-key configuration.
 
-To be honest, when even the broadcast cannot make it in time, the author designed the framework to protect subsequent waves as much as possible, but cannot guarantee absolute safety for the very first wave.
+When even the broadcast cannot arrive in time, the first wave relies solely on SingleFlight and normal TTL for protection. Subsequent waves receive full hot-key protection once the broadcast arrives.
 
-As mentioned before, the author's ability is limited. A scenario this extreme is rare in practice — probably only a 12306-level traffic surge could trigger it. And even then, there is not much the author can do about it. The author cannot foresee every extreme case. The design tries its best, but cannot promise absolute safety.
+This extreme scenario is rare in practice, typically requiring a traffic surge of extraordinary magnitude.

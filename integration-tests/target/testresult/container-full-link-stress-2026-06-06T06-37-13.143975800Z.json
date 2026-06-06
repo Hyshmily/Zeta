@@ -1,0 +1,803 @@
+{
+  "timestamp" : "2026-06-06T06:37:13.082659600Z",
+  "totalPhases" : 15,
+  "totalDurationMs" : 58331,
+  "totalOps" : 224851,
+  "totalErrors" : 0,
+  "config" : {
+    "threadCount" : 8,
+    "softTtlMs" : 300000,
+    "hardTtlMs" : 600000,
+    "hotKeyCount" : 5000,
+    "coldKeyCount" : 15000,
+    "opsPerThread" : 2000
+  },
+  "phases" : [ {
+    "name" : "warmup",
+    "durationMs" : 13351,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "1-5ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "keyCount" : 20000.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "hot-read",
+    "durationMs" : 1375,
+    "totalOps" : 16000,
+    "errors" : 0,
+    "p50Ms" : 0.6216,
+    "p95Ms" : 0.9702,
+    "p99Ms" : 1.5627,
+    "opsPerSecond" : 11636,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 15315,
+      "pct" : 95.72
+    }, {
+      "range" : "1-5ms",
+      "count" : 677,
+      "pct" : 4.23
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 8,
+      "pct" : 0.05
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "hotKeyRange" : 5000.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "cold-read",
+    "durationMs" : 11290,
+    "totalOps" : 16000,
+    "errors" : 0,
+    "p50Ms" : 0.62,
+    "p95Ms" : 0.9225,
+    "p99Ms" : 1.1546,
+    "opsPerSecond" : 1417,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 15568,
+      "pct" : 97.3
+    }, {
+      "range" : "1-5ms",
+      "count" : 424,
+      "pct" : 2.65
+    }, {
+      "range" : "5-10ms",
+      "count" : 8,
+      "pct" : 0.05
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "coldKeyRange" : 15000.0,
+      "actualL2Calls" : 15917.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "write-stress",
+    "durationMs" : 9,
+    "totalOps" : 1,
+    "errors" : 0,
+    "p50Ms" : 3.49,
+    "p95Ms" : 3.49,
+    "p99Ms" : 3.49,
+    "opsPerSecond" : 111,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "1-5ms",
+      "count" : 1,
+      "pct" : 100.0
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "writeVerifyPass" : 1.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "mixed-rw-inv",
+    "durationMs" : 1312,
+    "totalOps" : 16000,
+    "errors" : 0,
+    "p50Ms" : 0.6177,
+    "p95Ms" : 1.2513,
+    "p99Ms" : 1.65,
+    "opsPerSecond" : 12195,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 14221,
+      "pct" : 88.88
+    }, {
+      "range" : "1-5ms",
+      "count" : 1778,
+      "pct" : 11.11
+    }, {
+      "range" : "5-10ms",
+      "count" : 1,
+      "pct" : 0.01
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "readPct" : 80.0,
+      "writePct" : 10.0,
+      "invalidatePct" : 10.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "zipf-distribution",
+    "durationMs" : 3403,
+    "totalOps" : 100000,
+    "errors" : 0,
+    "p50Ms" : 8.0E-4,
+    "p95Ms" : 0.637,
+    "p99Ms" : 0.8589,
+    "opsPerSecond" : 29386,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 99682,
+      "pct" : 99.68
+    }, {
+      "range" : "1-5ms",
+      "count" : 318,
+      "pct" : 0.32
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "totalOps" : 100000.0,
+      "top20Hits" : 94563.0,
+      "bottom80Hits" : 5437.0,
+      "top20AccessRatio" : 94.56,
+      "exponent" : 1.2
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "large-value-stress",
+    "durationMs" : 4857,
+    "totalOps" : 800,
+    "errors" : 0,
+    "p50Ms" : 1.8353,
+    "p95Ms" : 13.2798,
+    "p99Ms" : 24.3276,
+    "opsPerSecond" : 165,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 13,
+      "pct" : 1.63
+    }, {
+      "range" : "1-5ms",
+      "count" : 579,
+      "pct" : 72.38
+    }, {
+      "range" : "5-10ms",
+      "count" : 120,
+      "pct" : 15.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 88,
+      "pct" : 11.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "sizeCount" : 4.0,
+      "opsPerSize" : 200.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "single-key-contention",
+    "durationMs" : 745,
+    "totalOps" : 10000,
+    "errors" : 0,
+    "p50Ms" : 0.0021,
+    "p95Ms" : 7.4553,
+    "p99Ms" : 11.1819,
+    "opsPerSecond" : 13423,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 6576,
+      "pct" : 65.76
+    }, {
+      "range" : "1-5ms",
+      "count" : 2344,
+      "pct" : 23.44
+    }, {
+      "range" : "5-10ms",
+      "count" : 897,
+      "pct" : 8.97
+    }, {
+      "range" : "10-50ms",
+      "count" : 183,
+      "pct" : 1.83
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "contentionThreads" : 20.0,
+      "opsPerThread" : 500.0,
+      "finalRedisValue" : "val-3498"
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "thundering-herd",
+    "durationMs" : 162,
+    "totalOps" : 50,
+    "errors" : 0,
+    "p50Ms" : 0.0019,
+    "p95Ms" : 0.8105,
+    "p99Ms" : 1.5669,
+    "opsPerSecond" : 309,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 49,
+      "pct" : 98.0
+    }, {
+      "range" : "1-5ms",
+      "count" : 1,
+      "pct" : 2.0
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "totalThreads" : 50.0,
+      "actualSupplierCalls" : 0.0,
+      "dedupRatioPct" : 100.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "worker-decisions",
+    "durationMs" : 11199,
+    "totalOps" : 2000,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 179,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "1-5ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "decisionSent" : 2000.0,
+      "workerDecisionsSent" : 0.0,
+      "promoted" : 25.0,
+      "promotionRate" : 0.0125,
+      "coolTarget" : 1000.0,
+      "downgraded" : 1000.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "cross-instance-sync",
+    "durationMs" : 2946,
+    "totalOps" : 5000,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 1697,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "1-5ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "batchSize" : 100.0,
+      "totalBroadcasts" : 5000.0,
+      "syncErrors" : 0.0,
+      "syncPropP50Ms" : 0.3561,
+      "syncPropP99Ms" : 97.2727,
+      "syncPropSamples" : 5000.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "version-degradation",
+    "durationMs" : 4412,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "1-5ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "case1_normal_normal" : 1.0,
+      "case2_degraded_over_normal" : 1.0,
+      "case3_normal_over_degraded" : 0.0,
+      "case4_degraded_degraded" : 0.0,
+      "workerDecisionAccepted" : 1.0,
+      "casesPassed" : 2.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "pattern-shift",
+    "durationMs" : 132,
+    "totalOps" : 15000,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 113636,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "1-5ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "patternKeys" : 200.0,
+      "opsPerPattern" : 5000.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "combined-stress",
+    "durationMs" : 2498,
+    "totalOps" : 32000,
+    "errors" : 0,
+    "p50Ms" : 1.3566,
+    "p95Ms" : 2.7127,
+    "p99Ms" : 3.8409,
+    "opsPerSecond" : 12810,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 11040,
+      "pct" : 34.5
+    }, {
+      "range" : "1-5ms",
+      "count" : 20842,
+      "pct" : 65.13
+    }, {
+      "range" : "5-10ms",
+      "count" : 109,
+      "pct" : 0.34
+    }, {
+      "range" : "10-50ms",
+      "count" : 9,
+      "pct" : 0.03
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : { },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  }, {
+    "name" : "burst-traffic",
+    "durationMs" : 640,
+    "totalOps" : 12000,
+    "errors" : 0,
+    "p50Ms" : 1.569,
+    "p95Ms" : 2.0757,
+    "p99Ms" : 2.5518,
+    "opsPerSecond" : 18750,
+    "latencyHistogram" : [ {
+      "range" : "0-1ms",
+      "count" : 2593,
+      "pct" : 21.61
+    }, {
+      "range" : "1-5ms",
+      "count" : 9407,
+      "pct" : 78.39
+    }, {
+      "range" : "5-10ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "10-50ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "50-100ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "100-500ms",
+      "count" : 0,
+      "pct" : 0.0
+    }, {
+      "range" : "500ms+",
+      "count" : 0,
+      "pct" : 0.0
+    } ],
+    "custom" : {
+      "steadyOps" : 2000.0,
+      "burstThreads" : 50.0,
+      "burstOpsPerThread" : 200.0,
+      "totalBurstOps" : 10000.0
+    },
+    "systemMetrics" : {
+      "heapUsedMb" : 436,
+      "heapCommittedMb" : 588,
+      "heapMaxMb" : 8032,
+      "nonHeapUsedMb" : 92,
+      "threadCount" : 77,
+      "gcCount" : 52,
+      "gcTimeMs" : 227
+    }
+  } ],
+  "finalSystemMetrics" : {
+    "heapUsedMb" : 436,
+    "heapCommittedMb" : 588,
+    "heapMaxMb" : 8032,
+    "threadCount" : 77,
+    "gcCount" : 52,
+    "gcTimeMs" : 227
+  }
+}

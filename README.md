@@ -13,37 +13,37 @@
 
 [**中文版**](README.zh.md)
 
-### Foreword: Why HotKey?
+## Background
 
-In real-world development, I frequently faced the challenge of managing a large number of cache keys. Manually maintaining Caffeine, Redis, and database multi-level caching, configuring logical expiration, and pre-computing and pre-warming hot keys — every step was tedious. Even more challenging, in a distributed cluster environment, ensuring hot keys are correctly shared across nodes and avoiding cache stampedes under high concurrency became a pain point that every developer must address.
+In real-world development, the author frequently faced the challenge of managing large numbers of cache keys. Manual maintenance of multi-tier caches (Caffeine, Redis, database), logical expiration configuration, pre-computation and pre-warming of hot keys — each step was extremely tedious. In distributed cluster environments, correctly sharing hot keys across nodes and preventing cache stampedes under high concurrency became an evergreen problem.
 
-My initial thought was simple: find a ready-to-use solution, or at least wrap a convenient multi-level cache utility class.
+The initial idea was simple: find an out-of-the-box solution, or at least wrap a convenient multi-level cache utility.
 
-Unfortunately, existing solutions were either too complex (requiring high deployment and operational costs) or had been abandoned (such as JD's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project, which as of May 2026 is no longer maintained), making them unsuitable for lightweight, practical use. While many of its ideas aligned with my own, its heavy architecture convinced me to forge a different path.
+Unfortunately, existing solutions were either overly complex with high deployment and operational costs, or had been discontinued (such as JD's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project, which as of May 2026 is no longer maintained), making them unsuitable for lightweight, practical needs. While the author's design concepts align with many of theirs, the architectural complexity motivated a different path.
 
-That's the context in which HotKey was born: a lightweight, portable, ready-to-use hot key caching framework.
+This is how HotKey was born: a lightweight, portable, out-of-the-box distributed hot key caching framework.
 
-It will remain open source — past, present, and future.
+Past, present, and future — it will remain open source.
 
 > [!TIP]
 > **Before you start, have questions?** See [FAQ.md](docs/FAQ.md) for answers to common questions about local vs central detection, Worker delay, MQ throughput, and more.
 
 ### Introduction
 
-HotKey is a [high-performance](docs/HotKey_Benchmark_Report.en.md), low-cost, lightweight distributed multi-level caching framework
+HotKey is a [high-performance](docs/HotKey_Benchmark_Report.en.md), low-cost, lightweight distributed multi-level caching framework.
 
-HotKey is not a general-purpose local cache — it's a lightweight hot key auto-detection & multi-level cache warming framework with optional distributed sync and an optional dedicated Worker node for cluster-wide hot key consensus.
+Not a general-purpose local cache — it's a hot key auto-detection & multi-level cache warming framework with optional distributed sync and Worker node.
 
-Most local cache solutions store every accessed key in Caffeine. This works fine with small data, but under millions of keys:
+Most local caches store all entries indiscriminately in Caffeine. With millions of keys:
 
-- **Memory waste** — most keys are read once and never accessed again
-- **Broadcast storm** — full cache invalidation requires full broadcast at scale
+- **Memory waste** — most keys are read once
+- **Broadcast storm** — full cache = full invalidation, broadcasts grow with key count
 
-HotKey takes a different approach — **cache with differentiated TTLs.**
+HotKey's strategy: **cache only truly hot data.**
 
-It uses [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant) to probabilistically detect access frequency. On the **read path**, all loaded keys enter the local Caffeine L1, but with **differentiated TTLs** — hot keys are cached longer (1h default), normal keys expire faster (5min). Optionally, hot keys can be synchronized across instances via RabbitMQ. On the **write path**, `putThrough` writes directly to L1 and broadcasts regardless of hot key status — the caller explicitly owns the write. Non-hot key reads still return values via the caller-supplied `Supplier<T>` — they are simply cached with shorter TTLs in L1.
+Uses [HeavyKeeper](https://github.com/go-kratos/aegis) (Count-Min Sketch variant) for probabilistic frequency detection. **Read path**: all loaded keys go to L1, but with **differentiated TTLs** — hot keys last longer (1h), normal keys expire faster (5min). **Write path**: `putThrough` writes directly to L1 and broadcasts regardless — caller owns the write.
 
-For **cluster-wide detection**, deploy a dedicated Worker node that aggregates access reports from all instances — solving the single-instance blind spot where "accessed 100 times by one pod" and "accessed once by 100 pods" are indistinguishable locally.
+**Cluster-wide detection**: deploy a dedicated Worker node aggregating access reports from all instances — solves the "100 hits on one pod" vs "1 hit on 100 pods" blind spot.
 
 ### When to use
 
@@ -75,58 +75,6 @@ For **cluster-wide detection**, deploy a dedicated Worker node that aggregates a
 - **Configurable Thread Pool** — dedicated `TaskExecutor` with bounded queue
 - **Spring Boot Auto-Configuration** — drop-in dependency, zero boilerplate
 
-## Degradation
-
-HotKey forms a three-level degradation chain through the `supplier` callback:
-
-```
-hotKey.get(key, supplier)
-  ├─ L1(Caffeine) HIT → return directly
-  ├─ L1 MISS → supplier()
-  │    ├─ Returns data → hot key? → write L1 (with appropriate TTL) + return
-  │    ├─ Returns null → Optional.empty() → caller's orElseGet/orElseThrow
-  │    │                     (null = miss — HotKey follows Caffeine's convention.
-  │    │                      If your backend stores nullable values, wrap them
-  │    │                      with a sentinel Object at the caller layer.)
-  │    │
-  │    │                      Example: Redis stores a nullable value
-  │    │                      private static final Object NULL_SENTINEL = new Object();
-  │    │                      Optional<Object> r = hotKey.get("k", () -> {
-  │    │                          Object val = redisTemplate.opsForValue().get("k");
-  │    │                          return val != null ? val : NULL_SENTINEL;
-  │    │                      });
-  │    │                      Object actual = r.orElse(null); // sentinel back to null
-  │    └─ Throws → SingleFlight.load() catches → Optional.empty() → caller's fallback
-  └─ HotKey itself fails → exception → fallback (if @HotKey fallbackEnabled=true) → caller
-```
-
-Component failure behavior:
-
-| Failed component           | Impact                                                     | Recovery                            |
-| -------------------------- | ---------------------------------------------------------- | ----------------------------------- |
-| HotKey itself              | L1 unavailable; exception or hot-key fallback (if enabled) | Restart app                         |
-| L2 backend (Redis/DB/API)  | Every request hits caller's fallback                       | Auto-recover on backend restoration |
-| L1 Caffeine OOM / eviction | Individual keys evicted, next read re-fetches via supplier | Automatic (Caffeine internal)       |
-
-> The caller is always responsible for handling `Optional.empty()` — HotKey never hides backend failures.
-
-Write path failure behavior:
-
-| Write method                                        | Failure scenario                 | Behavior                                                                                       |
-| --------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `putThrough`                                        | Executor queue full (outside tx) | `RejectedExecutionException` propagates to caller                                              |
-| `putThrough`                                        | `writer.run()` / Redis fails     | Error logged on `hotKeyExecutor`, L1 version not updated, no broadcast                         |
-| `putBeforeInvalidate`                               | `mutation.run()` throws          | Mutation exception caught and logged; local invalidate and broadcast skipped                   |
-| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to node-local counter (`Long.MIN_VALUE + counter`, non-persistent, `degraded=true`) |
-
-Worker mode failure behavior:
-
-| Failed component | Impact                                                       | Recovery                                 |
-| ---------------- | ------------------------------------------------------------ | ---------------------------------------- |
-| Worker crashes   | App instances continue with local TopK; no cluster consensus | Restart Worker; instances auto-reconnect |
-| Report channel   | Reports queued/buffered (RabbitMQ)                           | Auto-recover on RabbitMQ restoration     |
-| Worker broadcast | No cross-instance HOT/COOL sync; local TopK still functional | Restart Worker broadcaster               |
-
 ## Quick Start
 
 ### 1. Add dependency (JitPack)
@@ -147,6 +95,9 @@ Worker mode failure behavior:
 ```
 
 Use the latest release as the version. Redis and RabbitMQ dependencies are optional — include them only if you need the corresponding features.
+
+> [!IMPORTANT]
+> While HotKey itself does not strictly require external dependencies, the author strongly recommends introducing Redis for optimal results in distributed deployments, even though extensive degradation handling has been implemented in the core call chain.
 
 ### 2. Configure
 
@@ -176,7 +127,7 @@ hotkey:
 See [Configuration](#configuration) for all options and [CONFIG.md](docs/CONFIG.md) for the complete property reference.
 
 <details>
-<summary><b>Quick-deploy YAML templates</b> (lazy mode — only required overrides)</summary>
+<summary><b>Quick-deploy YAML templates</b> (minimal configuration — only required overrides)</summary>
 
 **Local (App side)** — add the `hotkey` dependency and you're ready; uncomment features as needed
 
@@ -226,19 +177,11 @@ hotkey:
 
 ```yaml
 hotkey:
-  # Cross-node consistency (app and worker sides MUST match)
   local:
+    # ——— Cross-node consistency (app and worker sides MUST match) ———
     app-name: "default"                     # must match worker.routing.app-name
     shard-count: 1                          # must match worker.routing.shard-count
 
-  worker:
-    routing:
-      app-name: "default"                   # must match local.app-name
-      shard-count: 1                        # must match local.shard-count
-      shard-index: 0                        # this instance's shard [0, shard-count-1]
-
-  # App-side local cache + algorithm
-  local:
     # ——— Instance identity ———
     instance-id: ""                         # explicit instance ID (empty = auto-generated)
 
@@ -276,15 +219,13 @@ hotkey:
     refresh-max-pools: 100                  # refresh thread pool limit
     version-key-ttl-minutes: 60             # Redis version key TTL
 
-  # TTL config (normal & hot keys)
-  local:
-    # ——— Normal keys ———
+    # ——— Normal key TTL ———
     default-hard-ttl-ms: 300000             # default hard TTL (5min)
     hard-ttl-ms: 0                          # override (0=use default)
     default-soft-ttl-ms: 30000              # default soft TTL (30s)
     soft-ttl-ms: 0                          # override (0=use default)
 
-    # ——— Hot keys (effective after Worker HOT decision) ———
+    # ——— Hot key TTL (effective after Worker HOT decision) ———
     default-hot-hard-ttl-ms: 3600000        # default hot key hard TTL (1h)
     hot-hard-ttl-ms: 0                      # override (0=use default)
     default-hot-soft-ttl-ms: 300000         # default hot key soft TTL (5min)
@@ -326,6 +267,11 @@ hotkey:
   # Worker-side standalone node
   worker:
     enabled: false
+
+    routing:
+      app-name: "default"                   # must match local.app-name
+      shard-count: 1                        # must match local.shard-count
+      shard-index: 0                        # this instance's shard [0, shard-count-1]
 
     messaging:
       report-exchange: "hotkey.report.exchange"
@@ -492,6 +438,14 @@ public class CollectionHotKeyCache {
 
 Replaces traditional logical expiration — no embedded expiry in Redis values, entirely managed by L1.
 
+| Dimension | Traditional Logical Expiration | HotKey Soft Expire |
+|---|---|---|
+| Expiry storage | Embedded in Redis value (`RedisData{data, expireTime}`) | L1 Caffeine metadata (`softExpireAt`) |
+| Stale value return | Parse wrapper then return stale data | Direct L1 stale value return |
+| Async rebuild | Redis distributed lock + custom thread pool | Singleflight (local) + `hotKeyExecutor` + `refreshLimiter` |
+| Redis format | Wrapped JSON | Raw value (no wrapper) |
+| DB fallback | Manual locking logic | Native `orElseGet` / `orElseThrow` |
+
 ```java
 // Soft expire: L1 hit but soft-expired → returns stale value + async refresh; miss → singleflight load
 Optional<String> r = hotKey.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
@@ -542,17 +496,69 @@ For cluster-wide hot key detection, enable a dedicated Worker node. See [WORKER.
 
 **J. @HotKey annotation**
 
-Declarative caching via AOP — no explicit API calls needed.
+The `@HotKey` annotation provides declarative caching for method return values — a drop-in AOP alternative to explicit `hotKey.get()` / `putBeforeInvalidate()` / `invalidate()` calls.
 
 ```java
 @HotKey(key = "'user:' + #id", hardTtlMs = 5000)
 public User getUser(Long id) { ... }
 ```
 
-Supports `READ` / `WRITE` / `INVALIDATE` operations with SpEL dynamic cache keys.
-Enable by adding `spring-boot-starter-aop` and setting `hotkey.annotation.enabled=true`.
+**Annotation attributes:**
 
-**Fallback on hot key:** When `fallbackEnabled=true` and HeavyKeeper detects the key as hot (in Top-K), the aspect calls the fallback _before_ the normal cache path — bypassing the supplier entirely. Falls back on `RuntimeException` too. Two resolution modes: SpEL (`fallback` attribute) or naming convention (`{methodName}Fallback`).
+| Attribute        | Type            | Default  | Description                                                                                                       |
+| ---------------- | --------------- | -------- | ----------------------------------------------------------------------------------------------------------------- |
+| `key`            | `String`        | Required | SpEL expression referencing method parameters via `#paramName`. Requires `-parameters` compiler flag; falls back to `arg0, arg1, ...` without debug info. |
+| `operation`      | `OperationType` | `READ`   | `READ` / `WRITE` / `INVALIDATE`                                                                                   |
+| `hardTtlMs`      | `long`          | `0`      | Hard TTL override in ms. `0` = use configured default.                                                             |
+| `softTtlMs`      | `long`          | `0`      | Soft TTL override in ms. `0` = use configured default.                                                             |
+| `softExpire`     | `boolean`       | `true`   | Whether to enable stale-while-revalidate on READ. When `false`, behaves like `get()`.                             |
+| `fallbackEnabled`| `boolean`       | `false`  | Whether to enable fallback. Triggered by HeavyKeeper hot key detection or `RuntimeException`.                     |
+| `fallback`       | `String`        | `""`     | SpEL fallback expression. Empty → `{methodName}Fallback` naming convention (method lookup on same bean).          |
+
+> **Hot key fallback:** When `fallbackEnabled=true` and HeavyKeeper detects the key as hot, the Aspect calls the fallback before the normal cache path — bypassing the supplier entirely. `RuntimeException` also triggers fallback. Two resolution modes: SpEL (`fallback` attribute) first, then naming convention `{methodName}Fallback`.
+
+**Three operation modes:**
+
+| Mode              | Facade method                    | Behavior                                                                                                                                                             |
+| ----------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `READ` (default)  | `getWithSoftExpire()` or `get()` | Method body acts as value supplier. `softExpire=true` → `getWithSoftExpire()` (stale value + async refresh); `false` → `get()`. Returns `Optional` directly, otherwise `orElse(null)` unwrap. |
+| `WRITE`           | `putBeforeInvalidate()`          | Method executes as mutation: run, version bump, L1 invalidate, send INVALIDATE broadcast. Exceptions caught and re-thrown after facade call completes.              |
+| `INVALIDATE`      | `invalidate()`                   | Invalidate L1 + version bump + broadcast TYPE_REFRESH (with version) to peers, then execute method.                                                                  |
+
+**SpEL key examples:**
+
+```java
+@HotKey(key = "'user:' + #id")
+public User getUser(Long id) { ... }
+
+@HotKey(key = "'shop:' + #shopId + ':item:' + #itemId")
+public Item getItem(Long shopId, Long itemId) { ... }
+
+@HotKey(key = "#user.id.toString()")
+public Profile getProfile(User user) { ... }
+```
+
+**WRITE / INVALIDATE examples:**
+
+```java
+@HotKey(key = "'user:' + #id", operation = OperationType.WRITE)
+public User updateUser(Long id, UserUpdate dto) { ... }
+
+@HotKey(key = "'user:' + #id", operation = OperationType.INVALIDATE)
+public void clearCache(Long id) { ... }
+```
+
+**Configuration:**
+
+```yaml
+hotkey:
+  annotation:
+    enabled: true
+```
+
+Requires `spring-boot-starter-aop` on the classpath (provides AspectJ). SpEL parameter name resolution requires the `-parameters` compiler flag (enabled by default in the parent POM).
+
+> **Note:** `@HotKey(operation=READ)` wraps the original method call as an L2 supplier — the method body serves as both cache reader and database fallback. This is convenient for read-heavy endpoints but bypasses `peek()` semantics. `softExpire=true` (default) enables stale-while-revalidate: stale values are returned immediately while a background thread refreshes asynchronously. When `softExpire=false`, cache misses always invoke the method synchronously.
 
 **Key config**
 
@@ -565,6 +571,58 @@ The framework offers rich configuration — TTLs, window parameters, Worker shar
 **Null handling**
 
 If the reader returns `null`, the framework treats it as a miss and returns `Optional.empty()`. To distinguish "no data" from "cache miss", use a null sentinel (see scenario C).
+
+### 4. Degradation
+
+HotKey forms a three-level degradation chain through the `supplier` callback:
+
+```
+hotKey.get(key, supplier)
+  ├─ L1(Caffeine) HIT → return directly
+  ├─ L1 MISS → supplier()
+  │    ├─ Returns data → hot key? → write L1 (with appropriate TTL) + return
+  │    ├─ Returns null → Optional.empty() → caller's orElseGet/orElseThrow
+  │    │                     (null = miss — HotKey follows Caffeine's convention.
+  │    │                      If your backend stores nullable values, wrap them
+  │    │                      with a sentinel Object at the caller layer.)
+  │    │
+  │    │                      Example: Redis stores a nullable value
+  │    │                      private static final Object NULL_SENTINEL = new Object();
+  │    │                      Optional<Object> r = hotKey.get("k", () -> {
+  │    │                          Object val = redisTemplate.opsForValue().get("k");
+  │    │                          return val != null ? val : NULL_SENTINEL;
+  │    │                      });
+  │    │                      Object actual = r.orElse(null); // sentinel back to null
+  │    └─ Throws → SingleFlight.load() catches → Optional.empty() → caller's fallback
+  └─ HotKey itself fails → exception → fallback (if @HotKey fallbackEnabled=true) → caller
+```
+
+Component failure behavior:
+
+| Failed component           | Impact                                                     | Recovery                            |
+| -------------------------- | ---------------------------------------------------------- | ----------------------------------- |
+| HotKey itself              | L1 unavailable; exception or hot-key fallback (if enabled) | Restart app                         |
+| L2 backend (Redis/DB/API)  | Every request hits caller's fallback                       | Auto-recover on backend restoration |
+| L1 Caffeine OOM / eviction | Individual keys evicted, next read re-fetches via supplier | Automatic (Caffeine internal)       |
+
+> The caller is always responsible for handling `Optional.empty()` — HotKey never hides backend failures.
+
+Write path failure behavior:
+
+| Write method                                        | Failure scenario                 | Behavior                                                                                       |
+| --------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `putThrough`                                        | Executor queue full (outside tx) | `RejectedExecutionException` propagates to caller                                              |
+| `putThrough`                                        | `writer.run()` / Redis fails     | Error logged on `hotKeyExecutor`, L1 version not updated, no broadcast                         |
+| `putBeforeInvalidate`                               | `mutation.run()` throws          | Mutation exception caught and logged; local invalidate and broadcast skipped                   |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails      | Falls back to node-local counter (`Long.MIN_VALUE + counter`, non-persistent, `degraded=true`) |
+
+Worker mode failure behavior:
+
+| Failed component | Impact                                                       | Recovery                                 |
+| ---------------- | ------------------------------------------------------------ | ---------------------------------------- |
+| Worker crashes   | App instances continue with local TopK; no cluster consensus | Restart Worker; instances auto-reconnect |
+| Report channel   | Reports queued/buffered (RabbitMQ)                           | Auto-recover on RabbitMQ restoration     |
+| Worker broadcast | No cross-instance HOT/COOL sync; local TopK still functional | Restart Worker broadcaster               |
 
 ## HotKey API Reference
 
@@ -665,8 +723,8 @@ Method-level TTL behavior:
 | `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | Same with both overrides                                                                           |
 | `putThrough(key, value, writer)`                       | L1 entry always uses normal-key TTLs (stored as KeyState.NORMAL)                                   |
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | L1 entry uses overridden TTLs (0 = use configured default)                                         |
-| Legacy `local-cache-ttl-minutes`                       | Write-based hard TTL for all entries (under `hotkey.local.*`; supplemented by differentiated TTLs) |
-| Legacy `local-cache-access-ttl-minutes`                | Access-based hard TTL (resets on read, under `hotkey.local.*`); supplements write-based TTL        |
+| `local-cache-ttl-minutes`                              | Write-based hard TTL for all entries (under `hotkey.local.*`; supplemented by differentiated TTLs) |
+| `local-cache-access-ttl-minutes`                       | Access-based hard TTL (resets on read, under `hotkey.local.*`); supplements write-based TTL        |
 
 > **Per-call semantics:** All per-call TTL overrides (hard and soft) are one-time only — the next call without the parameter falls back to the corresponding defaults for the key's state. The sole exception is soft-expire async refreshes, which preserve the original per-entry hard TTL.
 
@@ -771,6 +829,58 @@ When `spring-boot-starter-actuator` is on the classpath, the HotKey endpoint is 
 Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
 
 The response is split into three sections — **local** (app-side detection, cache, reporting, rules, TTLs, version), **worker** (cluster-wide TopK, health, state machine), and **sync** (broadcast dedup). See [MONITOR.md](docs/MONITOR.md) for the full response schema and field descriptions. ([中文版](docs/MONITOR.zh.md))
+
+<details>
+<summary><b>Latency & Performance</b>（click to expand — full chain breakdown and extreme tuning notes）</summary>
+
+See the [benchmark report](docs/HotKey_Benchmark_Report.en.md) for details. Per-hop latencies over Redis + RabbitMQ containers (10 phases, 45k ops, 0 errors):
+
+| Path | Description | P50 | P95 | P99 |
+|---|---|---|---|---|
+| L1 Hit (Caffeine lookup) | Pure memory lookup, no network I/O | **0.001 ms** | 0.004 ms | 0.018 ms |
+| L1 Miss → Redis → L1 | Redis GET RTT + SingleFlight dedup + L1 repopulation | 0.51 ms | 0.94 ms | 2.26 ms |
+| AMQP Publish | RabbitMQ channel write (memory-to-memory) | 0.02 ms | 0.11 ms | 0.27 ms |
+| AMQP E2E Delivery | Publish + broker routing + consumer delivery | 0.07 ms | 0.27 ms | 0.48 ms |
+| Redis GET RTT | Pure network round-trip | 0.62 ms | 1.60 ms | 4.01 ms |
+| Worker Decision (w/o state machine) | Sliding window → broadcast HOT, includes jitter+AMQP+L1 polling | **51.64 ms** | 97.75 ms | 104.16 ms |
+| State Machine Pipeline (w/ SM, 20 windows) | 20 confirm windows(2s) + AMQP decision broadcast + L1 promotion | **1,983 ms** | 2,015 ms | 2,015 ms |
+| **Full Chain (w/o state machine)** | **Step breakdown below** | **155.81 ms** | **202.14 ms** | **212.69 ms** |
+| ┣ L1 Miss → Redis → L1 | Same as Phase 6 | 0.51 ms | — | — |
+| ┣ Report batch wait | `report-interval-ms=100ms` half-interval average | ~50 ms | — | — |
+| ┣ AMQP Report Delivery (App→Worker) | flush() → Report Exchange → Worker | ~1 ms | — | — |
+| ┣ Worker Sliding Window + TopK | In-memory, negligible | <1 ms | — | — |
+| ┣ AMQP Decision Broadcast (Worker→App) | WorkerListener receives decision | ~1 ms | — | — |
+| ┗ Remainder (scheduling + polling + noise) | Two AMQP dispatch + isLocalHotKey() polling + variance | ~52 ms | — | — |
+| **Full Chain w/ SM (20 confirm windows)** | Full chain + 2s confirm windows, 10/10 keys promoted | **2,038 ms** | **2,055 ms** | **2,055 ms** |
+
+> [!WARNING]
+> **Extreme parameter tuning — trading reliability for latency:**
+>
+> Pushing the following parameters to their limits can reduce full-chain latency to **~8ms** (P50, with sliceMs also tuned), but the author **strongly discourages** this in production. HotKey's defaults are deliberately conservative to maximize distributed cluster reliability over raw latency.
+>
+> | Parameter | Limit | Effect | Constraint |
+> |---|---|---|---|
+> | `hotkey.local.report-interval-ms` | 0 → min 1 | Nearly disables report batching — flushes almost immediately after `record()` | `ScheduledExecutorService` requires period > 0 |
+> | `hotkey.worker.warmup-jitter-ms` | 0 | Disables warmup jitter (thundering-herd protection lost), Worker decision runs instantly | — |
+> | `hotkey.worker.state-machine.confirm-duration-ms` | 0 | Disables state-machine confirm windows — broadcasts HOT on first hot window | — |
+> | `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 → 100/100 | Shrinks tick interval, reduces next-tick wait (avg~50ms→~5ms) | Window statistical precision drops significantly |
+>
+> **Estimated latency under extreme tuning:**
+>
+> | Scenario | Default P50 | Extreme P50 | Savings |
+> |---|---|---|---|
+> | Full Chain (w/o state machine) | 155.81 ms | ~8 ms | ~148 ms |
+> | Full Chain + state machine | 2,038 ms | ~8 ms | ~2,030 ms |
+>
+> **Costs:**
+> - Report AMQP message volume surges from ~10 batches/s to ~1,000 batches/s (`report-interval-ms=1`), dramatically increasing RabbitMQ load
+> - Disabling warmup jitter lets millisecond traffic spikes trigger HOT broadcasts, raising false-positive rates
+> - Disabling confirm windows means any transient burst immediately escalates to a global hot key, amplifying false positives
+> - Reducing sliding-window `sliceMs` (via duration/slices) loses statistical accuracy — short-lived bursts are more likely to trigger false HOT decisions
+>
+> Stick with defaults unless you fully understand the trade-offs and your scenario can tolerate them.
+
+</details>
 
 ## Architecture
 

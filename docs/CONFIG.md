@@ -20,7 +20,7 @@
 | `hotkey.local.executor-core-pool-size`            | `8`              | Thread pool core size                                                                      |
 | `hotkey.local.executor-max-pool-size`             | `32`             | Thread pool max size                                                                       |
 | `hotkey.local.executor-queue-capacity`            | `2000`           | Thread pool queue capacity                                                                 |
-| `hotkey.local.decay-period`                       | `20`             | (Deprecated) HeavyKeeper decay period in seconds — backward compatibility only             |
+| `hotkey.local.expelled-queue-capacity`            | `50000`          | Capacity of the expelled hot key staging queue (prevents TopK overflow)                     |
 | `hotkey.local.default-hard-ttl-ms`                | `300000` (5min)  | Default hard TTL for normal keys (Caffeine eviction)                                       |
 | `hotkey.local.hard-ttl-ms`                        | `0`              | Per-call hard TTL override for normal keys; 0 = use `default-hard-ttl-ms`                  |
 | `hotkey.local.default-hot-hard-ttl-ms`            | `3600000` (1h)   | Default hard TTL for hot keys                                                              |
@@ -46,11 +46,12 @@
 | ------------------------------- | ------- | ---------------------------------------------------------------------------- |
 | `hotkey.report.enabled`        | `true`   | Enable app-to-Worker report aggregation (requires `RabbitTemplate` bean)      |
 
-### Scheduling (`hotkey.scheduling.*`)
+### Scheduling (`hotkey.scheduling.*`, `hotkey.decay-period`)
 
 | Property                          | Default | Description                                                                  |
 | --------------------------------- | ------- | ---------------------------------------------------------------------------- |
 | `hotkey.scheduling.enabled`      | `true`   | Enable internal scheduler for HeavyKeeper decay and expelled queue drain      |
+| `hotkey.decay-period`            | `20`     | HeavyKeeper decay period in seconds (resolved via `@Scheduled` directly, not under `hotkey.local.*`) |
 
 ### Annotation (`hotkey.annotation.*`)
 
@@ -70,6 +71,7 @@
 | `hotkey.sync.warmup-jitter-ms`              | `100`                       | Random jitter before processing sync messages (prevents herd)       |
 | `hotkey.sync.concurrent-consumers`          | `3`                         | Number of concurrent RabbitMQ consumers for sync queue               |
 | `hotkey.sync.scheduler-pool-size`           | `4`                         | Thread pool size for async sync jitter delay scheduling              |
+| `hotkey.sync.auto-startup`                 | `true`                      | Whether the sync listener container starts automatically with the application |
 
 ### Worker Listener (`hotkey.worker-listener.*`)
 
@@ -81,6 +83,7 @@
 | `hotkey.worker-listener.warmup-jitter-ms`          | `100`                       | Random jitter before processing Worker messages (prevents herd)        |
 | `hotkey.worker-listener.concurrent-consumers`      | `2`                         | Number of concurrent RabbitMQ consumers for Worker listener queue      |
 | `hotkey.worker-listener.scheduler-pool-size`       | `2`                         | Thread pool size for deferred Redis reads in Worker listener           |
+| `hotkey.worker-listener.auto-startup`              | `true`                      | Whether the worker listener container starts automatically with the application |
 
 ### Worker Node (`hotkey.worker.*`)
 
