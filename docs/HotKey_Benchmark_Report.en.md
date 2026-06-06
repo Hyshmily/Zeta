@@ -154,7 +154,7 @@ High-frequency reporter processes 2M records in 650ms with **zero data loss**. B
 
 **Stress test data source**: [`integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
 **Container stress data source**: [`integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
-**Propagation delay data source**: [`integration-tests/target/testresult/propagation-delay-2026-06-06T07-22-19.722553100Z.json`](../integration-tests/target/testresult/propagation-delay-2026-06-06T07-22-19.722553100Z.json)
+**Propagation delay data source**: [`integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json`](../integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json)
 
 ```
 Tests run: 97, Failures: 0, Errors: 0, Skipped: 9
@@ -195,7 +195,7 @@ Tests run: 97, Failures: 0, Errors: 0, Skipped: 9
 | `WorkerDecisionDeliveryBenchmarkIT` | Worker decision delivery (9,501 ops, 134 OPS overall) | Pass |
 | `HotKeyStressIT` | 31-scenario stress test (2.7M ops, 0 errors) | Pass |
 | `ContainerFullLinkStressIT` | 15-phase container stress test (224k ops, 0 errors) | Pass |
-| `PropagationDelayIT` | 8-phase propagation delay (45k ops, 0 errors) | Pass |
+| `PropagationDelayIT`                 | 10-phase propagation delay (45,312 ops, 0 errors) | Pass |
 
 ---
 

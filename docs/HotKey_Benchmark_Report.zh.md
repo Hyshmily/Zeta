@@ -152,7 +152,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 **压力测试数据源**：[`integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
 **容器压力测试数据源**：[`integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
-**传播延迟数据源**：[`integration-tests/target/testresult/propagation-delay-2026-06-06T07-22-19.722553100Z.json`](../integration-tests/target/testresult/propagation-delay-2026-06-06T07-22-19.722553100Z.json)
+**传播延迟数据源**：[`integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json`](../integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json)
 
 ### 4.1 功能性集成
 
@@ -189,7 +189,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 | `WorkerDecisionDeliveryBenchmarkIT` | Worker 决策投递（9,501 ops, 134 OPS）      | 通过 |
 | `HotKeyStressIT`                    | 31 场景压力测试（270 万 ops, 0 错误）      | 通过 |
 | `ContainerFullLinkStressIT`         | 15 阶段容器压力测试（22.5 万 ops, 0 错误） | 通过 |
-| `PropagationDelayIT`                | 8 阶段传播延迟测试（4.5 万 ops, 0 错误）   | 通过 |
+| `PropagationDelayIT`                | 10 阶段传播延迟测试（45,312 ops, 0 错误） | 通过 |
 
 ---
 
