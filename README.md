@@ -63,7 +63,8 @@ Uses [HeavyKeeper](https://github.com/go-kratos/aegis) (Count-Min Sketch variant
 - **Differentiated TTLs** — separate hard/soft TTLs for hot keys vs normal keys; hot keys cached longer (1h/5min) while normal keys expire faster (5min/30s)
 - **In-Flight Dedup** — concurrent L1 miss requests share a single L2 read via a dedicated `SingleFlight` bean
 
-  > **Note:** Ensure `hotkey.local.inflight-ttl-seconds` exceeds the slowest L2 response time for your workload, or the cache entry may expire before the future completes, causing duplicate L2 reads.
+  > [!NOTE]
+  > Ensure `hotkey.local.inflight-ttl-seconds` exceeds the slowest L2 response time for your workload, or the cache entry may expire before the future completes, causing duplicate L2 reads.
   > Also ensure `hotkey.local.inflight-timeout-seconds` < `hotkey.local.inflight-ttl-seconds`. On timeout, `SingleFlight.load()` returns `Optional.empty()` — the caller should handle via DB fallback.
 
 - **Soft Expire (Logical Expiration)** — return stale L1 value immediately while asynchronously refreshing in the background; lower p99 at the cost of short-lived staleness. **Fully replaces traditional Redis-side logical expiration** (`RedisData{data, expireTime}` wrapper pattern) — Redis stores raw values, HotKey manages staleness at the L1 Caffeine level
@@ -316,7 +317,8 @@ hotkey:
 
 ### 3. Use
 
-> **Note:** From v1.0.2 includes a **breaking change** — `get(hk, fk)` and `putAndBroadcast(hk, fk, val)` are removed. The library is now decoupled from `RedisTemplate`; callers supply their own read/write callbacks via `Supplier<T>` / `Runnable`.
+> [!NOTE]
+> From v1.0.2 includes a **breaking change** — `get(hk, fk)` and `putAndBroadcast(hk, fk, val)` are removed. The library is now decoupled from `RedisTemplate`; callers supply their own read/write callbacks via `Supplier<T>` / `Runnable`.
 
 **A. Pure local cache (no L2)**
 
@@ -558,7 +560,8 @@ hotkey:
 
 Requires `spring-boot-starter-aop` on the classpath (provides AspectJ). SpEL parameter name resolution requires the `-parameters` compiler flag (enabled by default in the parent POM).
 
-> **Note:** `@HotKey(operation=READ)` wraps the original method call as an L2 supplier — the method body serves as both cache reader and database fallback. This is convenient for read-heavy endpoints but bypasses `peek()` semantics. `softExpire=true` (default) enables stale-while-revalidate: stale values are returned immediately while a background thread refreshes asynchronously. When `softExpire=false`, cache misses always invoke the method synchronously.
+> [!NOTE]
+> `@HotKey(operation=READ)` wraps the original method call as an L2 supplier — the method body serves as both cache reader and database fallback. This is convenient for read-heavy endpoints but bypasses `peek()` semantics. `softExpire=true` (default) enables stale-while-revalidate: stale values are returned immediately while a background thread refreshes asynchronously. When `softExpire=false`, cache misses always invoke the method synchronously.
 
 **Key config**
 
@@ -671,7 +674,8 @@ The recommended entry point is the `HotKey` facade (auto-configured as a Spring 
 | `evaluateRule(cacheKey)`           | Return the `RuleAction` for a key without throwing — for programmatic inspection                           |
 | `broadcastAllLocalRulesManually()` | Force-broadcast the current rule set to all peers (useful when Redis is absent)                            |
 
-> **Note:** `invalidate()` generates a monotonic version via Redis `INCR` and broadcasts as `TYPE_REFRESH` with that version — peers reload the value from Redis via `CacheSyncListener`, skipping stale versions. `invalidateAll()` does **not** call `INCR` — it broadcasts as `TYPE_INVALIDATE_ALL` (no version header), so all peers unconditionally remove all listed keys from L1.
+> [!NOTE]
+> `invalidate()` generates a monotonic version via Redis `INCR` and broadcasts as `TYPE_REFRESH` with that version — peers reload the value from Redis via `CacheSyncListener`, skipping stale versions. `invalidateAll()` does **not** call `INCR` — it broadcasts as `TYPE_INVALIDATE_ALL` (no version header), so all peers unconditionally remove all listed keys from L1.
 
 ## Configuration
 
@@ -831,7 +835,7 @@ Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
 The response is split into three sections — **local** (app-side detection, cache, reporting, rules, TTLs, version), **worker** (cluster-wide TopK, health, state machine), and **sync** (broadcast dedup). See [MONITOR.md](docs/MONITOR.md) for the full response schema and field descriptions. ([中文版](docs/MONITOR.zh.md))
 
 <details>
-<summary><b>Latency & Performance</b>（click to expand — full chain breakdown and extreme tuning notes）</summary>
+<summary><b>Latency & Performance</b> (click to expand — full chain breakdown and extreme tuning notes)</summary>
 
 See the [benchmark report](docs/HotKey_Benchmark_Report.en.md) for details. Per-hop latencies over Redis + RabbitMQ containers (10 phases, 45k ops, 0 errors):
 
@@ -852,6 +856,8 @@ See the [benchmark report](docs/HotKey_Benchmark_Report.en.md) for details. Per-
 | ┣ AMQP Decision Broadcast (Worker→App) | WorkerListener receives decision | ~1 ms | — | — |
 | ┗ Remainder (scheduling + polling + noise) | Two AMQP dispatch + isLocalHotKey() polling + variance | ~52 ms | — | — |
 | **Full Chain w/ SM (20 confirm windows)** | Full chain + 2s confirm windows, 10/10 keys promoted | **2,038 ms** | **2,055 ms** | **2,055 ms** |
+
+</details>
 
 > [!WARNING]
 > **Extreme parameter tuning — trading reliability for latency:**
@@ -879,8 +885,6 @@ See the [benchmark report](docs/HotKey_Benchmark_Report.en.md) for details. Per-
 > - Reducing sliding-window `sliceMs` (via duration/slices) loses statistical accuracy — short-lived bursts are more likely to trigger false HOT decisions
 >
 > Stick with defaults unless you fully understand the trade-offs and your scenario can tolerate them.
-
-</details>
 
 ## Architecture
 
