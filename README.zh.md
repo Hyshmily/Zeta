@@ -544,11 +544,6 @@ String json = hotKey
 User user = JSONUtil.toBean(json, User.class);
 ```
 
-> [!NOTE]
-> 彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：向 `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` 传入 `hardTtlMs = Long.MAX_VALUE`。entry 永久驻留 Caffeine——硬 TTL 永不会将其移除。`softExpireAt` 过期后，读取立即返回旧值并触发异步刷新（软过期**不会**淘汰 entry）。不传 `Long.MAX_VALUE` 时，默认硬 TTL 可能先将 entry 淘汰出 Caffeine（L1 未命中 → 更高延迟），而非走旧值 + 异步刷新路径。
-
-见[配置](#配置)中的 TTL 属性选项。
-
 **H. 自定义 per-entry 硬 TTL**
 
 默认情况下，热点 key 和普通 key 使用不同 TTL。通过 `get(key, reader, hardTtlMs, softTtlMs)` 或 `putThrough(key, value, writer, hardTtlMs, softTtlMs)` 可为单个 entry 设置独立的硬和软 TTL。
@@ -571,12 +566,21 @@ hotKey.putThrough("weather:" + city, weatherData,
 >
 > - per-call 的 `hardTtlMs`/`softTtlMs` 仅对本次调用生效。下次调用不传参数时，回退到 key 当前状态（热点或普通）对应的默认 TTL。
 > - 传入 `0` 表示使用该 key 状态的配置默认值。
+> - 彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：向 `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` 传入 `hardTtlMs = Long.MAX_VALUE`。entry 永久驻留 Caffeine——硬 TTL 永不会将其移除。`softExpireAt` 过期后，读取立即返回旧值并触发异步刷新（软过期**不会**淘汰 entry）。不传 `Long.MAX_VALUE` 时，默认硬 TTL 可能先将 entry 淘汰出 Caffeine（L1 未命中 → 更高延迟），而非走旧值 + 异步刷新路径
 > - 传入 `Long.MAX_VALUE` 作为 `hardTtlMs` 可实现永久缓存——该条目永不会被 TTL 淘汰（仅受 Caffeine `maximumSize` 淘汰约束）。Caffeine 的 `Expiry` JavaDoc 官方明确支持此用法：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
-> - 与 `getWithSoftExpire` 配合使用时，per-entry 硬 TTL 在后台刷新中会被保留。配合 `hardTtlMs = Long.MAX_VALUE`，即为彻底逻辑过期：仅 Caffeine `maximumSize` 可淘汰 entry——软过期永不移除 entry，仅返回旧值并异步刷新。
 
 **I. Worker 模式**
 
-如需跨多实例的集群维度热点检测，详见 [Worker 模式](#worker-模式)。
+Worker 模式通过专用节点提供集群维度热点检测。App 实例定期报告访问计数，Worker 运行滑动窗口+状态机管道，将 HOT/COOL 决策广播回所有实例。
+
+两种部署模式：
+
+| 模式        | `worker.enabled` | 激活的 Bean                                                                      |
+| ----------- | ---------------- | -------------------------------------------------------------------------------- |
+| App-only    | `false`（默认）  | `HotKeyCache`、TopK、reporter、actuator、sync                                    |
+| Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `UnsupportedOperationException`） |
+
+**Worker-only** 模式下，缓存操作抛出 `UnsupportedOperationException`。
 
 **J. @HotKey 注解**
 
@@ -727,32 +731,6 @@ Worker 模式故障表现：
 > [!NOTE]
 > `invalidate()` 通过 Redis `INCR` 生成单调版本号，以 `TYPE_REFRESH` 广播——对端通过 `CacheSyncListener` 从 Redis 重新加载，跳过旧版本。`invalidateAll()` **不调用** `INCR`——它以 `TYPE_INVALIDATE_ALL` 广播（无版本头），所有对端无条件从 L1 移除所有列出的 key。
 
-## 配置
-
-快速入门配置见[配置](#2-配置)。完整属性列表见 [CONFIG.zh.md](docs/CONFIG.zh.md)。Worker 模式见 [Worker 模式](#worker-模式)。
-
-### TTL 覆盖属性
-
-通过 `hard-ttl-ms`、`hot-hard-ttl-ms`、`soft-ttl-ms`、`hot-soft-ttl-ms` 覆盖 TTL（0 = 使用默认值）。TTL 默认值和各方法行为见 [TTL 参考](#ttl-参考)。
-
-### 同步与 Worker Listener
-
-```yaml
-hotkey:
-  sync:
-    enabled: true # 跨实例缓存同步
-  worker-listener:
-    enabled: true # 接收 Worker HOT/COOL 决策
-```
-
-### Worker 模式
-
-启用 `hotkey.worker.enabled=true`。两种部署模式——见 [Worker 模式](#worker-模式)。
-
-### 监控
-
-通过 `management.endpoints.web.exposure.include=health,info,hotkey` 启用。
-
 ## TTL 参考
 
 HotKey 使用**差异化 TTL**：热点 key 和普通 key 分别有独立的默认硬和软 TTL。per-call 覆盖在此基础上生效。
@@ -854,25 +832,6 @@ RuleAction action = hotKey.evaluateRule("user:123"); // BLOCK / ALLOW_NO_REPORT 
 hotKey.removeBlacklist("secret:*");
 hotKey.clearAllRules();
 ```
-
-### Worker Listener
-
-如需接收专用 Worker 节点发出的 HOT/COOL 决策，启用 `hotkey.worker-listener.enabled=true`。详见 [Worker 模式](#worker-模式)。
-
-## Worker 模式
-
-Worker 模式通过专用节点提供集群维度热点检测。App 实例定期报告访问计数，Worker 运行滑动窗口+状态机管道，将 HOT/COOL 决策广播回所有实例。
-
-两种部署模式：
-
-| 模式        | `worker.enabled` | 激活的 Bean                                                                      |
-| ----------- | ---------------- | -------------------------------------------------------------------------------- |
-| App-only    | `false`（默认）  | `HotKeyCache`、TopK、reporter、actuator、sync                                    |
-| Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `UnsupportedOperationException`） |
-
-**Worker-only** 模式下，缓存操作抛出 `UnsupportedOperationException`。
-
-完整文档（Worker 搭建、状态机、滑动窗口、配置）见 [Worker 模式](#worker-模式)。
 
 ## 监控
 
