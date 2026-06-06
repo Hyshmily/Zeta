@@ -76,6 +76,60 @@ Uses [HeavyKeeper](https://github.com/go-kratos/aegis) (Count-Min Sketch variant
 - **Configurable Thread Pool** — dedicated `TaskExecutor` with bounded queue
 - **Spring Boot Auto-Configuration** — drop-in dependency, zero boilerplate
 
+## Latency & Performance
+
+<details>
+<summary><b>Click to expand — full chain breakdown and extreme tuning notes</b></summary>
+
+See the [benchmark report](docs/HotKey_Benchmark_Report.en.md) for details. Per-hop latencies over Redis + RabbitMQ containers (10 phases, 45k ops, 0 errors):
+
+| Path | Description | P50 | P95 | P99 |
+|---|---|---|---|---|
+| L1 Hit (Caffeine lookup) | Pure memory lookup, no network I/O | **0.001 ms** | 0.004 ms | 0.018 ms |
+| L1 Miss → Redis → L1 | Redis GET RTT + SingleFlight dedup + L1 repopulation | 0.51 ms | 0.94 ms | 2.26 ms |
+| AMQP Publish | RabbitMQ channel write (memory-to-memory) | 0.02 ms | 0.11 ms | 0.27 ms |
+| AMQP E2E Delivery | Publish + broker routing + consumer delivery | 0.07 ms | 0.27 ms | 0.48 ms |
+| Redis GET RTT | Pure network round-trip | 0.62 ms | 1.60 ms | 4.01 ms |
+| Worker Decision (w/o state machine) | Sliding window → broadcast HOT, includes jitter+AMQP+L1 polling | **51.64 ms** | 97.75 ms | 104.16 ms |
+| State Machine Pipeline (w/ SM, 20 windows) | 20 confirm windows(2s) + AMQP decision broadcast + L1 promotion | **1,983 ms** | 2,015 ms | 2,015 ms |
+| **Full Chain (w/o state machine)** | **Step breakdown below** | **155.81 ms** | **202.14 ms** | **212.69 ms** |
+| ┣ L1 Miss → Redis → L1 | Same as Phase 6 | 0.51 ms | — | — |
+| ┣ Report batch wait | `report-interval-ms=100ms` half-interval average | ~50 ms | — | — |
+| ┣ AMQP Report Delivery (App→Worker) | flush() → Report Exchange → Worker | ~1 ms | — | — |
+| ┣ Worker Sliding Window + TopK | In-memory, negligible | <1 ms | — | — |
+| ┣ AMQP Decision Broadcast (Worker→App) | WorkerListener receives decision | ~1 ms | — | — |
+| ┗ Remainder (scheduling + polling + noise) | Two AMQP dispatch + isLocalHotKey() polling + variance | ~52 ms | — | — |
+| **Full Chain w/ SM (20 confirm windows)** | Full chain + 2s confirm windows, 10/10 keys promoted | **2,038 ms** | **2,055 ms** | **2,055 ms** |
+
+</details>
+
+> [!WARNING]
+> **Extreme parameter tuning — trading reliability for latency:**
+>
+> Pushing the following parameters to their limits can reduce full-chain latency to **~8ms** (P50, with sliceMs also tuned), but the author **strongly discourages** this in production. HotKey's defaults are deliberately conservative to maximize distributed cluster reliability over raw latency.
+>
+> | Parameter | Limit | Effect | Constraint |
+> |---|---|---|---|
+> | `hotkey.local.report-interval-ms` | 0 → min 1 | Nearly disables report batching — flushes almost immediately after `record()` | `ScheduledExecutorService` requires period > 0 |
+> | `hotkey.worker.warmup-jitter-ms` | 0 | Disables warmup jitter (thundering-herd protection lost), Worker decision runs instantly | — |
+> | `hotkey.worker.state-machine.confirm-duration-ms` | 0 | Disables state-machine confirm windows — broadcasts HOT on first hot window | — |
+> | `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 → 100/100 | Shrinks tick interval, reduces next-tick wait (avg~50ms→~5ms) | Window statistical precision drops significantly |
+>
+> **Estimated latency under extreme tuning:**
+>
+> | Scenario | Default P50 | Extreme P50 | Savings |
+> |---|---|---|---|
+> | Full Chain (w/o state machine) | 155.81 ms | ~8 ms | ~148 ms |
+> | Full Chain + state machine | 2,038 ms | ~8 ms | ~2,030 ms |
+>
+> **Costs:**
+> - Report AMQP message volume surges from ~10 batches/s to ~1,000 batches/s (`report-interval-ms=1`), dramatically increasing RabbitMQ load
+> - Disabling warmup jitter lets millisecond traffic spikes trigger HOT broadcasts, raising false-positive rates
+> - Disabling confirm windows means any transient burst immediately escalates to a global hot key, amplifying false positives
+> - Reducing sliding-window `sliceMs` (via duration/slices) loses statistical accuracy — short-lived bursts are more likely to trigger false HOT decisions
+>
+> Stick with defaults unless you fully understand the trade-offs and your scenario can tolerate them.
+
 ## Quick Start
 
 ### 1. Add dependency (JitPack)
@@ -409,7 +463,7 @@ User user = r.orElseGet(() -> createDefaultUser());
 
 **F. Redis collections (List, Set, ZSet)**
 
-For incremental operations (e.g. SADD), use `putBeforeInvalidate` to invalidate L1 — the next read re-fetches from Redis.
+`putThrough` requires the full new value to update L1, but incremental collection operations (LPUSH, SADD, ZADD) modify only a single element — the caller cannot know the complete new value. Use `putBeforeInvalidate` to invalidate L1 after mutation; the next `get()` automatically re-fetches from Redis.
 
 ```java
 @Component
@@ -425,13 +479,22 @@ public class CollectionHotKeyCache {
     return hotKey.get(key + "::member::" + member, () -> redisTemplate.opsForSet().isMember(key, member));
   }
 
+  @SuppressWarnings("unchecked")
   public Set<Object> sMembers(String key) {
     return hotKey.get(key, () -> redisTemplate.opsForSet().members(key));
   }
 
-  // Incremental mutation — invalidate L1
   public void sAdd(String key, Object... members) {
     hotKey.putBeforeInvalidate(key, () -> redisTemplate.opsForSet().add(key, members));
+  }
+
+  public List<Object> lRange(String key, long start, long end) {
+    String cacheKey = key + "::range::" + start + "::" + end;
+    return hotKey.get(cacheKey, () -> redisTemplate.opsForList().range(key, start, end));
+  }
+
+  public Double zScore(String key, Object member) {
+    return hotKey.get(key + "::score::" + member, () -> redisTemplate.opsForZSet().score(key, member));
   }
 }
 ```
@@ -471,7 +534,14 @@ String json = hotKey
 User user = JSONUtil.toBean(json, User.class);
 ```
 
-Pure logical expiry: pass `hardTtlMs = Long.MAX_VALUE` to prevent time-based eviction — entries are only removed by Caffeine `maximumSize`. Soft expire only triggers async refresh, never removes entries. See [Configuration](#configuration) for TTL property options.
+> [!NOTE]
+> [!NOTE]
+> **Pure logical expiry (no hard TTL eviction):**
+> Pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` — the entry permanently resides in Caffeine, never removed by time-based eviction. After `softExpireAt` expires, reads return the stale value immediately and trigger an async refresh (soft expiry **never** evicts the entry).
+>
+> Without `Long.MAX_VALUE`, the default hard TTL may evict the entry from Caffeine first, causing an L1 miss → higher latency, rather than the stale-value + async-refresh path.
+>
+> See [Configuration](#configuration) for TTL property options.
 
 **H. Custom per-entry TTL**
 
@@ -490,7 +560,12 @@ hotKey.putThrough("weather:" + city, weatherData,
     TimeUnit.SECONDS.toMillis(30), 0); // 30s hard TTL, no soft TTL
 ```
 
-Pass `0` to use the key state's (normal/hot) default. Pass `Long.MAX_VALUE` for no expiry ([Caffeine docs](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java)).
+> **Per-call TTL semantics:**
+>
+> - Per-call `hardTtlMs`/`softTtlMs` apply to this call only. Next call without TTL parameters falls back to the key's current state (hot or normal) default.
+> - Passing `0` uses the configured default for the key's state.
+> - Passing `Long.MAX_VALUE` as `hardTtlMs` achieves permanent caching — the entry is never evicted by TTL (only by Caffeine `maximumSize`). Caffeine's `Expiry` JavaDoc explicitly supports this: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
+> - When used with `getWithSoftExpire`, the per-entry hard TTL is preserved across background refreshes. With `hardTtlMs = Long.MAX_VALUE`, this is pure logical expiry: only Caffeine `maximumSize` can evict the entry — soft expiry never removes it, only returns stale values and triggers async refresh.
 
 **I. Worker mode**
 
@@ -833,58 +908,6 @@ When `spring-boot-starter-actuator` is on the classpath, the HotKey endpoint is 
 Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
 
 The response is split into three sections — **local** (app-side detection, cache, reporting, rules, TTLs, version), **worker** (cluster-wide TopK, health, state machine), and **sync** (broadcast dedup). See [MONITOR.md](docs/MONITOR.md) for the full response schema and field descriptions. ([中文版](docs/MONITOR.zh.md))
-
-<details>
-<summary><b>Latency & Performance</b> (click to expand — full chain breakdown and extreme tuning notes)</summary>
-
-See the [benchmark report](docs/HotKey_Benchmark_Report.en.md) for details. Per-hop latencies over Redis + RabbitMQ containers (10 phases, 45k ops, 0 errors):
-
-| Path | Description | P50 | P95 | P99 |
-|---|---|---|---|---|
-| L1 Hit (Caffeine lookup) | Pure memory lookup, no network I/O | **0.001 ms** | 0.004 ms | 0.018 ms |
-| L1 Miss → Redis → L1 | Redis GET RTT + SingleFlight dedup + L1 repopulation | 0.51 ms | 0.94 ms | 2.26 ms |
-| AMQP Publish | RabbitMQ channel write (memory-to-memory) | 0.02 ms | 0.11 ms | 0.27 ms |
-| AMQP E2E Delivery | Publish + broker routing + consumer delivery | 0.07 ms | 0.27 ms | 0.48 ms |
-| Redis GET RTT | Pure network round-trip | 0.62 ms | 1.60 ms | 4.01 ms |
-| Worker Decision (w/o state machine) | Sliding window → broadcast HOT, includes jitter+AMQP+L1 polling | **51.64 ms** | 97.75 ms | 104.16 ms |
-| State Machine Pipeline (w/ SM, 20 windows) | 20 confirm windows(2s) + AMQP decision broadcast + L1 promotion | **1,983 ms** | 2,015 ms | 2,015 ms |
-| **Full Chain (w/o state machine)** | **Step breakdown below** | **155.81 ms** | **202.14 ms** | **212.69 ms** |
-| ┣ L1 Miss → Redis → L1 | Same as Phase 6 | 0.51 ms | — | — |
-| ┣ Report batch wait | `report-interval-ms=100ms` half-interval average | ~50 ms | — | — |
-| ┣ AMQP Report Delivery (App→Worker) | flush() → Report Exchange → Worker | ~1 ms | — | — |
-| ┣ Worker Sliding Window + TopK | In-memory, negligible | <1 ms | — | — |
-| ┣ AMQP Decision Broadcast (Worker→App) | WorkerListener receives decision | ~1 ms | — | — |
-| ┗ Remainder (scheduling + polling + noise) | Two AMQP dispatch + isLocalHotKey() polling + variance | ~52 ms | — | — |
-| **Full Chain w/ SM (20 confirm windows)** | Full chain + 2s confirm windows, 10/10 keys promoted | **2,038 ms** | **2,055 ms** | **2,055 ms** |
-
-</details>
-
-> [!WARNING]
-> **Extreme parameter tuning — trading reliability for latency:**
->
-> Pushing the following parameters to their limits can reduce full-chain latency to **~8ms** (P50, with sliceMs also tuned), but the author **strongly discourages** this in production. HotKey's defaults are deliberately conservative to maximize distributed cluster reliability over raw latency.
->
-> | Parameter | Limit | Effect | Constraint |
-> |---|---|---|---|
-> | `hotkey.local.report-interval-ms` | 0 → min 1 | Nearly disables report batching — flushes almost immediately after `record()` | `ScheduledExecutorService` requires period > 0 |
-> | `hotkey.worker.warmup-jitter-ms` | 0 | Disables warmup jitter (thundering-herd protection lost), Worker decision runs instantly | — |
-> | `hotkey.worker.state-machine.confirm-duration-ms` | 0 | Disables state-machine confirm windows — broadcasts HOT on first hot window | — |
-> | `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 → 100/100 | Shrinks tick interval, reduces next-tick wait (avg~50ms→~5ms) | Window statistical precision drops significantly |
->
-> **Estimated latency under extreme tuning:**
->
-> | Scenario | Default P50 | Extreme P50 | Savings |
-> |---|---|---|---|
-> | Full Chain (w/o state machine) | 155.81 ms | ~8 ms | ~148 ms |
-> | Full Chain + state machine | 2,038 ms | ~8 ms | ~2,030 ms |
->
-> **Costs:**
-> - Report AMQP message volume surges from ~10 batches/s to ~1,000 batches/s (`report-interval-ms=1`), dramatically increasing RabbitMQ load
-> - Disabling warmup jitter lets millisecond traffic spikes trigger HOT broadcasts, raising false-positive rates
-> - Disabling confirm windows means any transient burst immediately escalates to a global hot key, amplifying false positives
-> - Reducing sliding-window `sliceMs` (via duration/slices) loses statistical accuracy — short-lived bursts are more likely to trigger false HOT decisions
->
-> Stick with defaults unless you fully understand the trade-offs and your scenario can tolerate them.
 
 ## Architecture
 
