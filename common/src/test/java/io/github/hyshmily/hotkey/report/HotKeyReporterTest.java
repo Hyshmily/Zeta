@@ -2,6 +2,7 @@ package io.github.hyshmily.hotkey.report;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.AfterEach;
@@ -18,6 +19,7 @@ class HotKeyReporterTest {
   private TestReportPublisher testPublisher;
 
   static class TestReportPublisher extends ReportPublisher {
+
     volatile int publishCount = 0;
 
     TestReportPublisher() {
@@ -35,7 +37,15 @@ class HotKeyReporterTest {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     testPublisher = new TestReportPublisher();
     reporter = new HotKeyReporter(
-      testPublisher, scheduler, 1000, 1, "testApp", 1000, 100, 1
+      new WorkerHealthMonitor(),
+      testPublisher,
+      scheduler,
+      1000,
+      1,
+      "testApp",
+      1000,
+      100,
+      1
     );
   }
 

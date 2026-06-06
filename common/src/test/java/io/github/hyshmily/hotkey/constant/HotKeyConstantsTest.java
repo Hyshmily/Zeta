@@ -26,8 +26,7 @@ class HotKeyConstantsTest {
 
   @Test
   void shouldHaveExpectedRoutingKeys() {
-    assertThat(HotKeyConstants.ROUTING_KEY_HOT).isEqualTo("hot.");
-    assertThat(HotKeyConstants.ROUTING_KEY_COOL).isEqualTo("cool.");
+    assertThat(HotKeyConstants.ROUTING_KEY_BROADCAST).isEqualTo("broadcast.");
     assertThat(HotKeyConstants.ROUTING_KEY_REPORT).isEqualTo("report.");
   }
 

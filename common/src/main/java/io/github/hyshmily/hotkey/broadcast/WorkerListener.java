@@ -15,8 +15,7 @@
  */
 package io.github.hyshmily.hotkey.broadcast;
 
-import static io.github.hyshmily.hotkey.broadcast.WorkerMessage.TYPE_COOL;
-import static io.github.hyshmily.hotkey.broadcast.WorkerMessage.TYPE_HOT;
+import static io.github.hyshmily.hotkey.broadcast.WorkerMessage.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
@@ -24,12 +23,13 @@ import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.entity.KeyState;
 import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.VersionGuard;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import java.io.IOException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import org.springframework.amqp.core.Message;
 
 /**
@@ -54,6 +54,7 @@ public class WorkerListener {
   private final WorkerListenerProperties properties;
   private final ScheduledExecutorService scheduler;
   private final CacheExpireManager expireManager;
+  private final WorkerHealthMonitor workerHealthMonitor;
 
   /**
    * RabbitMQ message callback.  Acknowledges the message immediately after parsing;
@@ -103,6 +104,7 @@ public class WorkerListener {
     switch (msg.type()) {
       case TYPE_HOT -> handleHot(msg);
       case TYPE_COOL -> handleCool(msg);
+      case TYPE_PING -> handlePing(msg);
       default -> log.warn("Unknown worker message type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
     }
   }
@@ -222,5 +224,9 @@ public class WorkerListener {
         return existing;
       });
     log.debug("HotKey cooled by Worker: {}", wm.cacheKey());
+  }
+
+  private void handlePing(WorkerMessage msg) {
+    workerHealthMonitor.onHeartbeat(msg.shardIndex(), msg.timestamp());
   }
 }

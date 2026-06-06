@@ -21,19 +21,21 @@ import java.nio.charset.StandardCharsets;
 import org.springframework.amqp.core.Message;
 
 /**
- * Message from Worker to app instances carrying hot/cool decisions.
+ * Message from Worker to app instances carrying hot/cool decisions or heartbeats.
  * Travels via {@code hotkey.worker.exchange} (FanoutExchange).
  *
  * <p>No {@code isVersionDegraded} — Worker skips broadcast if Redis GET fails.
  *
  * @param cacheKey        the affected cache key
- * @param type            the decision ({@link #TYPE_HOT} or {@link #TYPE_COOL})
+ * @param type            the decision ({@link #TYPE_HOT}, {@link #TYPE_COOL}, or {@link #TYPE_PING})
  * @param decisionVersion the Worker‑local decision version (monotonically increasing)
+ * @param shardIndex      the Worker shard index (for PING; 0 for HOT/COOL)
+ * @param timestamp       the heartbeat timestamp (for PING; 0 for HOT/COOL)
  */
-public record WorkerMessage(String cacheKey, String type, long decisionVersion) {
-
+public record WorkerMessage(String cacheKey, String type, long decisionVersion, int shardIndex, long timestamp) {
   public static final String TYPE_HOT = "HOT";
   public static final String TYPE_COOL = "COOL";
+  public static final String TYPE_PING = "PING";
 
   /**
    * Deserialize a {@code WorkerMessage} from an AMQP message body and headers.
@@ -53,6 +55,10 @@ public record WorkerMessage(String cacheKey, String type, long decisionVersion) 
 
     long decisionVersion =
       msg.getMessageProperties().getHeader(AMQP_HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
-    return new WorkerMessage(cacheKey, type, decisionVersion);
+    int shardIndex =
+      msg.getMessageProperties().getHeader(AMQP_HEADER_SHARD_INDEX) instanceof Number n ? n.intValue() : 0;
+    long timestamp =
+      msg.getMessageProperties().getHeader(AMQP_HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
+    return new WorkerMessage(cacheKey, type, decisionVersion, shardIndex, timestamp);
   }
 }

@@ -207,17 +207,17 @@ HotKey.isWorkerHotKey(cacheKey)
 ### TopK Query Methods
 
 ```
-HotKey.returnHotKeys()
+HotKey.returnLocalHotKeys()
 └─ (topKAlgorithm != null)
      ├─ yes → topKAlgorithm.list()                             [本地 HeavyKeeper Top-K]
      └─ no  → Collections.emptyList()
 
-HotKey.returnExpelledHotKeys()
+HotKey.returnLocalExpelledHotKeys()
 └─ (topKAlgorithm != null)
      ├─ yes → topKAlgorithm.expelledItems()                    [被挤出的热点 key 队列]
      └─ no  → 空 LinkedBlockingQueue
 
-HotKey.returnTotalDataStreams()
+HotKey.returnLocalTotalDataStreams()
 └─ (topKAlgorithm != null)
      ├─ yes → topKAlgorithm.totalDataStreams()                 [累计访问量]
      └─ no  → 0L

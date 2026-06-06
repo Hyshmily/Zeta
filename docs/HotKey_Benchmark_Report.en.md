@@ -2,7 +2,7 @@
 
 > Test data backing for: *"HotKey is a high-performance, low-cost, lightweight distributed multi-level caching framework"*
 >
-> Version: 1.1.2 | Test date: 2026-06-04
+> Version: 1.1.3 | Test date: 2026-06-04
 
 ---
 

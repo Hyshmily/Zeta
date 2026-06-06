@@ -13,8 +13,6 @@
 
 [**English**](README.md)
 
-// TO-DO: Worker Ping心跳机制
-
 ### 写在最前面:为什么我(以下称作者)会创建HotKey？
 
 在实际开发中，作者曾频繁面对大量缓存 Key 的处理问题。Caffeine、Redis、数据库多级缓存的手动维护，逻辑过期的设定，热点 Key 的提前统计与预热——每一个环节都极其繁琐。更棘手的是，在分布式集群环境下，如何让热点 Key 在各个节点间正确共享、避免高并发下的缓存穿透，成了每个开发者绕不开的痛点。
@@ -143,7 +141,7 @@ Worker 模式故障表现：
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.2</version>
+    <version>1.1.3</version>
 </dependency>
 ```
 
@@ -352,6 +350,9 @@ hotkey:
       depth: 10                             # Sketch 深度
       decay: 0.9                            # 衰减因子
       min-count: 10                         # 最小计数
+
+    heartbeat:
+      ping-interval-ms: 1000                # 心跳广播间隔 (ms)
 ```
 
 </details>
@@ -664,9 +665,9 @@ hotkey:
 | `invalidate(cacheKey)`                                 | 使单个 key 在所有缓存层失效                                                                                                      |
 | `invalidateAll(cacheKeys...)`                          | 可变参数重载 — 批量失效多个 key                                                                                                  |
 | `invalidateAll(Collection)`                            | Collection 重载                                                                                                                  |
-| `returnHotKeys()`                                      | 应用端 Top-K 快照（key + 计数）                                                                                                  |
-| `returnExpelledHotKeys()`                              | 获取应用端被挤出的热点 key 队列；由内部定时器周期性清空                                                                          |
-| `returnTotalDataStreams()`                             | 经过应用端 HeavyKeeper 的累计读取数                                                                                              |
+| `returnLocalHotKeys()`                                 | 应用端 Top-K 快照（key + 计数）                                                                                                  |
+| `returnLocalExpelledHotKeys()`                         | 获取应用端被挤出的热点 key 队列；由内部定时器周期性清空                                                                          |
+| `returnLocalTotalDataStreams()`                        | 经过应用端 HeavyKeeper 的累计读取数                                                                                              |
 | `returnWorkerHotKeys()`                                | Worker 端（集群维度）Top-K 快照                                                                                                  |
 | `returnWorkerExpelledHotKeys()`                        | Worker 端被挤出的热点 key 队列                                                                                                   |
 | `returnWorkerTotalDataStreams()`                       | Worker 端 HeavyKeeper 累计读取数                                                                                                 |

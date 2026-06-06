@@ -23,28 +23,25 @@ import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
-import org.springframework.beans.factory.ObjectProvider;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
-import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
-import io.github.hyshmily.hotkey.hotkeycache.VersionController;
-import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.*;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import org.jspecify.annotations.NonNull;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -140,7 +137,7 @@ public class HotKeyAutoConfiguration {
    * Wired with an empty Redis and sync publisher since no Redis is available in this variant.
    */
   @Bean
-  @ConditionalOnMissingBean({RuleMatcher.class, org.springframework.data.redis.core.StringRedisTemplate.class})
+  @ConditionalOnMissingBean({ RuleMatcher.class, org.springframework.data.redis.core.StringRedisTemplate.class })
   public RuleMatcher ruleMatcher(ObjectProvider<CacheSyncPublisher> publisherProvider) {
     return new RuleMatcher(Optional.empty(), Optional.ofNullable(publisherProvider.getIfAvailable()));
   }
@@ -160,7 +157,8 @@ public class HotKeyAutoConfiguration {
     Optional<HotKeyReporter> hotKeyReporter,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     HotKeyProperties properties,
-    RuleMatcher ruleMatcher
+    RuleMatcher ruleMatcher,
+    ObjectProvider<WorkerHealthMonitor> workerHealthMonitorProvider
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -171,7 +169,8 @@ public class HotKeyAutoConfiguration {
       syncPublisher,
       hotKeyReporter,
       ruleMatcher,
-      new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes())
+      new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes()),
+      workerHealthMonitorProvider.getIfAvailable(WorkerHealthMonitor::new)
     );
   }
 

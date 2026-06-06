@@ -17,6 +17,9 @@ package io.github.hyshmily.hotkey.report;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -29,8 +32,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.RequiredArgsConstructor;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
+
 
 /**
  * Periodically aggregates per-key access counts and publishes them
@@ -50,6 +52,7 @@ import io.github.hyshmily.hotkey.log.HotKeyLogger;
 public class HotKeyReporter {
 
   private static final HotKeyLogger log = new DefaultLogger(HotKeyReporter.class);
+  private final WorkerHealthMonitor workerHealthMonitor;
 
   private final Cache<String, LongAdder> counters = Caffeine.newBuilder()
     .expireAfterAccess(30, TimeUnit.SECONDS)
@@ -145,7 +148,9 @@ public class HotKeyReporter {
         long val = adder.sumThenReset();
         if (val > 0) {
           int shard = Math.floorMod(key.hashCode(), shardCount);
-          sharded.computeIfAbsent(shard, _ -> new HashMap<>()).put(key, val);
+          if (workerHealthMonitor.isAlive(shard)) {
+            sharded.computeIfAbsent(shard, _ -> new HashMap<>()).put(key, val);
+          }
         }
       });
 
@@ -188,6 +193,13 @@ public class HotKeyReporter {
    */
   public long dispatcherDropped() {
     return dispatcher == null ? -1 : dispatcher.dropped();
+  }
+
+  /**
+   * @return number of keys currently buffered in the local counter cache
+   */
+  public long getPendingKeyCount() {
+    return counters.estimatedSize();
   }
 
   /**

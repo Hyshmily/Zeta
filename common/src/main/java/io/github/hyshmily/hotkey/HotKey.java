@@ -28,6 +28,7 @@ import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Supplier;
+import lombok.RequiredArgsConstructor;
 
 /**
  * Public facade for the HotKey library.
@@ -46,6 +47,7 @@ import java.util.function.Supplier;
  * {@link UnsupportedOperationException} (cache read/write) or return
  * empty / zero (TopK queries).
  */
+@RequiredArgsConstructor
 public class HotKey {
 
   private final HotKeyCache hotKeyCache;
@@ -59,17 +61,6 @@ public class HotKey {
    */
   public HotKey(HotKeyCache hotKeyCache, TopK topKAlgorithm) {
     this(hotKeyCache, topKAlgorithm, null);
-  }
-
-  /**
-   * Create a HotKey that may span both app and Worker modes.
-   * Any parameter may be {@code null} when the corresponding service
-   * is not available in the current deployment mode.
-   */
-  public HotKey(HotKeyCache hotKeyCache, TopK topKAlgorithm, TopK workerTopKAlgorithm) {
-    this.hotKeyCache = hotKeyCache;
-    this.topKAlgorithm = topKAlgorithm;
-    this.workerTopKAlgorithm = workerTopKAlgorithm;
   }
 
   //-----------------------------------------------------------------------------

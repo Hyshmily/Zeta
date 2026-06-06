@@ -31,6 +31,9 @@ public final class HotKeyConstants {
   public static final String AMQP_HEADER_VERSION = "version";
   /** AMQP message header key indicating whether the version is degraded. */
   public static final String AMQP_HEADER_IS_VERSION_DEGRADED = "isVersionDegraded";
+  public static final String AMQP_HEADER_SHARD_INDEX = "shardIndex";
+  public static final String AMQP_HEADER_TIMESTAMP = "timestamp";
+  public static final String AMQP_MESSAGE_PING = "ping";
 
   /** Thread name prefix for general hotkey operations. */
   public static final String THREAD_PREFIX_HOTKEY = "hotkey-";
@@ -41,10 +44,8 @@ public final class HotKeyConstants {
   /** Thread name prefix for report submission tasks. */
   public static final String THREAD_PREFIX_REPORT = "hotkey-report";
 
-  /** Routing key prefix for HOT decisions sent from worker to apps. */
-  public static final String ROUTING_KEY_HOT = "hot.";
-  /** Routing key prefix for COOL decisions sent from worker to apps. */
-  public static final String ROUTING_KEY_COOL = "cool.";
+  /** Routing key prefix for broadcast decisions (HOT/COOL) sent from worker to apps. */
+  public static final String ROUTING_KEY_BROADCAST = "broadcast.";
   /** Routing key prefix for report messages from apps to worker. */
   public static final String ROUTING_KEY_REPORT = "report.";
   /** Queue name prefix for report queues (appended with app name). */

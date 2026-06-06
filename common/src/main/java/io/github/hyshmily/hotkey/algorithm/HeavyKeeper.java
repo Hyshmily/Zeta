@@ -205,6 +205,26 @@ public class HeavyKeeper implements TopK {
     return expelledQueue;
   }
 
+  /** Maximum number of hot keys tracked. */
+  public int getK() {
+    return k;
+  }
+
+  /** Width of the Count-Min Sketch (columns per row). */
+  public int getWidth() {
+    return width;
+  }
+
+  /** Depth of the Count-Min Sketch (rows / hash functions). */
+  public int getDepth() {
+    return depth;
+  }
+
+  /** Minimum count threshold before a key can enter the TopK set. */
+  public int getMinCount() {
+    return minCount;
+  }
+
   /**
    * Halve all frequency counters in the sketch and the sorted heap,
    * removing entries whose count drops to zero.  Also halves the

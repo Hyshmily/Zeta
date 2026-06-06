@@ -60,6 +60,11 @@ public class CacheSyncPublisher {
       .build();
   }
 
+  /** Current size of the deduplication cache. */
+  public long getDedupCacheSize() {
+    return recentBroadcasts == null ? 0L : recentBroadcasts.estimatedSize();
+  }
+
   /**
    * Send a REFRESH sync message to all peers,
    * deduplicating against recent broadcasts of the same type+key with a higher version.

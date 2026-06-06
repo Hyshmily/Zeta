@@ -24,6 +24,9 @@ import io.github.hyshmily.hotkey.constant.HotKeyConstants;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.entity.KeyState;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
@@ -34,8 +37,6 @@ import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import lombok.RequiredArgsConstructor;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -61,6 +62,7 @@ public class HotKeyCache {
   private final Optional<HotKeyReporter> hotKeyReporter;
   private final RuleMatcher ruleMatcher;
   private final VersionController versionController;
+  private final WorkerHealthMonitor workerHealthMonitor;
 
   private static final String NO_SYNC_PUBLISHER = HotKeyConstants.NO_SYNC_PUBLISHER;
 
@@ -110,6 +112,8 @@ public class HotKeyCache {
       log.debug("peek: invalid cacheKey");
       return Optional.empty();
     }
+    checkAndThrowIfBlocked(cacheKey, "peek");
+
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).map(raw ->
       raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw
     );
@@ -148,7 +152,6 @@ public class HotKeyCache {
         }
         T val = raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw;
 
-        hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
         if (!skipReport) {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
         }
@@ -223,7 +226,6 @@ public class HotKeyCache {
             expireManager.triggerBackgroundRefresh(cacheKey, reader, effectiveSoft);
           }
         }
-        hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
         if (!skipReport) {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
         }

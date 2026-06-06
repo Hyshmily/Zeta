@@ -94,4 +94,14 @@ public class VersionController {
     long version = Long.MIN_VALUE + fallbackVersionCounter.incrementAndGet();
     return new VersionResult(version, true);
   }
+
+  /** Whether Redis is configured for version tracking. */
+  public boolean isRedisConfigured() {
+    return redisTemplate.isPresent();
+  }
+
+  /** Cumulative count of fallbacks to the local degraded counter. */
+  public long getDegradedVersionCount() {
+    return fallbackVersionCounter.get();
+  }
 }

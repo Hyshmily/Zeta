@@ -158,6 +158,11 @@ public class HotKeyStateMachine {
     // keeping the timestamp for a while avoids immediate re-creation churn.
   }
 
+  /** Number of keys currently tracked by the state machine. */
+  public int getTrackedKeys() {
+    return states.size();
+  }
+
   /**
    * Garbage-collects state for keys that have not been evaluated within
    * {@code staleAfterMs} milliseconds.  Should be invoked periodically

@@ -18,11 +18,11 @@ package io.github.hyshmily.hotkey.worker;
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.AMQP_HEADER_IS_VERSION_DEGRADED;
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.AMQP_HEADER_TYPE;
 import static io.github.hyshmily.hotkey.constant.HotKeyConstants.AMQP_HEADER_VERSION;
-import static io.github.hyshmily.hotkey.constant.HotKeyConstants.ROUTING_KEY_COOL;
-import static io.github.hyshmily.hotkey.constant.HotKeyConstants.ROUTING_KEY_HOT;
+import static io.github.hyshmily.hotkey.constant.HotKeyConstants.ROUTING_KEY_BROADCAST;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import io.github.hyshmily.hotkey.broadcast.WorkerMessage;
@@ -58,7 +58,7 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendHotWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastHot("myKey", "test_source");
-    verify(rabbitTemplate).send(eq("hotkey.broadcast.exchange"), eq(ROUTING_KEY_HOT + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate).send(eq("hotkey.broadcast.exchange"), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_HOT);
@@ -69,7 +69,7 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendCoolWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastCool("myKey");
-    verify(rabbitTemplate).send(eq("hotkey.broadcast.exchange"), eq(ROUTING_KEY_COOL + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate).send(eq("hotkey.broadcast.exchange"), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_COOL);
@@ -82,13 +82,11 @@ class WorkerBroadcasterTest {
     broadcaster.broadcastCool("k0");
     broadcaster.broadcastHot("k1", "s1");
     broadcaster.broadcastHot("k2", "s1");
-    verify(rabbitTemplate).send(any(), eq(ROUTING_KEY_COOL + "testApp"), messageCaptor.capture());
-    long v0 = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
-
     broadcaster.broadcastHot("k3", "s1");
-    verify(rabbitTemplate, org.mockito.Mockito.times(3)).send(any(), eq(ROUTING_KEY_HOT + "testApp"), messageCaptor.capture());
-    long v3 = (Long) messageCaptor.getAllValues().get(2).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
 
+    verify(rabbitTemplate, times(4)).send(any(), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
+    long v3 = (Long) messageCaptor.getAllValues().get(3).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
     assertThat(v3).isGreaterThan(v0);
   }
 }

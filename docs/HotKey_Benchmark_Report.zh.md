@@ -2,7 +2,7 @@
 
 > 项目 README 声明："HotKey is a high-performance, low-cost, lightweight distributed multi-level caching framework" 的测试数据支撑
 >
-> 版本：1.1.2 | 测试日期：2026-06-04
+> 版本：1.1.3 | 测试日期：2026-06-04
 
 ---
 

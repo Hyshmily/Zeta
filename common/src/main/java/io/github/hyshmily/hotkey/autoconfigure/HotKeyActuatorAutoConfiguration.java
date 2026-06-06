@@ -1,25 +1,15 @@
-/*
- * Copyright 2026 Hyshmily. All Rights Reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.actuator.HotKeyEndpoint;
+import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.VersionController;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import org.springframework.beans.factory.ObjectProvider;
@@ -56,13 +46,19 @@ public class HotKeyActuatorAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public HotKeyEndpoint hotKeyEndpoint(
-      @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
-      @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
-      ObjectProvider<Cache<String, Object>> hotLocalCacheProvider,
-      ObjectProvider<SingleFlight> singleFlightProvider,
-      ObjectProvider<HotKeyReporter> hotKeyReporterProvider,
-      ObjectProvider<RuleMatcher> ruleMatcherProvider,
-      HotKeyProperties properties) {
+    @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
+    @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
+    ObjectProvider<Cache<String, Object>> hotLocalCacheProvider,
+    ObjectProvider<SingleFlight> singleFlightProvider,
+    ObjectProvider<HotKeyReporter> hotKeyReporterProvider,
+    ObjectProvider<RuleMatcher> ruleMatcherProvider,
+    ObjectProvider<WorkerHealthMonitor> workerHealthMonitorProvider,
+    ObjectProvider<CacheExpireManager> expireManagerProvider,
+    ObjectProvider<VersionController> versionControllerProvider,
+    ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
+    ObjectProvider<HotKeyStateMachine> stateMachineProvider,
+    HotKeyProperties properties
+  ) {
     return new HotKeyEndpoint(
       hotKeyDetectorProvider.getIfAvailable(),
       workerTopKProvider.getIfAvailable(),
@@ -70,6 +66,12 @@ public class HotKeyActuatorAutoConfiguration {
       singleFlightProvider.getIfAvailable(),
       properties,
       hotKeyReporterProvider.getIfAvailable(),
-      ruleMatcherProvider.getIfAvailable());
+      ruleMatcherProvider.getIfAvailable(),
+      workerHealthMonitorProvider.getIfAvailable(),
+      expireManagerProvider.getIfAvailable(),
+      versionControllerProvider.getIfAvailable(),
+      cacheSyncPublisherProvider.getIfAvailable(),
+      stateMachineProvider.getIfAvailable()
+    );
   }
 }

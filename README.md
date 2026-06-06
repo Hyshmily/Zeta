@@ -13,8 +13,6 @@
 
 [**中文版**](README.zh.md)
 
-// TO-DO: Worker Ping Heartbeat Mechanism
-
 ### Foreword: Why HotKey?
 
 In real-world development, I frequently faced the challenge of managing a large number of cache keys. Manually maintaining Caffeine, Redis, and database multi-level caching, configuring logical expiration, and pre-computing and pre-warming hot keys — every step was tedious. Even more challenging, in a distributed cluster environment, ensuring hot keys are correctly shared across nodes and avoiding cache stampedes under high concurrency became a pain point that every developer must address.
@@ -144,7 +142,7 @@ Worker mode failure behavior:
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.2</version>
+    <version>1.1.3</version>
 </dependency>
 ```
 
@@ -223,8 +221,6 @@ hotkey:
 # Machine C:  shard-index: 2
 # shard-count: 3 (same on all machines)
 ```
-
-</details>
 
 **All parameters (override defaults)**
 
@@ -365,7 +361,12 @@ hotkey:
       depth: 10                             # Sketch depth
       decay: 0.9                            # decay factor
       min-count: 10                         # minimum count
+
+    heartbeat:
+      ping-interval-ms: 1000                # heartbeat broadcast interval (ms)
 ```
+
+</details>
 
 ### 3. Use
 
@@ -769,34 +770,7 @@ When `spring-boot-starter-actuator` is on the classpath, the HotKey endpoint is 
 
 Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
 
-```json
-{
-  "topK": [{ "key": "cache:shop:17", "count": 1523 }],
-  "topKCount": 1,
-  "totalRequests": 158392,
-  "l1CacheSize": 87,
-  "l1MaxSize": 1000,
-  "inflightSize": 3,
-  "recentlyExpelled": ["cache:shop:5", "cache:shop:99"],
-  "workerTopK": [{ "key": "cache:shop:17", "count": 8921 }],
-  "workerTopKCount": 1,
-  "workerTotalRequests": 784512,
-  "workerRecentlyExpelled": ["cache:shop:3"]
-}
-```
-
-| Field                       | Description                                   |
-| --------------------------- | --------------------------------------------- |
-| `topK`                      | App-side Top-K hot keys (descending by count) |
-| `topKCount`                 | Number of hot keys in app-side Top-K set      |
-| `totalRequests`             | Total requests through app-side detection     |
-| `l1CacheSize` / `l1MaxSize` | L1 Caffeine current size / max limit          |
-| `inflightSize`              | Current in-flight dedup requests              |
-| `recentlyExpelled`          | Recently evicted keys from app-side Top-K     |
-| `workerTopK`                | Worker-side (cluster-wide) Top-K hot keys     |
-| `workerTopKCount`           | Number of hot keys in Worker-side Top-K set   |
-| `workerTotalRequests`       | Total requests through Worker-side detection  |
-| `workerRecentlyExpelled`    | Recently evicted keys from Worker-side Top-K  |
+The response is split into three sections — **local** (app-side detection, cache, reporting, rules, TTLs, version), **worker** (cluster-wide TopK, health, state machine), and **sync** (broadcast dedup). See [MONITOR.md](docs/MONITOR.md) for the full response schema and field descriptions. ([中文版](docs/MONITOR.zh.md))
 
 ## Architecture
 

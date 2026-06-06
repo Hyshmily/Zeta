@@ -2,9 +2,7 @@ io.github.hyshmily.hotkey.autoconfigure.HotKeyFacadeAutoConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeyAutoConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeyRedisAutoConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeyActuatorAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeySyncAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeyWorkerListenerAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeyReportAutoConfiguration
+io.github.hyshmily.hotkey.autoconfigure.HotKeyAmqpAutoConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeySchedulingConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeyAnnotationAutoConfiguration
 

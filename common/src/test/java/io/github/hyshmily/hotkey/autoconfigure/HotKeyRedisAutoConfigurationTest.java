@@ -26,6 +26,7 @@ import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Optional;
@@ -34,8 +35,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -44,8 +45,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 @ExtendWith(MockitoExtension.class)
 class HotKeyRedisAutoConfigurationTest {
 
-  private final ApplicationContextRunner runner = new ApplicationContextRunner()
-    .withConfiguration(AutoConfigurations.of(HotKeyRedisAutoConfiguration.class));
+  private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
+    AutoConfigurations.of(HotKeyRedisAutoConfiguration.class)
+  );
 
   @Test
   void configIsSkippedWhenRedisTemplateClassNotOnClasspath() {
@@ -68,9 +70,17 @@ class HotKeyRedisAutoConfigurationTest {
     RuleMatcher ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
-      detector, localCache, singleFlight, expireManager,
-      Optional.empty(), Optional.empty(), executor,
-      redisTemplateProvider, properties, ruleMatcher
+      detector,
+      localCache,
+      singleFlight,
+      expireManager,
+      Optional.empty(),
+      Optional.empty(),
+      executor,
+      redisTemplateProvider,
+      properties,
+      ruleMatcher,
+      mock(WorkerHealthMonitor.class)
     );
 
     assertThat(cache).isNotNull();
@@ -91,9 +101,17 @@ class HotKeyRedisAutoConfigurationTest {
 
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
-      detector, localCache, singleFlight, expireManager,
-      Optional.of(publisher), Optional.of(reporter), executor,
-      redisTemplateProvider, properties, ruleMatcher
+      detector,
+      localCache,
+      singleFlight,
+      expireManager,
+      Optional.of(publisher),
+      Optional.of(reporter),
+      executor,
+      redisTemplateProvider,
+      properties,
+      ruleMatcher,
+      mock(WorkerHealthMonitor.class)
     );
 
     assertThat(cache).isNotNull();

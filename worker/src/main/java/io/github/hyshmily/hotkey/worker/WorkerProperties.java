@@ -100,10 +100,16 @@ public class WorkerProperties {
   public static class HeavyKeeper {
 
     private int topK = 100;
-    private int width = 20000;
+    private int width = 20_000;
     private int depth = 10;
     private double decay = 0.9;
     private int minCount = 10;
+  }
+
+  @Data
+  public static class Heartbeat {
+
+    private int pingIntervalMs = 1_000;
   }
 
   private boolean enabled = false;
@@ -115,6 +121,7 @@ public class WorkerProperties {
   private GlobalQpsDynamicThreshold globalQpsDynamicThreshold = new GlobalQpsDynamicThreshold();
   private TopKValidation topKValidation = new TopKValidation();
   private HeavyKeeper heavyKeeper = new HeavyKeeper();
+  private Heartbeat heartbeat = new Heartbeat();
 
   /**
    * Number of sliding-window slices that fit within the CONFIRM duration.

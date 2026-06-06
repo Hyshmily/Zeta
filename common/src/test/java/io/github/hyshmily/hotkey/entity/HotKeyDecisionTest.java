@@ -31,6 +31,6 @@ class HotKeyDecisionTest {
 
   @Test
   void decisionType_shouldHaveExpectedValues() {
-    assertThat(DecisionType.values()).containsExactly(DecisionType.HOT, DecisionType.COOL, DecisionType.NONE);
+    assertThat(DecisionType.values()).containsExactly(DecisionType.HOT, DecisionType.COOL, DecisionType.PING, DecisionType.NONE);
   }
 }

@@ -7,16 +7,16 @@ import static org.mockito.Mockito.when;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.VersionController;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.LinkedHashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,7 +43,7 @@ class HotKeyEndpointTest {
     singleFlight = mock(SingleFlight.class);
     properties = new HotKeyProperties();
     hotKeyReporter = mock(HotKeyReporter.class);
-    endpoint = new HotKeyEndpoint(hotKeyDetector, workerTopK, caffeineCache, singleFlight, properties, hotKeyReporter, new RuleMatcher(Optional.empty(), Optional.empty()));
+    endpoint = new HotKeyEndpoint(hotKeyDetector, workerTopK, caffeineCache, singleFlight, properties, hotKeyReporter, new RuleMatcher(Optional.empty(), Optional.empty()), null, null, null, null, null);
   }
 
   @Test
@@ -59,27 +59,37 @@ class HotKeyEndpointTest {
     when(hotKeyReporter.dispatcherDepth()).thenReturn(5);
 
     Map<String, Object> info = endpoint.hotKeyInfo();
-    assertThat(info).containsKey("topK");
-    assertThat(info).containsKey("topKCount");
-    assertThat(info).containsKey("totalRequests");
-    assertThat(info).containsKey("recentlyExpelled");
-    assertThat(info).containsKey("workerTopK");
-    assertThat(info).containsKey("workerTopKCount");
-    assertThat(info).containsKey("workerTotalRequests");
-    assertThat(info).containsKey("l1CacheSize");
-    assertThat(info).containsKey("l1MaxSize");
-    assertThat(info).containsKey("inflightSize");
-    assertThat(info).containsKey("reportQueueDepth");
+    assertThat(info).containsKey("instanceId");
+    assertThat(info).containsKey("nodeId");
+    assertThat(info).containsKey("local");
+    assertThat(info).containsKey("worker");
+
+    Map<String, Object> local = (Map<String, Object>) info.get("local");
+    assertThat(local).containsKey("topK");
+    assertThat(local).containsKey("topKCount");
+    assertThat(local).containsKey("totalRequests");
+    assertThat(local).containsKey("recentlyExpelled");
+    assertThat(local).containsKey("cacheSize");
+    assertThat(local).containsKey("cacheMaxSize");
+    assertThat(local).containsKey("inflightSize");
+    assertThat(local).containsKey("inflightMaxSize");
+    assertThat(local).containsKey("inflightTtlSec");
+    assertThat(local).containsKey("inflightTimeoutSec");
+    assertThat(local).containsKey("reportQueueDepth");
+    assertThat(local).containsKey("reportPendingKeys");
+
+    Map<String, Object> worker = (Map<String, Object>) info.get("worker");
+    assertThat(worker).containsKey("topK");
+    assertThat(worker).containsKey("topKCount");
+    assertThat(worker).containsKey("totalRequests");
   }
 
   @Test
   void hotKeyInfo_shouldHandleNullComponents() {
-    HotKeyEndpoint minimal = new HotKeyEndpoint(null, null, null, null, properties, null, null);
+    HotKeyEndpoint minimal = new HotKeyEndpoint(null, null, null, null, properties, null, null, null, null, null, null, null);
     Map<String, Object> info = minimal.hotKeyInfo();
-    assertThat(info).doesNotContainKey("topK");
-    assertThat(info).doesNotContainKey("workerTopK");
-    assertThat(info).doesNotContainKey("l1CacheSize");
-    assertThat(info).doesNotContainKey("inflightSize");
-    assertThat(info).doesNotContainKey("reportQueueDepth");
+    assertThat(info).doesNotContainKey("local");
+    assertThat(info).doesNotContainKey("worker");
+    assertThat(info).doesNotContainKey("sync");
   }
 }

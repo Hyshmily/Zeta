@@ -16,7 +16,9 @@
 package io.github.hyshmily.hotkey.entity;
 
 import lombok.Builder;
+import lombok.EqualsAndHashCode;
 import lombok.Getter;
+import lombok.ToString;
 
 /**
  * A value stored in the L1 cache together with its versions (dataVersion,
@@ -33,6 +35,8 @@ import lombok.Getter;
  * transitions in {@code normalHardTtlMs} and {@code normalSoftTtlMs}.
  */
 @Getter
+@ToString
+@EqualsAndHashCode
 @Builder(toBuilder = true)
 public class CacheEntry {
 

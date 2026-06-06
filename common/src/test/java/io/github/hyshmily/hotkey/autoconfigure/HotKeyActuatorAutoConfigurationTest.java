@@ -22,8 +22,13 @@ import static org.mockito.Mockito.mock;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.actuator.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
 import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.VersionController;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import org.junit.jupiter.api.Test;
@@ -32,7 +37,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-import org.springframework.boot.test.util.TestPropertyValues;
 
 /**
  * Tests for {@link HotKeyActuatorAutoConfiguration}.
@@ -40,8 +44,9 @@ import org.springframework.boot.test.util.TestPropertyValues;
 @ExtendWith(MockitoExtension.class)
 class HotKeyActuatorAutoConfigurationTest {
 
-  private final ApplicationContextRunner runner = new ApplicationContextRunner()
-    .withConfiguration(AutoConfigurations.of(HotKeyActuatorAutoConfiguration.class));
+  private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
+    AutoConfigurations.of(HotKeyActuatorAutoConfiguration.class)
+  );
 
   @Test
   void configLoadsWhenEndpointIsOnClasspath() {
@@ -67,6 +72,11 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
+    ObjectProvider<WorkerHealthMonitor> healthProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
+    ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
+    ObjectProvider<HotKeyStateMachine> stateMachineProvider = mock(ObjectProvider.class);
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
     doReturn(workerTopK).when(workerProvider).getIfAvailable();
@@ -74,10 +84,26 @@ class HotKeyActuatorAutoConfigurationTest {
     doReturn(singleFlight).when(sfProvider).getIfAvailable();
     doReturn(reporter).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
+    doReturn(null).when(healthProvider).getIfAvailable();
+    doReturn(null).when(expireManagerProvider).getIfAvailable();
+    doReturn(null).when(versionControllerProvider).getIfAvailable();
+    doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
+    doReturn(null).when(stateMachineProvider).getIfAvailable();
 
     HotKeyActuatorAutoConfiguration config = new HotKeyActuatorAutoConfiguration();
     HotKeyEndpoint endpoint = config.hotKeyEndpoint(
-      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, ruleMatcherProvider, properties
+      detectorProvider,
+      workerProvider,
+      cacheProvider,
+      sfProvider,
+      reporterProvider,
+      ruleMatcherProvider,
+      healthProvider,
+      expireManagerProvider,
+      versionControllerProvider,
+      cacheSyncPublisherProvider,
+      stateMachineProvider,
+      properties
     );
 
     assertThat(endpoint).isNotNull();
@@ -91,6 +117,11 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
+    ObjectProvider<WorkerHealthMonitor> healthProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
+    ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
+    ObjectProvider<HotKeyStateMachine> stateMachineProvider = mock(ObjectProvider.class);
     HotKeyProperties properties = new HotKeyProperties();
 
     doReturn(null).when(detectorProvider).getIfAvailable();
@@ -99,10 +130,26 @@ class HotKeyActuatorAutoConfigurationTest {
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
+    doReturn(null).when(healthProvider).getIfAvailable();
+    doReturn(null).when(expireManagerProvider).getIfAvailable();
+    doReturn(null).when(versionControllerProvider).getIfAvailable();
+    doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
+    doReturn(null).when(stateMachineProvider).getIfAvailable();
 
     HotKeyActuatorAutoConfiguration config = new HotKeyActuatorAutoConfiguration();
     HotKeyEndpoint endpoint = config.hotKeyEndpoint(
-      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, ruleMatcherProvider, properties
+      detectorProvider,
+      workerProvider,
+      cacheProvider,
+      sfProvider,
+      reporterProvider,
+      ruleMatcherProvider,
+      healthProvider,
+      expireManagerProvider,
+      versionControllerProvider,
+      cacheSyncPublisherProvider,
+      stateMachineProvider,
+      properties
     );
 
     assertThat(endpoint).isNotNull();
@@ -117,6 +164,11 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
+    ObjectProvider<WorkerHealthMonitor> healthProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
+    ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
+    ObjectProvider<HotKeyStateMachine> stateMachineProvider = mock(ObjectProvider.class);
     HotKeyProperties properties = new HotKeyProperties();
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
@@ -125,10 +177,26 @@ class HotKeyActuatorAutoConfigurationTest {
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
+    doReturn(null).when(healthProvider).getIfAvailable();
+    doReturn(null).when(expireManagerProvider).getIfAvailable();
+    doReturn(null).when(versionControllerProvider).getIfAvailable();
+    doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
+    doReturn(null).when(stateMachineProvider).getIfAvailable();
 
     HotKeyActuatorAutoConfiguration config = new HotKeyActuatorAutoConfiguration();
     HotKeyEndpoint endpoint = config.hotKeyEndpoint(
-      detectorProvider, workerProvider, cacheProvider, sfProvider, reporterProvider, ruleMatcherProvider, properties
+      detectorProvider,
+      workerProvider,
+      cacheProvider,
+      sfProvider,
+      reporterProvider,
+      ruleMatcherProvider,
+      healthProvider,
+      expireManagerProvider,
+      versionControllerProvider,
+      cacheSyncPublisherProvider,
+      stateMachineProvider,
+      properties
     );
 
     assertThat(endpoint).isNotNull();

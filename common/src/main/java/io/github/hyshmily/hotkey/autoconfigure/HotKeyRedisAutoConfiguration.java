@@ -19,16 +19,13 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
-import org.springframework.beans.factory.ObjectProvider;
+import io.github.hyshmily.hotkey.hotkeycache.*;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.report.HotKeyReporter;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
-import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
-import io.github.hyshmily.hotkey.hotkeycache.VersionController;
-import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -54,14 +51,14 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * on {@code hotKeyCache} wins over the non-Redis variant, and after
  * {@link RedisAutoConfiguration} so the Redis infrastructure is ready.
  */
-@AutoConfiguration(after = {HotKeyAutoConfiguration.class, RedisAutoConfiguration.class})
+@AutoConfiguration(after = { HotKeyAutoConfiguration.class, RedisAutoConfiguration.class })
 @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
 @EnableConfigurationProperties(HotKeyProperties.class)
 public class HotKeyRedisAutoConfiguration {
 
-   /**
-     * Create the {@link RuleMatcher} with Redis persistence and broadcast support.
-     */
+  /**
+   * Create the {@link RuleMatcher} with Redis persistence and broadcast support.
+   */
   @Bean
   @ConditionalOnMissingBean
   public RuleMatcher ruleMatcher(
@@ -74,11 +71,11 @@ public class HotKeyRedisAutoConfiguration {
     );
   }
 
-   /**
-     * Create the Redis-enhanced {@link HotKeyCache} with version-based stale detection.
-     * {@link StringRedisTemplate} is optional — if absent, version tracking falls back
-     * to a node-local counter ({@code Long.MIN_VALUE + counter}).
-     */
+  /**
+   * Create the Redis-enhanced {@link HotKeyCache} with version-based stale detection.
+   * {@link StringRedisTemplate} is optional — if absent, version tracking falls back
+   * to a node-local counter ({@code Long.MIN_VALUE + counter}).
+   */
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean(RedisTemplate.class)
@@ -92,7 +89,8 @@ public class HotKeyRedisAutoConfiguration {
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
     HotKeyProperties properties,
-    RuleMatcher ruleMatcher
+    RuleMatcher ruleMatcher,
+    WorkerHealthMonitor workerHealthMonitor
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -103,7 +101,11 @@ public class HotKeyRedisAutoConfiguration {
       syncPublisher,
       hotKeyReporter,
       ruleMatcher,
-      new VersionController(Optional.ofNullable(redisTemplateProvider.getIfAvailable()), properties.getVersionKeyTtlMinutes())
+      new VersionController(
+        Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
+        properties.getVersionKeyTtlMinutes()
+      ),
+      workerHealthMonitor
     );
   }
 

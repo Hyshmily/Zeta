@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import io.github.hyshmily.hotkey.log.DefaultLogger;
 import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import lombok.RequiredArgsConstructor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -42,20 +43,12 @@ import org.springframework.scheduling.annotation.Scheduled;
 @ConditionalOnProperty(name = "hotkey.scheduling.enabled", havingValue = "true", matchIfMissing = true)
 @ConditionalOnBean(TopK.class)
 @EnableScheduling
+@RequiredArgsConstructor
 public class HotKeySchedulingConfiguration {
 
   private static final HotKeyLogger log = new DefaultLogger(HotKeySchedulingConfiguration.class);
 
   private final List<TopK> topKInstances;
-
-  /**
-   * Creates the scheduling configuration with all available TopK instances.
-   *
-   * @param topKInstances list of TopK beans (app-side and/or Worker-side)
-   */
-  public HotKeySchedulingConfiguration(List<TopK> topKInstances) {
-    this.topKInstances = topKInstances;
-  }
 
   /**
    * Periodically decay the HeavyKeeper counters for all registered TopK instances.

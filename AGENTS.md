@@ -8,12 +8,12 @@ This file provides guidance to AI coding assistants (Claude Code, Copilot CLI, G
 
 HotKey is a Spring Boot Starter for automatic hot key detection and multi-level cache warming. It combines the HeavyKeeper algorithm (Count-Min Sketch variant) with Caffeine L1 caching, optional Redis L2 caching, and optional RabbitMQ broadcast for cross-instance synchronization.
 
-**Coordinates:** `io.github.hyshmily:hotkey:1.1.2`
+**Coordinates:** `io.github.hyshmily:hotkey:1.1.3`
 
-The project is split into 2 Maven modules under parent `hotkey-parent:1.1.2`:
+The project is split into 2 Maven modules under parent `hotkey-parent:1.1.3`:
 
-- **`common/`** (`io.github.hyshmily:hotkey:1.1.2`) — Spring Boot Starter published to Maven Central; all cache logic, auto-configuration, algorithm, broadcast, report, entity types
-- **`worker/`** (`io.github.hyshmily:hotkey-worker:1.1.2`) — standalone Spring Boot app (never published); cluster-wide hot key detection via RabbitMQ reports; parent `spring-boot-starter-parent:3.5.3`
+- **`common/`** (`io.github.hyshmily:hotkey:1.1.3`) — Spring Boot Starter published to Maven Central; all cache logic, auto-configuration, algorithm, broadcast, report, entity types
+- **`worker/`** (`io.github.hyshmily:hotkey-worker:1.1.3`) — standalone Spring Boot app (never published); cluster-wide hot key detection via RabbitMQ reports; parent `spring-boot-starter-parent:3.5.3`
 
 ## Build Commands
 
@@ -52,7 +52,7 @@ Worker-only components live in the `worker/` module under `io.github.hyshmily.ho
 
 `HotKey` is the sole public entry point (facade pattern). All cache operations go through this bean. `HotKeyCache` is internal.
 
-Key methods: `get()`, `get(key, supplier, hardTtlMs, softTtlMs)`, `putThrough()`, `putThrough(key, value, runnable, hardTtlMs, softTtlMs)`, `putBeforeInvalidate()`, `invalidate()`, `invalidateAll()`, `isLocalHotKey()`, `isWorkerHotKey()`, `returnHotKeys()`, `returnExpelledHotKeys()`, `returnTotalDataStreams()`, `returnWorkerHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnWorkerTotalDataStreams()`, `getWithSoftExpire()`, `getWithSoftExpire(key, supplier, softTtlMs)`, `getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs)`, `peek()`
+Key methods: `get()`, `get(key, supplier, hardTtlMs, softTtlMs)`, `putThrough()`, `putThrough(key, value, runnable, hardTtlMs, softTtlMs)`, `putBeforeInvalidate()`, `invalidate()`, `invalidateAll()`, `isLocalHotKey()`, `isWorkerHotKey()`, `returnLocalHotKeys()`, `returnLocalExpelledHotKeys()`, `returnLocalTotalDataStreams()`, `returnWorkerHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnWorkerTotalDataStreams()`, `getWithSoftExpire()`, `getWithSoftExpire(key, supplier, softTtlMs)`, `getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs)`, `peek()`
 
 `@HotKey` is the annotation-based entry point, handled by `HotKeyAspect` which injects the `HotKey` facade.
 

@@ -19,6 +19,8 @@ import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.constant.HotKeyConstants;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -34,8 +36,6 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Auto‑configuration for the <b>hot‑key Worker</b>.
@@ -67,6 +67,7 @@ import io.github.hyshmily.hotkey.log.HotKeyLogger;
 @EnableScheduling
 @RequiredArgsConstructor
 public class WorkerAutoConfiguration {
+
   private static final HotKeyLogger log = new DefaultLogger(WorkerAutoConfiguration.class);
 
   private final WorkerProperties properties;
@@ -327,6 +328,23 @@ public class WorkerAutoConfiguration {
       learner,
       properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
       properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
+      TimeUnit.MILLISECONDS
+    );
+    return new Object(); // placeholder bean
+  }
+
+  @Bean
+  public Object pingTask(
+    WorkerBroadcaster broadcaster,
+    WorkerProperties properties,
+    @Qualifier("hotKeyWorkerScheduler") ScheduledExecutorService scheduler
+  ) {
+    int shardIndex = properties.getRouting().getShardIndex();
+    int intervalMs = properties.getHeartbeat().getPingIntervalMs();
+    scheduler.scheduleAtFixedRate(
+      () -> broadcaster.broadcastHeartbeat(shardIndex),
+      0,
+      intervalMs,
       TimeUnit.MILLISECONDS
     );
     return new Object(); // placeholder bean
