@@ -81,7 +81,17 @@ Uses [HeavyKeeper](https://github.com/go-kratos/aegis) (Count-Min Sketch variant
 > [!WARNING]
 > **Extreme Performance**
 >
-> Pushing the part parameters to their limits can reduce full-chain latency to **~7.5ms** (P50), but the author **strongly discourages** this in production. HotKey's defaults are deliberately conservative to maximize distributed cluster reliability over raw latency.
+> Pushing certain parameters to their limits can reduce full-chain latency to as low as **~7.5ms** (P50), but this is **not recommended** for production use.
+>
+> HotKey's default parameters are deliberately conservative. The framework prioritizes the reliability of the distributed cluster over sheer speed:
+>
+> **The State Machine enforces "one broadcast per key per lifecycle"**, fundamentally eliminating the client CPU overload and self-inflicted congestion caused by redundant broadcasts. In extreme testing, the SM‑0‑confirm path produced only 10 broadcasts, while the no‑SM path generated 86, inflating latency by roughly 9× (65.88ms → 7.54ms).
+>
+> **The default 2‑second confirmation window** is not sluggishness—it is a continuous observation period that delivers near‑zero false‑positive global decisions. During those 2 seconds, the local HeavyKeeper has already completed nanosecond‑level protection, so user requests experience zero blocking.
+>
+> **Warmup jitter and batch intervals** are classic distributed‑system techniques for thundering‑herd prevention and load smoothing. They trade a few tens of milliseconds of latency for cluster‑wide stability.
+>
+> The extreme parameters exist to **demonstrate the framework's full‑chain performance ceiling** (~7.5ms) and to serve as a tuning reference for edge cases. Unless you fully understand and are willing to accept the trade‑offs—higher false‑positive rates, degraded statistical accuracy, client CPU overload—stick with the defaults or rigorously tested values.
 
 <details>
 <summary><b>Click to expand — full chain breakdown and extreme tuning notes</b></summary>
@@ -128,7 +138,7 @@ All scenarios use the state machine — the difference is `confirm-duration-ms=2
 
 **Costs:**
 
-- Report AMQP message volume surges from ~10 batches/s to ~1,000 batches/s (`report-interval-ms=1`), dramatically increasing RabbitMQ load
+- Under extreme tuning, the report frequency surges from ~10 batches/s to ~1000 batches/s. The RabbitMQ broker itself can handle this load, but **without the State Machine's broadcast compression, the Worker would convert every sliding-window verdict into a broadcast**, flooding client consumers with massive redundant messages and dramatically increasing CPU overhead. **The State Machine eliminates this risk by ensuring "one broadcast per key per lifecycle"** — in the SM 0-confirm extreme test, 10 keys generated only 10 broadcasts, whereas the no-SM path under identical conditions generated 86 broadcasts, inflating latency by roughly 9× (65.88ms vs 7.54ms).
 - Disabling warmup jitter lets millisecond traffic spikes trigger HOT broadcasts, raising false-positive rates
 - Disabling confirm windows means any transient burst immediately escalates to a global hot key, amplifying false positives
 - Reducing sliding-window `sliceMs` (via duration/slices) loses statistical accuracy — short-lived bursts are more likely to trigger false HOT decisions
