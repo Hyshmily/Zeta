@@ -135,6 +135,10 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 | combined-stress       | 2,498 ms  | 32,000  | 12,810 ops/s  | 1.36 ms   | 3.84 ms  | 16 线程：70% 读 + 混合写/同步/决策                     |
 | burst-traffic         | 640 ms    | 12,000  | 18,750 ops/s  | 1.57 ms   | 2.55 ms  | 50 线程 x 200 突发，稳定负载后                         |
 
+![容器全链路压力测试结果](img/container_stress_heatmap.png)
+
+*图 1：容器全链路压力测试 — 各阶段吞吐量（上）与延迟分布（下）。13 个阶段全部完成，224,851 次操作零错误。*
+
 ### 系统指标（全程稳定）
 
 | 指标         | 值       |
@@ -189,7 +193,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 | `WorkerDecisionDeliveryBenchmarkIT` | Worker 决策投递（9,501 ops, 134 OPS）      | 通过 |
 | `HotKeyStressIT`                    | 31 场景压力测试（270 万 ops, 0 错误）      | 通过 |
 | `ContainerFullLinkStressIT`         | 15 阶段容器压力测试（22.5 万 ops, 0 错误） | 通过 |
-| `PropagationDelayIT`                | 10 阶段传播延迟测试（45,312 ops, 0 错误） | 通过 |
+| `PropagationDelayIT`                | 10 阶段传播延迟测试（45,312 ops, 0 错误）  | 通过 |
 
 ---
 
@@ -299,17 +303,17 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 **Phase 9** 测量完整端到端延迟：应用缓存未命中 → 上报聚合 → AMQP 上报投递 → Worker 端滑动窗口累积 → SM 确认流水线 → HOT 决策 → AMQP 广播 → WorkerListener → L1 条目提升。Phase 9 默认需要连续 20 个确认窗口（最少 2,000ms）。
 
-| 阶段 | 操作数 | 耗时 | OPS | P50 | P95 | P99 |
-|---|---|---|---|---|---|---|
-| Redis GET 往返 | 10,000 | 7,928 ms | 1,261 | 0.62 ms | 1.60 ms | 4.01 ms |
-| Redis SET 往返 | 5,000 | 3,754 ms | 1,332 | 0.61 ms | 1.45 ms | 3.76 ms |
-| AMQP 发布 | 10,000 | 406 ms | 24,631 | 0.02 ms | 0.11 ms | 0.27 ms |
-| AMQP 端到端投递 | 5,000 | 2,526 ms | 1,979 | 0.07 ms | 0.27 ms | 0.48 ms |
-| HotKey L1 命中 | 10,000 | 129 ms | 77,519 | **0.001 ms** | 0.004 ms | 0.018 ms |
-| HotKey L1 未命中（→ Redis → L1） | 5,000 | 5,688 ms | 879 | 0.51 ms | 0.94 ms | 2.26 ms |
-| Worker 决策流水线 | 200 | 10,993 ms | 18 | **51.64 ms** | 97.75 ms | 104.16 ms |
-| SM 确认流水线（20 确认窗） | 10 | 2,042 ms | 5 | **1,983 ms** | 2,015 ms | 2,015 ms |
-| 全链路（SM 20 确认） | 10 | 2,999 ms | 3 | **2,038 ms** | 2,055 ms | 2,055 ms |
+| 阶段                             | 操作数 | 耗时      | OPS    | P50          | P95      | P99       |
+| -------------------------------- | ------ | --------- | ------ | ------------ | -------- | --------- |
+| Redis GET 往返                   | 10,000 | 7,928 ms  | 1,261  | 0.62 ms      | 1.60 ms  | 4.01 ms   |
+| Redis SET 往返                   | 5,000  | 3,754 ms  | 1,332  | 0.61 ms      | 1.45 ms  | 3.76 ms   |
+| AMQP 发布                        | 10,000 | 406 ms    | 24,631 | 0.02 ms      | 0.11 ms  | 0.27 ms   |
+| AMQP 端到端投递                  | 5,000  | 2,526 ms  | 1,979  | 0.07 ms      | 0.27 ms  | 0.48 ms   |
+| HotKey L1 命中                   | 10,000 | 129 ms    | 77,519 | **0.001 ms** | 0.004 ms | 0.018 ms  |
+| HotKey L1 未命中（→ Redis → L1） | 5,000  | 5,688 ms  | 879    | 0.51 ms      | 0.94 ms  | 2.26 ms   |
+| Worker 决策流水线                | 200    | 10,993 ms | 18     | **51.64 ms** | 97.75 ms | 104.16 ms |
+| SM 确认流水线（20 确认窗）       | 10     | 2,042 ms  | 5      | **1,983 ms** | 2,015 ms | 2,015 ms  |
+| 全链路（SM 20 确认）             | 10     | 2,999 ms  | 3      | **2,038 ms** | 2,055 ms | 2,055 ms  |
 
 关键：
 
@@ -322,12 +326,16 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 - **SM 确认流水线**（1,983ms P50）——主导因素是确认窗口流水线：连续 20 个热窗口 × 每个 100ms 时间片 = 最少 2,000ms。确认后 HOT 决策走与 Phase 7 相同的 AMQP + WorkerListener 路径。总延迟（1,983ms）接近理论最小值 2,000ms + ~52ms 传播 ≈ 2,052ms。
 - **全链路（SM 20 确认）**（2,038ms P50）——完整端到端路径：本地 Caffeine 未命中 → 上报聚合（100ms 批次）→ AMQP 上报投递 → SlidingWindowDetector → 20 确认窗状态机 → AMQP 决策广播 → L1 提升。总延迟主要由确认窗口需求主导，仅比 SM 确认流水线（Phase 8）多约 55ms——新增的上报聚合和投递开销相比 2s 确认底线可忽略不计。10/10 键成功提升，0 错误。
 
+![延迟分布热力图](img/latency_distribution_heatmap.png)
+
+*图 2：各阶段延迟分布热力图。显示每个延迟桶（0-1ms, 1-5ms, 5-10ms 等）的操作占比。L1 命中路径 100% 在 0-1ms 桶内。*
+
   状态机参数可通过 `WorkerProperties` 自定义：
   - `hotkey.worker.state-machine.confirm-duration-ms` = 2000（默认）→ `confirmWindows = ceil(2000 / SlidingWindowDetector.sliceMs(100)) = 20`
   - `hotkey.worker.state-machine.cool-duration-ms` = 15000 → `coolWindows = 150`
   - `hotkey.worker.state-machine.pre-cool-grace-ms` = 5000 → `preCoolGraceWindows = 50`
 
-   减小 `confirm-duration-ms` 或 `SlidingWindowDetector.sliceMs` 可直接缩短热键确认延迟，但会增加误判率。
+  减小 `confirm-duration-ms` 或 `SlidingWindowDetector.sliceMs` 可直接缩短热键确认延迟，但会增加误判率。
 
 ### 5.8 极限参数传播延迟
 
@@ -335,25 +343,30 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 与 5.7 相同的 4 阶段结构，但采用极限参数调优：
 
-| 参数                                                     | 默认值 | 极限值  |
-| -------------------------------------------------------- | ------ | ------- |
-| `hotkey.local.report-interval-ms`                        | 100    | **1**   |
-| `hotkey.worker-listener.warmup-jitter-ms`                | 100    | **0**   |
-| `hotkey.sync.warmup-jitter-ms`                           | 100    | **0**   |
-| `hotkey.worker.state-machine.confirm-duration-ms`        | 2000   | **0**   |
-| `hotkey.worker.sliding-window.duration-ms` / slices      | 1000/10 | **100/100** |
+| 参数                                                | 默认值  | 极限值      |
+| --------------------------------------------------- | ------- | ----------- |
+| `hotkey.local.report-interval-ms`                   | 100     | **1**       |
+| `hotkey.worker-listener.warmup-jitter-ms`           | 100     | **0**       |
+| `hotkey.sync.warmup-jitter-ms`                      | 100     | **0**       |
+| `hotkey.worker.state-machine.confirm-duration-ms`   | 2000    | **0**       |
+| `hotkey.worker.sliding-window.duration-ms` / slices | 1000/10 | **100/100** |
 
 所有阶段使用相同的键数（各 10 个键）以确保公平比较。状态机始终存在——区别在于确认窗口数量。
 
-| 阶段 | 操作数 | 耗时 | P50 | P95 | P99 |
-|---|---|---|---|---|---|
-| Worker 决策流水线（jitter=0） | 200 | 894 ms | **2.35 ms** | 3.77 ms | 5.16 ms |
-| SM 流水线（0 确认） | 10 | 27 ms | **6.80 ms** | 8.03 ms | 8.03 ms |
-| 全链路（SM 0 确认） | 10 | 43 ms | **7.54 ms** | 8.56 ms | 8.56 ms |
+| 阶段                          | 操作数 | 耗时   | P50         | P95     | P99     |
+| ----------------------------- | ------ | ------ | ----------- | ------- | ------- |
+| Worker 决策流水线（jitter=0） | 200    | 894 ms | **2.35 ms** | 3.77 ms | 5.16 ms |
+| SM 流水线（0 确认）           | 10     | 27 ms  | **6.80 ms** | 8.03 ms | 8.03 ms |
+| 全链路（SM 0 确认）           | 10     | 43 ms  | **7.54 ms** | 8.56 ms | 8.56 ms |
 
 全部阶段：**0 错误**，总计 45k 操作。
 
+![极端参数调优对比](img/extreme_tuning_comparison.png)
+
+*图 3：极端参数调优 — 从默认配置（confirm=20）到极限配置（confirm=0）的延迟降低。全链路实现 99.6% 降低（2038ms → 7.54ms）。*
+
 关键：
+
 - **Worker 决策流水线 P50 从 51.64ms 降至 2.35ms**——消除 100ms 预热抖动移除了主要延迟
 - **SM 流水线 P50 从 1,983ms 降至 6.80ms**——2s 确认窗口原本占约 99.7% 延迟
 - **全链路 P50 从 2,038ms（SM 20 确认）降至 7.54ms（SM 0 确认）**（99.6% 降低）——确认窗口是主导项。状态机控制广播量：每个键在整个生命周期中仅广播一次，不受确认窗口数量的影响，避免了 AMQP 发送争用
@@ -368,45 +381,6 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 | 正常（L2 未命中） | 3-5ms 每次操作（Redis） | 临时 CacheEntry 分配      | SingleFlight 去重          |
 | Redis 不可用      | 回落至节点本地计数器    | ~1KB 每 key（AtomicLong） | 降级版本标记防止脏数据覆盖 |
 | RabbitMQ 不可用   | 同步队列暂存消息        | 可编程（队列深度）        | 本地缓存操作不受影响       |
-
----
-
-## 6. 资源开销
-
-### 6.1 核心组件内存
-
-| 组件             | 默认内存                                                             | 配置来源 |
-| ---------------- | -------------------------------------------------------------------- | -------- |
-| HeavyKeeper 草图 | ~4 MB（`width=50000 x depth=5`，详见 `HotKeyProperties.java:42,45`） |
-| Caffeine L1      | 默认 1,000 条目，详见 `HotKeyProperties.java:55`                     |
-| 并发去重         | 默认 50,000 条目，详见 `HotKeyProperties.java:63`                    |
-| Reporter 队列    | 默认 10,000 条目，详见 `HotKeyProperties.java:151`                   |
-| 淘汰 key 队列    | 默认 50,000 条目，详见 `HotKeyProperties.java:81`                    |
-
-### 6.2 核心算法源码量
-
-| 文件                    | 行数 | 功能                       |
-| ----------------------- | ---- | -------------------------- |
-| `HeavyKeeper.java`      | 281  | Count-Min Sketch TopK 检测 |
-| `TopK.java`             | 16   | 接口定义                   |
-| `SingleFlight.java`     | 103  | 并发去重                   |
-| `HotKeyCache.java`      | 540  | 缓存编排                   |
-| `CacheEntry.java`       | 52   | 数据模型                   |
-| `HotKeyProperties.java` | 167  | 配置绑定                   |
-
-### 6.3 依赖分析
-
-| 依赖                         | 范围     | 必选               | 来源             |
-| ---------------------------- | -------- | ------------------ | ---------------- |
-| Spring Boot Starter          | Compile  | 是                 | `common/pom.xml` |
-| Caffeine                     | Compile  | 是                 | `common/pom.xml` |
-| Guava（哈希）                | Compile  | 是                 | `common/pom.xml` |
-| Spring Data Redis            | Provided | 否（L2 可选）      | `common/pom.xml` |
-| Spring AMQP                  | Provided | 否（同步可选）     | `common/pom.xml` |
-| Spring Boot Starter AOP      | Provided | 否（@HotKey 可选） | `common/pom.xml` |
-| Spring Boot Starter Actuator | Provided | 否（监控可选）     | `common/pom.xml` |
-
-**零强制外部服务依赖**。Redis、RabbitMQ、Worker 均为可选。最小部署：单 JAR，无中间件，仅嵌入式 L1。
 
 ---
 

@@ -96,7 +96,8 @@ Uses [HeavyKeeper](https://github.com/go-kratos/aegis) (Count-Min Sketch variant
 <details>
 <summary><b>Click to expand — full chain breakdown and extreme tuning notes</b></summary>
 
-See the [benchmark report](docs/HotKey_Benchmark_Report.en.md) for details. Per-hop latencies over Redis + RabbitMQ containers (10 phases, 45k ops, 0 errors):
+See the [benchmark report](docs/HotKey_Benchmark_Report.en.md)
+for detailed latency breakdowns of each component （[Extreme parameter tuning comparison](docs/img/latency_distribution_heatmap.png)）:
 
 | Path                                        | Description                                                      | P50          | P95          | P99          |
 | ------------------------------------------- | ---------------------------------------------------------------- | ------------ | ------------ | ------------ |
@@ -126,7 +127,7 @@ See the [benchmark report](docs/HotKey_Benchmark_Report.en.md) for details. Per-
 | `hotkey.worker.state-machine.confirm-duration-ms`     | 0                 | Disables state-machine confirm windows — broadcasts HOT on first hot window              | —                                                |
 | `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 → 100/100 | Shrinks tick interval, reduces next-tick wait (avg~50ms→~5ms)                            | Window statistical precision drops significantly |
 
-**Measured latency under extreme tuning** (PropagationDelayExtremeIT, real Redis + RabbitMQ containers, 46k ops, 0 errors):
+**Measured latency under extreme tuning** ([Extreme parameter tuning comparison](docs/img/extreme_tuning_comparison.png)):
 
 | Scenario                 | Default (20 confirm) P50 | Extreme (0 confirm) P50 | Extreme P95 | Extreme P99 |
 | ------------------------ | ------------------------ | ----------------------- | ----------- | ----------- |
