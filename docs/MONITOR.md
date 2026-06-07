@@ -6,6 +6,16 @@ HotKey provides two complementary monitoring mechanisms.
 
 ## 1. Actuator Endpoint
 
+**Prerequisite:** `spring-boot-starter-actuator` on classpath.
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,hotkey
+```
+
 When `spring-boot-starter-actuator` is on the classpath, the HotKey endpoint is automatically registered at `/actuator/hotkey`.
 
 Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.

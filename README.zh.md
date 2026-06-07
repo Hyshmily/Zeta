@@ -839,61 +839,9 @@ hotKey.clearAllRules();
 
 ## 监控
 
-HotKey 提供两种互补的监控机制：
+HotKey 提供两种互补的监控机制
 
-### 1. Actuator 端点（`/actuator/hotkey`）
-
-诊断型 REST 端点——返回结构化 JSON，用于运行时检查热 key、规则和内部状态。
-
-**前置条件：** classpath 中包含 `spring-boot-starter-actuator`。
-
-```yaml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,hotkey
-```
-
-响应分为三个板块 — **local**（应用端检测、缓存、上报、规则、TTL、版本）、**worker**（集群 TopK、健康状态、状态机）和 **sync**（广播去重）。完整响应格式和字段说明见 [MONITOR.zh.md](docs/MONITOR.zh.md)（[英文版](docs/MONITOR.md)）。
-
-### 2. Micrometer 指标
-
-数值型时序指标，用于 Prometheus/Grafana 仪表盘和告警。所有指标使用 `hotkey` 命名空间。
-
-**前置条件：** classpath 中包含 `io.micrometer:micrometer-core`（存在时自动配置）。
-
-| 指标                                  | 类型    | 标签                 | 来源                                    |
-| ------------------------------------- | ------- | -------------------- | --------------------------------------- |
-| `hotkey.l1.cache.gets`                | Counter | `result=hit/miss`    | Caffeine（通过 `CaffeineCacheMetrics`） |
-| `hotkey.l1.cache.puts`                | Counter | —                    | Caffeine                                |
-| `hotkey.l1.cache.evictions`           | Counter | —                    | Caffeine                                |
-| `hotkey.l1.cache.size`                | Gauge   | —                    | Caffeine 预估大小                       |
-| `hotkey.topk.size`                    | Gauge   | `type=local\|worker` | TopK 当前排名数                         |
-| `hotkey.topk.total`                   | Gauge   | `type=local\|worker` | TopK 追踪的总请求数                     |
-| `hotkey.expelled.queue.size`          | Gauge   | —                    | 驱逐队列积压量                          |
-| `hotkey.expelled.queue.remaining`     | Gauge   | —                    | 驱逐队列剩余容量                        |
-| `hotkey.singleflight.inflight`        | Gauge   | —                    | SingleFlight 进行中的去重数             |
-| `hotkey.reporter.queue.depth`         | Gauge   | —                    | Reporter 队列积压量                     |
-| `hotkey.reporter.queue.dropped.total` | Gauge   | —                    | 累计丢弃批次                            |
-| `hotkey.reporter.queue.expired.total` | Gauge   | —                    | 累计过期批次                            |
-| `hotkey.reporter.pending.keys`        | Gauge   | —                    | Reporter 计数缓存中缓冲的 key 数        |
-| `hotkey.expire.refresh.available`     | Gauge   | —                    | 刷新信号量可用许可数                    |
-| `hotkey.version.degraded.total`       | Gauge   | —                    | 累计版本回退次数                        |
-| `hotkey.sync.dedup.size`              | Gauge   | —                    | 广播去重缓存大小                        |
-| `hotkey.worker.alive`                 | Gauge   | —                    | 任意 Worker 分片是否存活（0/1）         |
-| `hotkey.worker.tracked.keys`          | Gauge   | —                    | 状态机追踪的 key 数                     |
-
-**对比：**
-
-| 维度        | Actuator 端点                      | Micrometer 指标                    |
-| ----------- | ---------------------------------- | ---------------------------------- |
-| 输出        | 结构化 JSON（热 key、规则、配置）  | 数值型 Gauge / Counter             |
-| 热 key 名称 | 是——实际 key 名 + 频率             | 否——仅 `topk.size` 总数            |
-| 算法配置    | 是——`width`/`depth`/`minCount`/`K` | 否                                 |
-| 规则        | 是——ID、模式、类型、创建时间       | 否                                 |
-| 查询方式    | 按需 HTTP GET                      | 定期拉取（Prometheus）/ 推送       |
-| 适用场景    | 运行时诊断（"哪些 key 是热点？"）  | 仪表盘和告警（"队列深度在增长？"） |
+完整响应格式和字段说明见 [MONITOR.zh.md](docs/MONITOR.zh.md)（[英文版](docs/MONITOR.md)）。
 
 ## 架构和设计细节
 

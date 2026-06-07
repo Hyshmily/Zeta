@@ -835,63 +835,9 @@ hotKey.clearAllRules();
 
 ## Monitoring
 
-HotKey provides two complementary monitoring mechanisms:
-
-### 1. Actuator Endpoint (`/actuator/hotkey`)
-
-Diagnostic REST endpoint — returns structured JSON for runtime inspection of hot keys, rules, and internal state.
-
-**Prerequisite:** `spring-boot-starter-actuator` on classpath.
-
-```yaml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,hotkey
-```
-
-The response is split into three sections — **local** (app-side detection, cache, reporting, rules, TTLs, version), **worker** (cluster-wide TopK, health, state machine), and **sync** (broadcast dedup).
+HotKey provides two complementary monitoring mechanisms
 
 See [MONITOR.md](docs/MONITOR.md) for the full response schema and field descriptions. ([中文版](docs/MONITOR.zh.md))
-
-### 2. Micrometer Metrics
-
-Numerical time-series metrics for Prometheus/Grafana dashboards and alerting. All metrics use the `hotkey` namespace.
-
-**Prerequisite:** `io.micrometer:micrometer-core` on classpath (auto-configured when present).
-
-| Metric                                | Type    | Tags                 | Source                                  |
-| ------------------------------------- | ------- | -------------------- | --------------------------------------- |
-| `hotkey.l1.cache.gets`                | Counter | `result=hit/miss`    | Caffeine (via `CaffeineCacheMetrics`)   |
-| `hotkey.l1.cache.puts`                | Counter | —                    | Caffeine                                |
-| `hotkey.l1.cache.evictions`           | Counter | —                    | Caffeine                                |
-| `hotkey.l1.cache.size`                | Gauge   | —                    | Caffeine estimated size                 |
-| `hotkey.topk.size`                    | Gauge   | `type=local\|worker` | TopK current ranking count              |
-| `hotkey.topk.total`                   | Gauge   | `type=local\|worker` | TopK total requests tracked             |
-| `hotkey.expelled.queue.size`          | Gauge   | —                    | Expelled queue backlog                  |
-| `hotkey.expelled.queue.remaining`     | Gauge   | —                    | Expelled queue remaining capacity       |
-| `hotkey.singleflight.inflight`        | Gauge   | —                    | SingleFlight in-flight dedup count      |
-| `hotkey.reporter.queue.depth`         | Gauge   | —                    | Reporter queue backlog                  |
-| `hotkey.reporter.queue.dropped.total` | Gauge   | —                    | Cumulative dropped batches              |
-| `hotkey.reporter.queue.expired.total` | Gauge   | —                    | Cumulative expired batches              |
-| `hotkey.reporter.pending.keys`        | Gauge   | —                    | Keys buffered in reporter counter cache |
-| `hotkey.expire.refresh.available`     | Gauge   | —                    | Available refresh limiter permits       |
-| `hotkey.version.degraded.total`       | Gauge   | —                    | Cumulative version fallback count       |
-| `hotkey.sync.dedup.size`              | Gauge   | —                    | Broadcast dedup cache size              |
-| `hotkey.worker.alive`                 | Gauge   | —                    | Whether any worker shard is alive (0/1) |
-| `hotkey.worker.tracked.keys`          | Gauge   | —                    | Keys tracked by state machine           |
-
-**Comparison:**
-
-| Dimension        | Actuator Endpoint                         | Micrometer Metrics                             |
-| ---------------- | ----------------------------------------- | ---------------------------------------------- |
-| Output           | Structured JSON (keys, rules, config)     | Numeric gauges / counters                      |
-| Hot key names    | Yes — actual keys + frequencies           | No — only `topk.size` count                    |
-| Algorithm config | Yes — `width`/`depth`/`minCount`/`K`      | No                                             |
-| Rules            | Yes — ID, pattern, type, creation time    | No                                             |
-| Query            | On-demand HTTP GET                        | Periodic scrape (Prometheus) / push            |
-| Best for         | Runtime diagnosis ("which keys are hot?") | Dashboards & alerting ("queue depth growing?") |
 
 ## Architecture
 

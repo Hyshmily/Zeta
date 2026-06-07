@@ -6,6 +6,16 @@ HotKey 提供两种互补的监控机制。
 
 ## 1. Actuator 端点
 
+**前置条件：** classpath 中包含 `spring-boot-starter-actuator`。
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,hotkey
+```
+
 当 classpath 中存在 `spring-boot-starter-actuator` 时，HotKey 端点将自动注册到 `/actuator/hotkey`。
 
 通过 `management.endpoints.web.exposure.include=health,info,hotkey` 启用。
@@ -106,20 +116,19 @@ HotKey 提供两种互补的监控机制。
 
 ### 自定义 HotKey 业务指标
 
-| 指标                                  | 类型                               | 标签                 | 说明                             |
-| ------------------------------------- | ---------------------------------- | -------------------- | -------------------------------- |
-| `hotkey.topk.size`                    | Gauge                              | `type=local\|worker` | TopK 当前排名数                  |
-| `hotkey.topk.total`                   | Gauge                              | `type=local\|worker` | TopK 追踪的总请求数              |
-| `hotkey.expelled.queue.size`          | Gauge                              | —                    | 驱逐队列积压量                   |
-| `hotkey.expelled.queue.remaining`     | Gauge                              | —                    | 驱逐队列剩余容量                 |
-| `hotkey.singleflight.inflight`        | Gauge                              | —                    | SingleFlight 进行中的去重数      |
-| `hotkey.reporter.queue.depth`         | Gauge                              | —                    | Reporter 队列积压量              |
-| `hotkey.reporter.queue.dropped.total` | Gauge                              | —                    | 累计丢弃批次（队列满）           |
-| `hotkey.reporter.queue.expired.total` | Gauge                              | —                    | 累计过期批次                     |
-| `hotkey.reporter.pending.keys`        | Gauge                              | —                    | Reporter 计数缓存中缓冲的 key 数 |
-| `hotkey.expire.refresh.available`     | Gauge                              | —                    | 刷新信号量可用许可数             |
-| `hotkey.version.degraded.total`       | Gauge                              | —                    | 累计版本回退次数                 |
-| `hotkey.sync.dedup.size`              | Gauge                              | —                    | 广播去重缓存大小                 |
-| `hotkey.worker.alive`                 | Gauge                              | —                    | 任意 Worker 分片是否存活（0/1）  |
-| `hotkey.worker.tracked.keys`          | Gauge                              | —                    | 状态机追踪的 key 数              |
-| 运行时诊断（"哪些 key 是热点？"）     | 仪表盘和告警（"队列深度在增长？"） |
+| 指标                                  | 类型  | 标签                 | 说明                             |
+| ------------------------------------- | ----- | -------------------- | -------------------------------- |
+| `hotkey.topk.size`                    | Gauge | `type=local\|worker` | TopK 当前排名数                  |
+| `hotkey.topk.total`                   | Gauge | `type=local\|worker` | TopK 追踪的总请求数              |
+| `hotkey.expelled.queue.size`          | Gauge | —                    | 驱逐队列积压量                   |
+| `hotkey.expelled.queue.remaining`     | Gauge | —                    | 驱逐队列剩余容量                 |
+| `hotkey.singleflight.inflight`        | Gauge | —                    | SingleFlight 进行中的去重数      |
+| `hotkey.reporter.queue.depth`         | Gauge | —                    | Reporter 队列积压量              |
+| `hotkey.reporter.queue.dropped.total` | Gauge | —                    | 累计丢弃批次（队列满）           |
+| `hotkey.reporter.queue.expired.total` | Gauge | —                    | 累计过期批次                     |
+| `hotkey.reporter.pending.keys`        | Gauge | —                    | Reporter 计数缓存中缓冲的 key 数 |
+| `hotkey.expire.refresh.available`     | Gauge | —                    | 刷新信号量可用许可数             |
+| `hotkey.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
+| `hotkey.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
+| `hotkey.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
+| `hotkey.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数              |
