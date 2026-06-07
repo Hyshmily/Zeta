@@ -1,127 +1,125 @@
 # 监控
 
+HotKey 提供两种互补的监控机制。
+
+---
+
+## 1. Actuator 端点
+
 当 classpath 中存在 `spring-boot-starter-actuator` 时，HotKey 端点将自动注册到 `/actuator/hotkey`。
 
 通过 `management.endpoints.web.exposure.include=health,info,hotkey` 启用。
 
-```json
+```javascript
 {
-  "instanceId": "a1b2c3d4",
-  "nodeId": "node-1",
+  "instanceId": "a1b2c3d4",        // 实例唯一标识
+  "nodeId": "node-1",               // 集群内节点标识
   "local": {
-    "topK": [{ "key": "cache:shop:17", "count": 1523 }],
-    "topKCount": 1,
-    "totalRequests": 158392,
-    "recentlyExpelled": ["cache:shop:5", "cache:shop:99"],
-    "topKCapacity": 100,
-    "sketchWidth": 50000,
-    "sketchDepth": 5,
-    "minCountThreshold": 10,
-    "expelledQueueSize": 2,
-    "expelledQueueRemaining": 49998,
-    "cacheSize": 87,
-    "cacheMaxSize": 1000,
-    "inflightSize": 3,
-    "inflightMaxSize": 50000,
-    "inflightTtlSec": 5,
-    "inflightTimeoutSec": 3,
-    "reportQueueDepth": 0,
-    "reportQueueCapacity": 10000,
-    "reportExpiredCount": 0,
-    "reportQueueFullCount": 0,
-    "reportPendingKeys": 0,
-    "rules": [
+    // ── 应用端 TopK 检测 ──
+    "topK": [{ "key": "cache:shop:17", "count": 1523 }],  // 热 key 列表（按频率降序）
+    "topKCount": 1,                                        // 当前热 key 数
+    "totalRequests": 158392,                               // 追踪的总请求数
+    "recentlyExpelled": ["cache:shop:5", "cache:shop:99"], // 最近被驱逐的 key
+
+    // ── HeavyKeeper 算法配置 ──
+    "topKCapacity": 100,            // 最大热 key 数（HeavyKeeper K）
+    "sketchWidth": 50000,           // Count-Min Sketch 宽度
+    "sketchDepth": 5,               // Count-Min Sketch 深度
+    "minCountThreshold": 10,        // 晋升为热 key 的最小计数
+    "expelledQueueSize": 2,         // 驱逐队列积压量
+    "expelledQueueRemaining": 49998,// 驱逐队列剩余容量
+
+    // ── L1 Caffeine 缓存 ──
+    "cacheSize": 87,                // L1 预估大小
+    "cacheMaxSize": 1000,           // L1 最大容量
+
+    // ── SingleFlight 去重 ──
+    "inflightSize": 3,              // 进行中的去重请求数
+    "inflightMaxSize": 50000,       // 最大去重 key 数
+    "inflightTtlSec": 5,            // 去重条目 TTL（秒）
+    "inflightTimeoutSec": 3,        // 异步等待超时（秒）
+
+    // ── Reporter（应用→Worker） ──
+    "reportQueueDepth": 0,          // Reporter 分发器队列深度
+    "reportQueueCapacity": 10000,   // Reporter 分发器队列容量
+    "reportExpiredCount": 0,        // 累计过期批次
+    "reportQueueFullCount": 0,      // 累计丢弃批次（队列满）
+    "reportPendingKeys": 0,         // 计数缓存中缓冲的 key 数
+
+    // ── 规则 ──
+    "rules": [                      // 当前生效的黑/白名单规则
       { "id": "...", "type": "BLOCK", "pattern": "secret:*", "createdAt": 1700000000000 }
     ],
-    "softExpireEnabled": true,
-    "hardTtlMs": 300000,
-    "softTtlMs": 30000,
-    "hotHardTtlMs": 3600000,
-    "hotSoftTtlMs": 300000,
-    "refreshPoolAvailable": 100,
-    "versionRedisEnabled": true,
-    "versionDegradedCount": 0
+
+    // ── TTL 配置 ──
+    "softExpireEnabled": true,      // 是否全局启用软过期
+    "hardTtlMs": 300000,            // 有效硬 TTL——普通 key（毫秒）
+    "softTtlMs": 30000,             // 有效软 TTL——普通 key（毫秒）
+    "hotHardTtlMs": 3600000,        // 有效硬 TTL——热 key（毫秒）
+    "hotSoftTtlMs": 300000,         // 有效软 TTL——热 key（毫秒）
+    "refreshPoolAvailable": 100,    // 刷新信号量可用许可数
+
+    // ── 版本追踪 ──
+    "versionRedisEnabled": true,    // Redis 版本追踪是否启用
+    "versionDegradedCount": 0       // 使用降级节点本地版本的 key 数
   },
   "worker": {
-    "topK": [{ "key": "cache:shop:17", "count": 8921 }],
-    "topKCount": 1,
-    "totalRequests": 784512,
-    "recentlyExpelled": ["cache:shop:3"],
-    "topKCapacity": 100,
-    "sketchWidth": 20000,
-    "sketchDepth": 10,
-    "minCountThreshold": 10,
-    "shards": [0, 1, 2],
-    "health": { "0": { "alive": true, ... } },
-    "trackedKeys": 7
+    // ── Worker 端 TopK（集群级） ──
+    "topK": [{ "key": "cache:shop:17", "count": 8921 }],  // 集群级热 key 列表
+    "topKCount": 1,                                        // Worker 热 key 数
+    "totalRequests": 784512,                               // Worker 总请求数
+    "recentlyExpelled": ["cache:shop:3"],                  // Worker 最近驱逐的 key
+    "topKCapacity": 100,            // Worker HeavyKeeper K
+    "sketchWidth": 20000,           // Worker sketch 宽度
+    "sketchDepth": 10,              // Worker sketch 深度
+    "minCountThreshold": 10,        // Worker 最小晋升计数
+
+    // ── Worker 健康状态 ──
+    "shards": [0, 1, 2],            // 已知分片索引
+    "health": { "0": { "alive": true, ... } },  // 按分片的健康元数据
+    "trackedKeys": 7                // 状态机追踪的 key 数
   },
   "sync": {
-    "dedupCacheSize": 20
+    "dedupCacheSize": 20            // 广播去重缓存条目数
   }
 }
 ```
 
-## 板块说明
+## 2. Micrometer 指标
 
-### `local`
+当 classpath 中存在 `io.micrometer:micrometer-core` 时，`HotKeyMicrometerAutoConfiguration` 自动注册 MeterBinder Bean，暴露以下指标。
 
-应用端检测、缓存、上报、规则、TTL 及版本状态。
+### Caffeine L1 缓存指标（`hotkey.l1.*`）
 
-| Key | 说明 |
-| --- | ---- |
-| `topK` | 应用端 Top-K 热 key 列表（按次数降序） |
-| `topKCount` | 应用端 Top-K 集中的热 key 数量 |
-| `totalRequests` | 应用端检测的总请求数 |
-| `recentlyExpelled` | 应用端 Top-K 最近被驱逐的 key |
-| `topKCapacity` | 最大热 key 数量（HeavyKeeper K） |
-| `sketchWidth` | Count-Min Sketch 宽度 |
-| `sketchDepth` | Count-Min Sketch 深度 |
-| `minCountThreshold` | 晋升为热 key 的最小计数 |
-| `expelledQueueSize` | 当前驱逐队列大小 |
-| `expelledQueueRemaining` | 驱逐队列剩余容量 |
-| `cacheSize` | L1 Caffeine 当前大小 |
-| `cacheMaxSize` | L1 Caffeine 最大限制 |
-| `inflightSize` | 当前正在去重的请求数 |
-| `inflightMaxSize` | 最大去重 key 数 |
-| `inflightTtlSec` | 去重条目 TTL（秒） |
-| `inflightTimeoutSec` | 异步等待超时（秒） |
-| `reportQueueDepth` | 上报分发器队列深度 |
-| `reportQueueCapacity` | 上报分发器队列容量 |
-| `reportExpiredCount` | 上报分发器过期任务数 |
-| `reportQueueFullCount` | 上报分发器丢弃数（队列满） |
-| `reportPendingKeys` | 上报缓冲中待处理的 key 数 |
-| `rules` | 当前生效的黑/白名单规则 |
-| `softExpireEnabled` | 是否全局启用软过期 |
-| `hardTtlMs` | 有效硬 TTL（普通 key，毫秒） |
-| `softTtlMs` | 有效软 TTL（普通 key，毫秒） |
-| `hotHardTtlMs` | 有效硬 TTL（热 key，毫秒） |
-| `hotSoftTtlMs` | 有效软 TTL（热 key，毫秒） |
-| `refreshPoolAvailable` | 刷新信号量可用许可数 |
-| `versionRedisEnabled` | Redis 版本追踪是否启用 |
-| `versionDegradedCount` | 使用降级版本（节点本地）的 key 数 |
+通过 `CaffeineCacheMetrics.monitor()` 提供的标准 Caffeine 缓存指标：
 
-### `worker`
+| 指标                               | 类型    | 说明                                              |
+| ---------------------------------- | ------- | ------------------------------------------------- |
+| `hotkey.l1.cache.gets`             | Counter | 缓存读取次数（标签 `result=hit` / `result=miss`） |
+| `hotkey.l1.cache.puts`             | Counter | 缓存写入次数                                      |
+| `hotkey.l1.cache.evictions`        | Counter | 缓存驱逐次数（标签 `cause=...`）                  |
+| `hotkey.l1.cache.evictions.weight` | Counter | 驱逐条目权重                                      |
+| `hotkey.l1.cache.hit.ratio`        | Gauge   | 当前命中率                                        |
+| `hotkey.l1.cache.miss.ratio`       | Gauge   | 当前未命中率                                      |
+| `hotkey.l1.cache.size`             | Gauge   | 缓存预估大小                                      |
+| `hotkey.l1.cache.max`              | Gauge   | 缓存最大大小                                      |
 
-Worker 端 TopK、健康状态和状态机。仅在 Worker 组件可用时出现。
+### 自定义 HotKey 业务指标
 
-| Key | 说明 |
-| --- | ---- |
-| `topK` | Worker 端（集群级）Top-K 热 key |
-| `topKCount` | Worker 端 Top-K 中的热 key 数量 |
-| `totalRequests` | Worker 端检测的总请求数 |
-| `recentlyExpelled` | Worker 端 Top-K 最近被驱逐的 key |
-| `topKCapacity` | Worker HeavyKeeper 最大热 key 数 |
-| `sketchWidth` | Worker Count-Min Sketch 宽度 |
-| `sketchDepth` | Worker Count-Min Sketch 深度 |
-| `minCountThreshold` | Worker 最小晋升计数 |
-| `shards` | 已知的分片索引列表 |
-| `health` | 按分片索引分组的健康元数据（存活、心跳时间、计数） |
-| `trackedKeys` | Worker 状态机中追踪的 key 数 |
-
-### `sync`
-
-跨实例广播去重。仅在 `CacheSyncPublisher` 激活时出现。
-
-| Key | 说明 |
-| --- | ---- |
-| `dedupCacheSize` | 当前去重缓存条目数 |
+| 指标                                  | 类型                               | 标签                 | 说明                             |
+| ------------------------------------- | ---------------------------------- | -------------------- | -------------------------------- |
+| `hotkey.topk.size`                    | Gauge                              | `type=local\|worker` | TopK 当前排名数                  |
+| `hotkey.topk.total`                   | Gauge                              | `type=local\|worker` | TopK 追踪的总请求数              |
+| `hotkey.expelled.queue.size`          | Gauge                              | —                    | 驱逐队列积压量                   |
+| `hotkey.expelled.queue.remaining`     | Gauge                              | —                    | 驱逐队列剩余容量                 |
+| `hotkey.singleflight.inflight`        | Gauge                              | —                    | SingleFlight 进行中的去重数      |
+| `hotkey.reporter.queue.depth`         | Gauge                              | —                    | Reporter 队列积压量              |
+| `hotkey.reporter.queue.dropped.total` | Gauge                              | —                    | 累计丢弃批次（队列满）           |
+| `hotkey.reporter.queue.expired.total` | Gauge                              | —                    | 累计过期批次                     |
+| `hotkey.reporter.pending.keys`        | Gauge                              | —                    | Reporter 计数缓存中缓冲的 key 数 |
+| `hotkey.expire.refresh.available`     | Gauge                              | —                    | 刷新信号量可用许可数             |
+| `hotkey.version.degraded.total`       | Gauge                              | —                    | 累计版本回退次数                 |
+| `hotkey.sync.dedup.size`              | Gauge                              | —                    | 广播去重缓存大小                 |
+| `hotkey.worker.alive`                 | Gauge                              | —                    | 任意 Worker 分片是否存活（0/1）  |
+| `hotkey.worker.tracked.keys`          | Gauge                              | —                    | 状态机追踪的 key 数              |
+| 运行时诊断（"哪些 key 是热点？"）     | 仪表盘和告警（"队列深度在增长？"） |

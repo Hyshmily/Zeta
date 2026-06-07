@@ -23,7 +23,7 @@
 
 ## 2. 压力测试结果
 
-**数据源**：[`integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
+**数据源**：[`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
 
 31 个测试用例，总耗时 4,667 ms，**0 错误**，总计 2,695,450 次操作。
 
@@ -111,7 +111,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ## 3. 容器全链路压力测试
 
-**数据源**：[`integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
+**数据源**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
 
 15 个阶段，总耗时 58,331 ms，**0 错误**，总计 224,851 次操作，基于真实 Redis + RabbitMQ 容器。
 
@@ -150,9 +150,9 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ## 4. 集成测试
 
-**压力测试数据源**：[`integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
-**容器压力测试数据源**：[`integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
-**传播延迟数据源**：[`integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json`](../integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json)
+**压力测试数据源**：[`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
+**容器压力测试数据源**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
+**传播延迟数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json)
 
 ### 4.1 功能性集成
 
@@ -266,7 +266,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 5.5 容器全链路压力
 
-**数据文件**：[`integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
+**数据文件**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
 
 **配置**：8 线程，5,000 热 key，15,000 冷 key，2,000 ops/thread，softTtl=300s，hardTtl=600s。
 
@@ -291,26 +291,25 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 5.7 传播延迟
 
-**数据源**：[`integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json`](../integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json)
+**数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json)
 
 10 个阶段，总计 45,312 次操作，**0 错误**，基于真实 Redis + RabbitMQ 容器（Testcontainers 单机）。测量 HotKey 数据路径中每个环节的单节点延迟。
 
 **Phase 8** 模拟完整的 HotKeyStateMachine 确认窗口流水线：20 次 evaluate() 调用 × 100ms 时间片 → HOT 决策 → AMQP 广播 → WorkerListener → L1 提升。
 
-**Phase 9** 测量完整端到端延迟：应用缓存未命中 → 上报聚合 → AMQP 上报投递 → Worker 端滑动窗口累积 → HOT 决策 → AMQP 广播 → WorkerListener → L1 条目提升。Phase 9A 未启用状态机（收到首次上报批次后立即广播），Phase 9B 需要连续 20 个确认窗口（最少 2,000ms）。
+**Phase 9** 测量完整端到端延迟：应用缓存未命中 → 上报聚合 → AMQP 上报投递 → Worker 端滑动窗口累积 → SM 确认流水线 → HOT 决策 → AMQP 广播 → WorkerListener → L1 条目提升。Phase 9 默认需要连续 20 个确认窗口（最少 2,000ms）。
 
-| 阶段                              | 操作数 | 耗时      | OPS    | P50           | P95       | P99       |
-| --------------------------------- | ------ | --------- | ------ | ------------- | --------- | --------- |
-| Redis GET 往返                    | 10,000 | 7,928 ms  | 1,261  | 0.62 ms       | 1.60 ms   | 4.01 ms   |
-| Redis SET 往返                    | 5,000  | 3,754 ms  | 1,332  | 0.61 ms       | 1.45 ms   | 3.76 ms   |
-| AMQP 发布                         | 10,000 | 406 ms    | 24,631 | 0.02 ms       | 0.11 ms   | 0.27 ms   |
-| AMQP 端到端投递                   | 5,000  | 2,526 ms  | 1,979  | 0.07 ms       | 0.27 ms   | 0.48 ms   |
-| HotKey L1 命中                    | 10,000 | 129 ms    | 77,519 | **0.001 ms**  | 0.004 ms  | 0.018 ms  |
-| HotKey L1 未命中（→ Redis → L1）  | 5,000  | 5,688 ms  | 879    | 0.51 ms       | 0.94 ms   | 2.26 ms   |
-| Worker 决策流水线（未开启状态机） | 200    | 10,993 ms | 18     | **51.64 ms**  | 97.75 ms  | 104.16 ms |
-| 状态机流水线（开启状态机）        | 10     | 2,042 ms  | 5      | **1,983 ms**  | 2,015 ms  | 2,015 ms  |
-| 全链路流水线（未开启状态机）      | 92     | 1,234 ms  | 75     | **155.81 ms** | 202.14 ms | 212.69 ms |
-| 全链路 + 状态机（20 个确认窗口）  | 10     | 2,999 ms  | 3      | **2,038 ms**  | 2,055 ms  | 2,055 ms  |
+| 阶段 | 操作数 | 耗时 | OPS | P50 | P95 | P99 |
+|---|---|---|---|---|---|---|---|
+| Redis GET 往返 | 10,000 | 7,928 ms | 1,261 | 0.62 ms | 1.60 ms | 4.01 ms |
+| Redis SET 往返 | 5,000 | 3,754 ms | 1,332 | 0.61 ms | 1.45 ms | 3.76 ms |
+| AMQP 发布 | 10,000 | 406 ms | 24,631 | 0.02 ms | 0.11 ms | 0.27 ms |
+| AMQP 端到端投递 | 5,000 | 2,526 ms | 1,979 | 0.07 ms | 0.27 ms | 0.48 ms |
+| HotKey L1 命中 | 10,000 | 129 ms | 77,519 | **0.001 ms** | 0.004 ms | 0.018 ms |
+| HotKey L1 未命中（→ Redis → L1） | 5,000 | 5,688 ms | 879 | 0.51 ms | 0.94 ms | 2.26 ms |
+| Worker 决策流水线 | 200 | 10,993 ms | 18 | **51.64 ms** | 97.75 ms | 104.16 ms |
+| SM 确认流水线（20 确认窗） | 10 | 2,042 ms | 5 | **1,983 ms** | 2,015 ms | 2,015 ms |
+| 全链路（SM 20 确认） | 10 | 2,999 ms | 3 | **2,038 ms** | 2,055 ms | 2,055 ms |
 
 关键：
 
@@ -319,17 +318,47 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 - **AMQP 发布**延迟可忽略，0.02ms P50——RabbitMQ 通道写入本质上是内存到内存。
 - **AMQP 端到端投递**（发布 + 代理路由 + 消费者投递）发布侧 P50=0.07ms，投递侧 P50=1.46ms——单机环境大多数投递在 2ms 内完成。
 - **HotKey L1 未命中**（0.51ms P50）包含 Redis GET RTT + SingleFlight 去重 + L1 回填开销——主要延迟来自 Redis 调用本身。
-- **Worker 决策流水线（未开启状态机）**（51.64ms P50）——Worker 的 `warmupJitterMs=100ms` 在决策评估前引入有意延迟，随后基于轮询的 `isLocalHotKey()` 提升检测。约 52ms P50 与抖动 + 处理 + AMQP 投递延迟一致。
-- **状态机流水线（开启状态机）**（1,983ms P50）——主导因素是确认窗口流水线：连续 20 个热窗口 × 每个 100ms 时间片 = 最少 2,000ms。确认后 HOT 决策走与 Phase 7 相同的 AMQP + WorkerListener 路径。总延迟（1,983ms）接近理论最小值 2,000ms + ~52ms 传播 ≈ 2,052ms。
-- **全链路（未开启状态机）**（155.81ms P50）——比 Worker 决策流水线多约 104ms，包括：上报聚合批处理（report-interval-ms=100ms）、AMQP 上报投递、滑动窗口累积、以及决策广播路径。两段 AMQP 跳转（上报 + 决策）各引入投递延迟，100ms 批处理间隔贡献了一个完整 tick。50/50 键成功提升，0 错误。
-- **全链路 + 状态机**（2,038ms P50）——在全链路基础上附加 20 窗口确认流水线（最少 2,000ms）。总延迟主要由确认窗口需求主导，仅比状态机流水线（Phase 8）多约 55ms——新增的上报聚合和投递开销相比 2s 确认底线可忽略不计。10/10 键成功提升，0 错误。
+- **Worker 决策流水线**（51.64ms P50）——Worker 的 `warmupJitterMs=100ms` 在决策评估前引入有意延迟，随后基于轮询的 `isLocalHotKey()` 提升检测。约 52ms P50 与抖动 + 处理 + AMQP 投递延迟一致。
+- **SM 确认流水线**（1,983ms P50）——主导因素是确认窗口流水线：连续 20 个热窗口 × 每个 100ms 时间片 = 最少 2,000ms。确认后 HOT 决策走与 Phase 7 相同的 AMQP + WorkerListener 路径。总延迟（1,983ms）接近理论最小值 2,000ms + ~52ms 传播 ≈ 2,052ms。
+- **全链路（SM 20 确认）**（2,038ms P50）——完整端到端路径：本地 Caffeine 未命中 → 上报聚合（100ms 批次）→ AMQP 上报投递 → SlidingWindowDetector → 20 确认窗状态机 → AMQP 决策广播 → L1 提升。总延迟主要由确认窗口需求主导，仅比 SM 确认流水线（Phase 8）多约 55ms——新增的上报聚合和投递开销相比 2s 确认底线可忽略不计。10/10 键成功提升，0 错误。
 
   状态机参数可通过 `WorkerProperties` 自定义：
   - `hotkey.worker.state-machine.confirm-duration-ms` = 2000（默认）→ `confirmWindows = ceil(2000 / SlidingWindowDetector.sliceMs(100)) = 20`
   - `hotkey.worker.state-machine.cool-duration-ms` = 15000 → `coolWindows = 150`
   - `hotkey.worker.state-machine.pre-cool-grace-ms` = 5000 → `preCoolGraceWindows = 50`
 
-  减小 `confirm-duration-ms` 或 `SlidingWindowDetector.sliceMs` 可直接缩短热键确认延迟，但会增加误判率。
+   减小 `confirm-duration-ms` 或 `SlidingWindowDetector.sliceMs` 可直接缩短热键确认延迟，但会增加误判率。
+
+### 5.8 极限参数传播延迟
+
+**数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-07T07-42-58.621466500Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-07T07-42-58.621466500Z.json)
+
+与 5.7 相同的 4 阶段结构，但采用极限参数调优：
+
+| 参数                                                     | 默认值 | 极限值  |
+| -------------------------------------------------------- | ------ | ------- |
+| `hotkey.local.report-interval-ms`                        | 100    | **1**   |
+| `hotkey.worker-listener.warmup-jitter-ms`                | 100    | **0**   |
+| `hotkey.sync.warmup-jitter-ms`                           | 100    | **0**   |
+| `hotkey.worker.state-machine.confirm-duration-ms`        | 2000   | **0**   |
+| `hotkey.worker.sliding-window.duration-ms` / slices      | 1000/10 | **100/100** |
+
+所有阶段使用相同的键数（各 10 个键）以确保公平比较。状态机始终存在——区别在于确认窗口数量。
+
+| 阶段 | 操作数 | 耗时 | P50 | P95 | P99 |
+|---|---|---|---|---|---|
+| Worker 决策流水线（jitter=0） | 200 | 894 ms | **2.35 ms** | 3.77 ms | 5.16 ms |
+| SM 流水线（0 确认） | 10 | 27 ms | **6.80 ms** | 8.03 ms | 8.03 ms |
+| 全链路（SM 0 确认） | 10 | 43 ms | **7.54 ms** | 8.56 ms | 8.56 ms |
+
+全部阶段：**0 错误**，总计 45k 操作。
+
+关键：
+- **Worker 决策流水线 P50 从 51.64ms 降至 2.35ms**——消除 100ms 预热抖动移除了主要延迟
+- **SM 流水线 P50 从 1,983ms 降至 6.80ms**——2s 确认窗口原本占约 99.7% 延迟
+- **全链路 P50 从 2,038ms（SM 20 确认）降至 7.54ms（SM 0 确认）**（99.6% 降低）——确认窗口是主导项。状态机控制广播量：每个键在整个生命周期中仅广播一次，不受确认窗口数量的影响，避免了 AMQP 发送争用
+
+  详见 [README 极限调优章节](../README.md#极限参数调整)的完整权衡讨论。
 
 ### 5.6 降级与性能
 
@@ -409,4 +438,4 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ---
 
-_所有数据来源于 `integration-tests/target/testresult/` 下的测试执行输出。源码默认值已与 `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java` 逐一核对。_
+_所有数据来源于 `integration-tests/src/test/resources/testresult/` 下的测试执行输出。源码默认值已与 `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java` 逐一核对。_

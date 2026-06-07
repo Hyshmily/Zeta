@@ -15,8 +15,10 @@
  */
 package io.github.hyshmily.hotkey.annotation;
 
+import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.log.DefaultLogger;
 import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import io.github.hyshmily.hotkey.rule.Rule;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Map;
@@ -34,27 +36,16 @@ import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
 
 /**
- * AOP aspect that intercepts methods annotated with {@link HotKey} and applies
- * the corresponding cache operation.
- * <p>
- * The cache key is resolved dynamically via SpEL against the method arguments.
- * Three operation modes are supported:
- * <ul>
- *   <li><b>READ</b> — uses {@code getWithSoftExpire} by default, or plain
- *       {@code get} when {@link HotKey#softExpire()} is {@code false}.
- *       The method invocation acts as the value supplier.</li>
- *   <li><b>WRITE</b> — uses {@code putBeforeInvalidate} to atomically execute
- *       the mutation, increment version, invalidate L1, and broadcast INVALIDATE.</li>
- *   <li><b>INVALIDATE</b> — invalidates L1, increments version, and broadcasts
- *       TYPE_REFRESH (versioned) to peers, then proceeds with the method.</li>
- * </ul>
- * <p>
- * If the annotated method returns {@link Optional}, the aspect passes it through
- * unchanged; otherwise it unwraps via {@link Optional#orElse(Object) orElse(null)}.
- * <p>
- * Requires the {@code -parameters} compiler flag for reliable SpEL key resolution.
- * Falls back to synthetic parameter names {@code arg0, arg1, ...} when debug info
- * is absent.
+ * AOP aspect that intercepts methods annotated with {@link HotKey @HotKey} and applies
+ * the corresponding cache operation with the following priority chain for READ:
+ * <ol>
+ *   <li><b>Blacklist</b> (always-on) — {@link Rule.RuleAction#BLOCK} → fallback or exception</li>
+ *   <li><b>Condition</b> — SpEL {@link HotKey#condition()} false → skip cache, execute method</li>
+ *   <li><b>Intercept</b> — {@link Intercept @Intercept} + local hot key → fallback or peek</li>
+ *   <li><b>TTL</b> — {@link HotKeyCacheTTL @HotKeyCacheTTL} override or global default</li>
+ *   <li><b>Cache</b> — {@code getWithSoftExpire} / {@code get} with fallback on exception</li>
+ *   <li><b>Unless</b> — SpEL {@link HotKey#unless()} evaluated (value accepted as cached)</li>
+ * </ol>
  */
 @Aspect
 @RequiredArgsConstructor
@@ -68,9 +59,12 @@ public class HotKeyAspect {
   private final Map<Method, String[]> paramNamesCache = new ConcurrentHashMap<>();
 
   /**
-   * Around advice for {@link HotKey @HotKey} methods.
-   * Resolves the SpEL cache key, then dispatches to the appropriate handler
-   * based on the operation type.
+   * Intercepts methods annotated with {@link HotKey @HotKey} and dispatches to the
+   * appropriate handler based on the operation type.
+   *
+   * @param pjp    the join point for the intercepted method
+   * @param hotKey the annotation instance on the intercepted method
+   * @return the cached value or the method return value
    */
   @Around("@annotation(hotKey)")
   public Object around(ProceedingJoinPoint pjp, HotKey hotKey) throws Throwable {
@@ -84,20 +78,51 @@ public class HotKeyAspect {
   }
 
   /**
-   * Handles {@link HotKey.OperationType#READ}.
-   * <p>
-   * The method invocation serves as the value supplier. If the method returns
-   * {@link Optional}, the result is passed through directly; otherwise the
-   * optional is unwrapped.
+   * Handles a {@link HotKey.OperationType#READ} operation through the full priority chain.
+   * <ol>
+   *   <li>Blacklist pre-check — blocked keys trigger fallback or exception</li>
+   *   <li>Condition evaluation — skip cache when SpEL condition is false</li>
+   *   <li>Intercept check — return fallback or peek value for hot keys</li>
+   *   <li>TTL resolution — per-annotation override or global default</li>
+   *   <li>Cache lookup — {@code getWithSoftExpire} or {@code get} with loader fallback</li>
+   *   <li>Unless evaluation — SpEL exclusion (value remains cached)</li>
+   * </ol>
    */
   private Object handleRead(ProceedingJoinPoint pjp, String cacheKey, HotKey hotKey) throws Throwable {
-    if (hotKeyFacade.isLocalHotKey(cacheKey) && hotKey.fallbackEnabled()) {
-      Object fb = resolveFallback(pjp, hotKey);
-      if (fb != null) {
-        return fb;
+    Method method = resolveMethod(pjp);
+    Fallback fallback = method.getAnnotation(Fallback.class);
+    Intercept intercept = method.getAnnotation(Intercept.class);
+    HotKeyCacheTTL ttl = method.getAnnotation(HotKeyCacheTTL.class);
+
+    // Blacklist pre-check (always-on, highest priority)
+    if (hotKeyFacade.evaluateRule(cacheKey) == Rule.RuleAction.BLOCK) {
+      if (fallback != null) {
+        return resolveFallback(pjp, fallback);
+      }
+      throw new HotKeyBlockedException(cacheKey);
+    }
+
+    //  Condition: skip cache entirely when condition is false
+    if (!hotKey.condition().isEmpty()) {
+      Boolean pass = evalSpel(pjp, hotKey.condition(), Boolean.class);
+      if (pass == null || !pass) {
+        return pjp.proceed();
       }
     }
 
+    //  @Intercept + isLocalHotKey: skip method, return fallback or peek
+    if (intercept != null && hotKeyFacade.isLocalHotKey(cacheKey)) {
+      if (fallback != null) {
+        return resolveFallback(pjp, fallback);
+      }
+      return hotKeyFacade.peek(cacheKey).orElse(null);
+    }
+
+    // TTL resolution: @HotKeyCacheTTL override or 0 (use global default)
+    long hardTtl = ttl != null ? ttl.hardTtlMs() : 0;
+    long softTtl = ttl != null ? ttl.softTtlMs() : 0;
+
+    //  Cache get
     Supplier<Object> loader = () -> {
       try {
         return pjp.proceed();
@@ -109,31 +134,24 @@ public class HotKeyAspect {
     };
 
     Optional<Object> result;
-    if (!hotKey.fallbackEnabled()) {
-      if (hotKey.softExpire()) {
-        result = hotKeyFacade.getWithSoftExpire(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
-      } else {
-        result = hotKeyFacade.get(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
+    try {
+      result = hotKey.softExpire()
+        ? hotKeyFacade.getWithSoftExpire(cacheKey, loader, hardTtl, softTtl)
+        : hotKeyFacade.get(cacheKey, loader, hardTtl, softTtl);
+    } catch (RuntimeException e) {
+      if (fallback != null) {
+        log.warn("[HotKey] fallback triggered for key={}, operation=READ, reason=cacheException", cacheKey);
+        return resolveFallback(pjp, fallback);
       }
-    } else {
-      try {
-        if (hotKey.softExpire()) {
-          result = hotKeyFacade.getWithSoftExpire(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
-        } else {
-          result = hotKeyFacade.get(cacheKey, loader, hotKey.hardTtlMs(), hotKey.softTtlMs());
-        }
-      } catch (RuntimeException e) {
-        log.warn("[HotKey] fallback triggered for key={}, operation=READ", cacheKey);
-        Object fallbackValue;
-        try {
-          fallbackValue = resolveFallback(pjp, hotKey);
-        } catch (Throwable ignored) {
-          throw e;
-        }
-        result = Optional.ofNullable(fallbackValue);
-      }
+      throw e;
     }
 
+    //  Unless: evaluated but value remains cached per design
+    if (!hotKey.unless().isEmpty() && result.isPresent()) {
+      evalSpelWithResult(pjp, hotKey.unless(), result.get(), Boolean.class);
+    }
+
+    // Return type adaptation
     MethodSignature sig = (MethodSignature) pjp.getSignature();
     Class<?> returnType = sig.getMethod().getReturnType();
     if (returnType == Optional.class) {
@@ -143,12 +161,10 @@ public class HotKeyAspect {
   }
 
   /**
-   * Handles {@link HotKey.OperationType#WRITE}.
-   * <p>
-   * Executes the method as the mutation inside {@code putBeforeInvalidate},
-   * which provides transaction-scoped mutation execution, version increment,
-   * L1 invalidation, and INVALIDATE broadcast. The result of the method is
-   * returned to the caller.
+   * Handles a {@link HotKey.OperationType#WRITE} operation.
+   * <p>Delegates to {@code putBeforeInvalidate} so the mutation runs inside a
+   * transaction-aware boundary.  After success, L1 is invalidated and an INVALIDATE
+   * broadcast is sent to peers.
    */
   private Object handleWrite(ProceedingJoinPoint pjp, String cacheKey) throws Throwable {
     Object[] resultHolder = new Object[1];
@@ -173,10 +189,9 @@ public class HotKeyAspect {
   }
 
   /**
-   * Handles {@link HotKey.OperationType#INVALIDATE}.
-   * <p>
-   * Invalidates the key from L1, increments version, and broadcasts
-   * TYPE_REFRESH (versioned) to peers, then proceeds with the method.
+   * Handles a {@link HotKey.OperationType#INVALIDATE} operation.
+   * <p>Invalidates the key from L1, increments the version,
+   * broadcasts TYPE_REFRESH to peers, then proceeds with the original method.
    */
   private Object handleInvalidate(ProceedingJoinPoint pjp, String cacheKey) throws Throwable {
     hotKeyFacade.invalidate(cacheKey);
@@ -184,67 +199,26 @@ public class HotKeyAspect {
   }
 
   /**
-   * Resolves a SpEL cache key expression against the method arguments.
-   * <p>
-   * Parameter names are discovered via {@link DefaultParameterNameDiscoverer}
-   * (requires the {@code -parameters} compiler flag) and cached in a
-   * {@link ConcurrentHashMap} keyed by {@link Method}. When names cannot be
-   * determined, synthetic names {@code arg0, arg1, ...} are used as fallback.
+   * Resolves the fallback value from a {@link Fallback @Fallback} annotation.
+   * <p>If the annotated SpEL expression is non-empty it is evaluated first;
+   * otherwise the naming-convention method ({@code {methodName}Fallback}) is invoked.
    */
-  private String resolveKey(ProceedingJoinPoint pjp, String expression) {
-    Method method = ((MethodSignature) pjp.getSignature()).getMethod();
-    String[] paramNames = paramNamesCache.computeIfAbsent(method, m -> {
-      String[] names = parameterNameDiscoverer.getParameterNames(m);
-      if (names == null) {
-        // Fallback to synthetic parameter names
-        names = new String[m.getParameterCount()];
-        for (int i = 0; i < names.length; i++) {
-          names[i] = "arg" + i;
-        }
-      }
-      return names;
-    });
-
-    Object[] args = pjp.getArgs();
-    StandardEvaluationContext context = new StandardEvaluationContext();
-    for (int i = 0; i < args.length; i++) {
-      context.setVariable(paramNames[i], args[i]);
-    }
-    return parser.parseExpression(expression).getValue(context, String.class);
-  }
-
-  @SuppressWarnings("unchecked")
-  private static <T extends Throwable> RuntimeException sneakyThrow(Throwable t) throws T {
-    throw (T) t;
-  }
-
-  private Object resolveFallback(ProceedingJoinPoint pjp, HotKey hotKey) throws Throwable {
-    if (!hotKey.fallback().isEmpty()) {
-      return resolveSpelFallback(pjp, hotKey.fallback());
+  private Object resolveFallback(ProceedingJoinPoint pjp, Fallback fallback) throws Throwable {
+    if (!fallback.value().isEmpty()) {
+      return resolveSpelFallback(pjp, fallback.value());
     }
     return invokeFallbackMethod(pjp);
   }
 
+  /** Evaluates a SpEL fallback expression with method parameters as context variables. */
   private Object resolveSpelFallback(ProceedingJoinPoint pjp, String expression) {
-    Method method = ((MethodSignature) pjp.getSignature()).getMethod();
-    String[] paramNames = paramNamesCache.computeIfAbsent(method, m -> {
-      String[] names = parameterNameDiscoverer.getParameterNames(m);
-      if (names == null) {
-        names = new String[m.getParameterCount()];
-        for (int i = 0; i < names.length; i++) {
-          names[i] = "arg" + i;
-        }
-      }
-      return names;
-    });
-    Object[] args = pjp.getArgs();
-    StandardEvaluationContext context = new StandardEvaluationContext();
-    for (int i = 0; i < args.length; i++) {
-      context.setVariable(paramNames[i], args[i]);
-    }
-    return parser.parseExpression(expression).getValue(context);
+    return evalSpel(pjp, expression, Object.class);
   }
 
+  /**
+   * Invokes the naming-convention fallback method ({@code {originalName}Fallback})
+   * on the target bean with the original method arguments.
+   */
   private Object invokeFallbackMethod(ProceedingJoinPoint pjp) throws Throwable {
     MethodSignature sig = (MethodSignature) pjp.getSignature();
     Method originalMethod = sig.getMethod();
@@ -267,6 +241,11 @@ public class HotKeyAspect {
     }
   }
 
+  /**
+   * Recursively searches the class hierarchy for a method with the given name and parameter types.
+   *
+   * @return the matching method, or {@code null} if not found
+   */
   private Method findFallbackMethod(Class<?> clazz, String name, Class<?>... paramTypes) {
     try {
       return clazz.getMethod(name, paramTypes);
@@ -277,5 +256,94 @@ public class HotKeyAspect {
       }
       return null;
     }
+  }
+
+  /**
+   * Resolves the concrete {@link Method} for the join point, unwrapping interface
+   * methods to the implementation class when necessary.
+   */
+  private Method resolveMethod(ProceedingJoinPoint pjp) {
+    MethodSignature sig = (MethodSignature) pjp.getSignature();
+    Method method = sig.getMethod();
+    if (method.getDeclaringClass().isInterface()) {
+      try {
+        method = pjp.getTarget().getClass().getMethod(method.getName(), method.getParameterTypes());
+      } catch (NoSuchMethodException ignored) {
+        // Keep the interface method
+      }
+    }
+    return method;
+  }
+
+  /**
+   * Builds a {@link StandardEvaluationContext} with method parameters registered
+   * as context variables.  Parameter names are resolved once and cached per method.
+   */
+  private StandardEvaluationContext buildEvaluationContext(ProceedingJoinPoint pjp) {
+    MethodSignature sig = (MethodSignature) pjp.getSignature();
+    Method method = sig.getMethod();
+    String[] names = paramNamesCache.computeIfAbsent(method, m -> {
+      String[] n = parameterNameDiscoverer.getParameterNames(m);
+      if (n == null) {
+        n = new String[m.getParameterCount()];
+        for (int i = 0; i < n.length; i++) {
+          n[i] = "arg" + i;
+        }
+      }
+      return n;
+    });
+    Object[] args = pjp.getArgs();
+    StandardEvaluationContext ctx = new StandardEvaluationContext();
+    for (int i = 0; i < args.length; i++) {
+      ctx.setVariable(names[i], args[i]);
+    }
+    return ctx;
+  }
+
+  /**
+   * Resolves the cache key from a SpEL expression using method parameter names
+   * as context variables.
+   *
+   * @return the evaluated cache key string
+   */
+  private String resolveKey(ProceedingJoinPoint pjp, String expression) {
+    return parser.parseExpression(expression).getValue(buildEvaluationContext(pjp), String.class);
+  }
+
+  /**
+   * Evaluates a SpEL expression against method parameter variables.
+   *
+   * @param <T>        the expected return type
+   * @param expression the SpEL expression to evaluate
+   * @param type       the expected result type
+   * @return the evaluated value
+   */
+  private <T> T evalSpel(ProceedingJoinPoint pjp, String expression, Class<T> type) {
+    return parser.parseExpression(expression).getValue(buildEvaluationContext(pjp), type);
+  }
+
+  /**
+   * Evaluates a SpEL expression with method parameters and a {@code #result} variable.
+   * <p>Used for the {@link HotKey#unless()} evaluation where the loaded cache value
+   * is exposed as {@code #result}.
+   *
+   * @param expression the SpEL expression to evaluate
+   * @param result     the loaded cache value to bind as {@code #result}
+   * @param type       the expected result type
+   */
+  private void evalSpelWithResult(ProceedingJoinPoint pjp, String expression, Object result, Class<?> type) {
+    StandardEvaluationContext ctx = buildEvaluationContext(pjp);
+    ctx.setVariable("result", result);
+    parser.parseExpression(expression).getValue(ctx, type);
+  }
+
+  /**
+   * Throws a checked exception without declaring it, using type erasure.
+   * <p>This avoids polluting method signatures with checked exception declarations
+   * inside lambda expressions used as cache loaders.
+   */
+  @SuppressWarnings("unchecked")
+  private static <T extends Throwable> RuntimeException sneakyThrow(Throwable t) throws T {
+    throw (T) t;
   }
 }

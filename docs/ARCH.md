@@ -378,6 +378,22 @@ HotKey.peek(cacheKey)
            [⚠ does not call hotKeyDetector.add / hotKeyReporter.record / L2 reader]
 ```
 
+### Raw Cache Access — `getLocalCache`
+
+Exposes the underlying Caffeine `Cache<String, Object>` for Caffeine-specific operations (`asMap`, `policy`, `cleanUp`).
+
+<!-- Source: HotKeyCache.java:542-544 -->
+
+```
+HotKey.getLocalCache()
+└─ HotKeyCache.getLocalCache()
+      └─ return caffeineCache                                   [direct Caffeine reference]
+      [⚠ bypasses HotKey orchestration — version tracking, broadcast, expiry management are skipped]
+```
+
+> [!WARNING]
+> `getLocalCache()` returns the **raw** Caffeine cache. Nothing written through this reference goes through version generation, broadcast sync, or expire management. Use it only for introspection or Caffeine-specific housekeeping (`asMap().keySet()`, `policy().expireAfterWrite()`, `cleanUp()`). Never write entries via this reference — use `putThrough()` or `putBeforeInvalidate()` instead.
+
 ### Write-Through Path — `putThrough`
 
 <!-- Source: HotKeyCache.java:375-416 -->
@@ -1044,3 +1060,6 @@ All degraded versions are negative, sorting below normal (positive) Redis INCR v
 
 **Why does `putThrough` run async (non-transactional) while other write methods run sync?**
 `putThrough`'s `writer.run()` may involve L2/DB network I/O — async execution avoids blocking the caller. `invalidate`/`invalidateAll`/`putBeforeInvalidate` are lightweight (cache operation + broadcast), so synchronous execution guarantees the broadcast is sent by the time the caller returns.
+
+**TTL Jitter (Cache Avalanche Protection):**
+`CacheExpireManager.toHardExpireTimestamp()` and `toSoftExpireTimestamp()` apply a ±10% uniform random offset (`ThreadLocalRandom`) to every computed expiry timestamp. This scatters the eviction times of many keys that share the same configured TTL, preventing simultaneous mass eviction (cache stampede). The jitter ratio is hard-coded at 10% — see `CacheExpireManager.java:48,136-155`.

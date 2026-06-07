@@ -174,7 +174,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
     mapper.enable(SerializationFeature.INDENT_OUTPUT);
     String json = mapper.writeValueAsString(report);
 
-    Path reportPath = Path.of("target", "testresult",
+    Path reportPath = Path.of("src", "test", "resources", "testresult",
         "benchmark-worker-decision-" + Instant.now().toString().replace(":", "-") + ".json");
     Files.createDirectories(reportPath.getParent());
     Files.writeString(reportPath, json);

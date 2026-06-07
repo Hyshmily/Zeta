@@ -20,14 +20,15 @@ import static io.github.hyshmily.hotkey.constant.HotKeyConstants.VERSION_DEFAULT
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.entity.CacheEntry;
 import io.github.hyshmily.hotkey.entity.KeyState;
+import io.github.hyshmily.hotkey.log.DefaultLogger;
+import io.github.hyshmily.hotkey.log.HotKeyLogger;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
 import lombok.Getter;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * Manages hard and soft TTL computation for {@link CacheEntry} instances.
@@ -44,6 +45,7 @@ public class CacheExpireManager {
   private final Executor executor;
   private final HotKeyProperties ttlConfig;
   private final Semaphore refreshLimiter;
+  private static final double ttlJitterRatio = 0.1; // 10% jitter to prevent cache stampedes
 
   /**
    * Creates a CacheExpireManager with the given Caffeine cache, executor, and TTL config.
@@ -78,7 +80,7 @@ public class CacheExpireManager {
    */
   public long computeHardExpireAt(long hardTtlMs) {
     long effective = hardTtlMs > 0 ? hardTtlMs : ttlConfig.effectiveHardTtlMs();
-    return toExpireTimestamp(effective);
+    return toHardExpireTimestamp(effective);
   }
 
   /**
@@ -86,7 +88,7 @@ public class CacheExpireManager {
    * Returns {@code Long.MAX_VALUE} if hot hard expire is disabled (TTL &lt;= 0).
    */
   public long computeHotHardExpireAt() {
-    return toExpireTimestamp(ttlConfig.effectiveHotHardTtlMs());
+    return toHardExpireTimestamp(ttlConfig.effectiveHotHardTtlMs());
   }
 
   /** Soft expire timestamp for hot keys, using {@code default-hot-soft-ttl} / {@code hot-soft-ttl}. Returns 0 if disabled. */
@@ -131,11 +133,13 @@ public class CacheExpireManager {
    * Propagates {@link Long#MAX_VALUE} unchanged — used to signal permanent entries
    * (pure logical expiry with no hard TTL eviction).
    */
-  static long toExpireTimestamp(long ttlMs) {
-    if (ttlMs == Long.MAX_VALUE) {
+  private long toHardExpireTimestamp(long hardTtlMs) {
+    if (hardTtlMs == Long.MAX_VALUE) {
       return Long.MAX_VALUE;
     }
-    return ttlMs > 0 ? System.currentTimeMillis() + ttlMs : Long.MAX_VALUE;
+    long jitter = (long) (hardTtlMs * ttlJitterRatio * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+
+    return hardTtlMs > 0 ? System.currentTimeMillis() + Math.max(1, hardTtlMs + jitter) : Long.MAX_VALUE;
   }
 
   private long toSoftExpireTimestamp(long softTtlMs) {
@@ -145,7 +149,9 @@ public class CacheExpireManager {
     if (softTtlMs == Long.MAX_VALUE) {
       return Long.MAX_VALUE;
     }
-    return System.currentTimeMillis() + softTtlMs;
+    long jitter = (long) (softTtlMs * ttlJitterRatio * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+
+    return System.currentTimeMillis() + Math.max(1, softTtlMs + jitter);
   }
 
   /**

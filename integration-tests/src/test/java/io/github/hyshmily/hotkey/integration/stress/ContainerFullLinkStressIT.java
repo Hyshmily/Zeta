@@ -350,7 +350,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     globalSys.put("gcTimeMs", gcTime);
     root.set("finalSystemMetrics", globalSys);
 
-    Path reportPath = Path.of("target", "testresult",
+    Path reportPath = Path.of("src", "test", "resources", "testresult",
         "container-full-link-stress-" + Instant.now().toString().replace(":", "-") + ".json");
     Files.createDirectories(reportPath.getParent());
     mapper.writeValue(reportPath.toFile(), root);

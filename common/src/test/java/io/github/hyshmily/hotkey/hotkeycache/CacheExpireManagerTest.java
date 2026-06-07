@@ -126,24 +126,25 @@ class CacheExpireManagerTest {
   }
 
   @Test
-  void toExpireTimestamp_withZero_shouldReturnMaxValue() {
-    assertThat(CacheExpireManager.toExpireTimestamp(0)).isEqualTo(Long.MAX_VALUE);
+  void computeHardExpireAt_withZero_shouldFallbackAndReturnFuture() {
+    long result = expireManager.computeHardExpireAt(0);
+    assertThat(result).isGreaterThan(System.currentTimeMillis());
   }
 
   @Test
-  void toExpireTimestamp_withNegative_shouldReturnMaxValue() {
-    assertThat(CacheExpireManager.toExpireTimestamp(-1)).isEqualTo(Long.MAX_VALUE);
-    assertThat(CacheExpireManager.toExpireTimestamp(-1000)).isEqualTo(Long.MAX_VALUE);
+  void computeHardExpireAt_withNegative_shouldFallbackAndReturnFuture() {
+    long result = expireManager.computeHardExpireAt(-1);
+    assertThat(result).isGreaterThan(System.currentTimeMillis());
   }
 
   @Test
-  void toExpireTimestamp_withMaxValue_shouldPassthrough() {
-    assertThat(CacheExpireManager.toExpireTimestamp(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
+  void computeHardExpireAt_withMaxValue_shouldPassthrough() {
+    assertThat(expireManager.computeHardExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
   }
 
   @Test
-  void toExpireTimestamp_withPositive_shouldReturnFuture() {
-    long result = CacheExpireManager.toExpireTimestamp(1_000);
+  void computeHardExpireAt_withPositive_shouldReturnFuture() {
+    long result = expireManager.computeHardExpireAt(1000);
     assertThat(result).isGreaterThan(System.currentTimeMillis());
   }
 

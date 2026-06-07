@@ -20,6 +20,7 @@ import static org.awaitility.Awaitility.await;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.annotation.HotKey.OperationType;
+import io.github.hyshmily.hotkey.annotation.HotKeyCacheTTL;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Tag;
@@ -203,10 +204,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
 
     @io.github.hyshmily.hotkey.annotation.HotKey(
       key = "'anno:read:static'",
-      operation = OperationType.READ,
-      hardTtlMs = 60000,
-      softTtlMs = 30000
+      operation = OperationType.READ
     )
+    @HotKeyCacheTTL(hardTtlMs = 60000, softTtlMs = 30000)
     public String readWithStaticKey(String supplierResult) {
       return supplierResult;
     }
@@ -214,19 +214,16 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     @io.github.hyshmily.hotkey.annotation.HotKey(
       key = "'anno:read:nosoft'",
       operation = OperationType.READ,
-      softExpire = false,
-      hardTtlMs = 60000,
-      softTtlMs = 0
+      softExpire = false
     )
+    @HotKeyCacheTTL(hardTtlMs = 60000)
     public String readWithoutSoftExpire(String supplierResult) {
       return supplierResult;
     }
 
     @io.github.hyshmily.hotkey.annotation.HotKey(
       key = "'anno:write:static'",
-      operation = OperationType.WRITE,
-      hardTtlMs = 60000,
-      softTtlMs = 30000
+      operation = OperationType.WRITE
     )
     public String writeWithStaticKey(String value) {
       return value;
@@ -234,9 +231,7 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
 
     @io.github.hyshmily.hotkey.annotation.HotKey(
       key = "'anno:invalidate:static'",
-      operation = OperationType.INVALIDATE,
-      hardTtlMs = 60000,
-      softTtlMs = 30000
+      operation = OperationType.INVALIDATE
     )
     public String invalidateWithStaticKey(String value) {
       return value;
@@ -244,10 +239,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
 
     @io.github.hyshmily.hotkey.annotation.HotKey(
       key = "'anno:spel:' + #arg",
-      operation = OperationType.READ,
-      hardTtlMs = 60000,
-      softTtlMs = 30000
+      operation = OperationType.READ
     )
+    @HotKeyCacheTTL(hardTtlMs = 60000, softTtlMs = 30000)
     public String readWithSpelKey(String arg, String supplierResult) {
       return supplierResult;
     }
@@ -272,9 +266,7 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
 
     @io.github.hyshmily.hotkey.annotation.HotKey(
       key = "'anno:read:ttl0'",
-      operation = OperationType.READ,
-      hardTtlMs = 0,
-      softTtlMs = 0
+      operation = OperationType.READ
     )
     public String readWithZeroTtl(String supplierResult) {
       return supplierResult;

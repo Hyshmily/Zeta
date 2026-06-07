@@ -49,16 +49,16 @@ The key insight: **a real hot key stays hot for minutes or hours**, not millisec
 **Measured latencies** (from `PropagationDelayIT`, 10 phases, 45k ops, 0 errors):
 
 | Scenario | P50 | P95 | P99 |
-|---|---|---|---|
-| Worker Decision (w/o state machine) | **51.64 ms** | 97.75 ms | 104.16 ms |
-| State Machine Pipeline (w/ state machine) | **1,983 ms** | 2,015 ms | 2,015 ms |
-| Full Chain (w/o state machine) | **155.81 ms** | 202.14 ms | 212.69 ms |
-| Full Chain w/ SM (20 confirm windows) | **2,038 ms** | 2,055 ms | 2,055 ms |
+|---|---|---|---|---|
+| Worker Decision Pipeline | **51.64 ms** | 97.75 ms | 104.16 ms |
+| SM Confirm Pipeline (20 windows) | **1,983 ms** | 2,015 ms | 2,015 ms |
+| Full Chain (SM 20 confirm) | **2,038 ms** | 2,055 ms | 2,055 ms |
 
-- **Without state machine** (Phase 7): Worker broadcasts HOT immediately after detection. P50=51.6ms includes `warmupJitterMs=100ms` + AMQP + L1 polling.
-- **With state machine** (Phase 8): 2.0s is dominated by confirm windows (20 × 100ms = 2,000ms min). After confirmation, same AMQP path (~52ms). Configurable via `hotkey.worker.state-machine.*`.
-- **Full Chain without SM** (Phase 9A): Full end-to-end path — local Caffeine miss → report aggregation (100ms batch) → AMQP report delivery → SlidingWindowDetector → AMQP decision broadcast → L1 promotion. Adds ~104ms over Phase 7 due to report batching + two AMQP hops.
-- **Full Chain with SM** (Phase 9B): Same as 9A but with 20 confirm windows on the Worker side. Total latency dominated by the 2s confirm floor.
+- **Worker Decision Pipeline** (Phase 7): Measures AMQP broadcast → WorkerListener → L1 promotion. P50=51.6ms includes `warmupJitterMs=100ms` + AMQP + L1 polling.
+- **SM Confirm Pipeline** (Phase 8): 2.0s dominated by confirm windows (20 × 100ms = 2,000ms min). After confirmation, same AMQP path (~52ms). Configurable via `hotkey.worker.state-machine.*`.
+- **Full Chain** (Phase 9): Full end-to-end path — local Caffeine miss → report aggregation (100ms batch) → AMQP report delivery → SlidingWindowDetector → SM confirm (20 windows) → AMQP decision broadcast → L1 promotion. Total latency dominated by the 2s confirm floor.
+
+> **Extreme parameter tuning** (PropagationDelayExtremeIT, report-interval-ms=1, warmup-jitter-ms=0, confirm-duration-ms=0) collapses these latencies dramatically: Worker Decision Pipeline → **2.35ms P50**, SM Pipeline (0 confirm) → **6.80ms P50**, Full Chain (SM 0 confirm) → **7.54ms P50** (all with equal 10-key counts). See the [README extreme tuning section](../README.md#extreme-parameter-tuning--trading-reliability-for-latency) for trade-offs.
 
 **What about a brief 100ms spike?** That's a local blip, not a cluster-level hot key. Local HeavyKeeper handles it with a longer TTL. Worker never needs to broadcast — that's why they're separate.
 

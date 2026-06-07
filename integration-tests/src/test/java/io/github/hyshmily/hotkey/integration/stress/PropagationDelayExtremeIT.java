@@ -82,26 +82,29 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * Per-node propagation delay measurements for the HotKey full data path.
+ * Extreme-parameter variant of PropagationDelayIT.
  *
- * <p>Measures the wall-clock latency of each individual hop in the HotKey pipeline:
- * Redis RTT, AMQP publish / delivery, HotKey facade overhead (L1 hit / cold miss),
- * and the full report→Worker→decision→L1 update loop.
- *
- * <p>Outputs a JSON report to {@code src/test/resources/testresult/propagation-delay-*.json}.
+ * <p>All parameters tuned to minimum theoretical values:
+ * <ul>
+ *   <li>report-interval-ms = 1 (was 100) — near-instant flush</li>
+ *   <li>warmup-jitter-ms = 0 (was 100) — no thundering-herd protection</li>
+ *   <li>confirm-duration-ms = 0 (was 2000) — state machine disabled</li>
+ *   <li>sliding-window slices at hardware minimum</li>
+ * </ul>
  */
 @Testcontainers
 @Tag("docker")
 @Tag("benchmark")
 @Tag("propagation")
+@Tag("extreme")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-class PropagationDelayIT extends AbstractIntegrationIT {
+class PropagationDelayExtremeIT extends AbstractIntegrationIT {
 
-  private static final Logger log = LoggerFactory.getLogger(PropagationDelayIT.class);
+  private static final Logger log = LoggerFactory.getLogger(PropagationDelayExtremeIT.class);
 
   private static final List<PhaseMetrics> ALL_PHASES = new ArrayList<>();
 
-  // ── Containers ──────────────────────────────────────────────────────────────────
+  // ── Containers ──
 
   @Container
   static GenericContainer<?> redis = new GenericContainer<>(
@@ -127,10 +130,13 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     r.add("spring.rabbitmq.cache.connection-mode", () -> "CONNECTION");
     r.add("spring.rabbitmq.listener.simple.concurrency", () -> "4");
     r.add("spring.rabbitmq.listener.simple.max-concurrency", () -> "8");
-    r.add("hotkey.local.report-interval-ms", () -> "100");
+    // ── Extreme parameters ──
+    r.add("hotkey.local.report-interval-ms", () -> "1");          // default 100 → 1
+    r.add("hotkey.worker-listener.warmup-jitter-ms", () -> "0");  // default 100 → 0
+    r.add("hotkey.sync.warmup-jitter-ms", () -> "0");             // default 100 → 0
   }
 
-  // ── Injection ───────────────────────────────────────────────────────────────────
+  // ── Injection ──
 
   @Autowired
   HotKey hotKey;
@@ -147,7 +153,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   @Autowired
   WorkerHealthMonitor workerHealthMonitor;
 
-  // ── Config ──────────────────────────────────────────────────────────────────────
+  // ── Config ──
 
   static final String SYNC_EXCHANGE = "hotkey.sync.exchange";
   static final String BROADCAST_EXCHANGE = "hotkey.broadcast.exchange";
@@ -155,7 +161,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   static final int SOFT_TTL = 300_000;
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Metrics (reuses PhaseMetrics from ContainerFullLinkStressIT)
+  // Metrics
   // ════════════════════════════════════════════════════════════════════════════════
 
   static class PhaseMetrics {
@@ -311,8 +317,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     root.put("totalOps", totalOps);
     root.put("totalErrors", totalErrors);
     root.put("description",
-        "Per-node propagation delay: Redis RTT, AMQP publish/delivery, "
-      + "HotKey L1 hit/miss, Worker decision pipeline");
+        "Extreme-parameter propagation delay: report-interval=1ms, warmup-jitter=0, confirm-duration=0");
 
     ArrayNode phases = mapper.createArrayNode();
     for (PhaseMetrics m : ALL_PHASES) {
@@ -337,10 +342,10 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     root.set("finalSystemMetrics", globalSys);
 
     Path reportPath = Path.of("src", "test", "resources", "testresult",
-        "propagation-delay-" + Instant.now().toString().replace(":", "-") + ".json");
+        "propagation-delay-extreme-" + Instant.now().toString().replace(":", "-") + ".json");
     Files.createDirectories(reportPath.getParent());
     mapper.writeValue(reportPath.toFile(), root);
-    log.info("Propagation delay report written to {}", reportPath.toAbsolutePath());
+    log.info("Extreme propagation delay report written to {}", reportPath.toAbsolutePath());
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
@@ -348,26 +353,30 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   // ════════════════════════════════════════════════════════════════════════════════
 
   @Test
-  void measurePropagationDelays() throws Exception {
-    log.info("══════ Propagation Delay Measurements ══════");
+  void measurePropagationDelaysExtreme() throws Exception {
+    log.info("══════ Extreme Propagation Delay Measurements ══════");
+    log.info("  report-interval-ms=1 | warmup-jitter-ms=0 | confirm-duration-ms=0");
 
     warmupConnections();
 
-    phaseRedisGet();                        // 1: App→Redis RTT (GET)
-    phaseRedisSet();                        // 2: App→Redis RTT (SET)
-    phaseAmqpPublish();                     // 3: App→AMQP (publish)
-    phaseAmqpE2e();                         // 4: App→AMQP→Consumer (e2e delivery)
-    phaseL1Hit();                           // 5: HotKey L1 hit (facade overhead)
-    phaseL2ColdGet();                       // 6: HotKey L1 miss→Redis→L1 populate
-    phaseWorkerDecisionPipeline();          // 7: Report→AMQP→Worker→AMQP→L1 update
-    phaseStateMachinePipeline();            // 8: State machine confirm windows + AMQP + L1
-    phaseFullChainWithSM(false);            // 9A: Full chain, SM 0 confirm (test-only no-SM path)
-    phaseFullChainWithSM(true);             // 9B: Full chain, SM 20 confirm (default)
+    phaseRedisGet();
+    phaseRedisSet();
+    phaseAmqpPublish();
+    phaseAmqpE2e();
+    phaseL1Hit();
+    phaseL2ColdGet();
+    // Phase 7: Worker decision pipeline — warmup-jitter=0 takes effect
+    phaseWorkerDecisionPipeline();
+    // Phase 8: State machine pipeline — confirmDurationMs=0 → instant promotion
+    phaseStateMachinePipelineZeroConfirm();
+    // Phase 9A: Full chain, SM 0 confirm (test-only no-SM path)
+    phaseFullChainNoSM();
+    // Phase 9B: Full chain with zero-confirm state machine
+    phaseFullChainWithSM();
 
-    // Assert all phases
     long totalErrors = ALL_PHASES.stream().mapToInt(m -> m.errorCount).sum();
     assertThat(totalErrors).as("Total errors across all phases").isZero();
-    log.info("══════ Propagation delay tests PASSED: {} phases, {} ops, {} errors ══════",
+    log.info("══════ Extreme propagation delay tests PASSED: {} phases, {} ops, {} errors ══════",
         ALL_PHASES.size(),
         ALL_PHASES.stream().mapToLong(m -> m.totalOps).sum(),
         totalErrors);
@@ -379,11 +388,9 @@ class PropagationDelayIT extends AbstractIntegrationIT {
 
   private void warmupConnections() {
     log.info("Warming up connections ...");
-    // Redis warmup
     redisTemplate.opsForValue().set("prop:warmup", "1");
     redisTemplate.opsForValue().get("prop:warmup");
     redisTemplate.delete("prop:warmup");
-    // AMQP warmup
     String wq = "prop.warmup.queue." + UUID.randomUUID();
     RabbitAdmin admin = new RabbitAdmin(rabbitTemplate);
     Queue warmupQ = new Queue(wq, false, false, true);
@@ -399,25 +406,22 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 1: Redis GET RTT (App→Redis→App)
+  // Phase 1: Redis GET RTT
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseRedisGet() throws Exception {
     PhaseMetrics m = new PhaseMetrics("redis_get_rtt");
     ALL_PHASES.add(m);
     log.info("══════ Phase 1: REDIS GET RTT ══════");
-
     int count = 10_000;
     String key = "prop:rget:key";
     redisTemplate.opsForValue().set(key, "x");
-
     for (int i = 0; i < count; i++) {
       long start = System.nanoTime();
       redisTemplate.opsForValue().get(key);
       m.recordLatency(System.nanoTime() - start);
       m.recordOp();
     }
-
     assertThat(m.errorCount).isZero();
     m.custom.put("key", key);
     m.custom.put("sampleCount", count);
@@ -432,47 +436,39 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     PhaseMetrics m = new PhaseMetrics("redis_set_rtt");
     ALL_PHASES.add(m);
     log.info("══════ Phase 2: REDIS SET RTT ══════");
-
     int count = 5_000;
-
     for (int i = 0; i < count; i++) {
       long start = System.nanoTime();
       redisTemplate.opsForValue().set("prop:rset:k" + i, "v" + i);
       m.recordLatency(System.nanoTime() - start);
       m.recordOp();
     }
-
     assertThat(m.errorCount).isZero();
     m.custom.put("sampleCount", count);
     m.finish().logSummary();
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 3: AMQP Publish (App→Broker)
+  // Phase 3: AMQP Publish
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseAmqpPublish() throws Exception {
     PhaseMetrics m = new PhaseMetrics("amqp_publish");
     ALL_PHASES.add(m);
     log.info("══════ Phase 3: AMQP PUBLISH ══════");
-
-    // Declare a transient exchange for the test
     String ex = "prop.pub.exchange." + UUID.randomUUID();
     RabbitAdmin admin = new RabbitAdmin(rabbitTemplate);
     FanoutExchange fex = new FanoutExchange(ex, false, true);
     admin.declareExchange(fex);
-
     int count = 10_000;
     byte[] payload = "hello".getBytes(StandardCharsets.UTF_8);
     MessageProperties props = new MessageProperties();
-
     for (int i = 0; i < count; i++) {
       long start = System.nanoTime();
       rabbitTemplate.send(ex, "", new Message(payload, props));
       m.recordLatency(System.nanoTime() - start);
       m.recordOp();
     }
-
     assertThat(m.errorCount).isZero();
     m.custom.put("sampleCount", count);
     m.custom.put("payloadBytes", payload.length);
@@ -480,15 +476,13 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 4: AMQP End-to-End Delivery (App→AMQP→Consumer)
+  // Phase 4: AMQP End-to-End Delivery
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseAmqpE2e() throws Exception {
     PhaseMetrics m = new PhaseMetrics("amqp_e2e_delivery");
     ALL_PHASES.add(m);
     log.info("══════ Phase 4: AMQP E2E DELIVERY ══════");
-
-    // Set up a transient exchange + queue + listener for e2e measurement
     String ex = "prop.e2e.exchange." + UUID.randomUUID();
     String q = "prop.e2e.queue." + UUID.randomUUID();
     RabbitAdmin admin = new RabbitAdmin(rabbitTemplate);
@@ -500,10 +494,9 @@ class PropagationDelayIT extends AbstractIntegrationIT {
 
     List<Long> deliveryLatencies = Collections.synchronizedList(new ArrayList<>());
     CountDownLatch consumerReady = new CountDownLatch(1);
-
     SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
     container.setQueueNames(q);
-    container.setAcknowledgeMode(org.springframework.amqp.core.AcknowledgeMode.AUTO);
+    container.setAcknowledgeMode(AcknowledgeMode.AUTO);
     container.setConcurrentConsumers(2);
     container.setMessageListener((MessageListener) msg -> {
       MessageProperties mp = msg.getMessageProperties();
@@ -517,22 +510,17 @@ class PropagationDelayIT extends AbstractIntegrationIT {
 
     int count = 5_000;
     byte[] payload = "payload".getBytes(StandardCharsets.UTF_8);
-
     for (int i = 0; i < count; i++) {
       MessageProperties props = new MessageProperties();
       props.setHeader("sendTimeNanos", System.nanoTime());
       long start = System.nanoTime();
       rabbitTemplate.send(ex, "", new Message(payload, props));
-      m.recordLatency(System.nanoTime() - start); // publish-side latency
+      m.recordLatency(System.nanoTime() - start);
       m.recordOp();
     }
-
-    // Wait for all deliveries to complete
     Thread.sleep(2_000);
-
     container.stop();
 
-    // Copy delivery latencies into the metrics for reporting
     m.custom.put("deliverySamples", deliveryLatencies.size());
     if (!deliveryLatencies.isEmpty()) {
       long[] sorted = deliveryLatencies.stream().mapToLong(Long::longValue).sorted().toArray();
@@ -543,36 +531,31 @@ class PropagationDelayIT extends AbstractIntegrationIT {
       m.custom.put("deliveryMinMs", sorted[0] / 1_000_000.0);
       m.custom.put("deliveryMaxMs", sorted[len - 1] / 1_000_000.0);
     }
-
     assertThat(m.errorCount).isZero();
     m.custom.put("publishSamples", count);
     m.finish().logSummary();
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 5: HotKey L1 Hit (in-process facade overhead)
+  // Phase 5: HotKey L1 Hit
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseL1Hit() throws Exception {
     PhaseMetrics m = new PhaseMetrics("hotkey_l1_hit");
     ALL_PHASES.add(m);
     log.info("══════ Phase 5: HOTKEY L1 HIT ══════");
-
     int count = 10_000;
     String key = "prop:l1hit:key";
     redisTemplate.opsForValue().set(key, "l1-hot");
     hotKey.putThrough(key, "l1-hot", () -> {});
-    // putThrough runs async outside a transaction; wait for it
     Thread.sleep(100);
     assertThat(hotKey.get(key, () -> null, HARD_TTL, SOFT_TTL)).isPresent();
-
     for (int i = 0; i < count; i++) {
       long start = System.nanoTime();
       hotKey.get(key, () -> null, HARD_TTL, SOFT_TTL);
       m.recordLatency(System.nanoTime() - start);
       m.recordOp();
     }
-
     assertThat(m.errorCount).isZero();
     m.custom.put("sampleCount", count);
     m.custom.put("key", key);
@@ -580,25 +563,21 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 6: HotKey Cold Get (L1 miss → Redis → L1 populate)
+  // Phase 6: HotKey Cold Get
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseL2ColdGet() throws Exception {
     PhaseMetrics m = new PhaseMetrics("hotkey_l1_miss");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 6: HOTKEY COLD GET (L1 miss → Redis → L1) ══════");
-
+    log.info("══════ Phase 6: HOTKEY COLD GET ══════");
     int count = 5_000;
-    // Use unique keys that are guaranteed not to be in L1
     List<String> keys = new ArrayList<>(count);
     for (int i = 0; i < count; i++) {
       String key = "prop:cold:k" + i + "-" + UUID.randomUUID();
       keys.add(key);
       redisTemplate.opsForValue().set(key, "cold-v" + i);
     }
-
     AtomicLong actualSupplierCalls = new AtomicLong(0);
-
     for (int i = 0; i < count; i++) {
       String key = keys.get(i);
       long start = System.nanoTime();
@@ -609,9 +588,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
       m.recordLatency(System.nanoTime() - start);
       m.recordOp();
     }
-
     assertThat(m.errorCount).isZero();
-    // Each cold key should trigger exactly 1 supplier call
     m.custom.put("sampleCount", count);
     m.custom.put("actualSupplierCalls", actualSupplierCalls.get());
     m.custom.put("supplierCallRatio",
@@ -620,15 +597,14 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 7: Worker Decision Pipeline (Report→AMQP→Worker→AMQP→L1 update)
+  // Phase 7: Worker Decision Pipeline (warmup-jitter=0)
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseWorkerDecisionPipeline() throws Exception {
     PhaseMetrics m = new PhaseMetrics("worker_decision_pipeline");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 7: WORKER DECISION PIPELINE ══════");
+    log.info("══════ Phase 7: WORKER DECISION PIPELINE (jitter=0) ══════");
 
-    // Ensure the broadcast exchange exists for Worker decisions
     rabbitTemplate.execute(channel -> {
       try { channel.exchangeDeclarePassive(BROADCAST_EXCHANGE); }
       catch (Exception e) { channel.exchangeDeclare(BROADCAST_EXCHANGE, "fanout", true); }
@@ -640,12 +616,9 @@ class PropagationDelayIT extends AbstractIntegrationIT {
 
     for (int i = 0; i < count; i++) {
       String key = "prop:worker:pipe:" + i + "-" + UUID.randomUUID();
-      // Seed Redis with the key value
       redisTemplate.opsForValue().set(key, "wpipe-v" + i);
-      // Ensure key is NOT in L1 (invalidate to be safe)
       hotKey.invalidate(key);
 
-      // Send a HOT decision via the broadcast exchange (simulating Worker)
       long dv = decisionVersion.incrementAndGet();
       MessageProperties props = new MessageProperties();
       props.setHeader(HotKeyConstants.AMQP_HEADER_TYPE, "HOT");
@@ -657,7 +630,6 @@ class PropagationDelayIT extends AbstractIntegrationIT {
       rabbitTemplate.send(BROADCAST_EXCHANGE, "", msg);
       m.recordOp();
 
-      // Poll L1 until the key is promoted to HOT (WorkerListener processes it)
       long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
       boolean promoted = false;
       while (System.nanoTime() < deadline) {
@@ -685,20 +657,19 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 8: State Machine Pipeline (with real confirm window simulation)
+  // Phase 8: State Machine Pipeline (confirmDurationMs=0 → instant promotion)
   // ════════════════════════════════════════════════════════════════════════════════
 
-  private void phaseStateMachinePipeline() throws Exception {
-    PhaseMetrics m = new PhaseMetrics("state_machine_pipeline");
+  private void phaseStateMachinePipelineZeroConfirm() throws Exception {
+    PhaseMetrics m = new PhaseMetrics("state_machine_pipeline_zero_confirm");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 8: STATE MACHINE PIPELINE (confirmWindows=20, sliceMs=100ms) ══════");
+    log.info("══════ Phase 8: STATE MACHINE (confirmDurationMs=0) ══════");
 
     int count = 10;
-    int confirmWindows = 20; // default: confirmDurationMs=2000 / sliceMs=100
-    int coolWindows = 150;
-    int preCoolGraceWindows = 50;
+    int confirmWindows = 0;
+    int coolWindows = 0;
+    int preCoolGraceWindows = 0;
 
-    // Ensure broadcast exchange exists
     rabbitTemplate.execute(channel -> {
       try { channel.exchangeDeclarePassive(BROADCAST_EXCHANGE); }
       catch (Exception e) { channel.exchangeDeclare(BROADCAST_EXCHANGE, "fanout", true); }
@@ -708,7 +679,6 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     HotKeyStateMachine sm = new HotKeyStateMachine(confirmWindows, coolWindows, preCoolGraceWindows);
     AtomicLong decisionVersion = new AtomicLong(System.currentTimeMillis());
 
-    // Prepare keys
     List<String> keys = new ArrayList<>();
     for (int i = 0; i < count; i++) {
       String key = "prop:smpipe:" + i + "-" + UUID.randomUUID();
@@ -723,16 +693,10 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     for (String key : keys) {
       pool.submit(() -> {
         try {
-          // Phase A: Simulate confirm windows (~2s wall-clock)
           long startTotal = System.nanoTime();
-          for (int w = 0; w < confirmWindows; w++) {
-            sm.evaluate(key, true);
-            if (w < confirmWindows - 1) {
-              Thread.sleep(100); // simulate sliceMs = 100ms
-            }
-          }
-
-          // Phase B: Send HOT decision via AMQP (same as Phase 7)
+          // confirmDurationMs=0: evaluate once is enough
+          sm.evaluate(key, true);
+          // Immediately send HOT decision
           long dv = decisionVersion.incrementAndGet();
           MessageProperties props = new MessageProperties();
           props.setHeader(HotKeyConstants.AMQP_HEADER_TYPE, "HOT");
@@ -742,7 +706,6 @@ class PropagationDelayIT extends AbstractIntegrationIT {
           rabbitTemplate.send(BROADCAST_EXCHANGE, "", msg);
           m.recordOp();
 
-          // Phase C: Poll L1 for promotion
           long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
           boolean promoted = false;
           while (System.nanoTime() < deadline) {
@@ -757,34 +720,32 @@ class PropagationDelayIT extends AbstractIntegrationIT {
             m.recordLatency(System.nanoTime() - startTotal);
           } else {
             m.errors.incrementAndGet();
-            log.warn("State machine promotion timeout for key: {}", key);
+            log.warn("Zero-confirm SM promotion timeout for key: {}", key);
           }
         } catch (Exception e) {
           m.errors.incrementAndGet();
-          log.error("State machine pipeline error for key: {}", key, e);
+          log.error("Zero-confirm SM pipeline error for key: {}", key, e);
         } finally {
           latch.countDown();
         }
       });
     }
 
-    latch.await(60, TimeUnit.SECONDS);
+    latch.await(30, TimeUnit.SECONDS);
     pool.shutdown();
 
-    assertThat(m.errorCount).as("State machine promotion timeouts").isLessThan(count / 10);
+    assertThat(m.errorCount).as("SM promotion timeouts").isLessThan(count / 10);
     m.custom.put("decisionSent", count);
     m.custom.put("promoted", count - m.errorCount);
     m.custom.put("promotionRate",
         Math.round((double) (count - m.errorCount) / count * 10000.0) / 100.0);
     m.custom.put("confirmWindows", confirmWindows);
-    m.custom.put("sliceMs", 100);
-    m.custom.put("expectedMinConfirmMs", confirmWindows * 100);
-    m.custom.put("stateMachineConfig", "confirmDurationMs=2000, coolDurationMs=15000, preCoolGraceMs=5000");
+    m.custom.put("stateMachineConfig", "confirmDurationMs=0");
     m.finish().logSummary();
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 9A: Full Chain (Local Miss → Report → AMQP → Worker-Sim → AMQP → L1)
+  // Phase 9A: Full Chain (No SM)
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseFullChainNoSM() throws Exception {
@@ -792,23 +753,22 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 9B: Full Chain with State Machine (confirmWindows=20)
+  // Phase 9B: Full Chain with Zero-Confirm SM
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseFullChainWithSM() throws Exception {
     phaseFullChain(true);
   }
 
-  /** Shared helper for Phase 9A (test-only no-SM path) and 9B (SM 20 confirm, default). */
   private void phaseFullChain(boolean withStateMachine) throws Exception {
-    PhaseMetrics m = new PhaseMetrics(withStateMachine ? "full_chain_with_sm" : "full_chain_without_sm");
+    PhaseMetrics m = new PhaseMetrics(withStateMachine ? "full_chain_with_sm_zero_confirm" : "full_chain_without_sm");
     ALL_PHASES.add(m);
     log.info(
-      "══════ Phase 9{}: FULL CHAIN ══════",
-      withStateMachine ? "B (with SM)" : "A (without SM)");
+      "══════ Phase 9{}: FULL CHAIN (extreme) ══════",
+      withStateMachine ? "B (w/ zero-confirm SM)" : "A (w/o SM)");
 
     int count = 10;
-    int confirmWindows = 20;
+    int confirmWindows = 0;
     String appName = "integration-test";
 
     rabbitTemplate.execute(channel -> {
@@ -817,15 +777,13 @@ class PropagationDelayIT extends AbstractIntegrationIT {
       return null;
     });
 
-    // ── Seed worker heartbeat so reports are not silently dropped ──
     workerHealthMonitor.onHeartbeat(0, System.currentTimeMillis());
     ScheduledExecutorService heartbeatRefresher = Executors.newSingleThreadScheduledExecutor();
     heartbeatRefresher.scheduleAtFixedRate(
       () -> workerHealthMonitor.onHeartbeat(0, System.currentTimeMillis()),
       3, 3, TimeUnit.SECONDS);
 
-    // ── Setup report queue + Worker-simulator listener ──
-    String reportQName = "test.fc.report." + UUID.randomUUID();
+    String reportQName = "test.fc.extreme." + UUID.randomUUID();
     RabbitAdmin admin = new RabbitAdmin(rabbitTemplate);
     Queue reportQ = new Queue(reportQName, false, false, true);
     admin.declareQueue(reportQ);
@@ -835,7 +793,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
         .with("report." + appName + ".0"));
 
     HotKeyStateMachine sm = withStateMachine
-      ? new HotKeyStateMachine(confirmWindows, 150, 50)
+      ? new HotKeyStateMachine(confirmWindows, 0, 0)
       : null;
     AtomicLong decisionVersion = new AtomicLong(System.currentTimeMillis());
     ObjectMapper mapper = new ObjectMapper();
@@ -879,18 +837,16 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     });
     reportContainer.start();
 
-    // ── Prepare keys ──
     List<String> keys = new ArrayList<>(count);
     for (int i = 0; i < count; i++) {
       String key =
-        "prop:fc:" + (withStateMachine ? "sm" : "nosm") + ":" + i + "-" + UUID.randomUUID();
+        "prop:fc:" + (withStateMachine ? "sm" : "nosm") + ":e" + i + "-" + UUID.randomUUID();
       keys.add(key);
       redisTemplate.opsForValue().set(key, "fc-v" + i);
       hotKey.invalidate(key);
       pending.add(key);
     }
 
-    // ── Run concurrent heat loops ──
     ExecutorService pool = Executors.newFixedThreadPool(count);
     CountDownLatch latch = new CountDownLatch(count);
 
@@ -908,7 +864,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
             }
             long elapsedSec =
               TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - start);
-            if (elapsedSec > (withStateMachine ? 60 : 30)) {
+            if (elapsedSec > (withStateMachine ? 30 : 15)) {
               m.errors.incrementAndGet();
               log.warn("Full chain timeout for key: {}", key);
               pending.remove(key);
@@ -925,13 +881,13 @@ class PropagationDelayIT extends AbstractIntegrationIT {
       });
     }
 
-    latch.await(withStateMachine ? 90 : 45, TimeUnit.SECONDS);
+    latch.await(withStateMachine ? 45 : 25, TimeUnit.SECONDS);
     pool.shutdown();
     reportContainer.stop();
     heartbeatRefresher.shutdown();
 
     assertThat(m.errors.get())
-      .as("Full chain timeouts (" + (withStateMachine ? "w/ SM" : "w/o SM") + ")")
+      .as("Full chain timeouts (" + (withStateMachine ? "w/ SM zero confirm" : "w/o SM") + ")")
       .isLessThan(withStateMachine ? count / 5 : count / 10);
     m.custom.put("totalKeys", count);
     m.custom.put("promoted", count - m.errors.get());

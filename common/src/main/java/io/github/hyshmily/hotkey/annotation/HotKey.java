@@ -34,86 +34,59 @@ import java.lang.annotation.Target;
  * </ul>
  * <p>
  * The {@code key} attribute supports Spring Expression Language (SpEL), enabling
- * parameter-driven cache keys such as {@code 'user:' + #id}. The <tt>-parameters</tt>
+ * parameter-driven cache keys such as {@code 'user:' + #id}. The {@code -parameters}
  * compiler flag is required (enabled by default in the parent POM).
  * <p>
- * When {@link #fallbackEnabled} is {@code true}, READ operations that throw
- * {@link RuntimeException} (e.g. blacklist block, supplier failure) are
- * intercepted and a fallback value is returned instead.  Two fallback modes
- * are supported:
+ * Companion annotations:
  * <ul>
- *   <li><b>SpEL expression</b> — set {@link #fallback} to a SpEL expression;
- *       method parameters are available as {@code #paramName} variables.</li>
- *   <li><b>Naming convention</b> — when {@link #fallback} is empty, the aspect
- *       looks for a method named {@code {originalMethodName}Fallback} on the
- *       same bean with identical parameter types.</li>
+ *   <li>{@link Fallback @Fallback} — fallback value when blacklist blocks, hot key
+ *       intercept triggers, or cache loader throws</li>
+ *   <li>{@link Intercept @Intercept} — skip method execution for recognised hot keys</li>
+ *   <li>{@link HotKeyCacheTTL @HotKeyCacheTTL} — per-entry hard/soft TTL overrides</li>
  * </ul>
- * <p>
- * Requires {@code hotkey.annotation.enabled=true} to activate.
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
 public @interface HotKey {
-  /**
-   * SpEL expression for the cache key. Method parameters are available as
-   * {@code #paramName} variables.
-   */
+
+  /** SpEL expression for the cache key. Method parameters are available as {@code #paramName} variables. */
   String key();
 
-  /**
-   * Cache operation type. Defaults to {@link OperationType#READ}.
-   */
+  /** Cache operation type. Defaults to {@link OperationType#READ}. */
   OperationType operation() default OperationType.READ;
 
   /**
-   * Hard TTL override in milliseconds. Pass 0 to use the configured default
-   * for the key's current state.
+   * SpEL condition that gates cache participation.
+   * <p>When the expression evaluates to {@code false} (or {@code null}), the cache is
+   * bypassed entirely and the method executes directly. Parameters are available
+   * as {@code #paramName} variables.
+   * <p>Defaults to empty (no condition — always attempt caching).
    */
-  long hardTtlMs() default 0;
+  String condition() default "";
 
   /**
-   * Soft TTL override in milliseconds. Pass 0 to use the configured default
-   * for the key's current state. Only applies when {@link #softExpire} is {@code true}.
+   * SpEL exclusion expression evaluated after a cache load succeeds.
+   * <p>When the expression evaluates to {@code true}, the loaded value is still
+   * placed into the cache but the result is accepted as-is. The special variable
+   * {@code #result} holds the loaded value.
+   * <p>Defaults to empty (no exclusion).
    */
-  long softTtlMs() default 0;
+  String unless() default "";
 
   /**
    * Whether to use soft-expire (stale-while-revalidate) semantics on READ.
-   * Defaults to {@code true}. When disabled, behaves as a plain {@code get()}.
+   * When enabled (default), stale entries are served immediately while a
+   * background refresh is triggered. When disabled, behaves as a plain {@code get()}.
    */
   boolean softExpire() default true;
 
-  /**
-   * Whether to enable fallback handling for READ operations.
-   * <p>
-   * When {@code true}, {@link RuntimeException} thrown during cache get
-   * (including blacklist block, supplier failure) is intercepted and
-   * a fallback value is returned.  Defaults to {@code false}.
-   */
-  boolean fallbackEnabled() default false;
-
-  /**
-   * SpEL expression for the fallback value.
-   * <p>
-   * When non-empty, evaluated as the fallback value.
-   * When empty and {@link #fallbackEnabled} is {@code true},
-   * discovers {@code {methodName}Fallback} on the same bean.
-   */
-  String fallback() default "";
-
-
-  /**
-   * The type of cache operation.
-   *
-   * <ul>
-   *   <li>{@link #READ} — reads from L1 or loads via method invocation</li>
-   *   <li>{@link #WRITE} — executes the mutation and invalidates the cache afterward</li>
-   *   <li>{@link #INVALIDATE} — removes the entry from L1 and broadcasts to peers</li>
-   * </ul>
-   */
+  /** The type of cache operation. */
   enum OperationType {
+    /** Reads from L1 / loads via method invocation and caches the result. */
     READ,
+    /** Executes the method as a mutation inside {@code putBeforeInvalidate}, then invalidates L1 and broadcasts INVALIDATE to peers. */
     WRITE,
+    /** Invalidates the key from L1, increments the version, and broadcasts TYPE_REFRESH to peers before executing the method. */
     INVALIDATE,
   }
 }

@@ -25,7 +25,7 @@ Infrastructure: Testcontainers-managed Docker containers on single machine. Dist
 
 ## 2. Stress Test Results
 
-**Data source**: [`integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
+**Data source**: [`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
 
 31 test cases, 4,667 ms total, **0 errors**, 2,695,450 total operations.
 
@@ -113,7 +113,7 @@ High-frequency reporter processes 2M records in 650ms with **zero data loss**. B
 
 ## 3. Container Full-Link Stress Test
 
-**Data source**: [`integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
+**Data source**: [`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
 
 15 phases, 58,331 ms total, **0 errors**, 224,851 total operations across real Redis + RabbitMQ containers.
 
@@ -152,9 +152,9 @@ High-frequency reporter processes 2M records in 650ms with **zero data loss**. B
 
 ## 4. Integration Tests
 
-**Stress test data source**: [`integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/target/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
-**Container stress data source**: [`integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
-**Propagation delay data source**: [`integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json`](../integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json)
+**Stress test data source**: [`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
+**Container stress data source**: [`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
+**Propagation delay data source**: [`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json)
 
 ```
 Tests run: 97, Failures: 0, Errors: 0, Skipped: 9
@@ -272,7 +272,7 @@ Memory stable between 68-295 MB across 5 minutes. Zero GC pressure (413 collecti
 
 ### 5.5 Container Full-Link Container Stress
 
-**File**: [`integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/target/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
+**File**: [`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
 
 **Config**: 8 threads, 5,000 hot keys, 15,000 cold keys, 2,000 ops/thread, softTtl=300s, hardTtl=600s.
 
@@ -297,13 +297,13 @@ Worker decisions (HOT/COOL) injected via `hotkey.broadcast.exchange` (fanout). 2
 
 ### 5.7 Propagation Delay
 
-**Data source**: [`integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json`](../integration-tests/target/testresult/propagation-delay-2026-06-06T08-02-16.442185900Z.json)
+**Data source**: [`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json)
 
 10 phases, 45,312 ops total, **0 errors**, across real Redis + RabbitMQ containers (Testcontainers on single machine). Measures per-node latency for each hop in the HotKey data path.
 
 **Phase 8** simulates the full HotKeyStateMachine confirm-window pipeline: 20 evaluate() calls × 100ms slice → HOT decision → AMQP broadcast → WorkerListener → L1 promotion.
 
-**Phase 9** measures the full end-to-end latency: application cache miss → report aggregation → AMQP report delivery → Worker-side sliding window accumulation → HOT decision → AMQP broadcast → WorkerListener → L1 entry promotion. Phase 9A runs without the state machine (immediate broadcast after first report batch), while Phase 9B requires 20 consecutive confirm windows (2,000ms minimum).
+**Phase 9** measures the full end-to-end latency: application cache miss → report aggregation → AMQP report delivery → Worker-side sliding window accumulation → SM confirm pipeline → HOT decision → AMQP broadcast → WorkerListener → L1 entry promotion. Phase 9B uses 20 consecutive confirm windows (2,000ms minimum, default).
 
 | Phase | Ops | Duration | Ops/s | P50 | P95 | P99 |
 |---|---|---|---|---|---|---|
@@ -313,10 +313,9 @@ Worker decisions (HOT/COOL) injected via `hotkey.broadcast.exchange` (fanout). 2
 | AMQP E2E Delivery | 5,000 | 2,526 ms | 1,979 | 0.07 ms | 0.27 ms | 0.48 ms |
 | HotKey L1 Hit | 10,000 | 129 ms | 77,519 | **0.001 ms** | 0.004 ms | 0.018 ms |
 | HotKey L1 Miss (→ Redis → L1) | 5,000 | 5,688 ms | 879 | 0.51 ms | 0.94 ms | 2.26 ms |
-| Worker Decision Pipeline (w/o SM) | 200 | 10,993 ms | 18 | **51.64 ms** | 97.75 ms | 104.16 ms |
-| State Machine Pipeline (w/ SM) | 10 | 2,042 ms | 5 | **1,983 ms** | 2,015 ms | 2,015 ms |
-| Full Chain Pipeline (w/o SM) | 92 | 1,234 ms | 75 | **155.81 ms** | 202.14 ms | 212.69 ms |
-| Full Chain w/ SM (20 confirm windows) | 10 | 2,999 ms | 3 | **2,038 ms** | 2,055 ms | 2,055 ms |
+| Worker Decision Pipeline | 200 | 10,993 ms | 18 | **51.64 ms** | 97.75 ms | 104.16 ms |
+| SM Confirm Pipeline (20 windows) | 10 | 2,042 ms | 5 | **1,983 ms** | 2,015 ms | 2,015 ms |
+| Full Chain (SM 20 confirm) | 10 | 2,999 ms | 3 | **2,038 ms** | 2,055 ms | 2,055 ms |
 
 Key observations:
 - **HotKey L1 Hit** is the fastest path at ~1μs P50 — pure Caffeine lookup through the HotKey facade with no network I/O.
@@ -324,10 +323,9 @@ Key observations:
 - **AMQP Publish** is negligible at 0.02ms P50 — RabbitMQ channel write is essentially memory-to-memory.
 - **AMQP E2E Delivery** (publish + broker routing + consumer delivery) has P50=0.07ms (publish side) and delivery P50=1.46ms — most consumer delivery completes within 2ms on a single machine.
 - **HotKey L1 Miss** (0.51ms P50) is Redis GET RTT + SingleFlight dedup + L1 re-population overhead — the majority of the latency is the Redis call itself.
-- **Worker Decision Pipeline (w/o state machine)** (51.64ms P50) — the Worker's `warmupJitterMs=100ms` introduces intentional delay before decision evaluation, followed by polling-based promotion detection via `isLocalHotKey()`. The P50 of ~52ms is consistent with jitter + processing + AMQP delivery.
-- **State Machine Pipeline (w/ state machine)** (1,983ms P50) — the dominant factor is the confirm window pipeline: 20 consecutive hot windows × 100ms slice interval = 2,000ms minimum. After confirmation, the HOT decision follows the same AMQP + WorkerListener path as Phase 7. The total (1,983ms) is close to the theoretical minimum of 2,000ms + ~52ms propagation ≈ 2,052ms.
-- **Full Chain without state machine** (155.81ms P50) — adds ~104ms over the Worker Decision Pipeline, which accounts for: report aggregation batching (report-interval-ms=100ms), AMQP report delivery, SlidingWindowDetector accumulation, plus the decision broadcast path. The two AMQP hops (report + decision) each add delivery latency, and the 100ms batch interval contributes one full tick. 50/50 keys promoted, 0 errors.
-- **Full Chain with state machine** (2,038ms P50) — adds the 20-window confirm pipeline (2,000ms minimum) on top of the full chain path. The total is dominated by the confirm window requirement, making it only ~55ms more than the state machine pipeline (Phase 8) — the additional report aggregation and delivery overhead is negligible compared to the 2s confirm floor. 10/10 keys promoted, 0 errors.
+- **Worker Decision Pipeline** (51.64ms P50) — the Worker's `warmupJitterMs=100ms` introduces intentional delay before decision evaluation, followed by polling-based promotion detection via `isLocalHotKey()`. The P50 of ~52ms is consistent with jitter + processing + AMQP delivery.
+- **SM Confirm Pipeline** (1,983ms P50) — the dominant factor is the confirm window pipeline: 20 consecutive hot windows × 100ms slice interval = 2,000ms minimum. After confirmation, the HOT decision follows the same AMQP + WorkerListener path as Phase 7. The total (1,983ms) is close to the theoretical minimum of 2,000ms + ~52ms propagation ≈ 2,052ms.
+- **Full Chain (SM 20 confirm)** (2,038ms P50) — full end-to-end path: local Caffeine miss → report aggregation (100ms batch) → AMQP report delivery → SlidingWindowDetector → 20-window confirm pipeline (2,000ms minimum) → AMQP decision broadcast → L1 promotion. Total latency is dominated by the confirm window requirement, making it only ~55ms more than the SM pipeline (Phase 8) — the report aggregation and delivery overhead is negligible compared to the 2s confirm floor. 10/10 keys promoted, 0 errors.
 
   The state machine parameters are configurable via `WorkerProperties`:
   - `hotkey.worker.state-machine.confirm-duration-ms` = 2000 (default) → `confirmWindows = ceil(2000 / SlidingWindowDetector.sliceMs(100)) = 20`
@@ -335,6 +333,37 @@ Key observations:
   - `hotkey.worker.state-machine.pre-cool-grace-ms` = 5000 → `preCoolGraceWindows = 50`
 
   Reducing `confirm-duration-ms` or the `SlidingWindowDetector.sliceMs` directly shortens the hot key confirmation delay, at the cost of increased false positives.
+
+### 5.8 Extreme Parameter Propagation Delay
+
+**Data source**: [`integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-07T07-42-58.621466500Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-07T07-42-58.621466500Z.json)
+
+Same 4-phase structure as 5.7, but with extreme parameter tuning:
+
+| Parameter | Default | Extreme |
+|---|---|---|
+| `hotkey.local.report-interval-ms` | 100 | **1** |
+| `hotkey.worker-listener.warmup-jitter-ms` | 100 | **0** |
+| `hotkey.sync.warmup-jitter-ms` | 100 | **0** |
+| `hotkey.worker.state-machine.confirm-duration-ms` | 2000 | **0** (no confirm windows) |
+| `hotkey.worker.sliding-window.duration-ms` / slices | 1000/10 | **100/100** |
+
+All phases use 10 keys each for a fair comparison. The state machine is always present — the difference is the confirm window count.
+
+| Phase | Ops | Duration | P50 | P95 | P99 |
+|---|---|---|---|---|---|
+| Worker Decision Pipeline (jitter=0) | 200 | 894 ms | **2.35 ms** | 3.77 ms | 5.16 ms |
+| SM Pipeline (0 confirm) | 10 | 27 ms | **6.80 ms** | 8.03 ms | 8.03 ms |
+| Full Chain (SM 0 confirm) | 10 | 43 ms | **7.54 ms** | 8.56 ms | 8.56 ms |
+
+All phases: **0 errors**, 45k total ops.
+
+Key observations:
+- **Worker Decision Pipeline drops from 51.64ms → 2.35ms P50** (eliminating the 100ms warmup jitter removes the dominant delay)
+- **SM Pipeline drops from 1,983ms → 6.80ms P50** (the 2s confirm window was ~99.7% of the latency)
+- **Full Chain drops from 2,038ms (SM 20 confirm) → 7.54ms (SM 0 confirm) P50** (99.6% reduction — the confirm window was the dominant term). The state machine gates broadcast volume: each key broadcasts once per lifecycle regardless of confirm window count, preventing AMQP send contention
+
+  See [README extreme tuning section](../README.md#extreme-parameter-tuning--trading-reliability-for-latency) for the full trade-off discussion.
 
 ### 5.6 Degradation & Performance
 
@@ -414,4 +443,4 @@ Verified against `HotKeyProperties.java`:
 
 ---
 
-*All data sourced from test execution outputs in `integration-tests/target/testresult/`. Source code defaults verified against `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java`.*
+*All data sourced from test execution outputs in `integration-tests/src/test/resources/testresult/`. Source code defaults verified against `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java`.*

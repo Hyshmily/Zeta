@@ -136,6 +136,7 @@
 | `worker-listener`       | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`  | `@ConditionalOnClass(RabbitTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` + 属性（`hotkey.worker-listener.enabled`） |
 | `worker`                | `spring-boot-starter-amqp`（+ `spring-boot-starter-data-redis`）| `@ConditionalOnBean(RabbitTemplate.class)` + 属性（`hotkey.worker.enabled`） |
 | `actuator`             | `spring-boot-starter-actuator`                                 | `@ConditionalOnClass(Endpoint.class)`                                   |
+| `micrometer`           | `io.micrometer:micrometer-core`                                | `@ConditionalOnClass(MeterBinder.class)` — 自动注册 Caffeine 缓存指标（`hotkey.l1.*`）+ 自定义 HotKey 业务指标 |
 | `scheduling`           | 无                                                             | `@ConditionalOnProperty` + `@ConditionalOnBean(TopK.class)` |
 
 ## 安全性

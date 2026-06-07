@@ -530,6 +530,20 @@ public class HotKeyCache {
   }
 
   /**
+   * Return the underlying Caffeine cache for direct access.
+   *
+   * <p>This provides access to Caffeine-specific operations such as
+   * {@code asMap()}, {@code policy()}, and {@code cleanUp()}. Use with
+   * caution — bypassing the HotKey orchestration layer (version tracking,
+   * broadcast, expiry management) can lead to inconsistent state.
+   *
+   * @return the raw Caffeine {@link Cache} instance
+   */
+  public Cache<String, Object> getLocalCache() {
+    return caffeineCache;
+  }
+
+  /**
    * Check whether a key is blocked; throws {@link HotKeyBlockedException} if so.
    *
    * @return {@code true} if the key is on the ALLOW_NO_REPORT list

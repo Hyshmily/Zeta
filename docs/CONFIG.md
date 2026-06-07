@@ -136,6 +136,7 @@
 | `worker-listener`      | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis` | `@ConditionalOnClass(RabbitTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` + property (`hotkey.worker-listener.enabled`) |
 | `worker`               | `spring-boot-starter-amqp` (+ `spring-boot-starter-data-redis`) | `@ConditionalOnBean(RabbitTemplate.class)` + property (`hotkey.worker.enabled`) |
 | `actuator`             | `spring-boot-starter-actuator`                                | `@ConditionalOnClass(Endpoint.class)`                                  |
+| `micrometer`           | `io.micrometer:micrometer-core`                               | `@ConditionalOnClass(MeterBinder.class)` — auto-registers Caffeine cache metrics (`hotkey.l1.*`) + custom HotKey business metrics |
 | `scheduling`           | none                                                          | `@ConditionalOnProperty` + `@ConditionalOnBean(TopK.class)` |
 
 ## Security

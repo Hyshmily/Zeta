@@ -52,7 +52,7 @@ Worker-only components live in the `worker/` module under `io.github.hyshmily.ho
 
 `HotKey` is the sole public entry point (facade pattern). All cache operations go through this bean. `HotKeyCache` is internal.
 
-Key methods: `get()`, `get(key, supplier, hardTtlMs, softTtlMs)`, `putThrough()`, `putThrough(key, value, runnable, hardTtlMs, softTtlMs)`, `putBeforeInvalidate()`, `invalidate()`, `invalidateAll()`, `isLocalHotKey()`, `isWorkerHotKey()`, `returnLocalHotKeys()`, `returnLocalExpelledHotKeys()`, `returnLocalTotalDataStreams()`, `returnWorkerHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnWorkerTotalDataStreams()`, `getWithSoftExpire()`, `getWithSoftExpire(key, supplier, softTtlMs)`, `getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs)`, `peek()`
+Key methods: `get()`, `get(key, supplier, hardTtlMs, softTtlMs)`, `putThrough()`, `putThrough(key, value, runnable, hardTtlMs, softTtlMs)`, `putBeforeInvalidate()`, `invalidate()`, `invalidateAll()`, `isLocalHotKey()`, `isWorkerHotKey()`, `returnLocalHotKeys()`, `returnLocalExpelledHotKeys()`, `returnLocalTotalDataStreams()`, `returnWorkerHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnWorkerTotalDataStreams()`, `getWithSoftExpire()`, `getWithSoftExpire(key, supplier, softTtlMs)`, `getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs)`, `peek()`, `getLocalCache()` (raw Caffeine reference — ⚠️ bypasses orchestration; introspection only, never write through it)
 
 `@HotKey` is the annotation-based entry point, handled by `HotKeyAspect` which injects the `HotKey` facade.
 
@@ -63,7 +63,8 @@ All in `autoconfigure/` package, registered in `META-INF/spring/org.springframew
 - `HotKeyFacadeAutoConfiguration` — always runs; creates `HotKey` facade via `ObjectProvider`
 - `HotKeyAutoConfiguration` — runs unless Worker-only mode; creates TopK, Caffeine, SingleFlight, non-Redis HotKeyCache
 - `HotKeyRedisAutoConfiguration` — activates when `RedisTemplate` bean present; `StringRedisTemplate` optional via `ObjectProvider`; version tracking
-- `HotKeyActuatorAutoConfiguration` — activates when `Endpoint.class` on classpath
+- `HotKeyActuatorAutoConfiguration` — activates when `Endpoint.class` on classpath; registers `/actuator/hotkey` diagnostic endpoint
+- `HotKeyMicrometerAutoConfiguration` — activates when `MeterBinder.class` on classpath; registers Caffeine cache metrics (`hotkey.l1.*`) and custom HotKey business metrics (`hotkey.*`) as Micrometer gauges
 - `HotKeySyncAutoConfiguration` — activates when `RabbitTemplate` + `RedisTemplate` present AND `hotkey.sync.enabled=true`
 - `HotKeyWorkerListenerAutoConfiguration` — activates when `RabbitTemplate` + `RedisTemplate` present AND `hotkey.worker-listener.enabled=true`
 - `HotKeyReportAutoConfiguration` — activates when `RabbitTemplate` present AND `hotkey.report.enabled=true` (default)

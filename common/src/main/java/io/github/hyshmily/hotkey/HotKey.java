@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
@@ -202,6 +203,21 @@ public class HotKey {
   public void putBeforeInvalidate(String cacheKey, Runnable mutation) {
     requireCache();
     hotKeyCache.putBeforeInvalidate(cacheKey, mutation);
+  }
+
+  /**
+   * Return the underlying Caffeine cache for direct access.
+   *
+   * <p>Useful for Caffeine-specific operations such as {@code asMap()},
+   * {@code policy()}, and {@code cleanUp()}. Use with caution — bypassing
+   * the HotKey orchestration layer can lead to inconsistent cache state.
+   *
+   * @return the raw Caffeine {@link Cache} instance
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public Cache<String, Object> getLocalCache() {
+    requireCache();
+    return hotKeyCache.getLocalCache();
   }
 
   //------------------------------------------------------------------------

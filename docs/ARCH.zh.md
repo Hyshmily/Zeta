@@ -370,6 +370,22 @@ HotKey.peek(cacheKey)
            [⚠ 不调用 hotKeyDetector.add / hotKeyReporter.record / L2 reader]
 ```
 
+### 原始缓存访问 — `getLocalCache`
+
+暴露底层 Caffeine `Cache<String, Object>`，用于 Caffeine 特定操作（`asMap`、`policy`、`cleanUp`）。
+
+<!-- Source: HotKeyCache.java:542-544 -->
+
+```
+HotKey.getLocalCache()
+└─ HotKeyCache.getLocalCache()
+      └─ return caffeineCache                                   [直接 Caffeine 引用]
+      [⚠ 绕过 HotKey 编排层——版本追踪、广播和过期管理均被跳过]
+```
+
+> [!WARNING]
+> `getLocalCache()` 返回**原始** Caffeine 缓存。通过此引用写入的任何内容都不经过版本生成、广播同步或过期管理。仅用于自省或 Caffeine 特定维护（`asMap().keySet()`、`policy().expireAfterWrite()`、`cleanUp()`）。切勿通过此引用写入条目——请使用 `putThrough()` 或 `putBeforeInvalidate()`。
+
 ### 写穿透路径 — `putThrough`
 
 <!-- Source: HotKeyCache.java:375-416 -->
@@ -1039,3 +1055,6 @@ hotkey:
 
 **`putThrough` 非事务时为什么异步，而其他写方法同步？**
 `putThrough` 的 `writer.run()` 可能涉及 L2/DB 网络 IO，异步执行避免阻塞调用者。`invalidate`/`invalidateAll`/`putBeforeInvalidate` 预期轻量（仅缓存操作+广播），同步执行保证调用者返回时广播已发出。
+
+**TTL 随机偏移（缓存雪崩防护）：**
+`CacheExpireManager.toHardExpireTimestamp()` 和 `toSoftExpireTimestamp()` 在计算每个过期时间戳时，使用 `ThreadLocalRandom` 施加 ±10% 的均匀随机偏移。这打散了拥有相同配置 TTL 的大量 key 的实际淘汰时间，防止同时大规模淘汰（缓存雪崩）。偏移比例硬编码为 10%——详见 `CacheExpireManager.java:48,136-155`。

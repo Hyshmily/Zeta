@@ -1,0 +1,181 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.hyshmily.hotkey.autoconfigure;
+
+import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
+import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeycache.VersionController;
+import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.binder.MeterBinder;
+import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+
+/**
+ * Auto-configuration for exposing HotKey metrics via Micrometer.
+ *
+ * <p>Registers two {@link MeterBinder} beans when Micrometer is on the classpath:
+ * <ul>
+ *   <li>{@code hotKeyCaffeineMetrics} — standard Caffeine cache metrics (hit rate, eviction, etc.)
+ *       under the {@code hotkey.l1} metric prefix.</li>
+ *   <li>{@code hotKeyCustomMetrics} — HotKey-specific business metrics covering TopK detection,
+ *       SingleFlight, Reporter, ExpireManager, VersionController, SyncPublisher, Worker TopK,
+ *       Worker health, and StateMachine.</li>
+ * </ul>
+ *
+ * <p>All custom metrics use the {@code hotkey} namespace. Any missing dependency silently
+ * skips the corresponding gauge registration, mirroring the same null-safe approach used
+ * by {@link io.github.hyshmily.hotkey.actuator.HotKeyEndpoint}.
+ */
+@AutoConfiguration(after = HotKeyAutoConfiguration.class)
+@ConditionalOnClass(MeterBinder.class)
+@EnableConfigurationProperties(HotKeyProperties.class)
+public class HotKeyMicrometerAutoConfiguration {
+
+  /**
+   * Registers standard Caffeine cache metrics (named {@code cache.*} with a
+   * {@code cache=hotkey.l1} tag) using {@link CaffeineCacheMetrics}. This exposes
+   * hit/miss counts, eviction count/weight, estimated size, and max size.
+   *
+   * <p>Uses {@link ObjectProvider} so the bean is created safely even when the
+   * L1 cache is absent (e.g. Worker-only mode).
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public MeterBinder hotKeyCaffeineMetrics(
+    @Qualifier("hotLocalCache") ObjectProvider<Cache<String, Object>> hotLocalCacheProvider
+  ) {
+    return registry ->
+      hotLocalCacheProvider.ifAvailable(cache ->
+        CaffeineCacheMetrics.monitor(registry, cache, "hotkey.l1")
+      );
+  }
+
+  /**
+   * Registers HotKey-specific business metrics for local and worker-side components.
+   *
+   * <p>Metrics registered (each gated by component availability):
+   * <table>
+   *   <tr><th>Metric name</th><th>Source</th></tr>
+   *   <tr><td>{@code hotkey.topk.size}</td><td>TopK current ranking count (tagged type=local/worker)</td></tr>
+   *   <tr><td>{@code hotkey.topk.total}</td><td>TopK total requests tracked (tagged type=local/worker)</td></tr>
+   *   <tr><td>{@code hotkey.expelled.queue.size}</td><td>Expelled queue backlog</td></tr>
+   *   <tr><td>{@code hotkey.expelled.queue.remaining}</td><td>Expelled queue remaining capacity</td></tr>
+   *   <tr><td>{@code hotkey.singleflight.inflight}</td><td>SingleFlight in-flight dedup count</td></tr>
+   *   <tr><td>{@code hotkey.reporter.queue.depth}</td><td>Reporter queue backlog</td></tr>
+   *   <tr><td>{@code hotkey.reporter.queue.dropped.total}</td><td>Cumulative dropped batches</td></tr>
+   *   <tr><td>{@code hotkey.reporter.queue.expired.total}</td><td>Cumulative expired batches</td></tr>
+   *   <tr><td>{@code hotkey.reporter.pending.keys}</td><td>Keys buffered in reporter counter cache</td></tr>
+   *   <tr><td>{@code hotkey.expire.refresh.available}</td><td>Available refresh limiter permits</td></tr>
+   *   <tr><td>{@code hotkey.version.degraded.total}</td><td>Cumulative version fallback count</td></tr>
+   *   <tr><td>{@code hotkey.sync.dedup.size}</td><td>Broadcast dedup cache size</td></tr>
+   *   <tr><td>{@code hotkey.worker.alive}</td><td>Whether any worker shard is alive (0/1)</td></tr>
+   *   <tr><td>{@code hotkey.worker.tracked.keys}</td><td>Keys tracked by state machine</td></tr>
+   * </table>
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public MeterBinder hotKeyCustomMetrics(
+    @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
+    @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
+    ObjectProvider<SingleFlight> singleFlightProvider,
+    ObjectProvider<HotKeyReporter> reporterProvider,
+    ObjectProvider<CacheExpireManager> expireManagerProvider,
+    ObjectProvider<VersionController> versionControllerProvider,
+    ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
+    ObjectProvider<HotKeyStateMachine> stateMachineProvider,
+    ObjectProvider<WorkerHealthMonitor> workerHealthMonitorProvider
+  ) {
+    return registry -> {
+      hotKeyDetectorProvider.ifAvailable(detector -> {
+        Gauge.builder("hotkey.topk.size", detector, t -> t.list().size())
+          .tag("type", "local")
+          .register(registry);
+        Gauge.builder("hotkey.topk.total", detector, t -> (double) t.total())
+          .tag("type", "local")
+          .register(registry);
+        Gauge.builder("hotkey.expelled.queue.size", detector, t -> (double) t.expelled().size())
+          .register(registry);
+        Gauge.builder("hotkey.expelled.queue.remaining", detector, t -> (double) t.expelled().remainingCapacity())
+          .register(registry);
+      });
+
+      singleFlightProvider.ifAvailable(sf ->
+        Gauge.builder("hotkey.singleflight.inflight", sf, s -> (double) s.estimatedInflightSize())
+          .register(registry)
+      );
+
+      reporterProvider.ifAvailable(r -> {
+        Gauge.builder("hotkey.reporter.queue.depth", r, rep -> (double) rep.dispatcherDepth())
+          .register(registry);
+        Gauge.builder("hotkey.reporter.queue.dropped.total", r, rep -> (double) rep.dispatcherDropped())
+          .register(registry);
+        Gauge.builder("hotkey.reporter.queue.expired.total", r, rep -> (double) rep.dispatcherExpired())
+          .register(registry);
+        Gauge.builder("hotkey.reporter.pending.keys", r, rep -> (double) rep.getPendingKeyCount())
+          .register(registry);
+      });
+
+      expireManagerProvider.ifAvailable(em -> {
+        if (em.getRefreshLimiter() != null) {
+          Gauge.builder("hotkey.expire.refresh.available", em, e -> (double) e.getRefreshLimiter().availablePermits())
+            .register(registry);
+        }
+      });
+
+      versionControllerProvider.ifAvailable(vc ->
+        Gauge.builder("hotkey.version.degraded.total", vc, v -> (double) v.getDegradedVersionCount())
+          .register(registry)
+      );
+
+      cacheSyncPublisherProvider.ifAvailable(csp ->
+        Gauge.builder("hotkey.sync.dedup.size", csp, p -> (double) p.getDedupCacheSize())
+          .register(registry)
+      );
+
+      workerTopKProvider.ifAvailable(wtk -> {
+        Gauge.builder("hotkey.topk.size", wtk, t -> t.list().size())
+          .tag("type", "worker")
+          .register(registry);
+        Gauge.builder("hotkey.topk.total", wtk, t -> (double) t.total())
+          .tag("type", "worker")
+          .register(registry);
+      });
+
+      workerHealthMonitorProvider.ifAvailable(whm ->
+        Gauge.builder("hotkey.worker.alive", whm, w -> w.isAnyWorkerAlive() ? 1.0 : 0.0)
+          .register(registry)
+      );
+
+      stateMachineProvider.ifAvailable(sm ->
+        Gauge.builder("hotkey.worker.tracked.keys", sm, s -> (double) s.getTrackedKeys())
+          .register(registry)
+      );
+    };
+  }
+}

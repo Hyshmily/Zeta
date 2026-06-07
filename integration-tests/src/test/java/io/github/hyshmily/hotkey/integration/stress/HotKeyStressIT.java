@@ -185,7 +185,7 @@ class HotKeyStressIT {
       tests.add(m.toJson(mapper));
     }
     root.set("tests", tests);
-    Path reportPath = Path.of("target", "testresult",
+    Path reportPath = Path.of("src", "test", "resources", "testresult",
         "hotkey-stress-" + Instant.now().toString().replace(":", "-") + ".json");
     Files.createDirectories(reportPath.getParent());
     mapper.writeValue(reportPath.toFile(), root);
