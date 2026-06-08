@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.hotkey.detection;
 
-import io.github.hyshmily.hotkey.entity.HotKeyDecision;
+import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
 

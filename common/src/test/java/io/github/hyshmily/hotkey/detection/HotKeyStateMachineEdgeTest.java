@@ -17,8 +17,8 @@ package io.github.hyshmily.hotkey.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.entity.HotKeyDecision;
-import io.github.hyshmily.hotkey.entity.HotKeyDecision.DecisionType;
+import io.github.hyshmily.hotkey.model.HotKeyDecision;
+import io.github.hyshmily.hotkey.model.HotKeyDecision.DecisionType;
 import org.junit.jupiter.api.Test;
 
 /**

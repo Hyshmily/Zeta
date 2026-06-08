@@ -16,6 +16,11 @@
 package io.github.hyshmily.hotkey.algorithm;
 
 import com.google.common.hash.Hashing;
+import io.github.hyshmily.hotkey.logging.DefaultLogger;
+import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -23,9 +28,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
-import lombok.AllArgsConstructor;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking.
@@ -45,9 +47,24 @@ public class HeavyKeeper implements TopK {
   private static final int LOOKUP_TABLE_SIZE = 256;
   private static final int LOCK_STRIPES = 256;
 
-  private final int k;
-  private final int width;
-  private final int depth;
+    /**
+     * -- GETTER --
+     * Maximum number of hot keys tracked.
+     */
+    @Getter
+    private final int k;
+    /**
+     * -- GETTER --
+     * Width of the Count-Min Sketch (columns per row).
+     */
+    @Getter
+    private final int width;
+    /**
+     * -- GETTER --
+     * Depth of the Count-Min Sketch (rows / hash functions).
+     */
+    @Getter
+    private final int depth;
   private final double[] lookupTable;
   private final long[] fingerprints;
   private final int[] counts;
@@ -57,7 +74,12 @@ public class HeavyKeeper implements TopK {
   private final Map<String, Node> heapIndex;
   private final BlockingQueue<Item> expelledQueue;
   private final LongAdder total;
-  private final int minCount;
+    /**
+     * -- GETTER --
+     * Minimum count threshold before a key can enter the TopK set.
+     */
+    @Getter
+    private final int minCount;
 
   /**
    * Construct a HeavyKeeper instance.
@@ -205,27 +227,7 @@ public class HeavyKeeper implements TopK {
     return expelledQueue;
   }
 
-  /** Maximum number of hot keys tracked. */
-  public int getK() {
-    return k;
-  }
-
-  /** Width of the Count-Min Sketch (columns per row). */
-  public int getWidth() {
-    return width;
-  }
-
-  /** Depth of the Count-Min Sketch (rows / hash functions). */
-  public int getDepth() {
-    return depth;
-  }
-
-  /** Minimum count threshold before a key can enter the TopK set. */
-  public int getMinCount() {
-    return minCount;
-  }
-
-  /**
+    /**
    * Halve all frequency counters in the sketch and the sorted heap,
    * removing entries whose count drops to zero.  Also halves the
    * running total.

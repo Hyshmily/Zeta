@@ -17,9 +17,9 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
-import io.github.hyshmily.hotkey.hotkeycache.InstanceIdGenerator;
+import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;

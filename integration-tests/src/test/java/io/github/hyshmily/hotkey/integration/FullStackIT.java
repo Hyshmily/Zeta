@@ -19,8 +19,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.broadcast.WorkerListener;
-import io.github.hyshmily.hotkey.constant.HotKeyConstants;
+import io.github.hyshmily.hotkey.sync.WorkerListener;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;

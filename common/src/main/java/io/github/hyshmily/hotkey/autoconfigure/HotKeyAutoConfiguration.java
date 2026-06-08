@@ -21,15 +21,18 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.constant.HotKeyConstants;
-import io.github.hyshmily.hotkey.entity.CacheEntry;
-import io.github.hyshmily.hotkey.hotkeycache.*;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import io.github.hyshmily.hotkey.logging.DefaultLogger;
+import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
-import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.VersionController;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -119,6 +122,8 @@ public class HotKeyAutoConfiguration {
     executor.setMaxPoolSize(properties.getExecutorMaxPoolSize());
     executor.setQueueCapacity(properties.getExecutorQueueCapacity());
     executor.setThreadNamePrefix(HotKeyConstants.THREAD_PREFIX_HOTKEY);
+    executor.setWaitForTasksToCompleteOnShutdown(true);
+    executor.setAwaitTerminationSeconds(60);
     executor.setRejectedExecutionHandler((_, _) -> {
       log.warn(
         "HotKey executor task rejected: corePool={}, maxPool={}, queueCapacity={}",

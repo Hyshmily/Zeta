@@ -15,8 +15,10 @@
  */
 package io.github.hyshmily.hotkey.monitor;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -31,6 +33,8 @@ public class WorkerHealthMonitor {
   private final Map<Integer, Long> lastHeartbeat = new ConcurrentHashMap<>();
   private final Map<Integer, Long> totalHeartbeats = new ConcurrentHashMap<>();
   private final Map<Integer, Long> firstHeartbeatAt = new ConcurrentHashMap<>();
+  private final Map<String, Long> nodeLastHeartbeat = new ConcurrentHashMap<>();
+  private final Map<String, Long> nodeTotalHeartbeats = new ConcurrentHashMap<>();
   private final long timeoutMs;
 
   /** Creates a monitor with the default 5-second timeout. */
@@ -60,16 +64,32 @@ public class WorkerHealthMonitor {
   }
 
   /**
-   * Returns whether at least one shard has sent a heartbeat within the timeout window.
+   * Records a heartbeat for the given Worker nodeId (consistent-hashing mode).
    *
-   * @return true if any shard is alive
+   * @param nodeId    the Worker node identifier
+   * @param timestamp the heartbeat timestamp (epoch millis)
+   */
+  public void onHeartbeat(String nodeId, long timestamp) {
+    nodeLastHeartbeat.put(nodeId, timestamp);
+    nodeTotalHeartbeats.merge(nodeId, 1L, Long::sum);
+  }
+
+  /**
+   * Returns whether at least one shard or node has sent a heartbeat within the timeout window.
+   *
+   * @return true if any worker is alive
    */
   public boolean isAnyWorkerAlive() {
     long now = System.currentTimeMillis();
     return lastHeartbeat
       .values()
       .stream()
-      .anyMatch(ts -> now - ts < timeoutMs);
+      .anyMatch(ts -> now - ts < timeoutMs)
+      ||
+      nodeLastHeartbeat
+        .values()
+        .stream()
+        .anyMatch(ts -> now - ts < timeoutMs);
   }
 
   /**
@@ -81,6 +101,33 @@ public class WorkerHealthMonitor {
   public boolean isAlive(int shardIndex) {
     Long ts = lastHeartbeat.get(shardIndex);
     return ts != null && System.currentTimeMillis() - ts < timeoutMs;
+  }
+
+  /**
+   * Returns whether a specific Worker node is alive (consistent-hashing mode).
+   *
+   * @param nodeId the Worker node identifier
+   * @return true if the node has heartbeated within the timeout window
+   */
+  public boolean isAlive(String nodeId) {
+    Long ts = nodeLastHeartbeat.get(nodeId);
+    return ts != null && System.currentTimeMillis() - ts < timeoutMs;
+  }
+
+  /**
+   * Returns the set of alive Worker node IDs (consistent-hashing mode).
+   *
+   * @return set of nodeIds that have heartbeated within the timeout window
+   */
+  public Set<String> getAliveNodeIds() {
+    long now = System.currentTimeMillis();
+    Set<String> alive = new HashSet<>();
+    nodeLastHeartbeat.forEach((nodeId, ts) -> {
+      if (now - ts < timeoutMs) {
+        alive.add(nodeId);
+      }
+    });
+    return alive;
   }
 
   /**
@@ -104,6 +151,10 @@ public class WorkerHealthMonitor {
       info.put("firstHeartbeatAt", firstHeartbeatAt.getOrDefault(shard, 0L));
       result.put(shard, info);
     });
+    result.put(-1, Map.of(
+      "aliveNodes", getAliveNodeIds(),
+      "nodeTotalHeartbeats", new LinkedHashMap<>(nodeTotalHeartbeats)
+    ));
     return result;
   }
 }

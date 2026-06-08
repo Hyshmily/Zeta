@@ -53,6 +53,14 @@
 | `hotkey.scheduling.enabled`      | `true`   | Enable internal scheduler for HeavyKeeper decay and expelled queue drain      |
 | `hotkey.decay-period`            | `20`     | HeavyKeeper decay period in seconds (resolved via `@Scheduled` directly, not under `hotkey.local.*`) |
 
+### Consistent Hashing (`hotkey.local.consistent-hashing.*`)
+
+| Property                                                  | Default | Description                                                                                             |
+| --------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------- |
+| `hotkey.local.consistent-hashing.enabled`                 | `false` | Enable consistent hashing for dynamic Worker routing (replaces static `shard-index` mapping)             |
+| `hotkey.local.consistent-hashing.virtual-nodes`           | `150`   | Number of virtual nodes per physical Worker node for hash-space distribution                             |
+| `hotkey.local.consistent-hashing.node-id`                | `""`    | Explicit node ID for consistent hashing (empty string = auto-generate from `InstanceIdGenerator`)        |
+
 ### Annotation (`hotkey.annotation.*`)
 
 | Property                        | Default | Description                                                                              |
@@ -132,8 +140,7 @@
 | `report`               | `spring-boot-starter-amqp`                                    | `@ConditionalOnBean(RabbitTemplate.class)` + property (`hotkey.report.enabled`) |
 | `annotation`           | `spring-boot-starter-aop`                                     | `@ConditionalOnClass(Aspect.class)` + `@ConditionalOnBean(HotKey.class)` + property (`hotkey.annotation.enabled`) |
 | `cache` (Redis)        | `spring-boot-starter-data-redis`                              | `@ConditionalOnClass(RedisTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` |
-| `sync` (RabbitMQ)      | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis` | `@ConditionalOnClass({RabbitTemplate.class, RedisTemplate.class})` + property (`hotkey.sync.enabled`) |
-| `worker-listener`      | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis` | `@ConditionalOnClass(RabbitTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` + property (`hotkey.worker-listener.enabled`) |
+| `amqp` (RabbitMQ, merged in `HotKeyAmqpAutoConfiguration`) | `spring-boot-starter-amqp` (+ `spring-boot-starter-data-redis` for worker-listener) | `@ConditionalOnClass(RabbitTemplate.class)` + inner `@ConditionalOnClass(RedisTemplate.class)` + properties (`hotkey.sync.enabled` / `hotkey.worker-listener.enabled`) |
 | `worker`               | `spring-boot-starter-amqp` (+ `spring-boot-starter-data-redis`) | `@ConditionalOnBean(RabbitTemplate.class)` + property (`hotkey.worker.enabled`) |
 | `actuator`             | `spring-boot-starter-actuator`                                | `@ConditionalOnClass(Endpoint.class)`                                  |
 | `micrometer`           | `io.micrometer:micrometer-core`                               | `@ConditionalOnClass(MeterBinder.class)` — auto-registers Caffeine cache metrics (`hotkey.l1.*`) + custom HotKey business metrics |

@@ -72,6 +72,7 @@ Uses [HeavyKeeper](https://github.com/go-kratos/aegis) (Count-Min Sketch variant
 - **Report Aggregation** — every `get()` / `getWithSoftExpire()` call reports to local `HotKeyReporter`, which periodically batches access counts to Worker node via RabbitMQ for cluster-wide hot key detection
 - **Configurable Thread Pool** — dedicated `TaskExecutor` with bounded queue
 - **TTL Jitter (Avalanche Protection)** — `CacheExpireManager` applies ±10% random offset to every hard and soft TTL via `ThreadLocalRandom`, scattering expiry timestamps to prevent cache stampedes
+- **Consistent Hashing** — replace static `shard-index` mapping with a murmur3_32-based consistent hash ring; Workers auto-register via heartbeat, enabling elastic scaling without full key remapping (opt-in via `hotkey.local.consistent-hashing.enabled`)
 - **Micrometer Metrics** — 18+ numeric gauges/counters (Caffeine cache, TopK, inflight, reporter, version degradation, worker health) auto-registered via `MeterBinder` beans when `micrometer-core` is on classpath
 - **Raw L1 Cache Access** — `HotKey.getLocalCache()` exposes the underlying `Cache<String, Object>` for Caffeine-specific operations (`asMap`, `policy`, `cleanUp`) with documented orchestration-bypass warnings
 - **Spring Boot Auto-Configuration** — drop-in dependency, zero boilerplate
@@ -211,6 +212,11 @@ hotkey:
   #   enabled: true
   # sync:
   #   enabled: true     # worker-listener depends on the hotKeyRedisLoader bean
+
+  # Consistent hashing (dynamic Worker routing, requires worker-listener enabled)
+  # local:
+  #   consistent-hashing:
+  #     enabled: true
 ```
 
 **Worker node (standalone)** — add `spring-boot-starter-amqp`
@@ -223,6 +229,7 @@ hotkey:
       app-name: myapp # 【MUST】match hotkey.local.app-name on the App side
       shard-count: 1 # 【MUST】match hotkey.local.shard-count on the App side
       shard-index: 0 # 【MUST】this instance's shard, range [0, shard-count-1]
+      node-id: ""   # explicit nodeId for consistent hashing ("" = auto from InstanceIdGenerator)
 
 
 # Multi-worker example: 3 machines, each with a different shard
@@ -292,6 +299,11 @@ hotkey:
     default-hot-soft-ttl-ms: 300000         # default hot key soft TTL (5min)
     hot-soft-ttl-ms: 0                      # override (0=use default)
 
+    # ——— Consistent hashing (replaces shard-index mapping) ———
+    consistent-hashing:
+      enabled: false                        # enable dynamic Worker routing
+      virtual-nodes: 150                    # virtual nodes per physical Worker
+
   # Feature toggles
   report:
     enabled: true                           # app→worker reporting
@@ -333,6 +345,7 @@ hotkey:
       app-name: "default"                   # must match local.app-name
       shard-count: 1                        # must match local.shard-count
       shard-index: 0                        # this instance's shard [0, shard-count-1]
+      node-id: ""                           # explicit nodeId for consistent hashing ("" = auto from InstanceIdGenerator)
 
     messaging:
       report-exchange: "hotkey.report.exchange"
@@ -667,7 +680,7 @@ hotKey.get(key, supplier)
   │    │                      });
   │    │                      Object actual = r.orElse(null); // sentinel back to null
   │    └─ Throws → SingleFlight.load() catches → Optional.empty() → caller's fallback
-  └─ HotKey itself fails → exception → fallback (if @HotKey fallbackEnabled=true) → caller
+  └─ HotKey itself fails → exception → fallback (if @Fallback is present) → caller
 ```
 
 Component failure behavior:

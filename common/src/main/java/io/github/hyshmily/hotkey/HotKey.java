@@ -19,7 +19,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Arrays;
@@ -224,7 +224,7 @@ public class HotKey {
   /**
    * Check whether a key is currently tracked as a local hot key in L1.
    *
-   * @return {@code true} if the key exists in L1 with {@link io.github.hyshmily.hotkey.entity.KeyState#HOT}
+   * @return {@code true} if the key exists in L1 with {@link io.github.hyshmily.hotkey.model.KeyState#HOT}
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public boolean isLocalHotKey(String cacheKey) {

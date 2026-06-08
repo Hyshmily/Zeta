@@ -53,6 +53,14 @@
 | `hotkey.scheduling.enabled`   | `true`    | 启用内部定时器（HeavyKeeper 衰减 + 挤出队列清空）         |
 | `hotkey.decay-period`         | `20`      | HeavyKeeper 衰减周期（秒），通过 `@Scheduled` 直接解析，不在 `hotkey.local.*` 下 |
 
+### 一致性哈希（`hotkey.local.consistent-hashing.*`）
+
+| 属性                                                  | 默认值 | 说明                                                                                                |
+| ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------- |
+| `hotkey.local.consistent-hashing.enabled`              | `false`| 启用一致性哈希实现动态 Worker 路由（替代静态 shard-index 映射）                                      |
+| `hotkey.local.consistent-hashing.virtual-nodes`        | `150`  | 每个物理 Worker 节点的虚拟节点数，用于哈希空间分布                                                   |
+| `hotkey.local.consistent-hashing.node-id`             | `""`   | 显式节点 ID（一致性哈希使用，空字符串 = 从 `InstanceIdGenerator` 自动生成）                         |
+
 ### 注解配置（`hotkey.annotation.*`）
 
 | 属性                           | 默认值   | 说明                                                  |
@@ -132,8 +140,7 @@
 | `report`                | `spring-boot-starter-amqp`                                     | `@ConditionalOnBean(RabbitTemplate.class)` + 属性（`hotkey.report.enabled`） |
 | `annotation`            | `spring-boot-starter-aop`                                      | `@ConditionalOnClass(Aspect.class)` + `@ConditionalOnBean(HotKey.class)` + 属性（`hotkey.annotation.enabled`） |
 | `cache`（Redis）        | `spring-boot-starter-data-redis`                               | `@ConditionalOnClass(RedisTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` |
-| `sync`（RabbitMQ）      | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`  | `@ConditionalOnClass({RabbitTemplate.class, RedisTemplate.class})` + 属性（`hotkey.sync.enabled`） |
-| `worker-listener`       | `spring-boot-starter-amqp` + `spring-boot-starter-data-redis`  | `@ConditionalOnClass(RabbitTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` + 属性（`hotkey.worker-listener.enabled`） |
+| `amqp`（RabbitMQ，合并到 `HotKeyAmqpAutoConfiguration`） | `spring-boot-starter-amqp`（+ `spring-boot-starter-data-redis`，worker-listener 需要） | `@ConditionalOnClass(RabbitTemplate.class)` + 内部 `@ConditionalOnClass(RedisTemplate.class)` + 属性（`hotkey.sync.enabled` / `hotkey.worker-listener.enabled`） |
 | `worker`                | `spring-boot-starter-amqp`（+ `spring-boot-starter-data-redis`）| `@ConditionalOnBean(RabbitTemplate.class)` + 属性（`hotkey.worker.enabled`） |
 | `actuator`             | `spring-boot-starter-actuator`                                 | `@ConditionalOnClass(Endpoint.class)`                                   |
 | `micrometer`           | `io.micrometer:micrometer-core`                                | `@ConditionalOnClass(MeterBinder.class)` — 自动注册 Caffeine 缓存指标（`hotkey.l1.*`）+ 自定义 HotKey 业务指标 |

@@ -16,8 +16,8 @@
 package io.github.hyshmily.hotkey.annotation;
 
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
-import io.github.hyshmily.hotkey.log.DefaultLogger;
-import io.github.hyshmily.hotkey.log.HotKeyLogger;
+import io.github.hyshmily.hotkey.logging.DefaultLogger;
+import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.rule.Rule;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -32,6 +32,7 @@ import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
 
@@ -55,8 +56,10 @@ public class HotKeyAspect {
 
   private final io.github.hyshmily.hotkey.HotKey hotKeyFacade;
   private final SpelExpressionParser parser = new SpelExpressionParser();
+  private final Map<String, Expression> expressionCache = new ConcurrentHashMap<>();
   private final ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();
   private final Map<Method, String[]> paramNamesCache = new ConcurrentHashMap<>();
+  private final Map<Method, Method> fallbackMethodCache = new ConcurrentHashMap<>();
 
   /**
    * Intercepts methods annotated with {@link HotKey @HotKey} and dispatches to the
@@ -72,8 +75,8 @@ public class HotKeyAspect {
 
     return switch (hotKey.operation()) {
       case READ -> handleRead(pjp, cacheKey, hotKey);
-      case WRITE -> handleWrite(pjp, cacheKey);
-      case INVALIDATE -> handleInvalidate(pjp, cacheKey);
+      case WRITE -> handleWrite(pjp, cacheKey, hotKey);
+      case INVALIDATE -> handleInvalidate(pjp, cacheKey, hotKey);
     };
   }
 
@@ -165,8 +168,14 @@ public class HotKeyAspect {
    * <p>Delegates to {@code putBeforeInvalidate} so the mutation runs inside a
    * transaction-aware boundary.  After success, L1 is invalidated and an INVALIDATE
    * broadcast is sent to peers.
+   * <p><b>Note:</b> {@code softExpire} from the {@link HotKey @HotKey} annotation is
+   * silently ignored — WRITE always uses {@code putBeforeInvalidate} which does not
+   * accept TTL parameters.
    */
-  private Object handleWrite(ProceedingJoinPoint pjp, String cacheKey) throws Throwable {
+  private Object handleWrite(ProceedingJoinPoint pjp, String cacheKey, HotKey hotKey) throws Throwable {
+    if (!hotKey.softExpire()) {
+      log.warn("[HotKey] softExpire=false is ignored for WRITE operation — putBeforeInvalidate does not accept TTL parameters");
+    }
     Object[] resultHolder = new Object[1];
     Throwable[] exceptionHolder = new Throwable[1];
 
@@ -192,8 +201,13 @@ public class HotKeyAspect {
    * Handles a {@link HotKey.OperationType#INVALIDATE} operation.
    * <p>Invalidates the key from L1, increments the version,
    * broadcasts TYPE_REFRESH to peers, then proceeds with the original method.
+   * <p><b>Note:</b> {@code softExpire} from the {@link HotKey @HotKey} annotation is
+   * silently ignored — INVALIDATE always calls {@code invalidate(key)} regardless.
    */
-  private Object handleInvalidate(ProceedingJoinPoint pjp, String cacheKey) throws Throwable {
+  private Object handleInvalidate(ProceedingJoinPoint pjp, String cacheKey, HotKey hotKey) throws Throwable {
+    if (!hotKey.softExpire()) {
+      log.warn("[HotKey] softExpire=false is ignored for INVALIDATE operation — invalidate always clears the entry");
+    }
     hotKeyFacade.invalidate(cacheKey);
     return pjp.proceed();
   }
@@ -222,14 +236,11 @@ public class HotKeyAspect {
   private Object invokeFallbackMethod(ProceedingJoinPoint pjp) throws Throwable {
     MethodSignature sig = (MethodSignature) pjp.getSignature();
     Method originalMethod = sig.getMethod();
-    String fallbackMethodName = originalMethod.getName() + "Fallback";
     Object target = pjp.getTarget();
     Object[] args = pjp.getArgs();
 
-    Method fallbackMethod = findFallbackMethod(
-      target.getClass(),
-      fallbackMethodName,
-      originalMethod.getParameterTypes()
+    Method fallbackMethod = fallbackMethodCache.computeIfAbsent(originalMethod, m ->
+      findFallbackMethod(target.getClass(), m.getName() + "Fallback", m.getParameterTypes())
     );
     if (fallbackMethod == null) {
       return null;
@@ -301,13 +312,22 @@ public class HotKeyAspect {
   }
 
   /**
+   * Returns a cached {@link Expression} for the given expression string, parsing it
+   * on first access.  Annotation-level expressions are compile-time constants so
+   * caching is safe and eliminates repeated lexing/AST construction.
+   */
+  private Expression getExpression(String expressionString) {
+    return expressionCache.computeIfAbsent(expressionString, parser::parseExpression);
+  }
+
+  /**
    * Resolves the cache key from a SpEL expression using method parameter names
    * as context variables.
    *
    * @return the evaluated cache key string
    */
   private String resolveKey(ProceedingJoinPoint pjp, String expression) {
-    return parser.parseExpression(expression).getValue(buildEvaluationContext(pjp), String.class);
+    return getExpression(expression).getValue(buildEvaluationContext(pjp), String.class);
   }
 
   /**
@@ -319,7 +339,7 @@ public class HotKeyAspect {
    * @return the evaluated value
    */
   private <T> T evalSpel(ProceedingJoinPoint pjp, String expression, Class<T> type) {
-    return parser.parseExpression(expression).getValue(buildEvaluationContext(pjp), type);
+    return getExpression(expression).getValue(buildEvaluationContext(pjp), type);
   }
 
   /**
@@ -334,7 +354,7 @@ public class HotKeyAspect {
   private void evalSpelWithResult(ProceedingJoinPoint pjp, String expression, Object result, Class<?> type) {
     StandardEvaluationContext ctx = buildEvaluationContext(pjp);
     ctx.setVariable("result", result);
-    parser.parseExpression(expression).getValue(ctx, type);
+    getExpression(expression).getValue(ctx, type);
   }
 
   /**

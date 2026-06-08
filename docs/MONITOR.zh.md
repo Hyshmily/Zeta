@@ -132,3 +132,23 @@ management:
 | `hotkey.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
 | `hotkey.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
 | `hotkey.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数              |
+
+## 3. 一致性哈希环管理
+
+当启用一致性哈希（`hotkey.local.consistent-hashing.enabled=true`）且 classpath 中包含 `spring-boot-starter-web` 时，会在 `/actuator/hotkeyring` 注册一个 REST 控制器（`RingEndpoint.java`），用于运行时环管理。
+
+| 方法     | 路径                                | 说明                         |
+| -------- | ----------------------------------- | ---------------------------- |
+| `GET`    | `/actuator/hotkeyring`              | 环拓扑和当前模式（`auto`/`manual`） |
+| `GET`    | `/actuator/hotkeyring/{key}`        | 查询指定 key 由哪个节点处理      |
+| `POST`   | `/actuator/hotkeyring`              | 添加节点（请求体：`{"nodeId":"..."}`）|
+| `DELETE` | `/actuator/hotkeyring/{nodeId}`     | 移除节点                       |
+| `POST`   | `/actuator/hotkeyring/rebuild`      | 切换回自动模式                  |
+
+**示例 — 添加节点：**
+
+```bash
+curl -X POST http://localhost:8080/actuator/hotkeyring \
+  -H "Content-Type: application/json" \
+  -d '{"nodeId":"worker-3"}'
+```

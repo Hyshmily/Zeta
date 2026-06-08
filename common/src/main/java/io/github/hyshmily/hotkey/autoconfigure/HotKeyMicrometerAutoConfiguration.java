@@ -17,15 +17,15 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
-import io.github.hyshmily.hotkey.hotkeycache.SingleFlight;
-import io.github.hyshmily.hotkey.hotkeycache.VersionController;
 import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
-import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.VersionController;
 import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import org.springframework.beans.factory.ObjectProvider;
@@ -50,7 +50,7 @@ import org.springframework.context.annotation.Bean;
  *
  * <p>All custom metrics use the {@code hotkey} namespace. Any missing dependency silently
  * skips the corresponding gauge registration, mirroring the same null-safe approach used
- * by {@link io.github.hyshmily.hotkey.actuator.HotKeyEndpoint}.
+ * by {@link io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint}.
  */
 @AutoConfiguration(after = HotKeyAutoConfiguration.class)
 @ConditionalOnClass(MeterBinder.class)
@@ -71,9 +71,7 @@ public class HotKeyMicrometerAutoConfiguration {
     @Qualifier("hotLocalCache") ObjectProvider<Cache<String, Object>> hotLocalCacheProvider
   ) {
     return registry ->
-      hotLocalCacheProvider.ifAvailable(cache ->
-        CaffeineCacheMetrics.monitor(registry, cache, "hotkey.l1")
-      );
+      hotLocalCacheProvider.ifAvailable(cache -> CaffeineCacheMetrics.monitor(registry, cache, "hotkey.l1"));
   }
 
   /**
@@ -112,70 +110,64 @@ public class HotKeyMicrometerAutoConfiguration {
     ObjectProvider<WorkerHealthMonitor> workerHealthMonitorProvider
   ) {
     return registry -> {
-      hotKeyDetectorProvider.ifAvailable(detector -> {
-        Gauge.builder("hotkey.topk.size", detector, t -> t.list().size())
-          .tag("type", "local")
-          .register(registry);
-        Gauge.builder("hotkey.topk.total", detector, t -> (double) t.total())
-          .tag("type", "local")
-          .register(registry);
-        Gauge.builder("hotkey.expelled.queue.size", detector, t -> (double) t.expelled().size())
-          .register(registry);
-        Gauge.builder("hotkey.expelled.queue.remaining", detector, t -> (double) t.expelled().remainingCapacity())
-          .register(registry);
-      });
-
+      hotKeyDetectorProvider.ifAvailable(detector -> registerLocalTopKGauges(detector, registry));
       singleFlightProvider.ifAvailable(sf ->
-        Gauge.builder("hotkey.singleflight.inflight", sf, s -> (double) s.estimatedInflightSize())
-          .register(registry)
+        Gauge.builder("hotkey.singleflight.inflight", sf, s -> (double) s.estimatedInflightSize()).register(registry)
       );
-
-      reporterProvider.ifAvailable(r -> {
-        Gauge.builder("hotkey.reporter.queue.depth", r, rep -> (double) rep.dispatcherDepth())
-          .register(registry);
-        Gauge.builder("hotkey.reporter.queue.dropped.total", r, rep -> (double) rep.dispatcherDropped())
-          .register(registry);
-        Gauge.builder("hotkey.reporter.queue.expired.total", r, rep -> (double) rep.dispatcherExpired())
-          .register(registry);
-        Gauge.builder("hotkey.reporter.pending.keys", r, rep -> (double) rep.getPendingKeyCount())
-          .register(registry);
-      });
-
+      reporterProvider.ifAvailable(r -> registerReporterGauges(r, registry));
       expireManagerProvider.ifAvailable(em -> {
         if (em.getRefreshLimiter() != null) {
-          Gauge.builder("hotkey.expire.refresh.available", em, e -> (double) e.getRefreshLimiter().availablePermits())
-            .register(registry);
+          Gauge.builder("hotkey.expire.refresh.available", em, e ->
+            (double) e.getRefreshLimiter().availablePermits()
+          ).register(registry);
         }
       });
-
       versionControllerProvider.ifAvailable(vc ->
-        Gauge.builder("hotkey.version.degraded.total", vc, v -> (double) v.getDegradedVersionCount())
-          .register(registry)
+        Gauge.builder("hotkey.version.degraded.total", vc, v -> (double) v.getDegradedVersionCount()).register(registry)
       );
-
       cacheSyncPublisherProvider.ifAvailable(csp ->
-        Gauge.builder("hotkey.sync.dedup.size", csp, p -> (double) p.getDedupCacheSize())
-          .register(registry)
+        Gauge.builder("hotkey.sync.dedup.size", csp, p -> (double) p.getDedupCacheSize()).register(registry)
       );
-
-      workerTopKProvider.ifAvailable(wtk -> {
-        Gauge.builder("hotkey.topk.size", wtk, t -> t.list().size())
-          .tag("type", "worker")
-          .register(registry);
-        Gauge.builder("hotkey.topk.total", wtk, t -> (double) t.total())
-          .tag("type", "worker")
-          .register(registry);
-      });
-
+      workerTopKProvider.ifAvailable(wtk -> registerWorkerTopKGauges(wtk, registry));
       workerHealthMonitorProvider.ifAvailable(whm ->
-        Gauge.builder("hotkey.worker.alive", whm, w -> w.isAnyWorkerAlive() ? 1.0 : 0.0)
-          .register(registry)
+        Gauge.builder("hotkey.worker.alive", whm, w -> w.isAnyWorkerAlive() ? 1.0 : 0.0).register(registry)
       );
-
       stateMachineProvider.ifAvailable(sm ->
-        Gauge.builder("hotkey.worker.tracked.keys", sm, s -> (double) s.getTrackedKeys())
-          .register(registry)
+        Gauge.builder("hotkey.worker.tracked.keys", sm, s -> (double) s.getTrackedKeys()).register(registry)
       );
     };
+  }
+
+  private static void registerLocalTopKGauges(TopK detector, MeterRegistry registry) {
+    Gauge.builder("hotkey.topk.size", detector, t -> t.list().size())
+      .tag("type", "local")
+      .register(registry);
+    Gauge.builder("hotkey.topk.total", detector, t -> (double) t.total())
+      .tag("type", "local")
+      .register(registry);
+    Gauge.builder("hotkey.expelled.queue.size", detector, t -> (double) t.expelled().size()).register(registry);
+    Gauge.builder("hotkey.expelled.queue.remaining", detector, t -> (double) t.expelled().remainingCapacity()).register(
+      registry
+    );
+  }
+
+  private static void registerWorkerTopKGauges(TopK worker, MeterRegistry registry) {
+    Gauge.builder("hotkey.topk.size", worker, t -> t.list().size())
+      .tag("type", "worker")
+      .register(registry);
+    Gauge.builder("hotkey.topk.total", worker, t -> (double) t.total())
+      .tag("type", "worker")
+      .register(registry);
+  }
+
+  private static void registerReporterGauges(HotKeyReporter reporter, MeterRegistry registry) {
+    Gauge.builder("hotkey.reporter.queue.depth", reporter, r -> (double) r.dispatcherDepth()).register(registry);
+    Gauge.builder("hotkey.reporter.queue.dropped.total", reporter, r -> (double) r.dispatcherDropped()).register(
+      registry
+    );
+    Gauge.builder("hotkey.reporter.queue.expired.total", reporter, r -> (double) r.dispatcherExpired()).register(
+      registry
+    );
+    Gauge.builder("hotkey.reporter.pending.keys", reporter, r -> (double) r.getPendingKeyCount()).register(registry);
   }
 }

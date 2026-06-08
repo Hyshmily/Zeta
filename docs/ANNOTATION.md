@@ -29,15 +29,15 @@ hotkey:
 | `operation`  | `OperationType` | `READ`   | `READ` / `WRITE` / `INVALIDATE`                                                                                               |
 | `condition`  | `String`        | `""`     | SpEL condition — `false` or `null` bypasses cache entirely; parameters available as `#paramName`                              |
 | `unless`     | `String`        | `""`     | SpEL exclusion — evaluated after cache load succeeds. The special variable `#result` holds the loaded value.                  |
-| `softExpire` | `boolean`       | `true`   | When enabled (default), stale entries are served immediately with background refresh. When `false`, behaves as plain `get()`. |
+| `softExpire` | `boolean`       | `true`   | When enabled (default), stale entries are served immediately with background refresh. When `false`, behaves as plain `get()`. **Only applies to `READ`** — silently ignored for `WRITE` and `INVALIDATE`. |
 
 ## Operation Types
 
 | Mode             | Facade Method                   | Behavior                                                                                                                                                                                                                                                           |
 | ---------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `READ` (default) | `getWithSoftExpire()` / `get()` | Method body acts as value supplier. `softExpire=true` → stale-value + async refresh; `false` → synchronous `get()`. Return type is `Optional`-aware — if method returns `Optional`, it is passed through directly; otherwise `orElse(null)` unwrapping is applied. |
-| `WRITE`          | `putBeforeInvalidate()`         | Method executes as mutation: run, version bump, L1 invalidate, send INVALIDATE broadcast. Exceptions are caught and re-thrown after the facade call completes.                                                                                                     |
-| `INVALIDATE`     | `invalidate()`                  | Invalidate L1 + version bump + broadcast TYPE_REFRESH (versioned) to peers, then execute the method.                                                                                                                                                               |
+| `WRITE`          | `putBeforeInvalidate()`         | Method executes as mutation: run, version bump, L1 invalidate, send INVALIDATE broadcast. `softExpire` is silently ignored — WRITE always uses `putBeforeInvalidate` which does not accept TTL parameters. Exceptions are caught and re-thrown after the facade call completes. |
+| `INVALIDATE`     | `invalidate()`                  | Invalidate L1 + version bump + broadcast TYPE_REFRESH (versioned) to peers, then execute the method. `softExpire` is silently ignored — INVALIDATE always clears the entry regardless.                                          |
 
 ## SpEL Key Examples
 

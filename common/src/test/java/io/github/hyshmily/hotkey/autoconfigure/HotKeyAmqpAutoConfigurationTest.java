@@ -19,14 +19,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.broadcast.*;
-import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.sync.*;
+import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
-import io.github.hyshmily.hotkey.report.HotKeyReporter;
-import io.github.hyshmily.hotkey.report.ReportPublisher;
+import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.concurrent.ScheduledExecutorService;
+import org.springframework.beans.factory.ObjectProvider;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -104,7 +106,8 @@ class HotKeyAmqpAutoConfigurationTest {
     HotKeyProperties properties = new HotKeyProperties();
 
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
-    HotKeyReporter reporter = config.hotKeyReporter(new WorkerHealthMonitor(), reportPublisher, scheduler, properties);
+    ObjectProvider<RingManager> ringProvider = mock(ObjectProvider.class);
+    HotKeyReporter reporter = config.hotKeyReporter(new WorkerHealthMonitor(), reportPublisher, scheduler, properties, ringProvider);
 
     assertThat(reporter).isNotNull();
   }
@@ -183,7 +186,7 @@ class HotKeyAmqpAutoConfigurationTest {
 
     assertThat(queue).isNotNull();
     assertThat(queue.getName()).isEqualTo(
-      "test.sync:" + io.github.hyshmily.hotkey.hotkeycache.InstanceIdGenerator.get()
+      "test.sync:" + io.github.hyshmily.hotkey.util.InstanceIdGenerator.get()
     );
     assertThat(queue.isDurable()).isTrue();
   }

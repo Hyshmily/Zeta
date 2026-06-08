@@ -20,9 +20,9 @@ import static org.mockito.Mockito.mock;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyCache;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
-import io.github.hyshmily.hotkey.hotkeycache.InstanceIdGenerator;
+import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;

@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.constant.HotKeyConstants;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.integration.AbstractIntegrationIT;
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;

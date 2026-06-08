@@ -29,15 +29,15 @@ hotkey:
 | `operation`  | `OperationType` | `READ` | `READ` / `WRITE` / `INVALIDATE`                                                          |
 | `condition`  | `String`        | `""`   | SpEL 条件——`false` 或 `null` 时完全绕过缓存；参数可通过 `#paramName` 引用                |
 | `unless`     | `String`        | `""`   | SpEL 排除表达式——缓存加载成功后评估。特殊变量 `#result` 持有加载的值                     |
-| `softExpire` | `boolean`       | `true` | 启用时（默认）过期旧值立即返回并后台刷新。`false` 时等同于 `get()`                       |
+| `softExpire` | `boolean`       | `true` | 启用时（默认）过期旧值立即返回并后台刷新。`false` 时等同于 `get()`。**仅适用于 `READ`** — 在 `WRITE` 和 `INVALIDATE` 上静默忽略 |
 
 ## 操作类型
 
 | 模式           | 门面方法                        | 行为                                                                                                                                                                    |
 | -------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `READ`（默认） | `getWithSoftExpire()` / `get()` | 方法体作为值 supplier。`softExpire=true` → 过期旧值 + 异步刷新；`false` → 同步 `get()`。返回类型感知 `Optional`——若方法返回 `Optional` 则透传，否则 `orElse(null)` 解包 |
-| `WRITE`        | `putBeforeInvalidate()`         | 方法作为突变执行：运行、版本递增、L1 失效、发送 INVALIDATE 广播。异常被捕获，在门面调用完成后重新抛出                                                                   |
-| `INVALIDATE`   | `invalidate()`                  | 失效 L1 + 版本递增 + 广播 TYPE_REFRESH（带版本号）到对端，然后执行方法                                                                                                  |
+| `WRITE`        | `putBeforeInvalidate()`         | 方法作为突变执行：运行、版本递增、L1 失效、发送 INVALIDATE 广播。`softExpire` 被静默忽略——WRITE 始终使用 `putBeforeInvalidate`（不接受 TTL 参数）。异常被捕获，在门面调用完成后重新抛出 |
+| `INVALIDATE`   | `invalidate()`                  | 失效 L1 + 版本递增 + 广播 TYPE_REFRESH（带版本号）到对端，然后执行方法。`softExpire` 被静默忽略——INVALIDATE 始终清除条目                          |
 
 ## SpEL Key 示例
 

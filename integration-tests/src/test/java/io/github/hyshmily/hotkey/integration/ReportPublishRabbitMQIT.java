@@ -17,7 +17,7 @@ package io.github.hyshmily.hotkey.integration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.constant.HotKeyConstants;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;

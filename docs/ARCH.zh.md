@@ -257,7 +257,7 @@ invalidateAll(cacheKeys)
 
 ### 版本空间
 
-<!-- Source: entity/CacheEntry.java, VersionGuard.java, HotKeyStateMachine.java -->
+<!-- Source: model/CacheEntry.java, VersionGuard.java, HotKeyStateMachine.java -->
 
 CacheEntry 维护**两个独立的版本空间**：
 
@@ -278,7 +278,7 @@ CacheEntry 维护**两个独立的版本空间**：
 
 ### CacheEntry 字段
 
-<!-- Source: entity/CacheEntry.java -->
+<!-- Source: model/CacheEntry.java -->
 
 | 字段                | 类型       | 说明                                                     |
 | ------------------- | ---------- | -------------------------------------------------------- |

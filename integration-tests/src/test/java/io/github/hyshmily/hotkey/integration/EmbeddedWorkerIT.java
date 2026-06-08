@@ -20,9 +20,9 @@ import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.constant.HotKeyConstants;
-import io.github.hyshmily.hotkey.report.ReportMessage;
-import io.github.hyshmily.hotkey.report.ReportPublisher;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import io.github.hyshmily.hotkey.reporting.ReportMessage;
+import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;

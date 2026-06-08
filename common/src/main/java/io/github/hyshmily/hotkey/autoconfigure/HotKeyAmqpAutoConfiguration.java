@@ -16,14 +16,14 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.broadcast.*;
-import io.github.hyshmily.hotkey.constant.HotKeyConstants;
-import io.github.hyshmily.hotkey.hotkeycache.CacheExpireManager;
-import io.github.hyshmily.hotkey.hotkeycache.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
-import io.github.hyshmily.hotkey.report.HotKeyReporter;
-import io.github.hyshmily.hotkey.report.ReportPublisher;
+import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
@@ -32,6 +32,7 @@ import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -99,6 +100,17 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
+     * Create the {@link RingManager} for consistent-hashing mode.
+     * Only active when {@code hotkey.local.consistent-hashing.enabled=true}.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "hotkey.local.consistent-hashing", name = "enabled", havingValue = "true")
+    public RingManager ringManager(HotKeyProperties properties) {
+      return new RingManager(properties.getConsistentHashing().getVirtualNodes());
+    }
+
+    /**
      * Create the {@link HotKeyReporter} that aggregates per-key counts and flushes them
      * at the configured interval.
      */
@@ -108,7 +120,8 @@ public class HotKeyAmqpAutoConfiguration {
       WorkerHealthMonitor workerHealthMonitor,
       ReportPublisher reportPublisher,
       ScheduledExecutorService hotKeyReportScheduler,
-      HotKeyProperties properties
+      HotKeyProperties properties,
+      ObjectProvider<RingManager> ringManagerProvider
     ) {
       return new HotKeyReporter(
         workerHealthMonitor,
@@ -119,7 +132,8 @@ public class HotKeyAmqpAutoConfiguration {
         properties.getAppName(),
         properties.getQueueCapacity(),
         properties.getQueueOfferTimeoutMs(),
-        properties.effectiveConsumerCount()
+        properties.effectiveConsumerCount(),
+        ringManagerProvider.getIfAvailable()
       );
     }
 
@@ -222,6 +236,7 @@ public class HotKeyAmqpAutoConfiguration {
       container.setAutoStartup(properties.isAutoStartup());
       container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
       container.setConcurrentConsumers(properties.getConcurrentConsumers());
+      container.setPrefetchCount(properties.getPrefetchCount());
       container.setMessageListener(
         (ChannelAwareMessageListener) (msg, channel) -> cacheSyncListener.handleSyncMessage(channel, msg)
       );
@@ -309,6 +324,7 @@ public class HotKeyAmqpAutoConfiguration {
       container.setAutoStartup(properties.isAutoStartup());
       container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
       container.setConcurrentConsumers(properties.getConcurrentConsumers());
+      container.setPrefetchCount(properties.getPrefetchCount());
       container.setMessageListener(
         (ChannelAwareMessageListener) (msg, channel) -> workerListener.handleWorkerMessage(channel, msg)
       );

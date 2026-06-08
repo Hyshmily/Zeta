@@ -77,6 +77,10 @@ public @interface HotKey {
    * Whether to use soft-expire (stale-while-revalidate) semantics on READ.
    * When enabled (default), stale entries are served immediately while a
    * background refresh is triggered. When disabled, behaves as a plain {@code get()}.
+   * <p><b>Only applies to {@link OperationType#READ}.</b> For
+   * {@code WRITE} and {@code INVALIDATE} operations this value is
+   * silently ignored — WRITE always uses {@code putBeforeInvalidate}
+   * (no TTL parameters) and INVALIDATE always clears the entry.
    */
   boolean softExpire() default true;
 

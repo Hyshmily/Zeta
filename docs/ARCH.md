@@ -265,7 +265,7 @@ When `hotkey.sync.enabled=true`, all write operations (`putThrough`, `putBeforeI
 
 ### Version Spaces
 
-<!-- Source: entity/CacheEntry.java, VersionGuard.java, HotKeyStateMachine.java -->
+<!-- Source: model/CacheEntry.java, VersionGuard.java, HotKeyStateMachine.java -->
 
 CacheEntry maintains **two independent version spaces** with different semantics:
 
@@ -286,7 +286,7 @@ CacheEntry maintains **two independent version spaces** with different semantics
 
 ### CacheEntry Fields
 
-<!-- Source: entity/CacheEntry.java -->
+<!-- Source: model/CacheEntry.java -->
 
 | Field               | Type       | Description                                                                                         |
 | ------------------- | ---------- | --------------------------------------------------------------------------------------------------- |
@@ -991,7 +991,7 @@ hotkey:
                                ┌─────────────────────────────────────────────┐
                                │  decay()                                    │
                                │  each bucket count -= 1 (min 0)             │
-                               │ 配合 fading(): exp(-1/count) 衰减最小计数    │
+                               │ Combined with fading(): exp(-1/count) decays minimum counts  │
                                └────────────────────┬────────────────────────┘
                                                     │
                                                     ▼

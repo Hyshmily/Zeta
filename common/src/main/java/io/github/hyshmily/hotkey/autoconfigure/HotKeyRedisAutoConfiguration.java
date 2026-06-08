@@ -18,10 +18,11 @@ package io.github.hyshmily.hotkey.autoconfigure;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.broadcast.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.hotkeycache.*;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.cache.*;
 import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
-import io.github.hyshmily.hotkey.report.HotKeyReporter;
+import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -44,7 +45,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * <p>Activates when a {@link RedisTemplate} bean is available.
  * {@link StringRedisTemplate} is injected as optional — if absent,
  * version tracking falls back to a node-local counter ({@link
- * io.github.hyshmily.hotkey.hotkeycache.InstanceIdGenerator#getNodeId()} + {@link
+ * io.github.hyshmily.hotkey.util.InstanceIdGenerator#getNodeId()} + {@link
  * java.util.concurrent.atomic.AtomicLong}).
  * Runs <em>after</em>
  * {@link HotKeyAutoConfiguration} so its {@code @ConditionalOnMissingBean}
