@@ -170,7 +170,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 **压力测试数据源**：[`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
 **容器压力测试数据源**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json)
-**传播延迟数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-00-56.757036300Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-00-56.757036300Z.json)
+**传播延迟数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json)
 
 ### 4.1 功能性集成
 
@@ -290,22 +290,22 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 #### 5.5.1 读路径性能
 
-`hot-read` 阶段达到 11,636 ops/s，95.72% 操作在 1ms 内完成（Caffeine L1 命中）。`cold-read` 阶段强制 L2 未命中 → Redis 回源 → L1 重缓存，达到 1,417 ops/s，97.30% < 1ms——验证 Redis 冷路径增加的延迟可忽略。
+`hot-read` 阶段达到 11,773 ops/s，95.01% 操作在 1ms 内完成（Caffeine L1 命中）。`cold-read` 阶段强制 L2 未命中 → Redis 回源 → L1 重缓存，达到 1,399 ops/s，96.41% < 1ms——验证 Redis 冷路径增加的延迟可忽略。
 
-`zipf-distribution` 阶段（100,000 操作，200 key，α=1.2）验证了 HeavyKeeper 在大规模下的概率排名准确性：top 20% key 捕获了 94.56% 的访问，符合帕累托分布预期。
+`zipf-distribution` 阶段（100,000 操作，200 key，α=1.2）验证了 HeavyKeeper 在大规模下的概率排名准确性：top 20% key 捕获了 94.59% 的访问，符合帕累托分布预期。
 
 #### 5.5.2 并发与去重
 
-- **单 key 争用**（20 线程 × 500 操作，相同 key）：13,423 ops/s，最终 Redis 值正确反映最后一次写入（`val-3498`），验证 `TransactionSupport` 延迟排序正确性。
+- **单 key 争用**（20 线程 × 500 操作，相同 key）：18,762 ops/s，最终 Redis 值正确反映最后一次写入（`val-5498`），验证 `TransactionSupport` 延迟排序正确性。
 - **惊群效应**（50 线程，1 个被 invalidate 的 key）：0 次 supplier 调用——`invalidate()` 发送 REFRESH 广播，异步监听器从 Redis 重新加载 key 并回填 L1，50 个 herd 线程释放时全部直接命中 L1。这验证了广播→回源→回填流水线能在测试的 150ms 休眠窗口内完成，在并发需求到达前就预热了 L1。
 
 #### 5.5.3 Worker 决策模拟
 
-通过 `hotkey.broadcast.exchange`（fanout）注入 HOT/COOL 决策。2,000 条 HOT 决策 → 25 个 key 提升（1.25% 提升率）。全部 1,000 个 COOL 目标成功降级。11.2s 的阶段耗时主要来自轮询检测间隔而非 AMQP 传播开销。
+通过 `hotkey.broadcast.exchange`（fanout）注入 HOT/COOL 决策。2,000 条 HOT 决策 → 663 个 key 提升（33.15% 提升率）。全部 1,000 个 COOL 目标成功降级。11.2s 的阶段耗时主要来自轮询检测间隔而非 AMQP 传播开销。
 
 #### 5.5.4 跨实例同步
 
-通过 `hotkey.sync.exchange`（direct）广播 5,000 条 INVALIDATE。同步传播 P50=0.36ms，P99=97.27ms——P99 尾部延迟由 `CacheExpireManager` 轮询间隔驱动而非 AMQP 投递延迟。零同步错误。
+通过 `hotkey.sync.exchange`（direct）广播 5,000 条 INVALIDATE。同步传播 P50=0.30ms，P99=97.31ms——P99 尾部延迟由 `CacheExpireManager` 轮询间隔驱动而非 AMQP 投递延迟。零同步错误。
 
 ### 5.7 传播延迟
 
@@ -319,9 +319,9 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 | 阶段                             | 操作数 | 耗时      | OPS   | P50            | P95        | P99         |
 | -------------------------------- | ------ | --------- | ----- | -------------- | ---------- | ----------- |
-| Redis GET 往返                   | 10,000 | 5,524 ms  | 1,810 | 0.44 ms        | 0.91 ms    | 1.91 ms     |
-| Redis SET 往返                   | 5,000  | 2,800 ms  | 1,786 | 0.51 ms        | 0.97 ms    | 1.33 ms     |
-| AMQP 发布                        | 10,000 | 341 ms    | 29,326 | 0.02 ms       | 0.12 ms    | 0.16 ms     |
+| Redis GET 往返                   | 10,000 | 5,924 ms  | 1,688 | 0.48 ms        | 0.90 ms    | 2.64 ms     |
+| Redis SET 往返                   | 5,000  | 2,836 ms  | 1,763 | 0.46 ms        | 0.91 ms    | 3.51 ms     |
+| AMQP 发布                        | 10,000 | 311 ms    | 32,154 | 0.02 ms       | 0.09 ms    | 0.15 ms     |
 | AMQP 端到端投递                  | 5,000  | 2,492 ms  | 2,006 | 0.07 ms        | 0.25 ms    | 0.38 ms     |
 | HotKey L1 命中                   | 10,000 | 123 ms    | 81,301 | **0.001 ms**  | 0.004 ms   | 0.011 ms    |
 | HotKey L1 未命中（→ Redis → L1） | 5,000  | 5,554 ms  | 900   | 0.47 ms        | 0.87 ms    | 1.65 ms     |

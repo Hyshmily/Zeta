@@ -76,7 +76,7 @@ hotkey:
 
     ## State Machine
     state-machine:
-      confirm-duration-ms: 2000
+      confirm-duration-ms: 300
       cool-duration-ms: 15000
       pre-cool-grace-ms: 5000
 

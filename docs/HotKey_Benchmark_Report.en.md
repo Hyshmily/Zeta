@@ -172,7 +172,7 @@ The enhanced report captures per-node latency for each phase, breaking down the 
 
 **Stress test data source**: [`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
 **Container stress data source**: [`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json)
-**Propagation delay data source**: [`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-00-56.757036300Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-00-56.757036300Z.json)
+**Propagation delay data source**: [`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json)
 
 ```
 Tests run: 97, Failures: 0, Errors: 0, Skipped: 9
@@ -296,22 +296,22 @@ Memory stable between 68-295 MB across 5 minutes. Zero GC pressure (413 collecti
 
 #### 5.5.1 Read Path Performance
 
-The `hot-read` phase achieves 11,636 ops/s with 95.72% of operations completing in under 1ms (Caffeine L1 hit). The `cold-read` phase forces L2 miss → Redis fallback → L1 re-cache, achieving 1,417 ops/s with 97.30% < 1ms — confirming that even the Redis-backed cold path adds negligible latency.
+The `hot-read` phase achieves 11,773 ops/s with 95.01% of operations completing in under 1ms (Caffeine L1 hit). The `cold-read` phase forces L2 miss → Redis fallback → L1 re-cache, achieving 1,399 ops/s with 96.41% < 1ms — confirming that even the Redis-backed cold path adds negligible latency.
 
-The `zipf-distribution` phase (100,000 ops across 200 keys with α=1.2) validates HeavyKeeper's probabilistic ranking at scale: top 20% of keys capture 94.56% of accesses, consistent with the expected Pareto distribution.
+The `zipf-distribution` phase (100,000 ops across 200 keys with α=1.2) validates HeavyKeeper's probabilistic ranking at scale: top 20% of keys capture 94.59% of accesses, consistent with the expected Pareto distribution.
 
 #### 5.5.2 Concurrency & Dedup
 
-- **Single-key contention** (20 threads × 500 ops on same key): 13,423 ops/s, final Redis value correctly reflects last write (`val-3498`), validating `TransactionSupport` deferral ordering.
+- **Single-key contention** (20 threads × 500 ops on same key): 18,762 ops/s, final Redis value correctly reflects last write (`val-5498`), validating `TransactionSupport` deferral ordering.
 - **Thundering herd** (50 threads on 1 invalidated key): 0 supplier calls — `invalidate()` broadcasts a REFRESH message; the async listener reloads the key from Redis and re-populates L1 before the 50 herd threads are released, so all 50 threads hit L1 directly. This validates that the broadcast-then-reload pipeline completes within the test's 150ms sleep window, effectively pre-warming L1 before concurrent demand arrives.
 
 #### 5.5.3 Worker Decision Simulation
 
-Worker decisions (HOT/COOL) injected via `hotkey.broadcast.exchange` (fanout). 2,000 HOT decisions → 25 promoted (1.25% promotion rate). All 1,000 COOL targets downgraded successfully. The 11.2s phase duration reflects the polling-based detection interval rather than AMQP propagation overhead.
+Worker decisions (HOT/COOL) injected via `hotkey.broadcast.exchange` (fanout). 2,000 HOT decisions → 663 promoted (33.15% promotion rate). All 1,000 COOL targets downgraded successfully. The 11.2s phase duration reflects the polling-based detection interval rather than AMQP propagation overhead.
 
 #### 5.5.4 Cross-Instance Sync
 
-5,000 INVALIDATE broadcasts via `hotkey.sync.exchange` (direct). Sync propagation P50=0.36ms, P99=97.27ms — the P99 tail is driven by `CacheExpireManager` polling interval rather than AMQP delivery latency. Zero sync errors.
+5,000 INVALIDATE broadcasts via `hotkey.sync.exchange` (direct). Sync propagation P50=0.30ms, P99=97.31ms — the P99 tail is driven by `CacheExpireManager` polling interval rather than AMQP delivery latency. Zero sync errors.
 
 ### 5.7 Propagation Delay
 
@@ -325,9 +325,9 @@ Worker decisions (HOT/COOL) injected via `hotkey.broadcast.exchange` (fanout). 2
 
 | Phase                            | Ops    | Duration  | Ops/s  | P50            | P95        | P99         |
 | -------------------------------- | ------ | --------- | ------ | -------------- | ---------- | ----------- |
-| Redis GET RTT                    | 10,000 | 5,524 ms  | 1,810  | 0.44 ms        | 0.91 ms    | 1.91 ms     |
-| Redis SET RTT                    | 5,000  | 2,800 ms  | 1,786  | 0.51 ms        | 0.97 ms    | 1.33 ms     |
-| AMQP Publish                     | 10,000 | 341 ms    | 29,326 | 0.02 ms        | 0.12 ms    | 0.16 ms     |
+| Redis GET RTT                    | 10,000 | 5,924 ms  | 1,688  | 0.48 ms        | 0.90 ms    | 2.64 ms     |
+| Redis SET RTT                    | 5,000  | 2,836 ms  | 1,763  | 0.46 ms        | 0.91 ms    | 3.51 ms     |
+| AMQP Publish                     | 10,000 | 311 ms    | 32,154 | 0.02 ms        | 0.09 ms    | 0.15 ms     |
 | AMQP E2E Delivery                | 5,000  | 2,492 ms  | 2,006  | 0.07 ms        | 0.25 ms    | 0.38 ms     |
 | HotKey L1 Hit                    | 10,000 | 123 ms    | 81,301 | **0.001 ms**   | 0.004 ms   | 0.011 ms    |
 | HotKey L1 Miss (→ Redis → L1)    | 5,000  | 5,554 ms  | 900    | 0.47 ms        | 0.87 ms    | 1.65 ms     |

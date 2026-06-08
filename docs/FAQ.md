@@ -159,7 +159,7 @@ These keys would **never** trigger the sliding-window threshold (default 1000 QP
 
 ## Q6: Could a brand-new key, never accessed before, hit ALL instances simultaneously faster than the Worker can broadcast HOT?
 
-**Short answer:** This is theoretically possible (even under the extreme configuration that collapses full-chain latency to ~7.5ms). The framework is designed to minimize the risk but cannot guarantee absolute protection against every extreme edge case.
+**Short answer:** This is theoretically possible (even under the extreme configuration that collapses full-chain latency to ~9.23ms). The framework is designed to minimize the risk but cannot guarantee absolute protection against every extreme edge case.
 
 **What happens step by step under default settings:**
 
@@ -171,10 +171,8 @@ These keys would **never** trigger the sliding-window threshold (default 1000 QP
 
 4. **t+100ms:** `HotKeyReporter` flushes the first batch of counts to the Worker (`reportIntervalMs=100` per `HotKeyProperties.java:148`). `reporter_highFrequency` stress test confirms **3M ops/s throughput with zero data loss**.
 
-5. **t+~360ms:** After 3 consecutive hot evaluations (confirmCount=3 × 100ms/tick = 300ms, per `WorkerProperties.java:74,124`), state machine transitions to CONFIRMED_HOT and broadcasts. The state machine guarantees each key broadcasts **only once per lifecycle** — extreme tests show SM-0-confirm path produces 10 broadcasts vs 86 for the without-SM path (a ~9× latency amplification from 7.54ms to 65.88ms). This is one of the framework's proudest design achievements.
-
-6. **t+~410ms:** All nodes receive HOT (propagation benchmark P50=56.28ms, P95=100.24ms, P99=102.44ms) → upgrade key to hot TTL (1h per `HotKeyProperties.java:87`) and enable soft expiration.
+5. **t+~298ms:** Full chain completes — after 3 consecutive hot evaluations the state machine transitions to CONFIRMED_HOT and broadcasts; all nodes receive HOT (propagation benchmark P50=56.38ms, P95=99.21ms, P99=103.56ms) → upgrade key to hot TTL (1h per `HotKeyProperties.java:87`) and enable soft expiration. Measured full chain (SM 3 confirm) P50 = 298.19ms. The state machine guarantees each key broadcasts **only once per lifecycle** — extreme tests show SM-0-confirm path produces 10 broadcasts vs 86 for the without-SM path, demonstrating the SM's broadcast suppression capability. This is one of the framework's proudest design achievements.
 
 The Worker broadcast solves the _second_ and subsequent waves — ensuring that when traffic continues (as real hot keys do), all nodes have the optimal hot-key configuration. The default 300ms confirm window is a deliberate stability choice; during those 300ms, the local HeavyKeeper, SingleFlight, and normal TTL form a three-layer protection barrier with zero request blocking.
 
-For latency-critical scenarios, specific parameters can be tuned to collapse the full-chain delay to ~7.5ms — at the cost of confirm-window protection and the broadcast compression advantage of the state machine. This extreme case is rarely encountered in practice and typically requires a traffic surge of extraordinary magnitude.
+For latency-critical scenarios, specific parameters can be tuned to collapse the full-chain delay to ~9.23ms — at the cost of confirm-window protection and the broadcast compression advantage of the state machine. This extreme case is rarely encountered in practice and typically requires a traffic surge of extraordinary magnitude.

@@ -104,9 +104,10 @@ for detailed latency breakdowns of each component （[Latency distribution heatm
 | ------------------------------------------- | ---------------------------------------------------------------- | -------------- | -------------- | -------------- |
 | L1 Hit (Caffeine lookup)                    | Pure memory lookup, no network I/O                               | **0.001 ms**   | 0.004 ms       | 0.011 ms       |
 | L1 Miss → Redis → L1                        | Redis GET RTT + SingleFlight dedup + L1 repopulation             | 0.47 ms        | 0.87 ms        | 1.65 ms        |
-| AMQP Publish                                | RabbitMQ channel write (memory-to-memory)                        | 0.02 ms        | 0.12 ms        | 0.16 ms        |
+| Redis SET RTT                               | Pure network round-trip                                          | 0.46 ms        | 0.91 ms        | 3.51 ms        |
+| AMQP Publish                                | RabbitMQ channel write (memory-to-memory)                        | 0.02 ms        | 0.09 ms        | 0.15 ms        |
 | AMQP E2E Delivery                           | Publish + broker routing + consumer delivery                     | 0.07 ms        | 0.25 ms        | 0.38 ms        |
-| Redis GET RTT                               | Pure network round-trip                                          | 0.44 ms        | 0.91 ms        | 1.91 ms        |
+| Redis GET RTT                               | Pure network round-trip                                          | 0.48 ms        | 0.90 ms        | 2.64 ms        |
 | Worker Decision Pipeline                    | Sliding window → AMQP broadcast, includes jitter+AMQP+L1 polling | **56.38 ms**   | 99.21 ms       | 103.56 ms      |
 | State Machine Pipeline (3 confirm windows)  | 3 confirm windows(300ms) + AMQP decision broadcast + L1 promotion | **246.46 ms** | 295.00 ms ^^   | 295.00 ms ^^   |
 | **Full Chain (SM 3 confirm windows)**       | **Step breakdown below**                                         | **298.19 ms**  | **351.50 ms ^^**  | **351.50 ms ^^**  |
