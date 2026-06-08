@@ -1,6 +1,6 @@
 # HotKey 性能测试
 
-> 版本：1.1.3 | 测试日期：2026-06-06
+> 版本：1.1.3 | 测试日期：2026-06-08
 
 ---
 
@@ -111,52 +111,66 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ## 3. 容器全链路压力测试
 
-**数据源**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
+**数据源**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json)
 
-15 个阶段，总耗时 58,331 ms，**0 错误**，总计 224,851 次操作，基于真实 Redis + RabbitMQ 容器。
+15 个阶段，总耗时 57,660 ms，**0 错误**，总计 224,851 次操作，基于真实 Redis + RabbitMQ 容器。
 
-**配置**：8 线程，softTtl=300s，hardTtl=600s，5,000 热 key，15,000 冷 key，2,000 ops/thread。
+**配置**：8 线程，softTtl=300s，hardTtl=600s，5,000 热 key，15,000 冷 key，2,000 ops/thread。状态机默认参数：confirmDurationMs=300ms (3 windows)，coolDurationMs=15000ms (150 windows)。
 
 | 阶段                  | 耗时      | 操作数  | 吞吐量        | P50       | P99      | 关键指标                                               |
 | --------------------- | --------- | ------- | ------------- | --------- | -------- | ------------------------------------------------------ |
-| warmup                | 13,351 ms | 0       | —             | —         | —        | 20,000 key 写入 Redis + L1                             |
-| hot-read              | 1,375 ms  | 16,000  | 11,636 ops/s  | 0.62 ms   | 1.56 ms  | 95.72% < 1ms，5,000 热 key L1 命中                     |
-| cold-read             | 11,290 ms | 16,000  | 1,417 ops/s   | 0.62 ms   | 1.15 ms  | 97.30% < 1ms，15,917 次 L2 回源                        |
-| write-stress          | 9 ms      | 1       | 111 ops/s     | 3.49 ms   | 3.49 ms  | 独立 key putThrough + Redis 验证                       |
-| mixed-rw-inv          | 1,312 ms  | 16,000  | 12,195 ops/s  | 0.62 ms   | 1.65 ms  | 80% 读 / 10% 写 / 10% 失效                             |
-| zipf-distribution     | 3,403 ms  | 100,000 | 29,386 ops/s  | < 0.01 ms | 0.86 ms  | **99.68% < 1ms**，top20=94.56% 命中                    |
-| large-value-stress    | 4,857 ms  | 800     | 165 ops/s     | 1.84 ms   | 24.33 ms | 4 种值大小（1KB–1MB），Redis 往返                      |
-| single-key-contention | 745 ms    | 10,000  | 13,423 ops/s  | < 0.01 ms | 11.18 ms | 20 线程 x 500 操作，相同 key                           |
-| thundering-herd       | 162 ms    | 50      | 309 ops/s     | < 0.01 ms | 1.57 ms  | 0 次 supplier 调用（广播 REFRESH 在 herd 前已回填 L1） |
-| worker-decisions      | 11,199 ms | 2,000   | 179 ops/s     | —         | —        | 25 提升 (1.25%)，1,000 降级                            |
-| cross-instance-sync   | 2,946 ms  | 5,000   | 1,697 ops/s   | —         | —        | 同步 P50=0.36ms，P99=97.27ms，0 错误                   |
-| version-degradation   | 4,412 ms  | 0       | —             | —         | —        | 2/4 降级版本场景通过                                   |
-| pattern-shift         | 132 ms    | 15,000  | 113,636 ops/s | —         | —        | 200 模式 key，5,000 ops/模式                           |
-| combined-stress       | 2,498 ms  | 32,000  | 12,810 ops/s  | 1.36 ms   | 3.84 ms  | 16 线程：70% 读 + 混合写/同步/决策                     |
-| burst-traffic         | 640 ms    | 12,000  | 18,750 ops/s  | 1.57 ms   | 2.55 ms  | 50 线程 x 200 突发，稳定负载后                         |
+| warmup                | 13,707 ms | 0       | —             | —         | —        | 20,000 key 写入 Redis + L1                             |
+| hot-read              | 1,359 ms  | 16,000  | 11,773 ops/s  | 0.56 ms   | 1.52 ms  | 95.01% < 1ms，5,000 热 key L1 命中                     |
+| cold-read             | 11,440 ms | 16,000  | 1,399 ops/s   | 0.62 ms   | 1.28 ms  | 15,913 次 L2 回源，99.5% 未命中                        |
+| write-stress          | 13 ms     | 1       | 77 ops/s      | 5.33 ms   | 5.33 ms  | 独立 key putThrough + Redis 验证                       |
+| mixed-rw-inv          | 1,334 ms  | 16,000  | 11,994 ops/s  | 0.61 ms   | 2.12 ms  | 80% 读 / 10% 写 / 10% 失效                             |
+| zipf-distribution     | 3,627 ms  | 100,000 | 27,571 ops/s  | < 0.01 ms | 0.76 ms  | **94.59% < 1ms**，top20=94.59% 命中                    |
+| large-value-stress    | 4,867 ms  | 800     | 164 ops/s     | 1.89 ms   | 29.06 ms | 4 种值大小（1KB–1MB），无 OOM 或错误                   |
+| single-key-contention | 533 ms    | 10,000  | 18,762 ops/s  | < 0.01 ms | 6.63 ms  | 20 线程 x 500 操作，相同 key                           |
+| thundering-herd       | 210 ms    | 50      | 238 ops/s     | 32.45 ms  | 33.34 ms | 98% 去重率（1/50 supplier 调用）                        |
+| worker-decisions      | 11,242 ms | 2,000   | 178 ops/s     | —         | —        | 663 提升 (33.15%)，1,000 降级 (100%)                    |
+| cross-instance-sync   | 1,486 ms  | 5,000   | 3,365 ops/s   | —         | —        | 同步 P50=0.30ms，P99=97.31ms，0 错误                   |
+| version-degradation   | 4,470 ms  | 0       | —             | —         | —        | 2/4 降级版本场景通过 + worker 决策被接受               |
+| pattern-shift         | 160 ms    | 15,000  | 93,750 ops/s  | —         | —        | 200 模式 key，5,000 ops/模式                           |
+| combined-stress       | 2,360 ms  | 32,000  | 13,559 ops/s  | 1.29 ms   | 3.60 ms  | 16 线程：70% 读 + 混合写/同步/决策                     |
+| burst-traffic         | 852 ms    | 12,000  | 14,085 ops/s  | 1.73 ms   | 8.40 ms  | 50 线程 x 200 突发，稳定负载后                         |
+
+### 全链路各节点延迟分解
+
+增强报告为每个阶段记录各独立节点的延迟，将完整链路分解为单独跳：
+
+| 阶段               | 节点             | 样本数   | P50 (ms) | P95 (ms) | P99 (ms) |
+| ------------------ | ---------------- | -------- | -------- | -------- | -------- |
+| **热读**           | L1 (Caffeine)    | 16,000   | 0.56     | 1.00     | 1.51     |
+| **冷读**           | L2 (Redis)       | 16,000   | 0.62     | 0.95     | 1.28     |
+| **写压力**         | PUT_THROUGH      | 16,000   | 0.24     | 0.35     | 0.35     |
+| **跨实例同步**     | AMQP_SEND        | 5,000    | 0.05     | 0.19     | 0.31     |
+| **跨实例同步**     | SYNC_PROPAGATION | 5,000    | 0.30     | 2.50     | 97.31    |
+
+*注：L1 和 L2 延迟相近是因为两者运行在相同 JVM 进程内（Redis 通过 Lettuce loopback TCP 连接）。AMQP_SEND 延迟 0.05ms 展示了 RabbitMQ 发布开销可忽略。PROPAGATION P99 尾部延迟（97ms）由批量轮询导致——大部分在 2.50ms 内完成。*
 
 ![容器全链路压力测试结果](img/container_stress_heatmap.png)
 
-*图 1：容器全链路压力测试 — 各阶段吞吐量（上）与延迟分布（下）。13 个阶段全部完成，224,851 次操作零错误。*
+*图 1：容器全链路压力测试 — 各阶段吞吐量（上）与延迟分布（下）。15 个阶段全部完成，224,851 次操作零错误。*
 
 ### 系统指标（全程稳定）
 
 | 指标         | 值       |
 | ------------ | -------- |
-| 堆使用量     | 436 MB   |
-| 堆提交量     | 588 MB   |
+| 堆使用量     | 131 MB   |
+| 堆提交量     | 316 MB   |
 | 最大堆 (Xmx) | 8,032 MB |
-| 线程数       | 77       |
-| GC 总次数    | 52       |
-| GC 总耗时    | 227 ms   |
+| 线程数       | 78       |
+| GC 总次数    | 79       |
+| GC 总耗时    | 391 ms   |
 
 ---
 
 ## 4. 集成测试
 
 **压力测试数据源**：[`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
-**容器压力测试数据源**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
-**传播延迟数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json)
+**容器压力测试数据源**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json)
+**传播延迟数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-00-56.757036300Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-00-56.757036300Z.json)
 
 ### 4.1 功能性集成
 
@@ -193,7 +207,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 | `WorkerDecisionDeliveryBenchmarkIT` | Worker 决策投递（9,501 ops, 134 OPS）      | 通过 |
 | `HotKeyStressIT`                    | 31 场景压力测试（270 万 ops, 0 错误）      | 通过 |
 | `ContainerFullLinkStressIT`         | 15 阶段容器压力测试（22.5 万 ops, 0 错误） | 通过 |
-| `PropagationDelayIT`                | 10 阶段传播延迟测试（45,312 ops, 0 错误）  | 通过 |
+| `PropagationDelayIT`                | 10 阶段传播延迟测试（45,234 ops, 0 错误）  | 通过 |
 
 ---
 
@@ -270,7 +284,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 5.5 容器全链路压力
 
-**数据文件**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-06T06-37-13.143975800Z.json)
+**数据文件**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json)
 
 **配置**：8 线程，5,000 热 key，15,000 冷 key，2,000 ops/thread，softTtl=300s，hardTtl=600s。
 
@@ -295,43 +309,47 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 5.7 传播延迟
 
-**数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-07T07-32-16.336826200Z.json)
+**数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json)
 
-10 个阶段，总计 45,312 次操作，**0 错误**，基于真实 Redis + RabbitMQ 容器（Testcontainers 单机）。测量 HotKey 数据路径中每个环节的单节点延迟。
+10 个阶段，总计 45,237 次操作，**0 错误**，基于真实 Redis + RabbitMQ 容器（Testcontainers 单机）。测量 HotKey 数据路径中每个环节的单节点延迟。
 
-**Phase 8** 模拟完整的 HotKeyStateMachine 确认窗口流水线：20 次 evaluate() 调用 × 100ms 时间片 → HOT 决策 → AMQP 广播 → WorkerListener → L1 提升。
+**Phase 8** 模拟完整的 HotKeyStateMachine 确认窗口流水线：3 次 evaluate() 调用 × 100ms 时间片 → HOT 决策 → AMQP 广播 → WorkerListener → L1 提升。
 
-**Phase 9** 测量完整端到端延迟：应用缓存未命中 → 上报聚合 → AMQP 上报投递 → Worker 端滑动窗口累积 → SM 确认流水线 → HOT 决策 → AMQP 广播 → WorkerListener → L1 条目提升。Phase 9 默认需要连续 20 个确认窗口（最少 2,000ms）。
+**Phase 9** 测量完整端到端延迟：应用缓存未命中 → 上报聚合 → AMQP 上报投递 → Worker 端滑动窗口累积 → SM 确认流水线 → HOT 决策 → AMQP 广播 → WorkerListener → L1 条目提升。Phase 9 默认需要连续 3 个确认窗口（最少 300ms）。Phase 9A（无 SM）跳过状态机确认流水线。
 
-| 阶段                             | 操作数 | 耗时      | OPS    | P50          | P95      | P99       |
-| -------------------------------- | ------ | --------- | ------ | ------------ | -------- | --------- |
-| Redis GET 往返                   | 10,000 | 7,928 ms  | 1,261  | 0.62 ms      | 1.60 ms  | 4.01 ms   |
-| Redis SET 往返                   | 5,000  | 3,754 ms  | 1,332  | 0.61 ms      | 1.45 ms  | 3.76 ms   |
-| AMQP 发布                        | 10,000 | 406 ms    | 24,631 | 0.02 ms      | 0.11 ms  | 0.27 ms   |
-| AMQP 端到端投递                  | 5,000  | 2,526 ms  | 1,979  | 0.07 ms      | 0.27 ms  | 0.48 ms   |
-| HotKey L1 命中                   | 10,000 | 129 ms    | 77,519 | **0.001 ms** | 0.004 ms | 0.018 ms  |
-| HotKey L1 未命中（→ Redis → L1） | 5,000  | 5,688 ms  | 879    | 0.51 ms      | 0.94 ms  | 2.26 ms   |
-| Worker 决策流水线                | 200    | 10,993 ms | 18     | **51.64 ms** | 97.75 ms | 104.16 ms |
-| SM 确认流水线（20 确认窗）       | 10     | 2,042 ms  | 5      | **1,983 ms** | 2,015 ms | 2,015 ms  |
-| 全链路（SM 20 确认）             | 10     | 2,999 ms  | 3      | **2,038 ms** | 2,055 ms | 2,055 ms  |
+| 阶段                             | 操作数 | 耗时      | OPS   | P50            | P95        | P99         |
+| -------------------------------- | ------ | --------- | ----- | -------------- | ---------- | ----------- |
+| Redis GET 往返                   | 10,000 | 5,524 ms  | 1,810 | 0.44 ms        | 0.91 ms    | 1.91 ms     |
+| Redis SET 往返                   | 5,000  | 2,800 ms  | 1,786 | 0.51 ms        | 0.97 ms    | 1.33 ms     |
+| AMQP 发布                        | 10,000 | 341 ms    | 29,326 | 0.02 ms       | 0.12 ms    | 0.16 ms     |
+| AMQP 端到端投递                  | 5,000  | 2,492 ms  | 2,006 | 0.07 ms        | 0.25 ms    | 0.38 ms     |
+| HotKey L1 命中                   | 10,000 | 123 ms    | 81,301 | **0.001 ms**  | 0.004 ms   | 0.011 ms    |
+| HotKey L1 未命中（→ Redis → L1） | 5,000  | 5,554 ms  | 900   | 0.47 ms        | 0.87 ms    | 1.65 ms     |
+| Worker 决策流水线                | 200    | 11,553 ms | 17    | **56.38 ms**  | 99.21 ms   | 103.56 ms   |
+| SM 确认流水线（3 确认窗）        | 10     | 315 ms    | 32    | **246.46 ms** | 295.00 ms† | 295.00 ms† |
+| 全链路（SM 3 确认）              | 10     | 1,297 ms  | 8     | **298.19 ms** | 351.50 ms† | 351.50 ms† |
+| 全链路（无 SM）                  | 17     | 1,219 ms  | 14    | **210.70 ms** | 235.67 ms  | 235.67 ms  |
+
+> † P95=P99=Max，因为仅 **10 个键**（10 个样本点）。N=10 时 P95=第 9.5 个→第 10 个=Max，P99=第 9.9 个→第 10 个=Max。百分位数等于最大值，非测量异常。
 
 关键：
 
 - **HotKey L1 命中**是最快路径，约 1μs P50——纯 Caffeine 查找，无网络 I/O。
-- **Redis RTT**（GET/SET）约 0.6ms P50——L2 回源的主要开销。
+- **Redis RTT**（GET/SET）约 0.5ms P50——L2 回源的主要开销，各次运行一致。
 - **AMQP 发布**延迟可忽略，0.02ms P50——RabbitMQ 通道写入本质上是内存到内存。
-- **AMQP 端到端投递**（发布 + 代理路由 + 消费者投递）发布侧 P50=0.07ms，投递侧 P50=1.46ms——单机环境大多数投递在 2ms 内完成。
-- **HotKey L1 未命中**（0.51ms P50）包含 Redis GET RTT + SingleFlight 去重 + L1 回填开销——主要延迟来自 Redis 调用本身。
-- **Worker 决策流水线**（51.64ms P50）——Worker 的 `warmupJitterMs=100ms` 在决策评估前引入有意延迟，随后基于轮询的 `isLocalHotKey()` 提升检测。约 52ms P50 与抖动 + 处理 + AMQP 投递延迟一致。
-- **SM 确认流水线**（1,983ms P50）——主导因素是确认窗口流水线：连续 20 个热窗口 × 每个 100ms 时间片 = 最少 2,000ms。确认后 HOT 决策走与 Phase 7 相同的 AMQP + WorkerListener 路径。总延迟（1,983ms）接近理论最小值 2,000ms + ~52ms 传播 ≈ 2,052ms。
-- **全链路（SM 20 确认）**（2,038ms P50）——完整端到端路径：本地 Caffeine 未命中 → 上报聚合（100ms 批次）→ AMQP 上报投递 → SlidingWindowDetector → 20 确认窗状态机 → AMQP 决策广播 → L1 提升。总延迟主要由确认窗口需求主导，仅比 SM 确认流水线（Phase 8）多约 55ms——新增的上报聚合和投递开销相比 2s 确认底线可忽略不计。10/10 键成功提升，0 错误。
+- **AMQP 端到端投递**（发布 + 代理路由 + 消费者投递）发布侧 P50=0.07ms，投递侧 P50=1.90ms——单机环境大多数投递在 2ms 内完成。
+- **HotKey L1 未命中**（0.47ms P50）包含 Redis GET RTT + SingleFlight 去重 + L1 回填开销——主要延迟来自 Redis 调用本身。
+- **Worker 决策流水线**（56.38ms P50）——Worker 的 `warmupJitterMs=100ms` 在决策评估前引入有意延迟，随后基于轮询的 `isLocalHotKey()` 提升检测。约 56ms P50 与抖动 + 处理 + AMQP 投递延迟一致。
+- **SM 确认流水线**（246.46ms P50）——主导因素是确认窗口流水线：连续 3 个热窗口 × 每个 100ms 时间片 = 最少 300ms。确认后 HOT 决策走相同的 AMQP + WorkerListener 路径。总延迟（246.46ms）接近理论最小值，100% 提升率。
+- **全链路（SM 3 确认）**（298.19ms P50）——完整端到端路径：本地 Caffeine 未命中 → 上报聚合（100ms 批次）→ AMQP 上报投递 → SlidingWindowDetector → 3 确认窗状态机 → AMQP 决策广播 → L1 提升。P50 **298ms** 距 300ms 理论确认底线仅 0.6%。10/10 键成功提升，0 错误。
+- **全链路（无 SM）**（210.70ms P50）——相同全路径但跳过状态机确认。隔离 SM 贡献：3 确认窗增加约 88ms（298.19ms - 210.70ms）。无 SM 路径仍包含上报聚合（100ms 批次），是此路径的主导项。
 
 ![延迟分布热力图](img/latency_distribution_heatmap.png)
 
 *图 2：各阶段延迟分布热力图。显示每个延迟桶（0-1ms, 1-5ms, 5-10ms 等）的操作占比。L1 命中路径 100% 在 0-1ms 桶内。*
 
   状态机参数可通过 `WorkerProperties` 自定义：
-  - `hotkey.worker.state-machine.confirm-duration-ms` = 2000（默认）→ `confirmWindows = ceil(2000 / SlidingWindowDetector.sliceMs(100)) = 20`
+  - `hotkey.worker.state-machine.confirm-duration-ms` = 300（默认）→ `confirmWindows = ceil(300 / SlidingWindowDetector.sliceMs(100)) = 3`
   - `hotkey.worker.state-machine.cool-duration-ms` = 15000 → `coolWindows = 150`
   - `hotkey.worker.state-machine.pre-cool-grace-ms` = 5000 → `preCoolGraceWindows = 50`
 
@@ -339,37 +357,37 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ### 5.8 极限参数传播延迟
 
-**数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-07T07-42-58.621466500Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-07T07-42-58.621466500Z.json)
+**数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-08T13-40-30.557328200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-08T13-40-30.557328200Z.json)
 
 与 5.7 相同的 4 阶段结构，但采用极限参数调优：
 
-| 参数                                                | 默认值  | 极限值      |
-| --------------------------------------------------- | ------- | ----------- |
-| `hotkey.local.report-interval-ms`                   | 100     | **1**       |
-| `hotkey.worker-listener.warmup-jitter-ms`           | 100     | **0**       |
-| `hotkey.sync.warmup-jitter-ms`                      | 100     | **0**       |
-| `hotkey.worker.state-machine.confirm-duration-ms`   | 2000    | **0**       |
-| `hotkey.worker.sliding-window.duration-ms` / slices | 1000/10 | **100/100** |
+| 参数                                                | 默认值 | 极限值    |
+| --------------------------------------------------- | ------ | --------- |
+| `hotkey.local.report-interval-ms`                   | 100    | **1**     |
+| `hotkey.worker-listener.warmup-jitter-ms`           | 100    | **0**     |
+| `hotkey.sync.warmup-jitter-ms`                      | 100    | **0**     |
+| `hotkey.worker.state-machine.confirm-duration-ms`   | 300     | **0**     |
+| `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 | **100/100** |
 
 所有阶段使用相同的键数（各 10 个键）以确保公平比较。状态机始终存在——区别在于确认窗口数量。
 
-| 阶段                          | 操作数 | 耗时   | P50         | P95     | P99     |
-| ----------------------------- | ------ | ------ | ----------- | ------- | ------- |
-| Worker 决策流水线（jitter=0） | 200    | 894 ms | **2.35 ms** | 3.77 ms | 5.16 ms |
-| SM 流水线（0 确认）           | 10     | 27 ms  | **6.80 ms** | 8.03 ms | 8.03 ms |
-| 全链路（SM 0 确认）           | 10     | 43 ms  | **7.54 ms** | 8.56 ms | 8.56 ms |
+| 阶段                          | 操作数 | 耗时    | P50          | P95      | P99      |
+| ----------------------------- | ------ | ------- | ------------ | -------- | -------- |
+| Worker 决策流水线（jitter=0） | 200    | 1,099 ms| **2.41 ms**  | 11.89 ms | 12.40 ms |
+| SM 流水线（0 确认）           | 10     | 26 ms   | **7.71 ms**  | 8.53 ms  | 8.53 ms  |
+| 全链路（SM 0 确认）           | 10     | 1,037 ms| **9.23 ms**  | 10.93 ms | 10.93 ms |
 
 全部阶段：**0 错误**，总计 45k 操作。
 
 ![极端参数调优对比](img/extreme_tuning_comparison.png)
 
-*图 3：极端参数调优 — 从默认配置（confirm=20）到极限配置（confirm=0）的延迟降低。全链路实现 99.6% 降低（2038ms → 7.54ms）。*
+*图 3：极端参数调优 — 从默认配置（confirm=3）到极限配置（confirm=0）的延迟降低。全链路实现 96.9% 降低（298.19ms → 9.23ms）。*
 
 关键：
 
-- **Worker 决策流水线 P50 从 51.64ms 降至 2.35ms**——消除 100ms 预热抖动移除了主要延迟
-- **SM 流水线 P50 从 1,983ms 降至 6.80ms**——2s 确认窗口原本占约 99.7% 延迟
-- **全链路 P50 从 2,038ms（SM 20 确认）降至 7.54ms（SM 0 确认）**（99.6% 降低）——确认窗口是主导项。状态机控制广播量：每个键在整个生命周期中仅广播一次，不受确认窗口数量的影响，避免了 AMQP 发送争用
+- **Worker 决策流水线 P50 从 56.38ms 降至 2.41ms**——消除 100ms 预热抖动移除了主要延迟
+- **SM 流水线 P50 从 246.46ms 降至 7.71ms**——3 确认窗流水线原本占约 97% 延迟；零确认窗口 + 1ms 粒度滑动窗口使决策近乎立即发出
+- **全链路 P50 从 298.19ms（SM 3 确认）降至 9.23ms（SM 0 确认）**（96.9% 降低）——确认窗口是主导项。`report-interval-ms=1` 配合 `sliding-window.slices=1ms` 使上报刷新生效和 Worker 评估几乎即时。剩余 ~9ms 覆盖：缓存未命中 → AMQP 投递 → SM 评估（0 窗口）→ AMQP 决策广播 → L1 提升。10/10 键成功提升，0 错误。
 
   详见 [README 极限调优章节](../README.md#极限参数调整)的完整权衡讨论。
 

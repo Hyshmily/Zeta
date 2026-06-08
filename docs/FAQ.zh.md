@@ -12,7 +12,7 @@
 
 | 维度         | 本地 HeavyKeeper               | 中央 Worker                          |
 | ------------ | ------------------------------ | ------------------------------------ |
-| **响应时间** | 纳秒级                         | ~100ms–2s（上报间隔 + 滑动窗口累积） |
+| **响应时间** | 纳秒级                         | ~100ms–300ms（上报间隔 + 滑动窗口累积） |
 | **视野范围** | 单节点                         | 全集群                               |
 | **目的**     | 立刻升级热 Key TTL，保护本节点 | 全局共识、跨实例预热、协调冷却       |
 | **何时触发** | 每次 `get()` 调用              | 累积足够窗口数据后                   |
@@ -23,7 +23,7 @@
 
 2. **同时，** `get()` 也会调用 `hotKeyReporter.record(key)` → `HotKeyReporter` 在本地 Caffeine 累加 → 每 `reportIntervalMs`（100ms）批量刷到 RabbitMQ。
 
-3. **Worker 收到上报** → `ReportConsumer.onReport()` 调用 `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` 追踪连续热点窗口 → 持续 `confirmDurationMs`（2s）后，向 **所有实例** 广播 HOT。
+3. **Worker 收到上报** → `ReportConsumer.onReport()` 调用 `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` 追踪连续热点窗口 → 持续 `confirmDurationMs`（300ms）后，向 **所有实例** 广播 HOT。
 
 4. **实例 B、C、D** 通过 `WorkerListener` 收到 HOT → 从 Redis 加载到本地 Caffeine，流量到达前完成预热。
 
@@ -41,27 +41,29 @@
 t=0ms    Key X 首次在节点 A 被访问
 t=+1μs   本地 HeavyKeeper："看起来热" → 以 1h 热 TTL 缓存在节点 A
 t=+100ms HotKeyReporter 刷新 → Worker 收到第一批计数，key 超过阈值 → tick 1
-t=+2.0s   连续 20 个热 tick（共 2000ms，confirmCount=20）→ CONFIRMED_HOT
-t=+2.0s   广播发送到所有节点（同一 tick 内 AMQP 发出）
-t=+2.1s   节点 B、C、D 收到 HOT → 从 Redis 加载 → 以热 TTL 缓存
-(将 confirm-duration-ms 设为 0 可将全链路延迟极限降低到约 7.5ms)
+t=+300ms   连续 3 个热 tick（共 300ms，confirmCount=3）→ CONFIRMED_HOT
+t=+300ms   广播发送到所有节点（同一 tick 内 AMQP 发出）
+t=+360ms   节点 B、C、D 收到 HOT → 从 Redis 加载 → 以热 TTL 缓存
+(将 confirm-duration-ms 设为 0 配合 report-interval-ms=1 和 sliding-window=100/100 可将全链路延迟降低到约 9ms)
 ```
 
-**真正的热 Key 会持续热几分钟甚至几小时**，而不是几百毫秒。Worker 的约 2s 延迟（默认 `confirmDurationMs=2000`，每 100ms 评估一次 = 20 个 tick）与总热期相比可以忽略不计。而接到第一波冲击的节点，早在微秒级就已被保护。
+**真正的热 Key 会持续热几分钟甚至几小时**，而不是几百毫秒。Worker 的约 300ms 延迟（默认 `confirmDurationMs=300`，每 100ms 评估一次 = 3 个 tick）与总热期相比可以忽略不计。而接到第一波冲击的节点，早在微秒级就已被保护。
 
 **实测延迟**（来自 `PropagationDelayIT`，10 个阶段，4.5 万 ops，0 错误）：
 
-| 场景                       | P50          | P95      | P99       |
-| -------------------------- | ------------ | -------- | --------- |
-| Worker 决策流水线          | **51.64 ms** | 97.75 ms | 104.16 ms |
-| SM 确认流水线（20 确认窗） | **1,983 ms** | 2,015 ms | 2,015 ms  |
-| 全链路（SM 20 确认）       | **2,038 ms** | 2,055 ms | 2,055 ms  |
+| 场景                     | P50            | P95        | P99         |
+| ------------------------ | -------------- | ---------- | ----------- |
+| Worker 决策流水线        | **56.38 ms**   | 99.21 ms   | 103.56 ms   |
+| SM 确认流水线（3 确认窗）| **246.46 ms**  | 295.00 ms† | 295.00 ms†  |
+| 全链路（SM 3 确认）      | **298.19 ms**  | 351.50 ms† | 351.50 ms†  |
 
-- **Worker 决策流水线**（Phase 7）：Worker 检测到热键后发起 AMQP 广播。P50=51.6ms 含 `warmupJitterMs=100ms` + AMQP + L1 轮询。
-- **SM 确认流水线**（Phase 8）：约 2.0s 由确认窗口主导（20 × 100ms = 2s），确认后走相同 AMQP 路径（约 52ms）。参数可调。
-- **全链路（SM 20 确认）**（Phase 9）：完整端到端路径——本地 Caffeine 未命中 → 上报聚合（100ms 批次）→ AMQP 上报投递 → SlidingWindowDetector → 20 确认窗状态机 → AMQP 决策广播 → L1 提升。总延迟由 2s 确认底线主导。
+> † P95=P99=Max，因为仅 **10 个键**（10 个样本点）。N=10 时 P95=第 9.5 个→第 10 个=Max，P99=第 9.9 个→第 10 个=Max。百分位数等于最大值，非测量异常。
 
-> **极限参数调优**（PropagationDelayExtremeIT，相同容器，但 report-interval-ms=1、warmup-jitter-ms=0、confirm-duration-ms=0）大幅压缩延迟：Worker 决策流水线 → **2.35ms P50**，SM 流水线（0 确认）→ **6.80ms P50**，全链路（SM 0 确认）→ **7.54ms P50**（均使用相同的 10 键数）。权衡讨论详见 [README 极限调优章节](../README.md#极限参数调整)。
+- **Worker 决策流水线**（Phase 7）：Worker 检测到热键后发起 AMQP 广播。P50=56.38ms 含 `warmupJitterMs=100ms` + AMQP + L1 轮询。
+- **SM 确认流水线**（Phase 8）：约 246ms 由确认窗口主导（3 × 100ms = 300ms），确认后走相同 AMQP 路径（约 56ms 含 jitter）。参数可调。
+- **全链路（SM 3 确认）**（Phase 9）：完整端到端路径——本地 Caffeine 未命中 → 上报聚合（100ms 批次）→ AMQP 上报投递 → SlidingWindowDetector → 3 确认窗状态机 → AMQP 决策广播 → L1 提升。总延迟约 298ms P50，距理论 300ms 底线仅 0.6%。
+
+> **极限参数调优**（PropagationDelayExtremeIT，相同容器，但 report-interval-ms=1、warmup-jitter-ms=0、confirm-duration-ms=0、sliding-window=100/100）大幅压缩延迟：Worker 决策流水线 → **2.41ms P50**，SM 流水线（0 确认）→ **7.71ms P50**，全链路（SM 0 确认）→ **9.23ms P50**（均使用相同的 10 键数）。从默认配置（3 确认窗，298.19ms P50）到极限配置（0 确认窗，9.23ms P50）的降幅达 **96.9%**。权衡讨论详见 [README 极限调优章节](../README.md#极限参数调整)。
 
 **如果是仅仅 100ms 的脉冲呢？** 那不算是集群级别的热 Key——只是一个本地毛刺。本地 HeavyKeeper 用稍长的 TTL 处理它，Worker 完全不需要广播。两者各司其职。
 
@@ -168,10 +170,10 @@ Worker 检测到 Key X 是全局热 Key → 广播 HOT
 
 4. **t+100ms：** `HotKeyReporter` 刷新第一批计数到 Worker（`reportIntervalMs=100`，详见 `HotKeyProperties.java:148`）。`reporter_highFrequency` 压力测试确认 **3M ops/s 吞吐，零数据丢失**。
 
-5. **t+~2.1s：** 连续 20 个热评估 tick（confirmCount=20 × 100ms/tick = 2000ms，详见 `WorkerProperties.java:74,124`），状态机转为 CONFIRMED_HOT 并广播。状态机的设计保证了每个 Key 在整个生命周期内**只广播一次**——极限测试中，SM 0 确认路径仅产生 10 条广播，而无状态机路径产生了 86 条，延迟因此放大了约 9 倍（65.88ms → 7.54ms）。这是框架作者最引以为傲的设计之一。
+5. **t+~360ms：** 连续 3 个热评估 tick（confirmCount=3 × 100ms/tick = 300ms，详见 `WorkerProperties.java:74,124`），状态机转为 CONFIRMED_HOT 并广播。状态机的设计保证了每个 Key 在整个生命周期内**只广播一次**——极限测试中，SM 0 确认路径仅产生 10 条广播，而无状态机路径产生了 86 条，延迟因此放大了约 9 倍（65.88ms → 7.54ms）。这是框架作者最引以为傲的设计之一。
 
-6. **t+~2.15s：** 所有节点收到 HOT（传播延迟基准实测 P50=51.64ms，P95=97.75ms，P99=104.16ms）→ 升级 Key 为热 TTL（1h，详见 `HotKeyProperties.java:91`）并开启软过期。
+6. **t+~410ms：** 所有节点收到 HOT（传播延迟基准实测 P50=56.28ms，P95=100.24ms，P99=102.44ms）→ 升级 Key 为热 TTL（1h，详见 `HotKeyProperties.java:91`）并开启软过期。
 
-Worker 广播解决的是 _第二波及后续_ 请求——确保当流量持续时（真实热 Key 就是这样），所有节点都处于最优的热 Key 配置状态。默认的 2 秒确认窗口是框架主动选择的稳定性保障，在这 2 秒内，本地 HeavyKeeper、SingleFlight 和普通 TTL 已构成三层保护，用户请求没有经历任何阻塞。
+Worker 广播解决的是 _第二波及后续_ 请求——确保当流量持续时（真实热 Key 就是这样），所有节点都处于最优的热 Key 配置状态。默认的 300ms 确认窗口是框架主动选择的稳定性保障，在这 300ms 内，本地 HeavyKeeper、SingleFlight 和普通 TTL 已构成三层保护，用户请求没有经历任何阻塞。
 
 对于追求极致速度的场景，可以通过修改特定参数将全链路延迟压缩至 ~7.5ms，但这需要牺牲确认窗口的保护能力和状态机带来的广播压缩优势。该极端场景在绝大多数实际业务中极为罕见，通常需要超大规模流量突发才能触发。

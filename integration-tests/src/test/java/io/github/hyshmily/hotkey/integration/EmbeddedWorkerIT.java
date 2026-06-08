@@ -155,7 +155,7 @@ class EmbeddedWorkerIT extends AbstractIntegrationIT {
     try {
       // ── Act ──
 
-      reportPublisher.publish(0, new ReportMessage("integration-test", System.currentTimeMillis(), Map.of(key, 42L)));
+      reportPublisher.publish("0", new ReportMessage("integration-test", System.currentTimeMillis(), Map.of(key, 42L)));
 
       // ── Assert ──
 

@@ -815,9 +815,9 @@ class HotKeyStressIT {
     ALL_METRICS.add(m);
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     ReportPublisher publisher = mock(ReportPublisher.class);
-    doAnswer(inv -> null).when(publisher).publish(anyInt(), any());
+    doAnswer(inv -> null).when(publisher).publish(any(), any());
     HotKeyReporter reporter = new HotKeyReporter(
-      new WorkerHealthMonitor(), publisher, scheduler, 100, 1, "stress-test", 10000, 100, 2);
+      new WorkerHealthMonitor(), publisher, scheduler, 100, 1, "stress-test", 10000, 100, 2, null);
     reporter.start();
     concurrentRun("highFreq-reporter", 20, 100_000, (idx) -> {
       reporter.record("freq-key-" + (idx & 0xFF));
@@ -840,11 +840,11 @@ class HotKeyStressIT {
     ALL_METRICS.add(m);
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     ReportPublisher publisher = mock(ReportPublisher.class);
-    doAnswer(inv -> null).when(publisher).publish(anyInt(), any());
+    doAnswer(inv -> null).when(publisher).publish(any(), any());
     int queueCapacity = 1000;
     HotKeyReporter reporter = new HotKeyReporter(
       new WorkerHealthMonitor(), publisher, scheduler, 100, 1, "backpressure-test",
-      queueCapacity, 1, 1);
+      queueCapacity, 1, 1, null);
     reporter.start();
     int threadCount = 10;
     int opsPerThread = 20_000;
@@ -876,11 +876,11 @@ class HotKeyStressIT {
     ALL_METRICS.add(m);
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     ReportPublisher publisher = mock(ReportPublisher.class);
-    doAnswer(inv -> null).when(publisher).publish(anyInt(), any());
+    doAnswer(inv -> null).when(publisher).publish(any(), any());
     int shardCount = 4;
     HotKeyReporter reporter = new HotKeyReporter(
       new WorkerHealthMonitor(), publisher, scheduler, 100, shardCount, "shard-test",
-      10000, 50, shardCount);
+      10000, 50, shardCount, null);
     reporter.start();
     int threadCount = 8;
     int opsPerThread = 20_000;

@@ -748,7 +748,7 @@ Each tracked key follows a lifecycle managed by `HotKeyStateMachine`:
 | --------------------------------------------------------- | ------- | ------------------------------------------------------ |
 | `hotkey.worker.threshold.hot-threshold`                   | `1000`  | Absolute hot threshold (use `-1` to use ratio instead) |
 | `hotkey.worker.threshold.hot-threshold-ratio`             | `0.01`  | Hot threshold as fraction of estimated global QPS      |
-| `hotkey.worker.state-machine.confirm-duration-ms`         | `2000`  | Duration above threshold to confirm HOT (2s)           |
+| `hotkey.worker.state-machine.confirm-duration-ms`         | `300`   | Duration above threshold to confirm HOT (300ms)        |
 | `hotkey.worker.state-machine.cool-duration-ms`            | `15000` | Duration below threshold to confirm COOL (15s)         |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`           | `5000`  | Grace period for silent re-heat (5s)                   |
 
@@ -813,7 +813,7 @@ hotkey:
       hot-threshold-ratio: 0.01
 
     state-machine:
-      confirm-duration-ms: 2000
+      confirm-duration-ms: 300
       cool-duration-ms: 15000
       pre-cool-grace-ms: 5000
 

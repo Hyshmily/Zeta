@@ -158,6 +158,9 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   final List<Long> decisionPropagationNs = Collections.synchronizedList(new ArrayList<>());
   final List<Long> syncPropagationNs = Collections.synchronizedList(new ArrayList<>());
 
+  /** Set during phaseWorkerDecisions to capture decision-to-promotion latency node. */
+  volatile NodeMetrics workerDecPropNode;
+
   // ════════════════════════════════════════════════════════════════════════════════
   // Metrics Framework
   // ════════════════════════════════════════════════════════════════════════════════
@@ -171,6 +174,9 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     final AtomicLong ops = new AtomicLong(0);
     final Map<String, Object> custom = new LinkedHashMap<>();
 
+    /** Per-node latency breakdown across full link. */
+    final Map<String, NodeMetrics> nodeMetrics = new LinkedHashMap<>();
+
     long durationMs;
     long totalOps;
     int errorCount;
@@ -178,9 +184,8 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     double p95Ms;
     double p99Ms;
     double opsPerSecond;
-    long[] sortedLatencies; // computed by finish(); reused by toJson() for histogram
+    long[] sortedLatencies;
 
-    // Histogram bucket boundaries (nanoseconds)
     private static final long[] BUCKET_NS = {
         1_000_000L,    // 0-1 ms
         5_000_000L,    // 1-5 ms
@@ -196,6 +201,11 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
 
     PhaseMetrics(String name) {
       this.name = name;
+    }
+
+    /** Get or create a per-node latency tracker. */
+    NodeMetrics node(String nodeName) {
+      return nodeMetrics.computeIfAbsent(nodeName, NodeMetrics::new);
     }
 
     void recordLatency(long nanos) {
@@ -216,16 +226,27 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
       p95Ms = len > 0 ? sortedLatencies[(int) (len * 0.95)] / 1_000_000.0 : 0;
       p99Ms = len > 0 ? sortedLatencies[(int) (len * 0.99)] / 1_000_000.0 : 0;
       opsPerSecond = durationMs > 0 ? (double) totalOps / durationMs * 1000.0 : 0;
-      takeSystemMetrics();
+      // Finish all node metrics
+      nodeMetrics.values().forEach(NodeMetrics::finish);
       return this;
     }
 
     void logSummary() {
-      log.info(
-        "▸ {}: {} ops in {}ms | {} err | {} ops/s | P50={}ms P95={}ms P99={}ms {}",
-        name, totalOps, durationMs, errorCount, Math.round(opsPerSecond),
-        String.format("%.2f", p50Ms), String.format("%.2f", p95Ms), String.format("%.2f", p99Ms),
-        custom.isEmpty() ? "" : custom.toString());
+      StringBuilder sb = new StringBuilder();
+      sb.append(String.format("▸ %s: %d ops in %dms | %d err | %d ops/s | P50=%.2fms P95=%.2fms P99=%.2fms",
+          name, totalOps, durationMs, errorCount, Math.round(opsPerSecond), p50Ms, p95Ms, p99Ms));
+      // Append per-node breakdown
+      for (Map.Entry<String, NodeMetrics> e : nodeMetrics.entrySet()) {
+        NodeMetrics nm = e.getValue();
+        if (nm.totalOps > 0) {
+          sb.append(String.format(" | %s P50=%.2f P95=%.2f P99=%.2f",
+              e.getKey(), nm.p50Ms, nm.p95Ms, nm.p99Ms));
+        }
+      }
+      if (!custom.isEmpty()) {
+        sb.append(" ").append(custom);
+      }
+      log.info(sb.toString());
     }
 
     ObjectNode toJson(ObjectMapper mapper) {
@@ -242,6 +263,13 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
       // Histogram buckets
       ArrayNode histo = histogramToJson(mapper);
       n.set("latencyHistogram", histo);
+
+      // Per-node latency breakdown
+      ObjectNode nodes = mapper.createObjectNode();
+      for (Map.Entry<String, NodeMetrics> e : nodeMetrics.entrySet()) {
+        nodes.set(e.getKey(), e.getValue().toJson(mapper));
+      }
+      n.set("nodeLatencies", nodes);
 
       ObjectNode cust = mapper.createObjectNode();
       custom.forEach((k, v) -> {
@@ -301,9 +329,46 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
       return buckets;
     }
 
-    private void takeSystemMetrics() {
-      // System metrics are collected inline in toJson(); this is a no-op placeholder
-      // kept for interface consistency.
+    private void takeSystemMetrics() { /* no-op placeholder */ }
+  }
+
+  /**
+   * Per-node latency tracker for full-link node breakdown.
+   * Tracks p50/p95/p99 for each named node (e.g. L1, L2/REDIS, AMQP_SEND, PROPAGATION).
+   */
+  static class NodeMetrics {
+    final String nodeName;
+    final List<Long> latencies = Collections.synchronizedList(new ArrayList<>());
+    long totalOps;
+    double p50Ms;
+    double p95Ms;
+    double p99Ms;
+
+    NodeMetrics(String nodeName) {
+      this.nodeName = nodeName;
+    }
+
+    void record(long nanos) {
+      latencies.add(nanos);
+    }
+
+    NodeMetrics finish() {
+      totalOps = latencies.size();
+      long[] sorted = latencies.stream().mapToLong(Long::longValue).sorted().toArray();
+      int len = sorted.length;
+      p50Ms = len > 0 ? sorted[len / 2] / 1_000_000.0 : 0;
+      p95Ms = len > 0 ? sorted[(int) (len * 0.95)] / 1_000_000.0 : 0;
+      p99Ms = len > 0 ? sorted[(int) (len * 0.99)] / 1_000_000.0 : 0;
+      return this;
+    }
+
+    ObjectNode toJson(ObjectMapper mapper) {
+      ObjectNode n = mapper.createObjectNode();
+      n.put("totalOps", totalOps);
+      n.put("p50Ms", Math.round(p50Ms * 100.0) / 100.0);
+      n.put("p95Ms", Math.round(p95Ms * 100.0) / 100.0);
+      n.put("p99Ms", Math.round(p99Ms * 100.0) / 100.0);
+      return n;
     }
   }
 
@@ -450,6 +515,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     // Phase 10-11: Worker + decision flow
     startWorker();
     phaseWorkerDecisions();                   // 10
+    workerDecPropNode = null;                 // un-wire before stopping
     stopWorker();
 
     // Phase 12: Cross-instance sync
@@ -502,12 +568,15 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   private void phaseHotRead() throws Exception {
     PhaseMetrics m = new PhaseMetrics("hot-read");
     ALL_PHASES.add(m);
+    NodeMetrics l1Node = m.node("L1");
     log.info("══════ Phase 2: HOT READ ══════");
-    log.info("{} threads x {} ops on {} hot keys ...", THREAD_COUNT, OPS_PER_THREAD, HOT_KEY_COUNT);
+    log.info("{} threads x {} ops on {} hot keys (expect L1 hits) ...", THREAD_COUNT, OPS_PER_THREAD, HOT_KEY_COUNT);
     concurrentRun("hotRead", THREAD_COUNT, OPS_PER_THREAD, (idx) -> {
       String key = keyFor(idx % HOT_KEY_COUNT);
+      long t0 = System.nanoTime();
       Optional<String> val = hotKey.get(key, () -> redisTemplate.opsForValue().get(key),
           HARD_TTL, SOFT_TTL);
+      l1Node.record(System.nanoTime() - t0);
       assertThat(val).isPresent();
     }, m);
     assertThat(m.errorCount).isZero();
@@ -523,6 +592,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   private void phaseColdRead() throws Exception {
     PhaseMetrics m = new PhaseMetrics("cold-read");
     ALL_PHASES.add(m);
+    NodeMetrics l2Node = m.node("L2_REDIS");
     log.info("══════ Phase 3: COLD READ ══════");
     log.info("{} threads x {} ops on {} cold keys (expect L2 fallback) ...",
         THREAD_COUNT, OPS_PER_THREAD, COLD_KEY_COUNT);
@@ -533,10 +603,12 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     AtomicLong actualL2Calls = new AtomicLong(0);
     concurrentRun("coldRead", THREAD_COUNT, OPS_PER_THREAD, (idx) -> {
       String key = keyFor(HOT_KEY_COUNT + (idx % COLD_KEY_COUNT));
+      long t0 = System.nanoTime();
       Optional<String> val = hotKey.get(key, () -> {
         actualL2Calls.incrementAndGet();
         return redisTemplate.opsForValue().get(key);
       }, HARD_TTL, SOFT_TTL);
+      l2Node.record(System.nanoTime() - t0);
       assertThat(val).isPresent();
     }, m);
     assertThat(m.errorCount).isZero();
@@ -553,13 +625,16 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   private void phaseWriteStress() throws Exception {
     PhaseMetrics m = new PhaseMetrics("write-stress");
     ALL_PHASES.add(m);
+    NodeMetrics putNode = m.node("PUT_THROUGH");
     log.info("══════ Phase 4: WRITE STRESS ══════");
     log.info("{} threads x {} putThrough ops with Redis persistence ...",
         THREAD_COUNT, OPS_PER_THREAD);
     concurrentRun("writeStress", THREAD_COUNT, OPS_PER_THREAD, (idx) -> {
       String key = "fl:write:" + UUID.randomUUID();
       String value = "w-" + idx;
+      long t0 = System.nanoTime();
       hotKey.putThrough(key, value, () -> redisTemplate.opsForValue().set(key, value));
+      putNode.record(System.nanoTime() - t0);
       String stored = redisTemplate.opsForValue().get(key);
       assertThat(stored).isEqualTo(value);
     }, m);
@@ -834,7 +909,9 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   private void phaseWorkerDecisions() throws Exception {
     PhaseMetrics m = new PhaseMetrics("worker-decisions");
     ALL_PHASES.add(m);
+    NodeMetrics decPropNode = m.node("DECISION_PROPAGATION");
     log.info("══════ Phase 10: WORKER DECISIONS ══════");
+    workerDecPropNode = decPropNode; // wire into worker callback
 
     int decisionCount = 2_000;
     long prevSent = workerDecisionsSent.get();
@@ -912,6 +989,8 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   private void phaseCrossInstanceSync() throws Exception {
     PhaseMetrics m = new PhaseMetrics("cross-instance-sync");
     ALL_PHASES.add(m);
+    NodeMetrics amqpNode = m.node("AMQP_SEND");
+    NodeMetrics syncPropNode = m.node("SYNC_PROPAGATION");
     log.info("══════ Phase 11: CROSS-INSTANCE SYNC ══════");
     log.info("Sending INVALIDATE broadcasts for {} hot keys via RabbitMQ ...", HOT_KEY_COUNT);
 
@@ -932,13 +1011,16 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
         Message msg = new Message(key.getBytes(StandardCharsets.UTF_8), props);
         try {
           rabbitTemplate.send(SYNC_EXCHANGE, "", msg);
+          amqpNode.record(System.nanoTime() - sendTime);
           m.recordOp();
           Thread pollThread = new Thread(() -> {
             try {
               long deadline = System.nanoTime() + 5_000_000_000L;
               while (System.nanoTime() < deadline) {
                 if (hotKey.peek(key).isEmpty()) {
-                  syncPropagationNs.add(System.nanoTime() - sendTime);
+                  long propNs = System.nanoTime() - sendTime;
+                  syncPropagationNs.add(propNs);
+                  syncPropNode.record(propNs);
                   break;
                 }
                 Thread.sleep(1);
@@ -1287,7 +1369,10 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
           Message msg = new Message(key.getBytes(StandardCharsets.UTF_8), props);
           rabbitTemplate.send(BROADCAST_EXCHANGE, "", msg);
           workerDecisionsSent.incrementAndGet();
-          decisionPropagationNs.add(System.nanoTime() - sendTime);
+          long propNs = System.nanoTime() - sendTime;
+          decisionPropagationNs.add(propNs);
+          NodeMetrics dNode = workerDecPropNode;
+          if (dNode != null) dNode.record(propNs);
         }
       } catch (Exception e) {
         log.warn("Worker processing error: {}", e.getMessage());

@@ -112,7 +112,7 @@
 | `hotkey.worker.threshold.hot-threshold`                                   | `1000`                     | Absolute hot-key threshold; `-1` = use ratio-based                   |
 | `hotkey.worker.threshold.hot-threshold-ratio`                             | `0.01`                     | Hot-key threshold as fraction of estimated global QPS (1%)           |
 | **`hotkey.worker.state-machine.*`**                                       |                            | **State Machine**                                                    |
-| `hotkey.worker.state-machine.confirm-duration-ms`                         | `2000`                     | Duration key must stay above threshold to be confirmed HOT           |
+| `hotkey.worker.state-machine.confirm-duration-ms`                         | `300`                      | Duration key must stay above threshold to be confirmed HOT           |
 | `hotkey.worker.state-machine.cool-duration-ms`                            | `15000`                    | Duration key must stay below threshold to be considered COLD         |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`                           | `5000`                     | Grace period at end of cool-down for silent revival                  |
 | **`hotkey.worker.global-qps-dynamic-threshold.*`**                        |                            | **Dynamic Threshold (Global QPS)**                                    |

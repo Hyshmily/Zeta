@@ -88,7 +88,7 @@ import org.testcontainers.utility.DockerImageName;
  * <ul>
  *   <li>report-interval-ms = 1 (was 100) — near-instant flush</li>
  *   <li>warmup-jitter-ms = 0 (was 100) — no thundering-herd protection</li>
- *   <li>confirm-duration-ms = 0 (was 2000) — state machine disabled</li>
+ *   <li>confirm-duration-ms = 0 (was 300) — state machine disabled</li>
  *   <li>sliding-window slices at hardware minimum</li>
  * </ul>
  */
@@ -134,6 +134,8 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     r.add("hotkey.local.report-interval-ms", () -> "1");          // default 100 → 1
     r.add("hotkey.worker-listener.warmup-jitter-ms", () -> "0");  // default 100 → 0
     r.add("hotkey.sync.warmup-jitter-ms", () -> "0");             // default 100 → 0
+    r.add("hotkey.worker.sliding-window.duration-ms", () -> "100"); // default 1000 → 100
+    r.add("hotkey.worker.sliding-window.slices", () -> "100");      // default 10 → 100 (1ms per slice)
   }
 
   // ── Injection ──

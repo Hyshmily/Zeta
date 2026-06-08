@@ -82,41 +82,43 @@ Uses [HeavyKeeper](https://github.com/go-kratos/aegis) (Count-Min Sketch variant
 > [!WARNING]
 > **Extreme Performance**
 >
-> Pushing certain parameters to their limits can reduce full-chain latency to as low as **~7.5ms** (P50), but this is **not recommended** for production use.
+> Pushing certain parameters to their limits can reduce full-chain latency to as low as **~9ms** (P50), but this is **not recommended** for production use.
 >
 > HotKey's default parameters are deliberately conservative. The framework prioritizes the reliability of the distributed cluster over sheer speed:
 >
-> **The State Machine enforces "one broadcast per key per lifecycle"**, fundamentally eliminating the client CPU overload and self-inflicted congestion caused by redundant broadcasts. In extreme testing, the SM‑0‑confirm path produced only 10 broadcasts, while the no‑SM path generated 86, inflating latency by roughly 9× (65.88ms → 7.54ms).
+> **The State Machine enforces "one broadcast per key per lifecycle"**, fundamentally eliminating the client CPU overload and self-inflicted congestion caused by redundant broadcasts. In extreme testing, the SM‑0‑confirm path produced only 10 broadcasts, while the no‑SM path generated many more redundant broadcasts, inflating latency dramatically.
 >
-> **The default 2‑second confirmation window** is not sluggishness—it is a continuous observation period that delivers near‑zero false‑positive global decisions. During those 2 seconds, the local HeavyKeeper has already completed nanosecond‑level protection, so user requests experience zero blocking.
+> **The default 300ms confirmation window** (3 windows × 100ms slice) is not sluggishness—it is a continuous observation period that delivers near‑zero false‑positive global decisions. During those 300ms, the local HeavyKeeper has already completed nanosecond‑level protection, so user requests experience zero blocking.
 >
 > **Warmup jitter and batch intervals** are classic distributed‑system techniques for thundering‑herd prevention and load smoothing. They trade a few tens of milliseconds of latency for cluster‑wide stability.
 >
-> The extreme parameters exist to **demonstrate the framework's full‑chain performance ceiling** (~7.5ms) and to serve as a tuning reference for edge cases. Unless you fully understand and are willing to accept the trade‑offs—higher false‑positive rates, degraded statistical accuracy, client CPU overload—stick with the defaults or rigorously tested values.
+> The extreme parameters exist to **demonstrate the framework's full‑chain performance ceiling** (~9ms) and to serve as a tuning reference for edge cases. Unless you fully understand and are willing to accept the trade‑offs—higher false‑positive rates, degraded statistical accuracy, client CPU overload—stick with the defaults or rigorously tested values.
 
 <details>
 <summary><b>Click to expand — full chain breakdown and extreme tuning notes</b></summary>
 
 See the [benchmark report](docs/HotKey_Benchmark_Report.en.md)
-for detailed latency breakdowns of each component （[Extreme parameter tuning comparison](docs/img/latency_distribution_heatmap.png)）:
+for detailed latency breakdowns of each component （[Latency distribution heatmap](docs/img/latency_distribution_heatmap.png)）:
 
-| Path                                        | Description                                                      | P50          | P95          | P99          |
-| ------------------------------------------- | ---------------------------------------------------------------- | ------------ | ------------ | ------------ |
-| L1 Hit (Caffeine lookup)                    | Pure memory lookup, no network I/O                               | **0.001 ms** | 0.004 ms     | 0.018 ms     |
-| L1 Miss → Redis → L1                        | Redis GET RTT + SingleFlight dedup + L1 repopulation             | 0.51 ms      | 0.94 ms      | 2.26 ms      |
-| AMQP Publish                                | RabbitMQ channel write (memory-to-memory)                        | 0.02 ms      | 0.11 ms      | 0.27 ms      |
-| AMQP E2E Delivery                           | Publish + broker routing + consumer delivery                     | 0.07 ms      | 0.27 ms      | 0.48 ms      |
-| Redis GET RTT                               | Pure network round-trip                                          | 0.62 ms      | 1.60 ms      | 4.01 ms      |
-| Worker Decision Pipeline                    | Sliding window → AMQP broadcast, includes jitter+AMQP+L1 polling | **51.64 ms** | 97.75 ms     | 104.16 ms    |
-| State Machine Pipeline (20 confirm windows) | 20 confirm windows(2s) + AMQP decision broadcast + L1 promotion  | **1,983 ms** | 2,015 ms     | 2,015 ms     |
-| **Full Chain (SM 20 confirm windows)**      | **Step breakdown below**                                         | **2,038 ms** | **2,055 ms** | **2,055 ms** |
-| ┣ L1 Miss → Redis → L1                      | Same as Phase 6                                                  | 0.51 ms      | —            | —            |
-| ┣ Report batch wait                         | `report-interval-ms=100ms` half-interval average                 | ~50 ms       | —            | —            |
-| ┣ AMQP Report Delivery (App→Worker)         | flush() → Report Exchange → Worker                               | ~1 ms        | —            | —            |
-| ┣ Worker Sliding Window + TopK              | In-memory, negligible                                            | <1 ms        | —            | —            |
-| ┣ SM Confirm Pipeline (20 windows)          | 20 consecutive hot windows × 100ms slice                         | ~2,000 ms    | —            | —            |
-| ┣ AMQP Decision Broadcast (Worker→App)      | WorkerListener receives decision                                 | ~1 ms        | —            | —            |
-| ┗ Remainder (scheduling + polling + noise)  | Two AMQP dispatch + isLocalHotKey() polling + variance           | ~52 ms       | —            | —            |
+| Path                                        | Description                                                      | P50            | P95            | P99            |
+| ------------------------------------------- | ---------------------------------------------------------------- | -------------- | -------------- | -------------- |
+| L1 Hit (Caffeine lookup)                    | Pure memory lookup, no network I/O                               | **0.001 ms**   | 0.004 ms       | 0.011 ms       |
+| L1 Miss → Redis → L1                        | Redis GET RTT + SingleFlight dedup + L1 repopulation             | 0.47 ms        | 0.87 ms        | 1.65 ms        |
+| AMQP Publish                                | RabbitMQ channel write (memory-to-memory)                        | 0.02 ms        | 0.12 ms        | 0.16 ms        |
+| AMQP E2E Delivery                           | Publish + broker routing + consumer delivery                     | 0.07 ms        | 0.25 ms        | 0.38 ms        |
+| Redis GET RTT                               | Pure network round-trip                                          | 0.44 ms        | 0.91 ms        | 1.91 ms        |
+| Worker Decision Pipeline                    | Sliding window → AMQP broadcast, includes jitter+AMQP+L1 polling | **56.38 ms**   | 99.21 ms       | 103.56 ms      |
+| State Machine Pipeline (3 confirm windows)  | 3 confirm windows(300ms) + AMQP decision broadcast + L1 promotion | **246.46 ms** | 295.00 ms ^^   | 295.00 ms ^^   |
+| **Full Chain (SM 3 confirm windows)**       | **Step breakdown below**                                         | **298.19 ms**  | **351.50 ms ^^**  | **351.50 ms ^^**  |
+| ┣ L1 Miss → Redis → L1                      | Same as Phase 6                                                  | 0.47 ms        | 0.87 ms        | 1.65 ms        |
+| ┣ Report batch wait                         | `report-interval-ms=100ms` half-interval average                 | ~50 ms         | — ^            | — ^            |
+| ┣ AMQP Report Delivery (App→Worker)         | flush() → Report Exchange → Worker                               | ~1 ms          | — ^            | — ^            |
+| ┣ Worker Sliding Window + TopK              | In-memory, negligible                                            | <1 ms          | — ^            | — ^            |
+| ┣ SM Confirm Pipeline (3 windows)           | 3 confirm windows + AMQP broadcast + WorkerListener + L1 promote | ~246 ms        | 295.00 ms      | 295.00 ms      |
+| ┗ Remainder (scheduling + polling + noise)  | isLocalHotKey() polling + scheduling variance                    | ~1 ms          | — ^            | — ^            |
+
+> ^ P95/P99 are not additive — the tail of individual sub-steps does not correlate to the tail of the composite. Only measured phases (L1 Miss → Redis, SM Pipeline) show real P95/P99. The P50 sum (~298ms) approximately matches the Full Chain P50 (298.19ms) because means are additive. The Full Chain P50 of **298ms** is within **0.6%** of the theoretical 300ms confirm window floor.
+> ^^ Full Chain SM 3 confirm and SM Pipeline phases have P95=P99=Max because each uses only **10 keys** (one measurement per key). With 10 samples, P95 = 9.5th → 10th value = Max, and P99 = 9.9th → 10th value = Max. The percentiles are identical to the maximum, not a measurement artifact.
 
 **Extreme parameter tuning — trading reliability for latency:**
 
@@ -126,21 +128,21 @@ for detailed latency breakdowns of each component （[Extreme parameter tuning c
 | `hotkey.worker-listener.warmup-jitter-ms`             | 0                 | Disables warmup jitter (thundering-herd protection lost), Worker decision runs instantly | —                                                |
 | `hotkey.sync.warmup-jitter-ms`                        | 0                 | Same as above, for cross-instance sync listener                                          | —                                                |
 | `hotkey.worker.state-machine.confirm-duration-ms`     | 0                 | Disables state-machine confirm windows — broadcasts HOT on first hot window              | —                                                |
-| `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 → 100/100 | Shrinks tick interval, reduces next-tick wait (avg~50ms→~5ms)                            | Window statistical precision drops significantly |
+| `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 → 100/100 | Shrinks tick interval from 100ms to 1ms, reduces next-tick wait (avg~50ms→~0.5ms) | Window statistical precision drops significantly |
 
 **Measured latency under extreme tuning** ([Extreme parameter tuning comparison](docs/img/extreme_tuning_comparison.png)):
 
-| Scenario                 | Default (20 confirm) P50 | Extreme (0 confirm) P50 | Extreme P95 | Extreme P99 |
-| ------------------------ | ------------------------ | ----------------------- | ----------- | ----------- |
-| Worker Decision Pipeline | 63.78 ms                 | **2.35 ms**             | 3.77 ms     | 5.16 ms     |
-| SM Confirm Pipeline      | 2,000.42 ms              | **6.80 ms**             | 8.03 ms     | 8.03 ms     |
-| Full Chain               | 2,024.38 ms              | **7.54 ms**             | 8.56 ms     | 8.56 ms     |
+| Scenario                 | Default (3 confirm) P50 | Extreme (0 confirm) P50 | Extreme P95 | Extreme P99 |
+| ------------------------ | ----------------------- | ----------------------- | ----------- | ----------- |
+| Worker Decision Pipeline | 56.38 ms                | **2.41 ms**             | 11.89 ms    | 12.40 ms    |
+| SM Confirm Pipeline      | 246.46 ms               | **7.71 ms**             | 8.53 ms     | 8.53 ms     |
+| Full Chain               | 298.19 ms               | **9.23 ms**             | 10.93 ms    | 10.93 ms    |
 
-All scenarios use the state machine — the difference is `confirm-duration-ms=2000` (default 20 windows) and `0` (broadcast on first hot window). The state machine gates broadcast volume: each key broadcasts once per lifecycle regardless of confirm window count. All scenarios are constrained by Redis GET RTT (~0.5 ms P50) and AMQP delivery (~2.5 ms P50).
+All scenarios use the state machine — the difference is `confirm-duration-ms=300` (default 3 windows) and `0` (broadcast on first hot window). The state machine gates broadcast volume: each key broadcasts once per lifecycle regardless of confirm window count. All scenarios are constrained by Redis GET RTT (~0.5 ms P50) and AMQP delivery (~2.5 ms P50).
 
 **Costs:**
 
-- Under extreme tuning, the report frequency surges from ~10 batches/s to ~1000 batches/s. The RabbitMQ broker itself can handle this load, but **without the State Machine's broadcast compression, the Worker would convert every sliding-window verdict into a broadcast**, flooding client consumers with massive redundant messages and dramatically increasing CPU overhead. **The State Machine eliminates this risk by ensuring "one broadcast per key per lifecycle"** — in the SM 0-confirm extreme test, 10 keys generated only 10 broadcasts, whereas the no-SM path under identical conditions generated 86 broadcasts, inflating latency by roughly 9× (65.88ms vs 7.54ms).
+- Under extreme tuning, the report frequency surges from ~10 batches/s to ~1000 batches/s. The RabbitMQ broker itself can handle this load, but **without the State Machine's broadcast compression, the Worker would convert every sliding-window verdict into a broadcast**, flooding client consumers with massive redundant messages and dramatically increasing CPU overhead. **The State Machine eliminates this risk by ensuring "one broadcast per key per lifecycle"** — in the SM 0-confirm extreme test, 10 keys generated only 10 broadcasts, whereas the no-SM path under identical conditions generated many more redundant broadcasts, inflating latency dramatically (68.95ms vs 9.23ms).
 - Disabling warmup jitter lets millisecond traffic spikes trigger HOT broadcasts, raising false-positive rates
 - Disabling confirm windows means any transient burst immediately escalates to a global hot key, amplifying false positives
 - Reducing sliding-window `sliceMs` (via duration/slices) loses statistical accuracy — short-lived bursts are more likely to trigger false HOT decisions
@@ -360,7 +362,7 @@ hotkey:
       hot-threshold-ratio: 0.01             # relative QPS ratio (1%)
 
     state-machine:
-      confirm-duration-ms: 2000             # confirm window (ms), sustained heat before HOT
+      confirm-duration-ms: 300              # confirm window (ms), sustained heat before HOT
       cool-duration-ms: 15000               # cool window (ms), sustained cool before COOL
       pre-cool-grace-ms: 5000               # pre-cool grace period (ms)
 

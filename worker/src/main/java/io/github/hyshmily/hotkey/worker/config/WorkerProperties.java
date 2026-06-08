@@ -75,7 +75,7 @@ public class WorkerProperties {
   @Data
   public static class StateMachine {
 
-    private long confirmDurationMs = 2000;
+    private long confirmDurationMs = 300;
     private long coolDurationMs = 15000;
     private long preCoolGraceMs = 5000;
   }

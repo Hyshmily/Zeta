@@ -112,7 +112,7 @@
 | `hotkey.worker.threshold.hot-threshold`                                   | `1000`                      | 绝对热点阈值；`-1` = 使用比例阈值                          |
 | `hotkey.worker.threshold.hot-threshold-ratio`                             | `0.01`                      | 热点阈值占估计全局 QPS 的比例（1%）                        |
 | **`hotkey.worker.state-machine.*`**                                       |                             | **状态机**                                                 |
-| `hotkey.worker.state-machine.confirm-duration-ms`                         | `2000`                      | key 持续超过阈值才确认 HOT 的时长                          |
+| `hotkey.worker.state-machine.confirm-duration-ms`                         | `300`                       | key 持续超过阈值才确认 HOT 的时长                          |
 | `hotkey.worker.state-machine.cool-duration-ms`                            | `15000`                     | key 持续低于阈值才确认 COLD 的时长                         |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`                           | `5000`                      | COOL 结束时的宽限期，允许静默恢复                          |
 | **`hotkey.worker.global-qps-dynamic-threshold.*`**                        |                             | **动态阈值（全局 QPS）**                                   |

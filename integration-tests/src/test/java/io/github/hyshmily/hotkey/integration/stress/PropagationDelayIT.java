@@ -361,8 +361,8 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     phaseL2ColdGet();                       // 6: HotKey L1 miss→Redis→L1 populate
     phaseWorkerDecisionPipeline();          // 7: Report→AMQP→Worker→AMQP→L1 update
     phaseStateMachinePipeline();            // 8: State machine confirm windows + AMQP + L1
-    phaseFullChainWithSM(false);            // 9A: Full chain, SM 0 confirm (test-only no-SM path)
-    phaseFullChainWithSM(true);             // 9B: Full chain, SM 20 confirm (default)
+    phaseFullChainNoSM();                   // 9A: Full chain without SM
+    phaseFullChainWithSM();                 // 9B: Full chain with SM (confirmWindows=3)
 
     // Assert all phases
     long totalErrors = ALL_PHASES.stream().mapToInt(m -> m.errorCount).sum();
@@ -691,10 +691,10 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   private void phaseStateMachinePipeline() throws Exception {
     PhaseMetrics m = new PhaseMetrics("state_machine_pipeline");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 8: STATE MACHINE PIPELINE (confirmWindows=20, sliceMs=100ms) ══════");
+    log.info("══════ Phase 8: STATE MACHINE PIPELINE (confirmWindows=3, sliceMs=100ms) ══════");
 
     int count = 10;
-    int confirmWindows = 20; // default: confirmDurationMs=2000 / sliceMs=100
+    int confirmWindows = 3; // default: confirmDurationMs=300 / sliceMs=100
     int coolWindows = 150;
     int preCoolGraceWindows = 50;
 
@@ -723,7 +723,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     for (String key : keys) {
       pool.submit(() -> {
         try {
-          // Phase A: Simulate confirm windows (~2s wall-clock)
+          // Phase A: Simulate confirm windows (~300ms wall-clock)
           long startTotal = System.nanoTime();
           for (int w = 0; w < confirmWindows; w++) {
             sm.evaluate(key, true);
@@ -779,7 +779,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     m.custom.put("confirmWindows", confirmWindows);
     m.custom.put("sliceMs", 100);
     m.custom.put("expectedMinConfirmMs", confirmWindows * 100);
-    m.custom.put("stateMachineConfig", "confirmDurationMs=2000, coolDurationMs=15000, preCoolGraceMs=5000");
+    m.custom.put("stateMachineConfig", "confirmDurationMs=300, coolDurationMs=15000, preCoolGraceMs=5000");
     m.finish().logSummary();
   }
 
@@ -792,7 +792,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   }
 
   // ════════════════════════════════════════════════════════════════════════════════
-  // Phase 9B: Full Chain with State Machine (confirmWindows=20)
+  // Phase 9B: Full Chain with State Machine (confirmWindows=3)
   // ════════════════════════════════════════════════════════════════════════════════
 
   private void phaseFullChainWithSM() throws Exception {
@@ -808,7 +808,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
       withStateMachine ? "B (with SM)" : "A (without SM)");
 
     int count = 10;
-    int confirmWindows = 20;
+    int confirmWindows = 3;
     String appName = "integration-test";
 
     rabbitTemplate.execute(channel -> {

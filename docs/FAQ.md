@@ -8,11 +8,11 @@ First, a disclaimer: most issues can be fully resolved by tuning the parameters.
 
 ## Q1: Why both local HeavyKeeper AND a central Worker? Isn't local detection enough?
 
-**Short answer:** Local detection is for _self-preservation_ (nanosecond-level); the central Worker is for _cluster coordination_ (100ms–2s level). They serve different time scales and purposes.
+**Short answer:** Local detection is for _self-preservation_ (nanosecond-level); the central Worker is for _cluster coordination_ (100ms–300ms level). They serve different time scales and purposes.
 
 | Aspect            | Local HeavyKeeper                                    | Central Worker                                                      |
 | ----------------- | ---------------------------------------------------- | ------------------------------------------------------------------- |
-| **Response time** | Nanoseconds                                          | ~100ms–2s (report interval + sliding window accumulation)           |
+| **Response time** | Nanoseconds                                          | ~100ms–300ms (report interval + sliding window accumulation)        |
 | **Scope**         | Single instance                                      | Cluster-wide                                                        |
 | **Purpose**       | Immediate hot-key TTL promotion to protect this node | Global consensus, cross-instance pre-warming, coordinated cool-down |
 | **When it acts**  | On every `get()` call                                | After accumulating enough window data                               |
@@ -23,7 +23,7 @@ First, a disclaimer: most issues can be fully resolved by tuning the parameters.
 
 2. **Meanwhile,** `get()` also calls `hotKeyReporter.record(key)` → `HotKeyReporter` accumulates in a local Caffeine counter → every `reportIntervalMs` (100ms) flushes to RabbitMQ.
 
-3. **Worker receives the report** → `ReportConsumer.onReport()` feeds `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` tracks consecutive hot windows → after `confirmDurationMs` (2s) of sustained heat, broadcasts HOT to **all instances**.
+3. **Worker receives the report** → `ReportConsumer.onReport()` feeds `detector.addCount(key, count)` → `HotKeyStateMachine.evaluate()` tracks consecutive hot windows → after `confirmDurationMs` (300ms) of sustained heat, broadcasts HOT to **all instances**.
 
 4. **Instances B, C, D** receive HOT via `WorkerListener` → pre-warm from Redis → cached with hot TTL before traffic reaches them.
 
@@ -41,27 +41,29 @@ First, a disclaimer: most issues can be fully resolved by tuning the parameters.
 t=0ms    Key X first accessed on Node A
 t=+1μs   Local HeavyKeeper: "looks hot" → cached with 1h hot TTL on Node A
 t=+100ms HotKeyReporter flush → Worker receives first batch, key above threshold → tick 1
-t=+2.0s   20 consecutive hot ticks (2000ms total, confirmCount=20) → CONFIRMED_HOT
-t=+2.0s   Broadcast sent to all nodes (AMQP, same tick)
-t=+2.1s   Nodes B, C, D receive HOT → pre-warm from Redis → cached with hot TTL
-(Setting confirm-duration-ms to 0 collapses the full-chain latency to ~7.5ms)
+t=+300ms  3 consecutive hot ticks (300ms total, confirmCount=3) → CONFIRMED_HOT
+t=+300ms  Broadcast sent to all nodes (AMQP, same tick)
+t=+360ms  Nodes B, C, D receive HOT → pre-warm from Redis → cached with hot TTL
+(Setting confirm-duration-ms to 0 with report-interval-ms=1 and sliding-window=100/100 collapses the full-chain latency to ~9ms)
 ```
 
-**A real hot key stays hot for minutes or hours**, not milliseconds. The ~2s Worker latency (default `confirmDurationMs=2000`, evaluated every 100ms = 20 ticks) is negligible compared to the total hot duration. Meanwhile, the node that got the first punch was already protected in microseconds.
+**A real hot key stays hot for minutes or hours**, not milliseconds. The ~300ms Worker latency (default `confirmDurationMs=300`, evaluated every 100ms = 3 ticks) is negligible compared to the total hot duration. Meanwhile, the node that got the first punch was already protected in microseconds.
 
 **Measured latencies** (from `PropagationDelayIT`, 10 phases, 45k ops, 0 errors):
 
-| Scenario                     | P50          | P95      | P99       |
-| ---------------------------- | ------------ | -------- | --------- |
-| Worker Decision Pipeline     | **51.64 ms** | 97.75 ms | 104.16 ms |
-| SM Confirm Pipeline (20 win) | **1,983 ms** | 2,015 ms | 2,015 ms  |
-| Full Chain (SM 20 confirm)   | **2,038 ms** | 2,055 ms | 2,055 ms  |
+| Scenario                     | P50            | P95        | P99         |
+| ---------------------------- | -------------- | ---------- | ----------- |
+| Worker Decision Pipeline     | **56.38 ms**   | 99.21 ms   | 103.56 ms   |
+| SM Confirm Pipeline (3 win)  | **246.46 ms**  | 295.00 ms† | 295.00 ms†  |
+| Full Chain (SM 3 confirm)    | **298.19 ms**  | 351.50 ms† | 351.50 ms†  |
 
-- **Worker Decision Pipeline** (Phase 7): Worker detects hot key and initiates AMQP broadcast. P50=51.6ms includes `warmupJitterMs=100ms` + AMQP + L1 polling.
-- **SM Confirm Pipeline** (Phase 8): ~2.0s dominated by confirm windows (20 × 100ms = 2,000ms). After confirmation, same AMQP path (~52ms). Configurable.
-- **Full Chain (SM 20 confirm)** (Phase 9): End-to-end — local Caffeine miss → report aggregation (100ms batch) → AMQP report delivery → SlidingWindowDetector → SM confirm (20 windows) → AMQP decision broadcast → L1 promotion. Total latency dominated by the 2s confirm floor.
+> † P95=P99=Max because these phases use only **10 keys** (10 samples). With N=10, P95=9.5th→10th=Max, P99=9.9th→10th=Max. Percentiles identical to max, not a measurement artifact.
 
-> **Extreme parameter tuning** (PropagationDelayExtremeIT, same containers, report-interval-ms=1, warmup-jitter-ms=0, confirm-duration-ms=0) collapses these dramatically: Worker Decision Pipeline → **2.35ms P50**, SM Pipeline (0 confirm) → **6.80ms P50**, Full Chain (SM 0 confirm) → **7.54ms P50** (all with equal 10-key counts). See the [README extreme tuning section](../README.md#extreme-parameter-tuning--trading-reliability-for-latency) for trade-offs.
+- **Worker Decision Pipeline** (Phase 7): Worker detects hot key and initiates AMQP broadcast. P50=56.38ms includes `warmupJitterMs=100ms` + AMQP + L1 polling.
+- **SM Confirm Pipeline** (Phase 8): ~246ms dominated by confirm windows (3 × 100ms = 300ms). After confirmation, same AMQP path (~56ms with jitter). Configurable.
+- **Full Chain (SM 3 confirm)** (Phase 9): End-to-end — local Caffeine miss → report aggregation (100ms batch) → AMQP report delivery → SlidingWindowDetector → SM confirm (3 windows) → AMQP decision broadcast → L1 promotion. Total latency ~298ms P50.
+
+> **Extreme parameter tuning** (PropagationDelayExtremeIT, same containers, report-interval-ms=1, warmup-jitter-ms=0, confirm-duration-ms=0, sliding-window=100/100) collapses these dramatically: Worker Decision Pipeline → **2.41ms P50**, SM Pipeline (0 confirm) → **7.71ms P50**, Full Chain (SM 0 confirm) → **9.23ms P50** (all with equal 10-key counts). The gap from default (3 windows, 298.19ms P50) to extreme (0 window, 9.23ms P50) is a **96.9% reduction**. See the [README extreme tuning section](../README.md#extreme-parameter-tuning--trading-reliability-for-latency) for trade-offs.
 
 **What about a brief 100ms spike?** That's not a cluster-level hot key — it's a local blip. Local HeavyKeeper handles it with a longer TTL. Worker never needs to broadcast. They serve different purposes.
 
@@ -169,10 +171,10 @@ These keys would **never** trigger the sliding-window threshold (default 1000 QP
 
 4. **t+100ms:** `HotKeyReporter` flushes the first batch of counts to the Worker (`reportIntervalMs=100` per `HotKeyProperties.java:148`). `reporter_highFrequency` stress test confirms **3M ops/s throughput with zero data loss**.
 
-5. **t+~2.1s:** After 20 consecutive hot evaluations (confirmCount=20 × 100ms/tick = 2000ms, per `WorkerProperties.java:74,124`), state machine transitions to CONFIRMED_HOT and broadcasts. The state machine guarantees each key broadcasts **only once per lifecycle** — extreme tests show SM-0-confirm path produces 10 broadcasts vs 86 for the without-SM path (a ~9× latency amplification from 7.54ms to 65.88ms). This is one of the framework's proudest design achievements.
+5. **t+~360ms:** After 3 consecutive hot evaluations (confirmCount=3 × 100ms/tick = 300ms, per `WorkerProperties.java:74,124`), state machine transitions to CONFIRMED_HOT and broadcasts. The state machine guarantees each key broadcasts **only once per lifecycle** — extreme tests show SM-0-confirm path produces 10 broadcasts vs 86 for the without-SM path (a ~9× latency amplification from 7.54ms to 65.88ms). This is one of the framework's proudest design achievements.
 
-6. **t+~2.15s:** All nodes receive HOT (propagation benchmark P50=51.64ms, P95=97.75ms, P99=104.16ms) → upgrade key to hot TTL (1h per `HotKeyProperties.java:87`) and enable soft expiration.
+6. **t+~410ms:** All nodes receive HOT (propagation benchmark P50=56.28ms, P95=100.24ms, P99=102.44ms) → upgrade key to hot TTL (1h per `HotKeyProperties.java:87`) and enable soft expiration.
 
-The Worker broadcast solves the _second_ and subsequent waves — ensuring that when traffic continues (as real hot keys do), all nodes have the optimal hot-key configuration. The default 2-second confirm window is a deliberate stability choice; during those 2 seconds, the local HeavyKeeper, SingleFlight, and normal TTL form a three-layer protection barrier with zero request blocking.
+The Worker broadcast solves the _second_ and subsequent waves — ensuring that when traffic continues (as real hot keys do), all nodes have the optimal hot-key configuration. The default 300ms confirm window is a deliberate stability choice; during those 300ms, the local HeavyKeeper, SingleFlight, and normal TTL form a three-layer protection barrier with zero request blocking.
 
 For latency-critical scenarios, specific parameters can be tuned to collapse the full-chain delay to ~7.5ms — at the cost of confirm-window protection and the broadcast compression advantage of the state machine. This extreme case is rarely encountered in practice and typically requires a traffic surge of extraordinary magnitude.
