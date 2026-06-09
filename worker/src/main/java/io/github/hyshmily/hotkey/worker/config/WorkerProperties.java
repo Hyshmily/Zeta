@@ -42,7 +42,6 @@ public class WorkerProperties {
     private String appName = "default";
     private int shardCount = 1;
     private int shardIndex = 0;
-    private String nodeId = "";
   }
 
   /** AMQP exchange names for report and broadcast messages. */

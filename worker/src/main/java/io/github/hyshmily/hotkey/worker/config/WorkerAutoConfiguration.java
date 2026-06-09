@@ -19,9 +19,9 @@ import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.ThresholdLearner;
@@ -32,6 +32,7 @@ import jakarta.annotation.PostConstruct;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -80,6 +81,14 @@ public class WorkerAutoConfiguration {
   private final WorkerProperties properties;
 
   /**
+   * Worker node identity — auto-generated once per JVM.
+   *
+   * <p>Used in queue names ({@code hotkey.worker.config.<nodeId>}) and heartbeat
+   * messages to identify this Worker instance uniquely.
+   */
+  private final String nodeId = InstanceIdGenerator.get();
+
+  /**
    * Validates that the sliding-window duration is evenly divisible by the
    * number of slices to avoid rounding inaccuracies.
    */
@@ -114,18 +123,6 @@ public class WorkerAutoConfiguration {
       properties.getSlidingWindow().getSlices(),
       threshold
     );
-  }
-
-  /**
-   * Worker node identity.
-   * <p>Uses the configured {@code hotkey.worker.routing.node-id} if set,
-   * otherwise falls back to {@link InstanceIdGenerator#get()}.
-   */
-  @Bean
-  public String workerNodeId(WorkerProperties properties) {
-    String configured = properties.getRouting().getNodeId();
-    if (!configured.isBlank()) return configured;
-    return InstanceIdGenerator.get();
   }
 
   /** Creates the per‑key lifecycle state machine. */
@@ -195,11 +192,18 @@ public class WorkerAutoConfiguration {
 
   /** Broadcasts HOT / COOL decisions to all application instances. */
   @Bean
-  public WorkerBroadcaster workerBroadcaster(RabbitTemplate rabbitTemplate, WorkerProperties properties) {
+  public WorkerBroadcaster workerBroadcaster(
+    RabbitTemplate rabbitTemplate,
+    WorkerProperties properties,
+    HotKeyStateMachine stateMachine,
+    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter
+  ) {
     return new WorkerBroadcaster(
       rabbitTemplate,
       properties.getMessaging().getBroadcastExchange(),
-      properties.getRouting().getAppName()
+      properties.getRouting().getAppName(),
+      stateMachine,
+      configTimestampCounter
     );
   }
 
@@ -218,7 +222,7 @@ public class WorkerAutoConfiguration {
 
   /**
    * Direct exchange to which clients publish report messages.
-   * Routing keys follow the pattern {@code report.<appName>.<shardIndex>}.
+   * Routing keys follow the pattern {@code report.<appName>.<nodeId>}.
    */
   @Bean
   public DirectExchange reportExchange(WorkerProperties properties) {
@@ -231,24 +235,57 @@ public class WorkerAutoConfiguration {
    * guaranteeing that a key always lands on the same Worker.
    */
   @Bean
-  public Queue reportQueue(WorkerProperties properties, @Qualifier("workerNodeId") String nodeId) {
-    String queueName =
-      HotKeyConstants.QUEUE_PREFIX_REPORT +
-      properties.getRouting().getAppName() +
-      "." +
-      nodeId;
+  public Queue reportQueue(WorkerProperties properties) {
+    String queueName = HotKeyConstants.QUEUE_PREFIX_REPORT + properties.getRouting().getAppName() + "." + nodeId;
     return QueueBuilder.durable(queueName).build();
   }
 
   /** Binds the queue to the report exchange with the matching routing key. */
   @Bean
-  public Binding reportBinding(Queue reportQueue, DirectExchange reportExchange, WorkerProperties properties, @Qualifier("workerNodeId") String nodeId) {
-    String routingKey =
-      HotKeyConstants.ROUTING_KEY_REPORT +
-      properties.getRouting().getAppName() +
-      "." +
-      nodeId;
+  public Binding reportBinding(Queue reportQueue, DirectExchange reportExchange, WorkerProperties properties) {
+    String routingKey = HotKeyConstants.ROUTING_KEY_REPORT + properties.getRouting().getAppName() + "." + nodeId;
     return BindingBuilder.bind(reportQueue).to(reportExchange).with(routingKey);
+  }
+
+  /**
+   * Auto-delete queue for receiving heartbeat-based config updates from
+   * other Workers.
+   *
+   * <p>Each Worker declares its own queue named
+   * {@code hotkey.worker.config.<nodeId>}, which is automatically removed
+   * when the Worker disconnects.  The queue is bound directly to the
+   * {@code broadcastExchange} — the same exchange that
+   * {@link WorkerBroadcaster} (and all app-side WorkerListeners) publish
+   * heartbeats to.
+   */
+  @Bean
+  public Queue workerConfigQueue() {
+    return QueueBuilder.nonDurable("hotkey.worker.config." + nodeId).autoDelete().build();
+  }
+
+  /** Binds the per-Worker config queue to the shared broadcast exchange. */
+  @Bean
+  public Binding workerConfigBinding(Queue workerConfigQueue, WorkerProperties properties) {
+    return new Binding(
+      workerConfigQueue.getName(),
+      Binding.DestinationType.QUEUE,
+      properties.getMessaging().getBroadcastExchange(),
+      "",
+      null
+    );
+  }
+
+  /**
+   * Monotonically increasing counter for config-change timestamps.
+   *
+   * <p>Every {@code POST /actuator/worker/state} call increments this counter.
+   * Receiving Workers compare their own counter against the incoming value;
+   * only strictly newer configs are applied.
+   */
+  @Bean
+  @Qualifier("configTimestampCounter")
+  public AtomicLong configTimestampCounter() {
+    return new AtomicLong(0);
   }
 
   /**
@@ -356,6 +393,26 @@ public class WorkerAutoConfiguration {
     return new ThresholdLearner(estimator, detector, properties);
   }
 
+  /**
+   * Listens for heartbeat-based config updates from peer Workers and applies
+   * them if the received config timestamp is newer than the local one.
+   *
+   * <p>On startup, waits up to 3 seconds for the first heartbeat to arrive.
+   * If none is received, the Worker continues with the values from
+   * {@link WorkerProperties}.
+   *
+   * @param stateMachine           the worker's state machine
+   * @param configTimestampCounter the shared config-change timestamp counter
+   * @return a new {@link WorkerConfigNegotiator} instance
+   */
+  @Bean
+  public WorkerConfigNegotiator workerConfigNegotiator(
+    HotKeyStateMachine stateMachine,
+    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter
+  ) {
+    return new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId);
+  }
+
   @Bean
   public Object thresholdLearningTask(
     ThresholdLearner learner,
@@ -375,23 +432,20 @@ public class WorkerAutoConfiguration {
    * Schedules a periodic heartbeat ping broadcast for this worker instance.
    *
    * @param broadcaster the worker broadcaster used to send the heartbeat
-   * @param properties  worker configuration properties (shard index and ping
-   *                    interval are extracted from here)
+   * @param properties  worker configuration properties (ping interval
+   *                    is extracted from here)
    * @param scheduler   the shared worker scheduler
-   * @param nodeId      the unique node identifier for this worker
    * @return a placeholder {@link Object} bean that keeps the scheduler alive
    */
   @Bean
   public Object pingTask(
     WorkerBroadcaster broadcaster,
     WorkerProperties properties,
-    @Qualifier("hotKeyWorkerScheduler") ScheduledExecutorService scheduler,
-    @Qualifier("workerNodeId") String nodeId
+    @Qualifier("hotKeyWorkerScheduler") ScheduledExecutorService scheduler
   ) {
-    int shardIndex = properties.getRouting().getShardIndex();
     int intervalMs = properties.getHeartbeat().getPingIntervalMs();
     scheduler.scheduleAtFixedRate(
-      () -> broadcaster.broadcastHeartbeat(shardIndex, nodeId),
+      () -> broadcaster.broadcastHeartbeat(nodeId),
       0,
       intervalMs,
       TimeUnit.MILLISECONDS

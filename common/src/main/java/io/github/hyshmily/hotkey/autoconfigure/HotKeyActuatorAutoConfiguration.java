@@ -22,6 +22,7 @@ import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.endpoint.RingEndpoint;
+import io.github.hyshmily.hotkey.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -32,6 +33,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -105,5 +107,27 @@ public class HotKeyActuatorAutoConfiguration {
   @ConditionalOnMissingBean
   public RingEndpoint ringEndpoint(RingManager ringManager) {
     return new RingEndpoint(ringManager);
+  }
+
+  /**
+   * Create the StateMachineEndpoint for reading and updating the Worker's
+   * state-machine configuration at runtime.
+   *
+   * <p>Only active when a {@link HotKeyStateMachine} bean is present
+   * (i.e. in Worker mode) and Spring MVC is on the classpath.
+   *
+   * @param stateMachine              the worker's state machine
+   * @param configTimestampCounterProvider optional config-change timestamp counter
+   * @return a new {@link StateMachineEndpoint} instance
+   */
+  @Bean
+  @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
+  @ConditionalOnBean(HotKeyStateMachine.class)
+  @ConditionalOnMissingBean
+  public StateMachineEndpoint stateMachineEndpoint(
+    HotKeyStateMachine stateMachine,
+    ObjectProvider<java.util.concurrent.atomic.AtomicLong> configTimestampCounterProvider
+  ) {
+    return new StateMachineEndpoint(stateMachine, configTimestampCounterProvider);
   }
 }

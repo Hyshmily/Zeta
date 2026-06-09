@@ -17,7 +17,9 @@ package io.github.hyshmily.hotkey.detection;
 
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import java.util.concurrent.ConcurrentHashMap;
-import lombok.RequiredArgsConstructor;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.Setter;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions.
@@ -54,7 +56,7 @@ import lombok.RequiredArgsConstructor;
  * <p>Instances are thread-safe and designed for single-shard workers; each key is
  * owned by exactly one worker thanks to consistent-hash routing on the client side.</p>
  */
-@RequiredArgsConstructor
+@AllArgsConstructor
 public class HotKeyStateMachine {
 
   /** Key-level state: current lifecycle stage plus streak counters. */
@@ -72,21 +74,27 @@ public class HotKeyStateMachine {
   }
 
   /** Number of consecutive hot windows required to promote COLD → CONFIRMED_HOT. */
-  private final int confirmCount;
+  @Getter
+  @Setter
+  private volatile int confirmCount;
 
   /**
    * Total number of consecutive cold windows required for a full cool-down
    * (CONFIRMED_HOT → PRE_COOLING → COLD).  Must be greater than
    * {@code preCoolGraceCount}.
    */
-  private final int coolCount;
+  @Getter
+  @Setter
+  private volatile int coolCount;
 
   /**
    * The number of cold windows that mark the entry into PRE_COOLING.
    * The remaining {@code coolCount - preCoolGraceCount} windows are the
    * grace period during which the key can revive without a broadcast.
    */
-  private final int preCoolGraceCount;
+  @Getter
+  @Setter
+  private volatile int preCoolGraceCount;
 
   /** Current state + streak counters, keyed by cache key. */
   private final ConcurrentHashMap<String, KeyState> states = new ConcurrentHashMap<>();

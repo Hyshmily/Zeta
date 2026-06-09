@@ -38,6 +38,15 @@ public final class HotKeyConstants {
   public static final String AMQP_HEADER_NODE_ID = "nodeId";
   /** AMQP message header key for the message creation timestamp. */
   public static final String AMQP_HEADER_TIMESTAMP = "timestamp";
+  /** AMQP message header key for the worker state-machine confirm-count config. */
+  public static final String AMQP_HEADER_CONFIG_CONFIRM_COUNT = "configConfirmCount";
+  /** AMQP message header key for the worker state-machine cool-count config. */
+  public static final String AMQP_HEADER_CONFIG_COOL_COUNT = "configCoolCount";
+  /** AMQP message header key for the worker state-machine pre-cool-grace config. */
+  public static final String AMQP_HEADER_CONFIG_GRACE_COUNT = "configGraceCount";
+  /** AMQP message header key for the worker config-change timestamp. */
+  public static final String AMQP_HEADER_CONFIG_TIMESTAMP = "configTimestamp";
+
   /** Payload value used for AMQP heartbeat / keep-alive messages. */
   public static final String AMQP_MESSAGE_PING = "ping";
 

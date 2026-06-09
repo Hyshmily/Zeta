@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.worker.dispatch;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.sync.WorkerMessage;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
@@ -47,6 +48,8 @@ public class WorkerBroadcaster {
   private final RabbitTemplate rabbitTemplate;
   private final String broadcastExchange;
   private final String appName;
+  private final HotKeyStateMachine stateMachine;
+  private final AtomicLong configTimestampCounter;
 
   /**
    * Worker‑local decision version counter.
@@ -97,15 +100,17 @@ public class WorkerBroadcaster {
   /**
    * Broadcasts a heartbeat (ping) message to all application instances.
    *
-   * @param shardIndex the shard index that this worker is responsible for
-   * @param nodeId     the unique identifier of this worker node
+   * @param nodeId the unique identifier of this worker node
    */
-  public void broadcastHeartbeat(int shardIndex, String nodeId) {
+  public void broadcastHeartbeat(String nodeId) {
     MessageProperties props = new MessageProperties();
     props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_PING);
-    props.setHeader(AMQP_HEADER_SHARD_INDEX, shardIndex);
     props.setHeader(AMQP_HEADER_NODE_ID, nodeId);
     props.setHeader(AMQP_HEADER_TIMESTAMP, System.currentTimeMillis());
+    props.setHeader(AMQP_HEADER_CONFIG_CONFIRM_COUNT, stateMachine.getConfirmCount());
+    props.setHeader(AMQP_HEADER_CONFIG_COOL_COUNT, stateMachine.getCoolCount());
+    props.setHeader(AMQP_HEADER_CONFIG_GRACE_COUNT, stateMachine.getPreCoolGraceCount());
+    props.setHeader(AMQP_HEADER_CONFIG_TIMESTAMP, configTimestampCounter.get());
 
     Message msg = new Message(AMQP_MESSAGE_PING.getBytes(StandardCharsets.UTF_8), props);
     rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);

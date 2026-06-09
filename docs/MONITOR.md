@@ -152,3 +152,47 @@ curl -X POST http://localhost:8080/actuator/hotkeyring \
   -H "Content-Type: application/json" \
   -d '{"nodeId":"worker-3"}'
 ```
+
+## 4. Worker State Machine Runtime Configuration
+
+When Worker mode is active (`hotkey.worker.enabled=true`) and `spring-boot-starter-web` is on the classpath, a REST controller (`StateMachineEndpoint.java`) is registered at `/actuator/hotkey/worker/state` for reading and updating the state-machine configuration at runtime.
+
+| Method | Path                                  | Description                                                   |
+| ------ | ------------------------------------- | ------------------------------------------------------------- |
+| `GET`  | `/actuator/hotkey/worker/state`       | Return current `confirmCount`, `coolCount`, `preCoolGraceCount`, `trackedKeys` |
+| `POST` | `/actuator/hotkey/worker/state`       | Update one or more parameters (body: `{"confirmCount":"5"}`)  |
+
+**Read current state:**
+
+```bash
+curl http://localhost:8080/actuator/hotkey/worker/state
+```
+
+**Example response:**
+
+```json
+{
+  "confirmCount": 3,
+  "coolCount": 10,
+  "preCoolGraceCount": 3,
+  "trackedKeys": 42
+}
+```
+
+**Update parameters:**
+
+Changes are propagated to peer Workers via the heartbeat broadcast. Each POST increments an internal `configTimestampCounter` — receiving Workers apply the new values only if the timestamp is strictly newer than their own.
+
+```bash
+curl -X POST http://localhost:8080/actuator/hotkey/worker/state \
+  -H "Content-Type: application/json" \
+  -d '{"confirmCount":"5","coolCount":"15"}'
+```
+
+**Example response:**
+
+```json
+{
+  "status": "ok"
+}
+```

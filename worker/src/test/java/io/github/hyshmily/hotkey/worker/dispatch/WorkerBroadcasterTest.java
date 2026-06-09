@@ -25,7 +25,9 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.sync.WorkerMessage;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -45,14 +47,18 @@ class WorkerBroadcasterTest {
   @Mock
   private RabbitTemplate rabbitTemplate;
 
+  @Mock
+  private HotKeyStateMachine stateMachine;
+
   @Captor
   private ArgumentCaptor<Message> messageCaptor;
 
   private WorkerBroadcaster broadcaster;
+  private final AtomicLong configTimestampCounter = new AtomicLong(0);
 
   @BeforeEach
   void setUp() {
-    broadcaster = new WorkerBroadcaster(rabbitTemplate, "hotkey.broadcast.exchange", "testApp");
+    broadcaster = new WorkerBroadcaster(rabbitTemplate, "hotkey.broadcast.exchange", "testApp", stateMachine, configTimestampCounter);
   }
 
   @Test

@@ -152,3 +152,47 @@ curl -X POST http://localhost:8080/actuator/hotkeyring \
   -H "Content-Type: application/json" \
   -d '{"nodeId":"worker-3"}'
 ```
+
+## 4. Worker 状态机运行时配置
+
+当启用 Worker 模式（`hotkey.worker.enabled=true`）且 classpath 中包含 `spring-boot-starter-web` 时，会在 `/actuator/hotkey/worker/state` 注册一个 REST 控制器（`StateMachineEndpoint.java`），用于运行时读取和更新状态机配置。
+
+| 方法   | 路径                                  | 说明                                                         |
+| ------ | ------------------------------------- | ------------------------------------------------------------ |
+| `GET`  | `/actuator/hotkey/worker/state`       | 返回当前 `confirmCount`、`coolCount`、`preCoolGraceCount`、`trackedKeys` |
+| `POST` | `/actuator/hotkey/worker/state`       | 更新一个或多个参数（请求体：`{"confirmCount":"5"}`）           |
+
+**读取当前状态：**
+
+```bash
+curl http://localhost:8080/actuator/hotkey/worker/state
+```
+
+**响应示例：**
+
+```json
+{
+  "confirmCount": 3,
+  "coolCount": 10,
+  "preCoolGraceCount": 3,
+  "trackedKeys": 42
+}
+```
+
+**更新参数：**
+
+变更通过心跳广播传播到对等 Worker。每次 POST 会递增内部的 `configTimestampCounter`——接收方 Worker 仅当时间戳严格更新于自身时才应用新值。
+
+```bash
+curl -X POST http://localhost:8080/actuator/hotkey/worker/state \
+  -H "Content-Type: application/json" \
+  -d '{"confirmCount":"5","coolCount":"15"}'
+```
+
+**响应示例：**
+
+```json
+{
+  "status": "ok"
+}
+```

@@ -252,7 +252,6 @@ public class WorkerListener {
    * @param msg the worker message containing heartbeat data
    */
   private void handlePing(WorkerMessage msg) {
-    workerHealthMonitor.onHeartbeat(msg.shardIndex(), msg.timestamp());
     if (msg.nodeId() != null) {
       workerHealthMonitor.onHeartbeat(msg.nodeId(), msg.timestamp());
     }

@@ -706,10 +706,10 @@ When `shard-count > 1`, reports are distributed across multiple Worker instances
 
 The `SlidingWindowDetector` is a lock-free time-series counter that tracks per-key access counts within a configurable window.
 
-| Property                                           | Default | Description                                   |
-| -------------------------------------------------- | ------- | --------------------------------------------- |
-| `hotkey.worker.sliding-window.duration-ms`         | `1000`  | Total window duration (1 second)              |
-| `hotkey.worker.sliding-window.slices`              | `10`    | Number of time slices per window (100ms each) |
+| Property                                   | Default | Description                                   |
+| ------------------------------------------ | ------- | --------------------------------------------- |
+| `hotkey.worker.sliding-window.duration-ms` | `1000`  | Total window duration (1 second)              |
+| `hotkey.worker.sliding-window.slices`      | `10`    | Number of time slices per window (100ms each) |
 
 Each key maintains an array of `long` counters indexed by time slice. On each report tick, the oldest slice is recycled and the effective count for each key is recomputed as the sum across all slices. This gives an accurate QPS estimate without per-access locking.
 
@@ -746,21 +746,66 @@ Each tracked key follows a lifecycle managed by `HotKeyStateMachine`:
 
 ### State Machine Configuration
 
-| Property                                                  | Default | Description                                            |
-| --------------------------------------------------------- | ------- | ------------------------------------------------------ |
-| `hotkey.worker.threshold.hot-threshold`                   | `1000`  | Absolute hot threshold (use `-1` to use ratio instead) |
-| `hotkey.worker.threshold.hot-threshold-ratio`             | `0.01`  | Hot threshold as fraction of estimated global QPS      |
-| `hotkey.worker.state-machine.confirm-duration-ms`         | `300`   | Duration above threshold to confirm HOT (300ms)        |
-| `hotkey.worker.state-machine.cool-duration-ms`            | `15000` | Duration below threshold to confirm COOL (15s)         |
-| `hotkey.worker.state-machine.pre-cool-grace-ms`           | `5000`  | Grace period for silent re-heat (5s)                   |
+| Property                                          | Default | Description                                            |
+| ------------------------------------------------- | ------- | ------------------------------------------------------ |
+| `hotkey.worker.threshold.hot-threshold`           | `1000`  | Absolute hot threshold (use `-1` to use ratio instead) |
+| `hotkey.worker.threshold.hot-threshold-ratio`     | `0.01`  | Hot threshold as fraction of estimated global QPS      |
+| `hotkey.worker.state-machine.confirm-duration-ms` | `300`   | Duration above threshold to confirm HOT (300ms)        |
+| `hotkey.worker.state-machine.cool-duration-ms`    | `15000` | Duration below threshold to confirm COOL (15s)         |
+| `hotkey.worker.state-machine.pre-cool-grace-ms`   | `5000`  | Grace period for silent re-heat (5s)                   |
+
+### Runtime State Machine Configuration
+
+The state machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime without restarting the Worker. A REST endpoint (`StateMachineEndpoint`) is exposed at `/actuator/hotkey/worker/state` when Worker mode is active and `spring-boot-starter-web` is present.
+
+| Method | Path                            | Description                                                                     |
+| ------ | ------------------------------- | ------------------------------------------------------------------------------- |
+| `GET`  | `/actuator/hotkey/worker/state` | Returns current `confirmCount`, `coolCount`, `preCoolGraceCount`, `trackedKeys` |
+| `POST` | `/actuator/hotkey/worker/state` | Updates one or more parameters (body: `{"confirmCount":"5"}`)                   |
+
+#### Config Propagation (Heartbeat-Based Peer Sync)
+
+When a Worker's state machine parameters are changed via POST, the new values are **broadcast to all peer Workers** through a heartbeat-based AMQP mechanism:
+
+1. **Shared broadcast exchange** — The existing `hotkey.broadcast.exchange` (the same exchange used for HOT/COOL decisions) is reused for config sync. Each Worker's `workerConfigQueue` binds directly to this exchange.
+2. **Per-node auto-delete queue** — Each Worker declares its own `hotkey.worker.config.<nodeId>` queue and binds it to the broadcast exchange. When a Worker disconnects, its queue is automatically removed.
+3. **Heartbeat headers** — `WorkerBroadcaster` piggybacks the current `confirmCount`, `coolCount`, `preCoolGraceCount`, and `configTimestamp` on every heartbeat message sent to the shared broadcast exchange.
+4. **WorkerConfigNegotiator** — A `@RabbitListener` on each Worker receives peer heartbeats. If the incoming `configTimestamp` is strictly newer than the local timestamp, it updates its own `HotKeyStateMachine` fields.
+5. **Startup compensation** — On startup, each Worker waits up to 3 seconds for the first peer heartbeat. If none arrives, it logs a WARN and continues with `WorkerProperties` defaults.
+
+```
+                           hotkey.broadcast.exchange
+                    ┌─────────────────────────────────┐
+                    │  (shared fanout — same exchange │
+                    │   used for HOT/COOL decisions)  │
+                    └──┬──────────────────────────┬───┘
+                       │                          │
+         heartbeat(AMQP)              heartbeat(AMQP)
+                       │                          │
+              ┌────────▼────────┐       ┌─────────▼────────┐
+              │  Worker A       │       │  Worker B        │
+              │  StateMachine   │       │  StateMachine    │
+              │  confTs=15      │       │  confTs=0        │
+              │                 │       │                  │
+              │  POST /state    │       │  receives hb     │
+              │  → increment(16)│       │  → 16 > 0, apply │
+              └─────────────────┘       └──────────────────┘
+
+> [!NOTE]
+> - `configTimestampCounter` starts at `0` — a first remote heartbeat with `configTimestamp > 0` is always applied.
+> - There is no separate "config change" AMQP message — changes diffuse within the next periodic heartbeat (≤1s latency).
+> - Changing `confirmDurationMs`/`coolDurationMs`/`preCoolGraceMs` in `WorkerProperties` does not update the runtime `confirmCount`/`coolCount`/`preCoolGraceCount`. The POST endpoint is the only way to change runtime values after startup. Consider adding a startup hook that initializes runtime counts from `WorkerProperties` if needed.
+> - `workerConfigQueue` binds directly to the existing `hotkey.broadcast.exchange` (no separate exchange). This ensures heartbeats from `WorkerBroadcaster` reach all peer `WorkerConfigNegotiator` instances.
 
 ### Dynamic Threshold (Global QPS)
 
 The Worker adapts to traffic patterns by periodically recalculating the hot threshold based on estimated global QPS:
 
 ```
-hotThreshold = max(minCount, estimatedGlobalQPS * hotThresholdRatio)
-```
+
+hotThreshold = max(minCount, estimatedGlobalQPS \* hotThresholdRatio)
+
+````
 
 | Property                                                                     | Default  | Description                                          |
 | ---------------------------------------------------------------------------- | -------- | ---------------------------------------------------- |
@@ -841,7 +886,7 @@ spring:
   rabbitmq:
     host: localhost
     port: 5672
-```
+````
 
 > [!IMPORTANT]
 > The example above uses a plain AMQP connection. In production, enable TLS via `spring.rabbitmq.ssl.*`:
@@ -881,11 +926,11 @@ hotkey:
 
 ### Failure Behavior
 
-| Failure                   | Impact                                                                     | Recovery                                          |
-| ------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------- |
-| Worker crashes            | App instances continue with local TopK; no cluster-wide HOT/COOL decisions | Restart Worker; instances reconnect automatically |
-| Report channel fails      | App reports queued/buffered (RabbitMQ persistence)                         | Auto-recover on RabbitMQ restoration              |
-| Worker broadcast fails    | No cross-instance HOT/COOL sync; local TopK still functional               | Restart Worker broadcaster                        |
+| Failure                | Impact                                                                     | Recovery                                          |
+| ---------------------- | -------------------------------------------------------------------------- | ------------------------------------------------- |
+| Worker crashes         | App instances continue with local TopK; no cluster-wide HOT/COOL decisions | Restart Worker; instances reconnect automatically |
+| Report channel fails   | App reports queued/buffered (RabbitMQ persistence)                         | Auto-recover on RabbitMQ restoration              |
+| Worker broadcast fails | No cross-instance HOT/COOL sync; local TopK still functional               | Restart Worker broadcaster                        |
 
 ---
 
@@ -901,15 +946,15 @@ hotkey:
          ▼          ▼          ▼              ▼
      ┌───────────────────────────────────────────────────┐
      │           SingleFlight.inflightCache              │
-     │  ┌───────────────────────────────────────────────┐ 
-     │  │ key = "cache:shop:17"                         
-     │  │   ▼                                           
-     │  │ future = CompletableFuture.supplyAsync(...)   
-     │  │ computeIfAbsent(key, future) ◀─ 1st thread: 
-     │  │   absent → supplyAsync created, all threads  
+     │  ┌───────────────────────────────────────────────┐
+     │  │ key = "cache:shop:17"
+     │  │   ▼
+     │  │ future = CompletableFuture.supplyAsync(...)
+     │  │ computeIfAbsent(key, future) ◀─ 1st thread:
+     │  │   absent → supplyAsync created, all threads
      │  │   share same future  ◀──────────────────────┐
-     │  │   present → block-wait on future  ◀─────┐   │ 
-     │  └──────────────────────────────────────────┼   | 
+     │  │   present → block-wait on future  ◀─────┐   │
+     │  └──────────────────────────────────────────┼   |
      │                                             │   │
      │  ┌──────────────────────────────────────────▼─┐ │
      │  │ supplier.get()  ─── L2 / DB read           │ │

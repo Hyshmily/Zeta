@@ -33,7 +33,7 @@ Via [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch varian
 - **Soft expiry (logical expiration)** — Returns stale data immediately while refreshing asynchronously in the background; reduces p99 latency at the cost of brief stale reads. **Fully replaces traditional Redis-side logical expiry** (`RedisData{data, expireTime}` wrapper pattern) — Redis stores plain values, HotKey manages expiration at the L1 Caffeine layer
 - **Redis collection types** — Supports incremental writes to List/Set/ZSet via `putBeforeInvalidate`, no `putThrough` required
 - **Hot key synchronization** — Optional RabbitMQ fanout (via `hotkey.sync.*`) for cross-instance cache invalidation; dedicated worker-listener (via `hotkey.worker-listener.*`) receives HOT/COOL decisions from Worker
-- **Worker mode** — Dedicated cluster-level hot key detection nodes; cross-instance consensus via sliding window + state machine pipeline; see [Worker Mode](#worker-mode)
+- **Worker mode** — Dedicated cluster-level hot key detection nodes; cross-instance consensus via sliding window + state machine pipeline; runtime state machine configuration via `/actuator/hotkey/worker/state` REST endpoint with heartbeat-based peer-to-peer config propagation; see [Worker Mode](#worker-mode)
 - **Report aggregation** — Every `get()` / `getWithSoftExpire()` call reports to the local `HotKeyReporter`, which periodically batches access counts to Worker nodes (RabbitMQ) for cluster-level hot key detection
 - **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies &#177;10% random jitter to each hard/soft TTL via `ThreadLocalRandom`, scattering expiration timestamps to prevent cache avalanches
 - **Consistent hashing** — Murmur3_32-based consistent hash ring replacing static `shard-index` mapping; Workers auto-register via heartbeats, supporting elastic scaling without full key remapping (enable with `hotkey.local.consistent-hashing.enabled`)
@@ -163,7 +163,6 @@ hotkey:
       app-name: myapp # [Required] Must match App-side hotkey.local.app-name
       shard-count: 1  # [Required] Must match App-side hotkey.local.shard-count
       shard-index: 0  # [Required] This instance's shard, range [0, shard-count-1]
-      node-id: ""     # Explicit nodeId (consistent hashing; "" = auto from InstanceIdGenerator)
 
 
 # Multi-Worker example: 3 machines, each owning one shard
@@ -279,7 +278,6 @@ hotkey:
       app-name: "default"                  # Must match local.app-name
       shard-count: 1                       # Must match local.shard-count
       shard-index: 0                       # This instance's shard [0, shard-count-1]
-      node-id: ""                          # Explicit nodeId (consistent hashing; "" = auto)
 
     messaging:
       report-exchange: "hotkey.report.exchange"
@@ -558,7 +556,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 
 **I. Worker mode**
 
-Worker mode provides cluster-level hot key detection via dedicated nodes. App instances periodically report access counts, Workers run a sliding window + state machine pipeline, and broadcast HOT/COOL decisions to all instances.
+Worker mode provides cluster-level hot key detection via dedicated nodes. App instances periodically report access counts, Workers run a sliding window + state machine pipeline, and broadcast HOT/COOL decisions to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state` — changes propagate to all peer Workers through heartbeat-based AMQP broadcast.
 
 Two deployment modes:
 
