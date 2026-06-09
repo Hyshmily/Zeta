@@ -23,6 +23,7 @@ package io.github.hyshmily.hotkey.constants;
  */
 public final class HotKeyConstants {
 
+  /** Utility class — do not instantiate. */
   private HotKeyConstants() {}
 
   /** AMQP message header key for the message type (SYNC/REPORT/WORKER). */
@@ -31,9 +32,13 @@ public final class HotKeyConstants {
   public static final String AMQP_HEADER_VERSION = "version";
   /** AMQP message header key indicating whether the version is degraded. */
   public static final String AMQP_HEADER_IS_VERSION_DEGRADED = "isVersionDegraded";
+  /** AMQP message header key for the shard index used in routing. */
   public static final String AMQP_HEADER_SHARD_INDEX = "shardIndex";
+  /** AMQP message header key for the origin node identifier. */
   public static final String AMQP_HEADER_NODE_ID = "nodeId";
+  /** AMQP message header key for the message creation timestamp. */
   public static final String AMQP_HEADER_TIMESTAMP = "timestamp";
+  /** Payload value used for AMQP heartbeat / keep-alive messages. */
   public static final String AMQP_MESSAGE_PING = "ping";
 
   /** Thread name prefix for general hotkey operations. */
@@ -68,5 +73,6 @@ public final class HotKeyConstants {
   /** Warning message logged when sync publisher is not available. */
   public static final String NO_SYNC_PUBLISHER = "No sync publisher found, please enable hotkey.sync";
 
+  /** Redis key for the dynamic rules hash (blacklist / whitelist entries). */
   public static final String REDIS_KEY_RULES = "hotkey:rules";
 }

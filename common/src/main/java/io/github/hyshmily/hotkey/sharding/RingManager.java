@@ -40,6 +40,11 @@ public class RingManager {
   private final int virtualNodeCount;
   private volatile Set<String> overrideNodes;
 
+  /**
+   * Create a RingManager with the given virtual-node replication factor.
+   *
+   * @param virtualNodeCount virtual copies per physical node on the ring
+   */
   public RingManager(int virtualNodeCount) {
     this.virtualNodeCount = virtualNodeCount;
     this.ring = new ConsistentHashRing(virtualNodeCount);
@@ -65,6 +70,11 @@ public class RingManager {
     return ring.getNode(key);
   }
 
+  /**
+   * Add a physical node to the ring.  Switches to manual mode if not already active.
+   *
+   * @param nodeId the ID of the node to add
+   */
   public synchronized void addNode(String nodeId) {
     if (overrideNodes == null) {
       overrideNodes = new HashSet<>(ring.getNodes());
@@ -73,6 +83,11 @@ public class RingManager {
     ring.rebuild(overrideNodes);
   }
 
+  /**
+   * Remove a physical node from the ring.  Switches to manual mode if not already active.
+   *
+   * @param nodeId the ID of the node to remove
+   */
   public synchronized void removeNode(String nodeId) {
     if (overrideNodes == null) {
       overrideNodes = new HashSet<>(ring.getNodes());
@@ -87,14 +102,29 @@ public class RingManager {
   }
 
 
+  /**
+   * Return whether the ring is in manual override mode.
+   *
+   * @return {@code true} if manual mode is active
+   */
   public boolean isManualMode() {
     return overrideNodes != null;
   }
 
+  /**
+   * Return the current set of live (or manually overridden) node IDs.
+   *
+   * @return an unmodifiable set of node IDs
+   */
   public Set<String> getCurrentNodes() {
     return ring.getNodes();
   }
 
+  /**
+   * Return the number of physical nodes currently in the ring.
+   *
+   * @return the node count
+   */
   public int nodeCount() {
     return ring.nodeCount();
   }

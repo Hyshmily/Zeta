@@ -142,6 +142,8 @@ public class TopKValidator {
   /**
    * Manually marks a key as confirmed (already pre-warmed), so it won't be
    * broadcast again until it cools down.
+   *
+   * @param key the cache key to mark as confirmed
    */
   public void markConfirmed(String key) {
     confirmedHotKeys.put(key, Boolean.TRUE);
@@ -150,6 +152,8 @@ public class TopKValidator {
   /**
    * Manually removes a key from the confirmed set, allowing it to be pre-warmed
    * again if it re-enters the Top-K.
+   *
+   * @param key the cache key to mark as cooled
    */
   public void markCooled(String key) {
     confirmedHotKeys.invalidate(key);

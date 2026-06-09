@@ -143,6 +143,14 @@ public class CacheExpireManager {
     return hardTtlMs > 0 ? System.currentTimeMillis() + Math.max(1, hardTtlMs + jitter) : Long.MAX_VALUE;
   }
 
+  /**
+   * Convert a soft TTL duration (ms) to an absolute epoch-ms expiration timestamp.
+   * Applies ±10% jitter to prevent cache stampedes. Returns 0 if soft expire is disabled
+   * or the TTL is non-positive.
+   *
+   * @param softTtlMs the soft TTL duration in milliseconds
+   * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
+   */
   private long toSoftExpireTimestamp(long softTtlMs) {
     if (!isSoftExpireEnabled() || softTtlMs <= 0) {
       return 0L;

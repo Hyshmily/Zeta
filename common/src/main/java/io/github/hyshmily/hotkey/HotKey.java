@@ -59,6 +59,9 @@ public class HotKey {
    * Create a HotKey with a cache and an app‑side TopK detector.
    * This constructor is used by programmatic configuration or by
    * auto‑configuration when the Worker is not active.
+   *
+   * @param hotKeyCache   the cache orchestrator (may be {@code null} in Worker-only mode)
+   * @param topKAlgorithm the app-side local TopK detector
    */
   public HotKey(HotKeyCache hotKeyCache, TopK topKAlgorithm) {
     this(hotKeyCache, topKAlgorithm, null);
@@ -69,6 +72,8 @@ public class HotKey {
   /**
    * Look up a cached value without loading or triggering hot-key detection.
    *
+   * @param cacheKey the key to look up
+   * @param <T>      the value type
    * @return an {@link Optional} containing the raw value if present
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
@@ -81,6 +86,10 @@ public class HotKey {
    * Get a value from L1 or load it via the reader.
    * Hot keys are promoted to L1 with configured hot TTLs; normal keys use default TTLs.
    *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
@@ -93,8 +102,12 @@ public class HotKey {
    * Get with explicit TTL overrides.
    * Pass 0 to use the configured default for that TTL type.
    *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses
    * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
    * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
@@ -107,6 +120,10 @@ public class HotKey {
    * Get with soft-expire (stale-while-revalidate). Returns cached value immediately
    * even if soft TTL expired, while triggering async refresh in background.
    *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses / refreshes
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
@@ -118,7 +135,11 @@ public class HotKey {
   /**
    * Get with soft-expire and explicit soft TTL override.
    *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses / refreshes
    * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
@@ -130,8 +151,12 @@ public class HotKey {
   /**
    * Get with soft-expire and explicit hard/soft TTL overrides.
    *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses / refreshes
    * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry — entry never hard-evicted, only soft-expire or Caffeine {@code maximumSize})
    * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
@@ -143,6 +168,7 @@ public class HotKey {
    * Invalidate a single key from L1 and broadcast REFRESH to peers.
    * The next {@link #get} will re-fetch from the reader.
    *
+   * @param cacheKey the key to invalidate
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void invalidate(String cacheKey) {
@@ -153,6 +179,7 @@ public class HotKey {
   /**
    * Invalidate one or more keys from L1 and broadcast INVALIDATE for each.
    *
+   * @param cacheKeys the keys to invalidate
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @see #invalidate(String)
    */
@@ -163,6 +190,7 @@ public class HotKey {
   /**
    * Invalidate a collection of keys from L1 and broadcast INVALIDATE for each.
    *
+   * @param cacheKeys the keys to invalidate
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void invalidateAll(Collection<String> cacheKeys) {
@@ -174,6 +202,10 @@ public class HotKey {
    * Write-through: execute the writer, then update L1 and broadcast.
    * Uses effective hard/soft TTL from configuration.
    *
+   * @param cacheKey the key to write
+   * @param value    the value to cache
+   * @param writer   the data-source mutation to execute before caching
+   * @param <T>      the value type
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer) {
@@ -185,8 +217,12 @@ public class HotKey {
    * Write-through with explicit TTL overrides.
    * Pass 0 to use the configured default for that TTL type.
    *
+   * @param cacheKey  the key to write
+   * @param value     the value to cache
+   * @param writer    the data-source mutation to execute before caching
    * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
    * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs, long softTtlMs) {
@@ -198,6 +234,8 @@ public class HotKey {
    * Execute a mutation, then invalidate L1 and broadcast.
    * Next {@link #get} will re-fetch from the reader.
    *
+   * @param cacheKey the key to invalidate after mutation
+   * @param mutation the mutation to execute
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void putBeforeInvalidate(String cacheKey, Runnable mutation) {
@@ -224,6 +262,7 @@ public class HotKey {
   /**
    * Check whether a key is currently tracked as a local hot key in L1.
    *
+   * @param cacheKey the key to inspect
    * @return {@code true} if the key exists in L1 with {@link io.github.hyshmily.hotkey.model.KeyState#HOT}
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
@@ -236,6 +275,7 @@ public class HotKey {
    * Check whether a key is currently tracked as a cluster-wide hot key by the
    * Worker-side global detector.
    *
+   * @param cacheKey the key to inspect
    * @return {@code true} if the key appears in the Worker TopK list
    */
   public boolean isWorkerHotKey(String cacheKey) {
@@ -317,6 +357,7 @@ public class HotKey {
    * prefix (trailing {@code *}), wildcard (containing {@code *} or {@code ?}),
    * or regex (prefixed with {@code regex:}).
    *
+   * @param keyPattern the key pattern to blacklist
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addBlacklist(String keyPattern) {
@@ -327,6 +368,7 @@ public class HotKey {
   /**
    * Remove a key pattern from the blacklist.
    *
+   * @param keyPattern the key pattern to remove from the blacklist
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeBlacklist(String keyPattern) {
@@ -340,6 +382,7 @@ public class HotKey {
    * normal cache get/put and local hot-key detection.
    * <p>The pattern is auto-detected by {@link RuleMatcher#of}.
    *
+   * @param keyPattern the key pattern to whitelist
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addWhitelist(String keyPattern) {
@@ -350,6 +393,7 @@ public class HotKey {
   /**
    * Remove a key pattern from the whitelist.
    *
+   * @param keyPattern the key pattern to remove from the whitelist
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeWhitelist(String keyPattern) {
@@ -401,6 +445,10 @@ public class HotKey {
     hotKeyCache.broadcastAllLocalRulesManually();
   }
 
+  /**
+   * Verify that the cache is available; throws {@link UnsupportedOperationException}
+   * when running in Worker-only mode where no app-side cache exists.
+   */
   private void requireCache() {
     if (hotKeyCache == null) {
       throw new UnsupportedOperationException(

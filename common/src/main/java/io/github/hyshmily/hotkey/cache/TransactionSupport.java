@@ -37,6 +37,9 @@ public final class TransactionSupport {
 
   private static final HotKeyLogger log = new DefaultLogger(TransactionSupport.class);
 
+  /**
+   * Utility class — no instantiation.
+   */
   private TransactionSupport() {}
 
   /**

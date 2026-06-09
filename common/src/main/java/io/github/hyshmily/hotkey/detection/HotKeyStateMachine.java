@@ -151,6 +151,8 @@ public class HotKeyStateMachine {
    * Immediately removes all state for the given key, effectively resetting
    * it to {@link State#COLD}.  Called when the Worker fails to obtain a
    * version from Redis and must abort the current HOT decision.
+   *
+   * @param key the cache key to reset
    */
   public void reset(String key) {
     states.remove(key);
@@ -158,7 +160,11 @@ public class HotKeyStateMachine {
     // keeping the timestamp for a while avoids immediate re-creation churn.
   }
 
-  /** Number of keys currently tracked by the state machine. */
+  /**
+   * Number of keys currently tracked by the state machine.
+   *
+   * @return the count of tracked keys
+   */
   public int getTrackedKeys() {
     return states.size();
   }
@@ -167,6 +173,8 @@ public class HotKeyStateMachine {
    * Garbage-collects state for keys that have not been evaluated within
    * {@code staleAfterMs} milliseconds.  Should be invoked periodically
    * (e.g. every 5 seconds) from a scheduled task.
+   *
+   * @param staleAfterMs maximum idle time in milliseconds before a key is evicted
    */
   public void evictStale(long staleAfterMs) {
     long now = System.currentTimeMillis();

@@ -29,6 +29,12 @@ import java.util.*;
  */
 public class ConsistentHashRing {
 
+  /**
+   * Immutable snapshot of the ring at a point in time.
+   *
+   * @param ring      the virtual-node hash-to-nodeId mapping
+   * @param liveNodes the set of live physical node IDs
+   */
   private record RingState(NavigableMap<Integer, String> ring, Set<String> liveNodes) {}
 
   private final int virtualNodeCount;
@@ -71,18 +77,39 @@ public class ConsistentHashRing {
     return (entry != null ? entry : state.ring.firstEntry()).getValue();
   }
 
+  /**
+   * Return the set of live physical node IDs.
+   *
+   * @return an unmodifiable set of node IDs
+   */
   public Set<String> getNodes() {
     return currentState.liveNodes;
   }
 
+  /**
+   * Return whether the ring contains no virtual nodes (i.e. no live nodes).
+   *
+   * @return {@code true} if the ring is empty
+   */
   public boolean isEmpty() {
     return currentState.ring.isEmpty();
   }
 
+  /**
+   * Return the number of live physical nodes in the ring.
+   *
+   * @return the node count
+   */
   public int nodeCount() {
     return currentState.liveNodes.size();
   }
 
+  /**
+   * Compute a 32-bit Murmur3 hash for the given string.
+   *
+   * @param key the string to hash
+   * @return the hash value
+   */
   private static int hash(String key) {
     return Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).asInt();
   }

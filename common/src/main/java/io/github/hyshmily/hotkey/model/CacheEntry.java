@@ -40,14 +40,23 @@ import lombok.ToString;
 @Builder(toBuilder = true)
 public class CacheEntry {
 
+  /** The cached value (may be {@code null} if the entry represents a tombstone or a miss). */
   private final Object value;
+  /** Monotonically increasing version from Redis INCR (normal) or node-local counter (degraded). */
   private final long dataVersion;
+  /** {@code true} if {@link #dataVersion} was obtained from the local fallback instead of Redis. */
   private final boolean isVersionDegraded;
+  /** Monotonically increasing version from Worker HOT/COOL decisions; never degraded. */
   private final long decisionVersion;
+  /** Hard TTL duration in milliseconds for this specific entry. */
   private final long hardTtlMs;
+  /** Absolute epoch-millis timestamp at which the entry should be evicted (hard expiry). */
   private final long hardExpireAtMs;
+  /** Soft TTL duration in milliseconds for stale-while-revalidate behaviour. */
   private final long softTtlMs;
+  /** Absolute epoch-millis timestamp at which the entry becomes stale (soft expiry). */
   private final long softExpireAtMs;
+  /** Current hot-key state of this entry ({@link KeyState#NORMAL}, {@link KeyState#HOT}, or {@link KeyState#COOL}). */
   private final KeyState keyState;
   /** Normal-state hard TTL recorded at entry creation, preserved across HOT/COOL transitions. */
   private final long normalHardTtlMs;

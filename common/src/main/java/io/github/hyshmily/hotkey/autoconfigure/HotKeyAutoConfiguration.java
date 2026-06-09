@@ -211,6 +211,12 @@ public class HotKeyAutoConfiguration {
       .maximumSize(properties.getLocalCacheMaxSize())
       .expireAfter(
         new Expiry<>() {
+          /**
+           * Compute the time-to-live for a newly created cache entry.
+           * Returns {@link Long#MAX_VALUE} for pure logical-expiry entries
+           * (where {@code hardExpireAtMs == Long.MAX_VALUE}); otherwise
+           * computes the remaining wall-clock time.
+           */
           @Override
           public long expireAfterCreate(@NonNull Object key, @NonNull Object value, long currentTimeNanos) {
             if (value instanceof CacheEntry entry) {
@@ -225,6 +231,11 @@ public class HotKeyAutoConfiguration {
             return TimeUnit.MINUTES.toNanos(properties.getLocalCacheTtlMinutes());
           }
 
+          /**
+           * Re-compute the expiry duration after an entry is updated.
+           * Preserves pure logical expiry across updates; otherwise
+           * recalculates from the entry's {@code hardExpireAtMs}.
+           */
           @Override
           public long expireAfterUpdate(
             @NonNull Object key,
@@ -243,6 +254,10 @@ public class HotKeyAutoConfiguration {
             return currentDuration;
           }
 
+          /**
+           * Preserve the current expiry duration on read — reads never
+           * extend or shorten the entry's time-to-live.
+           */
           @Override
           public long expireAfterRead(
             @NonNull Object key,

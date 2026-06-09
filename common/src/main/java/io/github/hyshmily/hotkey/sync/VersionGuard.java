@@ -32,15 +32,23 @@ import io.github.hyshmily.hotkey.model.CacheEntry;
  */
 public final class VersionGuard {
 
+  /**
+   * Utility class — prevent instantiation.
+   */
   private VersionGuard() {}
 
   /**
    * WorkerListener guard: compares {@code getDecisionVersion()}.
-    * When the existing entry has {@code isVersionDegraded()}{@code = true}
+   * When the existing entry has {@code isVersionDegraded()}{@code = true}
    * (i.e. it was created during a Redis outage), the guard unconditionally accepts the
    * incoming decision — the entry was written in an unstable period and should yield to
    * any newer Worker decision, even if the Worker restarted and its {@code AtomicLong}
    * reset.
+   *
+   * @param cache                    the local Caffeine cache
+   * @param cacheKey                 the cache key to check
+   * @param incomingDecisionVersion  the decision version from the incoming Worker message
+   * @return {@code true} if the incoming message should be skipped
    */
   public static boolean shouldSkipForWorker(
     Cache<String, Object> cache,
@@ -68,6 +76,10 @@ public final class VersionGuard {
    *   <li>Existing degraded, incoming normal: never skip (normal overwrites degraded)</li>
    * </ol>
    *
+   * @param cache               the local Caffeine cache
+   * @param cacheKey            the cache key to check
+   * @param incomingDataVersion the data version from the incoming sync message
+   * @param incomingDegraded    whether the incoming sync message is operating in degraded mode
    * @return {@code true} if the incoming refresh should be skipped
    */
   public static Boolean shouldSkipForSync(

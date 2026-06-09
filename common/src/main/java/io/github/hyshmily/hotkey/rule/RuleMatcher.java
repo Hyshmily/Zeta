@@ -263,6 +263,11 @@ public class RuleMatcher {
     }
   }
 
+  /**
+   * Load persisted rules from Redis (if available) and append them to the local
+   * rule list.  Failures are logged but never propagated — the application
+   * continues with an empty or partially-loaded rule set.
+   */
   private void loadRulesFromRedis() {
     redisTemplate.ifPresent(r -> {
       try {

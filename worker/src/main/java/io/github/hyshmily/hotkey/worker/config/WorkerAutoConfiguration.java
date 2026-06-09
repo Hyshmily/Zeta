@@ -320,6 +320,14 @@ public class WorkerAutoConfiguration {
     }
   }
 
+  /**
+   * Global QPS estimator that tracks overall throughput across all keys in the
+   * current shard using a sliding window.
+   *
+   * @param properties worker configuration properties (sliding-window duration
+   *                   and slice count are extracted from here)
+   * @return a new {@link GlobalQpsEstimator} instance
+   */
   @Bean
   public GlobalQpsEstimator globalQpsEstimator(WorkerProperties properties) {
     return new GlobalQpsEstimator(
@@ -328,6 +336,17 @@ public class WorkerAutoConfiguration {
     );
   }
 
+  /**
+   * Threshold learner that periodically recalculates the hot-key threshold
+   * based on estimated global QPS and updates the sliding-window detector.
+   *
+   * @param estimator the global QPS estimator
+   * @param detector  the sliding-window detector whose threshold will be
+   *                  dynamically adjusted
+   * @param properties worker configuration properties for threshold tuning
+   *                   parameters (ratio, tolerance, learning period)
+   * @return a new {@link ThresholdLearner} instance
+   */
   @Bean
   public ThresholdLearner thresholdLearner(
     GlobalQpsEstimator estimator,
@@ -352,6 +371,16 @@ public class WorkerAutoConfiguration {
     return new Object(); // placeholder bean
   }
 
+  /**
+   * Schedules a periodic heartbeat ping broadcast for this worker instance.
+   *
+   * @param broadcaster the worker broadcaster used to send the heartbeat
+   * @param properties  worker configuration properties (shard index and ping
+   *                    interval are extracted from here)
+   * @param scheduler   the shared worker scheduler
+   * @param nodeId      the unique node identifier for this worker
+   * @return a placeholder {@link Object} bean that keeps the scheduler alive
+   */
   @Bean
   public Object pingTask(
     WorkerBroadcaster broadcaster,

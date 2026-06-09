@@ -28,29 +28,42 @@ import java.util.function.Supplier;
  */
 public interface HotKeyLogger {
 
+  /** Log a message at DEBUG level. */
   void debug(String msg);
 
+  /** Log a parameterized message at DEBUG level. */
   void debug(String format, Object... args);
 
+  /** Log a lazily-supplied message at DEBUG level. */
   void debug(Supplier<String> supplier);
 
+  /** Log a message at INFO level. */
   void info(String msg);
 
+  /** Log a parameterized message at INFO level. */
   void info(String format, Object... args);
 
+  /** Log a lazily-supplied message at INFO level. */
   void info(Supplier<String> supplier);
 
+  /** Log a message at WARN level. */
   void warn(String msg);
 
+  /** Log a parameterized message at WARN level. */
   void warn(String format, Object... args);
 
+  /** Log a lazily-supplied message at WARN level. */
   void warn(Supplier<String> supplier);
 
+  /** Log a message at ERROR level. */
   void error(String msg);
 
+  /** Log a parameterized message at ERROR level. */
   void error(String format, Object... args);
 
+  /** Log a message at ERROR level with an associated throwable. */
   void error(String msg, Throwable t);
 
+  /** Log a lazily-supplied message at ERROR level. */
   void error(Supplier<String> supplier);
 }

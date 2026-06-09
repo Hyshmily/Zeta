@@ -57,6 +57,7 @@ public class Rule {
   /** Compiled regex for WILDCARD and REGEX types; lazily initialised. */
   private transient volatile Pattern compiledPattern;
 
+  /** No-arg constructor for frameworks (e.g. Jackson deserialisation). */
   public Rule() {}
 
   /**

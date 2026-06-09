@@ -36,6 +36,14 @@ public class ThresholdLearner implements Runnable {
   /** Worker startup time (when this bean is constructed). */
   private final long workerStartTime = System.currentTimeMillis();
 
+  /**
+   * Executes one threshold recalculation cycle.
+   *
+   * <p>During the learning period the update is skipped and the fixed
+   * threshold is retained.  After the learning period the current QPS is
+   * multiplied by the configured ratio to derive a new threshold value;
+   * small fluctuations within the tolerance window are ignored.
+   */
   @Override
   public void run() {
     try {

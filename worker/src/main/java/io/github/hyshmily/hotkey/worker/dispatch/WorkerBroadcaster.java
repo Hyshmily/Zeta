@@ -94,6 +94,12 @@ public class WorkerBroadcaster {
     rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);
   }
 
+  /**
+   * Broadcasts a heartbeat (ping) message to all application instances.
+   *
+   * @param shardIndex the shard index that this worker is responsible for
+   * @param nodeId     the unique identifier of this worker node
+   */
   public void broadcastHeartbeat(int shardIndex, String nodeId) {
     MessageProperties props = new MessageProperties();
     props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_PING);

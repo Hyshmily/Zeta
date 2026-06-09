@@ -138,6 +138,13 @@ public class HotKeyMicrometerAutoConfiguration {
     };
   }
 
+  /**
+   * Register Micrometer gauges for the local app-side TopK detector.
+   * Exposes top-K size, total requests, expelled queue size and remaining capacity.
+   *
+   * @param detector the local TopK detector
+   * @param registry the Micrometer meter registry
+   */
   private static void registerLocalTopKGauges(TopK detector, MeterRegistry registry) {
     Gauge.builder("hotkey.topk.size", detector, t -> t.list().size())
       .tag("type", "local")
@@ -151,6 +158,13 @@ public class HotKeyMicrometerAutoConfiguration {
     );
   }
 
+  /**
+   * Register Micrometer gauges for the worker-side TopK detector.
+   * Exposes top-K size and total requests tagged with type=worker.
+   *
+   * @param worker   the worker-side TopK detector
+   * @param registry the Micrometer meter registry
+   */
   private static void registerWorkerTopKGauges(TopK worker, MeterRegistry registry) {
     Gauge.builder("hotkey.topk.size", worker, t -> t.list().size())
       .tag("type", "worker")
@@ -160,6 +174,13 @@ public class HotKeyMicrometerAutoConfiguration {
       .register(registry);
   }
 
+  /**
+   * Register Micrometer gauges for the HotKey reporter.
+   * Exposes queue depth, dropped/expired batch counts, and pending key count.
+   *
+   * @param reporter the HotKey reporter
+   * @param registry the Micrometer meter registry
+   */
   private static void registerReporterGauges(HotKeyReporter reporter, MeterRegistry registry) {
     Gauge.builder("hotkey.reporter.queue.depth", reporter, r -> (double) r.dispatcherDepth()).register(registry);
     Gauge.builder("hotkey.reporter.queue.dropped.total", reporter, r -> (double) r.dispatcherDropped()).register(

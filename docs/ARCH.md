@@ -320,6 +320,7 @@ HotKey.get(cacheKey, reader[, hardTtlMs, softTtlMs])
       │    ├─ hit → unwrap CacheEntry
       │    │    ├─ KeyState == HOT → use hot TTLs (hotHardTtl / hotSoftTtl)
       │    │    └─ KeyState != HOT → use normal TTLs (normalHardTtl / normalSoftTtl)
+      │    ├─ promoteLocalHotkeyIfNeeded(key, entry)           [upgrade NORMAL/COOL to HOT if locally hot]
       │    ├─ hotKeyDetector.add(key, 1)                       [local HeavyKeeper frequency count]
       │    ├─ hotKeyReporter.record(key)                       [app→Worker report]
       │    └─ return Optional.of(entry.value)
@@ -352,6 +353,7 @@ HotKey.getWithSoftExpire(key, reader[, softTtlMs][, hardTtlMs, softTtlMs])
       │    ├─ hard TTL expired → return empty (same as get path)
       │    └─ soft TTL expired but hard TTL not expired
       │         ├─ return stale value immediately
+      │         ├─ promoteLocalHotkeyIfNeeded(key, entry)  [upgrade NORMAL/COOL to HOT if locally hot]
       │         ├─ hotKeyDetector.add(key, 1)
       │         ├─ hotKeyReporter.record(key)
       │         └─ async refresh task:

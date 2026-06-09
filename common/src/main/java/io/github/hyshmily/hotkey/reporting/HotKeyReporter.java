@@ -256,6 +256,10 @@ public class HotKeyReporter {
     private final List<Thread> consumers = new ArrayList<>();
     private volatile boolean running;
 
+    /**
+     * Starts the consumer threads that drain batches from the work queue
+     * and publish them via {@link ReportPublisher}.
+     */
     void start() {
       running = true;
       for (int i = 0; i < consumerCount; i++) {

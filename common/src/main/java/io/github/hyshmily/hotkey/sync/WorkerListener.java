@@ -79,6 +79,8 @@ public class WorkerListener {
   /**
    * Decodes the AMQP message into a {@link WorkerMessage} and schedules the
    * appropriate handler with a random jitter to avoid thundering herds.
+   *
+   * @param msg the raw AMQP message
    */
   private void processWorker(Message msg) {
     WorkerMessage wm = WorkerMessage.from(msg);
@@ -96,6 +98,8 @@ public class WorkerListener {
 
   /**
    * Routes the message to the correct handler based on {@link WorkerMessage#type()}.
+   *
+   * @param msg the worker message to route
    */
   private void workerMessageRouter(WorkerMessage msg) {
     if (msg.type() == null) {
@@ -121,6 +125,8 @@ public class WorkerListener {
    * Uses a double-checked locking (DCL) pattern: a fast-path version guard before
    * the Redis fetch, and a second guard inside the atomic {@code compute} block,
    * ensuring we never overwrite a newer decision that arrived concurrently.
+   *
+   * @param wm the worker message containing the HOT decision
    */
   private void handleHot(WorkerMessage wm) {
     // DCL first check – cheap, outside the compute lock
@@ -188,6 +194,8 @@ public class WorkerListener {
    * set to 0) so that the entry stops being proactively refreshed.  The data
    * remains in the cache and will be evicted naturally by Caffeine's capacity
    * policy or a subsequent invalidation.
+   *
+   * @param wm the worker message containing the COOL decision
    */
   private void handleCool(WorkerMessage wm) {
     caffeineCache
@@ -222,6 +230,12 @@ public class WorkerListener {
     log.debug("HotKey cooled by Worker: {}", wm.cacheKey());
   }
 
+  /**
+   * Loads the current value from Redis for the key in the worker message.
+   *
+   * @param wm the worker message containing the cache key to load
+   * @return the value from Redis, or {@code null} if the load failed
+   */
   private Object loadFromRedis(WorkerMessage wm) {
     try {
       return redisLoader.apply(wm.cacheKey());
@@ -231,6 +245,12 @@ public class WorkerListener {
     }
   }
 
+  /**
+   * Processes a Worker heartbeat ping, updating the health monitor with the
+   * shard or node liveness timestamp.
+   *
+   * @param msg the worker message containing heartbeat data
+   */
   private void handlePing(WorkerMessage msg) {
     workerHealthMonitor.onHeartbeat(msg.shardIndex(), msg.timestamp());
     if (msg.nodeId() != null) {

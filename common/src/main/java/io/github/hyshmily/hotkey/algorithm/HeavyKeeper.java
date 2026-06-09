@@ -94,6 +94,16 @@ public class HeavyKeeper implements TopK {
     this(k, width, depth, decay, minCount, 50_000);
   }
 
+  /**
+   * Construct a HeavyKeeper instance with a custom expelled-queue capacity.
+   *
+   * @param k                     maximum number of hot keys to track
+   * @param width                 width of the Count-Min Sketch (number of columns per row)
+   * @param depth                 depth of the Count-Min Sketch (number of rows / hash functions)
+   * @param decay                 probabilistic decay factor (0.0–1.0); higher values preserve counts longer
+   * @param minCount              minimum count threshold before a key can enter the TopK set
+   * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled keys
+   */
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount, int expelledQueueCapacity) {
     if (k <= 0) {
       throw new IllegalArgumentException("TopK must be greater than 0, but got: " + k);
@@ -123,6 +133,18 @@ public class HeavyKeeper implements TopK {
     this.total = new LongAdder();
   }
 
+  /**
+   * Record an access to the given key.
+   *
+   * <p>The returned {@link AddResult} carries an {@code expelledKey} when the key
+   * entered the TopK set by displacing a previous member (non-null expelledKey and
+   * {@code isHot == true}).  When the key was already in the TopK set or failed to
+   * meet the minimum count threshold, {@code expelledKey} is {@code null}.
+   *
+   * @param key       the cache key being accessed
+   * @param increment the frequency increment (typically 1)
+   * @return an {@link AddResult} with expelled key (or null), hot status, and the input key
+   */
   @Override
   public AddResult add(String key, int increment) {
     /* Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key -> same fingerprint) */
@@ -201,6 +223,11 @@ public class HeavyKeeper implements TopK {
     }
   }
 
+  /**
+   * Return all keys currently in the TopK set, sorted by estimated count descending.
+   *
+   * @return an unmodifiable-style list of {@link Item} entries, from highest to lowest count
+   */
   @Override
   public List<Item> list() {
     synchronized (sortedTopK) {
@@ -212,6 +239,12 @@ public class HeavyKeeper implements TopK {
     }
   }
 
+  /**
+   * Check whether a key is currently in the TopK set.
+   *
+   * @param key the cache key to test
+   * @return {@code true} if the key is in the TopK set, {@code false} otherwise
+   */
   @Override
   public boolean contains(String key) {
     synchronized (sortedTopK) {

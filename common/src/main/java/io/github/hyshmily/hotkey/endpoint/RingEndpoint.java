@@ -47,6 +47,12 @@ public class RingEndpoint {
 
   private final RingManager ringManager;
 
+  /**
+   * Return the current ring topology, mode (auto/manual), node count,
+   * virtual node count, and the sorted list of live nodes.
+   *
+   * @return a map containing ring status fields
+   */
   @GetMapping
   public Map<String, Object> ringInfo() {
     Map<String, Object> result = new LinkedHashMap<>();
@@ -57,6 +63,12 @@ public class RingEndpoint {
     return result;
   }
 
+  /**
+   * Determine which node is responsible for the given key.
+   *
+   * @param key the cache key to look up
+   * @return a map containing the key and its assigned node ID
+   */
   @GetMapping("/{key}")
   public Map<String, Object> keyMapping(@PathVariable String key) {
     Assert.hasText(key, "key must not be empty");
@@ -66,6 +78,12 @@ public class RingEndpoint {
     return result;
   }
 
+  /**
+   * Add a physical node to the ring.  Switches to manual mode if not already active.
+   *
+   * @param body a map containing the {@code "nodeId"} to add
+   * @return a status map confirming the action
+   */
   @PostMapping
   public Map<String, Object> addNode(@RequestBody Map<String, String> body) {
     String nodeId = body.get("nodeId");
@@ -74,6 +92,12 @@ public class RingEndpoint {
     return Map.of("status", "ok", "action", "addNode", "nodeId", nodeId);
   }
 
+  /**
+   * Remove a physical node from the ring.  Switches to manual mode if not already active.
+   *
+   * @param nodeId the ID of the node to remove
+   * @return a status map confirming the action
+   */
   @DeleteMapping("/{nodeId}")
   public Map<String, Object> removeNode(@PathVariable String nodeId) {
     Assert.hasText(nodeId, "nodeId must not be empty");
@@ -81,6 +105,12 @@ public class RingEndpoint {
     return Map.of("status", "ok", "action", "removeNode", "nodeId", nodeId);
   }
 
+  /**
+   * Reset the ring to auto mode, allowing the next heartbeat reconciliation
+   * to rebuild the topology from discovered nodes.
+   *
+   * @return a status map confirming the switch to auto mode
+   */
   @PostMapping("/rebuild")
   public Map<String, Object> rebuild() {
     ringManager.resetToAuto();

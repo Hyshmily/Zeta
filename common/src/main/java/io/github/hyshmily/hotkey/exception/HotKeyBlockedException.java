@@ -35,6 +35,11 @@ public class HotKeyBlockedException extends RuntimeException {
    */
   private final String cacheKey;
 
+  /**
+   * Creates a new exception for the blocked key.
+   *
+   * @param cacheKey the key that was blocked by a blacklist rule
+   */
   public HotKeyBlockedException(String cacheKey) {
     super("Cache key blocked by rule: " + cacheKey);
     this.cacheKey = cacheKey;

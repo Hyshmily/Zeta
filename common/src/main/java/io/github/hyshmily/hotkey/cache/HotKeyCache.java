@@ -19,20 +19,19 @@ import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
-import io.github.hyshmily.hotkey.model.CacheEntry;
-import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import io.github.hyshmily.hotkey.model.CacheEntry;
+import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
-import io.github.hyshmily.hotkey.sync.VersionController;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.VersionController;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -78,6 +77,20 @@ public class HotKeyCache {
    */
   static boolean isLogicallyExpired(CacheEntry entry) {
     return entry.getHardExpireAtMs() != Long.MAX_VALUE && System.currentTimeMillis() >= entry.getHardExpireAtMs();
+  }
+
+  /**
+   * Check whether an existing cache entry is managed by the Worker (HOT or COOL).
+   * Worker-managed entries preserve their original normal TTLs through writes.
+   *
+   * @param existing the existing cache entry (may be {@code null} or a raw value)
+   * @return {@code true} if the entry is a {@link CacheEntry} with state HOT or COOL
+   */
+  private static boolean isWorkerManagedEntry(Object existing) {
+    return (
+      existing instanceof CacheEntry entry &&
+      (entry.getKeyState() == KeyState.HOT || entry.getKeyState() == KeyState.COOL)
+    );
   }
 
   /**
@@ -154,6 +167,7 @@ public class HotKeyCache {
         }
         T val = raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw;
 
+        promoteLocalHotkeyIfNeeded(cacheKey, raw, val, hardTtlMs, softTtlMs);
         if (!skipReport) {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
         }
@@ -228,6 +242,8 @@ public class HotKeyCache {
             expireManager.triggerBackgroundRefresh(cacheKey, reader, effectiveSoft);
           }
         }
+
+        promoteLocalHotkeyIfNeeded(cacheKey, raw, cached, hardTtlMs, softTtlMs);
         if (!skipReport) {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
         }
@@ -267,43 +283,53 @@ public class HotKeyCache {
           long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
           long hotSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveHotSoftTtlMs();
 
-          caffeineCache.put(
-            cacheKey,
-            CacheEntry.builder()
-              .value(value)
-              .dataVersion(HotKeyConstants.VERSION_DEFAULT)
-              .isVersionDegraded(false)
-              .decisionVersion(0L)
-              .hardTtlMs(hotHard)
-              .hardExpireAtMs(expireManager.computeHardExpireAt(hotHard))
-              .softTtlMs(hotSoft)
-              .softExpireAtMs(expireManager.computeSoftExpireAt(hotSoft))
-              .keyState(KeyState.HOT)
-              .normalHardTtlMs(effectiveHard)
-              .normalSoftTtlMs(effectiveSoft)
-              .build()
-          );
+          caffeineCache
+            .asMap()
+            .compute(cacheKey, (_, existing) -> {
+              if (isWorkerManagedEntry(existing)) {
+                return existing;
+              }
+              return CacheEntry.builder()
+                .value(value)
+                .dataVersion(HotKeyConstants.VERSION_DEFAULT)
+                .isVersionDegraded(false)
+                .decisionVersion(0L)
+                .hardTtlMs(hotHard)
+                .hardExpireAtMs(expireManager.computeHardExpireAt(hotHard))
+                .softTtlMs(hotSoft)
+                .softExpireAtMs(expireManager.computeSoftExpireAt(hotSoft))
+                .keyState(KeyState.HOT)
+                .normalHardTtlMs(effectiveHard)
+                .normalSoftTtlMs(effectiveSoft)
+                .build();
+            });
+
           if (!skipReport) {
             hotKeyReporter.ifPresent(r -> r.record(cacheKey));
           }
           log.debug("HotKey detected, promoted to L1{}: {}", skipReport ? " (no report)" : " and reported", cacheKey);
         } else {
-          caffeineCache.put(
-            cacheKey,
-            CacheEntry.builder()
-              .value(value)
-              .dataVersion(HotKeyConstants.VERSION_DEFAULT)
-              .isVersionDegraded(false)
-              .decisionVersion(0L)
-              .hardTtlMs(effectiveHard)
-              .hardExpireAtMs(expireManager.computeHardExpireAt(effectiveHard))
-              .softTtlMs(effectiveSoft)
-              .softExpireAtMs(expireManager.computeSoftExpireAt(effectiveSoft))
-              .keyState(KeyState.NORMAL)
-              .normalHardTtlMs(effectiveHard)
-              .normalSoftTtlMs(effectiveSoft)
-              .build()
-          );
+          caffeineCache
+            .asMap()
+            .compute(cacheKey, (_, existing) -> {
+              if (isWorkerManagedEntry(existing)) {
+                return existing;
+              }
+              return CacheEntry.builder()
+                .value(value)
+                .dataVersion(HotKeyConstants.VERSION_DEFAULT)
+                .isVersionDegraded(false)
+                .decisionVersion(0L)
+                .hardTtlMs(effectiveHard)
+                .hardExpireAtMs(expireManager.computeHardExpireAt(effectiveHard))
+                .softTtlMs(effectiveSoft)
+                .softExpireAtMs(expireManager.computeSoftExpireAt(effectiveSoft))
+                .keyState(KeyState.NORMAL)
+                .normalHardTtlMs(effectiveHard)
+                .normalSoftTtlMs(effectiveSoft)
+                .build();
+            });
+
           if (!skipReport) {
             hotKeyReporter.ifPresent(r -> r.record(cacheKey));
           }
@@ -311,6 +337,48 @@ public class HotKeyCache {
         }
         return value;
       });
+  }
+
+  /**
+   * Promotes a non-hot entry to HOT state in L1 if the local TopK detector
+   * now considers it a hot key. Preserves existing version and TTL metadata.
+   *
+   * @param cacheKey  the key to promote
+   * @param raw       the raw cached value (maybe a {@link CacheEntry} or a bare object)
+   * @param val       the extracted value from the cache entry
+   * @param hardTtlMs hard TTL override (0 = use configured hot hard TTL)
+   * @param softTtlMs soft TTL override (0 = use configured hot soft TTL)
+   */
+  private void promoteLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
+    if (
+      raw instanceof CacheEntry ce &&
+      ce.getKeyState() != KeyState.HOT &&
+      hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR).isHotKey()
+    ) {
+      long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
+      long hotSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveHotSoftTtlMs();
+
+      caffeineCache
+        .asMap()
+        .compute(cacheKey, (_, existing) -> {
+          if (existing instanceof CacheEntry entry && entry.getKeyState() == KeyState.HOT) {
+            return existing;
+          }
+          return CacheEntry.builder()
+            .value(val)
+            .dataVersion(ce.getDataVersion())
+            .isVersionDegraded(ce.isVersionDegraded())
+            .decisionVersion(ce.getDecisionVersion())
+            .hardTtlMs(hotHard)
+            .hardExpireAtMs(expireManager.computeHardExpireAt(hotHard))
+            .softTtlMs(hotSoft)
+            .softExpireAtMs(expireManager.computeSoftExpireAt(hotSoft))
+            .keyState(KeyState.HOT)
+            .normalHardTtlMs(ce.getNormalHardTtlMs())
+            .normalSoftTtlMs(ce.getNormalSoftTtlMs())
+            .build();
+        });
+    }
   }
 
   /**
@@ -362,6 +430,11 @@ public class HotKeyCache {
   /**
    * Write-through: execute the writer, then update L1 and broadcast.
    * Uses effective hard/soft TTL from configuration.
+   *
+   * @param cacheKey the key to write
+   * @param value    the value to cache
+   * @param writer   the data-source mutation to execute before caching
+   * @param <T>      the value type
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer) {
     putThrough(cacheKey, value, writer, 0L, 0L);
@@ -371,8 +444,12 @@ public class HotKeyCache {
    * Write-through with explicit TTL overrides.
    * Pass 0 to use the configured default for that TTL type.
    *
+   * @param cacheKey  the key to write
+   * @param value     the value to cache
+   * @param writer    the data-source mutation to execute before caching
    * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
    * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs, long softTtlMs) {
     if (invalidCacheKey(cacheKey)) {
@@ -391,22 +468,11 @@ public class HotKeyCache {
         long effectiveHardTtl = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHardTtlMs();
         long effectiveSoftTtl = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveSoftTtlMs();
 
-        caffeineCache.put(
-          cacheKey,
-          CacheEntry.builder()
-            .value(value)
-            .dataVersion(vr.dataVersion())
-            .isVersionDegraded(vr.degraded())
-            .decisionVersion(0L)
-            .hardTtlMs(effectiveHardTtl)
-            .hardExpireAtMs(expireManager.computeHardExpireAt(effectiveHardTtl))
-            .softTtlMs(effectiveSoftTtl)
-            .softExpireAtMs(expireManager.computeSoftExpireAt(effectiveSoftTtl))
-            .keyState(KeyState.NORMAL)
-            .normalHardTtlMs(effectiveHardTtl)
-            .normalSoftTtlMs(effectiveSoftTtl)
-            .build()
-        );
+        caffeineCache
+          .asMap()
+          .compute(cacheKey, (_, existing) ->
+            buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl)
+          );
 
         cacheSyncPublisher.ifPresentOrElse(
           p -> p.broadcastRefresh(cacheKey, vr.dataVersion(), vr.degraded()),
@@ -418,8 +484,68 @@ public class HotKeyCache {
   }
 
   /**
+   * Builds a {@link CacheEntry} for a write-through operation, preserving
+   * Worker-managed state and version information from the existing entry.
+   *
+   * @param existing          the previous cache entry (maybe {@code null} or a raw value)
+   * @param value             the new value to cache
+   * @param vr                the version result from the version controller
+   * @param effectiveHardTtl  the effective hard TTL to use
+   * @param effectiveSoftTtl  the effective soft TTL to use
+   * @param <T>               the value type
+   * @return a new {@link CacheEntry} with the supplied value and metadata
+   */
+  private <T> CacheEntry buildPutThroughEntry(
+    Object existing,
+    T value,
+    VersionController.VersionResult vr,
+    long effectiveHardTtl,
+    long effectiveSoftTtl
+  ) {
+    KeyState state = (existing instanceof CacheEntry entry) ? entry.getKeyState() : KeyState.NORMAL;
+
+    boolean isWorkerManaged = isWorkerManagedEntry(existing);
+
+    long normalHardTtl = 0;
+    long normalSoftTtl = 0;
+    long decisionVersion = (existing instanceof CacheEntry entry) ? entry.getDecisionVersion() : 0L;
+
+    if (existing instanceof CacheEntry) {
+      normalHardTtl = isWorkerManaged ? ((CacheEntry) existing).getNormalHardTtlMs() : effectiveHardTtl;
+    }
+    if (existing instanceof CacheEntry) {
+      normalSoftTtl = isWorkerManaged ? ((CacheEntry) existing).getNormalSoftTtlMs() : effectiveSoftTtl;
+    }
+
+    return CacheEntry.builder()
+      .value(value)
+      .dataVersion(vr.dataVersion())
+      .isVersionDegraded(vr.degraded())
+      .decisionVersion(decisionVersion)
+      .hardTtlMs(state == KeyState.HOT ? expireManager.getEffectiveHotHardTtlMs() : effectiveHardTtl)
+      .hardExpireAtMs(
+        state == KeyState.HOT
+          ? expireManager.computeHotHardExpireAt()
+          : expireManager.computeHardExpireAt(effectiveHardTtl)
+      )
+      .softTtlMs(state == KeyState.HOT ? expireManager.getEffectiveHotSoftTtlMs() : effectiveSoftTtl)
+      .softExpireAtMs(
+        state == KeyState.HOT
+          ? expireManager.computeHotSoftExpireAt()
+          : expireManager.computeSoftExpireAt(effectiveSoftTtl)
+      )
+      .keyState(state)
+      .normalHardTtlMs(normalHardTtl)
+      .normalSoftTtlMs(normalSoftTtl)
+      .build();
+  }
+
+  /**
    * Execute a mutation, then invalidate L1 and broadcast.
    * Next {@link #get} will re-fetch from the reader.
+   *
+   * @param cacheKey the key to invalidate after mutation
+   * @param mutation the mutation to execute
    */
   public void putBeforeInvalidate(String cacheKey, Runnable mutation) {
     if (invalidCacheKey(cacheKey)) {
@@ -452,6 +578,8 @@ public class HotKeyCache {
   /**
    * Add a key pattern to the blacklist.
    * Subsequent accesses to matching keys will throw {@link HotKeyBlockedException}.
+   *
+   * @param cacheKey the key pattern to blacklist
    */
   public void addBlacklist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
@@ -464,6 +592,8 @@ public class HotKeyCache {
   /**
    * Add a key pattern to the whitelist.
    * Matching keys are allowed but bypass app-to-Worker reporting.
+   *
+   * @param cacheKey the key pattern to whitelist
    */
   public void addWhitelist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
@@ -477,6 +607,8 @@ public class HotKeyCache {
 
   /**
    * Remove a key pattern from the blacklist.
+   *
+   * @param cacheKey the key pattern to remove from the blacklist
    */
   public void unBlacklist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
@@ -488,6 +620,8 @@ public class HotKeyCache {
 
   /**
    * Remove a key pattern from the whitelist.
+   *
+   * @param cacheKey the key pattern to remove from the whitelist
    */
   public void unWhitelist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
@@ -548,6 +682,8 @@ public class HotKeyCache {
   /**
    * Check whether a key is blocked; throws {@link HotKeyBlockedException} if so.
    *
+   * @param cacheKey the key to check
+   * @param operation the operation being performed (for diagnostics)
    * @return {@code true} if the key is on the ALLOW_NO_REPORT list
    */
   private boolean checkAndThrowIfBlocked(String cacheKey, String operation) {

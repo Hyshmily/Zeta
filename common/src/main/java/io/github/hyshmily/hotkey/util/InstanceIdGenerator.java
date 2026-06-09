@@ -29,6 +29,7 @@ import java.util.UUID;
  */
 public final class InstanceIdGenerator {
 
+  /** Private constructor to prevent instantiation of this utility class. */
   private InstanceIdGenerator() {}
 
   /**

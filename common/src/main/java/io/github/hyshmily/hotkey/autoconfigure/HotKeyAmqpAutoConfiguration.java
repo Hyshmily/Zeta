@@ -70,6 +70,11 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 @EnableConfigurationProperties({ HotKeyProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class })
 public class HotKeyAmqpAutoConfiguration {
 
+  /**
+   * Create the {@link WorkerHealthMonitor} that tracks liveness of Worker shards.
+   * Always present when AMQP is on the classpath; consumed by the reporter
+   * to decide whether to enqueue report batches.
+   */
   @Bean
   public WorkerHealthMonitor workerHealthMonitor() {
     return new WorkerHealthMonitor();

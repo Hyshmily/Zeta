@@ -312,6 +312,7 @@ HotKey.get(cacheKey, reader[, hardTtlMs, softTtlMs])
       │    ├─ 命中 → unwrap CacheEntry
       │    │    ├─ KeyState == HOT → 使用热点 TTL（hotHardTtl / hotSoftTtl）
       │    │    └─ KeyState != HOT → 使用普通 TTL（normalHardTtl / normalSoftTtl）
+      │    ├─ promoteLocalHotkeyIfNeeded(key, entry)           [NORMAL/COOL 本地升级到 HOT]
       │    ├─ hotKeyDetector.add(key, 1)                       [本地 HeavyKeeper 频率计数]
       │    ├─ hotKeyReporter.record(key)                       [App→Worker 上报]
       │    └─ return Optional.of(entry.value)
@@ -344,6 +345,7 @@ HotKey.getWithSoftExpire(key, reader[, softTtlMs][, hardTtlMs, softTtlMs])
       │    ├─ 硬 TTL 已过期 → 返回 empty（同 get 路径）
       │    └─ 软 TTL 已过期但硬 TTL 未过期
       │         ├─ 立即返回旧值（stale）
+      │         ├─ promoteLocalHotkeyIfNeeded(key, entry)  [NORMAL/COOL 本地升级到 HOT]
       │         ├─ hotKeyDetector.add(key, 1)
       │         ├─ hotKeyReporter.record(key)
       │         └─ 异步提交刷新任务:

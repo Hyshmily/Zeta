@@ -30,5 +30,8 @@ public final class CacheKeysPolicy {
     return cacheKey == null || cacheKey.isBlank();
   }
 
+  /**
+   * Utility class — no instantiation.
+   */
   private CacheKeysPolicy() {}
 }

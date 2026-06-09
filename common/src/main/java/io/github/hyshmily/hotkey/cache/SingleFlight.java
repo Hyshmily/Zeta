@@ -61,6 +61,8 @@ public class SingleFlight {
   /**
    * Approximate number of keys currently tracked for dedup.
    * Useful for monitoring and diagnostics.
+   *
+   * @return the estimated number of in-flight keys
    */
   public long estimatedInflightSize() {
     return inflightLoads.estimatedSize();

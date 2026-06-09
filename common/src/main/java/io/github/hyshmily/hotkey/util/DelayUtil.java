@@ -46,5 +46,6 @@ public final class DelayUtil {
     task.run();
   }
 
+  /** Private constructor to prevent instantiation of this utility class. */
   private DelayUtil() {}
 }

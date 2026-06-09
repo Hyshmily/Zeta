@@ -232,6 +232,10 @@ public class SlidingWindowDetector {
   /**
    * Returns the total access count within the current sliding window for the
    * given key, or {@code 0} if the key is unknown.
+   *
+   * @param key the cache key to query
+   * @return the sum of access counts in the current window, or {@code 0} if
+   *         the key is not being tracked
    */
   public long getWindowSum(String key) {
     AtomicLong[] slices = windows.get(key);
@@ -242,7 +246,11 @@ public class SlidingWindowDetector {
     return getWindowSum(slices, currentIndex);
   }
 
-  /** Returns the number of keys currently being tracked by this detector. */
+  /**
+   * Returns the number of keys currently being tracked by this detector.
+   *
+   * @return the count of active keys in the windows map
+   */
   public int getActiveKeyCount() {
     return windows.size();
   }

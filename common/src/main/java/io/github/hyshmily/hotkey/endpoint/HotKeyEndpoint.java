@@ -1,3 +1,18 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.github.hyshmily.hotkey.endpoint;
 
 import com.github.benmanes.caffeine.cache.Cache;
@@ -84,6 +99,13 @@ public class HotKeyEndpoint {
     return info;
   }
 
+  /**
+   * Build the "local" section of the actuator response containing app-side
+   * diagnostics (TopK rankings, cache metrics, SingleFlight, reporter, rules,
+   * TTL settings, version tracking).
+   *
+   * @return a map of local diagnostic metrics (never {@code null})
+   */
   private Map<String, Object> buildLocalSection() {
     Map<String, Object> local = new LinkedHashMap<>();
 
@@ -159,6 +181,12 @@ public class HotKeyEndpoint {
     return local;
   }
 
+  /**
+   * Build the "worker" section of the actuator response containing worker-side
+   * diagnostics (worker TopK rankings, shard health, state machine tracked keys).
+   *
+   * @return a map of worker diagnostic metrics (never {@code null})
+   */
   private Map<String, Object> buildWorkerSection() {
     Map<String, Object> worker = new LinkedHashMap<>();
 
@@ -184,6 +212,13 @@ public class HotKeyEndpoint {
     return worker;
   }
 
+  /**
+   * Convert a list of TopK {@link Item} records into a list of key-count maps
+   * suitable for JSON serialisation in the actuator response.
+   *
+   * @param items the TopK items to convert
+   * @return a list of maps, each containing {@code "key"} and {@code "count"}
+   */
   private static List<Map<String, Object>> toTopKEntries(List<Item> items) {
     List<Map<String, Object>> entries = new ArrayList<>(items.size());
     for (Item item : items) {
@@ -192,6 +227,13 @@ public class HotKeyEndpoint {
     return entries;
   }
 
+  /**
+   * Extract HeavyKeeper-specific configuration from a TopK instance.
+   * Returns an empty map if the detector is not a HeavyKeeper.
+   *
+   * @param topK the TopK detector (may be any implementation)
+   * @return a map of HeavyKeeper config keys, or an empty map
+   */
   private static Map<String, Object> heavyKeeperConfig(TopK topK) {
     if (topK instanceof HeavyKeeper hk) {
       return Map.of(

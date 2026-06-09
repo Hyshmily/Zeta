@@ -31,20 +31,29 @@ public class DefaultLogger implements HotKeyLogger {
 
   private final Logger logger;
 
+  /**
+   * Create a {@code DefaultLogger} that delegates to an SLF4J {@link Logger}
+   * resolved for the given class.
+   *
+   * @param clazz the class to bind the logger to
+   */
   public DefaultLogger(Class<?> clazz) {
     this.logger = LoggerFactory.getLogger(clazz);
   }
 
+  /** Delegates to SLF4J {@code debug}. */
   @Override
   public void debug(String msg) {
     logger.debug(msg);
   }
 
+  /** Delegates to SLF4J {@code debug} with format arguments. */
   @Override
   public void debug(String format, Object... args) {
     logger.debug(format, args);
   }
 
+ /** Delegates to SLF4J {@code debug} with lazy supplier evaluation. */
   @Override
   public void debug(Supplier<String> supplier) {
     if (logger.isDebugEnabled()) {
@@ -52,16 +61,19 @@ public class DefaultLogger implements HotKeyLogger {
     }
   }
 
+  /** Delegates to SLF4J {@code info}. */
   @Override
   public void info(String msg) {
     logger.info(msg);
   }
 
+  /** Delegates to SLF4J {@code info} with format arguments. */
   @Override
   public void info(String format, Object... args) {
     logger.info(format, args);
   }
 
+  /** Delegates to SLF4J {@code info} with lazy supplier evaluation. */
   @Override
   public void info(Supplier<String> supplier) {
     if (logger.isInfoEnabled()) {
@@ -69,16 +81,19 @@ public class DefaultLogger implements HotKeyLogger {
     }
   }
 
+  /** Delegates to SLF4J {@code warn}. */
   @Override
   public void warn(String msg) {
     logger.warn(msg);
   }
 
+  /** Delegates to SLF4J {@code warn} with format arguments. */
   @Override
   public void warn(String format, Object... args) {
     logger.warn(format, args);
   }
 
+  /** Delegates to SLF4J {@code warn} with lazy supplier evaluation. */
   @Override
   public void warn(Supplier<String> supplier) {
     if (logger.isWarnEnabled()) {
@@ -86,21 +101,25 @@ public class DefaultLogger implements HotKeyLogger {
     }
   }
 
+  /** Delegates to SLF4J {@code error}. */
   @Override
   public void error(String msg) {
     logger.error(msg);
   }
 
+  /** Delegates to SLF4J {@code error} with format arguments. */
   @Override
   public void error(String format, Object... args) {
     logger.error(format, args);
   }
 
+  /** Delegates to SLF4J {@code error} with a throwable. */
   @Override
   public void error(String msg, Throwable t) {
     logger.error(msg, t);
   }
 
+  /** Delegates to SLF4J {@code error} with lazy supplier evaluation. */
   @Override
   public void error(Supplier<String> supplier) {
     if (logger.isErrorEnabled()) {

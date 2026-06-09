@@ -84,6 +84,8 @@ public class CacheSyncListener {
   /**
    * Decodes the message and schedules the appropriate handler with a random delay
    * to distribute Redis reads evenly.
+   *
+   * @param msg the raw AMQP message
    */
   private void processSync(Message msg) {
     SyncMessage sm = SyncMessage.from(msg);
@@ -100,6 +102,8 @@ public class CacheSyncListener {
 
   /**
    * Routes the message to the correct handler based on its type.
+   *
+   * @param msg the sync message to route
    */
   private void syncMessageRouter(SyncMessage msg) {
     if (msg.type() == null) {
@@ -126,6 +130,8 @@ public class CacheSyncListener {
    * <p>
    * A second DCL check inside the atomic {@code compute} body prevents a
    * concurrent refresh from being wiped by a stale degraded INVALIDATE.
+   *
+   * @param sm the sync message containing the key to invalidate
    */
   private void handleLocalInvalidate(SyncMessage sm) {
     boolean unconditional = sm.version() == 0L && !sm.isVersionDegraded();
@@ -156,6 +162,8 @@ public class CacheSyncListener {
    * This method bypasses version guards intentionally — the publisher
    * from {@code invalidateAll} sends clean (version=0L, not degraded)
    * and all keys in the batch are invalidated unconditionally.
+   *
+   * @param sm the sync message containing the batch-invalidation keys as a JSON array
    */
   private void handleLocalInvalidateAll(SyncMessage sm) {
     try {
@@ -169,6 +177,8 @@ public class CacheSyncListener {
 
   /**
    * Replace the entire rule set with the incoming JSON payload.
+   *
+   * @param sm the sync message containing the ruleset JSON
    */
   private void handleRulesSync(SyncMessage sm) {
     ruleMatcher.syncRules(sm.cacheKey());
@@ -184,6 +194,8 @@ public class CacheSyncListener {
    * The refreshed entry retains the original metadata (hard/soft TTLs, normal TTLs,
    * key state, decision version, degradation flag) except for the value and data
    * version which are taken from the incoming message and Redis.
+   *
+   * @param sm the sync message containing the key and version to refresh
    */
   private void handleRefresh(SyncMessage sm) {
     // DCL first check – cheap, outside the compute lock
@@ -229,6 +241,12 @@ public class CacheSyncListener {
     log.debug("Refreshed by sync: {}", sm.cacheKey());
   }
 
+  /**
+   * Loads the current value from Redis for the key carried in the sync message.
+   *
+   * @param sm the sync message containing the cache key to load
+   * @return the value from Redis, or {@code null} if the load failed
+   */
   private Object loadFromRedis(SyncMessage sm) {
     try {
       return redisLoader.apply(sm.cacheKey());
