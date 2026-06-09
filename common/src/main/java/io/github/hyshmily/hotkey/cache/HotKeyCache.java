@@ -352,7 +352,7 @@ public class HotKeyCache {
   private void promoteLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
     if (
       raw instanceof CacheEntry ce &&
-      ce.getKeyState() != KeyState.HOT &&
+      ce.getKeyState() == KeyState.NORMAL &&
       hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR).isHotKey()
     ) {
       long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
@@ -361,7 +361,7 @@ public class HotKeyCache {
       caffeineCache
         .asMap()
         .compute(cacheKey, (_, existing) -> {
-          if (existing instanceof CacheEntry entry && entry.getKeyState() == KeyState.HOT) {
+          if (existing instanceof CacheEntry entry && entry.getKeyState() != KeyState.NORMAL) {
             return existing;
           }
           return CacheEntry.builder()
