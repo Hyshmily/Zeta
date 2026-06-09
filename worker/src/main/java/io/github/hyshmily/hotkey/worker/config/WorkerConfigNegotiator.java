@@ -15,17 +15,18 @@
  */
 package io.github.hyshmily.hotkey.worker.config;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
-
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import jakarta.annotation.PostConstruct;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
  * Listens for heartbeat-based config updates from peer Workers and applies them
@@ -96,34 +97,30 @@ public class WorkerConfigNegotiator {
     if (remoteTsObj == null) {
       return;
     }
+
     long remoteTs = remoteTsObj.longValue();
     long localTs = configTimestampCounter.get();
     if (remoteTs <= localTs) {
       return;
     }
 
-    Number confirm = props.getHeader(AMQP_HEADER_CONFIG_CONFIRM_COUNT);
-    Number cool = props.getHeader(AMQP_HEADER_CONFIG_COOL_COUNT);
-    Number grace = props.getHeader(AMQP_HEADER_CONFIG_GRACE_COUNT);
+    Number confirmCount = props.getHeader(AMQP_HEADER_CONFIG_CONFIRM_COUNT);
+    Number coolCount = props.getHeader(AMQP_HEADER_CONFIG_COOL_COUNT);
+    Number preCoolGraceCount = props.getHeader(AMQP_HEADER_CONFIG_GRACE_COUNT);
 
-    boolean updated = false;
-    if (confirm != null) {
-      stateMachine.setConfirmCount(confirm.intValue());
-      updated = true;
-    }
-    if (cool != null) {
-      stateMachine.setCoolCount(cool.intValue());
-      updated = true;
-    }
-    if (grace != null) {
-      stateMachine.setPreCoolGraceCount(grace.intValue());
-      updated = true;
-    }
+    stateMachine.setConfirmCount(confirmCount.intValue());
+    stateMachine.setCoolCount(coolCount.intValue());
+    stateMachine.setPreCoolGraceCount(preCoolGraceCount.intValue());
 
-    if (updated) {
-      configTimestampCounter.set(remoteTs);
-      log.info("Applied newer config from {}: confirm={}, cool={}, grace={}", fromNode, confirm, cool, grace);
-    }
+    configTimestampCounter.set(remoteTs);
+
+    log.debug(
+      "Applied newer config from {}: confirmCount={}, coolCount={}, preCoolGraceCount={}",
+      fromNode,
+      confirmCount,
+      coolCount,
+      preCoolGraceCount
+    );
 
     if (startupLatch.getCount() > 0) {
       startupLatch.countDown();

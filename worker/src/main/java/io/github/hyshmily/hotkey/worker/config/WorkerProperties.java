@@ -138,7 +138,7 @@ public class WorkerProperties {
   /**
    * Number of sliding-window slices that fit within the CONFIRM duration.
    *
-   * @return window count for the confirm phase
+   * @return window count for the confirmation phase
    */
   public int getConfirmWindows() {
     double sliceMs = (double) slidingWindow.getDurationMs() / slidingWindow.getSlices();
