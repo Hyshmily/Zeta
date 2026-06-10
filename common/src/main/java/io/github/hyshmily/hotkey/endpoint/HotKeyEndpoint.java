@@ -212,9 +212,7 @@ public class HotKeyEndpoint {
     }
 
     if (workerHealthMonitor != null) {
-      Map<Integer, Map<String, Object>> healthData = workerHealthMonitor.getWorkerHealth();
-      worker.put("shards", healthData.keySet().stream().sorted().toList());
-      worker.put("health", healthData);
+      worker.put("health", workerHealthMonitor.getWorkerHealth());
     }
 
     if (hotKeyStateMachine != null) {

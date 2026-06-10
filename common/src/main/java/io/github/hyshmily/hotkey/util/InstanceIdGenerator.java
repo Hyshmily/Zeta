@@ -33,7 +33,7 @@ public final class InstanceIdGenerator {
   private InstanceIdGenerator() {}
 
   /**
-   * JVM-local node identifier derived from the upper 48 bits of a random UUID.
+   * JVM-local node identifier derived from the upper 31 bits of a random UUID.
    * Initialized once at class load, stable for the JVM lifetime.
    *
    * <p>Used by {@link io.github.hyshmily.hotkey.cache.VersionGuard} as the upper 32 bits of the

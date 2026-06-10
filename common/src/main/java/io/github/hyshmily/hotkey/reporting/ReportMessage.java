@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.hotkey.reporting;
 
-import java.io.Serializable;
 import java.util.Map;
 
 /**
@@ -29,4 +28,4 @@ public record ReportMessage(
   String appName,
   long timestamp,
   Map<String, Long> counts
-) implements Serializable {}
+) {}

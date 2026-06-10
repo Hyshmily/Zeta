@@ -817,10 +817,10 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
       return null;
     });
 
-    workerHealthMonitor.onHeartbeat(0, System.currentTimeMillis());
+    workerHealthMonitor.onHeartbeat("sim-node", System.currentTimeMillis());
     ScheduledExecutorService heartbeatRefresher = Executors.newSingleThreadScheduledExecutor();
     heartbeatRefresher.scheduleAtFixedRate(
-      () -> workerHealthMonitor.onHeartbeat(0, System.currentTimeMillis()),
+      () -> workerHealthMonitor.onHeartbeat("sim-node", System.currentTimeMillis()),
       3, 3, TimeUnit.SECONDS);
 
     String reportQName = "test.fc.extreme." + UUID.randomUUID();

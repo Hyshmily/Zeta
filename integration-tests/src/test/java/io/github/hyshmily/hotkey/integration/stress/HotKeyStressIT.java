@@ -30,6 +30,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncProperties;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.model.CacheEntry;
@@ -928,7 +929,7 @@ class HotKeyStressIT {
     ReportPublisher publisher = mock(ReportPublisher.class);
     doAnswer(inv -> null).when(publisher).publish(any(), any());
     HotKeyReporter reporter = new HotKeyReporter(
-      new WorkerHealthMonitor(), publisher, scheduler, 100, 1, "stress-test", 10000, 100, 2, null);
+      new WorkerHealthMonitor(), publisher, scheduler, 100, "stress-test", 10000, 100, 2, new RingManager(150));
     reporter.start();
     concurrentRun("highFreq-reporter", 20, 100_000, (idx) -> {
       reporter.record("freq-key-" + (idx & 0xFF));
@@ -957,8 +958,8 @@ class HotKeyStressIT {
     doAnswer(inv -> null).when(publisher).publish(any(), any());
     int queueCapacity = 1000;
     HotKeyReporter reporter = new HotKeyReporter(
-      new WorkerHealthMonitor(), publisher, scheduler, 100, 1, "backpressure-test",
-      queueCapacity, 1, 1, null);
+      new WorkerHealthMonitor(), publisher, scheduler, 100, "backpressure-test",
+      queueCapacity, 1, 1, new RingManager(150));
     reporter.start();
     int threadCount = 10;
     int opsPerThread = 20_000;
@@ -994,10 +995,9 @@ class HotKeyStressIT {
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     ReportPublisher publisher = mock(ReportPublisher.class);
     doAnswer(inv -> null).when(publisher).publish(any(), any());
-    int shardCount = 4;
     HotKeyReporter reporter = new HotKeyReporter(
-      new WorkerHealthMonitor(), publisher, scheduler, 100, shardCount, "shard-test",
-      10000, 50, shardCount, null);
+      new WorkerHealthMonitor(), publisher, scheduler, 100, "shard-test",
+      10000, 50, 4, new RingManager(150));
     reporter.start();
     int threadCount = 8;
     int opsPerThread = 20_000;
@@ -1007,12 +1007,11 @@ class HotKeyStressIT {
     Thread.sleep(200);
     reporter.stop();
     scheduler.shutdown();
-    m.custom.put("shardCount", shardCount);
     m.custom.put("depth", (long) reporter.dispatcherDepth());
     m.custom.put("expired", (long) reporter.dispatcherExpired());
     m.custom.put("dropped", (long) reporter.dispatcherDropped());
-    log.info("  Multi-shard: {} shards, {} ops, depth={}, expired={}, dropped={}",
-      shardCount, m.totalOps, reporter.dispatcherDepth(), reporter.dispatcherExpired(), reporter.dispatcherDropped());
+    log.info("  Multi-shard: {} ops, depth={}, expired={}, dropped={}",
+      m.totalOps, reporter.dispatcherDepth(), reporter.dispatcherExpired(), reporter.dispatcherDropped());
     m.finish().logSummary();
   }
 

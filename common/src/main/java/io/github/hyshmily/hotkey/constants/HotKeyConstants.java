@@ -32,8 +32,6 @@ public final class HotKeyConstants {
   public static final String AMQP_HEADER_VERSION = "version";
   /** AMQP message header key indicating whether the version is degraded. */
   public static final String AMQP_HEADER_IS_VERSION_DEGRADED = "isVersionDegraded";
-  /** AMQP message header key for the shard index used in routing. */
-  public static final String AMQP_HEADER_SHARD_INDEX = "shardIndex";
   /** AMQP message header key for the origin node identifier. */
   public static final String AMQP_HEADER_NODE_ID = "nodeId";
   /** AMQP message header key for the message creation timestamp. */

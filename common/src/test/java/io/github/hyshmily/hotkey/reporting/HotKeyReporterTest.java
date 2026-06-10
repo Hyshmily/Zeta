@@ -60,12 +60,11 @@ class HotKeyReporterTest {
       testPublisher,
       scheduler,
       1000,
-      1,
       "testApp",
       1000,
       100,
       1,
-      null
+      new RingManager(150)
     );
   }
 

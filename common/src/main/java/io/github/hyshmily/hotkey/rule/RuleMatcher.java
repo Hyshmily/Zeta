@@ -61,7 +61,7 @@ public class RuleMatcher {
   private final Optional<CacheSyncPublisher> cacheSyncPublisher;
 
   /** Thread-safe list of all active rules, evaluated in order. */
-  private List<Rule> rulesList = new CopyOnWriteArrayList<>();
+  private volatile List<Rule> rulesList = new CopyOnWriteArrayList<>();
 
   /**
    * Load persisted rules from Redis (if available) at startup.
@@ -282,8 +282,7 @@ public class RuleMatcher {
         String json = r.opsForValue().get(REDIS_KEY_RULES);
         if (json != null && !json.isEmpty()) {
           List<Rule> saved = OBJECT_MAPPER.readValue(json, new TypeReference<>() {});
-          saved.forEach(Rule::prepare);
-          rulesList.addAll(saved);
+          replaceRules(saved);
 
           log.info("Rules loaded from Redis: {} rules", saved.size());
         }

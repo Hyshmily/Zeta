@@ -41,9 +41,8 @@ import java.util.concurrent.atomic.LongAdder;
  * evicted after 30 seconds of inactivity to bound memory usage.
  * Flushed to the appropriate shard at a fixed interval.
  *
- * <p>In legacy mode, keys are routed by {@code Math.floorMod(key.hashCode(), shardCount)}.
- * In consistent-hashing mode (when {@link RingManager} is present), keys are routed
- * via the consistent hash ring.
+ * <p>Keys are routed via the {@link RingManager} consistent-hash ring, ensuring the
+ * same key always maps to the same Worker node even as the cluster scales.
  *
  * <p>Burst absorption and backpressure are provided by a bounded
  * {@link LinkedBlockingQueue} between the flush loop and the
@@ -68,8 +67,6 @@ public class HotKeyReporter {
   private final ScheduledExecutorService scheduler;
   /** Fixed delay between report flushes in milliseconds. */
   private final long reportIntervalMs;
-  /** Number of shards for legacy routing (Math.floorMod). */
-  private final int shardCount;
   /** Name of this application instance, included in report messages. */
   private final String appName;
   /** Maximum capacity of the dispatcher work queue. */
@@ -78,7 +75,7 @@ public class HotKeyReporter {
   private final int queueOfferTimeoutMs;
   /** Number of consumer threads draining the dispatcher queue. */
   private final int consumerCount;
-  /** Consistent-hashing ring manager; null in legacy mode. */
+  /** Consistent-hashing ring manager for Worker node routing. */
   private final RingManager ringManager;
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
@@ -88,7 +85,7 @@ public class HotKeyReporter {
   /**
    * A batch of key-count mappings destined for a single Worker target.
    *
-   * @param target    legacy: String.valueOf(shardIndex), CH mode: nodeId
+   * @param target    the Worker nodeId for this batch
    * @param timestamp wall-clock ms when the batch was assembled
    * @param counts    non-zero per-key counts accumulated since the last flush
    */
@@ -125,9 +122,8 @@ public class HotKeyReporter {
     dispatcher.start();
     scheduler.scheduleAtFixedRate(this::flush, reportIntervalMs, reportIntervalMs, TimeUnit.MILLISECONDS);
     log.info(
-      "HotKeyReporter started: appName={}, shardCount={}, intervalMs={}, queueCapacity={}, consumers={}",
+      "HotKeyReporter started: appName={}, intervalMs={}, queueCapacity={}, consumers={}",
       appName,
-      shardCount,
       reportIntervalMs,
       queueCapacity,
       dispatcher.consumerCount()
@@ -159,11 +155,9 @@ public class HotKeyReporter {
       return;
     }
 
-    // Consistent-hashing mode: reconcile ring with alive nodes
-    if (ringManager != null) {
-      Set<String> alive = workerHealthMonitor.getAliveNodeIds();
-      ringManager.reconcile(alive);
-    }
+    // Reconcile ring with alive Worker nodes, then route via consistent hash
+    Set<String> alive = workerHealthMonitor.getAliveNodeIds();
+    ringManager.reconcile(alive);
 
     Map<String, Map<String, Long>> sharded = new HashMap<>();
     long now = System.currentTimeMillis();
@@ -174,13 +168,7 @@ public class HotKeyReporter {
         long val = adder.sumThenReset();
 
         if (val > 0) {
-          String target;
-
-          if (ringManager != null) {
-            target = ringManager.getNode(key);
-          } else {
-            target = String.valueOf(Math.floorMod(key.hashCode(), shardCount));
-          }
+          String target = ringManager.getNode(key);
           if (target != null && isTargetAlive(target)) {
             sharded.computeIfAbsent(target, _ -> new HashMap<>()).put(key, val);
           }
@@ -206,21 +194,13 @@ public class HotKeyReporter {
   }
 
   /**
-   * Check whether the given target is considered alive.
-   * In consistent-hashing mode, target is a nodeId (String).
-   * In legacy mode, target is a shard index (parsed as int).
+   * Check whether the given target Worker node is considered alive.
+   *
+   * @param nodeId the Worker node identifier
+   * @return true if the node has sent a heartbeat within the timeout window
    */
-  private boolean isTargetAlive(String target) {
-    if (ringManager != null) {
-      return workerHealthMonitor.isAlive(target);
-    }
-    try {
-      int id = Integer.parseInt(target);
-      return workerHealthMonitor.isAlive(id);
-    } catch (NumberFormatException e) {
-      log.warn("Invalid target id: {}, cannot check liveness.", target);
-      return false;
-    }
+  private boolean isTargetAlive(String nodeId) {
+    return workerHealthMonitor.isAlive(nodeId);
   }
 
   /**

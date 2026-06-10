@@ -1,0 +1,3 @@
+# Local Promotion with Worker-Aware Fallback
+
+`promoteLocalHotkeyIfNeeded` upgrades NORMAL entries to HOT on every L1 hit (both `get` and `getWithSoftExpire`), and also upgrades COOL entries when `WorkerHealthMonitor.isAnyWorkerAlive()` returns `false`. This guarantees two things: (1) the local App always promotes hot keys faster than the Worker can broadcast, giving the local view priority; (2) when the Worker cluster is entirely dead, COOL entries don't stagnate with short TTLs — the local TopK takes over as the authority. Worker broadcasts on recovery override local promotions via `decisionVersion` comparison, so the system self-heals without coordination.

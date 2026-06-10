@@ -26,22 +26,20 @@ import org.springframework.validation.annotation.Validated;
  *
  * <p>Prefix: {@code hotkey.worker}.
  *
- * <p>Groups cover routing and sharding, AMQP exchange names, sliding-window
- * parameters, threshold settings, state-machine timings, dynamic threshold
- * adaptation, TopK pre-warm validation, and HeavyKeeper algorithm tuning.
+ * <p>Groups cover routing, AMQP exchange names, sliding-window parameters,
+ * threshold settings, state-machine timings, dynamic threshold adaptation,
+ * TopK pre-warm validation, and HeavyKeeper algorithm tuning.
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "hotkey.worker")
 public class WorkerProperties {
 
-  /** Routing configuration for sharding app-level report queues. */
+  /** Routing configuration for app-level report queue naming. */
   @Data
   public static class Routing {
 
     private String appName = "default";
-    private int shardCount = 1;
-    private int shardIndex = 0;
   }
 
   /** AMQP exchange names for report and broadcast messages. */
@@ -77,6 +75,8 @@ public class WorkerProperties {
     private long confirmDurationMs = 300;
     private long coolDurationMs = 15000;
     private long preCoolGraceMs = 5000;
+    /** Interval for evicting stale sliding-window and state-machine state. Must be >= coolDurationMs * 2. */
+    private long evictIntervalMs = 30000;
   }
 
   /** Dynamic threshold adaptation based on global QPS changes. */

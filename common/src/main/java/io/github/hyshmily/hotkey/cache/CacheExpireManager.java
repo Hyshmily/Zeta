@@ -18,11 +18,11 @@ package io.github.hyshmily.hotkey.cache;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.VERSION_DEFAULT;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.model.CacheEntry;
-import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import io.github.hyshmily.hotkey.model.CacheEntry;
+import io.github.hyshmily.hotkey.model.KeyState;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -50,6 +50,7 @@ public class CacheExpireManager {
   /** TTL configuration providing normal and hot-key TTL values. */
   private final HotKeyProperties ttlConfig;
   /** Semaphore limiting concurrent background refresh operations (null if soft expire disabled). */
+  // null when soft expire is disabled; always guarded by isSoftExpireEnabled() check
   private final Semaphore refreshLimiter;
   /** Jitter ratio applied to TTLs (±10%) to prevent cache stampedes. */
   private static final double ttlJitterRatio = 0.1;
@@ -225,6 +226,9 @@ public class CacheExpireManager {
    * Skipped silently if the refresh limiter is exhausted or soft expire is disabled.
    */
   public void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs) {
+    // Ordering constraint: isSoftExpireEnabled() MUST appear before refreshLimiter.tryAcquire().
+    // refreshLimiter is null when soft expire is disabled; the || short-circuit protects against NPE.
+    // Do NOT reorder or extract !isSoftExpireEnabled() into a separate variable.
     if (!isSoftExpireEnabled() || !refreshLimiter.tryAcquire()) {
       if (isSoftExpireEnabled()) {
         log.debug("Refresh limiter blocked, skip background refresh: {}", cacheKey);

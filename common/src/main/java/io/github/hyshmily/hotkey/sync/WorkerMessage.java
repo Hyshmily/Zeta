@@ -29,11 +29,10 @@ import org.springframework.amqp.core.Message;
  * @param cacheKey        the affected cache key
  * @param type            the decision ({@link #TYPE_HOT}, {@link #TYPE_COOL}, or {@link #TYPE_PING})
  * @param decisionVersion the Worker‑local decision version (monotonically increasing)
- * @param shardIndex      the Worker shard index (for PING; 0 for HOT/COOL)
  * @param timestamp       the heartbeat timestamp (for PING; 0 for HOT/COOL)
  * @param nodeId          the Worker node identifier (for PING; null for HOT/COOL)
  */
-public record WorkerMessage(String cacheKey, String type, long decisionVersion, int shardIndex, long timestamp, String nodeId) {
+public record WorkerMessage(String cacheKey, String type, long decisionVersion, long timestamp, String nodeId) {
   /** Promotes a cache key to hot state — extended TTL, soft expiration enabled. */
   public static final String TYPE_HOT = "HOT";
 
@@ -61,12 +60,10 @@ public record WorkerMessage(String cacheKey, String type, long decisionVersion, 
 
     long decisionVersion =
       msg.getMessageProperties().getHeader(AMQP_HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
-    int shardIndex =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_SHARD_INDEX) instanceof Number n ? n.intValue() : 0;
     long timestamp =
       msg.getMessageProperties().getHeader(AMQP_HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
     String nodeId =
       msg.getMessageProperties().getHeader(AMQP_HEADER_NODE_ID) instanceof String s ? s : null;
-    return new WorkerMessage(cacheKey, type, decisionVersion, shardIndex, timestamp, nodeId);
+    return new WorkerMessage(cacheKey, type, decisionVersion, timestamp, nodeId);
   }
 }

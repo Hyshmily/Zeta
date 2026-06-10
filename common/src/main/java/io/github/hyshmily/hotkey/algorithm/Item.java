@@ -21,4 +21,4 @@ package io.github.hyshmily.hotkey.algorithm;
  * @param key   the hot key
  * @param count the estimated access count
  */
-public record Item(String key, int count) {}
+public record Item(String key, long count) {}

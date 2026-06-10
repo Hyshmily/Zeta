@@ -73,12 +73,15 @@ public class HeavyKeeper implements TopK {
   /** Per-slot fingerprint values for collision verification in the Count-Min Sketch. */
   private final long[] fingerprints;
   /** Per-slot frequency counters for the Count-Min Sketch. */
-  private final int[] counts;
+  private final long[] counts;
   /** Striped lock objects for fine-grained concurrency on sketch slot updates. */
   private final Object[] lockStripes;
   /** Bitmask for mapping bucket index to lock stripe (stripe count must be power of two). */
   private final int lockMask;
-  /** Sorted map of current TopK entries, ordered by count ascending then key lexicographically. */
+  /** Sorted map of current TopK entries, ordered by count ascending then key lexicographically.
+   * Boolean.TRUE is a structural placeholder.  A TreeSet would not safely remove a Node
+   * whose count has changed because the Comparator includes the count; TreeMap.remove()
+   * uses identity equality (Node lacks equals/hashCode), so the heapIndex reference works. */
   private final TreeMap<Node, Boolean> sortedTopK;
   /** Reverse index from key to its {@link Node} in the sorted map, for O(1) lookups. */
   private final Map<String, Node> heapIndex;
@@ -132,14 +135,14 @@ public class HeavyKeeper implements TopK {
 
     int totalSlots = depth * width;
     this.fingerprints = new long[totalSlots];
-    this.counts = new int[totalSlots];
+    this.counts = new long[totalSlots];
     this.lockStripes = new Object[LOCK_STRIPES];
     for (int i = 0; i < LOCK_STRIPES; i++) {
       lockStripes[i] = new Object();
     }
     this.lockMask = LOCK_STRIPES - 1;
 
-    this.sortedTopK = new TreeMap<>(Comparator.comparingInt((Node a) -> a.count).thenComparing(a -> a.key));
+    this.sortedTopK = new TreeMap<>(Comparator.comparingLong((Node a) -> a.count).thenComparing(a -> a.key));
     this.heapIndex = new HashMap<>();
     this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
     this.total = new LongAdder();
@@ -161,7 +164,7 @@ public class HeavyKeeper implements TopK {
   public AddResult add(String key, int increment) {
     /* Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key -> same fingerprint) */
     long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
-    int maxCount = 0;
+    long maxCount = 0L;
 
     for (int i = 0; i < depth; i++) {
       int hash = (int) (itemFingerprint ^ (i * 0x9e3779b97f4a7c15L));
@@ -178,27 +181,23 @@ public class HeavyKeeper implements TopK {
           counts[index] += increment;
           maxCount = Math.max(maxCount, counts[index]);
         } else {
-          // HeavyKeeper probabilistic decay: each of the `increment` steps
-          // has a `decayProb` chance of decrementing the existing counter.
-          // decayProb grows with the counter value (via the pre-computed lookup
-          // table), so larger counters are more likely to be decremented.
-          // Pre-generate random values outside the loop to reduce lock hold time.
+          // HeavyKeeper probabilistic decay: sample the decay count from a
+          // Binomial(increment, decayProb) distribution in O(1) instead of
+          // looping increment times.  This keeps lock hold time bounded even
+          // when the Worker-side batch increment is large.
           ThreadLocalRandom rng = ThreadLocalRandom.current();
-          for (int j = 0; j < increment; j++) {
-            double decayProb = (counts[index] < LOOKUP_TABLE_SIZE)
-              ? lookupTable[counts[index]]
-              : lookupTable[LOOKUP_TABLE_SIZE - 1];
+          double decayProb = (counts[index] < LOOKUP_TABLE_SIZE)
+            ? lookupTable[(int) counts[index]]
+            : lookupTable[LOOKUP_TABLE_SIZE - 1];
 
-            if (rng.nextDouble() < decayProb) {
-              counts[index]--;
-              if (counts[index] == 0) {
-                fingerprints[index] = itemFingerprint;
-                counts[index] = increment - j;
-                maxCount = Math.max(maxCount, counts[index]);
-                break;
-              }
-            }
+          int decays = sampleBinomial(increment, decayProb, rng);
+          if (decays >= counts[index]) {
+            fingerprints[index] = itemFingerprint;
+            counts[index] = increment;
+          } else {
+            counts[index] -= decays;
           }
+          maxCount = Math.max(maxCount, counts[index]);
         }
       }
     }
@@ -280,9 +279,9 @@ public class HeavyKeeper implements TopK {
    */
   @Override
   public void fading() {
-    // Halve all sketch counters. int[] element writes are atomic per JLS 17.7,
-    // so per-stripe locks are not needed here. Concurrent add() calls may see
-    // a half-halved slot — acceptable precision trade-off for ~200K fewer locks.
+    // Halve all sketch counters. long writes are NOT atomic per JLS 17.7,
+    // so concurrent add() may observe a torn value during fading. This is
+    // an acceptable precision trade-off for ~200K fewer locks.
     for (int i = 0; i < counts.length; i++) {
       counts[i] >>= 1;
     }
@@ -292,7 +291,7 @@ public class HeavyKeeper implements TopK {
       TreeMap<Node, Boolean> newMap = new TreeMap<>(sortedTopK.comparator());
       heapIndex.clear();
       for (Node node : sortedTopK.keySet()) {
-        int half = node.count >> 1;
+        long half = node.count >> 1;
         if (half > 0) {
           Node newNode = new Node(node.key, half);
           newMap.put(newNode, Boolean.TRUE);
@@ -339,6 +338,43 @@ public class HeavyKeeper implements TopK {
     /** The cache key. */
     final String key;
     /** Its current estimated count. */
-    final int count;
+    final long count;
+  }
+
+  /**
+   * Sample from a Binomial(n, p) distribution in O(1) expected time.
+   *
+   * <p>Uses direct simulation for small n (≤10) and normal approximation
+   * for larger n when np(1-p) > 9.  Falls back to direct simulation for
+   * moderate n.
+   */
+  private static int sampleBinomial(int n, double p, ThreadLocalRandom rng) {
+    if (n <= 0) return 0;
+    if (p >= 1.0) return n;
+    if (p <= 0.0) return 0;
+
+    double q = 1.0 - p;
+
+    if (n <= 10) {
+      int k = 0;
+      for (int i = 0; i < n; i++) {
+        if (rng.nextDouble() < p) k++;
+      }
+      return k;
+    }
+
+    double np = n * p;
+    double npq = np * q;
+
+    if (npq > 9.0) {
+      int k = (int) Math.round(np + Math.sqrt(npq) * rng.nextGaussian());
+      return Math.max(0, Math.min(n, k));
+    }
+
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+      if (rng.nextDouble() < p) k++;
+    }
+    return k;
   }
 }

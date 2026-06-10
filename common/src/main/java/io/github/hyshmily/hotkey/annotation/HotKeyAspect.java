@@ -91,10 +91,11 @@ public class HotKeyAspect {
    * <ol>
    *   <li>Blacklist pre-check — blocked keys trigger fallback or exception</li>
    *   <li>Condition evaluation — skip cache when SpEL condition is false</li>
-   *   <li>Intercept check — return fallback or peek value for hot keys</li>
+   *   <li>Unless evaluation — skip cache when SpEL condition is true</li>
+   *   <li>Intercept + notifyLocalDetector — feed local TopK without Worker report</li>
+   *   <li>Intercept hot-key check — return fallback or peek for hot keys</li>
    *   <li>TTL resolution — per-annotation override or global default</li>
    *   <li>Cache lookup — {@code getWithSoftExpire} or {@code get} with loader fallback</li>
-   *   <li>Unless evaluation — SpEL exclusion (value remains cached)</li>
    * </ol>
    */
   private Object handleRead(ProceedingJoinPoint pjp, String cacheKey, HotKey hotKey) throws Throwable {
@@ -117,6 +118,19 @@ public class HotKeyAspect {
       if (pass == null || !pass) {
         return pjp.proceed();
       }
+    }
+
+    //  Unless: skip cache when SpEL evaluates to true (method runs directly)
+    if (!hotKey.unless().isEmpty()) {
+      Boolean skip = evalSpel(pjp, hotKey.unless(), Boolean.class);
+      if (Boolean.TRUE.equals(skip)) {
+        return pjp.proceed();
+      }
+    }
+
+    //  Keep local TopK accurate on @Intercept path without Worker report
+    if (intercept != null) {
+      hotKeyFacade.notifyLocalDetector(cacheKey);
     }
 
     //  @Intercept + isLocalHotKey: skip method, return fallback or peek
@@ -153,11 +167,6 @@ public class HotKeyAspect {
         return resolveFallback(pjp, fallback);
       }
       throw e;
-    }
-
-    //  Unless: evaluated but value remains cached per design
-    if (!hotKey.unless().isEmpty() && result.isPresent()) {
-      evalSpelWithResult(pjp, hotKey.unless(), result.get(), Boolean.class);
     }
 
     // Return type adaptation

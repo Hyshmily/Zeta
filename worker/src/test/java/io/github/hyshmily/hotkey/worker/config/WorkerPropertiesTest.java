@@ -41,13 +41,11 @@ class WorkerPropertiesTest {
   }
 
   /**
-   * Verifies the default values of the {@code routing} sub-properties.
+   * Verifies the default value of the {@code routing.app-name} sub-property.
    */
   @Test
-  void shouldHaveDefaultRoutingValues() {
+  void shouldHaveDefaultAppName() {
     assertThat(properties.getRouting().getAppName()).isEqualTo("default");
-    assertThat(properties.getRouting().getShardCount()).isEqualTo(1);
-    assertThat(properties.getRouting().getShardIndex()).isZero();
   }
 
   /**

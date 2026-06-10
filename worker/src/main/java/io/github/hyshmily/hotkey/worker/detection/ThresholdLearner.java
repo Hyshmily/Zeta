@@ -73,7 +73,9 @@ public class ThresholdLearner implements Runnable {
 
       // Tolerance check: avoid small fluctuations
       if (properties.getGlobalQpsDynamicThreshold().getQpsChangeTolerance() > 0) {
-        double changeRate = Math.abs(newThreshold - oldThreshold) / (double) oldThreshold;
+        double changeRate = oldThreshold == 0
+          ? Double.MAX_VALUE
+          : Math.abs(newThreshold - oldThreshold) / (double) oldThreshold;
         if (changeRate <= properties.getGlobalQpsDynamicThreshold().getQpsChangeTolerance()) {
           log.debug("Threshold change within tolerance ({}), keeping old value", changeRate);
           return;

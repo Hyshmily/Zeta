@@ -38,6 +38,24 @@ public final class VersionGuard {
   private VersionGuard() {}
 
   /**
+   * WorkerListener guard: the caller already holds the existing entry (inside a
+   * {@code compute} block), so no redundant {@code getIfPresent} is needed.
+   *
+   * @param existing                 the existing cache entry (maybe {@code null})
+   * @param incomingDecisionVersion  the decision version from the incoming Worker message
+   * @return {@code true} if the incoming message should be skipped
+   */
+  public static boolean shouldSkipForWorker(CacheEntry existing, long incomingDecisionVersion) {
+    if (existing == null) {
+      return false;
+    }
+    if (existing.isVersionDegraded()) {
+      return false;
+    }
+    return existing.getDecisionVersion() >= incomingDecisionVersion;
+  }
+
+  /**
    * WorkerListener guard: compares {@code getDecisionVersion()}.
    * When the existing entry has {@code isVersionDegraded()}{@code = true}
    * (i.e. it was created during a Redis outage), the guard unconditionally accepts the
@@ -57,12 +75,47 @@ public final class VersionGuard {
   ) {
     Object existing = cache.getIfPresent(cacheKey);
     if (existing instanceof CacheEntry existingCacheEntry) {
-      boolean existingDegraded = existingCacheEntry.isVersionDegraded();
-
-      if (!existingDegraded) {
-        return existingCacheEntry.getDecisionVersion() >= incomingDecisionVersion;
-      }
+      return shouldSkipForWorker(existingCacheEntry, incomingDecisionVersion);
     }
+    return false;
+  }
+
+  /**
+   * CacheSyncListener guard: the caller already holds the existing entry (inside a
+   * {@code compute} block), so no redundant {@code getIfPresent} is needed.
+   * <p>
+   * <ol>
+   *   <li>Both normal: skip if existing >= incoming</li>
+   *   <li>Existing normal, incoming degraded: always skip (normal wins)</li>
+   *   <li>Both degraded: skip if existing >= incoming</li>
+   *   <li>Existing degraded, incoming normal: never skip (normal overwrites degraded)</li>
+   * </ol>
+   *
+   * @param existing             the existing cache entry (maybe {@code null})
+   * @param incomingDataVersion  the data version from the incoming sync message
+   * @param incomingDegraded     whether the incoming sync message is operating in degraded mode
+   * @return {@code true} if the incoming refresh should be skipped
+   */
+  public static boolean shouldSkipForSync(CacheEntry existing, long incomingDataVersion, boolean incomingDegraded) {
+    if (existing == null) {
+      return false;
+    }
+
+    boolean existingDegraded = existing.isVersionDegraded();
+
+    // Both normal
+    if (!existingDegraded && !incomingDegraded) {
+      return existing.getDataVersion() >= incomingDataVersion;
+    }
+    // Existing normal, incoming degraded — normal wins
+    if (!existingDegraded) {
+      return true;
+    }
+    // Both degraded
+    if (incomingDegraded) {
+      return existing.getDataVersion() >= incomingDataVersion;
+    }
+    // Existing degraded, incoming normal — normal overwrites
     return false;
   }
 
@@ -82,7 +135,7 @@ public final class VersionGuard {
    * @param incomingDegraded    whether the incoming sync message is operating in degraded mode
    * @return {@code true} if the incoming refresh should be skipped
    */
-  public static Boolean shouldSkipForSync(
+  public static boolean shouldSkipForSync(
     Cache<String, Object> cache,
     String cacheKey,
     long incomingDataVersion,
@@ -90,21 +143,7 @@ public final class VersionGuard {
   ) {
     Object existing = cache.getIfPresent(cacheKey);
     if (existing instanceof CacheEntry existingCacheEntry) {
-      boolean existingDegraded = existingCacheEntry.isVersionDegraded();
-
-      // Both normal
-      if (!existingDegraded && !incomingDegraded) {
-        return existingCacheEntry.getDataVersion() >= incomingDataVersion;
-      }
-      // Existing normal, incoming degraded — normal wins
-      if (!existingDegraded) {
-        return true;
-      }
-      // Both degraded
-      if (incomingDegraded) {
-        return existingCacheEntry.getDataVersion() >= incomingDataVersion;
-      }
-      // Existing degraded, incoming normal — normal overwrites
+      return shouldSkipForSync(existingCacheEntry, incomingDataVersion, incomingDegraded);
     }
     return false;
   }

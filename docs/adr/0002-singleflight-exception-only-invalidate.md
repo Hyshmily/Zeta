@@ -1,0 +1,3 @@
+# SingleFlight: Exception-Only Invalidate
+
+SingleFlight previously invalidated completed futures in `whenComplete` (both success and exception paths). This caused a race: if T3 arrived after T1 completed but before the invalidate propagated, T3 would trigger a redundant supplier execution. Fixed by removing `whenComplete` and only invalidating in the `catch` block. Normal completions stay cached via Caffeine `expireAfterWrite(ttlSec)`, providing the standard dedup pattern (Reactors/Hystrix): late-arriving callers reuse the cached result until TTL expiry, and only execution failures trigger immediate cleanup.

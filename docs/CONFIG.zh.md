@@ -34,11 +34,11 @@
 | `hotkey.local.report-exchange`                    | `hotkey.report.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                  |
 | `hotkey.local.report-interval-ms`                 | `100`             | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）                   |
 | `hotkey.local.app-name`                           | `"default"`       | 逻辑应用名，用于 Worker 路由的租户区分                                   |
-| `hotkey.local.shard-count`                        | `1`               | Worker 侧处理的分片总数                                                  |
+| `hotkey.local.shard-count`                        | `1`               | 消费者线程数自动计算的除数（max(1, shardCount/2)）；路由默认使用一致性哈希 |
 | `hotkey.local.instance-id`                        | `""`（自动检测）    | 用于队列命名的显式实例 ID；为空时自动检测为 `server.port-HOSTNAME`（或 `server.port-UUID`） |
-| `hotkey.local.queue-capacity`                     | `10000`             | 报告分发器队列容量（每个分片内部有界队列） |
+| `hotkey.local.queue-capacity`                     | `10000`             | 报告分发器队列容量（内部有界队列） |
 | `hotkey.local.queue-offer-timeout-ms`             | `100`               | 报告队列写入超时（毫秒）——阻塞此时长后丢弃 |
-| `hotkey.local.consumer-count`                     | `0`                 | 每个分片的报告消费者线程数；0 = 自动（max(1, shardCount / 2)） |
+| `hotkey.local.consumer-count`                     | `0`                 | 报告消费者线程数；0 = 自动（max(1, shardCount / 2)） |
 
 ### 上报配置（`hotkey.report.*`）
 
@@ -57,8 +57,8 @@
 
 | 属性                                                  | 默认值 | 说明                                                                                                |
 | ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------- |
-| `hotkey.local.consistent-hashing.enabled`              | `false`| 启用一致性哈希实现动态 Worker 路由（替代静态 shard-index 映射）                                      |
-| `hotkey.local.consistent-hashing.virtual-nodes`        | `150`  | 每个物理 Worker 节点的虚拟节点数，用于哈希空间分布                                                   |
+| `hotkey.local.consistent-hashing.enabled`              | `true` | 启用一致性哈希动态 Worker 路由（默认）；设为 `false` 禁用                                            |
+| `hotkey.local.consistent-hashing.virtual-nodes`        | `500`  | 每个物理 Worker 节点的虚拟节点数，用于哈希空间分布                                                   |
 | `hotkey.local.consistent-hashing.node-id`             | `""`   | 显式节点 ID（一致性哈希使用，空字符串 = 从 `InstanceIdGenerator` 自动生成）                         |
 
 ### 注解配置（`hotkey.annotation.*`）
@@ -100,8 +100,6 @@
 | `hotkey.worker.enabled`                                                   | `false`                     | 启用 Worker 模式（必须显式设为 true）                       |
 | **`hotkey.worker.routing.*`**                                             |                             | **路由**                                                   |
 | `hotkey.worker.routing.app-name`                                          | `"default"`                 | 逻辑应用名（租户区分）                                     |
-| `hotkey.worker.routing.shard-count`                                       | `1`                         | 分片总数                                                   |
-| `hotkey.worker.routing.shard-index`                                       | `0`                         | 当前 Worker 消费的零基分片索引                             |
 | **`hotkey.worker.messaging.*`**                                           |                             | **消息**                                                   |
 | `hotkey.worker.messaging.report-exchange`                                 | `hotkey.report.exchange`    | App 报告消息的直接交换机                                   |
 | `hotkey.worker.messaging.broadcast-exchange`                              | `hotkey.broadcast.exchange` | HOT/COOL 广播的交换机（Worker 使用路由键发布；可能需要与 worker-listener.exchange-name 对齐） |

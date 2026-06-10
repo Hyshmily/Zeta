@@ -34,11 +34,11 @@
 | `hotkey.local.report-exchange`                    | `hotkey.report.exchange` | RabbitMQ exchange for app-to-Worker report messages                               |
 | `hotkey.local.report-interval-ms`                 | `100`            | Interval at which app instances batch and send TopK reports to the Worker (ms)             |
 | `hotkey.local.app-name`                           | `"default"`      | Logical application name used as tenant discriminator for Worker routing                   |
-| `hotkey.local.shard-count`                        | `1`              | Total number of shards for Worker-side processing                                          |
+| `hotkey.local.shard-count`                        | `1`              | Divisor for auto consumer count calculation (max(1, shardCount/2)); routing uses CH by default |
 | `hotkey.local.instance-id`                        | `""` (auto)      | Explicit instance ID for queue naming; auto-detected as `server.port-HOSTNAME` (or `server.port-UUID`) if empty |
-| `hotkey.local.queue-capacity`                     | `10000`          | Report dispatcher queue capacity (internal bounded queue per shard) |
+| `hotkey.local.queue-capacity`                     | `10000`          | Report dispatcher queue capacity (internal bounded queue) |
 | `hotkey.local.queue-offer-timeout-ms`             | `100`            | Report queue offer timeout (ms) — blocks up to this duration before dropping |
-| `hotkey.local.consumer-count`                     | `0`              | Report consumer thread count per shard; 0 = auto (max(1, shardCount / 2)) |
+| `hotkey.local.consumer-count`                     | `0`              | Report consumer thread count; 0 = auto (max(1, shardCount / 2)) |
 
 ### Reporting (`hotkey.report.*`)
 
@@ -57,8 +57,8 @@
 
 | Property                                                  | Default | Description                                                                                             |
 | --------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------- |
-| `hotkey.local.consistent-hashing.enabled`                 | `false` | Enable consistent hashing for dynamic Worker routing (replaces static `shard-index` mapping)             |
-| `hotkey.local.consistent-hashing.virtual-nodes`           | `150`   | Number of virtual nodes per physical Worker node for hash-space distribution                             |
+| `hotkey.local.consistent-hashing.enabled`                 | `true`  | Enable consistent hashing for dynamic Worker routing (default; set to `false` to disable)                |
+| `hotkey.local.consistent-hashing.virtual-nodes`           | `500`   | Number of virtual nodes per physical Worker node for hash-space distribution                             |
 | `hotkey.local.consistent-hashing.node-id`                | `""`    | Explicit node ID for consistent hashing (empty string = auto-generate from `InstanceIdGenerator`)        |
 
 ### Annotation (`hotkey.annotation.*`)
@@ -100,8 +100,6 @@
 | `hotkey.worker.enabled`                                                   | `false`                    | Enable Worker mode (must explicitly set to `true`)                   |
 | **`hotkey.worker.routing.*`**                                             |                            | **Routing**                                                          |
 | `hotkey.worker.routing.app-name`                                          | `"default"`                | Logical application name (tenant discriminator)                      |
-| `hotkey.worker.routing.shard-count`                                       | `1`                        | Total number of shards                                               |
-| `hotkey.worker.routing.shard-index`                                       | `0`                        | Zero-based shard index this Worker consumes                          |
 | **`hotkey.worker.messaging.*`**                                           |                            | **Messaging**                                                        |
 | `hotkey.worker.messaging.report-exchange`                                 | `hotkey.report.exchange`   | Direct exchange for app report messages                              |
 | `hotkey.worker.messaging.broadcast-exchange`                              | `hotkey.broadcast.exchange`| Exchange for HOT/COOL broadcasts (Worker publishes with routing keys; may need alignment with worker-listener.exchange-name) |

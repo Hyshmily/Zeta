@@ -164,7 +164,7 @@ public class WorkerListener {
       .asMap()
       .compute(wm.cacheKey(), (key, existing) -> {
         // DCL second check – atomic with to write
-        if (VersionGuard.shouldSkipForWorker(caffeineCache, key, wm.decisionVersion())) {
+        if (existing instanceof CacheEntry ce && VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion())) {
           return existing;
         }
 
@@ -213,7 +213,7 @@ public class WorkerListener {
     caffeineCache
       .asMap()
       .compute(wm.cacheKey(), (key, existing) -> {
-        if (VersionGuard.shouldSkipForWorker(caffeineCache, key, wm.decisionVersion())) {
+        if (existing instanceof CacheEntry ce && VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion())) {
           return existing;
         }
 

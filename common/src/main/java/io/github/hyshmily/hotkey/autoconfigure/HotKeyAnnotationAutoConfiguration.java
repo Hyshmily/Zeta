@@ -30,7 +30,7 @@ import org.springframework.context.annotation.Bean;
  * <p>
  * Activates when:
  * <ul>
- *   <li>{@code hotkey.annotation.enabled=true} (required)</li>
+ *   <li>{@code hotkey.annotation.enabled=true} (required, prefix {@code hotkey.annotation})</li>
  *   <li>{@link org.aspectj.lang.annotation.Aspect Aspect} is on the classpath (AOP enabled)</li>
  *   <li>A {@link HotKey} facade bean is present</li>
  * </ul>
@@ -44,7 +44,7 @@ import org.springframework.context.annotation.Bean;
 @AutoConfiguration(after = HotKeyFacadeAutoConfiguration.class)
 @ConditionalOnClass(Aspect.class)
 @ConditionalOnBean(HotKey.class)
-@ConditionalOnProperty(prefix = "hotkey", name = "annotation.enabled", havingValue = "true")
+@ConditionalOnProperty(prefix = "hotkey.annotation", name = "enabled", havingValue = "true")
 public class HotKeyAnnotationAutoConfiguration {
 
   /**

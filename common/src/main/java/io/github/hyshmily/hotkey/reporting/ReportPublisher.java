@@ -24,8 +24,8 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
  * Publishes access-count reports to the RabbitMQ report exchange.
- * Each report is routed to the shard-specific queue via the
- * {@code report.<appName>.<shardIndex>} routing key.
+ * Each report is routed to the specific Worker queue via the
+ * {@code report.<appName>.<nodeId>} routing key.
  */
 @RequiredArgsConstructor
 public class ReportPublisher {
@@ -42,7 +42,7 @@ public class ReportPublisher {
   /**
    * Publish a report message for the given target.
    *
-   * @param target  legacy: String.valueOf(shardIndex), CH mode: nodeId
+   * @param target  the Worker nodeId
    * @param message the report data
    */
   public void publish(String target, ReportMessage message) {

@@ -68,10 +68,6 @@ public class HotKeyProperties {
   @Min(1)
   private int localCacheTtlMinutes = 5;
 
-  /** Access-based TTL in minutes for the L1 cache (0 disables). */
-  @Min(0)
-  private int localCacheAccessTtlMinutes = 0;
-
   /** Maximum number of in-flight deduplication entries. */
   @Min(1)
   private int inflightMaxSize = 50_000;
@@ -218,11 +214,11 @@ public class HotKeyProperties {
   public static class ConsistentHashing {
 
     /** Whether consistent-hashing mode is enabled. */
-    private boolean enabled = false;
+    private boolean enabled = true;
 
     /** Number of virtual nodes per physical shard on the hash ring. */
     @Min(1)
-    private int virtualNodes = 150;
+    private int virtualNodes = 500;
   }
 
   /** Consistent-hashing configuration for report routing. */

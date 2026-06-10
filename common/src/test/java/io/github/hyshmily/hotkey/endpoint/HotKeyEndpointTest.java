@@ -36,6 +36,7 @@ import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import org.junit.jupiter.api.BeforeEach;
@@ -119,7 +120,7 @@ class HotKeyEndpointTest {
     when(versionController.isRedisConfigured()).thenReturn(true);
     when(versionController.getDegradedVersionCount()).thenReturn(0L);
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(15L);
-    when(workerHealthMonitor.getWorkerHealth()).thenReturn(Map.of(0, Map.<String, Object>of("alive", true)));
+    when(workerHealthMonitor.getWorkerHealth()).thenReturn(Map.of("aliveNodes", Set.of("n1"), "nodeTotalHeartbeats", Map.<String, Long>of("n1", 1L)));
     when(hotKeyStateMachine.getTrackedKeys()).thenReturn(7);
 
     Map<String, Object> info = endpointWithAll().hotKeyInfo();
@@ -160,7 +161,6 @@ class HotKeyEndpointTest {
     assertThat(worker).containsEntry("totalRequests", 80L);
     assertThat(worker).containsKey("topK");
     assertThat(worker).containsKey("recentlyExpelled");
-    assertThat(worker).containsEntry("shards", List.of(0));
     assertThat(worker).containsKey("health");
     assertThat(worker).containsEntry("trackedKeys", 7);
 
@@ -248,13 +248,13 @@ class HotKeyEndpointTest {
   /* worker section with multiple shards */
 
   /**
-   * Verifies that the worker section lists all known shards with their health status.
+   * Verifies that the worker section lists health info for all known Worker nodes.
    */
   @Test
-  void workerSection_shouldListAllKnownShards() {
+  void workerSection_shouldListWorkerHealth() {
     mockTopK(workerTopK, List.of(new Item("k", 1)), 10L);
     when(workerHealthMonitor.getWorkerHealth()).thenReturn(
-      Map.of(0, Map.of("alive", true), 1, Map.of("alive", true), 2, Map.of("alive", false)));
+      Map.of("aliveNodes", Set.of("n1"), "nodeTotalHeartbeats", Map.<String, Long>of("n1", 42L)));
     when(hotKeyStateMachine.getTrackedKeys()).thenReturn(3);
     HotKeyEndpoint ep = new HotKeyEndpoint(
       null, workerTopK, null, null, properties, null, null, workerHealthMonitor,
@@ -262,7 +262,6 @@ class HotKeyEndpointTest {
 
     Map<String, Object> info = ep.hotKeyInfo();
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
-    assertThat(worker).containsEntry("shards", List.of(0, 1, 2));
     assertThat(worker).containsEntry("trackedKeys", 3);
     assertThat(worker).containsKey("health");
   }

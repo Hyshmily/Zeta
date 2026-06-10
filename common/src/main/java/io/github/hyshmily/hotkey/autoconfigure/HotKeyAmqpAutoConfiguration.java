@@ -31,6 +31,8 @@ import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -92,7 +94,7 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Declare the DirectExchange for report routing (app → Worker).
-     * Routing keys ({@code report.<appName>.<shardIndex>}) ensure each shard's
+     * Routing keys ({@code report.<appName>.<nodeId>}) ensure each key's
      * messages land on the correct worker queue.
      */
     @Bean
@@ -102,7 +104,16 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Create the {@link ReportPublisher} for sending batched access-count reports to the Worker.
+     * <p>
+     * Uses Jackson JSON serialization (not Java serialization) for efficiency and cross-version
+     * compatibility.
      */
+    @Bean
+    @ConditionalOnMissingBean(MessageConverter.class)
+    public MessageConverter reportMessageConverter() {
+      return new Jackson2JsonMessageConverter();
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public ReportPublisher reportPublisher(RabbitTemplate rabbitTemplate, HotKeyProperties properties) {
@@ -110,12 +121,10 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
-     * Create the {@link RingManager} for consistent-hashing mode.
-     * Only active when {@code hotkey.local.consistent-hashing.enabled=true}.
+     * Create the {@link RingManager} for consistent-hashing report routing.
      */
     @Bean
     @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "hotkey.local.consistent-hashing", name = "enabled", havingValue = "true")
     public RingManager ringManager(HotKeyProperties properties) {
       return new RingManager(properties.getConsistentHashing().getVirtualNodes());
     }
@@ -138,12 +147,11 @@ public class HotKeyAmqpAutoConfiguration {
         reportPublisher,
         hotKeyReportScheduler,
         properties.getReportIntervalMs(),
-        properties.getShardCount(),
         properties.getAppName(),
         properties.getQueueCapacity(),
         properties.getQueueOfferTimeoutMs(),
         properties.effectiveConsumerCount(),
-        ringManagerProvider.getIfAvailable()
+        ringManagerProvider.getObject()
       );
     }
 

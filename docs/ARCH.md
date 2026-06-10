@@ -83,10 +83,10 @@ putThrough(cacheKey, value, writer[, hardTtlMs, softTtlMs])
 ├─ caffeineCache.put(cacheKey, CacheEntry {
 │      value,
 │      dataVersion, isVersionDegraded,
-│      decisionVersion = 0L,            ← always reset on write-through
+│      decisionVersion,                 ← preserves existing (Worker decision respected)
 │      hardTtlMs,  hardExpireAtMs,
 │      softTtlMs,  softExpireAtMs,
-│      keyState = NORMAL,               ← always stored as NORMAL
+│      keyState,                        ← preserves existing (HOT/COOL/NORMAL)
 │      normalHardTtlMs, normalSoftTtlMs })
 │
 └─ CacheSyncPublisher.broadcastRefresh(key, version, degraded)
@@ -359,14 +359,13 @@ HotKey.getWithSoftExpire(key, reader[, softTtlMs][, hardTtlMs, softTtlMs])
       │         └─ async refresh task:
       │              ├─ refreshLimiter.tryAcquire()
       │              │    └─ rate limited → skip this refresh
-      │              └─ executor.submit(() → reader.get())
-      │                   ├─ caffeineCache.put(key, newEntry)
-      │                   └─ update softExpireAtMs
-      │
-      └─ miss → SingleFlight.execute → same as get path
-```
-
-> [!NOTE] Async refresh preserves the original CacheEntry's hard TTL (`hardTtlMs` / `hardExpireAtMs`), only updating the value and soft expire time.
+      │              └─ supplyAsync(reader, executor).whenComplete:
+      │                   ├─ error → log.warn, skip
+      │                   ├─ compute(cacheKey, existing):
+      │                   │    ├─ if existing.dataVersion > refreshStartDataVersion → discard (newer write)
+      │                   │    ├─ else → update value + softTtl; preserve keyState, decisionVersion, hardTtls
+      │                   │    └─ if existing evicted → fallback to keyState=NORMAL
+      │                   └─ release refreshLimiter
 
 ### Peek Path — `peek`
 
@@ -421,8 +420,8 @@ HotKey.putThrough(key, value, writer[, hardTtlMs, softTtlMs])
       │
       ├─ caffeineCache.put(key, CacheEntry(
       │      value, dataVersion, degraded,
-      │      decisionVersion=0L,                                 [always reset on write-through]
-      │      keyState=NORMAL,                                   [always stored as NORMAL]
+      │      decisionVersion,                                    [preserves existing; Worker decision respected]
+      │      keyState,                                           [preserves existing: HOT/COOL/NORMAL]
       │      hardTtlMs, softTtlMs, ...))
       │
       └─ CacheSyncPublisher.broadcastRefresh(key, version, degraded)
@@ -560,12 +559,12 @@ HotKey.returnLocalHotKeys()
 
 HotKey.returnLocalExpelledHotKeys()
 └─ (topKAlgorithm != null)
-      ├─ yes → topKAlgorithm.expelledItems()                    [expelled hot key queue]
+      ├─ yes → topKAlgorithm.expelled()                    [expelled hot key queue]
       └─ no  → empty LinkedBlockingQueue
 
 HotKey.returnLocalTotalDataStreams()
 └─ (topKAlgorithm != null)
-      ├─ yes → topKAlgorithm.totalDataStreams()                 [total access count]
+      ├─ yes → topKAlgorithm.total()                 [total access count]
       └─ no  → 0L
 
 HotKey.returnWorkerHotKeys()
@@ -575,12 +574,12 @@ HotKey.returnWorkerHotKeys()
 
 HotKey.returnWorkerExpelledHotKeys()
 └─ (workerTopKAlgorithm != null)
-      ├─ yes → workerTopKAlgorithm.expelledItems()
+      ├─ yes → workerTopKAlgorithm.expelled()
       └─ no  → empty LinkedBlockingQueue
 
 HotKey.returnWorkerTotalDataStreams()
 └─ (workerTopKAlgorithm != null)
-      ├─ yes → workerTopKAlgorithm.totalDataStreams()
+      ├─ yes → workerTopKAlgorithm.total()
       └─ no  → 0L
 ```
 
@@ -692,13 +691,13 @@ This approach solves the **single-instance blind spot** — an app instance's lo
 ### Report Flow
 
 1. Every `get()` / `getWithSoftExpire()` call triggers `hotKeyReporter.record(key)` on both L1 hit and L2 miss paths.
-2. `HotKeyReporter` aggregates per-key counts locally (Caffeine, 30s expiry, max 100k keys) and periodically publishes `ReportMessage` records to the `hotkey.report.exchange` RabbitMQ exchange, routed by `app-name` and `shard-index`.
+2. `HotKeyReporter` aggregates per-key counts locally (Caffeine, 30s expiry, max 100k keys) and periodically publishes `ReportMessage` records to the `hotkey.report.exchange` RabbitMQ exchange, routed via consistent-hashing ring by `nodeId`.
 3. The Worker node's `ReportConsumer` receives reports and feeds access counts into `workerTopK.add()`, discarding stale reports (>5s old).
 4. The Worker processes reports asynchronously — it does not block app instances.
 
-### Report Sharding
+### Report Routing (Consistent Hashing)
 
-When `shard-count > 1`, reports are distributed across multiple Worker instances. Each app instance computes `Math.floorMod(cacheKey.hashCode(), shard-count)` and publishes to the corresponding shard routing key. Each Worker binds to its own queue (`hotkey.report.{appName}.{shardIndex}`), enabling horizontal scaling of the Worker plane.
+Reports are routed via a consistent-hash ring (`RingManager`) that maps each cache key to a Worker `nodeId`. The ring is reconciled on every flush cycle from the set of alive Worker nodes detected via heartbeats. Each Worker advertises its own `nodeId` (auto-generated via `InstanceIdGenerator`) and binds a per-node queue (`hotkey.report.{appName}.{nodeId}`) to the report exchange, enabling automatic horizontal scaling without static shard configuration.
 
 ### Sliding Window Detector
 
@@ -805,7 +804,7 @@ The Worker adapts to traffic patterns by periodically recalculating the hot thre
 
 hotThreshold = max(minCount, estimatedGlobalQPS \* hotThresholdRatio)
 
-````
+```
 
 | Property                                                                     | Default  | Description                                          |
 | ---------------------------------------------------------------------------- | -------- | ---------------------------------------------------- |
@@ -886,7 +885,7 @@ spring:
   rabbitmq:
     host: localhost
     port: 5672
-````
+```
 
 > [!IMPORTANT]
 > The example above uses a plain AMQP connection. In production, enable TLS via `spring.rabbitmq.ssl.*`:
@@ -1047,9 +1046,9 @@ hotkey:
                                │  TopK Heap (min-heap, K=100)                │
                                │  isHotKey() = heap.contains(key)            │
                                │  list()          → current hot keys         │
-                               │  expelledItems() → recently evicted         │
+                               │  expelled() → recently evicted         │
                                │  fading()        → exp decay per entry      │
-                               │  totalDataStreams() → total access count    │
+                               │  total() → total access count    │
                                └─────────────────────────────────────────────┘
 ```
 

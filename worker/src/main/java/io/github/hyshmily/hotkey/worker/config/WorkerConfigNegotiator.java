@@ -111,6 +111,11 @@ public class WorkerConfigNegotiator {
     Number coolCount = props.getHeader(AMQP_HEADER_CONFIG_COOL_COUNT);
     Number preCoolGraceCount = props.getHeader(AMQP_HEADER_CONFIG_GRACE_COUNT);
 
+    if (confirmCount == null || coolCount == null || preCoolGraceCount == null) {
+      log.debug("Incomplete config heartbeat from {}: missing header(s), skipping", fromNode);
+      return;
+    }
+
     stateMachine.setConfirmCount(confirmCount.intValue());
     stateMachine.setCoolCount(coolCount.intValue());
     stateMachine.setPreCoolGraceCount(preCoolGraceCount.intValue());

@@ -161,7 +161,7 @@ public class CacheSyncListener {
       .asMap()
       .compute(sm.cacheKey(), (key, existing) -> {
         if (
-          !unconditional && VersionGuard.shouldSkipForSync(caffeineCache, key, sm.version(), sm.isVersionDegraded())
+          !unconditional && existing instanceof CacheEntry ce && VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())
         ) {
           return existing;
         }
@@ -227,7 +227,7 @@ public class CacheSyncListener {
       .asMap()
       .compute(sm.cacheKey(), (key, existing) -> {
         // DCL second check – atomic with to write
-        if (VersionGuard.shouldSkipForSync(caffeineCache, key, sm.version(), sm.isVersionDegraded())) {
+        if (existing instanceof CacheEntry ce && VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())) {
           return existing; // keep existing if guard rejects
         }
         if (!(existing instanceof CacheEntry cacheEntry)) {

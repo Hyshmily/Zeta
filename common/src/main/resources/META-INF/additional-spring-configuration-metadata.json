@@ -205,7 +205,7 @@
     {
       "name": "hotkey.local.shard-count",
       "type": "java.lang.Integer",
-      "description": "Number of report shards (used when consistent-hashing is disabled).",
+      "description": "Thread count divisor for auto consumer calculation (max(1, shardCount/2)).",
       "defaultValue": 1
     },
     {
@@ -230,13 +230,13 @@
       "name": "hotkey.local.consistent-hashing.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable consistent-hashing mode for report routing to dynamic Worker instances.",
-      "defaultValue": false
+      "defaultValue": true
     },
     {
       "name": "hotkey.local.consistent-hashing.virtual-nodes",
       "type": "java.lang.Integer",
       "description": "Number of virtual nodes per physical Worker in the consistent-hash ring.",
-      "defaultValue": 150
+      "defaultValue": 500
     },
     {
       "name": "hotkey.local.instance-id",

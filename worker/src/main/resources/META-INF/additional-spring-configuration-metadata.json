@@ -13,18 +13,6 @@
       "defaultValue": "default"
     },
     {
-      "name": "hotkey.worker.routing.shard-count",
-      "type": "java.lang.Integer",
-      "description": "Total number of report shards (informational; consistent-hashing is preferred).",
-      "defaultValue": 1
-    },
-    {
-      "name": "hotkey.worker.routing.shard-index",
-      "type": "java.lang.Integer",
-      "description": "Shard index assigned to this Worker (informational; not used at runtime).",
-      "defaultValue": 0
-    },
-    {
       "name": "hotkey.worker.messaging.report-exchange",
       "type": "java.lang.String",
       "description": "Name of the DirectExchange for receiving app-to-Worker report messages.",

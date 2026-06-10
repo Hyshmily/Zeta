@@ -22,20 +22,14 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Monitors the liveness of worker shards by tracking heartbeats.
+ * Monitors Worker node liveness by tracking heartbeat pings.
  *
- * <p>Each shard reports heartbeats via {@link #onHeartbeat(int, long)}, and the monitor
- * determines whether any or a specific shard is alive based on a configurable timeout.
- * This class also exposes aggregate health metadata for diagnostics.
+ * <p>Each Worker node reports heartbeats via {@link #onHeartbeat(String, long)}, and the
+ * monitor determines whether any or a specific node is alive based on a configurable
+ * timeout.  This class also exposes aggregate health metadata for diagnostics.
  */
 public class WorkerHealthMonitor {
 
-  /** Tracks the latest heartbeat timestamp per shard (legacy sharding mode). */
-  private final Map<Integer, Long> lastHeartbeat = new ConcurrentHashMap<>();
-  /** Cumulative heartbeat count per shard (legacy sharding mode). */
-  private final Map<Integer, Long> totalHeartbeats = new ConcurrentHashMap<>();
-  /** Timestamp of the first heartbeat received from each shard. */
-  private final Map<Integer, Long> firstHeartbeatAt = new ConcurrentHashMap<>();
   /** Latest heartbeat timestamp per node (consistent-hashing mode). */
   private final Map<String, Long> nodeLastHeartbeat = new ConcurrentHashMap<>();
   /** Cumulative heartbeat count per node (consistent-hashing mode). */
@@ -58,19 +52,7 @@ public class WorkerHealthMonitor {
   }
 
   /**
-   * Records a heartbeat for the given shard.
-   *
-   * @param shardIndex the shard that reported the heartbeat
-   * @param timestamp  the heartbeat timestamp (epoch millis)
-   */
-  public void onHeartbeat(int shardIndex, long timestamp) {
-    lastHeartbeat.put(shardIndex, timestamp);
-    totalHeartbeats.merge(shardIndex, 1L, Long::sum);
-    firstHeartbeatAt.putIfAbsent(shardIndex, timestamp);
-  }
-
-  /**
-   * Records a heartbeat for the given Worker nodeId (consistent-hashing mode).
+   * Records a heartbeat for the given Worker nodeId.
    *
    * @param nodeId    the Worker node identifier
    * @param timestamp the heartbeat timestamp (epoch millis)
@@ -81,36 +63,20 @@ public class WorkerHealthMonitor {
   }
 
   /**
-   * Returns whether at least one shard or node has sent a heartbeat within the timeout window.
+   * Returns whether at least one node has sent a heartbeat within the timeout window.
    *
    * @return true if any worker is alive
    */
   public boolean isAnyWorkerAlive() {
     long now = System.currentTimeMillis();
-    return lastHeartbeat
+    return nodeLastHeartbeat
       .values()
       .stream()
-      .anyMatch(ts -> now - ts < timeoutMs)
-      ||
-      nodeLastHeartbeat
-        .values()
-        .stream()
-        .anyMatch(ts -> now - ts < timeoutMs);
+      .anyMatch(ts -> now - ts < timeoutMs);
   }
 
   /**
-   * Returns whether a specific shard is alive.
-   *
-   * @param shardIndex the shard to check
-   * @return true if the shard has heartbeated within the timeout window
-   */
-  public boolean isAlive(int shardIndex) {
-    Long ts = lastHeartbeat.get(shardIndex);
-    return ts != null && System.currentTimeMillis() - ts < timeoutMs;
-  }
-
-  /**
-   * Returns whether a specific Worker node is alive (consistent-hashing mode).
+   * Returns whether a specific Worker node is alive.
    *
    * @param nodeId the Worker node identifier
    * @return true if the node has heartbeated within the timeout window
@@ -121,7 +87,7 @@ public class WorkerHealthMonitor {
   }
 
   /**
-   * Returns the set of alive Worker node IDs (consistent-hashing mode).
+   * Returns the set of alive Worker node IDs.
    *
    * @return set of nodeIds that have heartbeated within the timeout window
    */
@@ -137,30 +103,14 @@ public class WorkerHealthMonitor {
   }
 
   /**
-   * Returns a snapshot of health metadata for all tracked shards.
+   * Returns a snapshot of health metadata for all tracked Worker nodes.
    *
-   * <p>The returned map is keyed by shard index; each value contains the shard's liveness
-   * status, last heartbeat age, raw timestamp, total heartbeat count, and first heartbeat.
-   *
-   * @return ordered map of shard health info
+   * @return map containing alive node IDs and per-node heartbeat counts
    */
-  public Map<Integer, Map<String, Object>> getWorkerHealth() {
-    long now = System.currentTimeMillis();
-    Map<Integer, Map<String, Object>> result = new LinkedHashMap<>();
-    lastHeartbeat.forEach((shard, ts) -> {
-      Map<String, Object> info = new LinkedHashMap<>();
-      long age = now - ts;
-      info.put("alive", age < timeoutMs);
-      info.put("lastHeartbeatAgeMs", age);
-      info.put("lastHeartbeatAt", ts);
-      info.put("totalHeartbeats", totalHeartbeats.getOrDefault(shard, 0L));
-      info.put("firstHeartbeatAt", firstHeartbeatAt.getOrDefault(shard, 0L));
-      result.put(shard, info);
-    });
-    result.put(-1, Map.of(
-      "aliveNodes", getAliveNodeIds(),
-      "nodeTotalHeartbeats", new LinkedHashMap<>(nodeTotalHeartbeats)
-    ));
+  public Map<String, Object> getWorkerHealth() {
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("aliveNodes", getAliveNodeIds());
+    result.put("nodeTotalHeartbeats", new LinkedHashMap<>(nodeTotalHeartbeats));
     return result;
   }
 }

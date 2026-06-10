@@ -918,10 +918,10 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     });
 
     // -- Seed worker heartbeat so reports are not silently dropped --
-    workerHealthMonitor.onHeartbeat(0, System.currentTimeMillis());
+    workerHealthMonitor.onHeartbeat("sim-node", System.currentTimeMillis());
     ScheduledExecutorService heartbeatRefresher = Executors.newSingleThreadScheduledExecutor();
     heartbeatRefresher.scheduleAtFixedRate(
-      () -> workerHealthMonitor.onHeartbeat(0, System.currentTimeMillis()),
+      () -> workerHealthMonitor.onHeartbeat("sim-node", System.currentTimeMillis()),
       3, 3, TimeUnit.SECONDS);
 
     // -- Setup report queue + Worker-simulator listener --

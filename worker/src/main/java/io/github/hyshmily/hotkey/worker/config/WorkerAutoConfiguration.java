@@ -319,7 +319,7 @@ public class WorkerAutoConfiguration {
     /**
      * Evicts keys that have not been accessed within {@code 2 * coolDurationMs}.
      */
-    @Scheduled(fixedDelayString = "${hotkey.worker.state-machine.cool-duration-ms:15000}")
+    @Scheduled(fixedDelayString = "${hotkey.worker.state-machine.evict-interval-ms:30000}")
     public void evictStale() {
       long staleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
       detector.evictStale(staleAfterMs);

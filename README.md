@@ -36,7 +36,7 @@ Via [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch varian
 - **Worker mode** — Dedicated cluster-level hot key detection nodes; cross-instance consensus via sliding window + state machine pipeline; runtime state machine configuration via `/actuator/hotkey/worker/state` REST endpoint with heartbeat-based peer-to-peer config propagation; see [Worker Mode](#worker-mode)
 - **Report aggregation** — Every `get()` / `getWithSoftExpire()` call reports to the local `HotKeyReporter`, which periodically batches access counts to Worker nodes (RabbitMQ) for cluster-level hot key detection
 - **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies &#177;10% random jitter to each hard/soft TTL via `ThreadLocalRandom`, scattering expiration timestamps to prevent cache avalanches
-- **Consistent hashing** — Murmur3_32-based consistent hash ring replacing static `shard-index` mapping; Workers auto-register via heartbeats, supporting elastic scaling without full key remapping (enable with `hotkey.local.consistent-hashing.enabled`)
+- **Consistent hashing (default)** — Murmur3_32-based consistent hash ring for dynamic Worker routing via heartbeats; elastic scaling without static shard configuration
 - **Spring Boot auto-configuration** — Add the dependency and it works, zero boilerplate
 
 ## Latency & Performance
@@ -145,10 +145,10 @@ hotkey:
   # sync:
   #   enabled: true     # worker-listener requires hotKeyRedisLoader Bean
 
-  # Consistent hashing (dynamic Worker routing, requires worker-listener)
+  # Consistent hashing is enabled by default (dynamic Worker routing via heartbeats)
   # local:
   #   consistent-hashing:
-  #     enabled: true
+  #     enabled: true     # (already default)
 ```
 
 **Single Worker (standalone node)** — Add `spring-boot-starter-amqp`
@@ -159,17 +159,12 @@ hotkey:
     enabled: true
     routing:
       app-name: myapp # [Required] Must match App-side hotkey.local.app-name
-      shard-count: 1 # [Required] Must match App-side hotkey.local.shard-count
-      shard-index: 0 # [Required] This instance's shard, range [0, shard-count-1]
+      # Consistent hashing is the default; Workers auto-register via heartbeats
 
 
-# Multi-Worker example: 3 machines, each owning one shard
-# Each machine shares the same app-name / shard-count, different shard-index
-#
-# Machine A: shard-index: 0
-# Machine B: shard-index: 1
-# Machine C: shard-index: 2
-# shard-count: 3 (same on all machines)
+# Multi-Worker example: 3 machines, same app-name
+# Consistent hashing auto-routes keys to the correct Worker via heartbeats
+# No static shard configuration needed — just add more machines
 ```
 
 **All parameters (overriding defaults)**
@@ -179,7 +174,6 @@ hotkey:
   local:
     # ——— Must match across nodes (App-side and Worker-side) ———
     app-name: "default"                    # Must match worker.routing.app-name
-    shard-count: 1                         # Must match worker.routing.shard-count
 
     # ——— Instance identification ———
     instance-id: ""                        # Explicit instance ID ("" = auto-generated)
@@ -230,10 +224,10 @@ hotkey:
     default-hot-soft-ttl-ms: 300000        # Default hot soft expiry (5min)
     hot-soft-ttl-ms: 0                     # Override (0=use default)
 
-    # ——— Consistent hashing (alternative to shard-index routing) ———
+    # ——— Consistent hashing (default; dynamic Worker routing) ———
     consistent-hashing:
-      enabled: false                       # Enable dynamic Worker routing
-      virtual-nodes: 150                   # Virtual nodes per physical Worker
+      enabled: true                        # Dynamic Worker routing via heartbeats
+      virtual-nodes: 500                   # Virtual nodes per physical Worker
 
   # Feature toggles
   report:
@@ -274,8 +268,7 @@ hotkey:
 
     routing:
       app-name: "default"                  # Must match local.app-name
-      shard-count: 1                       # Must match local.shard-count
-      shard-index: 0                       # This instance's shard [0, shard-count-1]
+      # Routing is auto-managed via consistent hashing and heartbeats
 
     messaging:
       report-exchange: "hotkey.report.exchange"

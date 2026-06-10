@@ -276,6 +276,18 @@ public class HotKey {
   }
 
   /**
+   * Notify the local TopK detector that a key was accessed, without triggering
+   * a report to the Worker. Used by {@code @Intercept} path to keep the local
+   * frequency sketch accurate without flooding the Worker with reports.
+   *
+   * @param cacheKey the accessed key
+   */
+  public void notifyLocalDetector(String cacheKey) {
+    if (cacheKey == null) return;
+    topKAlgorithm.add(cacheKey, io.github.hyshmily.hotkey.constants.HotKeyConstants.TOPK_INCR);
+  }
+
+  /**
    * Check whether a key is currently tracked as a cluster-wide hot key by the
    * Worker-side global detector.
    *
@@ -283,13 +295,7 @@ public class HotKey {
    * @return {@code true} if the key appears in the Worker TopK list
    */
   public boolean isWorkerHotKey(String cacheKey) {
-    return (
-      workerTopKAlgorithm != null &&
-      workerTopKAlgorithm
-        .list()
-        .stream()
-        .anyMatch(item -> item.key().equals(cacheKey))
-    );
+    return workerTopKAlgorithm != null && cacheKey != null && workerTopKAlgorithm.contains(cacheKey);
   }
 
   /**
@@ -411,9 +417,12 @@ public class HotKey {
    *
    * @param cacheKey the key to evaluate
    * @return the matching {@link Rule.RuleAction}, or {@code ALLOW} if no rule matches
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   *         or no cache is available (Worker-only mode)
    */
   public Rule.RuleAction evaluateRule(String cacheKey) {
+    if (hotKeyCache == null) {
+      return Rule.RuleAction.ALLOW;
+    }
     return hotKeyCache.evaluateRule(cacheKey);
   }
 
