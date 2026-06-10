@@ -45,6 +45,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class RingEndpoint {
 
+  /** Consistent-hash ring manager for shard routing. */
   private final RingManager ringManager;
 
   /**

@@ -24,6 +24,9 @@ import org.junit.jupiter.api.Test;
  */
 class SlidingWindowDetectorTest {
 
+  /**
+   * Verifies that the {@link SlidingWindowDetector} is constructed with the expected parameter values.
+   */
   @Test
   void shouldConstructWithValidParameters() {
     SlidingWindowDetector detector = new SlidingWindowDetector(1000, 10, 500);
@@ -32,18 +35,27 @@ class SlidingWindowDetectorTest {
     assertThat(detector.getThreshold()).isEqualTo(500);
   }
 
+  /**
+   * Verifies that {@code addCount} returns {@code true} when the window sum exceeds the threshold.
+   */
   @Test
   void shouldReturnTrueWhenWindowSumExceedsThreshold() {
     SlidingWindowDetector detector = new SlidingWindowDetector(1000, 10, 3);
     assertThat(detector.addCount("key1", 5)).isTrue();
   }
 
+  /**
+   * Verifies that {@code addCount} returns {@code false} when the window sum is below the threshold.
+   */
   @Test
   void shouldReturnFalseWhenWindowSumBelowThreshold() {
     SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 100);
     assertThat(detector.addCount("key2", 1)).isFalse();
   }
 
+  /**
+   * Verifies that {@code getWindowSum} returns a positive value for a key that has been tracked.
+   */
   @Test
   void shouldReturnWindowSumForTrackedKey() {
     SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
@@ -51,12 +63,18 @@ class SlidingWindowDetectorTest {
     assertThat(detector.getWindowSum("key3")).isPositive();
   }
 
+  /**
+   * Verifies that {@code getWindowSum} returns zero for a key that has never been tracked.
+   */
   @Test
   void shouldReturnZeroForUnknownKey() {
     SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
     assertThat(detector.getWindowSum("unknown")).isZero();
   }
 
+  /**
+   * Verifies that stale keys are evicted after calling {@code evictStale}.
+   */
   @Test
   void shouldEvictStaleKeys() throws InterruptedException {
     SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
@@ -67,6 +85,9 @@ class SlidingWindowDetectorTest {
     assertThat(detector.getActiveKeyCount()).isZero();
   }
 
+  /**
+   * Verifies that the active key count changes as keys are added to the detector.
+   */
   @Test
   void shouldReportActiveKeyCount() {
     SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);

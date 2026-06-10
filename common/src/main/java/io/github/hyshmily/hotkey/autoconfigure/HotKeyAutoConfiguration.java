@@ -66,10 +66,14 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 @EnableConfigurationProperties(HotKeyProperties.class)
 public class HotKeyAutoConfiguration {
 
+  /** Logger for this configuration class. */
   private static final HotKeyLogger log = new DefaultLogger(HotKeyAutoConfiguration.class);
 
   /**
    * Create the app-side TopK detector (HeavyKeeper).
+   *
+   * @param properties the HotKey configuration properties
+   * @return a new HeavyKeeper TopK instance
    */
   @Bean
   @ConditionalOnMissingBean
@@ -86,6 +90,10 @@ public class HotKeyAutoConfiguration {
 
   /**
    * Create the SingleFlight deduplication layer for concurrent cache-load requests.
+   *
+   * @param properties    the HotKey configuration properties
+   * @param hotKeyExecutor the dedicated HotKey executor
+   * @return a new SingleFlight instance
    */
   @Bean
   @ConditionalOnMissingBean
@@ -100,6 +108,11 @@ public class HotKeyAutoConfiguration {
 
   /**
    * Create the soft/hard expiration manager that uses a configurable pool of scheduled threads.
+   *
+   * @param hotLocalCache  the L1 Caffeine cache
+   * @param hotKeyExecutor the dedicated HotKey executor
+   * @param properties     the HotKey configuration properties
+   * @return a new CacheExpireManager instance
    */
   @Bean
   @ConditionalOnMissingBean
@@ -113,6 +126,9 @@ public class HotKeyAutoConfiguration {
 
   /**
    * Create the dedicated thread-pool executor for asynchronous cache operations.
+   *
+   * @param properties the HotKey configuration properties
+   * @return a configured ThreadPoolTaskExecutor
    */
   @Bean("hotKeyExecutor")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
@@ -140,6 +156,9 @@ public class HotKeyAutoConfiguration {
   /**
    * Create the {@link RuleMatcher} for key matching against user-defined rules.
    * Wired with an empty Redis and sync publisher since no Redis is available in this variant.
+   *
+   * @param publisherProvider optional provider for the cache sync publisher
+   * @return a new RuleMatcher instance
    */
   @Bean
   @ConditionalOnMissingBean({ RuleMatcher.class, org.springframework.data.redis.core.StringRedisTemplate.class })
@@ -150,6 +169,18 @@ public class HotKeyAutoConfiguration {
   /**
    * Create the {@link HotKeyCache} (non-Redis variant).  Only active when {@code RedisTemplate}
    * is absent; otherwise {@link HotKeyRedisAutoConfiguration#hotKeyCache} takes over.
+   *
+   * @param hotKeyDetector            the app-side TopK detector
+   * @param hotLocalCache             the L1 Caffeine cache
+   * @param singleFlight              the deduplication layer
+   * @param expireManager             the soft/hard expiration manager
+   * @param syncPublisher             optional cache sync publisher
+   * @param hotKeyReporter            optional hot key reporter
+   * @param hotKeyExecutor            the dedicated HotKey executor
+   * @param properties                the HotKey configuration properties
+   * @param ruleMatcher               the rule matcher instance
+   * @param workerHealthMonitorProvider optional provider for worker health monitor
+   * @return a new HotKeyCache instance
    */
   @Bean
   @ConditionalOnMissingBean(type = "org.springframework.data.redis.core.RedisTemplate")
@@ -186,6 +217,10 @@ public class HotKeyAutoConfiguration {
    * has been defined yet.  The primary {@link HotKey} creator is
    * {@link HotKeyFacadeAutoConfiguration} — this fallback covers the case where
    * that auto-configuration is excluded or its bean is overridden.
+   *
+   * @param hotKeyCache    the HotKeyCache instance
+   * @param hotKeyDetector the app-side TopK detector
+   * @return a new HotKey facade instance
    */
   @Bean
   @ConditionalOnBean(HotKeyCache.class)

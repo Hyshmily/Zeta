@@ -62,11 +62,17 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Long-running soak benchmark for sustained cache throughput under load.
+ *
+ * <p>Runs concurrent read, write, and sync operations for several minutes,
+ * taking periodic snapshots of heap, GC, thread count, and throughput.
+ * Validates post-soak data integrity in Redis.
+ */
 @Testcontainers
 @Tag("docker")
 @Tag("benchmark")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Long-running soak benchmark for sustained cache throughput under load. */
 class SoakBenchmarkIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(SoakBenchmarkIT.class);
@@ -83,6 +89,11 @@ class SoakBenchmarkIT extends AbstractIntegrationIT {
     .waitingFor(Wait.forLogMessage(".*Server startup complete.*", 1))
     .withStartupTimeout(Duration.ofMinutes(2));
 
+  /**
+   * Overrides Redis and RabbitMQ connection properties to point at the Testcontainers
+   * instances. Sets a longer report interval and larger expelled queue capacity for
+   * sustained soak operation.
+   */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -110,6 +121,7 @@ class SoakBenchmarkIT extends AbstractIntegrationIT {
   static final int WRITE_THREADS = 2;
   static final int SYNC_THREADS = 1;
 
+  /** Runs concurrent read/write/sync threads for a configured duration and takes periodic snapshots. */
   @Test
   void soakTest() throws Exception {
     log.info("══════ SOAK TEST ══════");
@@ -281,6 +293,7 @@ class SoakBenchmarkIT extends AbstractIntegrationIT {
     assertThat(integrityErrors).as("Post-soak Redis integrity").isZero();
   }
 
+  /** Captures a metrics snapshot including heap, GC, thread count, and operation counts. */
   private Map<String, Object> takeSnapshot(long elapsedMs,
       long readOps, long writeOps, long syncOps,
       long readErrs, long writeErrs, long syncErrs) {
@@ -318,6 +331,7 @@ class SoakBenchmarkIT extends AbstractIntegrationIT {
     return snap;
   }
 
+  /** Logs a single metrics snapshot at INFO level. */
   private void logSnapshot(Map<String, Object> snap) {
     log.info("Snapshot at {}s: heap={}M/{}M, threads={}, GC={}({}ms), "
         + "readOps={}, writeOps={}, syncOps={}, errors={}",
@@ -332,6 +346,7 @@ class SoakBenchmarkIT extends AbstractIntegrationIT {
             + ((Number) snap.get("syncErrors")).longValue());
   }
 
+  /** Declares a fanout exchange idempotently if it does not already exist. */
   private void ensureExchange(String name) {
     rabbitTemplate.execute(channel -> {
       try {

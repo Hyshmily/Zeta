@@ -35,6 +35,7 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
  */
 public final class TransactionSupport {
 
+  /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(TransactionSupport.class);
 
   /**

@@ -94,7 +94,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
 
   private static final List<PhaseMetrics> ALL_PHASES = new ArrayList<>();
 
-  // ── Containers ──────────────────────────────────────────────────────────────────
+  // -- Containers ------------------------------------------------------------------
 
   @Container
   static GenericContainer<?> redis = new GenericContainer<>(
@@ -122,7 +122,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     r.add("hotkey.local.report-interval-ms", () -> "5000");
   }
 
-  // ── Injection ───────────────────────────────────────────────────────────────────
+  // -- Injection -------------------------------------------------------------------
 
   @Autowired
   HotKey hotKey;
@@ -136,7 +136,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   @Autowired
   ConnectionFactory connectionFactory;
 
-  // ── Config ──────────────────────────────────────────────────────────────────────
+  // -- Config ----------------------------------------------------------------------
 
   static final int HOT_KEY_COUNT = 5_000;
   static final int COLD_KEY_COUNT = 15_000;
@@ -149,7 +149,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   static final String BROADCAST_EXCHANGE = "hotkey.broadcast.exchange";
   static final String REPORT_EXCHANGE = "hotkey.report.exchange";
 
-  // ── Simulated Worker state ──────────────────────────────────────────────────────
+  // -- Simulated Worker state ------------------------------------------------------
 
   SimpleMessageListenerContainer workerContainer;
   AtomicLong workerDecisionsSent = new AtomicLong(0);
@@ -161,10 +161,17 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   /** Set during phaseWorkerDecisions to capture decision-to-promotion latency node. */
   volatile NodeMetrics workerDecPropNode;
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Metrics Framework
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Per-phase latency, throughput, error, and system metrics collector.
+   *
+   * <p>Records operation latencies and computes p50/p95/p99 percentiles and histogram
+   * buckets on {@link #finish()}. Tracks per-node latency breakdown across the full
+   * HotKey link (L1, L2, AMQP send, propagation).
+   */
   static class PhaseMetrics {
 
     final String name;
@@ -199,6 +206,9 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
         "0-1ms", "1-5ms", "5-10ms", "10-50ms", "50-100ms", "100-500ms", "500ms+"
     };
 
+    /**
+     * @param name the phase name used for log and JSON report output
+     */
     PhaseMetrics(String name) {
       this.name = name;
     }
@@ -208,14 +218,25 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
       return nodeMetrics.computeIfAbsent(nodeName, NodeMetrics::new);
     }
 
+    /**
+     * Records a single operation latency in nanoseconds.
+     *
+     * @param nanos elapsed time for one operation
+     */
     void recordLatency(long nanos) {
       latencies.add(nanos);
     }
 
+    /** Increments the operation counter. */
     void recordOp() {
       ops.incrementAndGet();
     }
 
+    /**
+     * Finalizes metrics computation: duration, percentiles, throughput, and per-node breakdown.
+     *
+     * @return this instance for chaining
+     */
     PhaseMetrics finish() {
       durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
       totalOps = ops.get();
@@ -231,6 +252,9 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
       return this;
     }
 
+    /**
+     * Logs a one-line summary of this phase's metrics at INFO level.
+     */
     void logSummary() {
       StringBuilder sb = new StringBuilder();
       sb.append(String.format("▸ %s: %d ops in %dms | %d err | %d ops/s | P50=%.2fms P95=%.2fms P99=%.2fms",
@@ -249,6 +273,10 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
       log.info(sb.toString());
     }
 
+    /**
+     * Serializes this phase's metrics to a Jackson {@link ObjectNode} including
+     * latency histogram, per-node breakdown, custom fields, and JVM system metrics.
+     */
     ObjectNode toJson(ObjectMapper mapper) {
       ObjectNode n = mapper.createObjectNode();
       n.put("name", name);
@@ -299,6 +327,14 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
       return n;
     }
 
+    /**
+     * Converts the sorted latency array into a JSON histogram with predefined bucket
+     * ranges (0–1ms, 1–5ms, 5–10ms, 10–50ms, 50–100ms, 100–500ms, 500ms+).
+     *
+     * @param mapper the Jackson ObjectMapper used to create JSON nodes
+     * @return ArrayNode with one object per bucket containing range label, count, and
+     *     percentage
+     */
     private ArrayNode histogramToJson(ObjectMapper mapper) {
       ArrayNode buckets = mapper.createArrayNode();
       if (sortedLatencies == null || sortedLatencies.length == 0) {
@@ -344,14 +380,27 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     double p95Ms;
     double p99Ms;
 
+    /**
+     * @param nodeName the node label (e.g. L1, L2_REDIS, AMQP_SEND)
+     */
     NodeMetrics(String nodeName) {
       this.nodeName = nodeName;
     }
 
+    /**
+     * Records a single node-level latency sample in nanoseconds.
+     *
+     * @param nanos elapsed time for this node hop
+     */
     void record(long nanos) {
       latencies.add(nanos);
     }
 
+    /**
+     * Finalizes node metrics: computes total ops and p50/p95/p99 percentiles.
+     *
+     * @return this instance for chaining
+     */
     NodeMetrics finish() {
       totalOps = latencies.size();
       long[] sorted = latencies.stream().mapToLong(Long::longValue).sorted().toArray();
@@ -362,6 +411,9 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
       return this;
     }
 
+    /**
+     * Serializes this node's metrics to a Jackson {@link ObjectNode}.
+     */
     ObjectNode toJson(ObjectMapper mapper) {
       ObjectNode n = mapper.createObjectNode();
       n.put("totalOps", totalOps);
@@ -422,13 +474,22 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     log.info("Container full-link stress report written to {}", reportPath.toAbsolutePath());
   }
 
-  // ── Shared Helpers ──────────────────────────────────────────────────────────────
+  // -- Shared Helpers --------------------------------------------------------------
 
+  /**
+   * Consumer that accepts an index and may throw an exception.
+   * Used by {@link #concurrentRun} to define per-operation logic.
+   */
   @FunctionalInterface
   interface ThrowingConsumer {
     void accept(int index) throws Exception;
   }
 
+  /**
+   * Runs a concurrent workload with the given thread count; each thread executes
+   * {@code opsPerThread} operations via the supplied task. All errors and latencies
+   * are tracked in the provided metrics.
+   */
   static void concurrentRun(String label, int threads, int opsPerThread, ThrowingConsumer task,
       PhaseMetrics metrics) throws InterruptedException {
     ExecutorService pool = Executors.newFixedThreadPool(threads);
@@ -459,15 +520,26 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     }
   }
 
+  /**
+   * Returns a deterministic full-link key string for the given index.
+   */
   static String keyFor(int idx) {
     return "fl:key:" + idx;
   }
 
+  /**
+   * Runnable that may throw any throwable.
+   * Used by {@link #measure} for timed execution.
+   */
   @FunctionalInterface
   interface CheckedRunnable {
     void run() throws Throwable;
   }
 
+  /**
+   * Measures the execution time of a {@link CheckedRunnable} in nanoseconds.
+   * Re-throws {@link RuntimeException} and {@link Error} directly; wraps others.
+   */
   static long measure(CheckedRunnable r) {
     long t0 = System.nanoTime();
     try {
@@ -480,7 +552,12 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     return System.nanoTime() - t0;
   }
 
-  /** Generate a random string of the given approximate length in bytes. */
+  /**
+   * Generates a random alphabetic string of approximately the specified byte length.
+   *
+   * @param approxBytes target byte length approximation
+   * @return random uppercase alphabetic string
+   */
   static String randomValue(int approxBytes) {
     int chars = Math.max(1, approxBytes / 2);
     StringBuilder sb = new StringBuilder(chars);
@@ -491,10 +568,14 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     return sb.toString();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Main Test Orchestrator
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Orchestrates the full end-to-end stress test across all core phases: warmup, hot read, cold
+   * read, write stress, mixed workload, broadcast sync, recovery storm, and topology shuffle.
+   */
   @Test
   void fullLinkStress() throws Exception {
     ensureExchanges();
@@ -534,20 +615,24 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     // Assert all phases
     long totalErrors = ALL_PHASES.stream().mapToInt(m -> m.errorCount).sum();
     assertThat(totalErrors).as("Total errors across all phases").isZero();
-    log.info("══════ Full-link stress PASSED: {} phases, {} ops, {} errors ══════",
+    log.info("====== Full-link stress PASSED: {} phases, {} ops, {} errors ======",
         ALL_PHASES.size(),
         ALL_PHASES.stream().mapToLong(m -> m.totalOps).sum(),
         totalErrors);
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 1: Warmup
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Seeds all keys into Redis and L1 cache. Establishes a baseline populated
+   * cache state for all subsequent phases.
+   */
   private void phaseWarmup() throws Exception {
     PhaseMetrics m = new PhaseMetrics("warmup");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 1: WARMUP ══════");
+    log.info("====== Phase 1: WARMUP ======");
     log.info("Seeding {} keys into Redis + L1 ...", TOTAL_KEYS);
     for (int i = 0; i < TOTAL_KEYS; i++) {
       String key = keyFor(i);
@@ -561,15 +646,19 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 2: Hot Read Stress
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Stress-tests L1 cache hit path with repeated reads on pre-warmed hot keys.
+   * All reads should return from Caffeine without L2 fallback.
+   */
   private void phaseHotRead() throws Exception {
     PhaseMetrics m = new PhaseMetrics("hot-read");
     ALL_PHASES.add(m);
     NodeMetrics l1Node = m.node("L1");
-    log.info("══════ Phase 2: HOT READ ══════");
+    log.info("====== Phase 2: HOT READ ======");
     log.info("{} threads x {} ops on {} hot keys (expect L1 hits) ...", THREAD_COUNT, OPS_PER_THREAD, HOT_KEY_COUNT);
     concurrentRun("hotRead", THREAD_COUNT, OPS_PER_THREAD, (idx) -> {
       String key = keyFor(idx % HOT_KEY_COUNT);
@@ -585,15 +674,19 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 3: Cold Read Stress
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Stress-tests L1 miss path by invalidating cold keys first, then reading them.
+   * Verifies L2 (Redis) fallback with supplier calls and cache repopulation.
+   */
   private void phaseColdRead() throws Exception {
     PhaseMetrics m = new PhaseMetrics("cold-read");
     ALL_PHASES.add(m);
     NodeMetrics l2Node = m.node("L2_REDIS");
-    log.info("══════ Phase 3: COLD READ ══════");
+    log.info("====== Phase 3: COLD READ ======");
     log.info("{} threads x {} ops on {} cold keys (expect L2 fallback) ...",
         THREAD_COUNT, OPS_PER_THREAD, COLD_KEY_COUNT);
     for (int i = HOT_KEY_COUNT; i < TOTAL_KEYS; i++) {
@@ -618,15 +711,19 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 4: Write Stress
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Stress-tests putThrough with unique keys and verifies Redis persistence.
+   * Each write goes through HotKey putThrough, persists to Redis, and is verified.
+   */
   private void phaseWriteStress() throws Exception {
     PhaseMetrics m = new PhaseMetrics("write-stress");
     ALL_PHASES.add(m);
     NodeMetrics putNode = m.node("PUT_THROUGH");
-    log.info("══════ Phase 4: WRITE STRESS ══════");
+    log.info("====== Phase 4: WRITE STRESS ======");
     log.info("{} threads x {} putThrough ops with Redis persistence ...",
         THREAD_COUNT, OPS_PER_THREAD);
     concurrentRun("writeStress", THREAD_COUNT, OPS_PER_THREAD, (idx) -> {
@@ -644,14 +741,18 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 5: Mixed Read / Write / Invalidate
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Simulates a production workload mix: 80% reads, 10% writes, 10% invalidates.
+   * Verifies HotKey handles all three operation types concurrently without errors.
+   */
   private void phaseMixed() throws Exception {
     PhaseMetrics m = new PhaseMetrics("mixed-rw-inv");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 5: MIXED (80/10/10) ══════");
+    log.info("====== Phase 5: MIXED (80/10/10) ======");
     log.info("80% read + 10% putThrough + 10% invalidate on {} keys ...", TOTAL_KEYS);
     concurrentRun("mixed", THREAD_COUNT, OPS_PER_THREAD, (idx) -> {
       int op = idx % 10;
@@ -674,18 +775,23 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 6: Zipf Distribution (realistic traffic pattern)
   //
   // Simulates web-scale traffic where 20% of keys receive 80% of requests.
   // Uses a Zipf distribution with exponent ~1.2 to generate realistic hot key skew.
   // Verifies HeavyKeeper correctly identifies the true hot keys under skew.
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Simulates web-scale traffic with a Zipf-distributed access pattern where ~20% of
+   * keys receive ~80% of requests. Exercises HeavyKeeper detection under realistic
+   * traffic skew and verifies no errors under the non-uniform load.
+   */
   private void phaseZipfDistribution() throws Exception {
     PhaseMetrics m = new PhaseMetrics("zipf-distribution");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 6: ZIPF DISTRIBUTION ══════");
+    log.info("====== Phase 6: ZIPF DISTRIBUTION ======");
     log.info("Simulating 80/20 traffic skew across {} keys ...", TOTAL_KEYS);
 
     int totalOps = 100_000;
@@ -741,17 +847,22 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 7: Large Value Stress
   //
   // Tests cache behavior with variable value sizes: 1KB, 10KB, 100KB, 1MB.
   // Verifies that large values don't cause OOM, excessive GC, or throughput collapse.
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Tests cache behavior with values of varying sizes (1KB, 10KB, 100KB, 1MB).
+   * Verifies that large values do not cause OOM, excessive GC pressure, or throughput
+   * collapse. Runs {@link System#gc()} between size groups to measure GC impact.
+   */
   private void phaseLargeValueStress() throws Exception {
     PhaseMetrics m = new PhaseMetrics("large-value-stress");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 7: LARGE VALUE STRESS ══════");
+    log.info("====== Phase 7: LARGE VALUE STRESS ======");
 
     int[] sizes = {1_024, 10_240, 102_400, 1_048_576}; // 1KB, 10KB, 100KB, 1MB
     int opsPerSize = 200;
@@ -789,18 +900,22 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 8: Single-Key Contention
   //
   // Many threads competing on the same cache key simultaneously. Tests HotKeyCache
   // and SingleFlight dedup under extreme write contention. Verifies no data races,
   // no duplicate executions, and eventual consistency.
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Many threads compete on the same cache key simultaneously, testing HotKeyCache
+   * and SingleFlight dedup under extreme write contention.
+   */
   private void phaseSingleKeyContention() throws Exception {
     PhaseMetrics m = new PhaseMetrics("single-key-contention");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 8: SINGLE-KEY CONTENTION ══════");
+    log.info("====== Phase 8: SINGLE-KEY CONTENTION ======");
 
     String key = "fl:contention:key";
     redisTemplate.opsForValue().set(key, "init");
@@ -834,18 +949,22 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 9: Thundering Herd
   //
   // Simulates a cache stampede: many threads simultaneously loading a single
   // expired key. Verifies SingleFlight dedup works (only one actual load
   // executes, others wait and reuse the result).
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Simulates a cache stampede: many threads simultaneously loading a single
+   * expired key. Verifies SingleFlight dedup works correctly.
+   */
   private void phaseThunderingHerd() throws Exception {
     PhaseMetrics m = new PhaseMetrics("thundering-herd");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 9: THUNDERING HERD ══════");
+    log.info("====== Phase 9: THUNDERING HERD ======");
 
     // Create a key with very short hardTtl so it expires immediately
     String herdKey = "fl:herd:key";
@@ -902,15 +1021,19 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 10: Worker Decision Stress
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Stress-tests the Worker decision pipeline: sends HOT and COOL decisions via
+   * RabbitMQ broadcast and verifies promotion and downgrade in L1 cache.
+   */
   private void phaseWorkerDecisions() throws Exception {
     PhaseMetrics m = new PhaseMetrics("worker-decisions");
     ALL_PHASES.add(m);
     NodeMetrics decPropNode = m.node("DECISION_PROPAGATION");
-    log.info("══════ Phase 10: WORKER DECISIONS ══════");
+    log.info("====== Phase 10: WORKER DECISIONS ======");
     workerDecPropNode = decPropNode; // wire into worker callback
 
     int decisionCount = 2_000;
@@ -982,16 +1105,20 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 11: Cross-Instance Sync Stress
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Sends INVALIDATE broadcasts for all hot keys via RabbitMQ and measures
+   * end-to-end propagation latency from publish to L1 invalidation.
+   */
   private void phaseCrossInstanceSync() throws Exception {
     PhaseMetrics m = new PhaseMetrics("cross-instance-sync");
     ALL_PHASES.add(m);
     NodeMetrics amqpNode = m.node("AMQP_SEND");
     NodeMetrics syncPropNode = m.node("SYNC_PROPAGATION");
-    log.info("══════ Phase 11: CROSS-INSTANCE SYNC ══════");
+    log.info("====== Phase 11: CROSS-INSTANCE SYNC ======");
     log.info("Sending INVALIDATE broadcasts for {} hot keys via RabbitMQ ...", HOT_KEY_COUNT);
 
     int batchSize = 100;
@@ -1059,7 +1186,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 12: Version Degradation
   //
   // Tests the 4-case degraded version comparison logic from CacheSyncListener.
@@ -1071,15 +1198,20 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
   //
   // Also tests WorkerListener: if existing is degraded, incoming decision accepted
   // unconditionally; otherwise simple >= comparison on decisionVersion.
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Exercises the four-case degraded version comparison matrix from
+   * {@link io.github.hyshmily.hotkey.sync.VersionGuard} and WorkerListener
+   * degraded-state acceptance logic.
+   */
   private void phaseVersionDegradation() throws Exception {
     PhaseMetrics m = new PhaseMetrics("version-degradation");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 12: VERSION DEGRADATION ══════");
+    log.info("====== Phase 12: VERSION DEGRADATION ======");
     log.info("Testing 4-case degraded version matrix ...");
 
-    // ── Case 1: Normal-vs-Normal (newer wins) ──
+    // -- Case 1: Normal-vs-Normal (newer wins) --
     String keyNorm = "fl:degr:norm";
     redisTemplate.opsForValue().set(keyNorm, "base");
     hotKey.putThrough(keyNorm, "base", () -> {});
@@ -1095,7 +1227,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     boolean case1Pass = hotKey.peek(keyNorm).isEmpty();
     m.custom.put("case1_normal_normal", case1Pass ? 1 : 0);
 
-    // ── Case 2: Degraded tries to overwrite Normal ──
+    // -- Case 2: Degraded tries to overwrite Normal --
     String keyD2N = "fl:degr:d2n";
     redisTemplate.opsForValue().set(keyD2N, "normal-state");
     hotKey.putThrough(keyD2N, "normal-state", () -> {});
@@ -1113,7 +1245,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     boolean case2Stable = true; // We just verify no exception occurred
     m.custom.put("case2_degraded_over_normal", case2Stable ? 1 : 0);
 
-    // ── Case 3: Normal overwrites Degraded (should succeed) ──
+    // -- Case 3: Normal overwrites Degraded (should succeed) --
     String keyN2D = "fl:degr:n2d";
     redisTemplate.opsForValue().set(keyN2D, "degraded-state");
     // We simulate existing degraded state by directly creating one
@@ -1129,7 +1261,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     boolean case3Pass = hotKey.peek(keyN2D).isEmpty();
     m.custom.put("case3_normal_over_degraded", case3Pass ? 1 : 0);
 
-    // ── Case 4: Degraded-vs-Degraded (higher version wins) ──
+    // -- Case 4: Degraded-vs-Degraded (higher version wins) --
     String keyD2D = "fl:degr:d2d";
     redisTemplate.opsForValue().set(keyD2D, "d-state");
     hotKey.putThrough(keyD2D, "d-state", () -> {});
@@ -1150,7 +1282,7 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     boolean case4Pass = hotKey.peek(keyD2D).isEmpty();
     m.custom.put("case4_degraded_degraded", case4Pass ? 1 : 0);
 
-    // ── Worker decision with degraded state ──
+    // -- Worker decision with degraded state --
     // If existing entry is degraded, Worker decision should be accepted unconditionally
     String keyWorkerDegr = "fl:degr:worker";
     redisTemplate.opsForValue().set(keyWorkerDegr, "worker-degr");
@@ -1171,18 +1303,22 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 13: Access Pattern Shift
   //
   // Simulates production traffic pattern changes: a set of keys that were hot
   // become cold, and a different set becomes hot. Verifies HotKey detection
   // adapts to the new pattern within the expected window.
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Simulates production traffic pattern changes: a hot key set becomes cold
+   * and a different set becomes hot, verifying the detection adapts correctly.
+   */
   private void phasePatternShift() throws Exception {
     PhaseMetrics m = new PhaseMetrics("pattern-shift");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 13: PATTERN SHIFT ══════");
+    log.info("====== Phase 13: PATTERN SHIFT ======");
     log.info("Phase A: hot pattern A (keys 0-99), Phase B: shift to pattern B (keys 100-199) ...");
 
     int patternKeys = 200;
@@ -1219,14 +1355,18 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 14: Combined Full-Link Stress
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Combines reads, writes, invalidates, and Worker decisions in a single concurrent
+   * phase to stress all HotKey data paths simultaneously.
+   */
   private void phaseCombined() throws Exception {
     PhaseMetrics m = new PhaseMetrics("combined-stress");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 14: COMBINED STRESS ══════");
+    log.info("====== Phase 14: COMBINED STRESS ======");
     log.info("70% read + 10% write + 10% invalidate + 10% Worker decision ...");
 
     int combinedThreads = THREAD_COUNT * 2;
@@ -1273,14 +1413,18 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 15: Burst Traffic
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Runs steady background traffic followed by a sudden burst of 50 concurrent
+   * threads to simulate traffic spikes.
+   */
   private void phaseBurst() throws Exception {
     PhaseMetrics m = new PhaseMetrics("burst-traffic");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 15: BURST TRAFFIC ══════");
+    log.info("====== Phase 15: BURST TRAFFIC ======");
     log.info("Steady 500 ops then burst 50 threads x 200 ops on {} hot keys ...", HOT_KEY_COUNT);
 
     // Steady phase
@@ -1326,10 +1470,14 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Simulated Worker
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Creates and starts a simulated Worker that listens on the report exchange and emits HOT
+   * decisions back to the broadcast exchange.
+   */
   private void startWorker() {
     log.info("Starting simulated Worker (listening on report exchange) ...");
     String queueName = "stress.worker.queue." + UUID.randomUUID();
@@ -1382,6 +1530,9 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     log.info("Simulated Worker started, listening on queue: {}", queueName);
   }
 
+  /**
+   * Stops the simulated Worker message listener container if it is running.
+   */
   private void stopWorker() {
     if (workerContainer != null && workerContainer.isRunning()) {
       workerContainer.stop();
@@ -1389,6 +1540,9 @@ class ContainerFullLinkStressIT extends AbstractIntegrationIT {
     }
   }
 
+  /**
+   * Ensures the SYNC and BROADCAST exchanges exist, declaring them if missing.
+   */
   private void ensureExchanges() {
     rabbitTemplate.execute(channel -> {
       try { channel.exchangeDeclarePassive(SYNC_EXCHANGE); }

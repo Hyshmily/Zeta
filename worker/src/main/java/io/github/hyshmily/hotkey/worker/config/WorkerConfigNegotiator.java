@@ -40,8 +40,11 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 @Slf4j
 public class WorkerConfigNegotiator {
 
+  /** State machine whose config (confirm/cool/grace counts) is updated from heartbeat messages. */
   private final HotKeyStateMachine stateMachine;
+  /** Monotonically increasing counter tracking the latest config-change timestamp. */
   private final AtomicLong configTimestampCounter;
+  /** Unique identifier for this Worker node, used in queue names and heartbeat identification. */
   private final String nodeId;
   private final CountDownLatch startupLatch = new CountDownLatch(1);
 

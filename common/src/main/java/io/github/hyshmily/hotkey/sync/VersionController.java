@@ -35,6 +35,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 @RequiredArgsConstructor
 public class VersionController {
 
+  /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(VersionController.class);
 
   /**
@@ -46,8 +47,16 @@ public class VersionController {
    */
   public record VersionResult(long dataVersion, boolean degraded) {}
 
+  /** Optional Redis template — absent when Redis is not configured. */
   private final Optional<StringRedisTemplate> redisTemplate;
+
+  /** TTL (minutes) for the per-key version keys in Redis. */
   private final int versionKeyTtlMinutes;
+
+  /**
+   * Local counter used when Redis is unavailable. Starts at 0 and is subtracted
+   * from {@link Long#MIN_VALUE} so degraded versions always sort below normal.
+   */
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
 
   /**

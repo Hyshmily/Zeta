@@ -51,6 +51,9 @@ class TopKValidatorTest {
     validator = new TopKValidator(topK, broadcaster, 5, 2);
   }
 
+  /**
+   * Verifies that a key is broadcast as hot after it appears in the TopK list the minimum required number of times.
+   */
   @Test
   void shouldBroadcastWhenKeyAppearsMinRequiredTimes() {
     when(topK.listTopN(5)).thenReturn(List.of(new Item("hotKey", 100)));
@@ -60,6 +63,9 @@ class TopKValidatorTest {
     assertThat(validator).isNotNull();
   }
 
+  /**
+   * Verifies that keys already marked as confirmed are skipped during validation and not re-broadcast.
+   */
   @Test
   void shouldSkipAlreadyConfirmedKeys() {
     validator.markConfirmed("hotKey");
@@ -68,6 +74,9 @@ class TopKValidatorTest {
     verify(broadcaster, never()).broadcastHot(any(), any());
   }
 
+  /**
+   * Verifies that a key is auto-cooled when it drops out of the TopK list and must re-meet the minimum appearances.
+   */
   @Test
   void shouldAutoCoolWhenKeyDropsOutOfTopK() {
     when(topK.listTopN(5)).thenReturn(List.of(new Item("hotKey", 100)));
@@ -85,6 +94,9 @@ class TopKValidatorTest {
     verify(broadcaster).broadcastHot(eq("hotKey"), any());
   }
 
+  /**
+   * Verifies that {@code markConfirmed} and {@code markCooled} correctly toggle a key's internal state.
+   */
   @Test
   void markConfirmedAndMarkCooledShouldToggleState() {
     validator.markConfirmed("key1");

@@ -39,10 +39,15 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Integration test for Worker HOT/COOL decision delivery via RabbitMQ.
+ *
+ * <p>Verifies that HOT decisions promote a cache entry to HOT state and
+ * COOL decisions downgrade it back, using the worker exchange.
+ */
 @Testcontainers
 @Tag("docker")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Integration test for Worker HOT/COOL decision delivery via RabbitMQ. */
 class WorkerListenerRabbitMQIT extends AbstractIntegrationIT {
 
   @Container
@@ -76,6 +81,7 @@ class WorkerListenerRabbitMQIT extends AbstractIntegrationIT {
   @Autowired
   StringRedisTemplate redisTemplate;
 
+  /** Sends a HOT decision message to the worker exchange and verifies the cache entry is promoted. */
   @Test
   void hotDecision_shouldPromoteToHOT() {
     String key = "it:worker:hot:" + UUID.randomUUID();
@@ -96,6 +102,7 @@ class WorkerListenerRabbitMQIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.isLocalHotKey(key)).isTrue());
   }
 
+  /** Sends a COOL decision message to the worker exchange and verifies the cache entry is downgraded from HOT. */
   @Test
   void coolDecision_shouldDowngrade() {
     String key = "it:worker:cool:" + UUID.randomUUID();

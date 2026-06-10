@@ -52,8 +52,6 @@ class HotKeyAspectTest {
     aspect = new HotKeyAspect(hotKeyFacade);
   }
 
-  // ── Annotated target methods (real annotations for reflection) ─────
-
   @SuppressWarnings("unused")
   @HotKey(key = "'staticKey'")
   public String sampleMethod(String arg) {
@@ -129,8 +127,6 @@ class HotKeyAspectTest {
     return arg;
   }
 
-  // ── Helper ─────────────────────────────────────────────────────────
-
   private ProceedingJoinPoint mockPjp(String methodName, Object[] args) throws Exception {
     Method method = getClass().getDeclaredMethod(methodName, String.class);
     MethodSignature sig = mock(MethodSignature.class);
@@ -152,8 +148,9 @@ class HotKeyAspectTest {
     return ann;
   }
 
-  // ── READ: basic path ───────────────────────────────────────────────
-
+  /**
+   * Verifies that READ operations use getWithSoftExpire by default (softExpire=true).
+   */
   @Test
   void read_shouldUseGetWithSoftExpireByDefault() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleMethod", new Object[]{"testArg"});
@@ -171,6 +168,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).getWithSoftExpire(anyString(), any(), anyLong(), anyLong());
   }
 
+  /**
+   * Verifies that READ operations use get() instead of getWithSoftExpire when softExpire=false.
+   */
   @Test
   void read_withSoftExpireFalse_shouldUseGet() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleMethod", new Object[]{"testArg"});
@@ -187,8 +187,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).get(anyString(), any(), anyLong(), anyLong());
   }
 
-  // ── Step ①: Blacklist ──────────────────────────────────────────────
-
+  /**
+   * Verifies that a BLOCK action without a @Fallback annotation throws HotKeyBlockedException and does not proceed.
+   */
   @Test
   void blacklist_withoutFallback_shouldThrowBlockedException() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleMethod", new Object[]{"testArg"});
@@ -203,6 +204,9 @@ class HotKeyAspectTest {
     verify(pjp, never()).proceed();
   }
 
+  /**
+   * Verifies that a BLOCK action with a @Fallback annotation returns the fallback value without proceeding.
+   */
   @Test
   void blacklist_withFallback_shouldReturnFallbackValue() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithFallback", new Object[]{"testArg"});
@@ -216,8 +220,9 @@ class HotKeyAspectTest {
     verify(pjp, never()).proceed();
   }
 
-  // ── Step ②: Condition ──────────────────────────────────────────────
-
+  /**
+   * Verifies that when the condition evaluates to false, caching is skipped and the method executes directly.
+   */
   @Test
   void conditionFalse_shouldSkipCacheAndExecuteMethod() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithCondition", new Object[]{"testArg"});
@@ -236,6 +241,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade, never()).getWithSoftExpire(anyString(), any(), anyLong(), anyLong());
   }
 
+  /**
+   * Verifies that when the condition evaluates to true, caching is performed normally.
+   */
   @Test
   void conditionTrue_shouldGoThroughCache() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithCondition", new Object[]{"testArg"});
@@ -251,8 +259,9 @@ class HotKeyAspectTest {
     assertThat(aspect.around(pjp, ann)).isEqualTo("cached");
   }
 
-  // ── Step ③: Intercept ──────────────────────────────────────────────
-
+  /**
+   * Verifies that @Intercept with a hot key and @Fallback returns the fallback value without proceeding.
+   */
   @Test
   void intercept_hotKey_withFallback_shouldReturnFallbackValue() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleInterceptedWithFallback", new Object[]{"testArg"});
@@ -268,6 +277,9 @@ class HotKeyAspectTest {
     verify(pjp, never()).proceed();
   }
 
+  /**
+   * Verifies that @Intercept with a hot key but without @Fallback peeks the cache for the value.
+   */
   @Test
   void intercept_hotKey_withoutFallback_shouldPeek() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleInterceptedNoFallback", new Object[]{"testArg"});
@@ -285,6 +297,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).peek("staticKey");
   }
 
+  /**
+   * Verifies that @Intercept with a hot key and an empty cache returns null.
+   */
   @Test
   void intercept_hotKey_withoutFallback_peekEmpty_shouldReturnNull() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleInterceptedNoFallback", new Object[]{"testArg"});
@@ -301,6 +316,9 @@ class HotKeyAspectTest {
     verify(pjp, never()).proceed();
   }
 
+  /**
+   * Verifies that @Intercept with a non-hot key falls through to cache loading.
+   */
   @Test
   void intercept_notHot_shouldGoThroughCache() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleInterceptedNoFallback", new Object[]{"testArg"});
@@ -315,8 +333,9 @@ class HotKeyAspectTest {
     assertThat(aspect.around(pjp, ann)).isEqualTo("cached");
   }
 
-  // ── @Fallback alone should NOT imply @Intercept ────────────────────
-
+  /**
+   * Verifies that @Fallback alone (without @Intercept) does not skip the method even for hot keys.
+   */
   @Test
   void fallbackAlone_withHotKey_shouldNotIntercept() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithFallback", new Object[]{"testArg"});
@@ -336,8 +355,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).getWithSoftExpire(anyString(), any(), anyLong(), anyLong());
   }
 
-  // ── Step ④: TTL override ──────────────────────────────────────────
-
+  /**
+   * Verifies that @HotKeyCacheTTL annotation values override the default TTL in the cache call.
+   */
   @Test
   void ttlAnnotation_shouldOverrideTimer() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithTtl", new Object[]{"testArg"});
@@ -353,8 +373,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).getWithSoftExpire(eq("staticKey"), any(), eq(7777L), eq(8888L));
   }
 
-  // ── Step ⑤: Cache exception ───────────────────────────────────────
-
+  /**
+   * Verifies that a cache exception with @Fallback returns the fallback value.
+   */
   @Test
   void cacheException_withFallback_shouldReturnFallback() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithFallback", new Object[]{"testArg"});
@@ -371,6 +392,9 @@ class HotKeyAspectTest {
     assertThat(result).isEqualTo("fallbackVal");
   }
 
+  /**
+   * Verifies that a cache exception without @Fallback rethrows the original exception.
+   */
   @Test
   void cacheException_withoutFallback_shouldRethrow() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleMethod", new Object[]{"testArg"});
@@ -387,8 +411,9 @@ class HotKeyAspectTest {
       .hasMessageContaining("redis down");
   }
 
-  // ── Step ⑥: Unless ─────────────────────────────────────────────────
-
+  /**
+   * Verifies that the unless condition is evaluated but does not prevent caching (the cached value is still returned).
+   */
   @Test
   void unless_shouldEvaluateButNotPreventCaching() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithUnless", new Object[]{"testArg"});
@@ -408,8 +433,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).getWithSoftExpire(anyString(), any(), anyLong(), anyLong());
   }
 
-  // ── Fallback naming convention ─────────────────────────────────────
-
+  /**
+   * Verifies that the fallback naming convention (methodName + "Fallback") is invoked when the key is blocked.
+   */
   @Test
   void fallbackNamingConvention_shouldInvokeMethod() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithFallbackNaming", new Object[]{"testArg"});
@@ -423,8 +449,9 @@ class HotKeyAspectTest {
     assertThat(result).isEqualTo("naming-convention-fb");
   }
 
-  // ── WRITE ──────────────────────────────────────────────────────────
-
+  /**
+   * Verifies that WRITE operations use putBeforeInvalidate and execute the mutation.
+   */
   @Test
   void write_shouldUsePutBeforeInvalidate() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleMethod", new Object[]{"testArg"});
@@ -445,8 +472,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).putBeforeInvalidate(eq("writeKey"), any());
   }
 
-  // ── INVALIDATE ─────────────────────────────────────────────────────
-
+  /**
+   * Verifies that INVALIDATE operations call invalidate on the key and then proceed with the method.
+   */
   @Test
   void invalidate_shouldCallInvalidateAndProceed() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleMethod", new Object[]{"testArg"});
@@ -461,8 +489,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).invalidate("invalidateKey");
   }
 
-  // ── Full priority chain ────────────────────────────────────────────
-
+  /**
+   * Verifies that the full priority chain (Blacklist → Condition → Intercept → TTL → Cache → Unless) returns the cached value when all steps pass.
+   */
   @Test
   void fullChain_allStepsPass_shouldReturnCachedValue() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithFullAnnotations", new Object[]{"testArg"});
@@ -491,6 +520,9 @@ class HotKeyAspectTest {
     verify(hotKeyFacade).getWithSoftExpire(eq("staticKey"), any(), eq(5000L), eq(60000L));
   }
 
+  /**
+   * Verifies that in the full priority chain, a BLOCK action at the blacklist step returns the fallback value.
+   */
   @Test
   void fullChain_blacklistBlocked_shouldReturnFallback() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithFullAnnotations", new Object[]{"testArg"});
@@ -505,6 +537,9 @@ class HotKeyAspectTest {
     verify(pjp, never()).proceed();
   }
 
+  /**
+   * Verifies that in the full priority chain, the intercept step returns the fallback value when the key is hot.
+   */
   @Test
   void fullChain_intercepted_shouldReturnFallback() throws Throwable {
     ProceedingJoinPoint pjp = mockPjp("sampleWithFullAnnotations", new Object[]{"testArg"});
@@ -520,8 +555,9 @@ class HotKeyAspectTest {
     verify(pjp, never()).proceed();
   }
 
-  // ── Optional return type ───────────────────────────────────────────
-
+  /**
+   * Verifies that READ operations with Optional return types pass the cached Optional value through directly.
+   */
   @Test
   void read_optionalReturnType_shouldPassThrough() throws Throwable {
     Method signatureMethod = getClass().getDeclaredMethod("optionalReturnMethod");

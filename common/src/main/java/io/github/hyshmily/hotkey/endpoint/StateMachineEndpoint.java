@@ -43,7 +43,9 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor(onConstructor = @__(@Autowired))
 public class StateMachineEndpoint {
 
+  /** Hot-key state machine whose config is being exposed/modified. */
   private final HotKeyStateMachine stateMachine;
+  /** Shared atomic counter bumped on each config change; broadcast via heartbeat. */
   private final ObjectProvider<AtomicLong> configTimestampCounter;
 
   /**

@@ -59,6 +59,10 @@ public class HotKeyRedisAutoConfiguration {
 
   /**
    * Create the {@link RuleMatcher} with Redis persistence and broadcast support.
+   *
+   * @param redisTemplateProvider optional provider for StringRedisTemplate
+   * @param publisherProvider     optional provider for the cache sync publisher
+   * @return a new RuleMatcher instance with Redis-backed persistence
    */
   @Bean
   @ConditionalOnMissingBean
@@ -76,6 +80,19 @@ public class HotKeyRedisAutoConfiguration {
    * Create the Redis-enhanced {@link HotKeyCache} with version-based stale detection.
    * {@link StringRedisTemplate} is optional — if absent, version tracking falls back
    * to a node-local counter ({@code Long.MIN_VALUE + counter}).
+   *
+   * @param hotKeyDetector     the app-side TopK detector
+   * @param hotLocalCache      the L1 Caffeine cache
+   * @param singleFlight       the deduplication layer
+   * @param expireManager      the soft/hard expiration manager
+   * @param syncPublisher      optional cache sync publisher
+   * @param hotKeyReporter     optional hot key reporter
+   * @param hotKeyExecutor     the dedicated HotKey executor
+   * @param redisTemplateProvider optional provider for StringRedisTemplate (version tracking)
+   * @param properties         the HotKey configuration properties
+   * @param ruleMatcher        the rule matcher instance
+   * @param workerHealthMonitor the worker health monitor
+   * @return a new Redis-backed HotKeyCache instance
    */
   @Bean
   @ConditionalOnMissingBean
@@ -117,6 +134,10 @@ public class HotKeyRedisAutoConfiguration {
    * has been defined yet.  This covers the case where the primary
    * {@link HotKeyFacadeAutoConfiguration} is excluded and the {@link HotKeyCache}
    * originates from this configuration.
+   *
+   * @param hotKeyCache    the Redis-backed HotKeyCache instance
+   * @param hotKeyDetector the app-side TopK detector
+   * @return a new HotKey facade instance
    */
   @Bean
   @ConditionalOnBean(HotKeyCache.class)

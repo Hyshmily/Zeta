@@ -90,6 +90,7 @@ class DualBroadcastIT extends AbstractIntegrationIT {
   @Autowired
   HotKey hotKey;
 
+  /** Verifies that an INVALIDATE message on the sync exchange is fanned out to a second dynamically declared queue. */
   @Test
   void invalidateBroadcast_shouldFanoutToSecondQueue() throws Exception {
     String key = "it:dual:inv:" + UUID.randomUUID();

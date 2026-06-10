@@ -77,6 +77,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
   @Autowired
   private AnnotatedService annotatedService;
 
+  /**
+   * Evicts all known annotation cache keys before each test to ensure a clean slate.
+   */
   @BeforeEach
   void setUp() {
     hotKey.invalidate("anno:read:static");
@@ -92,6 +95,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
   private static final String TEST_ARG = "spelValue";
   private static final String SUPPLIER_RESULT = "from-supplier";
 
+  /**
+   * READ operation caches via {@code getWithSoftExpire}; invalidation forces a fresh supplier call.
+   */
   @Test
   void readOperation_shouldCacheViaGetWithSoftExpire() {
     String result = annotatedService.readWithStaticKey(SUPPLIER_RESULT);
@@ -105,6 +111,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(reloaded).isEqualTo("fresh-supplier");
   }
 
+  /**
+   * READ with {@code softExpire=false} uses plain {@code get()} instead of {@code getWithSoftExpire}.
+   */
   @Test
   void readOperation_withSoftExpireFalse_shouldUseGet() {
     String result = annotatedService.readWithoutSoftExpire(SUPPLIER_RESULT);
@@ -115,6 +124,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(second).isEqualTo(SUPPLIER_RESULT);
   }
 
+  /**
+   * WRITE operation mutates the value and invalidates the L1 cache entry.
+   */
   @Test
   void writeOperation_shouldMutateAndInvalidate() {
     String result = annotatedService.writeWithStaticKey("write-value");
@@ -123,6 +135,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek("anno:write:static")).isEmpty();
   }
 
+  /**
+   * INVALIDATE operation clears the L1 entry, then the method body executes normally.
+   */
   @Test
   void invalidateOperation_shouldClearCacheAndProceed() throws Exception {
     hotKey.putThrough("anno:invalidate:static", "pre-value", () -> {});
@@ -136,6 +151,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek("anno:invalidate:static")).isEmpty();
   }
 
+  /**
+   * SpEL key expression resolves to the correct cache key for READ operations.
+   */
   @Test
   void readOperation_shouldUseSpelKey() {
     String result = annotatedService.readWithSpelKey(TEST_ARG, SUPPLIER_RESULT);
@@ -145,6 +163,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(cached).isEqualTo(SUPPLIER_RESULT);
   }
 
+  /**
+   * Different SpEL arguments produce distinct cache keys and independent entries.
+   */
   @Test
   void readOperation_differentSpelArgs_shouldUseDifferentKeys() {
     String r1 = annotatedService.readWithSpelKey("key-a", "value-a");
@@ -157,6 +178,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek("anno:spel:key-b")).isPresent();
   }
 
+  /**
+   * WRITE with {@code hardTtlMs=0, softTtlMs=0} silently falls back to default TTL values.
+   */
   @Test
   void writeOperation_withZeroTtl_shouldUseDefaults() {
     String result = annotatedService.writeWithStaticKey("ttl0-value");
@@ -165,6 +189,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek("anno:write:static")).isEmpty();
   }
 
+  /**
+   * WRITE silently ignores {@code softExpire=false} since WRITE always uses {@code putBeforeInvalidate}.
+   */
   @Test
   void writeOperation_withSoftExpireFalse_shouldIgnore() {
     String result = annotatedService.writeWithoutSoftExpire("nosoft-write");
@@ -173,6 +200,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek("anno:write:nosoft")).isEmpty();
   }
 
+  /**
+   * INVALIDATE silently ignores {@code softExpire=false}; invalidation always clears the entry.
+   */
   @Test
   void invalidateOperation_withSoftExpireFalse_shouldIgnore() {
     hotKey.putThrough("anno:invalidate:nosoft", "pre-value", () -> {});
@@ -186,6 +216,9 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek("anno:invalidate:nosoft")).isEmpty();
   }
 
+  /**
+   * READ with {@code hardTtlMs=0, softTtlMs=0} falls back to {@link HotKeyProperties} default TTLs.
+   */
   @Test
   void readOperation_withZeroTtl_shouldFallbackToDefaults() {
     String result = annotatedService.readWithZeroTtl(SUPPLIER_RESULT);
@@ -199,6 +232,11 @@ class HotKeyAnnotationIntegrationIT extends AbstractIntegrationIT {
     assertThat(reloaded).isEqualTo("fresh-value");
   }
 
+  /**
+   * Spring {@link Service} bean providing annotated methods for each
+   * {@link io.github.hyshmily.hotkey.annotation.HotKey @HotKey} operation type and configuration variant
+   * (READ, WRITE, INVALIDATE, SpEL keys, soft-expire toggle, zero-TTL fallback).
+   */
   @Service
   public static class AnnotatedService {
 

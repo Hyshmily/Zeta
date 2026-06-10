@@ -35,10 +35,15 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Integration test for L2 (Redis) read-through when L1 misses.
+ *
+ * <p>Verifies that the HotKey facade correctly falls back to the Redis supplier
+ * on L1 miss, caches the result in L1, and handles missing keys and write-through.
+ */
 @Testcontainers
 @Tag("docker")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Integration test for L2 (Redis) read-through when L1 misses. */
 class RedisL2ReadIT extends AbstractIntegrationIT {
 
   @Container
@@ -69,6 +74,7 @@ class RedisL2ReadIT extends AbstractIntegrationIT {
   @Autowired
   StringRedisTemplate redisTemplate;
 
+  /** Loads a value from Redis via the L2 supplier and verifies it is cached in L1. */
   @Test
   void get_shouldLoadFromRealRedisViaL2() {
     String key = "it:l2read:exists:" + UUID.randomUUID();
@@ -87,6 +93,7 @@ class RedisL2ReadIT extends AbstractIntegrationIT {
       });
   }
 
+  /** Calls get() with a key that does not exist in Redis and verifies an empty result. */
   @Test
   void get_shouldReturnEmpty_whenKeyNotInRedis() {
     String key = "it:l2read:missing:" + UUID.randomUUID();
@@ -94,6 +101,7 @@ class RedisL2ReadIT extends AbstractIntegrationIT {
     assertThat(result).isEmpty();
   }
 
+  /** Writes a value via putThrough with a Redis writer and verifies it is persisted in Redis. */
   @Test
   void putThrough_withWriter_shouldPersistToRedis() {
     String key = "it:l2read:put:" + UUID.randomUUID();

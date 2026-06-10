@@ -42,9 +42,12 @@ import java.util.stream.Collectors;
  */
 public class HeavyKeeper implements TopK {
 
+  /** Class logger. */
   private static final HotKeyLogger log = new DefaultLogger(HeavyKeeper.class);
 
+  /** Pre-computed decay probability lookup table size ({@value}). */
   private static final int LOOKUP_TABLE_SIZE = 256;
+  /** Number of lock stripes for fine-grained concurrency ({@value}). Must be a power of two. */
   private static final int LOCK_STRIPES = 256;
 
     /**
@@ -65,14 +68,23 @@ public class HeavyKeeper implements TopK {
      */
     @Getter
     private final int depth;
+  /** Pre-computed decay probabilities: {@code decay^i} for {@code i in [0, LOOKUP_TABLE_SIZE)}. */
   private final double[] lookupTable;
+  /** Per-slot fingerprint values for collision verification in the Count-Min Sketch. */
   private final long[] fingerprints;
+  /** Per-slot frequency counters for the Count-Min Sketch. */
   private final int[] counts;
+  /** Striped lock objects for fine-grained concurrency on sketch slot updates. */
   private final Object[] lockStripes;
+  /** Bitmask for mapping bucket index to lock stripe (stripe count must be power of two). */
   private final int lockMask;
+  /** Sorted map of current TopK entries, ordered by count ascending then key lexicographically. */
   private final TreeMap<Node, Boolean> sortedTopK;
+  /** Reverse index from key to its {@link Node} in the sorted map, for O(1) lookups. */
   private final Map<String, Node> heapIndex;
+  /** Bounded blocking queue receiving expelled (evicted) key-count items for downstream consumption. */
   private final BlockingQueue<Item> expelledQueue;
+  /** Running total of all tracked data streams since startup or last {@link #fading()}. */
   private final LongAdder total;
     /**
      * -- GETTER --
@@ -170,13 +182,14 @@ public class HeavyKeeper implements TopK {
           // has a `decayProb` chance of decrementing the existing counter.
           // decayProb grows with the counter value (via the pre-computed lookup
           // table), so larger counters are more likely to be decremented.
-          // When the counter reaches 0, the slot is claimed for the new item.
+          // Pre-generate random values outside the loop to reduce lock hold time.
+          ThreadLocalRandom rng = ThreadLocalRandom.current();
           for (int j = 0; j < increment; j++) {
             double decayProb = (counts[index] < LOOKUP_TABLE_SIZE)
               ? lookupTable[counts[index]]
               : lookupTable[LOOKUP_TABLE_SIZE - 1];
 
-            if (ThreadLocalRandom.current().nextDouble() < decayProb) {
+            if (rng.nextDouble() < decayProb) {
               counts[index]--;
               if (counts[index] == 0) {
                 fingerprints[index] = itemFingerprint;
@@ -267,19 +280,14 @@ public class HeavyKeeper implements TopK {
    */
   @Override
   public void fading() {
-    for (int i = 0; i < depth; i++) {
-      for (int j = 0; j < width; j++) {
-        int index = i * width + j;
-        Object lock = lockStripes[index & lockMask];
-        synchronized (lock) {
-          counts[index] >>= 1;
-        }
-      }
+    // Halve all sketch counters. int[] element writes are atomic per JLS 17.7,
+    // so per-stripe locks are not needed here. Concurrent add() calls may see
+    // a half-halved slot — acceptable precision trade-off for ~200K fewer locks.
+    for (int i = 0; i < counts.length; i++) {
+      counts[i] >>= 1;
     }
 
     // Rebuild the TopK set: halve all counts and discard entries that drop to 0.
-    // Halving (rather than decaying proportionally) keeps the relative ordering
-    // while giving new keys a chance to enter the TopK set.
     synchronized (sortedTopK) {
       TreeMap<Node, Boolean> newMap = new TreeMap<>(sortedTopK.comparator());
       heapIndex.clear();
@@ -294,8 +302,6 @@ public class HeavyKeeper implements TopK {
       sortedTopK.clear();
       sortedTopK.putAll(newMap);
 
-      // Also halve the global stream counter so newly emitted keys are not
-      // immediately disadvantaged against the historical total.
       long half = total.sumThenReset() >> 1;
       if (half > 0) {
         total.add(half);

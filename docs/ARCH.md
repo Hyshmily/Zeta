@@ -320,7 +320,7 @@ HotKey.get(cacheKey, reader[, hardTtlMs, softTtlMs])
       │    ├─ hit → unwrap CacheEntry
       │    │    ├─ KeyState == HOT → use hot TTLs (hotHardTtl / hotSoftTtl)
       │    │    └─ KeyState != HOT → use normal TTLs (normalHardTtl / normalSoftTtl)
-      │    ├─ promoteLocalHotkeyIfNeeded(key, entry)           [upgrade NORMAL/COOL to HOT if locally hot]
+      │    ├─ promoteLocalHotkeyIfNeeded(key, entry)           [upgrade NORMAL→HOT always; COOL→HOT when all Workers dead]
       │    ├─ hotKeyDetector.add(key, 1)                       [local HeavyKeeper frequency count]
       │    ├─ hotKeyReporter.record(key)                       [app→Worker report]
       │    └─ return Optional.of(entry.value)
@@ -353,7 +353,7 @@ HotKey.getWithSoftExpire(key, reader[, softTtlMs][, hardTtlMs, softTtlMs])
       │    ├─ hard TTL expired → return empty (same as get path)
       │    └─ soft TTL expired but hard TTL not expired
       │         ├─ return stale value immediately
-      │         ├─ promoteLocalHotkeyIfNeeded(key, entry)  [upgrade NORMAL/COOL to HOT if locally hot]
+      │         ├─ promoteLocalHotkeyIfNeeded(key, entry)  [upgrade NORMAL→HOT always; COOL→HOT when all Workers dead]
       │         ├─ hotKeyDetector.add(key, 1)
       │         ├─ hotKeyReporter.record(key)
       │         └─ async refresh task:
@@ -926,11 +926,12 @@ hotkey:
 
 ### Failure Behavior
 
-| Failure                | Impact                                                                     | Recovery                                          |
-| ---------------------- | -------------------------------------------------------------------------- | ------------------------------------------------- |
-| Worker crashes         | App instances continue with local TopK; no cluster-wide HOT/COOL decisions | Restart Worker; instances reconnect automatically |
-| Report channel fails   | App reports queued/buffered (RabbitMQ persistence)                         | Auto-recover on RabbitMQ restoration              |
-| Worker broadcast fails | No cross-instance HOT/COOL sync; local TopK still functional               | Restart Worker broadcaster                        |
+| Failure                  | Impact                                                                     | Recovery                                          |
+| ------------------------ | -------------------------------------------------------------------------- | ------------------------------------------------- |
+| Worker crashes (all)     | Local TopK drives L1 TTLs; COOL entries promoted to HOT; Worker verdicts degrade gracefully | Restart Worker cluster; Worker broadcast overrides local promotions |
+| Worker crashes (partial) | Unaffected shards continue normally                                       | Restart crashed Worker; auto-reconnect            |
+| Report channel fails     | App reports queued/buffered (RabbitMQ persistence)                         | Auto-recover on RabbitMQ restoration              |
+| Worker broadcast fails   | No cross-instance HOT/COOL sync; local TopK still functional               | Restart Worker broadcaster                        |
 
 ---
 

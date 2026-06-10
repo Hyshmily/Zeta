@@ -32,6 +32,9 @@ import org.springframework.amqp.core.MessageProperties;
  */
 class SyncMessageTest {
 
+  /**
+   * Verifies that a valid AMQP message with type, version, and degraded headers is parsed correctly.
+   */
   @Test
   void from_shouldParseValidMessage() {
     MessageProperties props = new MessageProperties();
@@ -47,12 +50,18 @@ class SyncMessageTest {
     assertThat(sm.isVersionDegraded()).isTrue();
   }
 
+  /**
+   * Verifies that an empty message body causes from() to return null.
+   */
   @Test
   void from_shouldReturnNullForEmptyBody() {
     Message msg = new Message(new byte[0], new MessageProperties());
     assertThat(SyncMessage.from(msg)).isNull();
   }
 
+  /**
+   * Verifies that a message body with only whitespace causes from() to return null.
+   */
   @Test
   void from_shouldReturnNullForBlankKey() {
     MessageProperties props = new MessageProperties();
@@ -61,6 +70,9 @@ class SyncMessageTest {
     assertThat(SyncMessage.from(msg)).isNull();
   }
 
+  /**
+   * Verifies that from() uses default values (version 0, not degraded) when headers are missing.
+   */
   @Test
   void from_shouldUseDefaultsForMissingHeaders() {
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), new MessageProperties());
@@ -69,6 +81,9 @@ class SyncMessageTest {
     assertThat(sm.isVersionDegraded()).isFalse();
   }
 
+  /**
+   * Verifies the SyncMessage type constants have the expected string values.
+   */
   @Test
   void shouldHaveExpectedTypeConstants() {
     assertThat(SyncMessage.TYPE_REFRESH).isEqualTo("REFRESH");

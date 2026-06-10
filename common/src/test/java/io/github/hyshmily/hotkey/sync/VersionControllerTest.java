@@ -46,6 +46,9 @@ class VersionControllerTest {
     controller = new VersionController(Optional.of(redisTemplate), 10);
   }
 
+  /**
+   * Verifies that nextVersion returns a positive version without the degraded flag when Redis responds normally.
+   */
   @Test
   void nextVersion_withRedis_shouldReturnPositiveVersionNotDegraded() {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
@@ -55,6 +58,9 @@ class VersionControllerTest {
     assertThat(result.degraded()).isFalse();
   }
 
+  /**
+   * Verifies that nextVersion correctly handles a zero version from Redis.
+   */
   @Test
   void nextVersion_withRedis_shouldHandleZeroVersion() {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
@@ -64,6 +70,9 @@ class VersionControllerTest {
     assertThat(result.degraded()).isFalse();
   }
 
+  /**
+   * Verifies that nextVersion correctly handles Long.MAX_VALUE from Redis.
+   */
   @Test
   void nextVersion_withRedis_shouldHandleLargeVersion() {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
@@ -73,6 +82,9 @@ class VersionControllerTest {
     assertThat(result.degraded()).isFalse();
   }
 
+  /**
+   * Verifies that nextVersion falls back to a negative degraded version when Redis throws a RuntimeException.
+   */
   @Test
   void nextVersion_whenRedisFails_shouldFallbackToDegraded() {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
@@ -82,6 +94,9 @@ class VersionControllerTest {
     assertThat(result.degraded()).isTrue();
   }
 
+  /**
+   * Verifies that nextVersion falls back to a negative degraded version when Redis throws a non-RuntimeException.
+   */
   @Test
   void nextVersion_whenRedisThrows_shouldFallbackToDegraded() {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
@@ -91,6 +106,9 @@ class VersionControllerTest {
     assertThat(result.degraded()).isTrue();
   }
 
+  /**
+   * Verifies that nextVersion falls back to a negative degraded version when Redis returns null.
+   */
   @Test
   void nextVersion_whenRedisReturnsNull_shouldFallbackToDegraded() {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
@@ -100,6 +118,9 @@ class VersionControllerTest {
     assertThat(result.degraded()).isTrue();
   }
 
+  /**
+   * Verifies that nextVersion always returns a degraded version when no Redis template is configured.
+   */
   @Test
   void nextVersion_withEmptyRedisTemplate_shouldAlwaysBeDegraded() {
     VersionController noRedis = new VersionController(Optional.empty(), 10);
@@ -108,6 +129,9 @@ class VersionControllerTest {
     assertThat(r1.degraded()).isTrue();
   }
 
+  /**
+   * Verifies that fallbackVersion returns a negative version with the degraded flag set.
+   */
   @Test
   void fallbackVersion_shouldReturnNegativeVersionDegraded() {
     VersionResult result = controller.fallbackVersion();
@@ -115,6 +139,9 @@ class VersionControllerTest {
     assertThat(result.degraded()).isTrue();
   }
 
+  /**
+   * Verifies that consecutive fallbackVersion calls return monotonically increasing negative values.
+   */
   @Test
   void fallbackVersion_shouldBeMonotonicAscending() {
     VersionResult r1 = controller.fallbackVersion();
@@ -123,6 +150,9 @@ class VersionControllerTest {
     assertThat(r2.dataVersion()).isGreaterThan(r1.dataVersion());
   }
 
+  /**
+   * Verifies that all fallback version values stay within the negative long space across many calls.
+   */
   @Test
   void fallbackVersion_shouldStayInNegativeLongSpace() {
     for (int i = 0; i < 1000; i++) {
@@ -131,6 +161,9 @@ class VersionControllerTest {
     }
   }
 
+  /**
+   * Verifies that consecutive nextVersion calls for the same key return increasing version numbers.
+   */
   @Test
   void nextVersion_consecutiveCalls_shouldReturnIncreasingVersions() {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
@@ -140,6 +173,9 @@ class VersionControllerTest {
     assertThat(controller.nextVersion("key1").dataVersion()).isEqualTo(3L);
   }
 
+  /**
+   * Verifies that nextVersion for different keys produces independent version values.
+   */
   @Test
   void nextVersion_differentKeys_shouldBeIndependent() {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))

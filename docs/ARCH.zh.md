@@ -312,7 +312,7 @@ HotKey.get(cacheKey, reader[, hardTtlMs, softTtlMs])
       │    ├─ 命中 → unwrap CacheEntry
       │    │    ├─ KeyState == HOT → 使用热点 TTL（hotHardTtl / hotSoftTtl）
       │    │    └─ KeyState != HOT → 使用普通 TTL（normalHardTtl / normalSoftTtl）
-      │    ├─ promoteLocalHotkeyIfNeeded(key, entry)           [NORMAL/COOL 本地升级到 HOT]
+      │    ├─ promoteLocalHotkeyIfNeeded(key, entry)           [NORMAL 始终可升；COOL 仅在 Worker 全挂时升级]
       │    ├─ hotKeyDetector.add(key, 1)                       [本地 HeavyKeeper 频率计数]
       │    ├─ hotKeyReporter.record(key)                       [App→Worker 上报]
       │    └─ return Optional.of(entry.value)
@@ -345,7 +345,7 @@ HotKey.getWithSoftExpire(key, reader[, softTtlMs][, hardTtlMs, softTtlMs])
       │    ├─ 硬 TTL 已过期 → 返回 empty（同 get 路径）
       │    └─ 软 TTL 已过期但硬 TTL 未过期
       │         ├─ 立即返回旧值（stale）
-      │         ├─ promoteLocalHotkeyIfNeeded(key, entry)  [NORMAL/COOL 本地升级到 HOT]
+      │         ├─ promoteLocalHotkeyIfNeeded(key, entry)  [NORMAL 始终可升；COOL 仅在 Worker 全挂时升级]
       │         ├─ hotKeyDetector.add(key, 1)
       │         ├─ hotKeyReporter.record(key)
       │         └─ 异步提交刷新任务:
@@ -920,11 +920,12 @@ hotkey:
 
 ### 故障表现
 
-| 故障            | 影响                                            | 恢复方式                  |
-| --------------- | ----------------------------------------------- | ------------------------- |
-| Worker 崩溃     | App 实例继续使用本地 TopK；无集群 HOT/COOL 决策 | 重启 Worker；实例自动重连 |
-| 报告通道故障    | App 报告排队/缓冲（RabbitMQ 持久化）            | RabbitMQ 恢复后自动恢复   |
-| Worker 广播故障 | 无跨实例 HOT/COOL 同步；本地 TopK 仍正常        | 重启 Worker broadcaster   |
+| 故障              | 影响                                                      | 恢复方式                  |
+| ----------------- | --------------------------------------------------------- | ------------------------- |
+| Worker 全部崩溃   | 本地 TopK 驱动 L1 TTL；COOL 条目可升级为 HOT；Worker 决策优雅降级 | 重启 Worker 集群；Worker 广播覆盖本地升级 |
+| Worker 部分崩溃   | 未受影响的分片继续正常工作                                | 重启崩溃 Worker；自动重连 |
+| 报告通道故障      | App 报告排队/缓冲（RabbitMQ 持久化）                      | RabbitMQ 恢复后自动恢复   |
+| Worker 广播故障   | 无跨实例 HOT/COOL 同步；本地 TopK 仍正常                  | 重启 Worker broadcaster   |
 
 ---
 

@@ -29,8 +29,11 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 public class ThresholdLearner implements Runnable {
   private static final HotKeyLogger log = new DefaultLogger(ThresholdLearner.class);
 
+  /** Global QPS estimator providing the overall throughput baseline. */
   private final GlobalQpsEstimator qpsEstimator;
+  /** Sliding-window detector whose hot-key threshold will be dynamically adjusted. */
   private final SlidingWindowDetector detector;
+  /** Worker configuration properties for threshold tuning parameters (ratio, tolerance, learning period). */
   private final WorkerProperties properties;
 
   /** Worker startup time (when this bean is constructed). */

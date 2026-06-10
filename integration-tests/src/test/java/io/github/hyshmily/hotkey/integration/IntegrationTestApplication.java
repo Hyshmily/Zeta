@@ -25,10 +25,12 @@ import org.springframework.context.annotation.Bean;
 @SpringBootApplication
 public class IntegrationTestApplication {
 
+  /** Boots the Spring Boot test application. */
   public static void main(String[] args) {
     SpringApplication.run(IntegrationTestApplication.class, args);
   }
 
+  /** Configures Jackson JSON converter for AMQP message serialization. */
   @Bean
   public MessageConverter jackson2JsonMessageConverter() {
     return new Jackson2JsonMessageConverter();

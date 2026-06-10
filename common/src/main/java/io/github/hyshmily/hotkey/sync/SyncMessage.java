@@ -32,10 +32,24 @@ import org.springframework.amqp.core.Message;
  * @param isVersionDegraded whether the dataVersion was obtained in degraded mode (node-local counter fallback)
  */
 public record SyncMessage(String cacheKey, String type, long version, boolean isVersionDegraded) {
+  /** Invalidates a single cache key across all peer instances. */
   public static final String TYPE_INVALIDATE = "INVALIDATE";
+
+  /** Refreshes a cache key from Redis across all peer instances. */
   public static final String TYPE_REFRESH = "REFRESH";
+
+  /** Batch-invalidates multiple keys encoded as a JSON array in the message body. */
   public static final String TYPE_INVALIDATE_ALL = "INVALIDATE_ALL";
+
+  /** Synchronizes the full rule set — receivers replace their local rules entirely. */
   public static final String TYPE_RULES_SYNC = "RULES_SYNC";
+
+  /**
+   * Message types whose body is NOT a single cache key but a payload
+   * (JSON array of keys or full ruleset). The {@link #from(Message)}
+   * deserializer skips the cache-key validity check for these types.
+   */
+  private static final List<String> BATCH_TYPES = List.of(TYPE_INVALIDATE_ALL, TYPE_RULES_SYNC);
 
   /**
    * Deserialize a {@code SyncMessage} from an AMQP message body and headers.
@@ -44,7 +58,6 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
    * @param msg the incoming AMQP message
    * @return a parsed {@link SyncMessage}, or {@code null}
    */
-  private static final List<String> BATCH_TYPES = List.of(TYPE_INVALIDATE_ALL, TYPE_RULES_SYNC);
 
   public static SyncMessage from(Message msg) {
     byte[] body = msg.getBody();

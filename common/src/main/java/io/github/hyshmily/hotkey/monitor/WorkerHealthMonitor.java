@@ -30,11 +30,17 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class WorkerHealthMonitor {
 
+  /** Tracks the latest heartbeat timestamp per shard (legacy sharding mode). */
   private final Map<Integer, Long> lastHeartbeat = new ConcurrentHashMap<>();
+  /** Cumulative heartbeat count per shard (legacy sharding mode). */
   private final Map<Integer, Long> totalHeartbeats = new ConcurrentHashMap<>();
+  /** Timestamp of the first heartbeat received from each shard. */
   private final Map<Integer, Long> firstHeartbeatAt = new ConcurrentHashMap<>();
+  /** Latest heartbeat timestamp per node (consistent-hashing mode). */
   private final Map<String, Long> nodeLastHeartbeat = new ConcurrentHashMap<>();
+  /** Cumulative heartbeat count per node (consistent-hashing mode). */
   private final Map<String, Long> nodeTotalHeartbeats = new ConcurrentHashMap<>();
+  /** Heartbeat expiry threshold in milliseconds. */
   private final long timeoutMs;
 
   /** Creates a monitor with the default 5-second timeout. */

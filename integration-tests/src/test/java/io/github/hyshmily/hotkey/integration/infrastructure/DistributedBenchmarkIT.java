@@ -57,22 +57,30 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Benchmark for distributed cache operations across simulated nodes.
+ *
+ * <p>Measures throughput and latency for hot-read, cold-read, mixed-read/write/invalidate
+ * phases under multi-threaded concurrency with real Redis + RabbitMQ infrastructure.
+ * Outputs a JSON report with latency percentiles and L1/L2 hit rates.
+ */
 @Testcontainers
 @Tag("docker")
 @Tag("benchmark")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Benchmark for distributed cache operations across simulated nodes. */
 class DistributedBenchmarkIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(DistributedBenchmarkIT.class);
 
-  // ── Containers ──
+  // --- Containers ---
 
+  /** Redis container for L2 cache and version tracking. */
   @Container
   static GenericContainer<?> redis = new GenericContainer<>(
       DockerImageName.parse("redis:7-alpine"))
     .withExposedPorts(6379);
 
+  /** RabbitMQ container for broadcast sync and cross-instance messaging. */
   @Container
   static GenericContainer<?> rabbitmq = new GenericContainer<>(
       DockerImageName.parse("rabbitmq:4.1-management"))
@@ -80,6 +88,11 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     .waitingFor(Wait.forLogMessage(".*Server startup complete.*", 1))
     .withStartupTimeout(Duration.ofMinutes(2));
 
+  /**
+   * Overrides Spring properties to point Redis and RabbitMQ to Testcontainers endpoints.
+   *
+   * @param r the dynamic property registry
+   */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -90,7 +103,7 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     r.add("spring.rabbitmq.password", () -> "guest");
   }
 
-  // ── Injection ──
+  // --- Injection ---
 
   @Autowired
   HotKey hotKey;
@@ -101,17 +114,24 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
   @Autowired
   RabbitTemplate rabbitTemplate;
 
-  // ── Benchmark config ──
+  // --- Benchmark config ---
 
+  /** Number of keys pre-warmed and treated as hot in read phases. */
   static final int HOT_KEY_COUNT = 10_000;
+  /** Number of keys used as cold (never locally cached) in cold-read phases. */
   static final int COLD_KEY_COUNT = 40_000;
+  /** Number of concurrent threads for all benchmark phases. */
   static final int THREAD_COUNT = 8;
+  /** Operations executed per thread per phase. */
   static final int OPS_PER_THREAD = 2_500;
+  /** Hard TTL in milliseconds applied to all cached entries. */
   static final int HARD_TTL = 600_000;
+  /** Soft TTL in milliseconds for logical expiry. */
   static final int SOFT_TTL = 300_000;
 
-  // ── Main test ──
+  // --- Main test ---
 
+  /** Runs warmup, hot-read, cold-read, mixed, and post-sync read phases and writes a JSON report. */
   @Test
   void fullChainBenchmark() throws Exception {
     List<Map<String, Object>> phases = new ArrayList<>();
@@ -161,8 +181,7 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     assertThat(phases.stream().mapToLong(p -> ((Number) p.get("errors")).longValue()).sum()).isZero();
   }
 
-  // ── Warmup ──
-
+  /** Seeds all hot and cold keys into Redis and L1. */
   private Map<String, Object> warmup() throws Exception {
     log.info("Warmup: putting {} keys into Redis + L1 ...", HOT_KEY_COUNT + COLD_KEY_COUNT);
     long t0 = System.nanoTime();
@@ -187,8 +206,7 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     );
   }
 
-  // ── Read phase ──
-
+  /** Runs a concurrent read-only phase for keys in [from, to) range and returns metrics. */
   private Map<String, Object> readPhase(String name, int from, int to) throws Exception {
     log.info("Phase [{}]: keys [{},{}) ...", name, from, to);
     int range = to - from;
@@ -227,8 +245,7 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     return phase;
   }
 
-  // ── Mixed phase ──
-
+  /** Runs a mixed workload (80% read, 10% write, 10% invalidate) concurrently. */
   private Map<String, Object> mixedPhase() throws Exception {
     log.info("Phase [mixed-with-sync]: 80% read + 10% write + 10% invalidate ...");
     long t0 = System.nanoTime();
@@ -317,12 +334,23 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     return phase;
   }
 
-  // ── Helpers ──
-
+  /**
+   * Generates a deterministic key name from an integer index.
+   *
+   * @param idx the key index
+   * @return the key string in the format "benchmark:key:{idx}"
+   */
   private static String keyFor(int idx) {
     return "benchmark:key:" + idx;
   }
 
+  /**
+   * Computes the p-th percentile from a sorted array of latencies.
+   *
+   * @param sorted sorted latency values (nanoseconds, ascending)
+   * @param p      the percentile to compute (e.g. 50, 90, 99)
+   * @return the p-th percentile value
+   */
   private static double percentile(double[] sorted, double p) {
     if (sorted.length == 0) return 0;
     double rank = p / 100.0 * (sorted.length - 1);
@@ -333,6 +361,18 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     return sorted[lo] * (1 - frac) + sorted[hi] * frac;
   }
 
+  /**
+   * Builds a phase result map with latency percentiles, L1/L2 hit rates, and throughput.
+   *
+   * @param name    the phase name
+   * @param totalOps total operations performed
+   * @param ms      elapsed time in milliseconds
+   * @param l1Hits  number of L1 cache hits
+   * @param l2Calls number of L2 (Redis) calls
+   * @param errors  count of errors encountered
+   * @param latMs   sorted latency values in milliseconds
+   * @return a phase result map suitable for JSON serialization
+   */
   private static Map<String, Object> buildPhase(
       String name, long totalOps, double ms, long l1Hits, long l2Calls,
       long errors, double[] latMs) {
@@ -363,6 +403,17 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     return phase;
   }
 
+  /**
+   * Logs a phase summary line with duration, ops, L1/L2 counts, and p50/p99 latency.
+   *
+   * @param name    the phase name
+   * @param totalOps total operations
+   * @param ms      elapsed time in milliseconds
+   * @param l1Hits  L1 cache hit count
+   * @param l2Calls L2 (Redis) call count
+   * @param errors  error count
+   * @param latMs   sorted latency values in milliseconds
+   */
   private static void logPhase(
       String name, long totalOps, double ms, long l1Hits, long l2Calls,
       long errors, double[] latMs) {
@@ -373,17 +424,32 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
         String.format("%.3f", p50), String.format("%.3f", p99), errors);
   }
 
+  /**
+   * Rounds a double to 3 decimal places.
+   *
+   * @param v the value to round
+   * @return the value rounded to 3 decimal places
+   */
   private static double round3(double v) {
     return Math.round(v * 1000.0) / 1000.0;
   }
 
-  // ── Concurrent runner (no latency tracking) ──
-
+  /**
+   * A concurrent cache operation accepting thread ID, iteration index, key, and value.
+   */
   @FunctionalInterface
   interface Op {
     void run(int tid, int i, String key, String value) throws Throwable;
   }
 
+  /**
+   * Runs a concurrent key-based workload across a fixed thread pool.
+   *
+   * @param threads  number of concurrent threads
+   * @param keyCount total number of keys to process
+   * @param op       the operation to execute per key
+   * @param errors   accumulator for error count
+   */
   private static void runConcurrent(int threads, int keyCount, Op op, AtomicInteger errors)
       throws Exception {
     int keysPerThread = keyCount / threads;
@@ -413,8 +479,17 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     pool.shutdownNow();
   }
 
-  // ── Concurrent runner with latency tracking ──
-
+  /**
+   * Runs a concurrent workload with per-operation latency measurement.
+   *
+   * @param threads         number of concurrent threads
+   * @param opsPerThread    operations per thread
+   * @param keyRange        number of distinct keys
+   * @param keyOffset       starting key index offset
+   * @param op              the operation to execute
+   * @param errors          accumulator for error count
+   * @param threadLatencies per-thread list of measured latencies (nanoseconds)
+   */
   private static void runConcurrentWithLatency(
       int threads, int opsPerThread, int keyRange, int keyOffset,
       Op op, AtomicInteger errors, List<List<Long>> threadLatencies) throws Exception {
@@ -448,14 +523,26 @@ class DistributedBenchmarkIT extends AbstractIntegrationIT {
     pool.shutdownNow();
   }
 
-  // ── Micro-benchmark helper ──
+  // --- Micro-benchmark helper ---
 
+  /**
+   * A runnable that may throw checked exceptions.
+   */
   @FunctionalInterface
   interface CheckedRunnable {
     void run() throws Throwable;
   }
 
+  /**
+   * Micro-benchmark utility for measuring execution time in nanoseconds.
+   */
   static class PerfSupport {
+    /**
+     * Executes a runnable and returns the elapsed time in nanoseconds.
+     *
+     * @param r the runnable to measure
+     * @return elapsed time in nanoseconds
+     */
     static long measure(CheckedRunnable r) {
       long t0 = System.nanoTime();
       try {

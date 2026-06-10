@@ -104,7 +104,7 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
 
   private static final List<PhaseMetrics> ALL_PHASES = new ArrayList<>();
 
-  // ── Containers ──
+  // -- Containers --
 
   @Container
   static GenericContainer<?> redis = new GenericContainer<>(
@@ -130,7 +130,7 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     r.add("spring.rabbitmq.cache.connection-mode", () -> "CONNECTION");
     r.add("spring.rabbitmq.listener.simple.concurrency", () -> "4");
     r.add("spring.rabbitmq.listener.simple.max-concurrency", () -> "8");
-    // ── Extreme parameters ──
+    // -- Extreme parameters --
     r.add("hotkey.local.report-interval-ms", () -> "1");          // default 100 → 1
     r.add("hotkey.worker-listener.warmup-jitter-ms", () -> "0");  // default 100 → 0
     r.add("hotkey.sync.warmup-jitter-ms", () -> "0");             // default 100 → 0
@@ -138,7 +138,7 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     r.add("hotkey.worker.sliding-window.slices", () -> "100");      // default 10 → 100 (1ms per slice)
   }
 
-  // ── Injection ──
+  // -- Injection --
 
   @Autowired
   HotKey hotKey;
@@ -155,17 +155,22 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
   @Autowired
   WorkerHealthMonitor workerHealthMonitor;
 
-  // ── Config ──
+  // -- Config --
 
   static final String SYNC_EXCHANGE = "hotkey.sync.exchange";
   static final String BROADCAST_EXCHANGE = "hotkey.broadcast.exchange";
   static final int HARD_TTL = 600_000;
   static final int SOFT_TTL = 300_000;
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Metrics
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Collects latency, throughput, and error metrics for a single test phase.
+   * Computes P50/P95/P99 latency percentiles, throughput (ops/s), and a latency
+   * histogram. Supports JSON serialisation for the final aggregated report.
+   */
   static class PhaseMetrics {
 
     final String name;
@@ -197,18 +202,34 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
         "0-1ms", "1-5ms", "5-10ms", "10-50ms", "50-100ms", "100-500ms", "500ms+"
     };
 
+    /**
+     * Creates a new metrics collector for the named phase.
+     *
+     * @param name human-readable phase identifier (used in logs and JSON report)
+     */
     PhaseMetrics(String name) {
       this.name = name;
     }
 
+    /**
+     * Records a single operation latency.
+     *
+     * @param nanos measured elapsed time in nanoseconds
+     */
     void recordLatency(long nanos) {
       latencies.add(nanos);
     }
 
+    /** Increments the total operation counter by one. */
     void recordOp() {
       ops.incrementAndGet();
     }
 
+    /**
+     * Finalises metrics: computes duration, percentiles, and throughput.
+     *
+     * @return this instance for method chaining
+     */
     PhaseMetrics finish() {
       durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
       totalOps = ops.get();
@@ -222,6 +243,7 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
       return this;
     }
 
+    /** Logs a one-line summary of this phase's metrics via SLF4J. */
     void logSummary() {
       log.info(
         "▸ {}: {} ops in {}ms | {} err | {} ops/s | P50={}ms P95={}ms P99={}ms {}",
@@ -230,6 +252,12 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
         custom.isEmpty() ? "" : custom.toString());
     }
 
+    /**
+     * Serialises this phase's metrics and current JVM system metrics into a JSON node.
+     *
+     * @param mapper shared Jackson ObjectMapper
+     * @return populated ObjectNode with latency, throughput, and system metrics
+     */
     ObjectNode toJson(ObjectMapper mapper) {
       ObjectNode n = mapper.createObjectNode();
       n.put("name", name);
@@ -302,10 +330,16 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     }
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Report Writer
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Aggregates all phase metrics into a single JSON report file written to
+   * {@code src/test/resources/testresult/propagation-delay-extreme-&lt;timestamp&gt;.json}.
+   * Includes per-phase latency histograms, global system metrics (heap, GC, threads),
+   * and a top-level summary.
+   */
   @AfterAll
   static void writeReport() throws Exception {
     ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
@@ -350,13 +384,17 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     log.info("Extreme propagation delay report written to {}", reportPath.toAbsolutePath());
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   //  Main Test
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Measures propagation delays under extreme settings: report-interval-ms=1, warmup-jitter-ms=0,
+   * confirm-duration-ms=0 for the tightest possible Worker decision pipeline timing.
+   */
   @Test
   void measurePropagationDelaysExtreme() throws Exception {
-    log.info("══════ Extreme Propagation Delay Measurements ══════");
+    log.info("====== Extreme Propagation Delay Measurements ======");
     log.info("  report-interval-ms=1 | warmup-jitter-ms=0 | confirm-duration-ms=0");
 
     warmupConnections();
@@ -378,15 +416,15 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
 
     long totalErrors = ALL_PHASES.stream().mapToInt(m -> m.errorCount).sum();
     assertThat(totalErrors).as("Total errors across all phases").isZero();
-    log.info("══════ Extreme propagation delay tests PASSED: {} phases, {} ops, {} errors ══════",
+    log.info("====== Extreme propagation delay tests PASSED: {} phases, {} ops, {} errors ======",
         ALL_PHASES.size(),
         ALL_PHASES.stream().mapToLong(m -> m.totalOps).sum(),
         totalErrors);
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Warmup
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void warmupConnections() {
     log.info("Warming up connections ...");
@@ -407,14 +445,14 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     log.info("Warmup complete");
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 1: Redis GET RTT
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseRedisGet() throws Exception {
     PhaseMetrics m = new PhaseMetrics("redis_get_rtt");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 1: REDIS GET RTT ══════");
+    log.info("====== Phase 1: REDIS GET RTT ======");
     int count = 10_000;
     String key = "prop:rget:key";
     redisTemplate.opsForValue().set(key, "x");
@@ -430,14 +468,14 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 2: Redis SET RTT
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseRedisSet() throws Exception {
     PhaseMetrics m = new PhaseMetrics("redis_set_rtt");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 2: REDIS SET RTT ══════");
+    log.info("====== Phase 2: REDIS SET RTT ======");
     int count = 5_000;
     for (int i = 0; i < count; i++) {
       long start = System.nanoTime();
@@ -450,14 +488,14 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 3: AMQP Publish
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseAmqpPublish() throws Exception {
     PhaseMetrics m = new PhaseMetrics("amqp_publish");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 3: AMQP PUBLISH ══════");
+    log.info("====== Phase 3: AMQP PUBLISH ======");
     String ex = "prop.pub.exchange." + UUID.randomUUID();
     RabbitAdmin admin = new RabbitAdmin(rabbitTemplate);
     FanoutExchange fex = new FanoutExchange(ex, false, true);
@@ -477,14 +515,14 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 4: AMQP End-to-End Delivery
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseAmqpE2e() throws Exception {
     PhaseMetrics m = new PhaseMetrics("amqp_e2e_delivery");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 4: AMQP E2E DELIVERY ══════");
+    log.info("====== Phase 4: AMQP E2E DELIVERY ======");
     String ex = "prop.e2e.exchange." + UUID.randomUUID();
     String q = "prop.e2e.queue." + UUID.randomUUID();
     RabbitAdmin admin = new RabbitAdmin(rabbitTemplate);
@@ -538,14 +576,14 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 5: HotKey L1 Hit
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseL1Hit() throws Exception {
     PhaseMetrics m = new PhaseMetrics("hotkey_l1_hit");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 5: HOTKEY L1 HIT ══════");
+    log.info("====== Phase 5: HOTKEY L1 HIT ======");
     int count = 10_000;
     String key = "prop:l1hit:key";
     redisTemplate.opsForValue().set(key, "l1-hot");
@@ -564,14 +602,14 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 6: HotKey Cold Get
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseL2ColdGet() throws Exception {
     PhaseMetrics m = new PhaseMetrics("hotkey_l1_miss");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 6: HOTKEY COLD GET ══════");
+    log.info("====== Phase 6: HOTKEY COLD GET ======");
     int count = 5_000;
     List<String> keys = new ArrayList<>(count);
     for (int i = 0; i < count; i++) {
@@ -598,14 +636,14 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 7: Worker Decision Pipeline (warmup-jitter=0)
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseWorkerDecisionPipeline() throws Exception {
     PhaseMetrics m = new PhaseMetrics("worker_decision_pipeline");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 7: WORKER DECISION PIPELINE (jitter=0) ══════");
+    log.info("====== Phase 7: WORKER DECISION PIPELINE (jitter=0) ======");
 
     rabbitTemplate.execute(channel -> {
       try { channel.exchangeDeclarePassive(BROADCAST_EXCHANGE); }
@@ -658,14 +696,14 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 8: State Machine Pipeline (confirmDurationMs=0 → instant promotion)
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseStateMachinePipelineZeroConfirm() throws Exception {
     PhaseMetrics m = new PhaseMetrics("state_machine_pipeline_zero_confirm");
     ALL_PHASES.add(m);
-    log.info("══════ Phase 8: STATE MACHINE (confirmDurationMs=0) ══════");
+    log.info("====== Phase 8: STATE MACHINE (confirmDurationMs=0) ======");
 
     int count = 10;
     int confirmWindows = 0;
@@ -746,17 +784,17 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 9A: Full Chain (No SM)
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseFullChainNoSM() throws Exception {
     phaseFullChain(false);
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Phase 9B: Full Chain with Zero-Confirm SM
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
   private void phaseFullChainWithSM() throws Exception {
     phaseFullChain(true);
@@ -766,7 +804,7 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     PhaseMetrics m = new PhaseMetrics(withStateMachine ? "full_chain_with_sm_zero_confirm" : "full_chain_without_sm");
     ALL_PHASES.add(m);
     log.info(
-      "══════ Phase 9{}: FULL CHAIN (extreme) ══════",
+      "====== Phase 9{}: FULL CHAIN (extreme) ======",
       withStateMachine ? "B (w/ zero-confirm SM)" : "A (w/o SM)");
 
     int count = 10;

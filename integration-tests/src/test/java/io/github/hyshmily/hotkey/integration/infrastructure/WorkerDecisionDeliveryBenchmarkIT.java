@@ -59,11 +59,17 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Benchmark measuring worker decision (HOT/COOL) delivery latency and throughput.
+ *
+ * <p>Sends bulk HOT decisions, COOL decisions, version-ordered messages, and
+ * concurrent decisions while measuring propagation latency, promotion rate,
+ * and version ordering correctness.
+ */
 @Testcontainers
 @Tag("docker")
 @Tag("benchmark")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Benchmark measuring worker decision (HOT/COOL) delivery latency and throughput. */
 class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(WorkerDecisionDeliveryBenchmarkIT.class);
@@ -80,6 +86,11 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
     .waitingFor(Wait.forLogMessage(".*Server startup complete.*", 1))
     .withStartupTimeout(Duration.ofMinutes(2));
 
+  /**
+   * Overrides Redis and RabbitMQ connection properties to point at the Testcontainers
+   * instances. Configures connection-mode caching and listener concurrency for
+   * high-throughput decision delivery.
+   */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -111,11 +122,13 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
   static final int COLLECTIVE_WAIT_SECONDS = 15;
   static final String WORKER_EXCHANGE = "hotkey.worker.exchange";
 
+  /** Runnable that may throw any checked exception. */
   @FunctionalInterface
   interface CheckedRunnable {
     void run() throws Throwable;
   }
 
+  /** Times a single operation to nanosecond precision. */
   static long measure(CheckedRunnable r) {
     long t0 = System.nanoTime();
     try {
@@ -128,6 +141,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
     return System.nanoTime() - t0;
   }
 
+  /** Runs warmup, bulk HOT decisions, COOL decisions, version ordering, and concurrent decision phases and writes a JSON report. */
   @Test
   void decisionDeliveryBenchmark() throws Exception {
     ensureExchange(WORKER_EXCHANGE);
@@ -220,6 +234,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
   //   then count + sample fine-grained latency
   // ══════════════════════════════════════════════════
 
+  /** Result carrier for the bulk HOT decision phase, holding the phase metrics and the set of promoted keys. */
   static class PhaseTwoResult {
     final Map<String, Object> phase;
     final Set<String> promotedKeys;
@@ -230,6 +245,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
     }
   }
 
+  /** Sends bulk HOT decisions, waits for propagation, and measures promotion rate and latency. */
   private PhaseTwoResult phaseHotDecisionBulk() throws Exception {
     log.info("══════ Phase 2: BULK HOT DECISIONS ══════");
     log.info("Sending {} HOT decisions, then waiting {}s for promotion ...",
@@ -354,6 +370,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
   // Phase 3: COOL decision on promoted keys
   // ══════════════════════════════════════════════════
 
+  /** Result carrier for the COOL decision phase, holding the phase metrics. */
   static class PhaseCoolResult {
     final Map<String, Object> phase;
 
@@ -362,6 +379,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
     }
   }
 
+  /** Sends COOL decisions to a subset of promoted keys and measures downgrade rate. */
   private PhaseCoolResult phaseCoolDecision(Set<String> promotedKeys) throws Exception {
     log.info("══════ Phase 3: COOL DECISIONS ══════");
     List<String> toDowngrade = promotedKeys.stream()
@@ -422,6 +440,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
   // Phase 4: Version ordering
   // ══════════════════════════════════════════════════
 
+  /** Sends HOT decisions with monotonic versions and verifies an old-version decision is correctly rejected. */
   private Map<String, Object> phaseVersionOrdering() throws Exception {
     log.info("══════ Phase 4: VERSION ORDERING ══════");
     log.info("Sending {} HOT decisions with monotonic versions, "
@@ -485,6 +504,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
   // Phase 5: Concurrent decisions
   // ══════════════════════════════════════════════════
 
+  /** Runs concurrent multi-threaded HOT/COOL decision sending and measures throughput. */
   private Map<String, Object> phaseConcurrentDecisions() throws Exception {
     log.info("══════ Phase 5: CONCURRENT DECISIONS ══════");
     log.info("{} threads × {} ops, 90% HOT + 10% COOL, measuring send throughput ...",
@@ -562,6 +582,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
   // Helpers
   // ══════════════════════════════════════════════════
 
+  /** Declares a fanout exchange idempotently. */
   private void ensureExchange(String name) {
     rabbitTemplate.execute(channel -> {
       channel.exchangeDeclare(name, "fanout", true);
@@ -569,6 +590,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
     });
   }
 
+  /** Computes the p-th percentile from a sorted array of latencies. */
   private static double percentile(double[] sorted, double p) {
     if (sorted.length == 0) return 0;
     double rank = p / 100.0 * (sorted.length - 1);
@@ -579,10 +601,12 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
     return sorted[lo] * (1 - frac) + sorted[hi] * frac;
   }
 
+  /** Rounds a double to 3 decimal places. */
   private static double round3(double v) {
     return Math.round(v * 1000.0) / 1000.0;
   }
 
+  /** Creates a phase result map with name, ops, duration, hit rates, and latency percentiles. */
   private static Map<String, Object> buildPhase(
       String name, long totalOps, double ms,
       long l1Hits, long l2Calls, long errors, double[] latMs) {
@@ -614,6 +638,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
     return p;
   }
 
+  /** Logs a phase summary at INFO level. */
   private static void logPhase(Map<String, Object> phase) {
     log.info("Phase [{}] done: {} ops in {} ms, throughput={}/s, errors={}",
         phase.get("name"), phase.get("totalOps"),

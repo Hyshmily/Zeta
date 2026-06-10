@@ -78,6 +78,9 @@ class CacheSyncListenerTest {
     channel = mock(Channel.class);
   }
 
+  /**
+   * Verifies that an INVALIDATE sync message removes the key from cache and acknowledges the message.
+   */
   @Test
   void handleSyncMessage_invalidate_shouldAckAndRemove() throws IOException {
     cache.put("key1", "value");
@@ -85,6 +88,9 @@ class CacheSyncListenerTest {
     verify(channel).basicAck(anyLong(), eq(false));
   }
 
+  /**
+   * Verifies that a REFRESH sync message updates the cached entry with new data from the loader and acknowledges.
+   */
   @Test
   void handleSyncMessage_refresh_shouldAckAndUpdate() throws IOException {
     cache.put("key1", entry(1, false, 0));
@@ -92,6 +98,9 @@ class CacheSyncListenerTest {
     verify(channel).basicAck(anyLong(), eq(false));
   }
 
+  /**
+   * Verifies that a NACK is sent when an error occurs during sync message processing.
+   */
   @Test
   void handleSyncMessage_shouldNackOnError() throws IOException {
     MessageProperties props = new MessageProperties();
@@ -102,6 +111,9 @@ class CacheSyncListenerTest {
     verify(channel).basicNack(anyLong(), eq(false), eq(false));
   }
 
+  /**
+   * Verifies that a sync message with a null type header is handled gracefully without error.
+   */
   @Test
   void handleSyncMessage_shouldHandleNullType() throws IOException {
     MessageProperties props = new MessageProperties();
@@ -110,6 +122,9 @@ class CacheSyncListenerTest {
     verify(channel).basicAck(anyLong(), eq(false));
   }
 
+  /**
+   * Verifies that a RULES_SYNC message delegates to ruleMatcher.syncRules and acknowledges.
+   */
   @Test
   void handleSyncMessage_withRulesSync_shouldCallRuleMatcher() throws IOException {
     Message msg = syncMessage("rule-payload", SyncMessage.TYPE_RULES_SYNC, 0L, false);
@@ -118,6 +133,9 @@ class CacheSyncListenerTest {
     verify(channel).basicAck(anyLong(), eq(false));
   }
 
+  /**
+   * Verifies that the listener handles a plain string value (not a CacheEntry) in the cache gracefully.
+   */
   @Test
   void handleSyncMessage_withStringValueInsteadOfCacheEntry_shouldNotCrash() throws IOException {
     cache.put("key1", "plain-string");
@@ -125,6 +143,9 @@ class CacheSyncListenerTest {
     verify(channel).basicAck(anyLong(), eq(false));
   }
 
+  /**
+   * Verifies that a REFRESH with a null value from the Redis loader is handled without error.
+   */
   @Test
   void handleSyncMessage_withRefreshAndNullRedisValue_shouldLogAndReturn() throws IOException {
     cache.put("key1", entry(1, false, 0));
@@ -139,6 +160,9 @@ class CacheSyncListenerTest {
     verify(channel).basicAck(anyLong(), eq(false));
   }
 
+  /**
+   * Verifies that an unknown sync message type is acknowledged and ignored.
+   */
   @Test
   void handleSyncMessage_unknownType_shouldAckAndReturn() throws IOException {
     Message msg = syncMessage("key1", "UNKNOWN_TYPE", 1L, false);
@@ -146,6 +170,9 @@ class CacheSyncListenerTest {
     verify(channel).basicAck(anyLong(), eq(false));
   }
 
+  /**
+   * Verifies that an INVALIDATE with version 0 (unconditional) removes the entry regardless of existing version.
+   */
   @Test
   void invalidate_withVersion0AndNotDegraded_shouldBeUnconditional() throws IOException {
     cache.put("key1", entry(5, false, 0));
@@ -154,6 +181,9 @@ class CacheSyncListenerTest {
     assertThat(cache.getIfPresent("key1")).isNull();
   }
 
+  /**
+   * Verifies that invalidating a key with a plain string value (not CacheEntry) does not throw.
+   */
   @Test
   void invalidate_whenExistingNotCacheEntry_shouldNotThrow() throws IOException {
     cache.put("key1", "plain-string");

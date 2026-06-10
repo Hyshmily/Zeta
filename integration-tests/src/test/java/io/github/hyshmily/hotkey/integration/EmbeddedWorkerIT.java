@@ -99,12 +99,13 @@ class EmbeddedWorkerIT extends AbstractIntegrationIT {
   @Autowired
   ReportPublisher reportPublisher;
 
+  /** Publishes a report via {@link ReportPublisher} and verifies a mock Worker consuming the report sends back a HOT decision. */
   @Test
   void reportPublished_shouldTriggerHotDecisionViaMockWorker() throws Exception {
     String key = "it:pipeline:" + UUID.randomUUID();
     String mockWorkerQueue = "it.mockworker." + UUID.randomUUID().toString().substring(0, 8);
 
-    // ── Arrange ──
+    // --- Arrange ---
 
     // Write value to Redis (WorkerListener.handleHot reads via redisLoader)
     redisTemplate.opsForValue().set(key, "pipeline-value");
@@ -153,11 +154,11 @@ class EmbeddedWorkerIT extends AbstractIntegrationIT {
     container.start();
 
     try {
-      // ── Act ──
+      // --- Act ---
 
       reportPublisher.publish("0", new ReportMessage("integration-test", System.currentTimeMillis(), Map.of(key, 42L)));
 
-      // ── Assert ──
+      // --- Assert ---
 
       await()
         .atMost(Duration.ofSeconds(15))

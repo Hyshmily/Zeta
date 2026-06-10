@@ -40,13 +40,19 @@ import lombok.Getter;
 @Getter
 public class CacheExpireManager {
 
+  /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(CacheExpireManager.class);
 
+  /** The underlying L1 Caffeine cache instance. */
   private final Cache<String, Object> caffeineCache;
+  /** Async executor for background refresh tasks. */
   private final Executor executor;
+  /** TTL configuration providing normal and hot-key TTL values. */
   private final HotKeyProperties ttlConfig;
+  /** Semaphore limiting concurrent background refresh operations (null if soft expire disabled). */
   private final Semaphore refreshLimiter;
-  private static final double ttlJitterRatio = 0.1; // 10% jitter to prevent cache stampedes
+  /** Jitter ratio applied to TTLs (±10%) to prevent cache stampedes. */
+  private static final double ttlJitterRatio = 0.1;
 
   /**
    * Creates a CacheExpireManager with the given Caffeine cache, executor, and TTL config.
@@ -70,7 +76,11 @@ public class CacheExpireManager {
       : null;
   }
 
-  /** Whether any soft TTL is configured (normal or hot). */
+  /**
+   * Whether any soft TTL is configured (normal or hot).
+   *
+   * @return {@code true} if soft expire is enabled in the configuration
+   */
   public boolean isSoftExpireEnabled() {
     return ttlConfig.isSoftExpireEnabled();
   }
@@ -87,12 +97,18 @@ public class CacheExpireManager {
   /**
    * Hard expire timestamp for hot keys, using {@code default-hot-hard-ttl} / {@code hot-hard-ttl}.
    * Returns {@code Long.MAX_VALUE} if hot hard expire is disabled (TTL &lt;= 0).
+   *
+   * @return absolute epoch-ms timestamp for hot-key hard expiry
    */
   public long computeHotHardExpireAt() {
     return toHardExpireTimestamp(ttlConfig.effectiveHotHardTtlMs());
   }
 
-  /** Soft expire timestamp for hot keys, using {@code default-hot-soft-ttl} / {@code hot-soft-ttl}. Returns 0 if disabled. */
+  /**
+   * Soft expire timestamp for hot keys, using {@code default-hot-soft-ttl} / {@code hot-soft-ttl}.
+   *
+   * @return absolute epoch-ms timestamp for hot-key soft expiry, or 0 if disabled
+   */
   public long computeHotSoftExpireAt() {
     return toSoftExpireTimestamp(ttlConfig.effectiveHotSoftTtlMs());
   }
@@ -109,22 +125,38 @@ public class CacheExpireManager {
     return toSoftExpireTimestamp(effective);
   }
 
-  /** Effective hard TTL for normal keys (override > default). */
+  /**
+   * Effective hard TTL for normal keys (override > default).
+   *
+   * @return effective hard TTL duration in milliseconds
+   */
   public long getEffectiveHardTtlMs() {
     return ttlConfig.effectiveHardTtlMs();
   }
 
-  /** Effective hard TTL for hot keys (override > default). */
+  /**
+   * Effective hard TTL for hot keys (override > default).
+   *
+   * @return effective hot hard TTL duration in milliseconds
+   */
   public long getEffectiveHotHardTtlMs() {
     return ttlConfig.effectiveHotHardTtlMs();
   }
 
-  /** Effective soft TTL for normal keys (override > default). */
+  /**
+   * Effective soft TTL for normal keys (override > default).
+   *
+   * @return effective soft TTL duration in milliseconds
+   */
   public long getEffectiveSoftTtlMs() {
     return ttlConfig.effectiveSoftTtlMs();
   }
 
-  /** Effective soft TTL for hot keys (override > default). */
+  /**
+   * Effective soft TTL for hot keys (override > default).
+   *
+   * @return effective hot soft TTL duration in milliseconds
+   */
   public long getEffectiveHotSoftTtlMs() {
     return ttlConfig.effectiveHotSoftTtlMs();
   }
@@ -166,6 +198,8 @@ public class CacheExpireManager {
   /**
    * Check whether the given key's soft TTL has expired.
    *
+   * @param cacheKey the key to check for soft expiry
+   * @return {@code true} if the entry's soft TTL has expired or the entry is absent
    * @throws IllegalStateException if soft expire is disabled
    */
   public boolean isSoftExpired(String cacheKey) {

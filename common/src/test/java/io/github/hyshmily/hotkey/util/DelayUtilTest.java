@@ -31,6 +31,9 @@ import org.junit.jupiter.api.Test;
  */
 class DelayUtilTest {
 
+  /**
+   * Verifies that a zero jitter value causes the task to execute immediately without scheduling.
+   */
   @Test
   void floatTimeDelay_zeroJitter_shouldRunImmediately() {
     AtomicBoolean executed = new AtomicBoolean(false);
@@ -38,6 +41,9 @@ class DelayUtilTest {
     assertThat(executed).isTrue();
   }
 
+  /**
+   * Verifies that a negative jitter value causes the task to execute immediately without scheduling.
+   */
   @Test
   void floatTimeDelay_negativeJitter_shouldRunImmediately() {
     AtomicBoolean executed = new AtomicBoolean(false);
@@ -45,6 +51,9 @@ class DelayUtilTest {
     assertThat(executed).isTrue();
   }
 
+  /**
+   * Verifies that a positive jitter value schedules the task for deferred execution.
+   */
   @Test
   void floatTimeDelay_positiveJitter_shouldExecuteEventually() throws InterruptedException {
     AtomicBoolean executed = new AtomicBoolean(false);

@@ -30,16 +30,23 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
  * Deduplicates concurrent in-flight loads for the same key.
  * <p>
  * Only the first caller executes the supplier; subsequent callers wait for
- * the same {@link CompletableFuture}. Upon completion (or timeout), the
- * dedup entry is evicted so the next caller can retry.
+ * the same {@link CompletableFuture}. On normal completion, the future
+ * remains cached (TTL-based expiry) so late-arriving callers reuse the
+ * result without re-execution. On timeout or exception, the entry is
+ * evicted immediately to allow a subsequent retry.
  */
 public class SingleFlight {
 
+  /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(SingleFlight.class);
 
+  /** Caffeine cache tracking currently in-flight loads (key -> CompletableFuture). */
   private final Cache<String, CompletableFuture<Object>> inflightLoads;
+  /** Async executor for running the supplier. */
   private final Executor executor;
+  /** Timeout in seconds before a supplier future is completed exceptionally. */
   private final int timeoutSeconds;
+  /** Maximum number of in-flight keys tracked simultaneously. */
   private final int inflightMaxSize;
 
   /**
@@ -88,22 +95,11 @@ public class SingleFlight {
         CompletableFuture.supplyAsync(() -> (Object) reader.get(), executor).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
       );
 
-    future.whenComplete((v, e) -> {
-      try {
-        if (e != null) {
-          log.debug("singleflight load failed: key={}", cacheKey, e);
-        } else if (v == null) {
-          log.debug("singleflight returned null: key={}", cacheKey);
-        }
-      } finally {
-        inflightLoads.invalidate(cacheKey);
-      }
-    });
-
     try {
       return Optional.ofNullable((T) future.join());
     } catch (Exception e) {
       log.warn("singleflight join failed: key={}", cacheKey, e);
+      inflightLoads.invalidate(cacheKey);
       return Optional.empty();
     }
   }

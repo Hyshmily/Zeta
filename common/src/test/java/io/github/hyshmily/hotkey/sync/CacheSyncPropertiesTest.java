@@ -26,6 +26,9 @@ import org.junit.jupiter.api.Test;
  */
 class CacheSyncPropertiesTest {
 
+  /**
+   * Verifies that CacheSyncProperties initializes with expected default values.
+   */
   @Test
   void shouldHaveDefaultValues() {
     CacheSyncProperties props = new CacheSyncProperties();
@@ -37,6 +40,9 @@ class CacheSyncPropertiesTest {
     assertThat(props.getWarmupJitterMs()).isEqualTo(100);
   }
 
+  /**
+   * Verifies that getQueueName returns a name starting with the configured queue prefix followed by colon.
+   */
   @Test
   void getQueueName_shouldReturnPrefixedName() {
     CacheSyncProperties props = new CacheSyncProperties();

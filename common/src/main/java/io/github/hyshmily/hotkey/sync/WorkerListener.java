@@ -48,13 +48,25 @@ import org.springframework.amqp.core.Message;
 @RequiredArgsConstructor
 public class WorkerListener {
 
+  /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(WorkerListener.class);
 
+  /** Local Caffeine L1 cache — target for HOT promotion and COOL downgrade. */
   private final Cache<String, Object> caffeineCache;
+
+  /** Function that loads the current value from Redis given a cache key. */
   private final Function<String, Object> redisLoader;
+
+  /** Configuration for Worker exchange, queue, and jitter settings. */
   private final WorkerListenerProperties properties;
+
+  /** Scheduler for running jitter-delayed cache update tasks. */
   private final ScheduledExecutorService scheduler;
+
+  /** Computes expiry timestamps for HOT-promoted and default-TTL entries. */
   private final CacheExpireManager expireManager;
+
+  /** Tracks Worker heartbeat liveness across shards. */
   private final WorkerHealthMonitor workerHealthMonitor;
 
   /**

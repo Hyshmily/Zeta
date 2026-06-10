@@ -19,9 +19,9 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING
 
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
@@ -63,11 +63,17 @@ public class ReportConsumer {
 
   private static final HotKeyLogger log = new DefaultLogger(ReportConsumer.class);
 
+  /** Sliding-window detector that tracks per-key access counts and returns hot/cold verdicts. */
   private final SlidingWindowDetector detector;
+  /** Per-key lifecycle state machine managing COLD / CONFIRMED_HOT / PRE_COOLING transitions. */
   private final HotKeyStateMachine stateMachine;
+  /** Publishes HOT and COOL decisions back to all application instances. */
   private final WorkerBroadcaster broadcaster;
+  /** TopK pre-warm validator for cross-instance frequency-based confirmation. */
   private final TopKValidator topKValidator;
+  /** Worker-scoped HeavyKeeper sketch for cross-instance frequency estimation. */
   private final TopK workerTopK;
+  /** Global QPS estimator tracking overall throughput for dynamic threshold learning. */
   private final GlobalQpsEstimator globalQpsEstimator;
 
   /**
@@ -125,10 +131,6 @@ public class ReportConsumer {
             broadcaster.broadcastCool(key);
             // Update the TopK tracking accordingly.
             topKValidator.markCooled(key);
-          }
-          case PING -> {
-            // No state change, but we can use this opportunity to refresh the
-            // key's position in TopK based on the latest access count.
           }
           case NONE -> {
             // No state transition occurred – the key remains in its

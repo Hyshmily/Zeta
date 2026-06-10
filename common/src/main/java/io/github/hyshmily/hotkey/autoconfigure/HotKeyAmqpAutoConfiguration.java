@@ -80,6 +80,11 @@ public class HotKeyAmqpAutoConfiguration {
     return new WorkerHealthMonitor();
   }
 
+  /**
+   * Inner configuration for app-to-Worker report routing via DirectExchange.
+   * Creates the exchange, publisher, ring manager (optional), reporter, and report scheduler.
+   * Active by default when a {@link RabbitTemplate} bean is present.
+   */
   @Configuration
   @ConditionalOnBean(RabbitTemplate.class)
   @ConditionalOnProperty(prefix = "hotkey.report", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -155,6 +160,12 @@ public class HotKeyAmqpAutoConfiguration {
     }
   }
 
+  /**
+   * Inner configuration for instance-to-instance cache synchronization.
+   * Creates a FanoutExchange, per-instance queue with TTL, binding, publisher,
+   * Redis loader, sync listener, and a dedicated scheduled executor.
+   * Requires Redis and {@code hotkey.sync.enabled=true}.
+   */
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
   @ConditionalOnProperty(prefix = "hotkey.sync", name = "enabled", havingValue = "true")
@@ -261,6 +272,12 @@ public class HotKeyAmqpAutoConfiguration {
     }
   }
 
+  /**
+   * Inner configuration for receiving Worker HOT/COOL decisions.
+   * Creates a FanoutExchange, per-instance queue with TTL, binding, worker listener,
+   * listener container, and a dedicated scheduled executor.
+   * Requires Redis and {@code hotkey.worker-listener.enabled=true}.
+   */
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
   @ConditionalOnBean(RedisTemplate.class)

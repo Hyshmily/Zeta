@@ -30,6 +30,9 @@ import org.junit.jupiter.api.Test;
  */
 class TransactionSupportTest {
 
+  /**
+   * Verifies that {@code runNowOrAfterCommit} executes the action synchronously when there is no active transaction.
+   */
   @Test
   void runNowOrAfterCommit_shouldExecuteSynchronouslyOutsideTransaction() {
     AtomicBoolean executed = new AtomicBoolean(false);
@@ -37,6 +40,9 @@ class TransactionSupportTest {
     assertThat(executed).isTrue();
   }
 
+  /**
+   * Verifies that {@code runAsyncAfterCommit} executes the action asynchronously via the provided executor when there is no active transaction.
+   */
   @Test
   void runAsyncAfterCommit_shouldExecuteAsyncOutsideTransaction() throws InterruptedException {
     AtomicBoolean executed = new AtomicBoolean(false);

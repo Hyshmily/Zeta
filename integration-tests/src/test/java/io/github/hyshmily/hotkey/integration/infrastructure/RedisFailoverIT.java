@@ -41,10 +41,12 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Integration test for Redis failover tolerance during cache operations.
+ */
 @Testcontainers
 @Tag("docker")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Integration test for Redis failover tolerance during cache operations. */
 class RedisFailoverIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(RedisFailoverIT.class);
@@ -54,6 +56,11 @@ class RedisFailoverIT extends AbstractIntegrationIT {
       DockerImageName.parse("redis:7-alpine"))
     .withExposedPorts(6379);
 
+  /**
+   * Overrides Redis connection properties to point at the Testcontainers Redis instance.
+   * Disables sync, report, and worker-listener features since this test focuses on
+   * standalone Redis failover scenarios.
+   */
   @DynamicPropertySource
   static void overrideRedis(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -69,6 +76,7 @@ class RedisFailoverIT extends AbstractIntegrationIT {
   @Autowired(required = false)
   StringRedisTemplate redisTemplate;
 
+  /** Stores a value via putThrough with a Redis writer and verifies it persists. */
   @Test
   void putThrough_withRedisBackedRunnable() throws Exception {
     String key = "it:rf:put:" + UUID.randomUUID();
@@ -79,6 +87,7 @@ class RedisFailoverIT extends AbstractIntegrationIT {
     assertThat(redisTemplate.opsForValue().get(key)).isEqualTo(value);
   }
 
+  /** Loads a value from Redis via supplier and verifies it is cached in L1. */
   @Test
   void get_withRedisBackedSupplier() throws Exception {
     String key = "it:rf:get:" + UUID.randomUUID();
@@ -91,6 +100,7 @@ class RedisFailoverIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek(key)).isPresent().hasValue(value);
   }
 
+  /** Invalidates a cache entry and verifies L1 is cleared while L2 (Redis) retains the value. */
   @Test
   void invalidate_shouldClearL1_andRedis() throws Exception {
     String key = "it:rf:inv:" + UUID.randomUUID();
@@ -106,6 +116,7 @@ class RedisFailoverIT extends AbstractIntegrationIT {
     assertThat(redisTemplate.opsForValue().get(key)).isEqualTo(value);
   }
 
+  /** Runs concurrent putThrough and peek operations and verifies the cache is not corrupted. */
   @Test
   void concurrentAccess_shouldNotCorruptCache() throws Exception {
     int threadCount = 5;
@@ -139,6 +150,7 @@ class RedisFailoverIT extends AbstractIntegrationIT {
     assertThat(errors.get()).isZero();
   }
 
+  /** Pauses the Redis container, verifies L1 remains accessible, then unpauses and verifies operations resume. */
   @Test
   void operations_resumeAfterRedisRestart() throws Exception {
     String key = "it:rf:restart:" + UUID.randomUUID();

@@ -35,8 +35,9 @@ class RuleMatcherTest {
     ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
   }
 
-  // ── of() factory ─────────────────────────────────────────
-
+  /**
+   * Verifies that a pattern without wildcards or regex prefix is detected as EXACT type.
+   */
   @Test
   void of_shouldDetectExactPattern() {
     Rule r = RuleMatcher.of("foo", RuleAction.BLOCK);
@@ -45,6 +46,9 @@ class RuleMatcherTest {
     assertThat(r.getAction()).isEqualTo(RuleAction.BLOCK);
   }
 
+  /**
+   * Verifies that a pattern ending with * is detected as PREFIX type with the wildcard portion stripped.
+   */
   @Test
   void of_shouldDetectPrefixPattern() {
     Rule r = RuleMatcher.of("user:*", RuleAction.ALLOW_NO_REPORT);
@@ -53,6 +57,9 @@ class RuleMatcherTest {
     assertThat(r.getAction()).isEqualTo(RuleAction.ALLOW_NO_REPORT);
   }
 
+  /**
+   * Verifies that a pattern with * in the middle is detected as WILDCARD type.
+   */
   @Test
   void of_shouldDetectWildcardPattern() {
     Rule r = RuleMatcher.of("abc*def", RuleAction.BLOCK);
@@ -60,12 +67,18 @@ class RuleMatcherTest {
     assertThat(r.getPattern()).isEqualTo("abc*def");
   }
 
+  /**
+   * Verifies that a pattern with ? is detected as WILDCARD type.
+   */
   @Test
   void of_shouldDetectWildcardWithQuestionMark() {
     Rule r = RuleMatcher.of("abc?def", RuleAction.BLOCK);
     assertThat(r.getType()).isEqualTo(Rule.RuleType.WILDCARD);
   }
 
+  /**
+   * Verifies that a pattern with regex: prefix is detected as REGEX type with the prefix stripped.
+   */
   @Test
   void of_shouldDetectRegexPattern() {
     Rule r = RuleMatcher.of("regex:^foo.*bar$", RuleAction.BLOCK);
@@ -73,13 +86,17 @@ class RuleMatcherTest {
     assertThat(r.getPattern()).isEqualTo("^foo.*bar$");
   }
 
-  // ── addRule / evaluateRule ────────────────────────────────
-
+  /**
+   * Verifies that keys are ALLOW by default when no rules are configured.
+   */
   @Test
   void evaluateRule_shouldAllowByDefault() {
     assertThat(ruleMatcher.evaluateRule("anything")).isEqualTo(RuleAction.ALLOW);
   }
 
+  /**
+   * Verifies that an exact-match BLOCK rule correctly blocks matching keys and allows others.
+   */
   @Test
   void evaluateRule_shouldMatchExactBlock() {
     ruleMatcher.addRule(RuleMatcher.of("secret", RuleAction.BLOCK));
@@ -87,6 +104,9 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("secret2")).isEqualTo(RuleAction.ALLOW);
   }
 
+  /**
+   * Verifies that a PREFIX BLOCK rule matches all keys starting with the prefix and allows others.
+   */
   @Test
   void evaluateRule_shouldMatchPrefixBlock() {
     ruleMatcher.addRule(RuleMatcher.of("admin:*", RuleAction.BLOCK));
@@ -94,6 +114,9 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("user:login")).isEqualTo(RuleAction.ALLOW);
   }
 
+  /**
+   * Verifies that a WILDCARD rule matches keys matching the glob pattern and excludes non-matching keys.
+   */
   @Test
   void evaluateRule_shouldMatchWildcardBlock() {
     ruleMatcher.addRule(RuleMatcher.of("a*c", RuleAction.BLOCK));
@@ -103,6 +126,9 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("ab")).isEqualTo(RuleAction.ALLOW);
   }
 
+  /**
+   * Verifies that a REGEX rule performs a find (partial match) rather than full match against the key.
+   */
   @Test
   void evaluateRule_shouldMatchRegexFind() {
     ruleMatcher.addRule(RuleMatcher.of("regex:error|secret", RuleAction.BLOCK));
@@ -111,6 +137,9 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("normal_key")).isEqualTo(RuleAction.ALLOW);
   }
 
+  /**
+   * Verifies that the first matching rule takes precedence when multiple rules match the same key.
+   */
   @Test
   void evaluateRule_shouldRespectFirstMatch() {
     ruleMatcher.addRule(RuleMatcher.of("foo", RuleAction.BLOCK));
@@ -118,14 +147,18 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("foo")).isEqualTo(RuleAction.BLOCK);
   }
 
+  /**
+   * Verifies that an ALLOW_NO_REPORT rule allows access but suppresses reporting for matching keys.
+   */
   @Test
   void evaluateRule_shouldAllowNoReport() {
     ruleMatcher.addRule(RuleMatcher.of("audit:*", RuleAction.ALLOW_NO_REPORT));
     assertThat(ruleMatcher.evaluateRule("audit:log")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
   }
 
-  // ── removeRule(pattern, action) ───────────────────────────
-
+  /**
+   * Verifies removing a rule by its pattern and action succeeds and restores ALLOW default.
+   */
   @Test
   void removeRule_shouldRemoveByPatternAndAction() {
     ruleMatcher.addRule(RuleMatcher.of("foo", RuleAction.BLOCK));
@@ -136,6 +169,9 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.removeRule("foo", RuleAction.BLOCK)).isFalse();
   }
 
+  /**
+   * Verifies that removeRule does not remove when the action parameter does not match.
+   */
   @Test
   void removeRule_shouldNotRemoveIfActionDiffers() {
     ruleMatcher.addRule(RuleMatcher.of("foo", RuleAction.BLOCK));
@@ -143,13 +179,17 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("foo")).isEqualTo(RuleAction.BLOCK);
   }
 
+  /**
+   * Verifies that removeRule returns false for a non-existent pattern.
+   */
   @Test
   void removeRule_shouldHandleNonExistent() {
     assertThat(ruleMatcher.removeRule("nonexistent", RuleAction.BLOCK)).isFalse();
   }
 
-  // ── removeRulesByAction ──────────────────────────────────
-
+  /**
+   * Verifies that removeRulesByAction removes all rules with the given action and returns the count.
+   */
   @Test
   void removeRulesByAction_shouldRemoveAllMatching() {
     ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
@@ -161,13 +201,17 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("k3")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
   }
 
+  /**
+   * Verifies that removeRulesByAction returns zero when no rules match the given action.
+   */
   @Test
   void removeRulesByAction_shouldReturnZeroIfNone() {
     assertThat(ruleMatcher.removeRulesByAction(RuleAction.BLOCK)).isZero();
   }
 
-  // ── clearAllRules ───────────────────────────────────────────
-
+  /**
+   * Verifies that clearRules removes all configured rules and reverts evaluation to ALLOW default.
+   */
   @Test
   void clearRules_shouldRemoveAll() {
     ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
@@ -177,8 +221,9 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("k1")).isEqualTo(RuleAction.ALLOW);
   }
 
-  // ── getAllRules ──────────────────────────────────────────
-
+  /**
+   * Verifies that getAllRules returns a defensive copy (snapshot) not affected by external mutation.
+   */
   @Test
   void getAllRules_shouldReturnSnapshot() {
     ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
@@ -188,8 +233,9 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.getAllRules()).hasSize(1);
   }
 
-  // ── replaceRules ─────────────────────────────────────────
-
+  /**
+   * Verifies that replaceRules replaces all existing rules with the new set.
+   */
   @Test
   void replaceRules_shouldReplaceAll() {
     ruleMatcher.addRule(RuleMatcher.of("old", RuleAction.BLOCK));
@@ -199,14 +245,18 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("new1")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
   }
 
+  /**
+   * Verifies that replaceRules with an empty list clears all rules without error.
+   */
   @Test
   void replaceRules_shouldHandleEmpty() {
     ruleMatcher.replaceRules(List.of());
     assertThat(ruleMatcher.getAllRules()).isEmpty();
   }
 
-  // ── removeRule(int) legacy ───────────────────────────────
-
+  /**
+   * Verifies that removeRule by index removes the correct rule and does not affect others.
+   */
   @Test
   void removeRuleByIndex_shouldWork() {
     ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
@@ -216,6 +266,9 @@ class RuleMatcherTest {
     assertThat(ruleMatcher.evaluateRule("k2")).isEqualTo(RuleAction.BLOCK);
   }
 
+  /**
+   * Verifies that removeRule by index handles out-of-bounds and negative indices without throwing.
+   */
   @Test
   void removeRuleByIndex_shouldHandleOutOfBounds() {
     ruleMatcher.removeRule(99);

@@ -52,15 +52,28 @@ import org.springframework.amqp.core.Message;
 @RequiredArgsConstructor
 public class CacheSyncListener {
 
+  /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(CacheSyncListener.class);
 
+  /** Shared Jackson mapper for deserializing batch-invalidation key lists. */
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+  /** Local Caffeine L1 cache — the target of invalidation and refresh operations. */
   private final Cache<String, Object> caffeineCache;
+
+  /** Function that loads the current value from Redis given a cache key. */
   private final Function<String, Object> redisLoader;
+
+  /** Configuration for sync exchange, queue, jitter, and dedup window. */
   private final CacheSyncProperties properties;
+
+  /** Scheduler for running jitter-delayed cache update tasks. */
   private final ScheduledExecutorService scheduler;
+
+  /** Computes hard/soft expiry timestamps for refreshed entries. */
   private final CacheExpireManager expireManager;
+
+  /** Hot-key rule matcher — updated when a RULES_SYNC message arrives. */
   private final RuleMatcher ruleMatcher;
 
   /**

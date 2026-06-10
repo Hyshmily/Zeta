@@ -46,24 +46,36 @@ class CacheSyncPublisherTest {
     publisher.init();
   }
 
+  /**
+   * Verifies that broadcastRefresh sends a message via RabbitTemplate.
+   */
   @Test
   void broadcastRefresh_shouldSendMessage() {
     publisher.broadcastRefresh("key1", 1L, false);
     verify(rabbitTemplate).send(anyString(), anyString(), any());
   }
 
+  /**
+   * Verifies that broadcastLocalInvalidate sends a message via RabbitTemplate.
+   */
   @Test
   void broadcastLocalInvalidate_shouldSendMessage() {
     publisher.broadcastLocalInvalidate("key1", 1L, false);
     verify(rabbitTemplate).send(anyString(), anyString(), any());
   }
 
+  /**
+   * Verifies that broadcastRefresh skips sending when the key is blank.
+   */
   @Test
   void broadcastRefresh_shouldSkipForBlankKey() {
     publisher.broadcastRefresh("", 1L, false);
     verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
   }
 
+  /**
+   * Verifies that broadcastLocalInvalidate deduplicates sends so only one message is sent per key regardless of call count.
+   */
   @Test
   void broadcastLocalInvalidate_shouldDeduplicate() {
     publisher.broadcastLocalInvalidate("key1", 5L, false);

@@ -26,25 +26,46 @@ package io.github.hyshmily.hotkey.model;
  * @param cacheKey the affected key
  */
 public record HotKeyDecision(DecisionType type, String cacheKey) {
-  /** Possible decision outcomes. */
+  /**
+   * Possible decision outcomes for a hot-key evaluation.
+   * <ul>
+   *   <li>{@link #HOT} — key exceeds the frequency threshold and should be cached</li>
+   *   <li>{@link #COOL} — key frequency dropped below cooldown threshold</li>
+   *   <li>{@link #NONE} — no action is required</li>
+   * </ul>
+   */
   public enum DecisionType {
     HOT,
     COOL,
-    PING,
     NONE,
   }
 
-  /** Create a HOT decision for the given key. */
+  /**
+   * Create a HOT decision for the given key.
+   *
+   * @param cacheKey the affected cache key
+   * @return a new {@code HotKeyDecision} with type {@link DecisionType#HOT}
+   */
   public static HotKeyDecision hot(String cacheKey) {
     return new HotKeyDecision(DecisionType.HOT, cacheKey);
   }
 
-  /** Create a COOL decision for the given key. */
+  /**
+   * Create a COOL decision for the given key.
+   *
+   * @param cacheKey the affected cache key
+   * @return a new {@code HotKeyDecision} with type {@link DecisionType#COOL}
+   */
   public static HotKeyDecision cool(String cacheKey) {
     return new HotKeyDecision(DecisionType.COOL, cacheKey);
   }
 
-  /** Create a no-op decision for the given key. */
+  /**
+   * Create a no-op decision for the given key.
+   *
+   * @param cacheKey the affected cache key
+   * @return a new {@code HotKeyDecision} with type {@link DecisionType#NONE}
+   */
   public static HotKeyDecision none(String cacheKey) {
     return new HotKeyDecision(DecisionType.NONE, cacheKey);
   }

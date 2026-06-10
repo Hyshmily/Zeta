@@ -46,8 +46,6 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 @ExtendWith(MockitoExtension.class)
 class HotKeyAmqpAutoConfigurationTest {
 
-  // ── Context runners ──────────────────────────────────────────────────────
-
   private final ApplicationContextRunner reportRunner = new ApplicationContextRunner().withConfiguration(
     AutoConfigurations.of(HotKeyAmqpAutoConfiguration.class)
   );
@@ -60,8 +58,9 @@ class HotKeyAmqpAutoConfigurationTest {
     .withConfiguration(AutoConfigurations.of(HotKeyAmqpAutoConfiguration.class))
     .withPropertyValues("hotkey.worker-listener.enabled=true");
 
-  // ── Report tests ─────────────────────────────────────────────────────────
-
+  /**
+   * Verifies that ReportConfiguration is skipped when no RabbitTemplate bean is present.
+   */
   @Test
   void reportConfigIsSkippedWhenRabbitTemplateBeanNotPresent() {
     reportRunner.run(ctx -> {
@@ -70,6 +69,9 @@ class HotKeyAmqpAutoConfigurationTest {
     });
   }
 
+  /**
+   * Verifies that ReportConfiguration is skipped when hotkey.report.enabled is false.
+   */
   @Test
   void reportConfigIsSkippedWhenPropertyIsDisabled() {
     new ApplicationContextRunner()
@@ -81,11 +83,17 @@ class HotKeyAmqpAutoConfigurationTest {
       });
   }
 
+  /**
+   * Verifies that ReportConfiguration is active by default when RabbitTemplate is present.
+   */
   @Test
   void reportConfigIsActiveByDefaultWhenRabbitTemplatePresent() {
     reportRunner.run(ctx -> assertThat(ctx).isNotNull());
   }
 
+  /**
+   * Verifies that ReportPublisher is created with custom exchange and app name properties.
+   */
   @Test
   void reportPublisherIsCreatedWithCorrectProperties() {
     RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
@@ -99,6 +107,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(publisher).isNotNull();
   }
 
+  /**
+   * Verifies that HotKeyReporter is created with its required dependencies.
+   */
   @Test
   void hotKeyReporterIsCreatedWithRequiredDependencies() {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
@@ -112,6 +123,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(reporter).isNotNull();
   }
 
+  /**
+   * Verifies that ReportPublisher is configured with the app name from HotKeyProperties.
+   */
   @Test
   void reportPublisherUsesAppNameFromProperties() {
     RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
@@ -125,6 +139,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(publisher).isNotNull();
   }
 
+  /**
+   * Verifies that the report scheduler is created and not shut down.
+   */
   @Test
   void hotKeyReportSchedulerIsCreated() {
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
@@ -135,6 +152,9 @@ class HotKeyAmqpAutoConfigurationTest {
     scheduler.shutdown();
   }
 
+  /**
+   * Verifies that threads created by the report scheduler have the expected thread name prefix.
+   */
   @Test
   void hotKeyReportSchedulerThreadNameContainsReport() {
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
@@ -148,8 +168,9 @@ class HotKeyAmqpAutoConfigurationTest {
     scheduler.shutdown();
   }
 
-  // ── Sync tests ───────────────────────────────────────────────────────────
-
+  /**
+   * Verifies that SyncConfiguration is skipped when hotkey.sync.enabled is false.
+   */
   @Test
   void syncConfigIsSkippedWhenPropertyIsNotEnabled() {
     new ApplicationContextRunner()
@@ -162,6 +183,9 @@ class HotKeyAmqpAutoConfigurationTest {
       });
   }
 
+  /**
+   * Verifies that the sync FanoutExchange is created with the configured name, durable, and non-auto-delete.
+   */
   @Test
   void hotkeySyncExchangeIsCreatedWithCorrectProperties() {
     CacheSyncProperties props = new CacheSyncProperties();
@@ -176,6 +200,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(exchange.isAutoDelete()).isFalse();
   }
 
+  /**
+   * Verifies that the sync Queue is created with the configured prefix and instance ID suffix.
+   */
   @Test
   void hotkeySyncQueueIsCreatedWithCorrectProperties() {
     CacheSyncProperties props = new CacheSyncProperties();
@@ -191,6 +218,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(queue.isDurable()).isTrue();
   }
 
+  /**
+   * Verifies that the sync Binding correctly binds the queue to the exchange.
+   */
   @Test
   void hotkeySyncBindingBindsQueueToExchange() {
     Queue queue = new Queue("test-queue");
@@ -204,6 +234,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(binding.getExchange()).isEqualTo("test-exchange");
   }
 
+  /**
+   * Verifies that CacheSyncConfiguration is instantiated and properties are configured.
+   */
   @Test
   void cacheSyncPublisherIsCreated() {
     HotKeyAmqpAutoConfiguration.SyncConfiguration config = new HotKeyAmqpAutoConfiguration.SyncConfiguration();
@@ -212,6 +245,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(props).isNotNull();
   }
 
+  /**
+   * Verifies that CacheSyncListener is created with its required dependencies.
+   */
   @Test
   void cacheSyncListenerIsCreatedWithRequiredDependencies() {
     Cache<String, Object> localCache = mock(Cache.class);
@@ -233,6 +269,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(listener).isNotNull();
   }
 
+  /**
+   * Verifies that the sync scheduler is created with the configured pool size.
+   */
   @Test
   void hotKeySyncSchedulerIsCreated() {
     CacheSyncProperties props = new CacheSyncProperties();
@@ -246,8 +285,9 @@ class HotKeyAmqpAutoConfigurationTest {
     scheduler.shutdown();
   }
 
-  // ── Worker Listener tests ────────────────────────────────────────────────
-
+  /**
+   * Verifies that WorkerListenerConfiguration is skipped when hotkey.worker-listener.enabled is false.
+   */
   @Test
   void workerConfigIsSkippedWhenPropertyIsNotEnabled() {
     new ApplicationContextRunner()
@@ -259,6 +299,9 @@ class HotKeyAmqpAutoConfigurationTest {
       });
   }
 
+  /**
+   * Verifies that WorkerListenerConfiguration is skipped by default (property not enabled).
+   */
   @Test
   void workerConfigIsSkippedByDefault() {
     new ApplicationContextRunner()
@@ -269,6 +312,9 @@ class HotKeyAmqpAutoConfigurationTest {
       });
   }
 
+  /**
+   * Verifies that the worker FanoutExchange is created with the configured name, durable, and non-auto-delete.
+   */
   @Test
   void hotkeyWorkerExchangeIsCreatedWithCorrectProperties() {
     WorkerListenerProperties props = new WorkerListenerProperties();
@@ -284,6 +330,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(exchange.isAutoDelete()).isFalse();
   }
 
+  /**
+   * Verifies that the worker Queue is created with the configured prefix.
+   */
   @Test
   void hotkeyWorkerQueueIsCreatedWithCorrectProperties() {
     WorkerListenerProperties props = new WorkerListenerProperties();
@@ -298,6 +347,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(queue.isDurable()).isTrue();
   }
 
+  /**
+   * Verifies that the worker Binding correctly binds the queue to the exchange.
+   */
   @Test
   void hotkeyWorkerBindingBindsQueueToExchange() {
     Queue queue = new Queue("wq");
@@ -312,6 +364,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(binding.getExchange()).isEqualTo("we");
   }
 
+  /**
+   * Verifies that WorkerListener is created with its required dependencies.
+   */
   @Test
   void workerListenerIsCreatedWithRequiredDependencies() {
     Cache<String, Object> localCache = mock(Cache.class);
@@ -335,6 +390,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(listener).isNotNull();
   }
 
+  /**
+   * Verifies that the worker scheduler is created with the configured pool size.
+   */
   @Test
   void hotKeyWorkerSchedulerIsCreated() {
     WorkerListenerProperties props = new WorkerListenerProperties();

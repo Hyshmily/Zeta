@@ -24,17 +24,26 @@ import org.junit.jupiter.api.Test;
  */
 class CacheKeysPolicyTest {
 
+  /**
+   * Verifies that a null cache key is flagged as invalid.
+   */
   @Test
   void invalidCacheKey_null_shouldReturnTrue() {
     assertThat(CacheKeysPolicy.invalidCacheKey(null)).isTrue();
   }
 
+  /**
+   * Verifies that empty or whitespace-only cache keys are flagged as invalid.
+   */
   @Test
   void invalidCacheKey_blank_shouldReturnTrue() {
     assertThat(CacheKeysPolicy.invalidCacheKey("")).isTrue();
     assertThat(CacheKeysPolicy.invalidCacheKey("   ")).isTrue();
   }
 
+  /**
+   * Verifies that common valid cache keys pass validation.
+   */
   @Test
   void invalidCacheKey_valid_shouldReturnFalse() {
     assertThat(CacheKeysPolicy.invalidCacheKey("validKey")).isFalse();

@@ -48,19 +48,27 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Integration test for synchronizing large cache entries across instances.
+ *
+ * <p>Verifies that large values (1 MB) can be put-through, retrieved, invalidated,
+ * and refreshed via RabbitMQ sync without data corruption or memory errors.
+ * Also covers concurrent access and special character handling.
+ */
 @Testcontainers
 @Tag("docker")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Integration test for synchronizing large cache entries across instances. */
 class LargeMessageSyncIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(LargeMessageSyncIT.class);
 
+  /** Redis container for L2 cache and version tracking. */
   @Container
   static GenericContainer<?> redis = new GenericContainer<>(
       DockerImageName.parse("redis:7-alpine"))
     .withExposedPorts(6379);
 
+  /** RabbitMQ container for broadcast sync and cross-instance messaging. */
   @Container
   static GenericContainer<?> rabbitmq = new GenericContainer<>(
       DockerImageName.parse("rabbitmq:4.1-management"))
@@ -68,6 +76,11 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
     .waitingFor(Wait.forLogMessage(".*Server startup complete.*", 1))
     .withStartupTimeout(Duration.ofMinutes(2));
 
+  /**
+   * Overrides Spring properties to point Redis and RabbitMQ to Testcontainers endpoints.
+   *
+   * @param r the dynamic property registry
+   */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -87,12 +100,19 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
   @Autowired
   RabbitTemplate rabbitTemplate;
 
+  /**
+   * Generates a large string value of the specified size in kilobytes.
+   *
+   * @param kilobytes the desired size in kilobytes
+   * @return a string of length kilobytes * 1024, filled with 'x' characters
+   */
   private static String largeValue(int kilobytes) {
     return "x".repeat(kilobytes * 1024);
   }
 
-  // ── Large value storage ──
+  // --- Large value storage ---
 
+  /** Stores a 1 MB value via putThrough and verifies it is accessible via peek. */
   @Test
   void putThrough_withLargeValue() throws Exception {
     String key = "it:large:put:" + UUID.randomUUID();
@@ -109,6 +129,7 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
       });
   }
 
+  /** Loads a 1 MB value via get() with a supplier and verifies it is cached in L1. */
   @Test
   void get_withLargeValue() throws Exception {
     String key = "it:large:get:" + UUID.randomUUID();
@@ -120,6 +141,7 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek(key)).isPresent().hasValue(value);
   }
 
+  /** Writes a large value to Redis, reads it through HotKey, and verifies round-trip integrity. */
   @Test
   void largeValue_shouldRoundTripThroughRedis() throws Exception {
     String key = "it:large:rt:" + UUID.randomUUID();
@@ -134,8 +156,9 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek(key)).isPresent().hasValue(value);
   }
 
-  // ── Large invalidation sync ──
+  // --- Large invalidation sync ---
 
+  /** Sends an INVALIDATE broadcast for a large-value key and verifies L1 is cleared. */
   @Test
   void invalidateSync_withLargeValue() throws Exception {
     String key = "it:large:inv:" + UUID.randomUUID();
@@ -157,6 +180,7 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).isEmpty());
   }
 
+  /** Sends a REFRESH broadcast for a large-value key and verifies L1 reloads from Redis. */
   @Test
   void refreshSync_withLargeValue() throws Exception {
     String key = "it:large:ref:" + UUID.randomUUID();
@@ -181,8 +205,9 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).hasValue(newValue));
   }
 
-  // ── Concurrency with large values ──
+  // --- Concurrency with large values ---
 
+  /** Runs concurrent putThrough with variable-size values (256 KB to 832 KB) and verifies no errors. */
   @Test
   void concurrentAccess_withLargeValues() throws Exception {
     int threadCount = 4;
@@ -223,8 +248,9 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
     assertThat(errors.get()).isZero();
   }
 
-  // ── Edge cases ──
+  // --- Edge cases ---
 
+  /** Stores a value with mixed ASCII and Unicode characters and verifies round-trip integrity. */
   @Test
   void largeValue_withSpecialCharacters() throws Exception {
     String key = "it:large:spec:" + UUID.randomUUID();
@@ -246,6 +272,7 @@ class LargeMessageSyncIT extends AbstractIntegrationIT {
       });
   }
 
+  /** Verifies that invalidating a large-value entry frees memory and allows re-storing a new value. */
   @Test
   void largeValue_invalidate_shouldFreeMemory() throws Exception {
     String key = "it:large:mem:" + UUID.randomUUID();

@@ -35,9 +35,12 @@ import java.util.Set;
  */
 public class RingManager {
 
+  /** The underlying consistent hash ring; reads are lock-free. */
   private final ConsistentHashRing ring;
   @Getter
+  /** Virtual-node replication factor per physical node. */
   private final int virtualNodeCount;
+  /** Manual node override set; {@code null} when in auto mode. */
   private volatile Set<String> overrideNodes;
 
   /**
@@ -65,6 +68,9 @@ public class RingManager {
   /**
    * Return the node responsible for the given key.
    * Lock-free read against the current ring.
+   *
+   * @param key the cache key to route
+   * @return the physical node ID, or {@code null} if the ring is empty
    */
   public String getNode(String key) {
     return ring.getNode(key);

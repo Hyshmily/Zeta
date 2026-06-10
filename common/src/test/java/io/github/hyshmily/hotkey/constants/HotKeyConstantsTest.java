@@ -24,6 +24,9 @@ import org.junit.jupiter.api.Test;
  */
 class HotKeyConstantsTest {
 
+  /**
+   * Verifies the AMQP message header constant values.
+   */
   @Test
   void shouldHaveExpectedAmqpHeaders() {
     assertThat(HotKeyConstants.AMQP_HEADER_TYPE).isEqualTo("type");
@@ -31,6 +34,9 @@ class HotKeyConstantsTest {
     assertThat(HotKeyConstants.AMQP_HEADER_IS_VERSION_DEGRADED).isEqualTo("isVersionDegraded");
   }
 
+  /**
+   * Verifies the thread name prefix constant values.
+   */
   @Test
   void shouldHaveExpectedThreadPrefixes() {
     assertThat(HotKeyConstants.THREAD_PREFIX_HOTKEY).isEqualTo("hotkey-");
@@ -39,33 +45,51 @@ class HotKeyConstantsTest {
     assertThat(HotKeyConstants.THREAD_PREFIX_REPORT).isEqualTo("hotkey-report");
   }
 
+  /**
+   * Verifies the AMQP routing key constant values.
+   */
   @Test
   void shouldHaveExpectedRoutingKeys() {
     assertThat(HotKeyConstants.ROUTING_KEY_BROADCAST).isEqualTo("broadcast.");
     assertThat(HotKeyConstants.ROUTING_KEY_REPORT).isEqualTo("report.");
   }
 
+  /**
+   * Verifies the report queue prefix constant value.
+   */
   @Test
   void shouldHaveExpectedQueuePrefix() {
     assertThat(HotKeyConstants.QUEUE_PREFIX_REPORT).isEqualTo("hotkey.report.");
   }
 
+  /**
+   * Verifies the source identifier constant values.
+   */
   @Test
   void shouldHaveExpectedSources() {
     assertThat(HotKeyConstants.SOURCE_SLIDING_WINDOW).isEqualTo("sliding_window");
     assertThat(HotKeyConstants.SOURCE_TOPK_PRE_WARM).isEqualTo("topk_pre_warm");
   }
 
+  /**
+   * Verifies the Redis version key prefix constant value.
+   */
   @Test
   void shouldHaveExpectedRedisKeyPrefix() {
     assertThat(HotKeyConstants.REDIS_VERSION_KEY_PREFIX).isEqualTo("hotkey:ver:");
   }
 
+  /**
+   * Verifies that the default version constant is zero.
+   */
   @Test
   void shouldHaveExpectedDefaultVersion() {
     assertThat(HotKeyConstants.VERSION_DEFAULT).isZero();
   }
 
+  /**
+   * Verifies that the default TopK increment constant is one.
+   */
   @Test
   void shouldHaveExpectedTopKIncrement() {
     assertThat(HotKeyConstants.TOPK_INCR).isEqualTo(1);

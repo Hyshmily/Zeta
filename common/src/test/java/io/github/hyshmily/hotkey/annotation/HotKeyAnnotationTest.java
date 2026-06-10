@@ -25,6 +25,9 @@ import org.junit.jupiter.api.Test;
  */
 class HotKeyAnnotationTest {
 
+  /**
+   * Verifies that the {@link OperationType} enum contains all three expected values: READ, WRITE, INVALIDATE.
+   */
   @Test
   void operationType_shouldHaveExpectedValues() {
     assertThat(OperationType.values()).containsExactly(
@@ -34,6 +37,9 @@ class HotKeyAnnotationTest {
     );
   }
 
+  /**
+   * Verifies that the default operation type is READ.
+   */
   @Test
   void operationType_defaultShouldBeRead() {
     assertThat(OperationType.READ).isEqualTo(OperationType.READ);

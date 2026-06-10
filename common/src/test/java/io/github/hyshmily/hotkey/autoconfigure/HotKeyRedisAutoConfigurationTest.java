@@ -49,6 +49,9 @@ class HotKeyRedisAutoConfigurationTest {
     AutoConfigurations.of(HotKeyRedisAutoConfiguration.class)
   );
 
+  /**
+   * Verifies that the Redis auto-configuration is skipped when RedisTemplate is not on the classpath.
+   */
   @Test
   void configIsSkippedWhenRedisTemplateClassNotOnClasspath() {
     runner.run(ctx -> {
@@ -57,6 +60,9 @@ class HotKeyRedisAutoConfigurationTest {
     });
   }
 
+  /**
+   * Verifies that the HotKeyCache bean is created with all required dependencies.
+   */
   @Test
   void hotKeyCacheBeanIsCreatedWithRequiredDependencies() {
     HotKeyProperties properties = new HotKeyProperties();
@@ -86,6 +92,9 @@ class HotKeyRedisAutoConfigurationTest {
     assertThat(cache).isNotNull();
   }
 
+  /**
+   * Verifies that the HotKeyCache bean is created when optional dependencies (CacheSyncPublisher, HotKeyReporter) are present.
+   */
   @Test
   void hotKeyCacheBeanAcceptsOptionalDependencies() {
     HotKeyProperties properties = new HotKeyProperties();
@@ -117,6 +126,9 @@ class HotKeyRedisAutoConfigurationTest {
     assertThat(cache).isNotNull();
   }
 
+  /**
+   * Verifies that a HotKey facade bean is created when a HotKeyCache bean exists.
+   */
   @Test
   void fallbackHotKeyBeanIsCreatedWhenCacheExists() {
     HotKeyCache cache = mock(HotKeyCache.class);
@@ -128,6 +140,9 @@ class HotKeyRedisAutoConfigurationTest {
     assertThat(hotKey).isNotNull();
   }
 
+  /**
+   * Verifies that the Redis auto-configuration is skipped when RedisTemplate class is not available at runtime.
+   */
   @Test
   void configIsSkippedWhenRedisTemplateBeanNotAvailable() {
     // RedisTemplate class is not on test classpath, so @ConditionalOnClass prevents loading

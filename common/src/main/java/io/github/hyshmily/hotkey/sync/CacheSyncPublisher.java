@@ -15,24 +15,28 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
-
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import jakarta.annotation.PostConstruct;
-import java.nio.charset.StandardCharsets;
-import java.util.Collection;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import lombok.RequiredArgsConstructor;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import jakarta.annotation.PostConstruct;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
  * Publishes cache synchronization messages (INVALIDATE / REFRESH) to peer instances
@@ -43,11 +47,23 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 @RequiredArgsConstructor
 public class CacheSyncPublisher {
 
+  /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(CacheSyncPublisher.class);
 
+  /** RabbitMQ template for publishing to the sync FanoutExchange. */
   private final RabbitTemplate rabbitTemplate;
+
+  /** Configuration for sync exchange name and dedup settings. */
   private final CacheSyncProperties properties;
+
+  /** Caffeine cache keyed by {@code type:cacheKey} → dataVersion; prevents redundant broadcasts within the dedup window. */
   private Cache<String, Long> recentBroadcasts;
+
+  /** Shared Jackson mapper for serializing batch-invalidation key lists. */
+  private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+  /** Maximum number of keys per single batch-invalidation AMQP message. */
+  private static final int BATCH_SIZE = 1000;
 
   /**
    * Initializes the dedup cache. Called by Spring after construction.
@@ -94,15 +110,22 @@ public class CacheSyncPublisher {
     if (keys == null || keys.isEmpty()) {
       return;
     }
-    try {
-      String json = new ObjectMapper().writeValueAsString(keys);
-      MessageProperties props = new MessageProperties();
-      props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
-      Message message = new Message(json.getBytes(StandardCharsets.UTF_8), props);
 
-      rabbitTemplate.send(properties.getExchangeName(), "", message);
-    } catch (JsonProcessingException e) {
-      log.error("Failed to serialize keys for batch invalidate", e);
+    List<String> keyList = new ArrayList<>(keys);
+    for (int i = 0; i < keyList.size(); i += BATCH_SIZE) {
+      int end = Math.min(i + BATCH_SIZE, keyList.size());
+      List<String> batch = keyList.subList(i, end);
+
+      try {
+        String json = OBJECT_MAPPER.writeValueAsString(batch);
+        MessageProperties props = new MessageProperties();
+        props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+        Message message = new Message(json.getBytes(StandardCharsets.UTF_8), props);
+
+        rabbitTemplate.send(properties.getExchangeName(), "", message);
+      } catch (AmqpException | JsonProcessingException e) {
+        log.error("Failed to serialize batch invalidate keys", e);
+      }
     }
   }
 
@@ -114,10 +137,14 @@ public class CacheSyncPublisher {
     if (rulesJson == null || rulesJson.isBlank()) {
       return;
     }
-    MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
-    Message message = new Message(rulesJson.getBytes(StandardCharsets.UTF_8), props);
-    rabbitTemplate.send(properties.getExchangeName(), "", message);
+    try {
+      MessageProperties props = new MessageProperties();
+      props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
+      Message message = new Message(rulesJson.getBytes(StandardCharsets.UTF_8), props);
+      rabbitTemplate.send(properties.getExchangeName(), "", message);
+    } catch (AmqpException e) {
+      log.error("Failed to send rules sync message", e);
+    }
   }
 
   /**

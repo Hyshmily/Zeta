@@ -42,18 +42,25 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Integration test for boundary and edge case inputs (empty keys, null values, extreme TTLs).
+ *
+ * <p>Covers null key handling, negative/zero/max TTLs, concurrent operations,
+ * hard TTL expiry, and supplier reload semantics.
+ */
 @Testcontainers
 @Tag("docker")
-/** Integration test for boundary and edge case inputs (empty keys, null values, extreme TTLs). */
 class BoundaryInputIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(BoundaryInputIT.class);
 
+  /** Redis container for L2 cache and version tracking. */
   @Container
   static GenericContainer<?> redis = new GenericContainer<>(
       DockerImageName.parse("redis:7-alpine"))
     .withExposedPorts(6379);
 
+  /** RabbitMQ container for broadcast sync and cross-instance messaging. */
   @Container
   static GenericContainer<?> rabbitmq = new GenericContainer<>(
       DockerImageName.parse("rabbitmq:4.1-management"))
@@ -61,6 +68,11 @@ class BoundaryInputIT extends AbstractIntegrationIT {
     .waitingFor(Wait.forLogMessage(".*Server startup complete.*", 1))
     .withStartupTimeout(Duration.ofMinutes(2));
 
+  /**
+   * Overrides Spring properties to point Redis and RabbitMQ to Testcontainers endpoints.
+   *
+   * @param r the dynamic property registry
+   */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -77,38 +89,45 @@ class BoundaryInputIT extends AbstractIntegrationIT {
   @Autowired(required = false)
   StringRedisTemplate redisTemplate;
 
+  /** Calls get() with a null key and verifies no exception is thrown. */
   @Test
   void get_withNullKey_shouldNotThrow() {
     Optional<Object> result = hotKey.get(null, () -> "value", 60000, 30000);
     assertThat(result).isNotNull();
   }
 
+  /** Calls peek() with a null key and verifies no exception is thrown. */
   @Test
   void peek_withNullKey_shouldNotThrow() {
     Optional<Object> result = hotKey.peek(null);
     assertThat(result).isNotNull();
   }
 
+  /** Calls invalidate() with a null key and verifies no exception is thrown. */
   @Test
   void invalidate_withNullKey_shouldNotThrow() {
     hotKey.invalidate(null);
   }
 
+  /** Calls invalidateAll() and verifies no exception is thrown. */
   @Test
   void invalidateAll_shouldNotThrow() {
     hotKey.invalidateAll();
   }
 
+  /** Calls isLocalHotKey() with a null key and verifies it returns false. */
   @Test
   void isLocalHotKey_withNullKey_shouldReturnFalse() {
     assertThat(hotKey.isLocalHotKey(null)).isFalse();
   }
 
+  /** Calls isWorkerHotKey() with a null key and verifies it returns false. */
   @Test
   void isWorkerHotKey_withNullKey_shouldReturnFalse() {
     assertThat(hotKey.isWorkerHotKey(null)).isFalse();
   }
 
+  /** Calls get() with negative TTL values and verifies no exception is thrown. */
   @Test
   void get_withNegativeTtl_shouldNotThrow() {
     String key = "it:bound:negttl:" + UUID.randomUUID();
@@ -116,6 +135,7 @@ class BoundaryInputIT extends AbstractIntegrationIT {
     assertThat(result).isPresent().hasValue("neg-ttl-value");
   }
 
+  /** Calls get() with zero TTL values and verifies no exception is thrown. */
   @Test
   void get_withZeroTtl_shouldNotThrow() {
     String key = "it:bound:zerottl:" + UUID.randomUUID();
@@ -123,6 +143,7 @@ class BoundaryInputIT extends AbstractIntegrationIT {
     assertThat(result).isPresent().hasValue("zero-ttl-value");
   }
 
+  /** Calls get() with Long.MAX_VALUE TTL and verifies no exception is thrown. */
   @Test
   void get_withMaxTtl_shouldNotThrow() {
     String key = "it:bound:maxttl:" + UUID.randomUUID();
@@ -131,18 +152,21 @@ class BoundaryInputIT extends AbstractIntegrationIT {
     assertThat(result).isPresent().hasValue("max-ttl-value");
   }
 
+  /** Calls putThrough() with a null value and verifies no exception is thrown. */
   @Test
   void putThrough_withNullValue_shouldNotThrow() {
     String key = "it:bound:nullval:" + UUID.randomUUID();
     hotKey.putThrough(key, null, () -> {});
   }
 
+  /** Calls putBeforeInvalidate() with a null value and verifies no exception is thrown. */
   @Test
   void putBeforeInvalidate_withNullValue_shouldNotThrow() {
     String key = "it:bound:nullb4:" + UUID.randomUUID();
     hotKey.putBeforeInvalidate(key, () -> {});
   }
 
+  /** Runs concurrent get() and invalidate() calls and verifies no deadlock or exceptions occur. */
   @Test
   void concurrentGetAndInvalidate_shouldNotDeadlock() throws Exception {
     String key = "it:bound:deadlock:" + UUID.randomUUID();
@@ -176,6 +200,7 @@ class BoundaryInputIT extends AbstractIntegrationIT {
     assertThat(errors.get()).isZero();
   }
 
+  /** Runs concurrent get, putThrough, invalidate, and peek operations and verifies no exceptions occur. */
   @Test
   void concurrentMixedOperations_shouldNotThrow() throws Exception {
     int threadCount = 6;
@@ -212,6 +237,7 @@ class BoundaryInputIT extends AbstractIntegrationIT {
     assertThat(errors.get()).isZero();
   }
 
+  /** Stores a value with a short hard TTL and verifies it expires from L1 cache. */
   @Test
   void cacheEntry_expiresAfterHardTtl() throws Exception {
     String key = "it:bound:hardttl:" + UUID.randomUUID();
@@ -222,6 +248,7 @@ class BoundaryInputIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek(key)).isEmpty();
   }
 
+  /** Loads a value via get(), waits for hard TTL expiry, and verifies the supplier is re-invoked. */
   @Test
   void get_reloadsAfterHardTtl() throws Exception {
     String key = "it:bound:reload:" + UUID.randomUUID();

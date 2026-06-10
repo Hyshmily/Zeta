@@ -5,6 +5,352 @@
       "type": "java.lang.Boolean",
       "description": "Enable @HotKey annotation AOP support.",
       "defaultValue": false
+    },
+    {
+      "name": "hotkey.instance-id",
+      "type": "java.lang.String",
+      "description": "Explicit instance ID for queue naming. Falls back to <server.port>-<HOSTNAME> (or <server.port>-<UUID> if HOSTNAME is unset) if empty.",
+      "defaultValue": ""
+    },
+    {
+      "name": "hotkey.scheduling.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable periodic TopK decay and expelled-key drain scheduling.",
+      "defaultValue": true
+    },
+    {
+      "name": "hotkey.report.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable app-to-Worker report aggregation and publishing via AMQP.",
+      "defaultValue": true
+    },
+    {
+      "name": "hotkey.local.top-k",
+      "type": "java.lang.Integer",
+      "description": "HeavyKeeper top-K capacity (maximum number of tracked hot keys).",
+      "defaultValue": 100
+    },
+    {
+      "name": "hotkey.local.width",
+      "type": "java.lang.Integer",
+      "description": "HeavyKeeper sketch width (number of columns in the Count-Min Sketch matrix).",
+      "defaultValue": 50000
+    },
+    {
+      "name": "hotkey.local.depth",
+      "type": "java.lang.Integer",
+      "description": "HeavyKeeper sketch depth (number of hash rows).",
+      "defaultValue": 5
+    },
+    {
+      "name": "hotkey.local.decay",
+      "type": "java.lang.Double",
+      "description": "HeavyKeeper decay factor applied during periodic decay.",
+      "defaultValue": 0.92
+    },
+    {
+      "name": "hotkey.local.min-count",
+      "type": "java.lang.Integer",
+      "description": "Minimum frequency count before a key is considered for the top-K ranking.",
+      "defaultValue": 10
+    },
+    {
+      "name": "hotkey.local.local-cache-max-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum size of the L1 Caffeine cache (number of entries).",
+      "defaultValue": 1000
+    },
+    {
+      "name": "hotkey.local.local-cache-ttl-minutes",
+      "type": "java.lang.Integer",
+      "description": "Time-to-live in minutes for L1 cache entries (hard expiry).",
+      "defaultValue": 5
+    },
+    {
+      "name": "hotkey.local.local-cache-access-ttl-minutes",
+      "type": "java.lang.Integer",
+      "description": "Access-based expiry in minutes for L1 cache entries (0 = disabled).",
+      "defaultValue": 0
+    },
+    {
+      "name": "hotkey.local.inflight-max-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum number of in-flight (pending) SingleFlight requests.",
+      "defaultValue": 50000
+    },
+    {
+      "name": "hotkey.local.inflight-ttl-seconds",
+      "type": "java.lang.Integer",
+      "description": "Time-to-live in seconds for in-flight SingleFlight entries.",
+      "defaultValue": 5
+    },
+    {
+      "name": "hotkey.local.inflight-timeout-seconds",
+      "type": "java.lang.Integer",
+      "description": "Timeout in seconds before an in-flight SingleFlight request is considered failed.",
+      "defaultValue": 3
+    },
+    {
+      "name": "hotkey.local.executor-core-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Core pool size for the async cache-loading executor.",
+      "defaultValue": 8
+    },
+    {
+      "name": "hotkey.local.executor-max-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum pool size for the async cache-loading executor.",
+      "defaultValue": 32
+    },
+    {
+      "name": "hotkey.local.executor-queue-capacity",
+      "type": "java.lang.Integer",
+      "description": "Queue capacity for the async cache-loading executor.",
+      "defaultValue": 2000
+    },
+    {
+      "name": "hotkey.local.expelled-queue-capacity",
+      "type": "java.lang.Integer",
+      "description": "Capacity of the expelled-key queue (for keys evicted from the top-K ranking).",
+      "defaultValue": 50000
+    },
+    {
+      "name": "hotkey.local.decay-period",
+      "type": "java.lang.Integer",
+      "description": "Deprecated: decay period in seconds (no longer used).",
+      "defaultValue": 20,
+      "deprecation": {
+        "level": "warning",
+        "reason": "No longer used; decay is driven by HotKeySchedulingConfiguration."
+      }
+    },
+    {
+      "name": "hotkey.local.default-hard-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Default hard TTL in milliseconds for normal (non-hot) cache entries.",
+      "defaultValue": 300000
+    },
+    {
+      "name": "hotkey.local.hard-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Override hard TTL in milliseconds for normal keys (0 = use default-hard-ttl-ms).",
+      "defaultValue": 0
+    },
+    {
+      "name": "hotkey.local.default-hot-hard-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Default hard TTL in milliseconds for hot cache entries.",
+      "defaultValue": 3600000
+    },
+    {
+      "name": "hotkey.local.hot-hard-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Override hard TTL in milliseconds for hot keys (0 = use default-hot-hard-ttl-ms).",
+      "defaultValue": 0
+    },
+    {
+      "name": "hotkey.local.default-soft-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Default soft TTL in milliseconds for normal (non-hot) cache entries.",
+      "defaultValue": 30000
+    },
+    {
+      "name": "hotkey.local.soft-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Override soft TTL in milliseconds for normal keys (0 = use default-soft-ttl-ms).",
+      "defaultValue": 0
+    },
+    {
+      "name": "hotkey.local.default-hot-soft-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Default soft TTL in milliseconds for hot cache entries.",
+      "defaultValue": 300000
+    },
+    {
+      "name": "hotkey.local.hot-soft-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Override soft TTL in milliseconds for hot keys (0 = use default-hot-soft-ttl-ms).",
+      "defaultValue": 0
+    },
+    {
+      "name": "hotkey.local.refresh-max-pools",
+      "type": "java.lang.Integer",
+      "description": "Maximum number of async refresh pools for soft-expired cache entries.",
+      "defaultValue": 100
+    },
+    {
+      "name": "hotkey.local.version-key-ttl-minutes",
+      "type": "java.lang.Integer",
+      "description": "TTL in minutes for Redis version tracking keys.",
+      "defaultValue": 60
+    },
+    {
+      "name": "hotkey.local.app-name",
+      "type": "java.lang.String",
+      "description": "Application name used for report routing and queue naming.",
+      "defaultValue": "default"
+    },
+    {
+      "name": "hotkey.local.report-exchange",
+      "type": "java.lang.String",
+      "description": "Name of the DirectExchange for app-to-Worker report messages.",
+      "defaultValue": "hotkey.report.exchange"
+    },
+    {
+      "name": "hotkey.local.report-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Interval in milliseconds between periodic report flushes.",
+      "defaultValue": 100
+    },
+    {
+      "name": "hotkey.local.shard-count",
+      "type": "java.lang.Integer",
+      "description": "Number of report shards (used when consistent-hashing is disabled).",
+      "defaultValue": 1
+    },
+    {
+      "name": "hotkey.local.queue-capacity",
+      "type": "java.lang.Integer",
+      "description": "Capacity of the internal report batch queue.",
+      "defaultValue": 10000
+    },
+    {
+      "name": "hotkey.local.queue-offer-timeout-ms",
+      "type": "java.lang.Integer",
+      "description": "Timeout in milliseconds for offering a batch to the report queue.",
+      "defaultValue": 100
+    },
+    {
+      "name": "hotkey.local.consumer-count",
+      "type": "java.lang.Integer",
+      "description": "Number of report queue consumer threads (0 = auto: max(1, shardCount/2)).",
+      "defaultValue": 0
+    },
+    {
+      "name": "hotkey.local.consistent-hashing.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable consistent-hashing mode for report routing to dynamic Worker instances.",
+      "defaultValue": false
+    },
+    {
+      "name": "hotkey.local.consistent-hashing.virtual-nodes",
+      "type": "java.lang.Integer",
+      "description": "Number of virtual nodes per physical Worker in the consistent-hash ring.",
+      "defaultValue": 150
+    },
+    {
+      "name": "hotkey.local.instance-id",
+      "type": "java.lang.String",
+      "description": "Per-instance identifier for queue naming. Overrides auto-detected instance-id.",
+      "defaultValue": ""
+    },
+    {
+      "name": "hotkey.sync.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable cross-instance cache synchronization (INVALIDATE/REFRESH). Requires Redis.",
+      "defaultValue": false
+    },
+    {
+      "name": "hotkey.sync.exchange-name",
+      "type": "java.lang.String",
+      "description": "Name of the FanoutExchange for cache sync messages.",
+      "defaultValue": "hotkey.sync.exchange"
+    },
+    {
+      "name": "hotkey.sync.queue-prefix",
+      "type": "java.lang.String",
+      "description": "Prefix for the per-instance sync queue name.",
+      "defaultValue": "hotkey.sync"
+    },
+    {
+      "name": "hotkey.sync.auto-startup",
+      "type": "java.lang.Boolean",
+      "description": "Whether the sync listener container starts automatically.",
+      "defaultValue": true
+    },
+    {
+      "name": "hotkey.sync.dedup-window-seconds",
+      "type": "java.lang.Integer",
+      "description": "Time window in seconds for deduplicating duplicate sync messages.",
+      "defaultValue": 10
+    },
+    {
+      "name": "hotkey.sync.dedup-max-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum number of entries in the sync deduplication cache.",
+      "defaultValue": 10000
+    },
+    {
+      "name": "hotkey.sync.warmup-jitter-ms",
+      "type": "java.lang.Integer",
+      "description": "Maximum random jitter in milliseconds applied to sync listener startup.",
+      "defaultValue": 100
+    },
+    {
+      "name": "hotkey.sync.concurrent-consumers",
+      "type": "java.lang.Integer",
+      "description": "Number of concurrent consumers for the sync listener.",
+      "defaultValue": 3
+    },
+    {
+      "name": "hotkey.sync.scheduler-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Pool size for the sync scheduler (deferred Redis reads).",
+      "defaultValue": 4
+    },
+    {
+      "name": "hotkey.sync.prefetch-count",
+      "type": "java.lang.Integer",
+      "description": "AMQP prefetch count for the sync listener.",
+      "defaultValue": 5
+    },
+    {
+      "name": "hotkey.worker-listener.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable listening for Worker HOT/COOL decisions. Requires Redis.",
+      "defaultValue": false
+    },
+    {
+      "name": "hotkey.worker-listener.exchange-name",
+      "type": "java.lang.String",
+      "description": "Name of the FanoutExchange for Worker decision broadcasts. Must match hotkey.worker.messaging.broadcast-exchange.",
+      "defaultValue": "hotkey.broadcast.exchange"
+    },
+    {
+      "name": "hotkey.worker-listener.queue-prefix",
+      "type": "java.lang.String",
+      "description": "Prefix for the per-instance Worker decision queue name.",
+      "defaultValue": "hotkey.worker"
+    },
+    {
+      "name": "hotkey.worker-listener.auto-startup",
+      "type": "java.lang.Boolean",
+      "description": "Whether the Worker listener container starts automatically.",
+      "defaultValue": true
+    },
+    {
+      "name": "hotkey.worker-listener.warmup-jitter-ms",
+      "type": "java.lang.Integer",
+      "description": "Maximum random jitter in milliseconds applied to Worker listener startup.",
+      "defaultValue": 100
+    },
+    {
+      "name": "hotkey.worker-listener.concurrent-consumers",
+      "type": "java.lang.Integer",
+      "description": "Number of concurrent consumers for the Worker decision listener.",
+      "defaultValue": 2
+    },
+    {
+      "name": "hotkey.worker-listener.scheduler-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Pool size for the Worker listener scheduler (deferred Redis reads).",
+      "defaultValue": 2
+    },
+    {
+      "name": "hotkey.worker-listener.prefetch-count",
+      "type": "java.lang.Integer",
+      "description": "AMQP prefetch count for the Worker listener.",
+      "defaultValue": 5
     }
   ]
 }

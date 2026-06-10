@@ -31,6 +31,9 @@ import org.springframework.amqp.core.MessageProperties;
  */
 class WorkerMessageTest {
 
+  /**
+   * Verifies that a valid AMQP message with HOT type and version header is parsed correctly.
+   */
   @Test
   void from_shouldParseHotMessage() {
     MessageProperties props = new MessageProperties();
@@ -44,12 +47,18 @@ class WorkerMessageTest {
     assertThat(wm.decisionVersion()).isEqualTo(10L);
   }
 
+  /**
+   * Verifies that an empty message body causes WorkerMessage.from() to return null.
+   */
   @Test
   void from_shouldReturnNullForEmptyBody() {
     Message msg = new Message(new byte[0], new MessageProperties());
     assertThat(WorkerMessage.from(msg)).isNull();
   }
 
+  /**
+   * Verifies that from() uses default version 0 when the version header is missing.
+   */
   @Test
   void from_shouldUseDefaultVersionWhenMissing() {
     MessageProperties props = new MessageProperties();
@@ -59,6 +68,9 @@ class WorkerMessageTest {
     assertThat(wm.decisionVersion()).isZero();
   }
 
+  /**
+   * Verifies the WorkerMessage type constants have the expected string values.
+   */
   @Test
   void shouldHaveExpectedTypeConstants() {
     assertThat(WorkerMessage.TYPE_HOT).isEqualTo("HOT");

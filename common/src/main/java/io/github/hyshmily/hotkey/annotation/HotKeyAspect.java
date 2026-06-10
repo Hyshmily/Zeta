@@ -54,11 +54,17 @@ public class HotKeyAspect {
 
   private static final HotKeyLogger log = new DefaultLogger(HotKeyAspect.class);
 
+  /** The HotKey facade for all cache operations. */
   private final io.github.hyshmily.hotkey.HotKey hotKeyFacade;
+  /** SpEL expression parser, shared across all evaluations. */
   private final SpelExpressionParser parser = new SpelExpressionParser();
+  /** Cache of parsed SpEL expressions keyed by expression string. */
   private final Map<String, Expression> expressionCache = new ConcurrentHashMap<>();
+  /** Discoverer for resolving method parameter names at runtime. */
   private final ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();
+  /** Cache of method parameter name arrays, keyed by Method. */
   private final Map<Method, String[]> paramNamesCache = new ConcurrentHashMap<>();
+  /** Cache of resolved naming-convention fallback methods, keyed by original Method. */
   private final Map<Method, Method> fallbackMethodCache = new ConcurrentHashMap<>();
 
   /**
@@ -255,6 +261,9 @@ public class HotKeyAspect {
   /**
    * Recursively searches the class hierarchy for a method with the given name and parameter types.
    *
+   * @param clazz      the class to search from
+   * @param name       the method name to find
+   * @param paramTypes the parameter types of the method to find
    * @return the matching method, or {@code null} if not found
    */
   private Method findFallbackMethod(Class<?> clazz, String name, Class<?>... paramTypes) {
@@ -324,6 +333,8 @@ public class HotKeyAspect {
    * Resolves the cache key from a SpEL expression using method parameter names
    * as context variables.
    *
+   * @param pjp        the join point providing method arguments
+   * @param expression the SpEL expression to evaluate as the cache key
    * @return the evaluated cache key string
    */
   private String resolveKey(ProceedingJoinPoint pjp, String expression) {
@@ -347,6 +358,7 @@ public class HotKeyAspect {
    * <p>Used for the {@link HotKey#unless()} evaluation where the loaded cache value
    * is exposed as {@code #result}.
    *
+   * @param pjp        the join point providing method arguments for context variables
    * @param expression the SpEL expression to evaluate
    * @param result     the loaded cache value to bind as {@code #result}
    * @param type       the expected result type
@@ -361,6 +373,10 @@ public class HotKeyAspect {
    * Throws a checked exception without declaring it, using type erasure.
    * <p>This avoids polluting method signatures with checked exception declarations
    * inside lambda expressions used as cache loaders.
+   *
+   * @param <T> the throwable type
+   * @param t   the throwable to re-throw
+   * @return never returns (always throws)
    */
   @SuppressWarnings("unchecked")
   private static <T extends Throwable> RuntimeException sneakyThrow(Throwable t) throws T {

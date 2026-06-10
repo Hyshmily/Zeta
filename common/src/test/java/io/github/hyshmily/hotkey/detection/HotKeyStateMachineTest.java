@@ -35,6 +35,9 @@ class HotKeyStateMachineTest {
     machine = new HotKeyStateMachine(3, 10, 4);
   }
 
+  /**
+   * Verifies that enough consecutive hot windows transition a key from cold to HOT.
+   */
   @Test
   void coldToHot_requiresConfirmCountConsecutiveHotWindows() {
     assertThat(machine.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
@@ -43,6 +46,9 @@ class HotKeyStateMachineTest {
     assertThat(machine.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
   }
 
+  /**
+   * Verifies that enough consecutive cold windows transition a key from HOT through PRE_COOLING to COOL.
+   */
   @Test
   void hotToCool_requiresCoolCountConsecutiveColdWindows() {
     HotKeyDecision last = null;
@@ -66,6 +72,9 @@ class HotKeyStateMachineTest {
     assertThat(machine.evaluate("key", false).type()).isEqualTo(DecisionType.COOL);
   }
 
+  /**
+   * Verifies that a key in PRE_COOLING reverts to HOT without emitting COOL when a hot window arrives within the grace period.
+   */
   @Test
   void preCooling_toHot_shouldReviveWithoutOscillation() {
     HotKeyDecision last = null;
@@ -83,6 +92,9 @@ class HotKeyStateMachineTest {
     assertThat(machine.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
   }
 
+  /**
+   * Verifies that resetting a key clears its state so it starts from COLD on the next evaluation.
+   */
   @Test
   void reset_shouldClearState() {
     HotKeyDecision last = null;
@@ -94,6 +106,9 @@ class HotKeyStateMachineTest {
     assertThat(machine.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
   }
 
+  /**
+   * Verifies that stale keys are evicted and subsequent evaluations start from COLD again.
+   */
   @Test
   void evictStale_shouldRemoveOldKeys() throws InterruptedException {
     machine.evaluate("staleKey", true);

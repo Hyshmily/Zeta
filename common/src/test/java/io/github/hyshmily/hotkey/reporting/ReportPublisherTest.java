@@ -42,6 +42,9 @@ class ReportPublisherTest {
     publisher = new ReportPublisher(rabbitTemplate, "hotkey.report.exchange", "testApp");
   }
 
+  /**
+   * Verifies that publish sends the message to the correct exchange with a properly formatted routing key.
+   */
   @Test
   void publish_shouldSendToCorrectRoutingKey() {
     ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));

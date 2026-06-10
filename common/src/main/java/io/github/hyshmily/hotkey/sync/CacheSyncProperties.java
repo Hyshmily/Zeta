@@ -31,16 +31,34 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties(prefix = "hotkey.sync")
 public class CacheSyncProperties {
 
+  /** Whether instance-to-instance cache sync is enabled. */
   private boolean enabled = false;
+
+  /** FanoutExchange name for broadcasting INVALIDATE / REFRESH. */
   private String exchangeName = "hotkey.sync.exchange";
+
+  /** Prefix for the per-instance queue name (suffixed with instance ID). */
   private String queuePrefix = "hotkey.sync";
 
+  /** Whether the RabbitMQ listener container starts automatically. */
   private boolean autoStartup = true;
+
+  /** Time window (seconds) for deduplicating repeated broadcasts of the same type+key. */
   private int dedupWindowSeconds = 10;
+
+  /** Maximum capacity of the in-memory deduplication cache. */
   private int dedupMaxSize = 10_000;
+
+  /** Maximum random jitter (ms) added before each sync operation to spread Redis load. */
   private int warmupJitterMs = 100;
+
+  /** Number of concurrent RabbitMQ consumers for the sync queue. */
   private int concurrentConsumers = 3;
+
+  /** Pool size for the scheduled executor that runs jittered sync tasks. */
   private int schedulerPoolSize = 4;
+
+  /** AMQP prefetch count per consumer. */
   private int prefetchCount = 5;
 
   /**

@@ -66,12 +66,18 @@ class WorkerListenerTest {
     channel = mock(Channel.class);
   }
 
+  /**
+   * Verifies that a HOT worker decision acknowledges and promotes the key to HOT status.
+   */
   @Test
   void handleWorkerMessage_hot_shouldAckAndPromote() throws IOException {
     listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
   }
 
+  /**
+   * Verifies that a COOL worker decision acknowledges and downgrades the key to COOL status.
+   */
   @Test
   void handleWorkerMessage_cool_shouldAckAndDowngrade() throws IOException {
     cache.put("key1", hotEntry());
@@ -83,6 +89,9 @@ class WorkerListenerTest {
     });
   }
 
+  /**
+   * Verifies that a NACK is sent when an error occurs during worker message processing.
+   */
   @Test
   void handleWorkerMessage_shouldNackOnError() throws IOException {
     MessageProperties props = new MessageProperties();

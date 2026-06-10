@@ -51,17 +51,29 @@ import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 @RequiredArgsConstructor
 public class HotKeyEndpoint {
 
+  /** App-side TopK detector (HeavyKeeper) for local hot-key frequency tracking. */
   private final TopK hotKeyDetector;
+  /** Worker-side TopK detector — separate instance fed by {@code ReportConsumer}. */
   private final TopK workerTopK;
+  /** L1 Caffeine cache instance. */
   private final Cache<String, Object> caffeineCache;
+  /** SingleFlight deduplication guard for concurrent L2 reads. */
   private final SingleFlight singleFlight;
+  /** HotKey configuration properties. */
   private final HotKeyProperties properties;
+  /** App-to-Worker report aggregator. */
   private final HotKeyReporter hotKeyReporter;
+  /** Blacklist/whitelist rule evaluator. */
   private final RuleMatcher ruleMatcher;
+  /** Worker shard health monitor. */
   private final WorkerHealthMonitor workerHealthMonitor;
+  /** Cache TTL manager for soft/hard expiry. */
   private final CacheExpireManager expireManager;
+  /** Version tracking controller (Redis-backed, with local fallback). */
   private final VersionController versionController;
+  /** Cross-instance cache sync publisher (AMQP). */
   private final CacheSyncPublisher cacheSyncPublisher;
+  /** Worker-side hot-key state machine. */
   private final HotKeyStateMachine hotKeyStateMachine;
 
   /**

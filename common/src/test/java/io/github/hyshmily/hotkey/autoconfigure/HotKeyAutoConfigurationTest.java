@@ -41,6 +41,9 @@ class HotKeyAutoConfigurationTest {
     .withPropertyValues("hotkey.local.topK=200")
     .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class));
 
+  /**
+   * Verifies that all default beans (TopK, Cache, SingleFlight, CacheExpireManager, Executor, HotKeyCache, HotKey) are created.
+   */
   @Test
   void allBeansAreCreatedByDefault() {
     runner.run(ctx -> {
@@ -56,6 +59,9 @@ class HotKeyAutoConfigurationTest {
     });
   }
 
+  /**
+   * Verifies that the auto-configuration is skipped when the worker-only mode is enabled.
+   */
   @Test
   void configIsSkippedWhenWorkerEnabled() {
     new ApplicationContextRunner()
@@ -68,6 +74,9 @@ class HotKeyAutoConfigurationTest {
       });
   }
 
+  /**
+   * Verifies that a custom hotKeyDetector bean overrides the default one.
+   */
   @Test
   void hotKeyDetectorCanBeOverridden() {
     new ApplicationContextRunner()
@@ -80,6 +89,9 @@ class HotKeyAutoConfigurationTest {
       });
   }
 
+  /**
+   * Verifies that a custom local cache bean overrides the default one.
+   */
   @Test
   void hotLocalCacheCanBeOverridden() {
     new ApplicationContextRunner()
@@ -90,6 +102,9 @@ class HotKeyAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).hasSingleBean(Cache.class));
   }
 
+  /**
+   * Verifies that a custom SingleFlight bean overrides the default one.
+   */
   @Test
   void singleFlightCanBeOverridden() {
     new ApplicationContextRunner()
@@ -99,6 +114,9 @@ class HotKeyAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).hasSingleBean(SingleFlight.class));
   }
 
+  /**
+   * Verifies that a custom CacheExpireManager bean overrides the default one.
+   */
   @Test
   void expireManagerCanBeOverridden() {
     new ApplicationContextRunner()
@@ -108,6 +126,9 @@ class HotKeyAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).hasSingleBean(CacheExpireManager.class));
   }
 
+  /**
+   * Verifies that a custom Executor bean (named hotKeyExecutor) overrides the default one.
+   */
   @Test
   void hotKeyExecutorCanBeOverridden() {
     new ApplicationContextRunner()
@@ -120,6 +141,9 @@ class HotKeyAutoConfigurationTest {
       });
   }
 
+  /**
+   * Verifies that a non-Redis HotKeyCache is created when RedisTemplate is not on the test classpath.
+   */
   @Test
   void hotKeyCacheRespectsRedisTemplateCondition() {
     runner.run(ctx -> {
@@ -128,6 +152,9 @@ class HotKeyAutoConfigurationTest {
     });
   }
 
+  /**
+   * Verifies that the HotKey facade bean is created when a HotKeyCache exists.
+   */
   @Test
   void hotKeyFallbackIsCreatedWhenHotKeyCacheExists() {
     runner.run(ctx -> {
@@ -136,6 +163,9 @@ class HotKeyAutoConfigurationTest {
     });
   }
 
+  /**
+   * Verifies that a custom HotKey bean prevents the fallback from being created.
+   */
   @Test
   void hotKeyFallbackRespectsConditionalOnMissingBean() {
     new ApplicationContextRunner()

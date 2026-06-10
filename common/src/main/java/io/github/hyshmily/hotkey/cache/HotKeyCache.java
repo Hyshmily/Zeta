@@ -52,19 +52,31 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class HotKeyCache {
 
+  /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(HotKeyCache.class);
 
+  /** Local TopK detector (HeavyKeeper) for identifying hot keys. */
   private final TopK hotKeyDetector;
+  /** Underlying L1 Caffeine cache storing {@link CacheEntry} or raw values. */
   private final Cache<String, Object> caffeineCache;
+  /** Deduplicator preventing concurrent in-flight loads for the same key. */
   private final SingleFlight singleFlight;
+  /** Manages hard and soft TTL computation for cache entries. */
   private final CacheExpireManager expireManager;
+  /** Executor for async cache operations (promotion, soft refresh). */
   private final Executor hotKeyExecutor;
+  /** Optional publisher for cross-instance cache synchronization. */
   private final Optional<CacheSyncPublisher> cacheSyncPublisher;
+  /** Optional reporter for app-to-Worker hot key reporting. */
   private final Optional<HotKeyReporter> hotKeyReporter;
+  /** Matches cache keys against blacklist/whitelist rules. */
   private final RuleMatcher ruleMatcher;
+  /** Manages data version generation for mutation ordering. */
   private final VersionController versionController;
+  /** Monitors Worker cluster health for graceful degradation decisions. */
   private final WorkerHealthMonitor workerHealthMonitor;
 
+  /** Log message constant when no sync publisher is available. */
   private static final String NO_SYNC_PUBLISHER = HotKeyConstants.NO_SYNC_PUBLISHER;
 
   /**
@@ -83,7 +95,7 @@ public class HotKeyCache {
    * Check whether an existing cache entry is managed by the Worker (HOT or COOL).
    * Worker-managed entries preserve their original normal TTLs through writes.
    *
-   * @param existing the existing cache entry (may be {@code null} or a raw value)
+   * @param existing the existing cache entry (maybe {@code null} or a raw value)
    * @return {@code true} if the entry is a {@link CacheEntry} with state HOT or COOL
    */
   private static boolean isWorkerManagedEntry(Object existing) {
@@ -112,6 +124,29 @@ public class HotKeyCache {
       return KeyState.HOT == ce.getKeyState();
     }
     return false;
+  }
+
+  /**
+   * Whether the given {@link KeyState} is eligible for local promotion to HOT.
+   * <p>
+   * {@link KeyState#NORMAL} entries are always eligible: when the local TopK
+   * detects them as hot, they get promoted to HOT with longer TTLs.
+   * <p>
+   * {@link KeyState#COOL} entries are only eligible when no Worker shard is
+   * alive ({@link WorkerHealthMonitor#isAnyWorkerAlive()} returns {@code false}).
+   * This provides graceful degradation — when the Worker cluster is unavailable,
+   * the local TopK drives TTL decisions instead of preserving stale Worker verdicts.
+   * Once a Worker comes back online and broadcasts a new decision, it overrides
+   * the local promotion via {@code decisionVersion} comparison.
+   * <p>
+   * {@link KeyState#HOT} entries are never eligible — they already have the
+   * longest TTLs.
+   *
+   * @param state the current key state of the cache entry
+   * @return {@code true} if the entry may be promoted by local TopK
+   */
+  private boolean isPromotableState(KeyState state) {
+    return state == KeyState.NORMAL || (state == KeyState.COOL && !workerHealthMonitor.isAnyWorkerAlive());
   }
 
   /**
@@ -342,6 +377,8 @@ public class HotKeyCache {
   /**
    * Promotes a non-hot entry to HOT state in L1 if the local TopK detector
    * now considers it a hot key. Preserves existing version and TTL metadata.
+   * {@link KeyState#NORMAL} entries are always eligible; {@link KeyState#COOL}
+   * entries are only eligible when all Workers are dead (graceful fallback).
    *
    * @param cacheKey  the key to promote
    * @param raw       the raw cached value (maybe a {@link CacheEntry} or a bare object)
@@ -352,7 +389,7 @@ public class HotKeyCache {
   private void promoteLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
     if (
       raw instanceof CacheEntry ce &&
-      ce.getKeyState() == KeyState.NORMAL &&
+      isPromotableState(ce.getKeyState()) &&
       hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR).isHotKey()
     ) {
       long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
@@ -361,9 +398,10 @@ public class HotKeyCache {
       caffeineCache
         .asMap()
         .compute(cacheKey, (_, existing) -> {
-          if (existing instanceof CacheEntry entry && entry.getKeyState() != KeyState.NORMAL) {
+          if (existing instanceof CacheEntry entry && !isPromotableState(entry.getKeyState())) {
             return existing;
           }
+
           return CacheEntry.builder()
             .value(val)
             .dataVersion(ce.getDataVersion())
@@ -573,8 +611,6 @@ public class HotKeyCache {
     });
   }
 
-  //-------------------------------------------------------------------------
-
   /**
    * Add a key pattern to the blacklist.
    * Subsequent accesses to matching keys will throw {@link HotKeyBlockedException}.
@@ -659,7 +695,7 @@ public class HotKeyCache {
 
   /**
    * Broadcast all local rules to peer instances via the sync exchange.
-   * Useful for initial synchronisation when a new instance joins the cluster.
+   * Useful for initial synchronization when a new instance joins the cluster.
    */
   public void broadcastAllLocalRulesManually() {
     ruleMatcher.broadcastAllLocalRulesManually();

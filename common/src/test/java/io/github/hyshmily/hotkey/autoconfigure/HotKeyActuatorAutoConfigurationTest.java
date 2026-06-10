@@ -48,6 +48,9 @@ class HotKeyActuatorAutoConfigurationTest {
     AutoConfigurations.of(HotKeyActuatorAutoConfiguration.class)
   );
 
+  /**
+   * Verifies that the actuator auto-configuration loads when the Actuator Endpoint class is on the classpath.
+   */
   @Test
   void configLoadsWhenEndpointIsOnClasspath() {
     runner.run(ctx -> {
@@ -57,6 +60,9 @@ class HotKeyActuatorAutoConfigurationTest {
     });
   }
 
+  /**
+   * Verifies that the HotKeyEndpoint bean is created with all required dependencies provided via ObjectProviders.
+   */
   @Test
   void hotKeyEndpointIsCreatedWithAllDependencies() {
     TopK hotKeyDetector = mock(TopK.class);
@@ -109,6 +115,9 @@ class HotKeyActuatorAutoConfigurationTest {
     assertThat(endpoint).isNotNull();
   }
 
+  /**
+   * Verifies that the HotKeyEndpoint is still created when all optional ObjectProvider dependencies return null.
+   */
   @Test
   void hotKeyEndpointHandlesMissingDependenciesAsNull() {
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
@@ -155,6 +164,9 @@ class HotKeyActuatorAutoConfigurationTest {
     assertThat(endpoint).isNotNull();
   }
 
+  /**
+   * Verifies that the HotKeyEndpoint is created with only the app-level hotKeyDetector TopK present.
+   */
   @Test
   void hotKeyEndpointAcceptsOnlyAppTopK() {
     TopK hotKeyDetector = mock(TopK.class);

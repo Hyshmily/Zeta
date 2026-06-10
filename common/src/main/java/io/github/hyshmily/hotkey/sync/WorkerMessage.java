@@ -34,8 +34,13 @@ import org.springframework.amqp.core.Message;
  * @param nodeId          the Worker node identifier (for PING; null for HOT/COOL)
  */
 public record WorkerMessage(String cacheKey, String type, long decisionVersion, int shardIndex, long timestamp, String nodeId) {
+  /** Promotes a cache key to hot state — extended TTL, soft expiration enabled. */
   public static final String TYPE_HOT = "HOT";
+
+  /** Downgrades a cache key to cool state — normal TTL, soft expiration disabled. */
   public static final String TYPE_COOL = "COOL";
+
+  /** Heartbeat ping from a Worker node, carrying {@code nodeId} and {@code timestamp}. */
   public static final String TYPE_PING = "PING";
 
   /**

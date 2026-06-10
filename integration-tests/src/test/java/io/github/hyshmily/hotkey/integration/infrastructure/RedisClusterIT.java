@@ -38,12 +38,18 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Integration test for Redis cluster mode compatibility.
+ *
+ * <p>Verifies that HotKey operations (put-through, get, invalidate, concurrent access)
+ * work correctly against a Redis cluster (bitnami/redis-cluster) with MOVED redirect
+ * handling across cluster nodes.
+ */
 @Testcontainers
 @Tag("docker")
 @Tag("redis-cluster")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @Disabled("bitnami/redis-cluster:7.4 image unavailable on this VM")
-/** Integration test for Redis cluster mode compatibility. */
 class RedisClusterIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(RedisClusterIT.class);
@@ -59,6 +65,10 @@ class RedisClusterIT extends AbstractIntegrationIT {
     .waitingFor(Wait.forLogMessage(".*Cluster created successfully.*", 1))
     .withStartupTimeout(Duration.ofMinutes(3));
 
+  /**
+   * Overrides Redis connection properties to point at the Testcontainers Redis cluster instance.
+   * Configures cluster mode connection and shortens timeout/refresh intervals for test reliability.
+   */
   @DynamicPropertySource
   static void overrideCluster(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", () -> "");
@@ -76,6 +86,7 @@ class RedisClusterIT extends AbstractIntegrationIT {
   @Autowired(required = false)
   StringRedisTemplate redisTemplate;
 
+  /** Stores a value via putThrough and verifies it is accessible via peek against a Redis cluster. */
   @Test
   void clusterBasicPutAndPeek() throws Exception {
     String key = "it:cluster:put:" + UUID.randomUUID();
@@ -84,6 +95,7 @@ class RedisClusterIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek(key)).isPresent().hasValue("cluster-value");
   }
 
+  /** Loads a value via get() with a supplier against a Redis cluster and verifies result. */
   @Test
   void clusterGet_withSupplier() throws Exception {
     String key = "it:cluster:get:" + UUID.randomUUID();
@@ -91,6 +103,7 @@ class RedisClusterIT extends AbstractIntegrationIT {
     assertThat(result).isPresent().hasValue("supplied");
   }
 
+  /** Verifies that RedisTemplate handles MOVED redirects across cluster nodes correctly. */
   @Test
   void clusterRedisTemplate_shouldHandleMovedRedirect() {
     assert redisTemplate != null;
@@ -105,6 +118,7 @@ class RedisClusterIT extends AbstractIntegrationIT {
     assertThat(redisTemplate.opsForValue().get(key2)).isEqualTo("node-b");
   }
 
+  /** Exercises the full HotKey flow (get, cache, invalidate) against a Redis cluster. */
   @Test
   void hotKeyFlow_withRedisCluster() throws Exception {
     String key = "it:cluster:flow:" + UUID.randomUUID();
@@ -120,6 +134,7 @@ class RedisClusterIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek(key)).isEmpty();
   }
 
+  /** Runs concurrent putThrough operations against multiple cluster nodes and verifies no errors. */
   @Test
   void concurrentAccess_acrossClusterNodes() throws Exception {
     int threadCount = 5;

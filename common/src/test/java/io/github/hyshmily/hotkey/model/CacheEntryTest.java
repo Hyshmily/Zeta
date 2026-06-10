@@ -24,6 +24,9 @@ import org.junit.jupiter.api.Test;
  */
 class CacheEntryTest {
 
+  /**
+   * Verifies building a CacheEntry with all fields populated and reading them back correctly.
+   */
   @Test
   void shouldBuildEntryWithAllFields() {
     CacheEntry entry = CacheEntry.builder()
@@ -47,6 +50,9 @@ class CacheEntryTest {
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
   }
 
+  /**
+   * Verifies building a normal (non-hot) CacheEntry with default version values and NORMAL key state.
+   */
   @Test
   void shouldBuildNormalEntry() {
     CacheEntry entry = CacheEntry.builder()
@@ -67,6 +73,9 @@ class CacheEntryTest {
     assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
   }
 
+  /**
+   * Verifies building a CacheEntry with version degraded flag set and negative data version space.
+   */
   @Test
   void shouldBuildDegradedEntry() {
     CacheEntry entry = CacheEntry.builder()

@@ -32,11 +32,17 @@ class WorkerPropertiesTest {
     properties = new WorkerProperties();
   }
 
+  /**
+   * Verifies that the default value of {@code enabled} is {@code false}.
+   */
   @Test
   void shouldHaveDefaultEnabledFalse() {
     assertThat(properties.isEnabled()).isFalse();
   }
 
+  /**
+   * Verifies the default values of the {@code routing} sub-properties.
+   */
   @Test
   void shouldHaveDefaultRoutingValues() {
     assertThat(properties.getRouting().getAppName()).isEqualTo("default");
@@ -44,24 +50,36 @@ class WorkerPropertiesTest {
     assertThat(properties.getRouting().getShardIndex()).isZero();
   }
 
+  /**
+   * Verifies the default values of the {@code messaging} sub-properties.
+   */
   @Test
   void shouldHaveDefaultMessagingValues() {
     assertThat(properties.getMessaging().getReportExchange()).isEqualTo("hotkey.report.exchange");
     assertThat(properties.getMessaging().getBroadcastExchange()).isEqualTo("hotkey.broadcast.exchange");
   }
 
+  /**
+   * Verifies the default values of the {@code sliding-window} sub-properties.
+   */
   @Test
   void shouldHaveDefaultSlidingWindowValues() {
     assertThat(properties.getSlidingWindow().getDurationMs()).isEqualTo(1000);
     assertThat(properties.getSlidingWindow().getSlices()).isEqualTo(10);
   }
 
+  /**
+   * Verifies the default values of the {@code threshold} sub-properties.
+   */
   @Test
   void shouldHaveDefaultThresholdValues() {
     assertThat(properties.getThreshold().getHotThreshold()).isEqualTo(1000);
     assertThat(properties.getThreshold().getHotThresholdRatio()).isEqualTo(0.01);
   }
 
+  /**
+   * Verifies the default values of the {@code state-machine} sub-properties.
+   */
   @Test
   void shouldHaveDefaultStateMachineValues() {
     assertThat(properties.getStateMachine().getConfirmDurationMs()).isEqualTo(300);
@@ -69,6 +87,9 @@ class WorkerPropertiesTest {
     assertThat(properties.getStateMachine().getPreCoolGraceMs()).isEqualTo(5000);
   }
 
+  /**
+   * Verifies the default values of the {@code heavy-keeper} sub-properties.
+   */
   @Test
   void shouldHaveDefaultHeavyKeeperValues() {
     assertThat(properties.getHeavyKeeper().getTopK()).isEqualTo(100);
@@ -78,24 +99,36 @@ class WorkerPropertiesTest {
     assertThat(properties.getHeavyKeeper().getMinCount()).isEqualTo(10);
   }
 
+  /**
+   * Verifies that {@code confirmWindows} is correctly derived from {@code confirmDurationMs} and {@code sliceMs}.
+   */
   @Test
   void shouldComputeConfirmWindows() {
     // confirmDurationMs=300, sliceMs=1000/10=100 => 300/100 = 3
     assertThat(properties.getConfirmWindows()).isEqualTo(3);
   }
 
+  /**
+   * Verifies that {@code coolWindows} is correctly derived from {@code coolDurationMs} and {@code sliceMs}.
+   */
   @Test
   void shouldComputeCoolWindows() {
     // coolDurationMs=15000, sliceMs=100 => 15000/100 = 150
     assertThat(properties.getCoolWindows()).isEqualTo(150);
   }
 
+  /**
+   * Verifies that {@code preCoolGraceWindows} is correctly derived from {@code preCoolGraceMs} and {@code sliceMs}.
+   */
   @Test
   void shouldComputePreCoolGraceWindows() {
     // preCoolGraceMs=5000, sliceMs=100 => 5000/100 = 50
     assertThat(properties.getPreCoolGraceWindows()).isEqualTo(50);
   }
 
+  /**
+   * Verifies the default values of the {@code global-qps-dynamic-threshold} sub-properties.
+   */
   @Test
   void shouldHaveDefaultGlobalQpsDynamicThreshold() {
     assertThat(properties.getGlobalQpsDynamicThreshold().getQpsChangeTolerance()).isEqualTo(0.5);
@@ -104,6 +137,9 @@ class WorkerPropertiesTest {
     assertThat(properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs()).isEqualTo(60_000);
   }
 
+  /**
+   * Verifies the default values of the {@code topk-validation} sub-properties.
+   */
   @Test
   void shouldHaveDefaultTopKValidation() {
     assertThat(properties.getTopKValidation().getValidateIntervalMs()).isEqualTo(60000);

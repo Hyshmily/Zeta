@@ -109,6 +109,7 @@ public class WorkerProperties {
     private int minCount = 10;
   }
 
+  /** Heartbeat (ping) interval configuration for worker-to-worker health signalling and config sync. */
   @Data
   public static class Heartbeat {
 

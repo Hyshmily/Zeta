@@ -22,8 +22,12 @@ package io.github.hyshmily.hotkey.model;
  * {@code HOT -> PRE_COOL -> COOL -> NORMAL} (cooldown sequence).
  */
 public enum KeyState {
+  /** Key frequency exceeds the hot threshold; kept in L1 with extended TTL. */
   HOT,
+  /** Key frequency dropped below cooldown threshold; L1 TTL reverts to normal. */
   COOL,
+  /** Transient state between HOT and COOL during cooldown sequence. */
   PRE_COOL,
+  /** Default state; key is cached with standard TTL. */
   NORMAL
 }

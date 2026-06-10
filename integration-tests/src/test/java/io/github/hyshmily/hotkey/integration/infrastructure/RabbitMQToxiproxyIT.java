@@ -48,10 +48,15 @@ import org.testcontainers.utility.DockerImageName;
 
 import eu.rekawek.toxiproxy.model.ToxicDirection;
 
+/**
+ * Integration test for RabbitMQ network disruption tolerance using Toxiproxy.
+ *
+ * <p>Inserts latency, connection cuts, and packet loss via Toxiproxy to verify
+ * that the HotKey broadcast sync and Worker decision paths recover correctly.
+ */
 @Testcontainers
 @Tag("docker")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Integration test for RabbitMQ network disruption tolerance using Toxiproxy. */
 class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(RabbitMQToxiproxyIT.class);
@@ -91,6 +96,11 @@ class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
     }
   }
 
+  /**
+   * Checks whether the Toxiproxy Docker image is available locally.
+   *
+   * @return true if the image exists locally, false otherwise
+   */
   private static boolean isToxiproxyImageAvailable() {
     try {
       var cmd = org.testcontainers.DockerClientFactory.instance().client()
@@ -102,6 +112,7 @@ class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
     }
   }
 
+  /** Removes any Toxiproxy toxics that were injected during tests. */
   @AfterAll
   static void cleanup() {
     if (rabbitmqProxy != null) {
@@ -110,11 +121,18 @@ class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
     }
   }
 
+  /** Skips test execution when the Toxiproxy Docker image is not available locally. */
   @BeforeEach
   void skipWhenToxiproxyUnavailable() {
     Assumptions.assumeTrue(toxiproxyAvailable, "Toxiproxy image not pullable on this network");
   }
 
+  /**
+   * Registers dynamic Testcontainers host/port properties for Redis and RabbitMQ,
+   * routing through Toxiproxy when available.
+   *
+   * @param r the dynamic property registry supplied by Spring
+   */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -139,6 +157,7 @@ class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
   @Autowired
   StringRedisTemplate redisTemplate;
 
+  /** Injects 500ms latency via Toxiproxy and verifies sync messages are still delivered. */
   @Test
   void addedLatency_shouldNotLoseSyncMessages() throws Exception {
     String key = "it:tox:lat:" + UUID.randomUUID();
@@ -170,6 +189,7 @@ class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
     }
   }
 
+  /** Cuts the RabbitMQ connection via Toxiproxy and verifies recovery and message processing resume. */
   @Test
   void connectionCut_shouldRecoverAndProcessMessages() throws Exception {
     String key = "it:tox:cut:" + UUID.randomUUID();
@@ -200,6 +220,7 @@ class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).isEmpty());
   }
 
+  /** Injects 30% packet loss via Toxiproxy and verifies INVALIDATE messages are not lost. */
   @Test
   void intermittentPacketLoss_shouldNotDropCriticalMessages() throws Exception {
     String key = "it:tox:loss:" + UUID.randomUUID();
@@ -239,6 +260,7 @@ class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
     }
   }
 
+  /** Injects 200ms latency via Toxiproxy and verifies HOT decisions still promote cache entries. */
   @Test
   void workerDecision_withLatentNetwork_shouldStillPromote() throws Exception {
     String key = "it:tox:wrk:" + UUID.randomUUID();

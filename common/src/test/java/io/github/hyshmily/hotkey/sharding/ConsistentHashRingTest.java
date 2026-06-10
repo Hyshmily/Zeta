@@ -29,6 +29,9 @@ import org.junit.jupiter.api.Test;
  */
 class ConsistentHashRingTest {
 
+  /**
+   * Verifies that an empty ring routes all keys to null and reports isEmpty as true.
+   */
   @Test
   void emptyRing_shouldRouteToNull() {
     ConsistentHashRing ring = new ConsistentHashRing(1);
@@ -36,6 +39,9 @@ class ConsistentHashRingTest {
     assertThat(ring.isEmpty()).isTrue();
   }
 
+  /**
+   * Verifies that a ring with a single node routes all keys to that node.
+   */
   @Test
   void singleNode_shouldRouteAllKeysToIt() {
     ConsistentHashRing ring = new ConsistentHashRing(1);
@@ -46,6 +52,9 @@ class ConsistentHashRingTest {
     }
   }
 
+  /**
+   * Verifies that a multi-node ring distributes keys across all nodes with some keys going to each.
+   */
   @Test
   void multiNode_shouldDistributeKeys() {
     ConsistentHashRing ring = new ConsistentHashRing(100);
@@ -61,6 +70,9 @@ class ConsistentHashRingTest {
     distribution.values().forEach(count -> assertThat(count).isPositive());
   }
 
+  /**
+   * Verifies that removing a node only re-routes keys that previously belonged to that node, leaving others unchanged.
+   */
   @Test
   void removeNode_shouldOnlyAffectKeysThatBelongedToIt() {
     ConsistentHashRing ring = new ConsistentHashRing(100);
@@ -93,6 +105,9 @@ class ConsistentHashRingTest {
     assertThat(unchanged).isEqualTo(500 - (int) nodeBCount);
   }
 
+  /**
+   * Verifies that adding a node causes minimal key reassignment, with fewer than half of keys moving.
+   */
   @Test
   void addNode_shouldNotChangeExistingNodeAssignments() {
     ConsistentHashRing ring = new ConsistentHashRing(100);
@@ -119,6 +134,9 @@ class ConsistentHashRingTest {
     assertThat(changed).isLessThan(250);
   }
 
+  /**
+   * Verifies that getNode returns the same node consistently for the same key.
+   */
   @Test
   void getNode_shouldBeDeterministic() {
     ConsistentHashRing ring = new ConsistentHashRing(100);
@@ -130,6 +148,9 @@ class ConsistentHashRingTest {
     }
   }
 
+  /**
+   * Verifies that rebuilding with an empty set clears the ring and routes all keys to null.
+   */
   @Test
   void rebuild_emptySet_shouldClearRing() {
     ConsistentHashRing ring = new ConsistentHashRing(10);
@@ -141,6 +162,9 @@ class ConsistentHashRingTest {
     assertThat(ring.getNode("key")).isNull();
   }
 
+  /**
+   * Verifies that getNodes returns all currently registered live nodes.
+   */
   @Test
   void getNodes_shouldReturnLiveNodes() {
     ConsistentHashRing ring = new ConsistentHashRing(10);
@@ -148,6 +172,9 @@ class ConsistentHashRingTest {
     assertThat(ring.getNodes()).containsExactlyInAnyOrder("node-a", "node-b", "node-c");
   }
 
+  /**
+   * Verifies that nodeCount returns the number of physical (not virtual) nodes.
+   */
   @Test
   void nodeCount_shouldReturnPhysicalNodeCount() {
     ConsistentHashRing ring = new ConsistentHashRing(10);
@@ -155,6 +182,9 @@ class ConsistentHashRingTest {
     assertThat(ring.nodeCount()).isEqualTo(3);
   }
 
+  /**
+   * Verifies that rebuilding with the same nodes produces identical routing results.
+   */
   @Test
   void rebuild_sameNodes_shouldNotAffectRouting() {
     ConsistentHashRing ring = new ConsistentHashRing(100);
@@ -165,6 +195,9 @@ class ConsistentHashRingTest {
     assertThat(ring.getNode("key")).isEqualTo(before);
   }
 
+  /**
+   * Verifies that getNode remains consistent under concurrent access from multiple threads.
+   */
   @Test
   void noDuplicateKeys_underConcurrentAccess() throws Exception {
     ConsistentHashRing ring = new ConsistentHashRing(100);

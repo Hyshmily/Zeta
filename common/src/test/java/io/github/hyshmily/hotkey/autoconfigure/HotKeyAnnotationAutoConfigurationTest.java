@@ -36,6 +36,9 @@ class HotKeyAnnotationAutoConfigurationTest {
   private final ApplicationContextRunner runner = new ApplicationContextRunner()
     .withConfiguration(AutoConfigurations.of(HotKeyAnnotationAutoConfiguration.class));
 
+  /**
+   * Verifies that the annotation auto-configuration is skipped when the Aspect class is not on the classpath.
+   */
   @Test
   void configIsSkippedWhenAspectClassNotOnClasspath() {
     // Aspect is from spring-boot-starter-aop (optional),
@@ -43,6 +46,9 @@ class HotKeyAnnotationAutoConfigurationTest {
     runner.run(ctx -> assertThat(ctx).doesNotHaveBean(HotKeyAspect.class));
   }
 
+  /**
+   * Verifies that the annotation auto-configuration is skipped when the property {@code hotkey.annotation.enabled} is not set to true.
+   */
   @Test
   void configIsSkippedWhenPropertyIsNotEnabled() {
     // Even if Aspect were available, @ConditionalOnProperty requires enabled=true
@@ -51,6 +57,9 @@ class HotKeyAnnotationAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).doesNotHaveBean(HotKeyAspect.class));
   }
 
+  /**
+   * Verifies that the annotation auto-configuration is skipped when no HotKey bean is present.
+   */
   @Test
   void configIsSkippedWhenHotKeyBeanNotPresent() {
     // Even if Aspect were available and property enabled,
@@ -61,6 +70,9 @@ class HotKeyAnnotationAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).doesNotHaveBean(HotKeyAspect.class));
   }
 
+  /**
+   * Verifies that a HotKeyAspect bean can be created with a HotKey dependency.
+   */
   @Test
   void hotKeyAspectIsCreatedWithHotKeyDependency() {
     HotKey hotKey = mock(HotKey.class);
@@ -71,6 +83,9 @@ class HotKeyAnnotationAutoConfigurationTest {
     assertThat(aspect).isNotNull();
   }
 
+  /**
+   * Verifies that the hotKeyAspect bean method creates new instances each time (no singleton caching in the factory method).
+   */
   @Test
   void hotKeyAspectIsNotCreatedWhenAlreadyDefined() {
     // This tests @ConditionalOnMissingBean on the hotKeyAspect method
@@ -87,6 +102,9 @@ class HotKeyAnnotationAutoConfigurationTest {
     assertThat(aspect1).isNotSameAs(aspect2);
   }
 
+  /**
+   * Verifies that the {@code @AutoConfiguration(after = ...)} annotation declares HotKeyFacadeAutoConfiguration as a dependency.
+   */
   @Test
   void configAnnotationHasCorrectAfterOrder() {
     // Verify the @AutoConfiguration(after = HotKeyFacadeAutoConfiguration.class)

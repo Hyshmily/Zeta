@@ -32,8 +32,11 @@ public class ReportPublisher {
 
   private static final HotKeyLogger log = new DefaultLogger(ReportPublisher.class);
 
+  /** RabbitMQ template for message publishing. */
   private final RabbitTemplate rabbitTemplate;
+  /** Name of the RabbitMQ exchange to which reports are sent. */
   private final String reportExchange;
+  /** Application name; included in the routing key and message payload. */
   private final String appName;
 
   /**

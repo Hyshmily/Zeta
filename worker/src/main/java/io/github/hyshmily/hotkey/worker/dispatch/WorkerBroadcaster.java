@@ -45,10 +45,15 @@ public class WorkerBroadcaster {
 
   private static final HotKeyLogger log = new DefaultLogger(WorkerBroadcaster.class);
 
+  /** RabbitMQ template used to publish HOT/COOL decisions and heartbeats. */
   private final RabbitTemplate rabbitTemplate;
+  /** Target exchange name for all broadcast messages (typically {@code hotkey.broadcast.exchange}). */
   private final String broadcastExchange;
+  /** Application name used in the broadcast routing key. */
   private final String appName;
+  /** State machine providing current confirm/cool/grace counts for heartbeat messages. */
   private final HotKeyStateMachine stateMachine;
+  /** Shared monotonic counter for config-change timestamps embedded in heartbeats. */
   private final AtomicLong configTimestampCounter;
 
   /**
@@ -84,8 +89,13 @@ public class WorkerBroadcaster {
 
   /**
    * Common send helper for HOT/COOL decisions.
-   * Builds {@link MessageProperties} with type, version, and degraded flag,
+   *
+   * <p>Builds {@link MessageProperties} with type, version, and degraded flag,
    * creates a {@link Message}, and publishes via {@link #rabbitTemplate}.
+   *
+   * @param cacheKey the key being broadcast
+   * @param type     the message type ({@link WorkerMessage#TYPE_HOT} or {@link WorkerMessage#TYPE_COOL})
+   * @param version  the monotonically increasing decision version for ordering
    */
   private void sendBroadcast(String cacheKey, String type, long version) {
     MessageProperties props = new MessageProperties();

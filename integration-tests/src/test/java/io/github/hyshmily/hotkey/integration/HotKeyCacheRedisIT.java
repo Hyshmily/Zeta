@@ -74,6 +74,7 @@ class HotKeyCacheRedisIT extends AbstractIntegrationIT {
   @Autowired
   StringRedisTemplate redisTemplate;
 
+  /** Stores a value via putThrough and verifies it appears in the L1 cache. */
   @Test
   void cachePutThrough_shouldStoreInL1() {
     String key = "it:putthrough:" + UUID.randomUUID();
@@ -87,6 +88,7 @@ class HotKeyCacheRedisIT extends AbstractIntegrationIT {
       });
   }
 
+  /** Loads a value via get() with a supplier and verifies it is cached in L1. */
   @Test
   void cacheGet_withSupplier_shouldLoadAndCache() {
     String key = "it:get:" + UUID.randomUUID();
@@ -99,6 +101,7 @@ class HotKeyCacheRedisIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).isPresent());
   }
 
+  /** Invalidates a cached entry and verifies it is removed from L1. */
   @Test
   void invalidate_shouldRemoveFromL1() {
     String key = "it:invalidate:" + UUID.randomUUID();
@@ -111,6 +114,7 @@ class HotKeyCacheRedisIT extends AbstractIntegrationIT {
     assertThat(hotKey.peek(key)).isEmpty();
   }
 
+  /** Accesses a cached entry a second time and verifies the L1 hit returns the cached value. */
   @Test
   void cacheGet_shouldReturnL1Hit_onSecondAccess() {
     String key = "it:l1hit:" + UUID.randomUUID();

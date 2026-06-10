@@ -24,6 +24,9 @@ import org.junit.jupiter.api.Test;
  */
 class KeyStateTest {
 
+  /**
+   * Verifies the KeyState enum contains exactly HOT, COOL, PRE_COOL, and NORMAL in that order.
+   */
   @Test
   void shouldHaveExpectedEnumValues() {
     assertThat(KeyState.values()).containsExactly(KeyState.HOT, KeyState.COOL, KeyState.PRE_COOL, KeyState.NORMAL);

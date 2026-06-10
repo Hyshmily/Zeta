@@ -34,6 +34,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 @SpringBootTest(classes = IntegrationTestApplication.class)
 public abstract class AbstractIntegrationIT {
 
+  /** Logger for integration test subclasses. */
   protected static final Logger log = LoggerFactory.getLogger(AbstractIntegrationIT.class);
 
   @Autowired(required = false)
@@ -47,6 +48,7 @@ public abstract class AbstractIntegrationIT {
   @Autowired
   private CachingConnectionFactory connectionFactory;
 
+  /** Starts Redis and RabbitMQ containers before each test. */
   @BeforeEach
   void resetAndStartContainers() {
     stopContainer(syncContainer);
@@ -56,18 +58,29 @@ public abstract class AbstractIntegrationIT {
     startContainer(workerContainer);
   }
 
+  /** Stops all containers after each test. */
   @AfterEach
   void stopContainers() {
     stopContainer(syncContainer);
     stopContainer(workerContainer);
   }
 
+  /**
+   * Stops a listener container if it is non-null and currently running.
+   *
+   * @param container the container to stop, may be {@code null}
+   */
   private void stopContainer(SimpleMessageListenerContainer container) {
     if (container != null && container.isRunning()) {
       container.stop();
     }
   }
 
+  /**
+   * Starts a listener container if it is non-null and not already running.
+   *
+   * @param container the container to start, may be {@code null}
+   */
   private void startContainer(SimpleMessageListenerContainer container) {
     if (container != null && !container.isRunning()) {
       container.start();

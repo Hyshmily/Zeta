@@ -26,6 +26,9 @@ import org.junit.jupiter.api.Test;
  */
 class WorkerListenerPropertiesTest {
 
+  /**
+   * Verifies that WorkerListenerProperties initializes with expected default values.
+   */
   @Test
   void shouldHaveDefaultValues() {
     WorkerListenerProperties props = new WorkerListenerProperties();
@@ -35,6 +38,9 @@ class WorkerListenerPropertiesTest {
     assertThat(props.getWarmupJitterMs()).isEqualTo(100);
   }
 
+  /**
+   * Verifies that getQueueName returns a name starting with the configured worker queue prefix.
+   */
   @Test
   void getQueueName_shouldReturnPrefixedName() {
     WorkerListenerProperties props = new WorkerListenerProperties();

@@ -21,8 +21,8 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Utility for introducing random jitter before executing a task.
- * Package-private; used internally by broadcast listeners to spread
- * Redis reads evenly across instances.
+ * Used internally by broadcast listeners to spread Redis reads
+ * evenly across instances. Non-instantiable — private constructor.
  */
 public final class DelayUtil {
 

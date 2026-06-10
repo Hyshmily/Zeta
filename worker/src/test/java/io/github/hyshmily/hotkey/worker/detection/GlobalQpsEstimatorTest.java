@@ -24,6 +24,9 @@ import org.junit.jupiter.api.Test;
  */
 class GlobalQpsEstimatorTest {
 
+  /**
+   * Verifies a new {@link GlobalQpsEstimator} starts with zero window total and zero QPS.
+   */
   @Test
   void shouldConstructWithInitializedSlices() {
     GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);
@@ -31,6 +34,9 @@ class GlobalQpsEstimatorTest {
     assertThat(estimator.getQps()).isZero();
   }
 
+  /**
+   * Verifies that {@code addTotal} correctly accumulates into the window total.
+   */
   @Test
   void shouldComputeWindowTotalAfterAddingCounts() {
     GlobalQpsEstimator estimator = new GlobalQpsEstimator(10_000, 10);
@@ -40,6 +46,9 @@ class GlobalQpsEstimatorTest {
     assertThat(total).isEqualTo(300);
   }
 
+  /**
+   * Verifies that QPS is correctly derived from the total count and the configured window duration.
+   */
   @Test
   void shouldComputeQpsCorrectly() {
     GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);
@@ -50,6 +59,9 @@ class GlobalQpsEstimatorTest {
     assertThat(qps).isEqualTo(500.0);
   }
 
+  /**
+   * Verifies that multiple {@code addTotal} calls are accumulated correctly.
+   */
   @Test
   void shouldHandleMultipleAddTotalCalls() {
     GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);

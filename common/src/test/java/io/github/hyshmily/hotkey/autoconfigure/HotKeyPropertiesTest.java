@@ -29,6 +29,9 @@ class HotKeyPropertiesTest {
     return new HotKeyProperties();
   }
 
+  /**
+   * Verifies that a freshly created HotKeyProperties has the expected default values.
+   */
   @Test
   void shouldHaveDefaultValues() {
     HotKeyProperties p = props();
@@ -39,6 +42,9 @@ class HotKeyPropertiesTest {
     assertThat(p.getMinCount()).isEqualTo(10);
   }
 
+  /**
+   * Verifies that effectiveHardTtlMs returns the explicitly set value when non-zero.
+   */
   @Test
   void effectiveHardTtlMs_shouldReturnOverrideWhenSet() {
     HotKeyProperties p = props();
@@ -47,12 +53,18 @@ class HotKeyPropertiesTest {
     assertThat(p.effectiveHardTtlMs()).isEqualTo(600_000L);
   }
 
+  /**
+   * Verifies that effectiveHardTtlMs falls back to the default when the explicit value is zero.
+   */
   @Test
   void effectiveHardTtlMs_shouldReturnDefaultWhenOverrideIsZero() {
     HotKeyProperties p = props();
     assertThat(p.effectiveHardTtlMs()).isEqualTo(300_000L);
   }
 
+  /**
+   * Verifies that effectiveHotHardTtlMs returns the explicitly set non-zero value.
+   */
   @Test
   void effectiveHotHardTtlMs_shouldReturnOverrideWhenSet() {
     HotKeyProperties p = props();
@@ -61,6 +73,9 @@ class HotKeyPropertiesTest {
     assertThat(p.effectiveHotHardTtlMs()).isEqualTo(7_200_000L);
   }
 
+  /**
+   * Verifies that effectiveSoftTtlMs returns the explicitly set non-zero value.
+   */
   @Test
   void effectiveSoftTtlMs_shouldReturnOverrideWhenSet() {
     HotKeyProperties p = props();
@@ -69,6 +84,9 @@ class HotKeyPropertiesTest {
     assertThat(p.effectiveSoftTtlMs()).isEqualTo(60_000L);
   }
 
+  /**
+   * Verifies that effectiveHotSoftTtlMs returns the explicitly set non-zero value.
+   */
   @Test
   void effectiveHotSoftTtlMs_shouldReturnOverrideWhenSet() {
     HotKeyProperties p = props();
@@ -77,12 +95,18 @@ class HotKeyPropertiesTest {
     assertThat(p.effectiveHotSoftTtlMs()).isEqualTo(600_000L);
   }
 
+  /**
+   * Verifies that soft-expire is enabled when at least one soft TTL is configured with a non-zero value.
+   */
   @Test
   void isSoftExpireEnabled_shouldReturnTrueWhenAnySoftTtlConfigured() {
     HotKeyProperties p = props();
     assertThat(p.isSoftExpireEnabled()).isTrue();
   }
 
+  /**
+   * Verifies that soft-expire is disabled when all soft TTL values are explicitly set to zero.
+   */
   @Test
   void isSoftExpireEnabled_shouldReturnFalseWhenAllSoftTtlsZero() {
     HotKeyProperties p = props();
@@ -93,6 +117,9 @@ class HotKeyPropertiesTest {
     assertThat(p.isSoftExpireEnabled()).isFalse();
   }
 
+  /**
+   * Verifies that effectiveConsumerCount returns the configured value when it is positive.
+   */
   @Test
   void effectiveConsumerCount_shouldReturnConfiguredWhenPositive() {
     HotKeyProperties p = props();
@@ -100,6 +127,9 @@ class HotKeyPropertiesTest {
     assertThat(p.effectiveConsumerCount()).isEqualTo(4);
   }
 
+  /**
+   * Verifies that effectiveConsumerCount returns the default value of 1 when the configured value is zero.
+   */
   @Test
   void effectiveConsumerCount_shouldReturnDefaultWhenZero() {
     HotKeyProperties p = props();

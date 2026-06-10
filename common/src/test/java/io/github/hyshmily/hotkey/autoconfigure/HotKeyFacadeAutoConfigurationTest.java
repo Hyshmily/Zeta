@@ -45,6 +45,9 @@ class HotKeyFacadeAutoConfigurationTest {
     InstanceIdGenerator.setOverride(null);
   }
 
+  /**
+   * Verifies that the HotKey facade bean is created with only minimal dependencies (HotKeyProperties).
+   */
   @Test
   void hotKeyBeanIsCreatedWithMinimalDependencies() {
     runner.run(ctx -> {
@@ -53,6 +56,9 @@ class HotKeyFacadeAutoConfigurationTest {
     });
   }
 
+  /**
+   * Verifies that the HotKey facade bean is created when all optional dependencies are provided.
+   */
   @Test
   void hotKeyBeanIsCreatedWithAllDependencies() {
     new ApplicationContextRunner()
@@ -64,6 +70,9 @@ class HotKeyFacadeAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKey.class));
   }
 
+  /**
+   * Verifies that a custom HotKey bean is respected and the auto-configured one is not created.
+   */
   @Test
   void hotKeyBeanIsNotCreatedWhenAlreadyDefined() {
     new ApplicationContextRunner()
@@ -73,6 +82,9 @@ class HotKeyFacadeAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKey.class));
   }
 
+  /**
+   * Verifies that the instance ID configured via properties is propagated to the InstanceIdGenerator.
+   */
   @Test
   void instanceIdIsSetFromPropertiesWhenConfigured() {
     String instanceId = "test-instance-456";
@@ -87,12 +99,18 @@ class HotKeyFacadeAutoConfigurationTest {
       .run(ctx -> assertThat(InstanceIdGenerator.get()).isEqualTo(instanceId));
   }
 
+  /**
+   * Verifies that a blank instance ID property does not override the InstanceIdGenerator.
+   */
   @Test
   void instanceIdIsNotSetWhenPropertyIsBlank() {
     InstanceIdGenerator.setOverride(null);
     runner.run(ctx -> assertThat(InstanceIdGenerator.get()).isNotEqualTo("my-instance"));
   }
 
+  /**
+   * Verifies that a null instance ID property does not override the InstanceIdGenerator.
+   */
   @Test
   void instanceIdIsNotSetWhenPropertyIsNull() {
     InstanceIdGenerator.setOverride(null);
@@ -106,6 +124,9 @@ class HotKeyFacadeAutoConfigurationTest {
       .run(ctx -> assertThat(InstanceIdGenerator.get()).isNotNull());
   }
 
+  /**
+   * Verifies that the HotKey bean is created when only the app-level TopK (hotKeyDetector) is present.
+   */
   @Test
   void hotKeyBeanAcceptsOnlyAppTopK() {
     new ApplicationContextRunner()
@@ -115,6 +136,9 @@ class HotKeyFacadeAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKey.class));
   }
 
+  /**
+   * Verifies that the HotKey bean is created when only the worker-level TopK (workerTopK) is present.
+   */
   @Test
   void hotKeyBeanAcceptsOnlyWorkerTopK() {
     new ApplicationContextRunner()
@@ -124,6 +148,9 @@ class HotKeyFacadeAutoConfigurationTest {
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKey.class));
   }
 
+  /**
+   * Verifies that the HotKey bean is created when only the HotKeyCache is present (no TopK beans).
+   */
   @Test
   void hotKeyBeanAcceptsOnlyHotKeyCache() {
     new ApplicationContextRunner()

@@ -92,8 +92,15 @@ class HotKeyStressIT {
 
   private static final List<StressMetrics> ALL_METRICS = new ArrayList<>();
 
-  // ── Metrics Framework ──────────────────────────────────────────────────────────
+  // -- Metrics Framework ----------------------------------------------------------
 
+  /**
+   * Collects and computes latency percentiles, throughput, and error counts for a single test scenario.
+   *
+   * <p>Test methods instantiate one of these, call {@link #recordLatency} and {@link #recordOp}
+   * per operation, then {@link #finish()} to compute p50/p95/p99, ops/sec, and error totals.
+   * Metrics are serialized to the final JSON report by {@link #writeReport}.
+   */
   static class StressMetrics {
 
     final String testName;
@@ -111,22 +118,37 @@ class HotKeyStressIT {
     double p99Ms;
     double opsPerSecond;
 
+    /**
+     * @param testName the test name for log and JSON report output
+     */
     StressMetrics(String testName) {
       this.testName = testName;
     }
 
+    /**
+     * Records a single operation latency in nanoseconds.
+     *
+     * @param nanos elapsed time for one operation
+     */
     void recordLatency(long nanos) {
       latencies.add(nanos);
     }
 
+    /** Increments the operation counter. */
     void recordOp() {
       opCount.incrementAndGet();
     }
 
+    /** Increments the error counter. */
     void recordError() {
       errorCount.incrementAndGet();
     }
 
+    /**
+     * Finalizes metrics computation: duration, percentiles, and throughput.
+     *
+     * @return this instance for chaining
+     */
     StressMetrics finish() {
       durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
       totalOps = opCount.get();
@@ -140,6 +162,9 @@ class HotKeyStressIT {
       return this;
     }
 
+    /**
+     * Logs a one-line summary of this metric's results at INFO level.
+     */
     void logSummary() {
       log.info(
         "▸ {}: {} ops in {}ms | {} err | {} ops/s | P50={}ms P95={}ms P99={}ms {}",
@@ -148,6 +173,10 @@ class HotKeyStressIT {
         custom.isEmpty() ? "" : custom.toString());
     }
 
+    /**
+     * Serializes this metric's results to a Jackson {@link ObjectNode} including
+     * custom fields mapped to numeric or string values.
+     */
     ObjectNode toJson(ObjectMapper mapper) {
       ObjectNode n = mapper.createObjectNode();
       n.put("testName", testName);
@@ -168,6 +197,13 @@ class HotKeyStressIT {
     }
   }
 
+  /**
+   * Writes a JSON report of all collected stress metrics to
+   * {@code src/test/resources/testresult/hotkey-stress-<timestamp>.json}.
+   *
+   * <p>Includes a summary (total tests, total duration, total ops, total errors) and per-test
+   * details (latency percentiles, throughput, custom metrics). Runs once after all tests complete.
+   */
   @AfterAll
   static void writeReport() throws IOException {
     ObjectMapper mapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
@@ -192,8 +228,12 @@ class HotKeyStressIT {
     log.info("Stress report written to {}", reportPath.toAbsolutePath());
   }
 
-  // ── Shared Helpers ─────────────────────────────────────────────────────────────
+  // -- Shared Helpers -------------------------------------------------------------
 
+  /**
+   * Builds a {@link CacheEntry} with the given parameters; hard and soft expire-at times are
+   * computed from the current wall clock.
+   */
   static CacheEntry entry(String value, int dataVersion, KeyState state, long hardTtlMs, long decisionVersion) {
     return CacheEntry.builder()
       .value(value)
@@ -210,6 +250,10 @@ class HotKeyStressIT {
       .build();
   }
 
+  /**
+   * Creates a {@link HotKeyCache} wired with a {@link SingleFlight}, {@link CacheExpireManager},
+   * empty {@link RuleMatcher}, and a {@link VersionController} for stress testing.
+   */
   static HotKeyCache createCache(TopK detector, Cache<String, Object> caffeine, Executor executor) {
     HotKeyProperties props = new HotKeyProperties();
     CacheExpireManager expireMgr = new CacheExpireManager(caffeine, executor, props, 10);
@@ -222,10 +266,20 @@ class HotKeyStressIT {
       new WorkerHealthMonitor());
   }
 
+  /**
+   * A consumer that accepts an integer index and may throw any exception.
+   *
+   * <p>Used by {@link #concurrentRun} to abstract per-operation logic that might fail, so errors
+   * can be caught and counted rather than aborting the entire concurrent workload.
+   */
   interface ThrowingConsumer {
     void accept(int index) throws Exception;
   }
 
+  /**
+   * Runs a concurrent workload with the given thread count; each thread executes {@code opsPerThread}
+   * operations via the supplied task. All errors are tracked in the provided metrics.
+   */
   static void concurrentRun(String label, int threads, int opsPerThread, ThrowingConsumer task, StressMetrics metrics)
     throws InterruptedException {
     ExecutorService pool = Executors.newFixedThreadPool(threads);
@@ -256,10 +310,13 @@ class HotKeyStressIT {
     }
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 1: Algorithm (HeavyKeeper / TopK)
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Verifies HeavyKeeper correctly identifies top-K keys under a Zipf distribution.
+   */
   @Test
   void heavyKeeper_zipfDistribution() throws InterruptedException {
     StressMetrics m = new StressMetrics("heavyKeeper_zipfDistribution");
@@ -307,6 +364,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Ensures HeavyKeeper produces no duplicate keys under high-thread contention.
+   */
   @Test
   void heavyKeeper_noDuplicateKeys() throws InterruptedException {
     StressMetrics m = new StressMetrics("heavyKeeper_noDuplicateKeys");
@@ -337,6 +397,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Confirms HeavyKeeper's result list stays within configured K bound under heavy insertions.
+   */
   @Test
   void heavyKeeper_boundedSize() throws InterruptedException {
     StressMetrics m = new StressMetrics("heavyKeeper_boundedSize");
@@ -357,10 +420,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 2: SingleFlight
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Verifies SingleFlight deduplicates 100 concurrent requests into a single supplier execution.
+   */
   @Test
   void singleFlight_extremeDedup() throws InterruptedException {
     StressMetrics m = new StressMetrics("singleFlight_extremeDedup");
@@ -398,6 +464,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Prevents cache stampede across 50 keys each contended by 20 threads simultaneously.
+   */
   @Test
   void singleFlight_cacheStampede() throws InterruptedException {
     StressMetrics m = new StressMetrics("singleFlight_cacheStampede");
@@ -442,6 +511,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Validates SingleFlight handles mixed hot-key and cold-key contention correctly.
+   */
   @Test
   void singleFlight_mixedHotCold() throws InterruptedException {
     StressMetrics m = new StressMetrics("singleFlight_mixedHotCold");
@@ -485,10 +557,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 3: HotKeyCache
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Ensures concurrent get/invalidate/peek on HotKeyCache maintains consistency without errors.
+   */
   @Test
   void hotKeyCache_consistency() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_consistency");
@@ -512,6 +587,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Simulates a realistic read-heavy (90%) / write-light (10%) production workload mix.
+   */
   @Test
   void hotKeyCache_productionMix() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_productionMix");
@@ -547,6 +625,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Stress-tests HotKeyCache when 200 entries expire nearly simultaneously and are reloaded.
+   */
   @Test
   void hotKeyCache_ttlExpiryStorm() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_ttlExpiryStorm");
@@ -570,6 +651,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Verifies Caffeine eviction under high memory pressure (5x max capacity insertions).
+   */
   @Test
   void hotKeyCache_memoryPressure() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_memoryPressure");
@@ -593,6 +677,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Tracks a single key through its full lifecycle: warmup → hot → cool states.
+   */
   @Test
   void hotKeyCache_lifecycle() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_lifecycle");
@@ -626,10 +713,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 4: Broadcast
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Verifies CacheSyncPublisher deduplicates 30 concurrent send attempts to exactly 1 actual send.
+   */
   @Test
   void cacheSyncPublisher_dedup() throws InterruptedException {
     StressMetrics m = new StressMetrics("cacheSyncPublisher_dedup");
@@ -674,6 +764,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Validates version-ordering logic with 5 test cases (newer, older, equal, edge cases).
+   */
   @Test
   void cacheSyncPublisher_versionOrdering() {
     StressMetrics m = new StressMetrics("cacheSyncPublisher_versionOrdering");
@@ -697,6 +790,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Simulates a broadcast storm with 2000 requests across 500 keys from 20 concurrent threads.
+   */
   @Test
   void broadcastStorm() throws InterruptedException {
     StressMetrics m = new StressMetrics("broadcastStorm");
@@ -722,10 +818,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 5: VersionGuard
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Tests VersionGuard's shouldSkipForSync and shouldSkipForWorker under 10-thread concurrent load.
+   */
   @Test
   void versionGuard_concurrent() throws InterruptedException {
     StressMetrics m = new StressMetrics("versionGuard_concurrent");
@@ -740,10 +839,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 6: HotKeyStateMachine
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Verifies HotKeyStateMachine handles independent keys with no cross-key interference.
+   */
   @Test
   void stateMachine_independentKeys() throws InterruptedException {
     StressMetrics m = new StressMetrics("stateMachine_independentKeys");
@@ -766,6 +868,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Stress-tests HotKeyStateMachine with 20 threads all evaluating the same key concurrently.
+   */
   @Test
   void stateMachine_sameKey() throws InterruptedException {
     StressMetrics m = new StressMetrics("stateMachine_sameKey");
@@ -778,6 +883,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Simulates gradual hot-key emergence over 5 phases where hot ratio changes over time.
+   */
   @Test
   void stateMachine_gradualDrift() throws InterruptedException {
     StressMetrics m = new StressMetrics("stateMachine_gradualDrift");
@@ -805,10 +913,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 7: Reporter
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Pushes the HotKeyReporter with 20 threads × 100k high-frequency record operations.
+   */
   @Test
   void reporter_highFrequency() throws InterruptedException {
     StressMetrics m = new StressMetrics("reporter_highFrequency");
@@ -834,6 +945,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Validates HotKeyReporter backpressure behavior with limited queue capacity under heavy load.
+   */
   @Test
   void reporter_backpressure() throws InterruptedException {
     StressMetrics m = new StressMetrics("reporter_backpressure");
@@ -870,6 +984,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Tests HotKeyReporter sharding with 4 shards spread across 8 threads × 20k operations.
+   */
   @Test
   void reporter_multiShard() throws InterruptedException {
     StressMetrics m = new StressMetrics("reporter_multiShard");
@@ -899,10 +1016,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 8: Listener Stress
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Tests concurrent invalidate and refresh operations on CacheSyncListener across 100 keys.
+   */
   @Test
   void cacheSyncListener_concurrent() throws InterruptedException {
     StressMetrics m = new StressMetrics("cacheSyncListener_concurrent");
@@ -941,6 +1061,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Validates WorkerListener HOT/COOL decision race handling with 10 concurrent threads.
+   */
   @Test
   void workerListener_concurrent() throws InterruptedException {
     StressMetrics m = new StressMetrics("workerListener_concurrent");
@@ -979,10 +1102,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 9: Distributed Scenarios
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * Simulates a 5-node distributed scenario with 8 workers each, 500 ops, simulated Redis + broadcast bus.
+   */
   @Test
   void distributedScenario() throws InterruptedException {
     StressMetrics m = new StressMetrics("distributedScenario");
@@ -1052,6 +1178,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Simulates a 3-node distributed system with random network jitter (delay + partial message loss).
+   */
   @Test
   void distributed_networkJitter() throws InterruptedException {
     StressMetrics m = new StressMetrics("distributed_networkJitter");
@@ -1125,8 +1254,15 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * A broadcast task paired with a simulated delay in milliseconds.
+   * Used by {@link #distributed_networkJitter} to model network latency.
+   */
   record DelayedBroadcast(Runnable task, int delayMs) {}
 
+  /**
+   * Simulates burst traffic: steady load followed by sudden 30-thread burst across 3 nodes.
+   */
   @Test
   void distributed_burstTraffic() throws InterruptedException {
     StressMetrics m = new StressMetrics("distributed_burstTraffic");
@@ -1185,10 +1321,13 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
   // Section 10: Edge Cases
-  // ════════════════════════════════════════════════════════════════════════════════
+  // ================================================================================
 
+  /**
+   * HeavyKeeper bounded size under high key churn: 100k unique keys with K=100.
+   */
   @Test
   void keyChurn_highRate() throws InterruptedException {
     StressMetrics m = new StressMetrics("keyChurn_highRate");
@@ -1211,6 +1350,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Tracks a key gradually emerging as hot over 10 phases with varying hot-access ratios.
+   */
   @Test
   void gradualHotKeyEmergence() throws InterruptedException {
     StressMetrics m = new StressMetrics("gradualHotKeyEmergence");
@@ -1250,6 +1392,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Simulates a cold-start boot storm: 40 threads × 500 keys against an empty cache.
+   */
   @Test
   void emptyCache_bootStorm() throws InterruptedException {
     StressMetrics m = new StressMetrics("emptyCache_bootStorm");
@@ -1280,6 +1425,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Validates HeavyKeeper handles mixed short and long key strings without bias.
+   */
   @Test
   void mixedKeySizes_heavyKeeper() throws InterruptedException {
     StressMetrics m = new StressMetrics("mixedKeySizes_heavyKeeper");
@@ -1307,6 +1455,9 @@ class HotKeyStressIT {
     m.finish().logSummary();
   }
 
+  /**
+   * Verifies SingleFlight handles timeout contention where some suppliers are slow.
+   */
   @Test
   void singleFlight_timeoutContention() throws InterruptedException {
     StressMetrics m = new StressMetrics("singleFlight_timeoutContention");

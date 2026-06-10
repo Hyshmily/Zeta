@@ -66,6 +66,7 @@ class ReportPublishRabbitMQIT extends AbstractIntegrationIT {
   @Autowired
   RabbitTemplate rabbitTemplate;
 
+  /** Verifies that a message sent to the report exchange is received on a dynamically declared queue. */
   @Test
   void reportPublisher_shouldSendMessageToExchange() {
     String testQueue = "it.report.verify." + UUID.randomUUID().toString().substring(0, 8);

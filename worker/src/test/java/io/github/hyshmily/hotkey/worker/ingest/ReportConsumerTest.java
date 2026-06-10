@@ -71,6 +71,9 @@ class ReportConsumerTest {
     consumer = new ReportConsumer(detector, stateMachine, broadcaster, topKValidator, workerTopK, globalQpsEstimator);
   }
 
+  /**
+   * Verifies that {@code onReport} processes all entries and feeds the detector, TopK, and QPS estimator.
+   */
   @Test
   void shouldProcessEntriesAndFeedAllComponents() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("key1", 5L, "key2", 3L));
@@ -86,6 +89,9 @@ class ReportConsumerTest {
     verify(globalQpsEstimator).addTotal(8L);
   }
 
+  /**
+   * Verifies that a HOT decision from the state machine triggers {@code broadcastHot} and confirmation.
+   */
   @Test
   void shouldBroadcastHotWhenStateMachineReturnsHot() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
@@ -98,6 +104,9 @@ class ReportConsumerTest {
     verify(topKValidator).markConfirmed("hotKey");
   }
 
+  /**
+   * Verifies that a COOL decision from the state machine triggers {@code broadcastCool} and cool confirmation.
+   */
   @Test
   void shouldBroadcastCoolWhenStateMachineReturnsCool() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
@@ -110,6 +119,9 @@ class ReportConsumerTest {
     verify(topKValidator).markCooled("coolKey");
   }
 
+  /**
+   * Verifies that stale report messages (older than the staleness threshold) are skipped without processing.
+   */
   @Test
   void shouldSkipStaleMessages() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
@@ -120,6 +132,9 @@ class ReportConsumerTest {
     verify(stateMachine, never()).evaluate(anyString(), anyBoolean());
   }
 
+  /**
+   * Verifies that exceptions thrown during per-key processing are caught and do not prevent other keys from being processed.
+   */
   @Test
   void shouldHandleExceptionsGracefully() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("badKey", 1L));

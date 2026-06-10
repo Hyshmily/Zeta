@@ -36,6 +36,9 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 @ExtendWith(MockitoExtension.class)
 class HotKeySchedulingConfigurationTest {
 
+  /**
+   * Verifies that cleanHotKeys calls fading on all registered TopK instances.
+   */
   @Test
   void cleanHotKeysCallsFadingOnAllInstances() {
     TopK topK1 = mock(TopK.class);
@@ -48,6 +51,9 @@ class HotKeySchedulingConfigurationTest {
     verify(topK2).fading();
   }
 
+  /**
+   * Verifies that cleanHotKeys works correctly with a single TopK instance.
+   */
   @Test
   void cleanHotKeysHandlesSingleInstance() {
     TopK topK = mock(TopK.class);
@@ -58,6 +64,9 @@ class HotKeySchedulingConfigurationTest {
     verify(topK).fading();
   }
 
+  /**
+   * Verifies that cleanHotKeys handles an empty TopK list without throwing.
+   */
   @Test
   void cleanHotKeysHandlesEmptyList() {
     HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(List.of());
@@ -66,6 +75,9 @@ class HotKeySchedulingConfigurationTest {
     // No exception should be thrown
   }
 
+  /**
+   * Verifies that drainExpelled drains expelled items from all registered TopK instances.
+   */
   @Test
   void drainExpelledDrainsItemsFromAllInstances() {
     TopK topK1 = mock(TopK.class);
@@ -85,6 +97,9 @@ class HotKeySchedulingConfigurationTest {
     assertThat(queue2).isEmpty();
   }
 
+  /**
+   * Verifies that drainExpelled handles empty expelled queues without throwing.
+   */
   @Test
   void drainExpelledHandlesEmptyQueues() {
     TopK topK = mock(TopK.class);
@@ -95,6 +110,9 @@ class HotKeySchedulingConfigurationTest {
     // No exception should be thrown
   }
 
+  /**
+   * Verifies that drainExpelled handles a large number of expelled items (1500) in a single queue.
+   */
   @Test
   void drainExpelledLimitsDrainTo1000ItemsPerInstance() {
     TopK topK = mock(TopK.class);
@@ -111,6 +129,9 @@ class HotKeySchedulingConfigurationTest {
     assertThat(queue).isEmpty();
   }
 
+  /**
+   * Verifies that the scheduling configuration is active by default when a TopK bean exists.
+   */
   @Test
   void configIsActiveByDefaultWhenTopKBeanExists() {
     new ApplicationContextRunner()
@@ -119,6 +140,9 @@ class HotKeySchedulingConfigurationTest {
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKeySchedulingConfiguration.class));
   }
 
+  /**
+   * Verifies that the scheduling configuration is inactive when the property hotkey.scheduling.enabled is false.
+   */
   @Test
   void configIsInactiveWhenPropertyIsDisabled() {
     new ApplicationContextRunner()
@@ -127,6 +151,9 @@ class HotKeySchedulingConfigurationTest {
       .run(ctx -> assertThat(ctx).doesNotHaveBean(HotKeySchedulingConfiguration.class));
   }
 
+  /**
+   * Verifies that the scheduling configuration is inactive when no TopK bean exists.
+   */
   @Test
   void configIsInactiveWhenNoTopKBeanExists() {
     new ApplicationContextRunner()

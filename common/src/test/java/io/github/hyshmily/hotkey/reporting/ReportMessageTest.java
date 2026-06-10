@@ -26,6 +26,9 @@ import org.junit.jupiter.api.Test;
  */
 class ReportMessageTest {
 
+  /**
+   * Verifies creating a ReportMessage with app name, timestamp, and key counts.
+   */
   @Test
   void shouldCreateReportMessage() {
     ReportMessage msg = new ReportMessage("app1", 1000L, Map.of("key1", 5L, "key2", 3L));

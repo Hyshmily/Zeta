@@ -79,7 +79,7 @@ class HotKeyEndpointTest {
     hotKeyStateMachine = mock(HotKeyStateMachine.class);
   }
 
-  /* ─── helpers ────────────────────────────────────────────────── */
+  /* helpers */
 
   private HotKeyEndpoint endpointWithAll() {
     return new HotKeyEndpoint(
@@ -94,8 +94,11 @@ class HotKeyEndpointTest {
     when(topK.expelled()).thenReturn(new LinkedBlockingQueue<>());
   }
 
-  /* ─── all components present ─────────────────────────────────── */
+  /* all components present */
 
+  /**
+   * Verifies that hotKeyInfo returns all three sections (local, worker, sync) with their respective fields when all components are present.
+   */
   @Test
   void hotKeyInfo_shouldContainLocalWorkerAndSyncSections() {
     mockTopK(hotKeyDetector, List.of(new Item("k1", 10), new Item("k2", 7)), 200L);
@@ -166,8 +169,11 @@ class HotKeyEndpointTest {
     assertThat(sync).containsEntry("dedupCacheSize", 15L);
   }
 
-  /* ─── HeavyKeeper algorithm params ────────────────────────────── */
+  /* HeavyKeeper algorithm params */
 
+  /**
+   * Verifies that the local section exposes HeavyKeeper-specific algorithm parameters (capacity, sketch width/depth, decay, min count threshold).
+   */
   @Test
   void localSection_shouldExposeHeavyKeeperParams() {
     HeavyKeeper hk = new HeavyKeeper(10, 500, 4, 0.9, 5);
@@ -189,8 +195,11 @@ class HotKeyEndpointTest {
     assertThat(local).containsKey("expelledQueueRemaining");
   }
 
-  /* ─── null components ────────────────────────────────────────── */
+  /* null components */
 
+  /**
+   * Verifies that hotKeyInfo omits all three sections when all optional components are null.
+   */
   @Test
   void hotKeyInfo_shouldOmitSectionWhenAllComponentsNull() {
     HotKeyEndpoint minimal = new HotKeyEndpoint(
@@ -200,8 +209,11 @@ class HotKeyEndpointTest {
     assertThat(info).containsKeys("instanceId", "nodeId");
   }
 
-  /* ─── partial: only local, no worker/sync ────────────────────── */
+  /* partial: only local, no worker/sync */
 
+  /**
+   * Verifies that hotKeyInfo includes local but omits worker and sync when only local components are provided.
+   */
   @Test
   void hotKeyInfo_shouldOmitWorkerAndSyncWhenOnlyLocalComponents() {
     when(hotKeyDetector.list()).thenReturn(List.of());
@@ -216,8 +228,11 @@ class HotKeyEndpointTest {
     assertThat(info).doesNotContainKeys("worker", "sync");
   }
 
-  /* ─── partial: only sync, no local/worker ────────────────────── */
+  /* partial: only sync, no local/worker */
 
+  /**
+   * Verifies that hotKeyInfo includes sync but omits local and worker when only sync components are provided.
+   */
   @Test
   void hotKeyInfo_shouldIncludeSyncWhenOnlySyncComponents() {
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(5L);
@@ -230,8 +245,11 @@ class HotKeyEndpointTest {
     assertThat(((Map<String, Object>) info.get("sync"))).containsEntry("dedupCacheSize", 5L);
   }
 
-  /* ─── worker section with multiple shards ─────────────────────── */
+  /* worker section with multiple shards */
 
+  /**
+   * Verifies that the worker section lists all known shards with their health status.
+   */
   @Test
   void workerSection_shouldListAllKnownShards() {
     mockTopK(workerTopK, List.of(new Item("k", 1)), 10L);
@@ -249,8 +267,11 @@ class HotKeyEndpointTest {
     assertThat(worker).containsKey("health");
   }
 
-  /* ─── no rule matcher rules ───────────────────────────────────── */
+  /* no rule matcher rules */
 
+  /**
+   * Verifies that the local section shows an empty rule list when no rules are configured.
+   */
   @Test
   void localSection_shouldShowEmptyRulesWhenNoRules() {
     mockTopK(hotKeyDetector, List.of(), 0L);
@@ -263,8 +284,11 @@ class HotKeyEndpointTest {
     assertThat((List<?>) local.get("rules")).isEmpty();
   }
 
-  /* ─── rule matcher with rules ─────────────────────────────────── */
+  /* rule matcher with rules */
 
+  /**
+   * Verifies that the local section includes configured rules with their type, pattern, and creation timestamp.
+   */
   @Test
   void localSection_shouldIncludeRules() {
     ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
@@ -283,8 +307,11 @@ class HotKeyEndpointTest {
     assertThat(rules.get(0)).containsKeys("id", "type", "pattern", "createdAt");
   }
 
-  /* ─── null refresh limiter ────────────────────────────────────── */
+  /* null refresh limiter */
 
+  /**
+   * Verifies that the local section skips the refresh pool available field when the limiter is null.
+   */
   @Test
   void localSection_shouldSkipRefreshPoolWhenLimiterNull() {
     mockTopK(hotKeyDetector, List.of(), 0L);
@@ -303,8 +330,11 @@ class HotKeyEndpointTest {
     assertThat(local).doesNotContainKey("refreshPoolAvailable");
   }
 
-  /* ─── topK list values match mock data ────────────────────────── */
+  /* topK list values match mock data */
 
+  /**
+   * Verifies that the local and worker TopK sections correctly reflect the counts from mock data.
+   */
   @Test
   void localAndWorkerTopK_shouldRespectMockData() {
     mockTopK(hotKeyDetector, List.of(new Item("k1", 10)), 200L);

@@ -76,6 +76,9 @@ class HotKeyCacheTest {
     );
   }
 
+  /**
+   * Verifies that peek returns a cached CacheEntry value.
+   */
   @Test
   void peek_shouldReturnCachedValue() {
     caffeineCache.put(
@@ -98,12 +101,18 @@ class HotKeyCacheTest {
     assertThat(hotKeyCache.peek("key1")).contains("stored");
   }
 
+  /**
+   * Verifies that peek returns empty for null or blank keys.
+   */
   @Test
   void peek_shouldReturnEmptyForInvalidKey() {
     assertThat(hotKeyCache.peek(null)).isEmpty();
     assertThat(hotKeyCache.peek("")).isEmpty();
   }
 
+  /**
+   * Verifies that a cache entry with KeyState.HOT is identified as a local hot key.
+   */
   @Test
   void isLocalHotKey_shouldReturnTrueForHotEntry() {
     caffeineCache.put(
@@ -126,6 +135,9 @@ class HotKeyCacheTest {
     assertThat(hotKeyCache.isLocalHotKey("hotKey")).isTrue();
   }
 
+  /**
+   * Verifies that a cache entry with KeyState.NORMAL is not identified as a local hot key.
+   */
   @Test
   void isLocalHotKey_shouldReturnFalseForNormalEntry() {
     caffeineCache.put(
@@ -148,22 +160,34 @@ class HotKeyCacheTest {
     assertThat(hotKeyCache.isLocalHotKey("normalKey")).isFalse();
   }
 
+  /**
+   * Verifies that isLocalHotKey returns false for a key not present in the cache.
+   */
   @Test
   void isLocalHotKey_shouldReturnFalseForMissingKey() {
     assertThat(hotKeyCache.isLocalHotKey("missing")).isFalse();
   }
 
+  /**
+   * Verifies that isLocalHotKey returns false for null keys.
+   */
   @Test
   void isLocalHotKey_shouldReturnFalseForInvalidKey() {
     assertThat(hotKeyCache.isLocalHotKey(null)).isFalse();
   }
 
+  /**
+   * Verifies that get returns a cached raw value without invoking the loader.
+   */
   @Test
   void get_shouldReturnCachedValueOnHit() {
     caffeineCache.put("key1", "rawValue");
     assertThat(hotKeyCache.get("key1", () -> "loaded")).contains("rawValue");
   }
 
+  /**
+   * Verifies that get loads and caches a value on cache miss via SingleFlight.
+   */
   @Test
   void get_shouldLoadAndCacheOnMiss() {
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loadedValue"));
@@ -174,12 +198,18 @@ class HotKeyCacheTest {
     assertThat(caffeineCache.getIfPresent("key1")).isNotNull();
   }
 
+  /**
+   * Verifies that get returns empty for null or blank keys without loading.
+   */
   @Test
   void get_shouldReturnEmptyForInvalidKey() {
     assertThat(hotKeyCache.get(null, () -> "v")).isEmpty();
     assertThat(hotKeyCache.get("", () -> "v")).isEmpty();
   }
 
+  /**
+   * Verifies that invalidate removes a cached entry.
+   */
   @Test
   void invalidate_shouldRemoveEntry() {
     caffeineCache.put("key1", "value");
@@ -187,12 +217,18 @@ class HotKeyCacheTest {
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
+  /**
+   * Verifies that invalidate handles null and blank keys without throwing.
+   */
   @Test
   void invalidate_shouldHandleInvalidKey() {
     hotKeyCache.invalidate(null);
     hotKeyCache.invalidate("");
   }
 
+  /**
+   * Verifies that invalidateAll removes multiple cached entries.
+   */
   @Test
   void invalidateAll_shouldRemoveEntries() {
     caffeineCache.put("k1", "v1");
@@ -202,6 +238,9 @@ class HotKeyCacheTest {
     assertThat(caffeineCache.getIfPresent("k2")).isNull();
   }
 
+  /**
+   * Verifies that invalidateAll skips null and blank keys in the input list.
+   */
   @Test
   void invalidateAll_shouldSkipInvalidKeys() {
     caffeineCache.put("k1", "v1");
@@ -209,12 +248,18 @@ class HotKeyCacheTest {
     assertThat(caffeineCache.getIfPresent("k1")).isNull();
   }
 
+  /**
+   * Verifies that get throws HotKeyBlockedException for a blacklisted key.
+   */
   @Test
   void get_shouldThrowHotKeyBlockedExceptionForBlacklistedKey() {
     hotKeyCache.addBlacklist("secret");
     assertThatThrownBy(() -> hotKeyCache.get("secret", () -> "db")).isInstanceOf(HotKeyBlockedException.class);
   }
 
+  /**
+   * Verifies that getWithSoftExpire throws HotKeyBlockedException for a blacklisted key.
+   */
   @Test
   void getWithSoftExpire_shouldThrowHotKeyBlockedExceptionForBlacklistedKey() {
     hotKeyCache.addBlacklist("secret");

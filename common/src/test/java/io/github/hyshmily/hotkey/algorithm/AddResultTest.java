@@ -25,6 +25,9 @@ import org.junit.jupiter.api.Test;
  */
 class AddResultTest {
 
+  /**
+   * Verifies that a hot-key result has {@code isHotKey() == true}, the correct key, and no expelled key.
+   */
   @Test
   void shouldCreateHotKeyResult() {
     AddResult result = new AddResult(null, true, "key1");
@@ -33,12 +36,18 @@ class AddResultTest {
     assertThat(result.expelledKey()).isNull();
   }
 
+  /**
+   * Verifies that a result created with an expelled key retains it.
+   */
   @Test
   void shouldCreateResultWithExpelledKey() {
     AddResult result = new AddResult("expelledKey", true, "key1");
     assertThat(result.expelledKey()).isEqualTo("expelledKey");
   }
 
+  /**
+   * Verifies that a non-hot result has {@code isHotKey() == false}.
+   */
   @Test
   void shouldCreateNonHotResult() {
     AddResult result = new AddResult(null, false, "key1");

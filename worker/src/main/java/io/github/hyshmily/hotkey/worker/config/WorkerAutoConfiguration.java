@@ -413,6 +413,18 @@ public class WorkerAutoConfiguration {
     return new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId);
   }
 
+  /**
+   * Schedules periodic threshold recalculation using the {@link ThresholdLearner}.
+   *
+   * <p>The learner runs at the interval specified by
+   * {@code hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms}.
+   * The returned placeholder bean keeps the scheduled task alive in the context.
+   *
+   * @param learner    the threshold learner to schedule
+   * @param properties worker configuration for the recalculation interval
+   * @param scheduler  the shared worker scheduler
+   * @return a placeholder {@link Object} bean that keeps the scheduled task alive
+   */
   @Bean
   public Object thresholdLearningTask(
     ThresholdLearner learner,

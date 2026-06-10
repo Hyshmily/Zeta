@@ -44,6 +44,9 @@ class WorkerAutoConfigurationTest {
     .withUserConfiguration(MinimalMockConfiguration.class)
     .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class));
 
+  /**
+   * Verifies all expected worker beans are created when {@code hotkey.worker.enabled=true}.
+   */
   @Test
   void allBeansAreCreatedWhenWorkerEnabled() {
     runner.run(ctx -> {
@@ -59,6 +62,9 @@ class WorkerAutoConfigurationTest {
     });
   }
 
+  /**
+   * Verifies no worker beans are created when {@code hotkey.worker.enabled=false}.
+   */
   @Test
   void beansAreNotCreatedWhenWorkerDisabled() {
     new ApplicationContextRunner()
@@ -74,6 +80,9 @@ class WorkerAutoConfigurationTest {
       });
   }
 
+  /**
+   * Verifies the {@link SlidingWindowDetector} bean is created with the expected default parameters.
+   */
   @Test
   void slidingWindowDetectorHasCorrectDefaults() {
     runner.run(ctx -> {

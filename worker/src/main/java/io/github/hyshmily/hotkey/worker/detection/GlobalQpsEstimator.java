@@ -27,8 +27,11 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class GlobalQpsEstimator {
 
+  /** Number of time slices that form one complete sliding window. */
   private final int windowSize;
+  /** Duration of a single time slice in milliseconds. */
   private final long timeMillisPerSlice;
+  /** Doubled circular buffer of per-slice aggregate counters. */
   private final AtomicLong[] slices;
 
   /**

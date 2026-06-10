@@ -37,7 +37,9 @@ public class ConsistentHashRing {
    */
   private record RingState(NavigableMap<Integer, String> ring, Set<String> liveNodes) {}
 
+  /** Number of virtual copies created per physical node on the ring. */
   private final int virtualNodeCount;
+  /** Current immutable ring snapshot; read lock-free, replaced atomically via {@link #rebuild(Set)}. */
   private volatile RingState currentState = new RingState(Collections.emptyNavigableMap(), Collections.emptySet());
 
   /**

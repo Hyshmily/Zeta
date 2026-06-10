@@ -26,12 +26,18 @@ import org.springframework.boot.SpringApplication;
  */
 class WorkerApplicationTest {
 
+  /**
+   * Verifies that {@link WorkerApplication} declares a {@code main(String[])} method.
+   */
   @Test
   void shouldHaveMainMethod() throws Exception {
     Method main = WorkerApplication.class.getMethod("main", String[].class);
     assertThat(main).isNotNull();
   }
 
+  /**
+   * Verifies that {@link WorkerApplication} is annotated with {@code @SpringBootApplication}.
+   */
   @Test
   void shouldBeAnnotatedWithSpringBootApplication() {
     org.springframework.boot.autoconfigure.SpringBootApplication annotation =
@@ -39,6 +45,9 @@ class WorkerApplicationTest {
     assertThat(annotation).isNotNull();
   }
 
+  /**
+   * Verifies that the {@link WorkerApplication} class can be loaded without errors.
+   */
   @Test
   void classShouldLoad() {
     assertThat(WorkerApplication.class).isNotNull();

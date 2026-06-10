@@ -25,6 +25,9 @@ import org.junit.jupiter.api.Test;
  */
 class HotKeyDecisionTest {
 
+  /**
+   * Verifies that the hot factory method creates a decision with HOT type.
+   */
   @Test
   void hot_shouldCreateHotDecision() {
     HotKeyDecision decision = HotKeyDecision.hot("key1");
@@ -32,20 +35,29 @@ class HotKeyDecisionTest {
     assertThat(decision.cacheKey()).isEqualTo("key1");
   }
 
+  /**
+   * Verifies that the cool factory method creates a decision with COOL type.
+   */
   @Test
   void cool_shouldCreateCoolDecision() {
     HotKeyDecision decision = HotKeyDecision.cool("key1");
     assertThat(decision.type()).isEqualTo(DecisionType.COOL);
   }
 
+  /**
+   * Verifies that the none factory method creates a decision with NONE type.
+   */
   @Test
   void none_shouldCreateNoneDecision() {
     HotKeyDecision decision = HotKeyDecision.none("key1");
     assertThat(decision.type()).isEqualTo(DecisionType.NONE);
   }
 
+  /**
+   * Verifies the DecisionType enum contains exactly HOT, COOL, and NONE in that order.
+   */
   @Test
   void decisionType_shouldHaveExpectedValues() {
-    assertThat(DecisionType.values()).containsExactly(DecisionType.HOT, DecisionType.COOL, DecisionType.PING, DecisionType.NONE);
+    assertThat(DecisionType.values()).containsExactly(DecisionType.HOT, DecisionType.COOL, DecisionType.NONE);
   }
 }

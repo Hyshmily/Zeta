@@ -39,10 +39,16 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Integration test for cache synchronization via RabbitMQ broadcast.
+ *
+ * <p>Verifies that INVALIDATE and REFRESH messages sent to the sync exchange
+ * are correctly processed by {@code CacheSyncListener}, clearing or reloading
+ * the L1 cache entry respectively.
+ */
 @Testcontainers
 @Tag("docker")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Integration test for cache synchronization via RabbitMQ broadcast. */
 class CacheSyncRabbitMQIT extends AbstractIntegrationIT {
 
   @Container
@@ -76,6 +82,7 @@ class CacheSyncRabbitMQIT extends AbstractIntegrationIT {
   @Autowired
   StringRedisTemplate redisTemplate;
 
+  /** Sends an INVALIDATE message to the sync exchange and verifies the L1 cache entry is cleared. */
   @Test
   void invalidateMessage_shouldClearLocalCache() {
     String key = "it:sync:inv:" + UUID.randomUUID();
@@ -96,6 +103,7 @@ class CacheSyncRabbitMQIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).isEmpty());
   }
 
+  /** Sends a REFRESH message to the sync exchange and verifies the L1 cache reloads from Redis. */
   @Test
   void refreshMessage_shouldReloadValue() {
     String key = "it:sync:ref:" + UUID.randomUUID();

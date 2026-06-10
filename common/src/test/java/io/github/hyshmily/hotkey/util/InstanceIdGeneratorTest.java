@@ -31,11 +31,17 @@ class InstanceIdGeneratorTest {
     InstanceIdGenerator.setOverride("");
   }
 
+  /**
+   * Verifies that getNodeId returns a non-negative node ID.
+   */
   @Test
   void getNodeId_shouldReturnNonNegative() {
     assertThat(InstanceIdGenerator.getNodeId()).isNotNegative();
   }
 
+  /**
+   * Verifies that get() returns the same cached value on the second call.
+   */
   @Test
   void get_shouldReturnCachedValueOnSecondCall() {
     String first = InstanceIdGenerator.get();
@@ -43,6 +49,9 @@ class InstanceIdGeneratorTest {
     assertThat(second).isEqualTo(first);
   }
 
+  /**
+   * Verifies that setOverride overrides the default instance ID with a custom value.
+   */
   @Test
   void setOverride_shouldTakePrecedence() {
     InstanceIdGenerator.setOverride("custom-instance");

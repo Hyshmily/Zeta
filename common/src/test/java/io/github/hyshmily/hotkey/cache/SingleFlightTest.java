@@ -41,12 +41,18 @@ class SingleFlightTest {
     singleFlight = new SingleFlight(1000, 10, 5, executor);
   }
 
+  /**
+   * Verifies that a basic load operation returns the value supplied by the loader.
+   */
   @Test
   void load_shouldReturnValue() {
     Optional<String> result = singleFlight.load("key", () -> "value");
     assertThat(result).contains("value");
   }
 
+  /**
+   * Verifies that concurrent requests for the same key are deduplicated so the loader executes only once (or fewer times than the request count).
+   */
   @Test
   void load_shouldDeduplicateConcurrentRequests() throws InterruptedException {
     AtomicInteger counter = new AtomicInteger(0);
@@ -71,18 +77,27 @@ class SingleFlightTest {
     assertThat(counter.get()).isLessThan(5);
   }
 
+  /**
+   * Verifies that a supplier exception results in an empty Optional.
+   */
   @Test
   void load_shouldReturnEmptyOnSupplierException() {
     Optional<String> result = singleFlight.load("key", () -> { throw new RuntimeException("fail"); });
     assertThat(result).isEmpty();
   }
 
+  /**
+   * Verifies that a supplier returning null results in an empty Optional.
+   */
   @Test
   void load_shouldReturnEmptyOnNullSupplier() {
     Optional<String> result = singleFlight.load("key", () -> null);
     assertThat(result).isEmpty();
   }
 
+  /**
+   * Verifies that the estimated inflight request size is never negative.
+   */
   @Test
   void estimatedInflightSize_shouldBeNonNegative() {
     assertThat(singleFlight.estimatedInflightSize()).isNotNegative();

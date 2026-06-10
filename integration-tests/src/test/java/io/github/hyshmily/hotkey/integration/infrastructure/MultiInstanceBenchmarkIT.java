@@ -66,16 +66,23 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Benchmark for multi-instance cache consistency under concurrent access.
+ *
+ * <p>Simulates a multi-node deployment with a local Worker (HeavyKeeper) consuming
+ * reports and issuing HOT decisions. Measures throughput, latency, and propagation
+ * delay across warmup, hot-read, worker decision, cross-instance sync, and combined
+ * stress phases. Outputs a JSON report with per-phase metrics.
+ */
 @Testcontainers
 @Tag("docker")
 @Tag("benchmark")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Benchmark for multi-instance cache consistency under concurrent access. */
 class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(MultiInstanceBenchmarkIT.class);
 
-  // ── Containers ──
+  // --- Containers ---
 
   @Container
   static GenericContainer<?> redis = new GenericContainer<>(
@@ -89,6 +96,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     .waitingFor(Wait.forLogMessage(".*Server startup complete.*", 1))
     .withStartupTimeout(Duration.ofMinutes(2));
 
+  /**
+   * Registers dynamic Testcontainers host/port properties for Redis and RabbitMQ.
+   *
+   * @param r the dynamic property registry supplied by Spring
+   */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -101,7 +113,7 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     r.add("hotkey.worker-listener.exchange", () -> "hotkey.broadcast.exchange");
   }
 
-  // ── Injection ──
+  // --- Injection ---
 
   @Autowired
   HotKey hotKey;
@@ -115,7 +127,7 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
   @Autowired
   ConnectionFactory connectionFactory;
 
-  // ── Benchmark config ──
+  // --- Benchmark config ---
 
   static final int HOT_KEY_COUNT = 10_000;
   static final int COLD_KEY_COUNT = 40_000;
@@ -126,7 +138,7 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
   static final int SOFT_TTL = 300_000;
   static final int WORKER_HOT_THRESHOLD = 50;
 
-  // ── Simulated Worker state ──
+  // --- Simulated Worker state ---
 
   HeavyKeeper workerTopK;
   SimpleMessageListenerContainer workerContainer;
@@ -136,18 +148,19 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
   AtomicLong workerDecisionVersion = new AtomicLong(System.currentTimeMillis());
   final List<Long> decisionPropagationNs = Collections.synchronizedList(new ArrayList<>());
 
-  // ── App-2 simulation state ──
+  // --- App-2 simulation state ---
 
   final List<Long> syncPropagationNs = Collections.synchronizedList(new ArrayList<>());
 
-  // ── Phase metrics ──
+  // --- Phase metrics ---
 
   static final String REPORT_EXCHANGE = "hotkey.report.exchange";
   static final String SYNC_EXCHANGE = "hotkey.sync.exchange";
   static final String BROADCAST_EXCHANGE = "hotkey.broadcast.exchange";
 
-  // ══════════════════════════════════════════════════
+  // ================================================
 
+  /** Runs warmup, hot-read, worker decision, cross-instance sync, and combined stress phases and writes a JSON report. */
   @Test
   void fullChainBenchmark() throws Exception {
     declareReportExchange();
@@ -203,10 +216,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     assertThat(totalErrors).as("Total benchmark errors (≤5 tolerated)").isLessThanOrEqualTo(5);
   }
 
-  // ══════════════════════════════════════════════════
+  // ================================================
   // Phase 1: Warmup
-  // ══════════════════════════════════════════════════
+  // ================================================
 
+  /** Seeds all hot and cold keys into Redis and L1. */
   private Map<String, Object> phaseWarmup() throws Exception {
     log.info("══════ Phase 1: WARMUP ══════");
     log.info("Putting {} keys via app-1 (L1 + Redis) ...", TOTAL_KEYS);
@@ -225,10 +239,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return phaseMap("warmup", TOTAL_KEYS, ms, errors.get());
   }
 
-  // ══════════════════════════════════════════════════
+  // ================================================
   // Phase 2: Hot read (app-1 only)
-  // ══════════════════════════════════════════════════
+  // ================================================
 
+  /** Reads hot keys via app-1 and measures L1 hit rate. */
   private Map<String, Object> phaseHotRead() throws Exception {
     log.info("══════ Phase 2: APP-1 HOT READ ══════");
     log.info("Reading {} hot keys via app-1 should hit L1 ...", HOT_KEY_COUNT);
@@ -256,10 +271,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return phase;
   }
 
-  // ══════════════════════════════════════════════════
+  // ================================================
   // Phase 3: Worker decision flow
-  // ══════════════════════════════════════════════════
+  // ================================================
 
+  /** Triggers reports via reads, simulates Worker consuming and issuing HOT decisions. */
   private Map<String, Object> phaseWorkerDecision() throws Exception {
     log.info("══════ Phase 3: WORKER DECISION ══════");
     log.info("Triggering reports via reads → Worker consumes → HOT decisions → app-1 promotes ...");
@@ -308,10 +324,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return phase;
   }
 
-  // ══════════════════════════════════════════════════
+  // ================================================
   // Phase 4: Cross-instance sync (simulate app-2)
-  // ══════════════════════════════════════════════════
+  // ================================================
 
+  /** Simulates app-2 sending INVALIDATE broadcasts and measures propagation latency. */
   private Map<String, Object> phaseCrossInstanceSync() throws Exception {
     log.info("══════ Phase 4: CROSS-INSTANCE SYNC ══════");
     log.info("Simulating app-2 sending INVALIDATE broadcasts to {} keys ...", HOT_KEY_COUNT);
@@ -386,10 +403,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return phase;
   }
 
-  // ══════════════════════════════════════════════════
+  // ================================================
   // Phase 5: Combined stress (all paths simultaneously)
-  // ══════════════════════════════════════════════════
+  // ================================================
 
+  /** Runs a combined workload (70% read, 15% write, 10% sync invalidate, 5% Worker decision). */
   private Map<String, Object> phaseCombinedStress() throws Exception {
     log.info("══════ Phase 5: COMBINED STRESS ══════");
     log.info("70% read + 15% write + 10% app-2 invalidate + 5% Worker decision ...");
@@ -483,10 +501,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return phase;
   }
 
-  // ══════════════════════════════════════════════════
+  // ================================================
   // Simulated Worker
-  // ══════════════════════════════════════════════════
+  // ================================================
 
+  /** Starts a simulated Worker using HeavyKeeper to consume reports and issue HOT decisions. */
   private void startWorker() {
     log.info("Starting simulated Worker (HeavyKeeper + decision loop) ...");
     workerTopK = new HeavyKeeper(200, 20000, 10, 0.9, 10);
@@ -549,6 +568,7 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     log.info("Simulated Worker started, listening on queue: {}", queueName);
   }
 
+  /** Stops the simulated Worker listener container. */
   private void stopWorker() {
     if (workerContainer != null && workerContainer.isRunning()) {
       workerContainer.stop();
@@ -556,6 +576,9 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     }
   }
 
+  /**
+   * Declares the report fanout exchange idempotently.
+   */
   private void declareReportExchange() {
     rabbitTemplate.execute(channel -> {
       channel.exchangeDeclare(REPORT_EXCHANGE, "fanout", true);
@@ -563,14 +586,27 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     });
   }
 
-  // ══════════════════════════════════════════════════
+  // ================================================
   // Helpers
-  // ══════════════════════════════════════════════════
+  // ================================================
 
+  /**
+   * Generates a deterministic key name from an integer index.
+   *
+   * @param idx the key index
+   * @return the key string in the format "benchmark:key:{idx}"
+   */
   private static String keyFor(int idx) {
     return "benchmark:key:" + idx;
   }
 
+  /**
+   * Computes the p-th percentile from a sorted array of latencies.
+   *
+   * @param sorted sorted latency values (milliseconds, ascending)
+   * @param p      the percentile to compute (e.g. 50, 90, 99)
+   * @return the p-th percentile value
+   */
   private static double percentile(double[] sorted, double p) {
     if (sorted.length == 0) return 0;
     double rank = p / 100.0 * (sorted.length - 1);
@@ -581,16 +617,34 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return sorted[lo] * (1 - frac) + sorted[hi] * frac;
   }
 
+  /**
+   * Rounds a double to 3 decimal places.
+   *
+   * @param v the value to round
+   * @return the value rounded to 3 decimal places
+   */
   private static double round3(double v) {
     return Math.round(v * 1000.0) / 1000.0;
   }
 
+  /**
+   * Initialises per-thread latency buckets for the given thread count.
+   *
+   * @param n number of threads
+   * @return a list of n empty latency lists
+   */
   private static List<List<Long>> initLatencyBuckets(int n) {
     List<List<Long>> buckets = new ArrayList<>(n);
     for (int i = 0; i < n; i++) buckets.add(new ArrayList<>());
     return buckets;
   }
 
+  /**
+   * Flattens per-thread latency buckets into a single sorted array (ms).
+   *
+   * @param buckets per-thread latency lists (nanoseconds)
+   * @return sorted array of latency values in milliseconds
+   */
   private static double[] flattenLatencies(List<List<Long>> buckets) {
     double[] arr = buckets.stream()
         .flatMapToLong(list -> list.stream().mapToLong(Long::longValue))
@@ -600,6 +654,15 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return arr;
   }
 
+  /**
+   * Creates a basic phase result map with name, ops, duration, and throughput.
+   *
+   * @param name     the phase name
+   * @param totalOps total operations performed
+   * @param ms       elapsed time in milliseconds
+   * @param errors   error count
+   * @return a phase result map with basic metrics
+   */
   private static Map<String, Object> phaseMap(
       String name, long totalOps, double ms, long errors) {
     Map<String, Object> p = new HashMap<>();
@@ -611,6 +674,18 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return p;
   }
 
+  /**
+   * Creates a phase result map including latency percentiles and L1/L2 hit rates.
+   *
+   * @param name     the phase name
+   * @param totalOps total operations performed
+   * @param ms       elapsed time in milliseconds
+   * @param l1Hits   number of L1 cache hits
+   * @param l2Calls  number of L2 (Redis) calls
+   * @param errors   error count
+   * @param lats     sorted latency values in milliseconds
+   * @return a phase result map with latency percentiles and hit rates
+   */
   private static Map<String, Object> phaseWithLatency(
       String name, long totalOps, double ms, long l1Hits, long l2Calls,
       long errors, double[] lats) {
@@ -633,19 +708,22 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return p;
   }
 
+  /** Logs a phase summary line with name, ops, duration, and errors. */
   private static void logPhase(Map<String, Object> phase) {
     log.info("Phase [{}] done: {} ops in {} ms, errors={}",
         phase.get("name"), phase.get("totalOps"),
         String.format("%.1f", phase.get("durationMs")), phase.get("errors"));
   }
 
-  // ── Helpers: measure ──
+  // --- Helpers: measure ---
 
+  /** A runnable that may throw any checked exception. */
   @FunctionalInterface
   interface CheckedRunnable {
     void run() throws Throwable;
   }
 
+  /** Measures execution time of a runnable in nanoseconds. */
   static long measure(CheckedRunnable r) {
     long t0 = System.nanoTime();
     try {
@@ -658,13 +736,15 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     return System.nanoTime() - t0;
   }
 
-  // ── Helpers: concurrent runner (no latency) ──
+  // --- Helpers: concurrent runner (no latency) ---
 
+  /** A concurrent key-value operation that may throw any checked exception. */
   @FunctionalInterface
   interface Op {
     void run(int tid, int i, String key, String value) throws Throwable;
   }
 
+  /** Runs a concurrent key-based workload across a fixed thread pool. */
   private static void runConcurrent(int threads, int keyCount, Op op, AtomicInteger errors)
       throws Exception {
     int keysPerThread = keyCount / threads;
@@ -693,8 +773,9 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
     pool.shutdownNow();
   }
 
-  // ── Helpers: read phase with latency ──
+  // --- Helpers: read phase with latency ---
 
+  /** Runs a concurrent read workload with per-operation latency tracking. */
   private static void runReadWithLatency(
       int threads, int opsPerThread, int keyRange, int keyOffset,
       Op op, AtomicInteger errors, List<List<Long>> threadLatencies) throws Exception {

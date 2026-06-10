@@ -47,10 +47,16 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Integration test for RabbitMQ connection recovery after broker restart.
+ *
+ * <p>Verifies that the HotKey system survives RabbitMQ broker restart: after a forced
+ * restart, cache operations resume and broadcast sync messages are still processed
+ * correctly.
+ */
 @Testcontainers
 @Tag("docker")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Integration test for RabbitMQ connection recovery after broker restart. */
 class RabbitMQRecoveryIT extends AbstractIntegrationIT {
 
   private static final Logger log = LoggerFactory.getLogger(RabbitMQRecoveryIT.class);
@@ -67,6 +73,11 @@ class RabbitMQRecoveryIT extends AbstractIntegrationIT {
     .waitingFor(Wait.forLogMessage(".*Server startup complete.*", 1))
     .withStartupTimeout(Duration.ofMinutes(2));
 
+  /**
+   * Registers dynamic Testcontainers host/port properties for Redis and RabbitMQ.
+   *
+   * @param r the dynamic property registry supplied by Spring
+   */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
     r.add("spring.data.redis.host", redis::getHost);
@@ -86,6 +97,7 @@ class RabbitMQRecoveryIT extends AbstractIntegrationIT {
   @Autowired
   RabbitTemplate rabbitTemplate;
 
+  /** Sends an INVALIDATE message via broadcast and verifies the L1 cache entry is cleared. */
   @Test
   void invalidateSync_shouldClearL1() throws Exception {
     String key = "it:rr:inv:" + UUID.randomUUID();
@@ -106,6 +118,7 @@ class RabbitMQRecoveryIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).isEmpty());
   }
 
+  /** Sends a REFRESH message via broadcast and verifies the L1 entry is updated from Redis. */
   @Test
   void refreshSync_shouldUpdateL1() throws Exception {
     String key = "it:rr:ref:" + UUID.randomUUID();
@@ -129,6 +142,7 @@ class RabbitMQRecoveryIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).hasValue(newValue));
   }
 
+  /** Runs concurrent putThrough and broadcast INVALIDATE calls and verifies no exceptions occur. */
   @Test
   void concurrentAccess_withBroadcastSync() throws Exception {
     int threadCount = 5;

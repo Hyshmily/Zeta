@@ -40,10 +40,15 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+/**
+ * Full-stack integration test exercising the complete HotKey pipeline.
+ *
+ * <p>Covers put-through, invalidate, HOT decision promotion, and recovery
+ * with real Redis + RabbitMQ infrastructure.
+ */
 @Testcontainers
 @Tag("docker")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-/** Full-stack integration test exercising the complete HotKey pipeline. */
 class FullStackIT extends AbstractIntegrationIT {
 
   @Container
@@ -77,6 +82,7 @@ class FullStackIT extends AbstractIntegrationIT {
   @Autowired
   StringRedisTemplate redisTemplate;
 
+  /** Exercises the basic put-through, invalidate, and reload flow through HotKey facade. */
   @Test
   void hotKeyFlow_shouldWorkEndToEnd() {
     String key = "it:fullstack:" + UUID.randomUUID();
@@ -94,6 +100,7 @@ class FullStackIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).isPresent());
   }
 
+  /** Sends a HOT decision from the Worker exchange, verifies promotion, then invalidates and recovers via supplier. */
   @Test
   void hotDecision_shouldPromote_andInvalidate_shouldClear() {
     String key = "it:fullstack:hotinv:" + UUID.randomUUID();

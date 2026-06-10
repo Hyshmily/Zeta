@@ -53,6 +53,9 @@ class HotKeyTest {
     hotKey = new HotKey(hotKeyCache, topK, workerTopK);
   }
 
+  /**
+   * Verifies that isLocalHotKey delegates to HotKeyCache and returns the expected result.
+   */
   @Test
   void isLocalHotKey_shouldDelegateToCache() {
     when(hotKeyCache.isLocalHotKey("key1")).thenReturn(true);
@@ -60,6 +63,9 @@ class HotKeyTest {
     verify(hotKeyCache).isLocalHotKey("key1");
   }
 
+  /**
+   * Verifies that peek delegates to HotKeyCache and returns the cached value if present.
+   */
   @Test
   void peek_shouldDelegateToCache() {
     when(hotKeyCache.peek("key1")).thenReturn(Optional.of("value"));
@@ -67,6 +73,9 @@ class HotKeyTest {
     verify(hotKeyCache).peek("key1");
   }
 
+  /**
+   * Verifies that get(key, supplier) delegates to HotKeyCache.
+   */
   @Test
   void get_shouldDelegateToCache() {
     when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.of("value"));
@@ -74,6 +83,9 @@ class HotKeyTest {
     verify(hotKeyCache).get(anyString(), any());
   }
 
+  /**
+   * Verifies that get(key, supplier, hardTtlMs, softTtlMs) delegates to HotKeyCache with TTL parameters.
+   */
   @Test
   void get_withTtl_shouldDelegateToCache() {
     when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
@@ -81,6 +93,9 @@ class HotKeyTest {
     verify(hotKeyCache).get(anyString(), any(), anyLong(), anyLong());
   }
 
+  /**
+   * Verifies that getWithSoftExpire delegates to HotKeyCache.
+   */
   @Test
   void getWithSoftExpire_shouldDelegateToCache() {
     when(hotKeyCache.getWithSoftExpire(anyString(), any())).thenReturn(Optional.of("v"));
@@ -88,64 +103,97 @@ class HotKeyTest {
     verify(hotKeyCache).getWithSoftExpire(anyString(), any());
   }
 
+  /**
+   * Verifies that invalidate delegates to HotKeyCache to remove the key.
+   */
   @Test
   void invalidate_shouldDelegateToCache() {
     hotKey.invalidate("key1");
     verify(hotKeyCache).invalidate("key1");
   }
 
+  /**
+   * Verifies that invalidateAll with varargs delegates to HotKeyCache with the key list.
+   */
   @Test
   void invalidateAll_varargs_shouldDelegateToCache() {
     hotKey.invalidateAll("k1", "k2");
     verify(hotKeyCache).invalidateAll(List.of("k1", "k2"));
   }
 
+  /**
+   * Verifies that putThrough delegates to HotKeyCache.
+   */
   @Test
   void putThrough_shouldDelegateToCache() {
     hotKey.putThrough("key1", "value", () -> {});
     verify(hotKeyCache).putThrough(anyString(), any(), any());
   }
 
+  /**
+   * Verifies that putBeforeInvalidate delegates to HotKeyCache.
+   */
   @Test
   void putBeforeInvalidate_shouldDelegateToCache() {
     hotKey.putBeforeInvalidate("key1", () -> {});
     verify(hotKeyCache).putBeforeInvalidate(anyString(), any());
   }
 
+  /**
+   * Verifies that returnLocalHotKeys returns items from the local TopK instance.
+   */
   @Test
   void returnHotKeys_shouldReturnLocalFromTopK() {
     when(topK.list()).thenReturn(List.of(new Item("k1", 10)));
     assertThat(hotKey.returnLocalHotKeys()).hasSize(1);
   }
 
+  /**
+   * Verifies that returnLocalHotKeys returns an empty list when the local TopK is null.
+   */
   @Test
   void returnHotKeys_shouldReturnLocalEmptyWhenTopKNull() {
     HotKey hk = new HotKey(hotKeyCache, null);
     assertThat(hk.returnLocalHotKeys()).isEmpty();
   }
 
+  /**
+   * Verifies that returnWorkerHotKeys returns items from the worker TopK instance.
+   */
   @Test
   void returnWorkerHotKeys_shouldReturnFromWorkerTopK() {
     when(workerTopK.list()).thenReturn(List.of(new Item("k1", 5)));
     assertThat(hotKey.returnWorkerHotKeys()).hasSize(1);
   }
 
+  /**
+   * Verifies that returnWorkerHotKeys returns an empty list when the worker TopK is null.
+   */
   @Test
   void returnWorkerHotKeys_shouldReturnEmptyWhenWorkerTopKNull() {
     assertThat(new HotKey(hotKeyCache, topK, null).returnWorkerHotKeys()).isEmpty();
   }
 
+  /**
+   * Verifies that returnLocalTotalDataStreams returns the total count from the local TopK.
+   */
   @Test
   void returnTotalDataStreams_shouldReturnLocalFromTopK() {
     when(topK.total()).thenReturn(100L);
     assertThat(hotKey.returnLocalTotalDataStreams()).isEqualTo(100L);
   }
 
+  /**
+   * Verifies that returnLocalTotalDataStreams returns zero when the local TopK is null.
+   */
   @Test
   void returnTotalDataStreams_shouldReturnLocalZeroWhenTopKNull() {
     assertThat(new HotKey(hotKeyCache, null).returnLocalTotalDataStreams()).isZero();
   }
 
+  /**
+   * Verifies that returnLocalExpelledHotKeys returns expelled items from the local TopK.
+   */
   @Test
   void returnExpelledHotKeys_shouldReturnLocalFromTopK() {
     LinkedBlockingQueue<Item> queue = new LinkedBlockingQueue<>();
@@ -154,6 +202,9 @@ class HotKeyTest {
     assertThat(hotKey.returnLocalExpelledHotKeys()).hasSize(1);
   }
 
+  /**
+   * Verifies that cache methods throw UnsupportedOperationException in worker-only mode (null HotKeyCache).
+   */
   @Test
   void cacheMethods_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, topK);
@@ -171,6 +222,9 @@ class HotKeyTest {
       .isInstanceOf(UnsupportedOperationException.class);
   }
 
+  /**
+   * Verifies that HotKeyBlockedException from HotKeyCache propagates through the facade.
+   */
   @Test
   void get_shouldPropagateHotKeyBlockedException() {
     when(hotKeyCache.get(anyString(), any()))

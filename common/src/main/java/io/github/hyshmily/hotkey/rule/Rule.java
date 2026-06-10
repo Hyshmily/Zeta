@@ -49,15 +49,22 @@ public class Rule {
     ALLOW,
   }
 
+  /** Unique identifier for this rule. */
   private String id;
+  /** Timestamp (epoch millis) when this rule was created. */
   private long createdAt;
+  /** Pattern type used to match cache keys. */
   private RuleType type;
+  /** Pattern string (exact value, prefix, glob, or regex). */
   private String pattern;
+  /** Action to take when a key matches this rule. */
   private RuleAction action;
   /** Compiled regex for WILDCARD and REGEX types; lazily initialised. */
   private transient volatile Pattern compiledPattern;
 
-  /** No-arg constructor for frameworks (e.g. Jackson deserialisation). */
+  /**
+   * No-arg constructor for frameworks (e.g. Jackson deserialisation).
+   */
   public Rule() {}
 
   /**

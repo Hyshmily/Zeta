@@ -21,6 +21,8 @@ import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import lombok.RequiredArgsConstructor;
+
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -29,7 +31,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
-import lombok.RequiredArgsConstructor;
 
 
 /**
@@ -54,22 +55,34 @@ import lombok.RequiredArgsConstructor;
 public class HotKeyReporter {
 
   private static final HotKeyLogger log = new DefaultLogger(HotKeyReporter.class);
+  /** Monitors worker shard liveness; used to skip reporting to dead shards. */
   private final WorkerHealthMonitor workerHealthMonitor;
-
+  /** Caffeine cache acting as a temporary counter store; entries evict after 30 s of inactivity. */
   private final Cache<String, LongAdder> counters = Caffeine.newBuilder()
     .expireAfterAccess(30, TimeUnit.SECONDS)
     .maximumSize(100_000)
     .build();
+  /** Publishes aggregated reports to RabbitMQ. */
   private final ReportPublisher reportPublisher;
+  /** Scheduler for the periodic flush loop. */
   private final ScheduledExecutorService scheduler;
+  /** Fixed delay between report flushes in milliseconds. */
   private final long reportIntervalMs;
+  /** Number of shards for legacy routing (Math.floorMod). */
   private final int shardCount;
+  /** Name of this application instance, included in report messages. */
   private final String appName;
+  /** Maximum capacity of the dispatcher work queue. */
   private final int queueCapacity;
+  /** Timeout (ms) for offering a batch to the dispatcher queue before dropping. */
   private final int queueOfferTimeoutMs;
+  /** Number of consumer threads draining the dispatcher queue. */
   private final int consumerCount;
+  /** Consistent-hashing ring manager; null in legacy mode. */
   private final RingManager ringManager;
+  /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
+  /** The report dispatcher instance; created on start(). */
   private ReportDispatcher dispatcher;
 
   /**
@@ -176,13 +189,18 @@ public class HotKeyReporter {
 
     sharded.forEach((target, counts) -> {
       if (!dispatcher.enqueue(new ShardBatch(target, now, counts))) {
-        log.warn(
-          "report queue full, dropped target={} keys={}, depth={}/{}",
-          target,
-          counts.size(),
-          dispatcher.depth(),
-          queueCapacity
-        );
+        long dropped = dispatcher.dropped();
+
+        if (dropped % 100 == 0 || dropped == 1) {
+          log.warn(
+            "report queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
+            target,
+            counts.size(),
+            dispatcher.depth(),
+            queueCapacity,
+            dropped
+          );
+        }
       }
     });
   }
@@ -250,10 +268,15 @@ public class HotKeyReporter {
    */
   class ReportDispatcher {
 
+    /** Bounded work queue between the flush loop and the consumer threads. */
     private final BlockingQueue<ShardBatch> queue = new LinkedBlockingQueue<>(queueCapacity);
+    /** Count of batches discarded due to staleness (>5 s wait in queue). */
     private final AtomicLong expiredCount = new AtomicLong();
+    /** Count of batches rejected because the queue was full. */
     private final AtomicLong droppedCount = new AtomicLong();
+    /** Active consumer threads draining the work queue. */
     private final List<Thread> consumers = new ArrayList<>();
+    /** Lifecycle flag; false after shutdown. */
     private volatile boolean running;
 
     /**

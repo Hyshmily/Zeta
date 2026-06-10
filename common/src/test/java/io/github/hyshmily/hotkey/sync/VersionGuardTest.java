@@ -37,18 +37,27 @@ class VersionGuardTest {
     cache = Caffeine.newBuilder().maximumSize(100).build();
   }
 
+  /**
+   * Verifies that for two normal (non-degraded) entries, the sync is skipped when the existing version is higher.
+   */
   @Test
   void shouldSkipForSync_bothNormal_shouldSkipWhenExistingVersionHigher() {
     cache.put("key", entry(5, false, 0));
     assertThat(VersionGuard.shouldSkipForSync(cache, "key", 4, false)).isTrue();
   }
 
+  /**
+   * Verifies that for two normal entries, the sync is not skipped when the incoming version is higher.
+   */
   @Test
   void shouldSkipForSync_bothNormal_shouldNotSkipWhenIncomingVersionHigher() {
     cache.put("key", entry(5, false, 0));
     assertThat(VersionGuard.shouldSkipForSync(cache, "key", 6, false)).isFalse();
   }
 
+  /**
+   * Verifies that a degraded incoming message is always skipped when the existing entry is normal.
+   */
   @Test
   void shouldSkipForSync_existingNormalIncomingDegraded_shouldAlwaysSkip() {
     cache.put("key", entry(5, false, 0));
@@ -56,35 +65,53 @@ class VersionGuardTest {
     assertThat(VersionGuard.shouldSkipForSync(cache, "key", 0, true)).isTrue();
   }
 
+  /**
+   * Verifies that for two degraded entries, the sync is skipped when the existing degraded version is higher.
+   */
   @Test
   void shouldSkipForSync_bothDegraded_shouldSkipWhenExistingVersionHigher() {
     cache.put("key", entry(10, true, 0));
     assertThat(VersionGuard.shouldSkipForSync(cache, "key", 8, true)).isTrue();
   }
 
+  /**
+   * Verifies that a normal (non-degraded) incoming message is always accepted even when the existing entry is degraded with a higher version.
+   */
   @Test
   void shouldSkipForSync_existingDegradedIncomingNormal_shouldNotSkip() {
     cache.put("key", entry(5, true, 0));
     assertThat(VersionGuard.shouldSkipForSync(cache, "key", 1, false)).isFalse();
   }
 
+  /**
+   * Verifies that a sync is never skipped when there is no existing entry in the cache.
+   */
   @Test
   void shouldSkipForSync_noExistingEntry_shouldNotSkip() {
     assertThat(VersionGuard.shouldSkipForSync(cache, "missing", 1, false)).isFalse();
   }
 
+  /**
+   * Verifies that a worker decision is never skipped when the existing entry is degraded.
+   */
   @Test
   void shouldSkipForWorker_existingDegraded_shouldNotSkip() {
     cache.put("key", entry(5, true, 0));
     assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 10)).isFalse();
   }
 
+  /**
+   * Verifies that a worker decision is not skipped when the incoming decision version is greater than the existing one.
+   */
   @Test
   void shouldSkipForWorker_existingNormalLowerVersion_shouldNotSkip() {
     cache.put("key", entry(5, false, 3));
     assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 5)).isFalse();
   }
 
+  /**
+   * Verifies that a worker decision is skipped when the incoming decision version is less than or equal to the existing one.
+   */
   @Test
   void shouldSkipForWorker_existingNormalEqualOrHigherVersion_shouldSkip() {
     cache.put("key", entry(5, false, 5));
@@ -92,6 +119,9 @@ class VersionGuardTest {
     assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 5)).isTrue();
   }
 
+  /**
+   * Verifies that a worker decision is not skipped when there is no existing entry in the cache.
+   */
   @Test
   void shouldSkipForWorker_noExistingEntry_shouldNotSkip() {
     assertThat(VersionGuard.shouldSkipForWorker(cache, "missing", 1)).isFalse();

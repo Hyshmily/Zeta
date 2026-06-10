@@ -61,6 +61,9 @@ class WorkerBroadcasterTest {
     broadcaster = new WorkerBroadcaster(rabbitTemplate, "hotkey.broadcast.exchange", "testApp", stateMachine, configTimestampCounter);
   }
 
+  /**
+   * Verifies that {@code broadcastHot} sends a message with the correct routing key and AMQP headers.
+   */
   @Test
   void shouldSendHotWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastHot("myKey", "test_source");
@@ -72,6 +75,9 @@ class WorkerBroadcasterTest {
     assertThat((Long) sent.getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION)).isPositive();
   }
 
+  /**
+   * Verifies that {@code broadcastCool} sends a message with the correct routing key and AMQP headers.
+   */
   @Test
   void shouldSendCoolWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastCool("myKey");
@@ -83,6 +89,9 @@ class WorkerBroadcasterTest {
     assertThat((Long) sent.getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION)).isPositive();
   }
 
+  /**
+   * Verifies that the decision version counter increments on each successive broadcast.
+   */
   @Test
   void decisionVersionShouldIncrementOnEachBroadcast() {
     broadcaster.broadcastCool("k0");

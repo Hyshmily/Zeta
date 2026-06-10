@@ -48,6 +48,7 @@ public class HotKeySchedulingConfiguration {
 
   private static final HotKeyLogger log = new DefaultLogger(HotKeySchedulingConfiguration.class);
 
+  /** All registered TopK instances (both app-side and worker-side). */
   private final List<TopK> topKInstances;
 
   /**

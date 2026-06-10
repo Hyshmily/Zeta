@@ -24,6 +24,9 @@ import org.junit.jupiter.api.Test;
  */
 class ItemTest {
 
+  /**
+   * Verifies that an Item record is created with the correct key and count fields.
+   */
   @Test
   void shouldCreateItemWithKeyAndCount() {
     Item item = new Item("key1", 42);

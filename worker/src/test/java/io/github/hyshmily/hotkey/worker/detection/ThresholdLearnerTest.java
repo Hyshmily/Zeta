@@ -48,6 +48,9 @@ class ThresholdLearnerTest {
     properties.getGlobalQpsDynamicThreshold().setHotThresholdRatio(0.01);
   }
 
+  /**
+   * Verifies that the {@link ThresholdLearner} skips processing during the initial learning period.
+   */
   @Test
   void shouldSkipDuringLearningPeriod() {
     properties.getGlobalQpsDynamicThreshold().setLearningPeriodMs(Long.MAX_VALUE);
@@ -56,6 +59,9 @@ class ThresholdLearnerTest {
     verifyNoInteractions(qpsEstimator);
   }
 
+  /**
+   * Verifies that the learner skips threshold update when the current QPS is zero.
+   */
   @Test
   void shouldSkipWhenQpsIsZero() {
     when(qpsEstimator.getQps()).thenReturn(0.0);
@@ -64,6 +70,9 @@ class ThresholdLearnerTest {
     verifyNoInteractions(detector);
   }
 
+  /**
+   * Verifies that the learner updates the detector threshold when QPS exceeds the change tolerance.
+   */
   @Test
   void shouldUpdateThresholdWhenQpsExceedsTolerance() {
     when(qpsEstimator.getQps()).thenReturn(100_000.0);
@@ -74,6 +83,9 @@ class ThresholdLearnerTest {
     verify(detector).setThreshold(1000L);
   }
 
+  /**
+   * Verifies that the learner skips threshold update when the QPS change is within the configured tolerance.
+   */
   @Test
   void shouldSkipThresholdUpdateWhenChangeWithinTolerance() {
     when(qpsEstimator.getQps()).thenReturn(105.0);
@@ -85,6 +97,9 @@ class ThresholdLearnerTest {
     verify(detector).setThreshold(10L);
   }
 
+  /**
+   * Verifies that the learner floors the threshold at a minimum value of 10.
+   */
   @Test
   void shouldFloorThresholdAtTen() {
     when(qpsEstimator.getQps()).thenReturn(50.0);
@@ -95,6 +110,9 @@ class ThresholdLearnerTest {
     verify(detector).setThreshold(10L);
   }
 
+  /**
+   * Verifies that exceptions thrown by the QPS estimator are caught and do not propagate.
+   */
   @Test
   void shouldCatchExceptionsGracefully() {
     when(qpsEstimator.getQps()).thenThrow(new RuntimeException("test error"));

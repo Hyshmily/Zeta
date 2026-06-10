@@ -29,6 +29,7 @@ import org.slf4j.LoggerFactory;
  */
 public class DefaultLogger implements HotKeyLogger {
 
+  /** Underlying SLF4J logger instance. */
   private final Logger logger;
 
   /**

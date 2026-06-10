@@ -32,14 +32,28 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties(prefix = "hotkey.worker-listener")
 public class WorkerListenerProperties {
 
+  /** Whether the Worker decision listener is enabled. */
   private boolean enabled = false;
+
+  /** FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats. */
   private String exchangeName = "hotkey.broadcast.exchange";
+
+  /** Prefix for the per-instance queue name (suffixed with instance ID). */
   private String queuePrefix = "hotkey.worker";
 
+  /** Whether the RabbitMQ listener container starts automatically. */
   private boolean autoStartup = true;
+
+  /** Maximum random jitter (ms) added before each Worker decision update to spread Redis load. */
   private int warmupJitterMs = 100;
+
+  /** Number of concurrent RabbitMQ consumers for the Worker decision queue. */
   private int concurrentConsumers = 2;
+
+  /** Pool size for the scheduled executor that runs jittered Worker tasks. */
   private int schedulerPoolSize = 2;
+
+  /** AMQP prefetch count per consumer. */
   private int prefetchCount = 5;
 
   /**

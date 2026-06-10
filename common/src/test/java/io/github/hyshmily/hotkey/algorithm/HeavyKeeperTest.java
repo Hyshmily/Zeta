@@ -47,6 +47,9 @@ class HeavyKeeperTest {
     keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, MIN_COUNT);
   }
 
+  /**
+   * Verifies that the constructor rejects zero or negative values for topK.
+   */
   @Test
   void constructor_shouldRejectInvalidK() {
     assertThatThrownBy(() -> new HeavyKeeper(0, WIDTH, DEPTH, DECAY, MIN_COUNT))
@@ -55,6 +58,9 @@ class HeavyKeeperTest {
       .isInstanceOf(IllegalArgumentException.class);
   }
 
+  /**
+   * Verifies that adding a single key with sufficient count marks it as hot.
+   */
   @Test
   void add_shouldTrackSingleKey() {
     AddResult result = keeper.add("key1", 10);
@@ -63,6 +69,9 @@ class HeavyKeeperTest {
     assertThat(result.expelledKey()).isNull();
   }
 
+  /**
+   * Verifies that when the TopK set is full, adding a high-count key expels the least frequent key.
+   */
   @Test
   void add_shouldReturnExpelledKeyWhenTopKFull() {
     for (int i = 0; i < TOP_K; i++) {
@@ -76,6 +85,9 @@ class HeavyKeeperTest {
     assertThat(result.expelledKey()).isNotNull();
   }
 
+  /**
+   * Verifies that keys added with a count below the minimum threshold are not promoted to hot.
+   */
   @Test
   void add_keysBelowMinCountShouldNotBeHot() {
     keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 100);
@@ -84,6 +96,9 @@ class HeavyKeeperTest {
     assertThat(result.expelledKey()).isNull();
   }
 
+  /**
+   * Verifies that the list of hot keys is returned in descending order of count.
+   */
   @Test
   void list_shouldReturnKeysInDescendingOrder() {
     keeper.add("keyA", 5);
@@ -98,6 +113,9 @@ class HeavyKeeperTest {
     }
   }
 
+  /**
+   * Verifies that listTopN returns at most N items and never exceeds the configured TopK size.
+   */
   @Test
   void listTopN_shouldReturnAtMostNItems() {
     for (int i = 0; i < 10; i++) {
@@ -107,17 +125,26 @@ class HeavyKeeperTest {
     assertThat(keeper.listTopN(100)).hasSizeLessThanOrEqualTo(TOP_K);
   }
 
+  /**
+   * Verifies that contains returns true for a key that has been added and promoted to hot.
+   */
   @Test
   void contains_shouldReturnTrueForHotKey() {
     keeper.add("hotKey", 50);
     assertThat(keeper.contains("hotKey")).isTrue();
   }
 
+  /**
+   * Verifies that contains returns false for a key that has never been added.
+   */
   @Test
   void contains_shouldReturnFalseForUnknownKey() {
     assertThat(keeper.contains("unknown")).isFalse();
   }
 
+  /**
+   * Verifies that the total count reflects the sum of all additions across keys.
+   */
   @Test
   void total_shouldTrackAllAdditions() {
     keeper.add("k1", 10);
@@ -126,6 +153,9 @@ class HeavyKeeperTest {
     assertThat(keeper.total()).isEqualTo(60);
   }
 
+  /**
+   * Verifies that the expelled queue contains items after eviction from a full TopK set.
+   */
   @Test
   void expelled_shouldReturnNonEmptyQueueAfterEviction() {
     for (int i = 0; i < TOP_K + 5; i++) {
@@ -134,6 +164,9 @@ class HeavyKeeperTest {
     assertThat(keeper.expelled()).isNotEmpty();
   }
 
+  /**
+   * Verifies that the fading operation reduces the total accumulated count.
+   */
   @Test
   void fading_shouldHalveCounts() {
     keeper.add("k1", 100);
@@ -142,6 +175,9 @@ class HeavyKeeperTest {
     assertThat(keeper.total()).isLessThan(before);
   }
 
+  /**
+   * Verifies that after fading, keys whose count drops to zero are removed from the tracking set.
+   */
   @Test
   void fading_shouldClearZeroCountKeys() {
     keeper.add("k1", 1);
@@ -149,6 +185,9 @@ class HeavyKeeperTest {
     assertThat(keeper.contains("k1")).isFalse();
   }
 
+  /**
+   * Verifies that concurrent additions from multiple threads are safe and all counts are accurately tracked.
+   */
   @Test
   void add_shouldBeThreadSafe() throws InterruptedException {
     int threadCount = 10;

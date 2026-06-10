@@ -49,12 +49,15 @@ public class RuleMatcher {
 
   private static final HotKeyLogger log = new DefaultLogger(RuleMatcher.class);
 
+  /** Shared Jackson mapper; ignores unknown properties for forward compatibility. */
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().configure(
     DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
     false
   );
 
+  /** Optional Redis template for rule persistence across restarts. */
   private final Optional<StringRedisTemplate> redisTemplate;
+  /** Optional publisher for broadcasting rule changes to sibling instances. */
   private final Optional<CacheSyncPublisher> cacheSyncPublisher;
 
   /** Thread-safe list of all active rules, evaluated in order. */
@@ -212,7 +215,12 @@ public class RuleMatcher {
     return Optional.of(action == RuleAction.ALLOW_NO_REPORT);
   }
 
-  /** Walk the rule list in order; the first match wins. */
+  /**
+   * Walk the rule list in order; the first match wins.
+   *
+   * @param cacheKey the key to evaluate against all rules
+   * @return the {@link RuleAction} of the first matching rule, or {@link RuleAction#ALLOW} if no rule matches
+   */
   public RuleAction evaluateRule(String cacheKey) {
     for (Rule rule : rulesList) {
       if (rule.match(cacheKey)) {

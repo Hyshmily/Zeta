@@ -26,12 +26,18 @@ import org.junit.jupiter.api.Test;
  */
 class HotKeyStateMachineEdgeTest {
 
+  /**
+   * Verifies that the state machine emits HOT on the first evaluation within a single-window configuration.
+   */
   @Test
   void shouldHandleSingleHotWindow() {
     HotKeyStateMachine m = new HotKeyStateMachine(1, 5, 2);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
   }
 
+  /**
+   * Verifies that a hot window followed by cold windows transitions from HOT to NONE to COOL.
+   */
   @Test
   void shouldHandleImmediateCooling() {
     HotKeyStateMachine m = new HotKeyStateMachine(1, 2, 1);
@@ -40,6 +46,9 @@ class HotKeyStateMachineEdgeTest {
     assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.COOL);
   }
 
+  /**
+   * Verifies that interleaved evaluations for different keys are tracked independently without interference.
+   */
   @Test
   void shouldHandleInterleavedKeys() {
     assertThat(machine("key1", true).type()).isEqualTo(DecisionType.NONE);

@@ -51,8 +51,11 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class HotKey {
 
+  /** Cache orchestrator; {@code null} in Worker-only mode. */
   private final HotKeyCache hotKeyCache;
+  /** App-side local hot-key detector. */
   private final TopK topKAlgorithm;
+  /** Worker-side global hot-key detector (may be {@code null} without Worker). */
   private final TopK workerTopKAlgorithm;
 
   /**
@@ -259,6 +262,7 @@ public class HotKey {
   }
 
   //------------------------------------------------------------------------
+
   /**
    * Check whether a key is currently tracked as a local hot key in L1.
    *
@@ -350,6 +354,7 @@ public class HotKey {
   }
 
   //-------------------------------------------------------------------------------------
+
   /**
    * Add a key pattern to the blacklist. Keys matching this pattern will be
    * blocked from cache get/put operations (returns {@link Optional#empty()}).

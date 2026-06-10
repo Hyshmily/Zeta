@@ -75,6 +75,9 @@ class HotKeyReporterTest {
     scheduler.shutdown();
   }
 
+  /**
+   * Verifies that recording keys increments the internal dispatcher capacity counter.
+   */
   @Test
   void record_shouldIncrementCounter() {
     reporter.start();
@@ -84,6 +87,9 @@ class HotKeyReporterTest {
     assertThat(reporter.dispatcherCapacity()).isEqualTo(1000);
   }
 
+  /**
+   * Verifies that calling start multiple times is idempotent and does not throw.
+   */
   @Test
   void start_shouldBeIdempotent() {
     reporter.start();
@@ -91,6 +97,9 @@ class HotKeyReporterTest {
     assertThat(reporter.dispatcherCapacity()).isEqualTo(1000);
   }
 
+  /**
+   * Verifies that dispatcher depth returns -1 before the reporter has been started.
+   */
   @Test
   void dispatcherDepth_shouldReturnMinusOneBeforeStart() {
     assertThat(reporter.dispatcherDepth()).isEqualTo(-1);

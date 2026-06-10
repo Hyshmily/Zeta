@@ -64,11 +64,17 @@ class HotKeyMicrometerAutoConfigurationTest {
     registry = new SimpleMeterRegistry();
   }
 
+  /**
+   * Verifies that the Micrometer auto-configuration loads when MeterBinder is on the classpath.
+   */
   @Test
   void configLoadsWhenMeterBinderIsOnClasspath() {
     runner.run(ctx -> assertThat(ctx).hasSingleBean(HotKeyProperties.class));
   }
 
+  /**
+   * Verifies that the Caffeine cache MeterBinder registers hit/miss and size metrics.
+   */
   @Test
   void caffeineMeterBinder_registersMetrics() {
     Cache<String, Object> cache = Caffeine.newBuilder().recordStats().build();
@@ -92,6 +98,9 @@ class HotKeyMicrometerAutoConfigurationTest {
     assertThat(registry.find("cache.size").gauge()).isNotNull();
   }
 
+  /**
+   * Verifies that the custom MeterBinder registers all hotkey-specific metrics when all optional dependencies are present.
+   */
   @Test
   void customMeterBinder_registersAllMetrics_whenAllDepsPresent() {
     TopK detector = mockTopK(5, 100L, 3, 97);
@@ -145,6 +154,9 @@ class HotKeyMicrometerAutoConfigurationTest {
     assertGaugeValue("hotkey.worker.tracked.keys", 12.0);
   }
 
+  /**
+   * Verifies that the custom MeterBinder registers no metrics when all optional dependencies are absent.
+   */
   @Test
   void customMeterBinder_handlesNoDeps() {
     MeterBinder binder = config.hotKeyCustomMetrics(
@@ -163,6 +175,9 @@ class HotKeyMicrometerAutoConfigurationTest {
     assertThat(registry.getMeters()).isEmpty();
   }
 
+  /**
+   * Verifies that the custom MeterBinder gracefully handles a null refresh limiter from CacheExpireManager.
+   */
   @Test
   void customMeterBinder_handlesNullRefreshLimiter() {
     CacheExpireManager expireManager = mock(CacheExpireManager.class);
@@ -185,6 +200,9 @@ class HotKeyMicrometerAutoConfigurationTest {
     assertThat(registry.getMeters()).isEmpty();
   }
 
+  /**
+   * Verifies that the custom MeterBinder registers only local metrics when worker/reporter/sync dependencies are absent.
+   */
   @Test
   void customMeterBinder_registersLocalOnly() {
     TopK detector = mockTopK(3, 50L, 0, 100);
@@ -216,8 +234,6 @@ class HotKeyMicrometerAutoConfigurationTest {
     assertThat(registry.find("hotkey.worker.tracked.keys").gauge()).isNull();
     assertThat(registry.find("hotkey.sync.dedup.size").gauge()).isNull();
   }
-
-  // ── helpers ──────────────────────────────────────────────────────────────
 
   @SuppressWarnings("unchecked")
   private <T> ObjectProvider<T> providerThatReturns(T value) {
