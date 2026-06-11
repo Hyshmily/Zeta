@@ -59,7 +59,6 @@
 | ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------- |
 | `hotkey.local.consistent-hashing.enabled`              | `true` | 启用一致性哈希动态 Worker 路由（默认）；设为 `false` 禁用                                            |
 | `hotkey.local.consistent-hashing.virtual-nodes`        | `500`  | 每个物理 Worker 节点的虚拟节点数，用于哈希空间分布                                                   |
-| `hotkey.local.consistent-hashing.node-id`             | `""`   | 显式节点 ID（一致性哈希使用，空字符串 = 从 `InstanceIdGenerator` 自动生成）                         |
 
 ### 注解配置（`hotkey.annotation.*`）
 

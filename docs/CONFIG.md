@@ -59,7 +59,6 @@
 | --------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------- |
 | `hotkey.local.consistent-hashing.enabled`                 | `true`  | Enable consistent hashing for dynamic Worker routing (default; set to `false` to disable)                |
 | `hotkey.local.consistent-hashing.virtual-nodes`           | `500`   | Number of virtual nodes per physical Worker node for hash-space distribution                             |
-| `hotkey.local.consistent-hashing.node-id`                | `""`    | Explicit node ID for consistent hashing (empty string = auto-generate from `InstanceIdGenerator`)        |
 
 ### Annotation (`hotkey.annotation.*`)
 

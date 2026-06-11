@@ -9,7 +9,7 @@
 
 ## Cache States
 
-- **KeyState** — Enum: `NORMAL` / `HOT` / `COOL`. `PRE_COOL` exists in the Worker state machine only (transient).
+- **KeyState** — Enum: `NORMAL` / `HOT` / `PRE_COOL` / `COOL`. `PRE_COOL` is a transient state in the Worker state machine cooling sequence (`HOT → PRE_COOL → COOL → NORMAL`).
 - **NORMAL** — Default state. No Worker involvement. Local TopK can freely promote to HOT.
 - **HOT** — Worker-broadcasted hot decision OR local promotion result. Longest TTLs (hotHardTtl / hotSoftTtl). Never degraded or overwritten by local decisions.
 - **COOL** — Worker-broadcasted cool decision. Preserved when at least one Worker is alive. Eligible for local promotion to HOT only when **all** Workers are dead (graceful degradation mode).
