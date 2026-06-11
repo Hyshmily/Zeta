@@ -35,7 +35,7 @@ class ConsistentHashRingTest {
   @Test
   void emptyRing_shouldRouteToNull() {
     ConsistentHashRing ring = new ConsistentHashRing(1);
-    assertThat(ring.getNode("any-key")).isNull();
+    assertThat(ring.locateNode("any-key", s -> true)).isNull();
     assertThat(ring.isEmpty()).isTrue();
   }
 
@@ -48,7 +48,7 @@ class ConsistentHashRingTest {
     ring.rebuild(Set.of("node-a"));
     assertThat(ring.isEmpty()).isFalse();
     for (int i = 0; i < 100; i++) {
-      assertThat(ring.getNode("key-" + i)).isEqualTo("node-a");
+      assertThat(ring.locateNode("key-" + i, s -> true)).isEqualTo("node-a");
     }
   }
 
@@ -62,7 +62,7 @@ class ConsistentHashRingTest {
 
     Map<String, Integer> distribution = new HashMap<>();
     for (int i = 0; i < 1000; i++) {
-      String node = ring.getNode("key-" + i);
+      String node = ring.locateNode("key-" + i, s -> true);
       distribution.merge(node, 1, Integer::sum);
     }
 
@@ -84,7 +84,7 @@ class ConsistentHashRingTest {
 
     Map<String, String> before = new HashMap<>();
     for (String key : testKeys) {
-      before.put(key, ring.getNode(key));
+      before.put(key, ring.locateNode(key, s -> true));
     }
 
     ring.rebuild(Set.of("node-a", "node-c"));
@@ -92,7 +92,7 @@ class ConsistentHashRingTest {
     int moved = 0;
     int unchanged = 0;
     for (String key : testKeys) {
-      String after = ring.getNode(key);
+      String after = ring.locateNode(key, s -> true);
       if (before.get(key).equals(after)) {
         unchanged++;
       } else {
@@ -119,14 +119,14 @@ class ConsistentHashRingTest {
 
     Map<String, String> before = new HashMap<>();
     for (String key : testKeys) {
-      before.put(key, ring.getNode(key));
+      before.put(key, ring.locateNode(key, s -> true));
     }
 
     ring.rebuild(Set.of("node-a", "node-b", "node-c"));
 
     int changed = 0;
     for (String key : testKeys) {
-      if (!before.get(key).equals(ring.getNode(key))) {
+      if (!before.get(key).equals(ring.locateNode(key, s -> true))) {
         changed++;
       }
     }
@@ -135,16 +135,16 @@ class ConsistentHashRingTest {
   }
 
   /**
-   * Verifies that getNode returns the same node consistently for the same key.
+   * Verifies that locateNode returns the same node consistently for the same key.
    */
   @Test
-  void getNode_shouldBeDeterministic() {
+  void locateNode_shouldBeDeterministic() {
     ConsistentHashRing ring = new ConsistentHashRing(100);
     ring.rebuild(Set.of("node-a", "node-b"));
 
-    String first = ring.getNode("some-test-key");
+    String first = ring.locateNode("some-test-key", s -> true);
     for (int i = 0; i < 50; i++) {
-      assertThat(ring.getNode("some-test-key")).isEqualTo(first);
+      assertThat(ring.locateNode("some-test-key", s -> true)).isEqualTo(first);
     }
   }
 
@@ -159,14 +159,14 @@ class ConsistentHashRingTest {
 
     ring.rebuild(Set.of());
     assertThat(ring.isEmpty()).isTrue();
-    assertThat(ring.getNode("key")).isNull();
+    assertThat(ring.locateNode("key", s -> true)).isNull();
   }
 
   /**
    * Verifies that getNodes returns all currently registered live nodes.
    */
   @Test
-  void getNodes_shouldReturnLiveNodes() {
+  void getNodes_shouldReturnLiveNodesForSharding() {
     ConsistentHashRing ring = new ConsistentHashRing(10);
     ring.rebuild(Set.of("node-a", "node-b", "node-c"));
     assertThat(ring.getNodes()).containsExactlyInAnyOrder("node-a", "node-b", "node-c");
@@ -189,14 +189,14 @@ class ConsistentHashRingTest {
   void rebuild_sameNodes_shouldNotAffectRouting() {
     ConsistentHashRing ring = new ConsistentHashRing(100);
     ring.rebuild(Set.of("a", "b"));
-    String before = ring.getNode("key");
+    String before = ring.locateNode("key", s -> true);
 
     ring.rebuild(Set.of("a", "b"));
-    assertThat(ring.getNode("key")).isEqualTo(before);
+    assertThat(ring.locateNode("key", s -> true)).isEqualTo(before);
   }
 
   /**
-   * Verifies that getNode remains consistent under concurrent access from multiple threads.
+   * Verifies that locateNode remains consistent under concurrent access from multiple threads.
    */
   @Test
   void noDuplicateKeys_underConcurrentAccess() throws Exception {
@@ -206,8 +206,11 @@ class ConsistentHashRingTest {
     java.util.concurrent.Executors.newFixedThreadPool(10).invokeAll(
       java.util.Collections.nCopies(20, () -> {
         for (int i = 0; i < 200; i++) {
-          assertThat(ring.getNode("concurrent-key-" + i))
-            .isIn("node-a", "node-b", "node-c");
+          assertThat(ring.locateNode("concurrent-key-" + i, s -> true)).isIn(
+            "node-a",
+            "node-b",
+            "node-c"
+          );
         }
         return null;
       })

@@ -46,6 +46,7 @@ mvn source:jar                       # Generate source JAR (common only)
 10. **`constant`** — Shared constants (`HotKeyConstants`: AMQP headers, thread prefixes, routing keys)
 
 Worker-only components live in the `worker/` module under `io.github.hyshmily.hotkey.worker`:
+
 - `SlidingWindowDetector`, `TopKValidator`, `WorkerBroadcaster`, `ReportConsumer`, `WorkerAutoConfiguration`, `WorkerProperties`, `GlobalQpsEstimator`, `ThresholdLearner`, `WorkerApplication`
 
 ### Public API
@@ -120,14 +121,14 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
   - Prefer Javadoc (`/** ... */`) on all public classes and methods
   - **Do NOT delete existing comments** — only add or improve them
   - **When modifying code, update the related comments accordingly** — if a method signature, behavior, or parameter changes, the comment must reflect the new state
-   - All comments must be in English
+  - All comments must be in English
   - Section dividers (e.g. `// ── Section Name ──`) are acceptable for organizing long classes
 
 ## Workflow Rules
 
 1. **Skill usage per conversation:**
-   - **Mandatory check:** Before any substantive operation (planning, code modification, debugging, code review, refactoring, testing, sub-agent dispatch), the AI MUST check the available skills at `$HOME/.agents/skills/` and load the relevant skill(s) first. Consult each skill's description in its `SKILL.md` to determine applicability.
-   - **Planning/discussion:** Load `brainstorm` + `grill-with-docs` + `improve-codebase-architecture` + `grill-me` + `zoom-out` before any planning session.
+   - **Mandatory check:** Before any substantive operation (planning, code modification, debugging, code review, refactoring, testing, sub-agent dispatch, etc.), the AI MUST first examine the available skills located at $HOME/.agents/skills/ and load the relevant skill(s) before proceeding. When multiple skills apply, priority must be given to Matt Pocock's skills (i.e., those from the mattpocock/skills repository or any skill authored by Matt Pocock) over others, unless explicitly instructed otherwise. Consult each skill's description in its SKILL.md to determine applicability.
+   - **Planning/discussion:** Load `brainstorming` + `grill-with-docs` + `improve-codebase-architecture` + `grill-me` + `zoom-out` before any planning session.
    - **Before code modification:** Load `code-review` + `grill-me`.
    - **Testing/debugging:** Load `diagnose` for bug investigation.
    - **Sub-agent dispatch:** Invoke `zoom-out` to provide broader context for sub-agent tasks.
@@ -147,20 +148,21 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
 9. **Bilingual doc sync.** Every EN doc in `docs/` (`ARCH.md`, `CONFIG.md`, `ANNOTATION.md`, `MONITOR.md`) has a `*.zh.md` counterpart. Both must be updated in the same change. The ZH file can be a translation or a re-expression — the domain semantics must match.
 
 10. **Stress test every core change.** Any code change affecting `TopK`, `SingleFlight`, `HotKeyCache`, `VersionGuard`, `CacheSyncPublisher/Listener`, `WorkerListener`, `HotKeyStateMachine`, `CacheExpireManager`, or `HotKeyReporter` must pass `HotKeyStressTest` (31 scenarios). The stress test covers:
-   - **TopK**: no duplicate keys under 20-thread contention, bounded size ≤ K
-   - **SingleFlight**: extreme dedup (50 threads, 1 execution), no `Recursive update` race
-   - **HotKeyCache**: concurrent get/invalidate/peek consistency; logical expiry (B path, pure logical expiry)
-   - **CacheSyncPublisher**: concurrent dedup (20 threads, exactly 1 send), version ordering correctness
-   - **VersionGuard**: concurrent shouldSkipForSync/Worker under 10-thread load
-   - **HotKeyStateMachine**: independent keys + same-key concurrent evaluations
-   - **HotKeyReporter**: 10 threads × 50k high-frequency record
-   - **CacheSyncListener**: concurrent invalidate/refresh (10 threads × 100 ops each)
-   - **WorkerListener**: concurrent HOT/COOL decision race, final state sanity
-   - **Distributed**: 3 nodes, each 5 workers × 300 ops, simulated Redis + broadcast bus
 
-   Test pattern: `CountDownLatch` for synchronization, `AtomicInteger errors` for exception tracking, `CachedThreadPool`/`FixedThreadPool` for concurrency, `Optional` + `Supplier` for Cold/Hot access, `Runnable::run` executor to expose inline CompletionStage races. Assert `errors.get() == 0` and component-level invariants.
+- **TopK**: no duplicate keys under 20-thread contention, bounded size ≤ K
+- **SingleFlight**: extreme dedup (50 threads, 1 execution), no `Recursive update` race
+- **HotKeyCache**: concurrent get/invalidate/peek consistency; logical expiry (B path, pure logical expiry)
+- **CacheSyncPublisher**: concurrent dedup (20 threads, exactly 1 send), version ordering correctness
+- **VersionGuard**: concurrent shouldSkipForSync/Worker under 10-thread load
+- **HotKeyStateMachine**: independent keys + same-key concurrent evaluations
+- **HotKeyReporter**: 10 threads × 50k high-frequency record
+- **CacheSyncListener**: concurrent invalidate/refresh (10 threads × 100 ops each)
+- **WorkerListener**: concurrent HOT/COOL decision race, final state sanity
+- **Distributed**: 3 nodes, each 5 workers × 300 ops, simulated Redis + broadcast bus
 
-   **Skip when:** Changes that do NOT touch any of the listed components (e.g., config metadata, Javadoc, non-functional formatting, build config, properties files) can skip the stress test. Use judgment — if the change affects data flow, state machine, or cache orchestration indirectly, run the tests.
+Test pattern: `CountDownLatch` for synchronization, `AtomicInteger errors` for exception tracking, `CachedThreadPool`/`FixedThreadPool` for concurrency, `Optional` + `Supplier` for Cold/Hot access, `Runnable::run` executor to expose inline CompletionStage races. Assert `errors.get() == 0` and component-level invariants.
+
+**Skip when:** Changes that do NOT touch any of the listed components (e.g., config metadata, Javadoc, non-functional formatting, build config, properties files) can skip the stress test. Use judgment — if the change affects data flow, state machine, or cache orchestration indirectly, run the tests.
 
 11. **Doc sync on every code change.** After any code modification, cross-reference the change against all relevant documentation:
     - **`README.md` / `README.zh.md`** — check and update code samples, config examples, feature descriptions, usage instructions
@@ -179,30 +181,35 @@ See `CONTEXT.md` (project root) for the canonical domain glossary — it defines
 
 Design decision records (ADRs) are in `docs/adr/`:
 
-| ADR | Subject |
-|-----|---------|
+| ADR    | Subject                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `0001` | **Local Promotion with Worker-Aware Fallback** — `promoteLocalHotkeyIfNeeded` upgrades NORMAL always, COOL only when all Workers are dead. Rationale: local App promotes faster than Worker broadcast (priority for local view); when Worker cluster is entirely dead, COOL entries don't stagnate — local TopK takes over. Worker re-override via `decisionVersion` ensures self-healing. |
-| `0002` | **SingleFlight Exception-Only Invalidate** — removed `whenComplete` invalidate, only catch-block invalidates. Normal completions stay cached via Caffeine `expireAfterWrite`. Rationale: prevents T3 duplicate supplier execution from premature cleanup; follows Reactors/Hystrix standard dedup pattern. |
-| `0003` | **State Machine Config via Heartbeat Gossip** — `HotKeyStateMachine` parameters sync via AMQP heartbeat broadcasts (not Redis/etcd). New Worker waits ≤3s for peer heartbeat. Rationale: avoid external config store dependency; rolling/k8s deployment never has all Workers down simultaneously. |
-| `0004` | **Ack-Before-Update for AMQP Listeners** — `WorkerListener` and `CacheSyncListener` ack before cache write, trading at-most-once delivery for simpler logic and avoiding redelivery storms during jitter windows. Self-healing via periodic broadcast. |
-| `0005` | **32-bit Murmur3 for Consistent Hash Ring** — uses `murmur3_32_fixed()` instead of MD5/SHA-256. Collision probability <3% with 500 virtual nodes × 100 Workers; performance-critical hot path favors speed over theoretical collision resistance. |
+| `0002` | **SingleFlight Exception-Only Invalidate** — removed `whenComplete` invalidate, only catch-block invalidates. Normal completions stay cached via Caffeine `expireAfterWrite`. Rationale: prevents T3 duplicate supplier execution from premature cleanup; follows Reactors/Hystrix standard dedup pattern.                                                                                 |
+| `0003` | **State Machine Config via Heartbeat Gossip** — `HotKeyStateMachine` parameters sync via AMQP heartbeat broadcasts (not Redis/etcd). New Worker waits ≤3s for peer heartbeat. Rationale: avoid external config store dependency; rolling/k8s deployment never has all Workers down simultaneously.                                                                                         |
+| `0004` | **Ack-Before-Update for AMQP Listeners** — `WorkerListener` and `CacheSyncListener` ack before cache write, trading at-most-once delivery for simpler logic and avoiding redelivery storms during jitter windows. Self-healing via periodic broadcast.                                                                                                                                     |
+| `0005` | **32-bit Murmur3 for Consistent Hash Ring** — uses `murmur3_32_fixed()` instead of MD5/SHA-256. Collision probability <3% with 500 virtual nodes × 100 Workers; performance-critical hot path favors speed over theoretical collision resistance.                                                                                                                                          |
 
 ## Design Principles
 
 ### Local-First Promotion
+
 The local App must always be able to promote a key to HOT faster than the Worker can broadcast. This ensures the local view of hot keys takes priority over centralized cluster consensus. Worker decisions only override local state when they arrive with a strictly newer `decisionVersion`.
 
 ### Graceful Degradation
-When all Workers are dead (`WorkerHealthMonitor.isAnyWorkerAlive() == false`), the system degrades gracefully:
+
+When all Workers are dead (`RingManager.isAnyWorkerAlive() == false`), the system degrades gracefully:
+
 - `isPromotableState()` returns true for COOL entries (normally only NORMAL is eligible)
 - Local TopK assumes authority for drive L1 TTL decisions
 - Reporter drops all batches silently (no AMQP target alive)
 - On Worker recovery, broadcast decisions override local promotions via `decisionVersion >=` comparison — no explicit recovery protocol needed
 
 ### SingleFlight as Dedup, Not Cache
+
 SingleFlight is a dedup mechanism for concurrent identical requests, not a cache. Completed futures stay in `inflightLoads` only for the TTL window (`inflightTtlSec`), and this TTL is intentionally short (5s default). This means SingleFlight only coalesces requests arriving within that window. Long-lived dedup is the job of Caffeine L1. This design limits memory growth from stale futures and prevents any single key's failure from blocking future requests indefinitely.
 
 ### Decentralized Config Gossip
+
 Worker configuration (state machine parameters) propagates via existing heartbeat broadcasts rather than a dedicated config store. This works because the target deployment model (k8s rolling updates) never has all Workers down simultaneously. A single surviving Worker provides the latest config to newly started peers within 3 seconds. The trade-off: if all Workers restart simultaneously, config resets to `WorkerProperties` defaults — acceptable for the target deployment model but explicitly not suitable for bare-metal deployments where all Workers could go down together.
 
 ## Logging Rules
@@ -219,17 +226,17 @@ Worker configuration (state machine parameters) propagates via existing heartbea
 
 Located in `HotKeyAnnotationIntegrationIT` (Testcontainers, tagged `docker`):
 
-| Test | Verifies |
-|------|----------|
-| `readOperation_shouldCacheViaGetWithSoftExpire` | READ caches via `getWithSoftExpire`, invalidate forces reload |
-| `readOperation_withSoftExpireFalse_shouldUseGet` | `softExpire=false` uses `get()` not `getWithSoftExpire` |
-| `writeOperation_shouldMutateAndInvalidate` | WRITE + default TTLs, L1 cleared after mutation |
-| `invalidateOperation_shouldClearCacheAndProceed` | INVALIDATE clears L1 then executes method |
-| `readOperation_shouldUseSpelKey` | SpEL key resolves to correct cache key |
-| `readOperation_differentSpelArgs_shouldUseDifferentKeys` | Different SpEL args → different keys |
-| `writeOperation_withZeroTtl_shouldUseDefaults` | WRITE silently ignores `hardTtlMs=0, softTtlMs=0` (no error) |
-| `writeOperation_withSoftExpireFalse_shouldIgnore` | WRITE silently ignores `softExpire=false` |
-| `invalidateOperation_withSoftExpireFalse_shouldIgnore` | INVALIDATE silently ignores `softExpire=false` |
-| `readOperation_withZeroTtl_shouldFallbackToDefaults` | READ `hardTtlMs=0, softTtlMs=0` falls back to `HotKeyProperties` default TTLs, cache hit works |
+| Test                                                     | Verifies                                                                                       |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `readOperation_shouldCacheViaGetWithSoftExpire`          | READ caches via `getWithSoftExpire`, invalidate forces reload                                  |
+| `readOperation_withSoftExpireFalse_shouldUseGet`         | `softExpire=false` uses `get()` not `getWithSoftExpire`                                        |
+| `writeOperation_shouldMutateAndInvalidate`               | WRITE + default TTLs, L1 cleared after mutation                                                |
+| `invalidateOperation_shouldClearCacheAndProceed`         | INVALIDATE clears L1 then executes method                                                      |
+| `readOperation_shouldUseSpelKey`                         | SpEL key resolves to correct cache key                                                         |
+| `readOperation_differentSpelArgs_shouldUseDifferentKeys` | Different SpEL args → different keys                                                           |
+| `writeOperation_withZeroTtl_shouldUseDefaults`           | WRITE silently ignores `hardTtlMs=0, softTtlMs=0` (no error)                                   |
+| `writeOperation_withSoftExpireFalse_shouldIgnore`        | WRITE silently ignores `softExpire=false`                                                      |
+| `invalidateOperation_withSoftExpireFalse_shouldIgnore`   | INVALIDATE silently ignores `softExpire=false`                                                 |
+| `readOperation_withZeroTtl_shouldFallbackToDefaults`     | READ `hardTtlMs=0, softTtlMs=0` falls back to `HotKeyProperties` default TTLs, cache hit works |
 
 **Known limitations:** `handleWrite` (line 122) ignores `HotKey.hardTtlMs()` and `HotKey.softExpire()`; `handleInvalidate` (line 150) ignores `HotKey.softExpire()`. These are by design — WRITE always uses `putBeforeInvalidate` (no TTL params), INVALIDATE always calls `invalidate(key)`.

@@ -20,13 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.util.Assert;
-import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 /**
  * Actuator {@code /actuator/hotkeyring} endpoint for consistent-hash ring CRUD.
@@ -75,7 +69,7 @@ public class RingEndpoint {
     Assert.hasText(key, "key must not be empty");
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("key", key);
-    result.put("nodeId", ringManager.getNode(key));
+    result.put("nodeId", ringManager.routeNode(key));
     return result;
   }
 

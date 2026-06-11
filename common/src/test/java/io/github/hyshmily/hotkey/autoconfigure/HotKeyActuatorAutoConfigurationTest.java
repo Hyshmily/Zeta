@@ -28,7 +28,7 @@ import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.sync.VersionController;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import org.junit.jupiter.api.Test;
@@ -78,7 +78,7 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<WorkerHealthMonitor> healthProvider = mock(ObjectProvider.class);
+    ObjectProvider<RingManager> healthProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
@@ -126,7 +126,7 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<WorkerHealthMonitor> healthProvider = mock(ObjectProvider.class);
+    ObjectProvider<RingManager> healthProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
@@ -176,7 +176,7 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<WorkerHealthMonitor> healthProvider = mock(ObjectProvider.class);
+    ObjectProvider<RingManager> healthProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);

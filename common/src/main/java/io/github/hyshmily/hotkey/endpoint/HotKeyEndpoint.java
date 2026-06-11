@@ -25,7 +25,7 @@ import io.github.hyshmily.hotkey.sync.VersionController;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -65,8 +65,8 @@ public class HotKeyEndpoint {
   private final HotKeyReporter hotKeyReporter;
   /** Blacklist/whitelist rule evaluator. */
   private final RuleMatcher ruleMatcher;
-  /** Worker shard health monitor. */
-  private final WorkerHealthMonitor workerHealthMonitor;
+  /** Worker shard health monitor (heartbeat + hash ring). */
+  private final RingManager ringManager;
   /** Cache TTL manager for soft/hard expiry. */
   private final CacheExpireManager expireManager;
   /** Version tracking controller (Redis-backed, with local fallback). */
@@ -211,8 +211,8 @@ public class HotKeyEndpoint {
       worker.putAll(heavyKeeperConfig(workerTopK));
     }
 
-    if (workerHealthMonitor != null) {
-      worker.put("health", workerHealthMonitor.getWorkerHealth());
+    if (ringManager != null) {
+      worker.put("health", ringManager.getWorkerHealth());
     }
 
     if (hotKeyStateMachine != null) {

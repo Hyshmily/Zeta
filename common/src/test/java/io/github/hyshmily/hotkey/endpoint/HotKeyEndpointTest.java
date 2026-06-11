@@ -29,7 +29,7 @@ import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.sync.VersionController;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -58,7 +58,7 @@ class HotKeyEndpointTest {
   private HotKeyProperties properties;
   private HotKeyReporter hotKeyReporter;
   private RuleMatcher ruleMatcher;
-  private WorkerHealthMonitor workerHealthMonitor;
+  private RingManager workerHealthMonitor;
   private CacheExpireManager expireManager;
   private VersionController versionController;
   private CacheSyncPublisher cacheSyncPublisher;
@@ -73,7 +73,7 @@ class HotKeyEndpointTest {
     properties = new HotKeyProperties();
     hotKeyReporter = mock(HotKeyReporter.class);
     ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
-    workerHealthMonitor = mock(WorkerHealthMonitor.class);
+    workerHealthMonitor = mock(RingManager.class);
     expireManager = mock(CacheExpireManager.class);
     versionController = mock(VersionController.class);
     cacheSyncPublisher = mock(CacheSyncPublisher.class);

@@ -19,11 +19,11 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import lombok.RequiredArgsConstructor;
-
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import lombok.RequiredArgsConstructor;
 
 
 /**
@@ -43,6 +44,8 @@ import java.util.concurrent.atomic.LongAdder;
  *
  * <p>Keys are routed via the {@link RingManager} consistent-hash ring, ensuring the
  * same key always maps to the same Worker node even as the cluster scales.
+ * The RingManager also tracks Worker liveness via heartbeat, so dead shards are
+ * automatically excluded from routing.
  *
  * <p>Burst absorption and backpressure are provided by a bounded
  * {@link LinkedBlockingQueue} between the flush loop and the
@@ -54,8 +57,6 @@ import java.util.concurrent.atomic.LongAdder;
 public class HotKeyReporter {
 
   private static final HotKeyLogger log = new DefaultLogger(HotKeyReporter.class);
-  /** Monitors worker shard liveness; used to skip reporting to dead shards. */
-  private final WorkerHealthMonitor workerHealthMonitor;
   /** Caffeine cache acting as a temporary counter store; entries evict after 30 s of inactivity. */
   private final Cache<String, LongAdder> counters = Caffeine.newBuilder()
     .expireAfterAccess(30, TimeUnit.SECONDS)
@@ -155,9 +156,8 @@ public class HotKeyReporter {
       return;
     }
 
-    // Reconcile ring with alive Worker nodes, then route via consistent hash
-    Set<String> alive = workerHealthMonitor.getAliveNodeIds();
-    ringManager.reconcile(alive);
+    // Reconcile ring with alive Worker nodes (from heartbeat state), then route via consistent hash
+    ringManager.reconcile();
 
     Map<String, Map<String, Long>> sharded = new HashMap<>();
     long now = System.currentTimeMillis();
@@ -168,8 +168,9 @@ public class HotKeyReporter {
         long val = adder.sumThenReset();
 
         if (val > 0) {
-          String target = ringManager.getNode(key);
-          if (target != null && isTargetAlive(target)) {
+          String target = ringManager.routeNode(key);
+
+          if (target != null) {
             sharded.computeIfAbsent(target, _ -> new HashMap<>()).put(key, val);
           }
         }
@@ -191,16 +192,6 @@ public class HotKeyReporter {
         }
       }
     });
-  }
-
-  /**
-   * Check whether the given target Worker node is considered alive.
-   *
-   * @param nodeId the Worker node identifier
-   * @return true if the node has sent a heartbeat within the timeout window
-   */
-  private boolean isTargetAlive(String nodeId) {
-    return workerHealthMonitor.isAlive(nodeId);
   }
 
   /**

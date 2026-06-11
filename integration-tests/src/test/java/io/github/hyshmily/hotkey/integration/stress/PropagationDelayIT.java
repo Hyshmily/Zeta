@@ -26,7 +26,7 @@ import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.integration.AbstractIntegrationIT;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
@@ -151,7 +151,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   ConnectionFactory connectionFactory;
 
   @Autowired
-  WorkerHealthMonitor workerHealthMonitor;
+  RingManager workerHealthMonitor;
 
   // -- Config ----------------------------------------------------------------------
 

@@ -25,8 +25,8 @@ import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -74,7 +74,7 @@ public class HotKeyCache {
   /** Manages data version generation for mutation ordering. */
   private final VersionController versionController;
   /** Monitors Worker cluster health for graceful degradation decisions. */
-  private final WorkerHealthMonitor workerHealthMonitor;
+  private final RingManager ringManager;
 
   /** Log message constant when no sync publisher is available. */
   private static final String NO_SYNC_PUBLISHER = HotKeyConstants.NO_SYNC_PUBLISHER;
@@ -133,7 +133,7 @@ public class HotKeyCache {
    * detects them as hot, they get promoted to HOT with longer TTLs.
    * <p>
    * {@link KeyState#COOL} entries are only eligible when no Worker shard is
-   * alive ({@link WorkerHealthMonitor#isAnyWorkerAlive()} returns {@code false}).
+   * alive ({@link RingManager#isAnyWorkerAlive()} returns {@code false}).
    * This provides graceful degradation — when the Worker cluster is unavailable,
    * the local TopK drives TTL decisions instead of preserving stale Worker verdicts.
    * Once a Worker comes back online and broadcasts a new decision, it overrides
@@ -146,7 +146,7 @@ public class HotKeyCache {
    * @return {@code true} if the entry may be promoted by local TopK
    */
   private boolean isPromotableState(KeyState state) {
-    return state == KeyState.NORMAL || (state == KeyState.COOL && !workerHealthMonitor.isAnyWorkerAlive());
+    return state == KeyState.NORMAL || (state == KeyState.COOL && !ringManager.isAnyWorkerAlive());
   }
 
   /**

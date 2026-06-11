@@ -10,7 +10,7 @@ The system must decide: should COOL entries become **promotable by local TopK** 
 
 ## Decision
 
-When `WorkerHealthMonitor.isAnyWorkerAlive()` returns `false`, the App enters **graceful degradation mode**:
+When `RingManager.isAnyWorkerAlive()` returns `false`, the App enters **graceful degradation mode**:
 
 1. **COOL entries become locally promotable** — `isWorkerManagedEntry()` returns `false` for COOL entries when no Workers are alive. This allows `promoteLocalHotkeyIfNeeded` to upgrade COOL→HOT with local TopK authority.
 2. **Reports continue to be dropped** — `HotKeyReporter` continues to accept `record()` calls but the dispatcher queue eventually backpressures. When Workers recover, the next flush cycle delivers the accumulated counters.
@@ -20,6 +20,6 @@ When `WorkerHealthMonitor.isAnyWorkerAlive()` returns `false`, the App enters **
 
 - **Positive:** The system never stalls waiting for a missing Worker. Cache performance degrades to local-only but remains operational.
 - **Positive:** Recovery is automatic — no manual intervention needed when Workers come back.
-- **Positive:** The `WorkerHealthMonitor` heartbeat timeout (5s) is the only failure detection mechanism. No consensus protocol, no leader election.
+- **Positive:** The `RingManager` heartbeat timeout (5s) is the only failure detection mechanism. No consensus protocol, no leader election.
 - **Negative:** During the outage window, different App instances may have inconsistent HOT/COOL states (each runs its own local TopK). This is acceptable because: (a) without Workers, there is no global authority anyway, and (b) Worker recovery overrides all local decisions within one broadcast cycle (~300ms).
 - **Negative:** The combined "Worker all dead" vs "Worker partial dead" vs "Worker healthy" states are spread across three code paths (`promoteLocalHotkeyIfNeeded`, `HotKeyReporter.flush()`, `isWorkerManagedEntry`). A holistic test suite is needed to cover all transitions.

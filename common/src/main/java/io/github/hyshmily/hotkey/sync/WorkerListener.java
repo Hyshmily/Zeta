@@ -24,7 +24,7 @@ import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import java.io.IOException;
 import java.util.Optional;
@@ -67,7 +67,7 @@ public class WorkerListener {
   private final CacheExpireManager expireManager;
 
   /** Tracks Worker heartbeat liveness across shards. */
-  private final WorkerHealthMonitor workerHealthMonitor;
+  private final RingManager ringManager;
 
   /**
    * RabbitMQ message callback.  Acknowledges the message immediately after parsing;
@@ -265,7 +265,7 @@ public class WorkerListener {
    */
   private void handlePing(WorkerMessage msg) {
     if (msg.nodeId() != null) {
-      workerHealthMonitor.onHeartbeat(msg.nodeId(), msg.timestamp());
+      ringManager.onHeartbeat(msg.nodeId(), msg.timestamp());
     }
   }
 }

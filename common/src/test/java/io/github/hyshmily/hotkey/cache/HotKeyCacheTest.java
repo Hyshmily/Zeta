@@ -31,7 +31,7 @@ import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.cache.*;
 import io.github.hyshmily.hotkey.sync.VersionController;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Arrays;
 import java.util.List;
@@ -72,7 +72,7 @@ class HotKeyCacheTest {
       Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
       new VersionController(Optional.empty(), 60),
-      mock(WorkerHealthMonitor.class)
+      mock(RingManager.class)
     );
   }
 

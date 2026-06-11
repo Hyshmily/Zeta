@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.sharding;
 import com.google.common.hash.Hashing;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.function.Predicate;
 
 /**
  * Consistent hash ring backed by a {@link TreeMap}.
@@ -65,18 +66,44 @@ public class ConsistentHashRing {
   }
 
   /**
-   * Return the node responsible for the given key, or {@code null} if the ring is empty.
+   * Return the physical node responsible for the given business key, skipping nodes
+   * that fail the liveness predicate.
+   *
+   * @param key     the business key to route
+   * @param isAlive predicate that returns {@code true} if a node is considered alive
+   * @return the physical node ID, or {@code null} if the ring is empty or all nodes are dead
    */
-  public String getNode(String key) {
-    RingState state = currentState;
-    if (state.ring.isEmpty()) {
+  public String locateNode(String key, Predicate<String> isAlive) {
+    NavigableMap<Integer, String> currentRing = currentState.ring;
+
+    if (currentRing.isEmpty()) {
       return null;
     }
 
-    int h = hash(key);
-    Map.Entry<Integer, String> entry = state.ring.ceilingEntry(h);
+    int hashKey = hash(key);
+    Map.Entry<Integer, String> entry = currentRing.ceilingEntry(hashKey);
+    if (entry == null) {
+      entry = currentRing.firstEntry();
+    }
 
-    return (entry != null ? entry : state.ring.firstEntry()).getValue();
+    int startHash = entry.getKey();
+    int currentHash = startHash;
+
+    do {
+      String physicalNode = currentRing.get(currentHash);
+      if (physicalNode != null && isAlive.test(physicalNode)) {
+        return physicalNode;
+      }
+
+      Map.Entry<Integer, String> next = currentRing.higherEntry(currentHash);
+      if (next == null) {
+        next = currentRing.firstEntry();
+      }
+
+      currentHash = next.getKey();
+    } while (currentHash != startHash);
+
+    return null;
   }
 
   /**

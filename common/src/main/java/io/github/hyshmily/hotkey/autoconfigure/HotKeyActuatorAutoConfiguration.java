@@ -23,8 +23,8 @@ import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.endpoint.RingEndpoint;
 import io.github.hyshmily.hotkey.endpoint.StateMachineEndpoint;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
@@ -71,7 +71,7 @@ public class HotKeyActuatorAutoConfiguration {
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<HotKeyReporter> hotKeyReporterProvider,
     ObjectProvider<RuleMatcher> ruleMatcherProvider,
-    ObjectProvider<WorkerHealthMonitor> workerHealthMonitorProvider,
+    ObjectProvider<RingManager> ringManagerProvider,
     ObjectProvider<CacheExpireManager> expireManagerProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
@@ -86,7 +86,7 @@ public class HotKeyActuatorAutoConfiguration {
       properties,
       hotKeyReporterProvider.getIfAvailable(),
       ruleMatcherProvider.getIfAvailable(),
-      workerHealthMonitorProvider.getIfAvailable(),
+      ringManagerProvider.getIfAvailable(),
       expireManagerProvider.getIfAvailable(),
       versionControllerProvider.getIfAvailable(),
       cacheSyncPublisherProvider.getIfAvailable(),

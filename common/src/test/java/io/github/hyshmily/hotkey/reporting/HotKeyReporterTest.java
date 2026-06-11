@@ -17,11 +17,10 @@ package io.github.hyshmily.hotkey.reporting;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.AfterEach;
@@ -56,7 +55,6 @@ class HotKeyReporterTest {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     testPublisher = new TestReportPublisher();
     reporter = new HotKeyReporter(
-      new WorkerHealthMonitor(),
       testPublisher,
       scheduler,
       1000,

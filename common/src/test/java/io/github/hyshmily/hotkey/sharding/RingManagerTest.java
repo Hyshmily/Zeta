@@ -41,14 +41,15 @@ class RingManagerTest {
   @Test
   void reconcile_withSameNodes_shouldNotRebuild() {
     RingManager manager = new RingManager(10);
-    manager.reconcile(Set.of("a", "b", "c"));
+    manager.onHeartbeat("a", System.currentTimeMillis());
+    manager.onHeartbeat("b", System.currentTimeMillis());
+    manager.onHeartbeat("c", System.currentTimeMillis());
+    manager.reconcile();
     Set<String> nodes1 = manager.getCurrentNodes();
 
-    manager.reconcile(Set.of("a", "b", "c"));
+    manager.reconcile();
     Set<String> nodes2 = manager.getCurrentNodes();
 
-    // same reference → no new allocation (Set.copyOf would normally create new set,
-    // but the ring's nodes set only changes when rebuild is called)
     assertThat(nodes2).isSameAs(nodes1);
   }
 
@@ -58,10 +59,13 @@ class RingManagerTest {
   @Test
   void reconcile_withDifferentNodes_shouldRebuild() {
     RingManager manager = new RingManager(10);
-    manager.reconcile(Set.of("a", "b"));
+    manager.onHeartbeat("a", System.currentTimeMillis());
+    manager.onHeartbeat("b", System.currentTimeMillis());
+    manager.reconcile();
     Set<String> nodes1 = manager.getCurrentNodes();
 
-    manager.reconcile(Set.of("a", "b", "c"));
+    manager.onHeartbeat("c", System.currentTimeMillis());
+    manager.reconcile();
     Set<String> nodes2 = manager.getCurrentNodes();
 
     assertThat(nodes2).isNotSameAs(nodes1);
@@ -89,7 +93,7 @@ class RingManagerTest {
     RingManager manager = new RingManager(10);
     manager.addNode("manual-a");
 
-    manager.reconcile(Set.of("auto-a", "auto-b"));
+    manager.reconcile();
     assertThat(manager.getCurrentNodes()).containsExactly("manual-a");
   }
 
@@ -123,9 +127,11 @@ class RingManagerTest {
    */
   @Test
   void removeNode_shouldStartManualModeFromCurrentNodes() {
-    // In auto mode, removeNode should snapshot current nodes and then remove
     RingManager manager = new RingManager(10);
-    manager.reconcile(Set.of("a", "b", "c"));
+    manager.onHeartbeat("a", System.currentTimeMillis());
+    manager.onHeartbeat("b", System.currentTimeMillis());
+    manager.onHeartbeat("c", System.currentTimeMillis());
+    manager.reconcile();
     manager.removeNode("c");
 
     assertThat(manager.isManualMode()).isTrue();
@@ -144,30 +150,31 @@ class RingManagerTest {
     manager.resetToAuto();
     assertThat(manager.isManualMode()).isFalse();
 
-    manager.reconcile(Set.of("auto-a"));
+    manager.onHeartbeat("auto-a", System.currentTimeMillis());
+    manager.reconcile();
     assertThat(manager.getCurrentNodes()).containsExactly("auto-a");
   }
 
   /**
-   * Verifies that getNode routes a key to one of the registered nodes.
+   * Verifies that locateNode routes a key to one of the registered nodes.
    */
   @Test
-  void getNode_shouldRouteToCorrectNode() {
+  void routeNode_shouldRouteToCorrectNode() {
     RingManager manager = new RingManager(10);
     manager.addNode("target-a");
     manager.addNode("target-b");
 
-    String node = manager.getNode("some-key");
+    String node = manager.routeNode("some-key");
     assertThat(node).isIn("target-a", "target-b");
   }
 
   /**
-   * Verifies that getNode returns null when the ring is empty.
+   * Verifies that locateNode returns null when the ring is empty.
    */
   @Test
-  void getNode_withEmptyRing_shouldReturnNull() {
+  void getNode_ForSharding_withEmptyRing_shouldReturnNull() {
     RingManager manager = new RingManager(10);
-    assertThat(manager.getNode("any-key")).isNull();
+    assertThat(manager.routeNode("any-key")).isNull();
   }
 
   /**
@@ -185,7 +192,10 @@ class RingManagerTest {
   @Test
   void nodeCount_shouldReturnCorrectCount() {
     RingManager manager = new RingManager(10);
-    manager.reconcile(Set.of("a", "b", "c"));
+    manager.onHeartbeat("a", System.currentTimeMillis());
+    manager.onHeartbeat("b", System.currentTimeMillis());
+    manager.onHeartbeat("c", System.currentTimeMillis());
+    manager.reconcile();
     assertThat(manager.nodeCount()).isEqualTo(3);
   }
 
@@ -196,7 +206,7 @@ class RingManagerTest {
   void reconcile_doesNotAffectManualMode() {
     RingManager manager = new RingManager(10);
     manager.addNode("manual");
-    manager.reconcile(Set.of("should-be-ignored"));
+    manager.reconcile();
     assertThat(manager.getCurrentNodes()).containsExactly("manual");
   }
 }

@@ -18,7 +18,6 @@ package io.github.hyshmily.hotkey.autoconfigure;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -71,16 +70,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @EnableConfigurationProperties({ HotKeyProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class })
 public class HotKeyAmqpAutoConfiguration {
-
-  /**
-   * Create the {@link WorkerHealthMonitor} that tracks liveness of Worker shards.
-   * Always present when AMQP is on the classpath; consumed by the reporter
-   * to decide whether to enqueue report batches.
-   */
-  @Bean
-  public WorkerHealthMonitor workerHealthMonitor() {
-    return new WorkerHealthMonitor();
-  }
 
   /**
    * Inner configuration for app-to-Worker report routing via DirectExchange.
@@ -136,14 +125,12 @@ public class HotKeyAmqpAutoConfiguration {
     @Bean(initMethod = "start", destroyMethod = "stop")
     @ConditionalOnMissingBean
     public HotKeyReporter hotKeyReporter(
-      WorkerHealthMonitor workerHealthMonitor,
       ReportPublisher reportPublisher,
       ScheduledExecutorService hotKeyReportScheduler,
       HotKeyProperties properties,
-      ObjectProvider<RingManager> ringManagerProvider
+      RingManager ringManager
     ) {
       return new HotKeyReporter(
-        workerHealthMonitor,
         reportPublisher,
         hotKeyReportScheduler,
         properties.getReportIntervalMs(),
@@ -151,7 +138,7 @@ public class HotKeyAmqpAutoConfiguration {
         properties.getQueueCapacity(),
         properties.getQueueOfferTimeoutMs(),
         properties.effectiveConsumerCount(),
-        ringManagerProvider.getObject()
+        ringManager
       );
     }
 
@@ -328,7 +315,7 @@ public class HotKeyAmqpAutoConfiguration {
       WorkerListenerProperties properties,
       ScheduledExecutorService hotKeyWorkerScheduler,
       CacheExpireManager expireManager,
-      WorkerHealthMonitor workerHealthMonitor
+      RingManager ringManager
     ) {
       return new WorkerListener(
         hotLocalCache,
@@ -336,7 +323,7 @@ public class HotKeyAmqpAutoConfiguration {
         properties,
         hotKeyWorkerScheduler,
         expireManager,
-        workerHealthMonitor
+        ringManager
       );
     }
 

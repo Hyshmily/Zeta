@@ -28,8 +28,8 @@ import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.VersionController;
@@ -194,7 +194,7 @@ public class HotKeyAutoConfiguration {
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    ObjectProvider<WorkerHealthMonitor> workerHealthMonitorProvider
+    ObjectProvider<RingManager> ringManagerProvider
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -206,7 +206,7 @@ public class HotKeyAutoConfiguration {
       hotKeyReporter,
       ruleMatcher,
       new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes()),
-      workerHealthMonitorProvider.getIfAvailable(WorkerHealthMonitor::new)
+      ringManagerProvider.getIfAvailable(() -> new RingManager(properties.getConsistentHashing().getVirtualNodes()))
     );
   }
 

@@ -22,11 +22,10 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.sync.*;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.concurrent.ScheduledExecutorService;
 import org.springframework.beans.factory.ObjectProvider;
 import java.util.function.Function;
@@ -117,8 +116,7 @@ class HotKeyAmqpAutoConfigurationTest {
     HotKeyProperties properties = new HotKeyProperties();
 
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
-    ObjectProvider<RingManager> ringProvider = mock(ObjectProvider.class);
-    HotKeyReporter reporter = config.hotKeyReporter(new WorkerHealthMonitor(), reportPublisher, scheduler, properties, ringProvider);
+    HotKeyReporter reporter = config.hotKeyReporter(reportPublisher, scheduler, properties, new RingManager(150));
 
     assertThat(reporter).isNotNull();
   }
@@ -377,7 +375,7 @@ class HotKeyAmqpAutoConfigurationTest {
 
     HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    WorkerHealthMonitor healthMonitor = new WorkerHealthMonitor();
+    RingManager healthMonitor = new RingManager(150);
     WorkerListener listener = config.workerListener(
       localCache,
       redisLoader,

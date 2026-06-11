@@ -26,7 +26,7 @@ import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.Optional;
@@ -86,7 +86,7 @@ class HotKeyRedisAutoConfigurationTest {
       redisTemplateProvider,
       properties,
       ruleMatcher,
-      mock(WorkerHealthMonitor.class)
+      mock(RingManager.class)
     );
 
     assertThat(cache).isNotNull();
@@ -120,7 +120,7 @@ class HotKeyRedisAutoConfigurationTest {
       redisTemplateProvider,
       properties,
       ruleMatcher,
-      mock(WorkerHealthMonitor.class)
+      mock(RingManager.class)
     );
 
     assertThat(cache).isNotNull();

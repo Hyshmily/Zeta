@@ -34,7 +34,6 @@ import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncProperties;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.model.CacheEntry;
-import io.github.hyshmily.hotkey.monitor.WorkerHealthMonitor;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
@@ -264,7 +263,7 @@ class HotKeyStressIT {
       Optional.empty(), Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
       new VersionController(Optional.empty(), 60),
-      new WorkerHealthMonitor());
+      new RingManager(150));
   }
 
   /**
@@ -929,7 +928,7 @@ class HotKeyStressIT {
     ReportPublisher publisher = mock(ReportPublisher.class);
     doAnswer(inv -> null).when(publisher).publish(any(), any());
     HotKeyReporter reporter = new HotKeyReporter(
-      new WorkerHealthMonitor(), publisher, scheduler, 100, "stress-test", 10000, 100, 2, new RingManager(150));
+      publisher, scheduler, 100, "stress-test", 10000, 100, 2, new RingManager(150));
     reporter.start();
     concurrentRun("highFreq-reporter", 20, 100_000, (idx) -> {
       reporter.record("freq-key-" + (idx & 0xFF));
@@ -958,7 +957,7 @@ class HotKeyStressIT {
     doAnswer(inv -> null).when(publisher).publish(any(), any());
     int queueCapacity = 1000;
     HotKeyReporter reporter = new HotKeyReporter(
-      new WorkerHealthMonitor(), publisher, scheduler, 100, "backpressure-test",
+      publisher, scheduler, 100, "backpressure-test",
       queueCapacity, 1, 1, new RingManager(150));
     reporter.start();
     int threadCount = 10;
@@ -996,7 +995,7 @@ class HotKeyStressIT {
     ReportPublisher publisher = mock(ReportPublisher.class);
     doAnswer(inv -> null).when(publisher).publish(any(), any());
     HotKeyReporter reporter = new HotKeyReporter(
-      new WorkerHealthMonitor(), publisher, scheduler, 100, "shard-test",
+      publisher, scheduler, 100, "shard-test",
       10000, 50, 4, new RingManager(150));
     reporter.start();
     int threadCount = 8;
