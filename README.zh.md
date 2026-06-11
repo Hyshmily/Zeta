@@ -161,7 +161,6 @@ hotkey:
       app-name: myapp # 【必须】与 App 侧 hotkey.local.app-name 一致
       # 一致性哈希默认开启；Worker 通过心跳自动注册
 
-
 # 多 Worker 示例：3 台机器，相同 app-name
 # 一致性哈希通过心跳自动将 key 路由到正确的 Worker
 # 无需静态分片配置——只需增加机器即可
@@ -780,7 +779,10 @@ HotKey 提供两种互补的监控机制
 
 ## 架构和设计细节
 
-详见 [ARCH.md](docs/ARCH.md)（英文）和 [ARCH.zh.md](docs/ARCH.zh.md)（中文）。
+详见 [ARCH.md](docs/ARCH.md)（英文）和 [ARCH.zh.md](docs/ARCH.zh.md）（中文）。
+
+领域术语定义见 [CONTEXT.md](CONTEXT.md)。
+架构决策记录（ADR）维护在 [docs/adr/](docs/adr/0001-local-promotion-worker-fallback.md)。
 
 ## License
 

@@ -778,6 +778,9 @@ See [MONITOR.md](docs/MONITOR.md) for full response formats and field descriptio
 
 See [ARCH.md](docs/ARCH.md) for detailed architecture documentation.
 
+For domain terminology definitions, see [CONTEXT.md](CONTEXT.md).
+Architectural Decision Records (ADRs) are maintained in [docs/adr/](docs/adr/0001-local-promotion-worker-fallback.md).
+
 ## License
 
 Apache License 2.0

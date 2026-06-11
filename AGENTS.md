@@ -127,6 +127,7 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
 ## Workflow Rules
 
 1. **Skill usage per conversation:**
+   - **Session start:** MUST load `grill-with-docs` at the beginning of EVERY session, regardless of the task. This is non-negotiable.
    - **Mandatory check:** Before any substantive operation (planning, code modification, debugging, code review, refactoring, testing, sub-agent dispatch, etc.), the AI MUST first examine the available skills located at $HOME/.agents/skills/ and load the relevant skill(s) before proceeding. When multiple skills apply, priority must be given to Matt Pocock's skills (i.e., those from the mattpocock/skills repository or any skill authored by Matt Pocock) over others, unless explicitly instructed otherwise. Consult each skill's description in its SKILL.md to determine applicability.
    - **Planning/discussion:** Load `brainstorming` + `grill-with-docs` + `improve-codebase-architecture` + `grill-me` + `zoom-out` before any planning session.
    - **Before code modification:** Load `code-review` + `grill-me`.
@@ -145,7 +146,7 @@ Every read access (hit or miss, hot or not) triggers both `hotKeyDetector.add()`
 
 8. **CONTEXT.md on term clarification.** When `grill-with-docs` resolves a fuzzy domain term (`hot` vs `HOT`, `degraded` vs `normal`, etc.), update `CONTEXT.md` immediately with the canonical definition. Don't defer. If the conversation surfaces a new domain concept not yet in `CONTEXT.md`, add it on the spot.
 
-9. **Bilingual doc sync.** Every EN doc in `docs/` (`ARCH.md`, `CONFIG.md`, `ANNOTATION.md`, `MONITOR.md`) has a `*.zh.md` counterpart. Both must be updated in the same change. The ZH file can be a translation or a re-expression — the domain semantics must match.
+9. **Bilingual doc sync.** Every EN doc in `docs/` (`ARCH.md`, `CONFIG.md`, `ANNOTATION.md`, `MONITOR.md`) plus `CONTEXT.md` has a `*.zh.md` counterpart. Both must be updated in the same change. The ZH file can be a translation or a re-expression — the domain semantics must match.
 
 10. **Stress test every core change.** Any code change affecting `TopK`, `SingleFlight`, `HotKeyCache`, `VersionGuard`, `CacheSyncPublisher/Listener`, `WorkerListener`, `HotKeyStateMachine`, `CacheExpireManager`, or `HotKeyReporter` must pass `HotKeyStressTest` (31 scenarios). The stress test covers:
 
@@ -166,6 +167,7 @@ Test pattern: `CountDownLatch` for synchronization, `AtomicInteger errors` for e
 
 11. **Doc sync on every code change.** After any code modification, cross-reference the change against all relevant documentation:
     - **`README.md` / `README.zh.md`** — check and update code samples, config examples, feature descriptions, usage instructions
+    - **`CONTEXT.md`** — check and update domain term definitions
     - **`docs/`** — check `CONFIG.md`, `ARCH.md`, `ANNOTATION.md`, `MONITOR.md` and their `*.zh.md` counterparts for affected sections
     - **`docs/adr/`** — if the change invalidates or modifies a prior ADR's rationale, update or supersede it
     - The check is shallow but mandatory: skim each doc for references (property names, defaults, descriptions, diagrams, config blocks) related to the changed code. If none are found, no doc change is needed.
