@@ -251,7 +251,7 @@ public class CacheExpireManager {
         if (value != null) {
           caffeineCache
             .asMap()
-            .compute(cacheKey, (_, existing) ->
+            .compute(cacheKey, (k, existing) ->
               Optional.ofNullable(existing)
                 .filter(CacheEntry.class::isInstance)
                 .map(CacheEntry.class::cast)

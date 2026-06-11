@@ -140,7 +140,7 @@ public class HotKeyAutoConfiguration {
     executor.setThreadNamePrefix(HotKeyConstants.THREAD_PREFIX_HOTKEY);
     executor.setWaitForTasksToCompleteOnShutdown(true);
     executor.setAwaitTerminationSeconds(60);
-    executor.setRejectedExecutionHandler((_, _) -> {
+    executor.setRejectedExecutionHandler((r, exe) -> {
       log.warn(
         "HotKey executor task rejected: corePool={}, maxPool={}, queueCapacity={}",
         properties.getExecutorCorePoolSize(),

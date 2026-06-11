@@ -101,7 +101,7 @@ public class TopKValidator {
         continue; // Already confirmed
       }
 
-      AtomicInteger appearances = topKAppearances.computeIfAbsent(item.key(), _ -> new AtomicInteger(0));
+      AtomicInteger appearances = topKAppearances.computeIfAbsent(item.key(), k -> new AtomicInteger(0));
 
       if (appearances.incrementAndGet() >= preWarmMinAppearances) {
         broadcaster.broadcastHot(item.key(), SOURCE_TOPK_PRE_WARM);

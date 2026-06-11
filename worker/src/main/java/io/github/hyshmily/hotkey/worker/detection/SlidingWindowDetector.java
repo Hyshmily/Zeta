@@ -120,7 +120,7 @@ public class SlidingWindowDetector {
     // Obtain or create the circular buffer for this key.
     AtomicLong[] slices = windows.get(key);
     if (slices == null) {
-      slices = windows.computeIfAbsent(key, _ -> new AtomicLong[windowSize * 2]);
+      slices = windows.computeIfAbsent(key, k -> new AtomicLong[windowSize * 2]);
     }
 
     // Compute the index of the current time slice.

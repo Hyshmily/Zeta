@@ -8,12 +8,12 @@ This file provides guidance to AI coding assistants (Claude Code, Copilot CLI, G
 
 HotKey is a Spring Boot Starter for automatic hot key detection and multi-level cache warming. It combines the HeavyKeeper algorithm (Count-Min Sketch variant) with Caffeine L1 caching, optional Redis L2 caching, and optional RabbitMQ broadcast for cross-instance synchronization.
 
-**Coordinates:** `io.github.hyshmily:hotkey:1.1.3`
+**Coordinates:** `io.github.hyshmily:hotkey:1.1.4`
 
-The project is split into 2 Maven modules under parent `hotkey-parent:1.1.3`:
+The project is split into 2 Maven modules under parent `hotkey-parent:1.1.4`:
 
-- **`common/`** (`io.github.hyshmily:hotkey:1.1.3`) — Spring Boot Starter published to Maven Central; all cache logic, auto-configuration, algorithm, broadcast, report, entity types
-- **`worker/`** (`io.github.hyshmily:hotkey-worker:1.1.3`) — standalone Spring Boot app (never published); cluster-wide hot key detection via RabbitMQ reports; parent `spring-boot-starter-parent:3.5.3`
+- **`common/`** (`io.github.hyshmily:hotkey:1.1.4`) — Spring Boot Starter published to Maven Central; all cache logic, auto-configuration, algorithm, broadcast, report, entity types
+- **`worker/`** (`io.github.hyshmily:hotkey-worker:1.1.4`) — standalone Spring Boot app (never published); cluster-wide hot key detection via RabbitMQ reports; parent `spring-boot-starter-parent:3.5.3`
 
 ## Build Commands
 

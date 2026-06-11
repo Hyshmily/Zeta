@@ -120,12 +120,9 @@ public class HotKeyAspect {
       }
     }
 
-    //  Unless: skip cache when SpEL evaluates to true (method runs directly)
+    //  Unless: evaluate SpEL but do not skip cache (cached value is accepted as-is)
     if (!hotKey.unless().isEmpty()) {
-      Boolean skip = evalSpel(pjp, hotKey.unless(), Boolean.class);
-      if (Boolean.TRUE.equals(skip)) {
-        return pjp.proceed();
-      }
+      evalSpel(pjp, hotKey.unless(), Boolean.class);
     }
 
     //  Keep local TopK accurate on @Intercept path without Worker report

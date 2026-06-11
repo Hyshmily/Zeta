@@ -326,7 +326,7 @@ public class HotKeyCache {
 
           caffeineCache
             .asMap()
-            .compute(cacheKey, (_, existing) -> {
+            .compute(cacheKey, (k, existing) -> {
               if (isWorkerManagedEntry(existing)) {
                 return existing;
               }
@@ -352,7 +352,7 @@ public class HotKeyCache {
         } else {
           caffeineCache
             .asMap()
-            .compute(cacheKey, (_, existing) -> {
+            .compute(cacheKey, (k, existing) -> {
               if (isWorkerManagedEntry(existing)) {
                 return existing;
               }
@@ -403,7 +403,7 @@ public class HotKeyCache {
 
       caffeineCache
         .asMap()
-        .compute(cacheKey, (_, existing) -> {
+        .compute(cacheKey, (k, existing) -> {
           if (existing instanceof CacheEntry entry && !isPromotableState(entry.getKeyState())) {
             return existing;
           }
@@ -514,7 +514,7 @@ public class HotKeyCache {
 
         caffeineCache
           .asMap()
-          .compute(cacheKey, (_, existing) ->
+          .compute(cacheKey, (k, existing) ->
             buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl)
           );
 

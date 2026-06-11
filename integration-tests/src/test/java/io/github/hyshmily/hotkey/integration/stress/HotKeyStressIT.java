@@ -533,7 +533,7 @@ class HotKeyStressIT {
         String fk = hk;
         asyncExec.submit(() -> {
           try {
-            sf.load(fk, () -> { totalExecutions.incrementAndGet(); execPerKey.compute(fk, (_, v) -> v == null ? 1 : v + 1); try { Thread.sleep(1); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } return "hot"; });
+            sf.load(fk, () -> { totalExecutions.incrementAndGet(); execPerKey.compute(fk, (k, v) -> v == null ? 1 : v + 1); try { Thread.sleep(1); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } return "hot"; });
           } finally { latch.countDown(); }
         });
       }
@@ -731,12 +731,12 @@ class HotKeyStressIT {
     AtomicInteger sendCount = new AtomicInteger(0);
     for (int t = 0; t < threadCount; t++) {
       int tid = t;
-      Thread.startVirtualThread(() -> {
+      Thread thread = new Thread(() -> {
         try {
           long start = System.nanoTime();
           String compositeKey = "REFRESH:broadcast-key";
           AtomicBoolean skipped = new AtomicBoolean(false);
-          dedupCache.asMap().compute(compositeKey, (_, oldVersion) -> {
+          dedupCache.asMap().compute(compositeKey, (k, oldVersion) -> {
             if (oldVersion != null && oldVersion >= 10L) {
               skipped.set(true);
               return oldVersion;
@@ -753,6 +753,7 @@ class HotKeyStressIT {
           }
         } finally { latch.countDown(); }
       });
+      thread.start();
     }
     assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
     assertThat(sendCount.get()).isEqualTo(1);
@@ -776,9 +777,9 @@ class HotKeyStressIT {
     int[][] testCases = {{5, 3, 1}, {3, 6, 0}, {10, 10, 1}, {7, 7, 1}, {1, 0, 1}};
     for (int[] tc : testCases) {
       String key = "ver-" + tc[0] + "-" + tc[1];
-      dedupCache.asMap().compute(key, (_, old) -> (long) tc[0]);
+      dedupCache.asMap().compute(key, (k, old) -> (long) tc[0]);
       AtomicBoolean skipped = new AtomicBoolean(false);
-      dedupCache.asMap().compute(key, (_, old) -> {
+      dedupCache.asMap().compute(key, (k, old) -> {
         if (old != null && old >= tc[1]) { skipped.set(true); return old; }
         return (long) tc[1];
       });
@@ -805,7 +806,7 @@ class HotKeyStressIT {
     concurrentRun("broadcastStorm", threads, opsPerThread, (idx) -> {
       String key = "storm-key-" + (idx % 500);
       String compositeKey = "REFRESH:" + key;
-      dedupCache.asMap().compute(compositeKey, (_, oldVersion) -> {
+      dedupCache.asMap().compute(compositeKey, (k, oldVersion) -> {
         long newVer = idx;
         if (oldVersion != null && oldVersion >= newVer) return oldVersion;
         return newVer;
@@ -1032,13 +1033,13 @@ class HotKeyStressIT {
     concurrentRun("syncListener", 10, 200, (idx) -> {
       String key = "sl-key-" + (idx % 100);
       if (idx % 2 == 0) {
-        cache.asMap().compute(key, (_, existing) -> {
+        cache.asMap().compute(key, (k, existing) -> {
           if (existing == null) return null;
           if (VersionGuard.shouldSkipForSync(cache, key, 15, false)) return existing;
           return null;
         });
       } else {
-        cache.asMap().compute(key, (_, existing) -> {
+        cache.asMap().compute(key, (k, existing) -> {
           if (existing == null) return null;
           if (VersionGuard.shouldSkipForSync(cache, key, 8, false)) return existing;
           if (existing instanceof CacheEntry ce) {
@@ -1070,7 +1071,7 @@ class HotKeyStressIT {
     cache.put("wl-key", entry("initial", 5, KeyState.NORMAL, 300_000, 0));
     concurrentRun("workerListener", 10, 100, (idx) -> {
       long decisionVer = idx + 1;
-      cache.asMap().compute("wl-key", (_, existing) -> {
+      cache.asMap().compute("wl-key", (k, existing) -> {
         if (VersionGuard.shouldSkipForWorker(cache, "wl-key", decisionVer)) return existing;
         if (existing instanceof CacheEntry ce) {
           boolean isHot = idx % 2 == 0;

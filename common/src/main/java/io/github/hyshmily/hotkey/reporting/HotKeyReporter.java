@@ -102,7 +102,7 @@ public class HotKeyReporter {
    * @param cacheKey the accessed key
    */
   public void record(String cacheKey) {
-    counters.get(cacheKey, _ -> new LongAdder()).increment();
+    counters.get(cacheKey, k -> new LongAdder()).increment();
   }
 
   /**
@@ -171,7 +171,7 @@ public class HotKeyReporter {
           String target = ringManager.routeNode(key);
 
           if (target != null) {
-            sharded.computeIfAbsent(target, _ -> new HashMap<>()).put(key, val);
+            sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);
           }
         }
       });

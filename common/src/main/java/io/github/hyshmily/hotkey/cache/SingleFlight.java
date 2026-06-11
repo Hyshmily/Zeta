@@ -91,7 +91,7 @@ public class SingleFlight {
 
     CompletableFuture<Object> future = inflightLoads
       .asMap()
-      .computeIfAbsent(cacheKey, _ ->
+      .computeIfAbsent(cacheKey, k ->
         CompletableFuture.supplyAsync(() -> (Object) reader.get(), executor).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
       );
 

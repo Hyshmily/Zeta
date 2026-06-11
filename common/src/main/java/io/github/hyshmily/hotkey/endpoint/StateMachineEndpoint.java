@@ -19,7 +19,6 @@ import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
-import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -40,13 +39,19 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkey/worker/state")
-@RequiredArgsConstructor(onConstructor = @__(@Autowired))
 public class StateMachineEndpoint {
 
   /** Hot-key state machine whose config is being exposed/modified. */
   private final HotKeyStateMachine stateMachine;
   /** Shared atomic counter bumped on each config change; broadcast via heartbeat. */
   private final ObjectProvider<AtomicLong> configTimestampCounter;
+
+  @Autowired
+  public StateMachineEndpoint(HotKeyStateMachine stateMachine,
+      ObjectProvider<AtomicLong> configTimestampCounter) {
+    this.stateMachine = stateMachine;
+    this.configTimestampCounter = configTimestampCounter;
+  }
 
   /**
    * Returns the current state-machine configuration values.

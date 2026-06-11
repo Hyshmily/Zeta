@@ -118,7 +118,7 @@ public class HotKeyStateMachine {
     // Touch timestamp for eviction tracking
     stateTimestamps.put(key, System.currentTimeMillis());
 
-    KeyState state = states.computeIfAbsent(key, _ -> new KeyState());
+    KeyState state = states.computeIfAbsent(key, k -> new KeyState());
 
     if (isHotThisWindow) {
       state.hotStreak++;

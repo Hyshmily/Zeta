@@ -164,7 +164,7 @@ public class CacheSyncPublisher {
     AtomicBoolean skipped = new AtomicBoolean(false);
     recentBroadcasts
       .asMap()
-      .compute(compositeKey, (_, oldVersion) -> {
+      .compute(compositeKey, (k, oldVersion) -> {
         if (oldVersion != null && oldVersion >= version) {
           log.debug(
             "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
