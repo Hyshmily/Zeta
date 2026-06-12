@@ -1,0 +1,199 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.hyshmily.hotkey.worker.dispatch;
+
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.logging.DefaultLogger;
+import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import java.lang.management.ManagementFactory;
+import java.lang.management.OperatingSystemMXBean;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
+
+/**
+ * Enhanced Worker heartbeat sender.
+ *
+ * <p>Replaces the old ping-only heartbeat approach with
+ * structured heartbeats containing epoch, decisionVersionHwm, loadFactor,
+ * and readyToServe flags. Broadcast on the dedicated heartbeat exchange.
+ *
+ * <p>Epoch is persisted to Redis (fallback to local file), incremented
+ * atomically on each process start for restart detection by Apps.
+ */
+@RequiredArgsConstructor
+public class WorkerHeartbeatProducer {
+
+  private static final HotKeyLogger log = new DefaultLogger(WorkerHeartbeatProducer.class);
+
+  /** RabbitMQ template for publishing heartbeat messages. */
+  private final RabbitTemplate rabbitTemplate;
+  /** Target topic exchange for heartbeat messages. */
+  private final String heartbeatExchange;
+  /** Unique identity of this Worker node. */
+  private final String workerId;
+  /** State machine providing config-gossip fields (confirm/cool/grace counts). */
+  private final HotKeyStateMachine stateMachine;
+  /** Broadcaster for reading the current decision version watermark. */
+  private final WorkerBroadcaster broadcaster;
+  /** Monotonically increasing epoch, persisted across restarts. */
+  private final long epoch = initEpoch(new StringRedisTemplate());
+  /** JVM start timestamp used for the ready-to-serve grace period. */
+  private final long startTime = System.currentTimeMillis();
+  /** Single-thread scheduler for periodic heartbeat sends. */
+  private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r ->
+    new Thread(r, "hb-producer")
+  );
+  /** Shared monotonic counter for config-change timestamps embedded in heartbeats. */
+  private final AtomicLong configTimestampCounter;
+  /** Interval between consecutive heartbeat sends (milliseconds). */
+  private final long pingIntervalMs;
+
+  private static final String EPOCH_REDIS_KEY_PREFIX = "hotkey:worker:epoch:";
+
+  /**
+   * Initialises the epoch by atomically incrementing a Redis counter.
+   * Falls back to a local file if Redis is unavailable.
+   *
+   * @param redis the Redis template (created ad-hoc for this one-time operation)
+   * @return the new epoch value for this Worker incarnation
+   */
+  private long initEpoch(StringRedisTemplate redis) {
+    try {
+      String key = EPOCH_REDIS_KEY_PREFIX + workerId;
+      String val = redis.opsForValue().get(key);
+      long next = (val != null) ? Long.parseLong(val) + 1 : 1;
+      redis.opsForValue().set(key, String.valueOf(next));
+      log.info("Epoch initialized via Redis: workerId={}, epoch={}", workerId, next);
+      return next;
+    } catch (Exception e) {
+      log.warn("Redis unavailable for epoch, using local file fallback", e);
+      return initEpochFromLocalFile();
+    }
+  }
+
+  /**
+   * Fallback epoch initialisation using a local temp file when Redis is
+   * unavailable.  Reads the previous value, increments, and writes back.
+   *
+   * @return the new epoch value
+   */
+  private long initEpochFromLocalFile() {
+    try {
+      Path path = Path.of(System.getProperty("java.io.tmpdir"), "hotkey-epoch-" + workerId);
+      long next = 1;
+      if (Files.exists(path)) {
+        String content = Files.readString(path);
+        next = Long.parseLong(content.trim()) + 1;
+      }
+      Files.writeString(path, String.valueOf(next));
+      log.info("Epoch initialized via local file: workerId={}, epoch={}", workerId, next);
+      return next;
+    } catch (Exception e) {
+      log.error("Epoch local file fallback failed, using System.currentTimeMillis()", e);
+      return System.currentTimeMillis();
+    }
+  }
+
+  /**
+   * Computes the current CPU load factor (0.0 – 1.0) via the platform MXBean.
+   *
+   * @return CPU load clamped to [0, 1], or 0.0 if unavailable
+   */
+  private double computeLoadFactor() {
+    double cpuLoad = 0.0;
+    try {
+      OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
+      if (osBean instanceof com.sun.management.OperatingSystemMXBean sunOsBean) {
+        cpuLoad = sunOsBean.getCpuLoad();
+      }
+    } catch (Exception ignored) {}
+    return Math.min(1.0, cpuLoad);
+  }
+
+  /**
+   * Whether this Worker is ready to serve hot-key detection.
+   * Returns {@code true} after a 3-second startup grace period or as soon as
+   * the state machine has tracked at least one key.
+   *
+   * @return {@code true} if the Worker considers itself ready
+   */
+  private boolean isReadyToServe() {
+    long uptime = System.currentTimeMillis() - startTime;
+    return uptime > 3000 || stateMachine.getTrackedKeys() > 0;
+  }
+
+  /**
+   * Computes an integer fingerprint of the current state-machine config
+   * (confirm count, cool count, grace count) so receivers can quickly
+   * detect config changes without comparing individual fields.
+   *
+   * @return config fingerprint hash
+   */
+  private int computeConfigFingerprint() {
+    int hash = stateMachine.getConfirmCount();
+    hash = 31 * hash + stateMachine.getCoolCount();
+    hash = 31 * hash + stateMachine.getPreCoolGraceCount();
+    return hash;
+  }
+
+  /**
+   * Starts the periodic heartbeat sender at the configured ping interval.
+   */
+  @PostConstruct
+  public void start() {
+    scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, pingIntervalMs, TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Shuts down the heartbeat scheduler gracefully.
+   */
+  @PreDestroy
+  public void stop() {
+    scheduler.shutdown();
+  }
+
+  /**
+   * Builds and sends a single heartbeat message containing epoch, decision
+   * version watermark, load factor, ready-to-serve flag, config fingerprint,
+   * and state-machine config gossip fields.
+   */
+  void sendHeartbeat() {
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
+      workerId,
+      epoch,
+      System.currentTimeMillis(),
+      broadcaster.getCurrentDecisionVersion(),
+      computeLoadFactor(),
+      isReadyToServe(),
+      computeConfigFingerprint(),
+      stateMachine.getConfirmCount(),
+      stateMachine.getCoolCount(),
+      stateMachine.getPreCoolGraceCount(),
+      configTimestampCounter.get()
+    );
+    rabbitTemplate.send(heartbeatExchange, "heartbeat." + workerId, hb.toMessage());
+  }
+}

@@ -27,6 +27,7 @@ import io.github.hyshmily.hotkey.worker.ingest.ReportConsumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -93,7 +94,7 @@ class WorkerAutoConfigurationTest {
   }
 
   /**
-   * Minimal configuration providing mocked RabbitTemplate for the context runner.
+   * Minimal configuration providing mocked RabbitTemplate and ConnectionFactory for the context runner.
    */
   @Configuration
   static class MinimalMockConfiguration {
@@ -101,6 +102,11 @@ class WorkerAutoConfigurationTest {
     @Bean
     RabbitTemplate rabbitTemplate() {
       return org.mockito.Mockito.mock(RabbitTemplate.class);
+    }
+
+    @Bean
+    ConnectionFactory connectionFactory() {
+      return org.mockito.Mockito.mock(ConnectionFactory.class);
     }
   }
 }

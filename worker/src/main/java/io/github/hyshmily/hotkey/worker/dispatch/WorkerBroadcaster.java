@@ -88,6 +88,14 @@ public class WorkerBroadcaster {
   }
 
   /**
+   * Returns the current decision version without incrementing.
+   * Used by {@link WorkerHeartbeatProducer} for the heartbeat's decisionVersionHwm field.
+   */
+  public long getCurrentDecisionVersion() {
+    return decisionVersionCounter.get();
+  }
+
+  /**
    * Common send helper for HOT/COOL decisions.
    *
    * <p>Builds {@link MessageProperties} with type, version, and degraded flag,
@@ -107,22 +115,4 @@ public class WorkerBroadcaster {
     rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);
   }
 
-  /**
-   * Broadcasts a heartbeat (ping) message to all application instances.
-   *
-   * @param nodeId the unique identifier of this worker node
-   */
-  public void broadcastHeartbeat(String nodeId) {
-    MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_PING);
-    props.setHeader(AMQP_HEADER_NODE_ID, nodeId);
-    props.setHeader(AMQP_HEADER_TIMESTAMP, System.currentTimeMillis());
-    props.setHeader(AMQP_HEADER_CONFIG_CONFIRM_COUNT, stateMachine.getConfirmCount());
-    props.setHeader(AMQP_HEADER_CONFIG_COOL_COUNT, stateMachine.getCoolCount());
-    props.setHeader(AMQP_HEADER_CONFIG_GRACE_COUNT, stateMachine.getPreCoolGraceCount());
-    props.setHeader(AMQP_HEADER_CONFIG_TIMESTAMP, configTimestampCounter.get());
-
-    Message msg = new Message(AMQP_MESSAGE_PING.getBytes(StandardCharsets.UTF_8), props);
-    rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);
-  }
 }

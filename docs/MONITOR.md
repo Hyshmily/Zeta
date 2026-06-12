@@ -85,8 +85,7 @@ Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
     "minCountThreshold": 10,        // Worker minimum hot count
 
     // ── Worker health & state ──
-    "shards": [0, 1, 2],            // Known shard indices
-    "health": { "0": { "alive": true, ... } },  // Per-shard health metadata
+    "health": "healthy",            // Cluster health: "healthy", "unhealthy", or "unknown"
     "trackedKeys": 7                // Keys tracked by state machine
   },
   "sync": {

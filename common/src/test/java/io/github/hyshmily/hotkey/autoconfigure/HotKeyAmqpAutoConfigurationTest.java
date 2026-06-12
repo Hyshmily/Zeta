@@ -25,6 +25,7 @@ import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.concurrent.ScheduledExecutorService;
 import org.springframework.beans.factory.ObjectProvider;
@@ -110,13 +111,17 @@ class HotKeyAmqpAutoConfigurationTest {
    * Verifies that HotKeyReporter is created with its required dependencies.
    */
   @Test
+  @SuppressWarnings("unchecked")
   void hotKeyReporterIsCreatedWithRequiredDependencies() {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     HotKeyProperties properties = new HotKeyProperties();
+    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
 
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
-    HotKeyReporter reporter = config.hotKeyReporter(reportPublisher, scheduler, properties, new RingManager(150));
+    HotKeyReporter reporter = config.hotKeyReporter(
+      reportPublisher, scheduler, properties, new RingManager(150), healthViewProvider
+    );
 
     assertThat(reporter).isNotNull();
   }
@@ -375,14 +380,12 @@ class HotKeyAmqpAutoConfigurationTest {
 
     HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    RingManager healthMonitor = new RingManager(150);
     WorkerListener listener = config.workerListener(
       localCache,
       redisLoader,
       props,
       scheduler,
-      expireManager,
-      healthMonitor
+      expireManager
     );
 
     assertThat(listener).isNotNull();

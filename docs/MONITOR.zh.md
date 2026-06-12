@@ -85,8 +85,7 @@ management:
     "minCountThreshold": 10,        // Worker 最小晋升计数
 
     // ── Worker 健康状态 ──
-    "shards": [0, 1, 2],            // 已知分片索引
-    "health": { "0": { "alive": true, ... } },  // 按分片的健康元数据
+    "health": "healthy",            // 集群健康状态："healthy"、"unhealthy"、"unknown"
     "trackedKeys": 7                // 状态机追踪的 key 数
   },
   "sync": {

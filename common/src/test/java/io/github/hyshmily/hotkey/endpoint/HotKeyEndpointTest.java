@@ -24,6 +24,7 @@ import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
 import io.github.hyshmily.hotkey.algorithm.Item;
 import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
@@ -41,6 +42,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 
 /**
  * Aggregate verification for {@link HotKeyEndpoint}.
@@ -63,8 +65,11 @@ class HotKeyEndpointTest {
   private VersionController versionController;
   private CacheSyncPublisher cacheSyncPublisher;
   private HotKeyStateMachine hotKeyStateMachine;
+  private ObjectProvider<ClusterHealthView> healthViewProvider;
+  private ClusterHealthView healthView;
 
   @BeforeEach
+  @SuppressWarnings("unchecked")
   void setUp() {
     hotKeyDetector = mock(TopK.class);
     workerTopK = mock(TopK.class);
@@ -78,6 +83,10 @@ class HotKeyEndpointTest {
     versionController = mock(VersionController.class);
     cacheSyncPublisher = mock(CacheSyncPublisher.class);
     hotKeyStateMachine = mock(HotKeyStateMachine.class);
+    healthViewProvider = mock(ObjectProvider.class);
+    healthView = mock(ClusterHealthView.class);
+    when(healthViewProvider.getIfAvailable()).thenReturn(healthView);
+    when(healthView.isClusterHealthy()).thenReturn(true);
   }
 
   /* helpers */
@@ -86,7 +95,7 @@ class HotKeyEndpointTest {
     return new HotKeyEndpoint(
       hotKeyDetector, workerTopK, caffeineCache, singleFlight, properties,
       hotKeyReporter, ruleMatcher, workerHealthMonitor, expireManager,
-      versionController, cacheSyncPublisher, hotKeyStateMachine);
+      versionController, cacheSyncPublisher, hotKeyStateMachine, healthViewProvider);
   }
 
   private void mockTopK(TopK topK, List<Item> items, long total) {
@@ -120,7 +129,6 @@ class HotKeyEndpointTest {
     when(versionController.isRedisConfigured()).thenReturn(true);
     when(versionController.getDegradedVersionCount()).thenReturn(0L);
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(15L);
-    when(workerHealthMonitor.getWorkerHealth()).thenReturn(Map.of("aliveNodes", Set.of("n1"), "nodeTotalHeartbeats", Map.<String, Long>of("n1", 1L)));
     when(hotKeyStateMachine.getTrackedKeys()).thenReturn(7);
 
     Map<String, Object> info = endpointWithAll().hotKeyInfo();
@@ -180,7 +188,7 @@ class HotKeyEndpointTest {
     hk.add("k1", 20);
     HotKeyEndpoint ep = new HotKeyEndpoint(
       hk, null, caffeineCache, singleFlight, properties, hotKeyReporter, ruleMatcher,
-      null, null, null, null, null);
+      null, null, null, null, null, healthViewProvider);
     when(caffeineCache.estimatedSize()).thenReturn(10L);
 
     Map<String, Object> info = ep.hotKeyInfo();
@@ -202,8 +210,10 @@ class HotKeyEndpointTest {
    */
   @Test
   void hotKeyInfo_shouldOmitSectionWhenAllComponentsNull() {
+    ObjectProvider<ClusterHealthView> nullHvProvider = mock(ObjectProvider.class);
+    when(nullHvProvider.getIfAvailable()).thenReturn(null);
     HotKeyEndpoint minimal = new HotKeyEndpoint(
-      null, null, null, null, properties, null, null, null, null, null, null, null);
+      null, null, null, null, properties, null, null, null, null, null, null, null, nullHvProvider);
     Map<String, Object> info = minimal.hotKeyInfo();
     assertThat(info).doesNotContainKeys("local", "worker", "sync");
     assertThat(info).containsKeys("instanceId", "nodeId");
@@ -220,8 +230,10 @@ class HotKeyEndpointTest {
     when(hotKeyDetector.total()).thenReturn(0L);
     when(hotKeyDetector.expelled()).thenReturn(new LinkedBlockingQueue<>());
     when(caffeineCache.estimatedSize()).thenReturn(5L);
+    ObjectProvider<ClusterHealthView> nullHvProvider = mock(ObjectProvider.class);
+    when(nullHvProvider.getIfAvailable()).thenReturn(null);
     HotKeyEndpoint ep = new HotKeyEndpoint(
-      hotKeyDetector, null, caffeineCache, null, properties, null, null, null, null, null, null, null);
+      hotKeyDetector, null, caffeineCache, null, properties, null, null, null, null, null, null, null, nullHvProvider);
 
     Map<String, Object> info = ep.hotKeyInfo();
     assertThat(info).containsKey("local");
@@ -236,8 +248,10 @@ class HotKeyEndpointTest {
   @Test
   void hotKeyInfo_shouldIncludeSyncWhenOnlySyncComponents() {
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(5L);
+    ObjectProvider<ClusterHealthView> nullHvProvider = mock(ObjectProvider.class);
+    when(nullHvProvider.getIfAvailable()).thenReturn(null);
     HotKeyEndpoint ep = new HotKeyEndpoint(
-      null, null, null, null, properties, null, null, null, null, null, cacheSyncPublisher, null);
+      null, null, null, null, properties, null, null, null, null, null, cacheSyncPublisher, null, nullHvProvider);
 
     Map<String, Object> info = ep.hotKeyInfo();
     assertThat(info).doesNotContainKeys("local", "worker");
@@ -253,12 +267,10 @@ class HotKeyEndpointTest {
   @Test
   void workerSection_shouldListWorkerHealth() {
     mockTopK(workerTopK, List.of(new Item("k", 1)), 10L);
-    when(workerHealthMonitor.getWorkerHealth()).thenReturn(
-      Map.of("aliveNodes", Set.of("n1"), "nodeTotalHeartbeats", Map.<String, Long>of("n1", 42L)));
     when(hotKeyStateMachine.getTrackedKeys()).thenReturn(3);
     HotKeyEndpoint ep = new HotKeyEndpoint(
       null, workerTopK, null, null, properties, null, null, workerHealthMonitor,
-      null, null, null, hotKeyStateMachine);
+      null, null, null, hotKeyStateMachine, healthViewProvider);
 
     Map<String, Object> info = ep.hotKeyInfo();
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
@@ -297,7 +309,7 @@ class HotKeyEndpointTest {
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     HotKeyEndpoint ep = new HotKeyEndpoint(
       hotKeyDetector, null, caffeineCache, null, properties, null, ruleMatcher,
-      null, null, null, null, null);
+      null, null, null, null, null, healthViewProvider);
     Map<String, Object> info = ep.hotKeyInfo();
     Map<String, Object> local = (Map<String, Object>) info.get("local");
     assertThat(local).containsKey("rules");

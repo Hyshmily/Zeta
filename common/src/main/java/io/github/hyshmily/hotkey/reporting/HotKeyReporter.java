@@ -20,6 +20,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -78,6 +79,8 @@ public class HotKeyReporter {
   private final int consumerCount;
   /** Consistent-hashing ring manager for Worker node routing. */
   private final RingManager ringManager;
+  /** Cluster health view for filtering dead Workers. */
+  private final ClusterHealthView healthView;
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
   /** The report dispatcher instance; created on start(). */
@@ -157,7 +160,7 @@ public class HotKeyReporter {
     }
 
     // Reconcile ring with alive Worker nodes (from heartbeat state), then route via consistent hash
-    ringManager.reconcile();
+    ringManager.reconcileFromHealthView(healthView);
 
     Map<String, Map<String, Long>> sharded = new HashMap<>();
     long now = System.currentTimeMillis();
@@ -168,7 +171,7 @@ public class HotKeyReporter {
         long val = adder.sumThenReset();
 
         if (val > 0) {
-          String target = ringManager.routeNode(key);
+          String target = ringManager.routeNode(key, healthView);
 
           if (target != null) {
             sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);

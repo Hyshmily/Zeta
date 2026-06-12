@@ -21,8 +21,8 @@ import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -107,7 +107,7 @@ public class HotKeyMicrometerAutoConfiguration {
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
     ObjectProvider<HotKeyStateMachine> stateMachineProvider,
-    ObjectProvider<RingManager> ringManagerProvider
+    ObjectProvider<ClusterHealthView> healthViewProvider
   ) {
     return registry -> {
       hotKeyDetectorProvider.ifAvailable(detector -> registerLocalTopKGauges(detector, registry));
@@ -129,8 +129,8 @@ public class HotKeyMicrometerAutoConfiguration {
         Gauge.builder("hotkey.sync.dedup.size", csp, p -> (double) p.getDedupCacheSize()).register(registry)
       );
       workerTopKProvider.ifAvailable(wtk -> registerWorkerTopKGauges(wtk, registry));
-      ringManagerProvider.ifAvailable(rm ->
-        Gauge.builder("hotkey.worker.alive", rm, r -> r.isAnyWorkerAlive() ? 1.0 : 0.0).register(registry)
+      healthViewProvider.ifAvailable(hv ->
+        Gauge.builder("hotkey.worker.alive", hv, v -> v.isClusterHealthy() ? 1.0 : 0.0).register(registry)
       );
       stateMachineProvider.ifAvailable(sm ->
         Gauge.builder("hotkey.worker.tracked.keys", sm, s -> (double) s.getTrackedKeys()).register(registry)

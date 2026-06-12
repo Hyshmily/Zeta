@@ -16,9 +16,11 @@
 package io.github.hyshmily.hotkey.endpoint;
 
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.util.Assert;
 import org.springframework.web.bind.annotation.*;
 
@@ -41,6 +43,9 @@ public class RingEndpoint {
 
   /** Consistent-hash ring manager for shard routing. */
   private final RingManager ringManager;
+
+  /** Cluster health view provider (optional — unavailable in Worker-only mode). */
+  private final ObjectProvider<ClusterHealthView> healthViewProvider;
 
   /**
    * Return the current ring topology, mode (auto/manual), node count,
@@ -69,7 +74,11 @@ public class RingEndpoint {
     Assert.hasText(key, "key must not be empty");
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("key", key);
-    result.put("nodeId", ringManager.routeNode(key));
+    ClusterHealthView view = healthViewProvider.getIfAvailable();
+    if (view == null) {
+      view = new ClusterHealthView(0, 0, 0);
+    }
+    result.put("nodeId", ringManager.routeNode(key, view));
     return result;
   }
 

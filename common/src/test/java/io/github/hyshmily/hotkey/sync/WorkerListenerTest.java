@@ -32,7 +32,6 @@ import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executors;
@@ -62,7 +61,7 @@ class WorkerListenerTest {
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
     CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
-    listener = new WorkerListener(cache, redisLoader, properties, scheduler, expireManager, new RingManager(150));
+    listener = new WorkerListener(cache, redisLoader, properties, scheduler, expireManager);
     channel = mock(Channel.class);
   }
 

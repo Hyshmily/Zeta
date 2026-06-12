@@ -31,9 +31,9 @@ import org.springframework.web.bind.annotation.RestController;
  * Actuator endpoint for reading and updating the Worker's state-machine
  * configuration at runtime.
  *
- * <p>Changes are propagated to peer Workers via the heartbeat broadcast
- * (see {@code AMQP_HEADER_CONFIG_*} headers in
- * {@code WorkerBroadcaster#broadcastHeartbeat}).
+ * <p>Changes are propagated to peer Workers via heartbeat broadcast
+ * (see {@code AMQP_HEADER_HEARTBEAT_CONFIG_FP} / {@code hbConfigFp} in
+ * {@code WorkerHeartbeatProducer}).
  *
  * <p>Endpoint path: {@code /actuator/hotkey/worker/state}.
  */

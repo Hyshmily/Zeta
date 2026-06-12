@@ -21,16 +21,16 @@ import java.nio.charset.StandardCharsets;
 import org.springframework.amqp.core.Message;
 
 /**
- * Message from Worker to app instances carrying hot/cool decisions or heartbeats.
+ * Message from Worker to app instances carrying hot/cool decisions.
  * Travels via {@code hotkey.worker.exchange} (FanoutExchange).
  *
  * <p>No {@code isVersionDegraded} — Worker skips broadcast if Redis GET fails.
  *
  * @param cacheKey        the affected cache key
- * @param type            the decision ({@link #TYPE_HOT}, {@link #TYPE_COOL}, or {@link #TYPE_PING})
+ * @param type            the decision ({@link #TYPE_HOT} or {@link #TYPE_COOL})
  * @param decisionVersion the Worker‑local decision version (monotonically increasing)
- * @param timestamp       the heartbeat timestamp (for PING; 0 for HOT/COOL)
- * @param nodeId          the Worker node identifier (for PING; null for HOT/COOL)
+ * @param timestamp       reserved (0 for HOT/COOL)
+ * @param nodeId          reserved (null for HOT/COOL)
  */
 public record WorkerMessage(String cacheKey, String type, long decisionVersion, long timestamp, String nodeId) {
   /** Promotes a cache key to hot state — extended TTL, soft expiration enabled. */
@@ -38,9 +38,6 @@ public record WorkerMessage(String cacheKey, String type, long decisionVersion, 
 
   /** Downgrades a cache key to cool state — normal TTL, soft expiration disabled. */
   public static final String TYPE_COOL = "COOL";
-
-  /** Heartbeat ping from a Worker node, carrying {@code nodeId} and {@code timestamp}. */
-  public static final String TYPE_PING = "PING";
 
   /**
    * Deserialize a {@code WorkerMessage} from an AMQP message body and headers.

@@ -26,16 +26,16 @@ import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.ThresholdLearner;
 import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
+import io.github.hyshmily.hotkey.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
+import io.github.hyshmily.hotkey.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.hotkey.worker.ingest.ReportConsumer;
 import jakarta.annotation.PostConstruct;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -44,6 +44,11 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
+
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Auto‑configuration for the <b>hot‑key Worker</b>.
@@ -249,30 +254,31 @@ public class WorkerAutoConfiguration {
 
   /**
    * Auto-delete queue for receiving heartbeat-based config updates from
-   * other Workers.
+   * peer Workers.
    *
    * <p>Each Worker declares its own queue named
    * {@code hotkey.worker.config.<nodeId>}, which is automatically removed
-   * when the Worker disconnects.  The queue is bound directly to the
-   * {@code broadcastExchange} — the same exchange that
-   * {@link WorkerBroadcaster} (and all app-side WorkerListeners) publish
-   * heartbeats to.
+   * when the Worker disconnects.  The queue is bound to the
+   * {@code heartbeatExchange} with routing key {@code heartbeat.*}.
    */
   @Bean
   public Queue workerConfigQueue() {
     return QueueBuilder.nonDurable("hotkey.worker.config." + nodeId).autoDelete().build();
   }
 
-  /** Binds the per-Worker config queue to the shared broadcast exchange. */
+  /** Binds the per-Worker config queue to the heartbeat exchange. */
   @Bean
-  public Binding workerConfigBinding(Queue workerConfigQueue, WorkerProperties properties) {
-    return new Binding(
-      workerConfigQueue.getName(),
-      Binding.DestinationType.QUEUE,
-      properties.getMessaging().getBroadcastExchange(),
-      "",
-      null
-    );
+  public Binding workerConfigBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
+    return BindingBuilder
+      .bind(workerConfigQueue)
+      .to(heartbeatExchange)
+      .with("heartbeat.*");
+  }
+
+  /** Topic exchange for epoch-aware structured heartbeats from Workers. */
+  @Bean
+  public TopicExchange heartbeatExchange(WorkerProperties properties) {
+    return new TopicExchange(properties.getMessaging().getHeartbeatExchange(), true, false);
   }
 
   /**
@@ -441,27 +447,55 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Schedules a periodic heartbeat ping broadcast for this worker instance.
-   *
-   * @param broadcaster the worker broadcaster used to send the heartbeat
-   * @param properties  worker configuration properties (ping interval
-   *                    is extracted from here)
-   * @param scheduler   the shared worker scheduler
-   * @return a placeholder {@link Object} bean that keeps the scheduler alive
+   * Auto-delete queue for on-demand verification requests (PING) from Apps.
    */
   @Bean
-  public Object pingTask(
-    WorkerBroadcaster broadcaster,
-    WorkerProperties properties,
-    @Qualifier("hotKeyWorkerScheduler") ScheduledExecutorService scheduler
+  public Queue verifyPingQueue() {
+    return QueueBuilder.nonDurable("hotkey.verify.ping." + nodeId).autoDelete().build();
+  }
+
+  /** Handles PING requests from Apps, replies PONG via Direct reply-to. */
+  @Bean
+  public VerifyConsumer verifyConsumer(RabbitTemplate rabbitTemplate) {
+    return new VerifyConsumer(rabbitTemplate, nodeId);
+  }
+
+  /** Container for the verification ping queue (NONE ack, on-demand only). */
+  @Bean
+  public SimpleMessageListenerContainer verifyPingContainer(
+    ConnectionFactory connectionFactory,
+    Queue verifyPingQueue,
+    VerifyConsumer verifyConsumer
   ) {
-    int intervalMs = properties.getHeartbeat().getPingIntervalMs();
-    scheduler.scheduleAtFixedRate(
-      () -> broadcaster.broadcastHeartbeat(nodeId),
-      0,
-      intervalMs,
-      TimeUnit.MILLISECONDS
+    SimpleMessageListenerContainer c = new SimpleMessageListenerContainer(connectionFactory);
+    c.setQueues(verifyPingQueue);
+    c.setMessageListener(verifyConsumer::handlePing);
+    c.setAcknowledgeMode(AcknowledgeMode.NONE);
+    return c;
+  }
+
+  /**
+   * Enhanced heartbeat producer that sends structured heartbeats with epoch,
+   * load factor, decision-version watermark, and state-machine config gossip.
+   *
+   * <p>Replaces the old ping-only heartbeat approach. Uses its own internal scheduler.
+   */
+  @Bean
+  public WorkerHeartbeatProducer workerHeartbeatProducer(
+    RabbitTemplate rabbitTemplate,
+    WorkerProperties properties,
+    HotKeyStateMachine stateMachine,
+    WorkerBroadcaster broadcaster,
+    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter
+  ) {
+    return new WorkerHeartbeatProducer(
+      rabbitTemplate,
+      properties.getMessaging().getHeartbeatExchange(),
+      nodeId,
+      stateMachine,
+      broadcaster,
+      configTimestampCounter,
+      properties.getHeartbeat().getPingIntervalMs()
     );
-    return new Object(); // placeholder bean
   }
 }

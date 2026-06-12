@@ -31,8 +31,8 @@ import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.sync.VersionController;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -118,8 +118,8 @@ class HotKeyMicrometerAutoConfigurationTest {
     when(vc.getDegradedVersionCount()).thenReturn(7L);
     CacheSyncPublisher csp = mock(CacheSyncPublisher.class);
     when(csp.getDedupCacheSize()).thenReturn(15L);
-    RingManager whm = mock(RingManager.class);
-    when(whm.isAnyWorkerAlive()).thenReturn(true);
+    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    when(healthView.isClusterHealthy()).thenReturn(true);
     HotKeyStateMachine sm = mock(HotKeyStateMachine.class);
     when(sm.getTrackedKeys()).thenReturn(12);
 
@@ -132,7 +132,7 @@ class HotKeyMicrometerAutoConfigurationTest {
       providerThatReturns(vc),
       providerThatReturns(csp),
       providerThatReturns(sm),
-      providerThatReturns(whm)
+      providerThatReturns(healthView)
     );
     binder.bindTo(registry);
 

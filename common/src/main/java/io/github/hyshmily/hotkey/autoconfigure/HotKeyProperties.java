@@ -96,10 +96,6 @@ public class HotKeyProperties {
   @Min(1)
   private int expelledQueueCapacity = 50_000;
 
-  /** @deprecated No longer used; decay is driven by {@link io.github.hyshmily.hotkey.autoconfigure.HotKeySchedulingConfiguration#cleanHotKeys()} with a configurable fixed delay. */
-  @Deprecated
-  private int decayPeriod = 20;
-
   /** Default hard TTL (ms) for normal keys — fallback when {@link #hardTtlMs} is not set. */
   private long defaultHardTtlMs = 300_000;
 
@@ -230,4 +226,23 @@ public class HotKeyProperties {
    * Falls back to {@code server.port-HOSTNAME} (or {@code server.port-UUID} if {@code HOSTNAME} is unset) if empty.
    */
   private String instanceId = "";
+
+  @Getter
+  @Setter
+  public static class Heartbeat {
+
+    /** Heartbeat exchange name. */
+    private String exchangeName = "hotkey.heartbeat.exchange";
+    /** Heartbeat timeout (ms). */
+    private long timeoutMs = 3000;
+    /** Verify interval (ms). */
+    private long verifyIntervalMs = 1500;
+    /** PING timeout (ms). */
+    private long pingTimeoutMs = 2000;
+    /** Degrade after consecutive failures. */
+    private int degradeAfterFailures = 2;
+  }
+
+  @Valid
+  private Heartbeat heartbeat = new Heartbeat();
 }

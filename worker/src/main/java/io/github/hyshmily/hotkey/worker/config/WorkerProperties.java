@@ -48,6 +48,7 @@ public class WorkerProperties {
 
     private String reportExchange = "hotkey.report.exchange";
     private String broadcastExchange = "hotkey.broadcast.exchange";
+    private String heartbeatExchange = "hotkey.heartbeat.exchange";
   }
 
   /** Sliding-window parameters for local QPS tracking. */
@@ -117,22 +118,31 @@ public class WorkerProperties {
   }
 
   private boolean enabled = false;
+
   @Valid
   private Routing routing = new Routing();
+
   @Valid
   private Messaging messaging = new Messaging();
+
   @Valid
   private SlidingWindow slidingWindow = new SlidingWindow();
+
   @Valid
   private Threshold threshold = new Threshold();
+
   @Valid
   private StateMachine stateMachine = new StateMachine();
+
   @Valid
   private GlobalQpsDynamicThreshold globalQpsDynamicThreshold = new GlobalQpsDynamicThreshold();
+
   @Valid
   private TopKValidation topKValidation = new TopKValidation();
+
   @Valid
   private HeavyKeeper heavyKeeper = new HeavyKeeper();
+
   @Valid
   private Heartbeat heartbeat = new Heartbeat();
 

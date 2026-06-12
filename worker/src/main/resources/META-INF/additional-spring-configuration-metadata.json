@@ -21,8 +21,14 @@
     {
       "name": "hotkey.worker.messaging.broadcast-exchange",
       "type": "java.lang.String",
-      "description": "Name of the FanoutExchange for broadcasting HOT/COOL decisions and heartbeats.",
+      "description": "Name of the FanoutExchange for broadcasting HOT/COOL decisions.",
       "defaultValue": "hotkey.broadcast.exchange"
+    },
+    {
+      "name": "hotkey.worker.messaging.heartbeat-exchange",
+      "type": "java.lang.String",
+      "description": "Name of the TopicExchange for epoch-driven structured worker heartbeats.",
+      "defaultValue": "hotkey.heartbeat.exchange"
     },
     {
       "name": "hotkey.worker.sliding-window.duration-ms",
@@ -141,7 +147,7 @@
     {
       "name": "hotkey.worker.heartbeat.ping-interval-ms",
       "type": "java.lang.Integer",
-      "description": "Interval in milliseconds between Worker heartbeat (ping) broadcasts.",
+      "description": "Interval in milliseconds between structured heartbeat sends (epoch, loadFactor, decisionVersionHwm, config gossip).",
       "defaultValue": 1000
     }
   ]

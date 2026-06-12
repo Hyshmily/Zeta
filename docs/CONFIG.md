@@ -13,7 +13,6 @@
 | `hotkey.local.min-count`                          | `10`             | Minimum count threshold for hot key                                                        |
 | `hotkey.local.local-cache-max-size`               | `1000`           | Caffeine L1 max entries                                                                    |
 | `hotkey.local.local-cache-ttl-minutes`            | `5`              | Caffeine L1 write-based TTL (minutes)                                                      |
-| `hotkey.local.local-cache-access-ttl-minutes`     | `0`              | Caffeine L1 access-based TTL (minutes), 0 = disabled. Supplements write-based TTL          |
 | `hotkey.local.inflight-max-size`                  | `50000`          | In-flight dedup max entries                                                                |
 | `hotkey.local.inflight-ttl-seconds`               | `5`              | In-flight dedup entry TTL (must exceed slowest L2 response)                                |
 | `hotkey.local.inflight-timeout-seconds`           | `3`              | In-flight load timeout (must be < inflight-ttl-seconds). On timeout returns `Optional.empty()` — caller should fallback to DB |
@@ -30,7 +29,7 @@
 | `hotkey.local.default-hot-soft-ttl-ms`            | `300000` (5min)  | Default soft TTL for hot keys                                                              |
 | `hotkey.local.hot-soft-ttl-ms`                    | `0`              | Per-call soft TTL override for hot keys; 0 = use `default-hot-soft-ttl-ms`                 |
 | `hotkey.local.refresh-max-pools`                  | `100`            | Max concurrent async refreshes for soft expire (Semaphore)                                  |
-| `hotkey.local.version-key-ttl-minutes`            | `60`             | Redis version key TTL (minutes); 0 = no expire                                             |
+| `hotkey.local.version-key-ttl-minutes`            | `60`             | Redis version key TTL (minutes); minimum 1                                                 |
 | `hotkey.local.report-exchange`                    | `hotkey.report.exchange` | RabbitMQ exchange for app-to-Worker report messages                               |
 | `hotkey.local.report-interval-ms`                 | `100`            | Interval at which app instances batch and send TopK reports to the Worker (ms)             |
 | `hotkey.local.app-name`                           | `"default"`      | Logical application name used as tenant discriminator for Worker routing                   |
@@ -39,6 +38,16 @@
 | `hotkey.local.queue-capacity`                     | `10000`          | Report dispatcher queue capacity (internal bounded queue) |
 | `hotkey.local.queue-offer-timeout-ms`             | `100`            | Report queue offer timeout (ms) — blocks up to this duration before dropping |
 | `hotkey.local.consumer-count`                     | `0`              | Report consumer thread count; 0 = auto (max(1, shardCount / 2)) |
+
+### Heartbeat (`hotkey.local.heartbeat.*`)
+
+| Property | Default | Description |
+| -------- | ------- | ----------- |
+| `hotkey.local.heartbeat.exchange-name` | `hotkey.heartbeat.exchange` | Topic exchange name for epoch-driven structured heartbeats from Workers |
+| `hotkey.local.heartbeat.timeout-ms` | `3000` | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window |
+| `hotkey.local.heartbeat.verify-interval-ms` | `1500` | Interval (ms) for verifying suspected dead Workers via Direct reply-to PING |
+| `hotkey.local.heartbeat.ping-timeout-ms` | `2000` | Timeout (ms) for a PING/PONG verification probe |
+| `hotkey.local.heartbeat.degrade-after-failures` | `2` | Number of consecutive PING failures before degrading the Worker (allow local promotion of its entries) |
 
 ### Reporting (`hotkey.report.*`)
 
@@ -78,6 +87,7 @@
 | `hotkey.sync.warmup-jitter-ms`              | `100`                       | Random jitter before processing sync messages (prevents herd)       |
 | `hotkey.sync.concurrent-consumers`          | `3`                         | Number of concurrent RabbitMQ consumers for sync queue               |
 | `hotkey.sync.scheduler-pool-size`           | `4`                         | Thread pool size for async sync jitter delay scheduling              |
+| `hotkey.sync.prefetch-count`               | `5`                         | AMQP prefetch count per sync consumer                               |
 | `hotkey.sync.auto-startup`                 | `true`                      | Whether the sync listener container starts automatically with the application |
 
 ### Worker Listener (`hotkey.worker-listener.*`)
@@ -90,6 +100,7 @@
 | `hotkey.worker-listener.warmup-jitter-ms`          | `100`                       | Random jitter before processing Worker messages (prevents herd)        |
 | `hotkey.worker-listener.concurrent-consumers`      | `2`                         | Number of concurrent RabbitMQ consumers for Worker listener queue      |
 | `hotkey.worker-listener.scheduler-pool-size`       | `2`                         | Thread pool size for deferred Redis reads in Worker listener           |
+| `hotkey.worker-listener.prefetch-count`            | `5`                         | AMQP prefetch count per worker-listener consumer                     |
 | `hotkey.worker-listener.auto-startup`              | `true`                      | Whether the worker listener container starts automatically with the application |
 
 ### Worker Node (`hotkey.worker.*`)
@@ -102,6 +113,7 @@
 | **`hotkey.worker.messaging.*`**                                           |                            | **Messaging**                                                        |
 | `hotkey.worker.messaging.report-exchange`                                 | `hotkey.report.exchange`   | Direct exchange for app report messages                              |
 | `hotkey.worker.messaging.broadcast-exchange`                              | `hotkey.broadcast.exchange`| Exchange for HOT/COOL broadcasts (Worker publishes with routing keys; may need alignment with worker-listener.exchange-name) |
+| `hotkey.worker.messaging.heartbeat-exchange`                              | `hotkey.heartbeat.exchange`| Topic exchange for epoch-driven structured heartbeats (must match App-side `hotkey.local.heartbeat.exchange-name`) |
 | **`hotkey.worker.sliding-window.*`**                                      |                            | **Sliding Window**                                                   |
 | `hotkey.worker.sliding-window.duration-ms`                                | `1000`                     | Sliding window duration (milliseconds)                               |
 | `hotkey.worker.sliding-window.slices`                                     | `10`                       | Number of time slices within one window                              |
@@ -112,6 +124,7 @@
 | `hotkey.worker.state-machine.confirm-duration-ms`                         | `300`                      | Duration key must stay above threshold to be confirmed HOT           |
 | `hotkey.worker.state-machine.cool-duration-ms`                            | `15000`                    | Duration key must stay below threshold to be considered COLD         |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`                           | `5000`                     | Grace period at end of cool-down for silent revival                  |
+| `hotkey.worker.state-machine.evict-interval-ms`                          | `30000`                    | Stale state eviction interval (ms); must be >= cool-duration-ms * 2  |
 | **`hotkey.worker.global-qps-dynamic-threshold.*`**                        |                            | **Dynamic Threshold (Global QPS)**                                    |
 | `hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms`      | `60000`                    | Interval for dynamic threshold recalculation                         |
 | `hotkey.worker.global-qps-dynamic-threshold.qps-change-tolerance`         | `0.5`                      | QPS change tolerance before threshold update (±50%)                  |
@@ -127,6 +140,8 @@
 | `hotkey.worker.heavy-keeper.depth`                                        | `10`                       | Worker-side Count-Min Sketch depth                                   |
 | `hotkey.worker.heavy-keeper.decay`                                        | `0.9`                      | Worker-side HeavyKeeper decay factor                                 |
 | `hotkey.worker.heavy-keeper.min-count`                                    | `10`                       | Worker-side minimum count threshold                                  |
+| **`hotkey.worker.heartbeat.*`**                                           |                            | **Heartbeat**                                                        |
+| `hotkey.worker.heartbeat.ping-interval-ms`                                | `1000`                     | Interval (ms) between structured heartbeat sends                     |
 
 ## Modules
 

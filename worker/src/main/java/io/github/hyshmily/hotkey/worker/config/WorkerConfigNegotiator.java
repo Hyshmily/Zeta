@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.worker.config;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,7 +27,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
  * Listens for heartbeat-based config updates from peer Workers and applies them
@@ -82,52 +82,33 @@ public class WorkerConfigNegotiator {
    */
   @RabbitListener(queues = "#{@workerConfigQueue.name}")
   public void onHeartbeat(Message msg) {
-    var props = msg.getMessageProperties();
-    if (props == null) {
+    WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
+    if (hb == null) {
       return;
     }
 
-    if (!AMQP_MESSAGE_PING.equals(props.getHeader(AMQP_HEADER_TYPE))) {
+    if (hb.workerId().equals(nodeId)) {
       return;
     }
 
-    String fromNode = props.getHeader(AMQP_HEADER_NODE_ID);
-    if (fromNode == null || fromNode.equals(nodeId)) {
-      return;
-    }
-
-    Number remoteTsObj = props.getHeader(AMQP_HEADER_CONFIG_TIMESTAMP);
-    if (remoteTsObj == null) {
-      return;
-    }
-
-    long remoteTs = remoteTsObj.longValue();
+    long remoteTs = hb.configTimestamp();
     long localTs = configTimestampCounter.get();
     if (remoteTs <= localTs) {
       return;
     }
 
-    Number confirmCount = props.getHeader(AMQP_HEADER_CONFIG_CONFIRM_COUNT);
-    Number coolCount = props.getHeader(AMQP_HEADER_CONFIG_COOL_COUNT);
-    Number preCoolGraceCount = props.getHeader(AMQP_HEADER_CONFIG_GRACE_COUNT);
-
-    if (confirmCount == null || coolCount == null || preCoolGraceCount == null) {
-      log.debug("Incomplete config heartbeat from {}: missing header(s), skipping", fromNode);
-      return;
-    }
-
-    stateMachine.setConfirmCount(confirmCount.intValue());
-    stateMachine.setCoolCount(coolCount.intValue());
-    stateMachine.setPreCoolGraceCount(preCoolGraceCount.intValue());
+    stateMachine.setConfirmCount(hb.configConfirmCount());
+    stateMachine.setCoolCount(hb.configCoolCount());
+    stateMachine.setPreCoolGraceCount(hb.configGraceCount());
 
     configTimestampCounter.set(remoteTs);
 
     log.debug(
       "Applied newer config from {}: confirmCount={}, coolCount={}, preCoolGraceCount={}",
-      fromNode,
-      confirmCount,
-      coolCount,
-      preCoolGraceCount
+      hb.workerId(),
+      hb.configConfirmCount(),
+      hb.configCoolCount(),
+      hb.configGraceCount()
     );
 
     if (startupLatch.getCount() > 0) {

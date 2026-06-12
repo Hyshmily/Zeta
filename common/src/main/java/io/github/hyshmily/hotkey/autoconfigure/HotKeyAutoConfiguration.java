@@ -32,6 +32,7 @@ import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -194,7 +195,8 @@ public class HotKeyAutoConfiguration {
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    ObjectProvider<RingManager> ringManagerProvider
+    ObjectProvider<RingManager> ringManagerProvider,
+    ObjectProvider<ClusterHealthView> healthViewProvider
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -206,7 +208,8 @@ public class HotKeyAutoConfiguration {
       hotKeyReporter,
       ruleMatcher,
       new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes()),
-      ringManagerProvider.getIfAvailable(() -> new RingManager(properties.getConsistentHashing().getVirtualNodes()))
+      ringManagerProvider.getIfAvailable(() -> new RingManager(properties.getConsistentHashing().getVirtualNodes())),
+      healthViewProvider.getIfAvailable(() -> new ClusterHealthView(0, 3000, 2))
     );
   }
 

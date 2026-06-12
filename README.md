@@ -196,7 +196,6 @@ hotkey:
     # ——— L1 Caffeine cache ———
     local-cache-max-size: 1000             # Maximum entries
     local-cache-ttl-minutes: 5             # Cache expiry (minutes)
-    local-cache-access-ttl-minutes: 0      # Post-access expiry (0=no expiry)
 
     # ——— SingleFlight deduplication ———
     inflight-max-size: 50000               # Maximum dedup keys
@@ -229,6 +228,14 @@ hotkey:
       enabled: true                        # Dynamic Worker routing via heartbeats
       virtual-nodes: 500                   # Virtual nodes per physical Worker
 
+    # ——— Heartbeat (App-side; Worker health monitoring) ———
+    heartbeat:
+      exchange-name: "hotkey.heartbeat.exchange"
+      timeout-ms: 3000                       # Worker considered dead after this silent window
+      verify-interval-ms: 1500               # Suspect verification interval
+      ping-timeout-ms: 2000                  # Direct reply-to PING timeout
+      degrade-after-failures: 2              # Degrade after N consecutive PING failures
+
   # Feature toggles
   report:
     enabled: true                          # App&#8594;Worker report publishing
@@ -249,6 +256,7 @@ hotkey:
     warmup-jitter-ms: 100                  # Random delay before processing (anti-herd)
     concurrent-consumers: 2                # Concurrent consumers
     scheduler-pool-size: 2                 # Delayed task thread pool size
+    prefetch-count: 5                      # AMQP prefetch count per consumer
 
   # App-side — Cross-instance cache sync
   sync:
@@ -261,6 +269,7 @@ hotkey:
     warmup-jitter-ms: 100                  # Random delay before processing (anti-herd)
     concurrent-consumers: 3                # Concurrent consumers
     scheduler-pool-size: 4                 # Delayed task thread pool size
+    prefetch-count: 5                      # AMQP prefetch count per consumer
 
   # Worker-side — Standalone deployment node
   worker:
@@ -273,6 +282,7 @@ hotkey:
     messaging:
       report-exchange: "hotkey.report.exchange"
       broadcast-exchange: "hotkey.broadcast.exchange"
+      heartbeat-exchange: "hotkey.heartbeat.exchange"
 
     sliding-window:
       duration-ms: 1000                    # Window duration (ms)
@@ -286,6 +296,7 @@ hotkey:
       confirm-duration-ms: 300             # Confirmation window (ms), sustained heat beyond this = HOT
       cool-duration-ms: 15000              # Cooling window (ms), sustained cool beyond this = COOL
       pre-cool-grace-ms: 5000              # Pre-cooling grace period (ms)
+      evict-interval-ms: 30000             # Stale state eviction interval (ms), must be >= coolDurationMs * 2
 
     global-qps-dynamic-threshold:
       qps-change-tolerance: 0.5            # QPS change tolerance multiplier
@@ -547,7 +558,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 
 **I. Worker mode**
 
-Worker mode provides cluster-level hot key detection via dedicated nodes. App instances periodically report access counts, Workers run a sliding window + state machine pipeline, and broadcast HOT/COOL decisions to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state` — changes propagate to all peer Workers through heartbeat-based AMQP broadcast.
+Worker mode provides cluster-level hot key detection via dedicated nodes. App instances periodically report access counts, Workers run a sliding window + state machine pipeline, and broadcast HOT/COOL decisions to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state` — changes propagate to all peer Workers through epoch-driven heartbeat gossip on a dedicated TopicExchange (isolated from decision traffic). Workers also emit structured heartbeats every 1s (configurable) containing epoch, decision version watermark, load factor, and config fingerprint — enabling immediate restart detection and cluster health evaluation via majority quorum.
 
 Two deployment modes:
 
@@ -692,7 +703,6 @@ Method-level TTL behavior:
 | `putThrough(key, value, writer)`                       | L1 entry always uses normal key TTL (stored with `KeyState.NORMAL`)                    |
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | L1 entry uses override TTL (0 = use config default)                                    |
 | Legacy `local-cache-ttl-minutes`                       | Write TTL (under `hotkey.local.*`; supplemented by differentiated TTL)                 |
-| Legacy `local-cache-access-ttl-minutes`                | Access-based hard TTL (reset on each read, under `hotkey.local.*`)                     |
 
 > **Per-call semantics:** All per-call TTL overrides (hard and soft) are one-shot — the next call without params falls back to the key state's default TTL. The sole exception is that soft-expiry background refresh preserves the original per-entry hard TTL.
 

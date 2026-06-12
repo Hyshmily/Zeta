@@ -67,12 +67,6 @@
       "defaultValue": 5
     },
     {
-      "name": "hotkey.local.local-cache-access-ttl-minutes",
-      "type": "java.lang.Integer",
-      "description": "Access-based expiry in minutes for L1 cache entries (0 = disabled).",
-      "defaultValue": 0
-    },
-    {
       "name": "hotkey.local.inflight-max-size",
       "type": "java.lang.Integer",
       "description": "Maximum number of in-flight (pending) SingleFlight requests.",

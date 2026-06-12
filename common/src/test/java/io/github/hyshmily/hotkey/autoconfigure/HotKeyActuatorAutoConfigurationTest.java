@@ -31,6 +31,7 @@ import io.github.hyshmily.hotkey.sync.VersionController;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -83,6 +84,7 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyStateMachine> stateMachineProvider = mock(ObjectProvider.class);
+    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
     doReturn(workerTopK).when(workerProvider).getIfAvailable();
@@ -109,6 +111,7 @@ class HotKeyActuatorAutoConfigurationTest {
       versionControllerProvider,
       cacheSyncPublisherProvider,
       stateMachineProvider,
+      healthViewProvider,
       properties
     );
 
@@ -131,6 +134,7 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyStateMachine> stateMachineProvider = mock(ObjectProvider.class);
+    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
     HotKeyProperties properties = new HotKeyProperties();
 
     doReturn(null).when(detectorProvider).getIfAvailable();
@@ -158,6 +162,7 @@ class HotKeyActuatorAutoConfigurationTest {
       versionControllerProvider,
       cacheSyncPublisherProvider,
       stateMachineProvider,
+      healthViewProvider,
       properties
     );
 
@@ -181,6 +186,7 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyStateMachine> stateMachineProvider = mock(ObjectProvider.class);
+    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
     HotKeyProperties properties = new HotKeyProperties();
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
@@ -208,6 +214,7 @@ class HotKeyActuatorAutoConfigurationTest {
       versionControllerProvider,
       cacheSyncPublisherProvider,
       stateMachineProvider,
+      healthViewProvider,
       properties
     );
 

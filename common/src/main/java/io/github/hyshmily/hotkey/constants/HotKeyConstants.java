@@ -36,17 +36,29 @@ public final class HotKeyConstants {
   public static final String AMQP_HEADER_NODE_ID = "nodeId";
   /** AMQP message header key for the message creation timestamp. */
   public static final String AMQP_HEADER_TIMESTAMP = "timestamp";
-  /** AMQP message header key for the worker state-machine confirm-count config. */
-  public static final String AMQP_HEADER_CONFIG_CONFIRM_COUNT = "configConfirmCount";
-  /** AMQP message header key for the worker state-machine cool-count config. */
-  public static final String AMQP_HEADER_CONFIG_COOL_COUNT = "configCoolCount";
-  /** AMQP message header key for the worker state-machine pre-cool-grace config. */
-  public static final String AMQP_HEADER_CONFIG_GRACE_COUNT = "configGraceCount";
-  /** AMQP message header key for the worker config-change timestamp. */
-  public static final String AMQP_HEADER_CONFIG_TIMESTAMP = "configTimestamp";
 
-  /** Payload value used for AMQP heartbeat / keep-alive messages. */
-  public static final String AMQP_MESSAGE_PING = "ping";
+  /** AMQP message header key for the heartbeat epoch (state machine generation). */
+  public static final String AMQP_HEADER_HEARTBEAT_EPOCH = "hbEpoch";
+  /** AMQP message header key for the sender's current load metric. */
+  public static final String AMQP_HEADER_HEARTBEAT_LOAD = "hbLoad";
+  /** AMQP message header key indicating whether the sender is ready to serve. */
+  public static final String AMQP_HEADER_HEARTBEAT_READY = "hbReady";
+  /** AMQP message header key for the sender's config fingerprint for change detection. */
+  public static final String AMQP_HEADER_HEARTBEAT_CONFIG_FP = "hbConfigFp";
+  /** AMQP message header key for the sender's data version high-water mark. */
+  public static final String AMQP_HEADER_HEARTBEAT_DV_HWM = "hbDvHwm";
+
+  /** AMQP message header key for the verification message type (PING or PONG). */
+  public static final String AMQP_HEADER_VERIFY_TYPE = "verifyType";
+  /** AMQP message header key for the originating app instance identifier. */
+  public static final String AMQP_HEADER_VERIFY_APP_INSTANCE = "verifyAppInstance";
+  /** AMQP message header key for the responding worker identifier. */
+  public static final String AMQP_HEADER_VERIFY_WORKER_ID = "verifyWorkerId";
+  /** Verification request type constant. */
+  public static final String AMQP_HEADER_VERIFY_PING = "PING";
+  /** Verification response type constant. */
+  public static final String AMQP_HEADER_VERIFY_PONG = "PONG";
+
 
   /** Thread name prefix for general hotkey operations. */
   public static final String THREAD_PREFIX_HOTKEY = "hotkey-";

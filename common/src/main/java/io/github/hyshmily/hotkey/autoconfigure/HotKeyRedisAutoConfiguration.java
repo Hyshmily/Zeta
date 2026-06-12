@@ -21,6 +21,7 @@ import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.cache.*;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -108,7 +109,8 @@ public class HotKeyRedisAutoConfiguration {
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    RingManager ringManager
+    RingManager ringManager,
+    ClusterHealthView healthView
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -123,7 +125,8 @@ public class HotKeyRedisAutoConfiguration {
         Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
         properties.getVersionKeyTtlMinutes()
       ),
-      ringManager
+      ringManager,
+      healthView
     );
   }
 

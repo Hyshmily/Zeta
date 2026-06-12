@@ -279,8 +279,8 @@ CacheEntry maintains **two independent version spaces** with different semantics
 - `dataVersion` tracks the actual data mutation version for cross-instance cache sync. It can degrade to a node-local counter if Redis is unavailable.
 - `decisionVersion` tracks Worker HOT/COOL decision ordering. It is always a clean `AtomicLong` on the Worker — never degraded.
 - These versions are **orthogonal**: a data mutation does not affect `decisionVersion`, and a Worker decision does not affect `dataVersion`.
-- `putThrough` always sets `decisionVersion=0L` (never preserves — the write-through replaces the value so any prior Worker decision is invalidated).
-- `loadAndCache` also sets `decisionVersion=0L` (no Worker decision on first load).
+- `putThrough` preserves existing `decisionVersion` from the prior CacheEntry (new entry inherits 0L if none existed).
+- `loadAndCache` sets `decisionVersion=0L` (no Worker decision on first load).
 - `CacheSyncListener` preserves `decisionVersion` from the existing entry during cross-instance sync refreshes.
 - **`isVersionDegraded` safety net in `shouldSkipForWorker`:** When an existing entry has `isVersionDegraded=true` (i.e. it was created during a Redis outage), Worker decisions are unconditionally accepted regardless of `decisionVersion`. This prevents Worker restart (which resets `AtomicLong`) from being blocked by degraded entries — the degraded entry was created in an unstable period and should yield to any newer Worker decision.
 
@@ -372,11 +372,13 @@ HotKey.getWithSoftExpire(key, reader[, softTtlMs][, hardTtlMs, softTtlMs])
 <!-- Source: HotKeyCache.java:170-180 -->
 
 ```
+
 HotKey.peek(cacheKey)
 └─ HotKeyCache.peek(cacheKey)
-      └─ caffeineCache.getIfPresent(key)                       [L1 only, no side effects]
-           └─ return Optional.ofNullable(entry.value)
-           [⚠ does not call hotKeyDetector.add / hotKeyReporter.record / L2 reader]
+└─ caffeineCache.getIfPresent(key) [L1 only, no side effects]
+└─ return Optional.ofNullable(entry.value)
+[⚠ does not call hotKeyDetector.add / hotKeyReporter.record / L2 reader]
+
 ```
 
 ### Raw Cache Access — `getLocalCache`
@@ -386,10 +388,12 @@ Exposes the underlying Caffeine `Cache<String, Object>` for Caffeine-specific op
 <!-- Source: HotKeyCache.java:542-544 -->
 
 ```
+
 HotKey.getLocalCache()
 └─ HotKeyCache.getLocalCache()
-      └─ return caffeineCache                                   [direct Caffeine reference]
-      [⚠ bypasses HotKey orchestration — version tracking, broadcast, expiry management are skipped]
+└─ return caffeineCache [direct Caffeine reference]
+[⚠ bypasses HotKey orchestration — version tracking, broadcast, expiry management are skipped]
+
 ```
 
 > [!WARNING]
@@ -400,38 +404,40 @@ HotKey.getLocalCache()
 <!-- Source: HotKeyCache.java:375-416 -->
 
 ```
+
 HotKey.putThrough(key, value, writer[, hardTtlMs, softTtlMs])
 └─ HotKeyCache.putThrough(key, value, writer, effectiveHardTtl, effectiveSoftTtl)
-      ├─ (tx) → TransactionSupport.registerAfterCommit()
-      │    └─ afterCommit → execute all below
-      │
-      ├─ (non-tx) → async: hotKeyExecutor.submit(() → execute all below)
-      │
-      ├─ writer.run()                                          [caller writes to L2/DB]
-      │    └─ exception → log.error, continue (L1 and broadcast still execute)
-      │
-      ├─ nextVersion(key)                                      [version generation]
-      │    ├─ Redis available:
-      │    │    └─ Lua: "INCR KEYS[1]; EXPIRE KEYS[1] ARGV[1]"
-      │    │         → dataVersion=positive, degraded=false
-      │    └─ Redis unavailable:
-      │         └─ fallbackVersionCounter.incrementAndGet()
-      │              → dataVersion=Long.MIN_VALUE + counter, degraded=true
-      │
-      ├─ caffeineCache.put(key, CacheEntry(
-      │      value, dataVersion, degraded,
-      │      decisionVersion,                                    [preserves existing; Worker decision respected]
-      │      keyState,                                           [preserves existing: HOT/COOL/NORMAL]
-      │      hardTtlMs, softTtlMs, ...))
-      │
-      └─ CacheSyncPublisher.broadcastRefresh(key, version, degraded)
-           └─ sendDeduped(key, "REFRESH", version, degraded)
-                ├─ recentBroadcasts.compute("REFRESH:"+key, (_, old) →
-                │    old != null && old > version ? old : version)
-                │    └─ return != version → newer version exists, skip broadcast
-                │    └─ return == version → send message
-                └─ rabbitTemplate.send(exchange, "", msg)
-                     [header: type=REFRESH, version, isVersionDegraded]
+├─ (tx) → TransactionSupport.registerAfterCommit()
+│ └─ afterCommit → execute all below
+│
+├─ (non-tx) → async: hotKeyExecutor.submit(() → execute all below)
+│
+├─ writer.run() [caller writes to L2/DB]
+│ └─ exception → log.error, continue (L1 and broadcast still execute)
+│
+├─ nextVersion(key) [version generation]
+│ ├─ Redis available:
+│ │ └─ Lua: "INCR KEYS[1]; EXPIRE KEYS[1] ARGV[1]"
+│ │ → dataVersion=positive, degraded=false
+│ └─ Redis unavailable:
+│ └─ fallbackVersionCounter.incrementAndGet()
+│ → dataVersion=Long.MIN*VALUE + counter, degraded=true
+│
+├─ caffeineCache.put(key, CacheEntry(
+│ value, dataVersion, degraded,
+│ decisionVersion, [preserves existing; Worker decision respected]
+│ keyState, [preserves existing: HOT/COOL/NORMAL]
+│ hardTtlMs, softTtlMs, ...))
+│
+└─ CacheSyncPublisher.broadcastRefresh(key, version, degraded)
+└─ sendDeduped(key, "REFRESH", version, degraded)
+├─ recentBroadcasts.compute("REFRESH:"+key, (*, old) →
+│ old != null && old > version ? old : version)
+│ └─ return != version → newer version exists, skip broadcast
+│ └─ return == version → send message
+└─ rabbitTemplate.send(exchange, "", msg)
+[header: type=REFRESH, version, isVersionDegraded]
+
 ```
 
 ### Collection Write Path — `putBeforeInvalidate`
@@ -439,20 +445,22 @@ HotKey.putThrough(key, value, writer[, hardTtlMs, softTtlMs])
 <!-- Source: HotKeyCache.java:422-446 -->
 
 ```
+
 HotKey.putBeforeInvalidate(key, mutation)
 └─ HotKeyCache.putBeforeInvalidate(key, mutation)
-      ├─ (tx) → TransactionSupport.registerAfterCommit()
-      │    └─ afterCommit → execute all below
-      │
-      ├─ (non-tx) → sync (caller thread)
-      │
-      ├─ mutation.run()                                        [caller mutates L2/DB]
-      │    └─ exception → log.error, return (terminate, skip L1 invalidation and broadcast)
-      │
-      ├─ nextVersion(key)                                      [same as putThrough]
-      ├─ caffeineCache.invalidate(key)                         [L1 remove, not put]
-      └─ CacheSyncPublisher.broadcastLocalInvalidate(key, version, degraded)
-           └─ same as putThrough (but type=INVALIDATE instead of REFRESH)
+├─ (tx) → TransactionSupport.registerAfterCommit()
+│ └─ afterCommit → execute all below
+│
+├─ (non-tx) → sync (caller thread)
+│
+├─ mutation.run() [caller mutates L2/DB]
+│ └─ exception → log.error, return (terminate, skip L1 invalidation and broadcast)
+│
+├─ nextVersion(key) [same as putThrough]
+├─ caffeineCache.invalidate(key) [L1 remove, not put]
+└─ CacheSyncPublisher.broadcastLocalInvalidate(key, version, degraded)
+└─ same as putThrough (but type=INVALIDATE instead of REFRESH)
+
 ```
 
 > [!NOTE] There is a ~1ms window between `mutation.run()` and L1 invalidation where a concurrent `get()` may hit the stale L1 value. This is a deliberate trade-off — invalidating before the mutation would cause a worse race where `get()` re-populates L1 with old data, creating a longer window.
@@ -462,36 +470,38 @@ HotKey.putBeforeInvalidate(key, mutation)
 <!-- Source: HotKeyCache.java:321-358 -->
 
 ```
+
 HotKey.invalidate(cacheKey)
 └─ HotKeyCache.invalidate(cacheKey)
-      ├─ invalidCacheKey(key) → return                          [skip null/empty]
-      ├─ TransactionSupport.runNowOrAfterCommit()
-      │    ├─ (tx) → deferred to afterCommit
-      │    └─ (non-tx) → sync
-      │
-      ├─ nextVersion(key)
-      │    ├─ Redis available: INCR + EXPIRE → positive version, degraded=false
-      │    └─ Redis unavailable: Long.MIN_VALUE + counter → degraded=true
-      │
-      ├─ caffeineCache.invalidate(key)                          [L1 remove]
-      │
-      └─ CacheSyncPublisher.broadcastRefresh(key, version, degraded)
-           └─ sendDeduped(key, "REFRESH", version, degraded)
-                ├─ recentBroadcasts.compute(...)                [dedup]
-                └─ rabbitTemplate.send()
-                     ↓
-                 ┌─ remote: CacheSyncListener.handleRefresh(msg)
-                 │    ├─ extract dataVersion + isVersionDegraded
-                 │    ├─ VersionGuard.shouldSkipForSync():
-                 │    │    ├─ Normal vs Normal: higher wins
-                 │    │    ├─ Normal vs Degraded: Normal wins (skip degraded)
-                 │    │    ├─ Degraded vs Normal: Normal wins (load normal)
-                 │    │    └─ Degraded vs Degraded: higher wins
-                 │    ├─ pass → redisReader.get(key)              [reload from Redis]
-                 │    ├─ caffeineCache.put(key, newEntry)
-                 │    │    [decisionVersion=preserve existing]
-                 │    └─ return
-                 └─
+├─ invalidCacheKey(key) → return [skip null/empty]
+├─ TransactionSupport.runNowOrAfterCommit()
+│ ├─ (tx) → deferred to afterCommit
+│ └─ (non-tx) → sync
+│
+├─ nextVersion(key)
+│ ├─ Redis available: INCR + EXPIRE → positive version, degraded=false
+│ └─ Redis unavailable: Long.MIN_VALUE + counter → degraded=true
+│
+├─ caffeineCache.invalidate(key) [L1 remove]
+│
+└─ CacheSyncPublisher.broadcastRefresh(key, version, degraded)
+└─ sendDeduped(key, "REFRESH", version, degraded)
+├─ recentBroadcasts.compute(...) [dedup]
+└─ rabbitTemplate.send()
+↓
+┌─ remote: CacheSyncListener.handleRefresh(msg)
+│ ├─ extract dataVersion + isVersionDegraded
+│ ├─ VersionGuard.shouldSkipForSync():
+│ │ ├─ Normal vs Normal: higher wins
+│ │ ├─ Normal vs Degraded: Normal wins (skip degraded)
+│ │ ├─ Degraded vs Normal: Normal wins (load normal)
+│ │ └─ Degraded vs Degraded: higher wins
+│ ├─ pass → redisReader.get(key) [reload from Redis]
+│ ├─ caffeineCache.put(key, newEntry)
+│ │ [decisionVersion=preserve existing]
+│ └─ return
+└─
+
 ```
 
 ### Batch Invalidate — `invalidateAll`
@@ -499,27 +509,29 @@ HotKey.invalidate(cacheKey)
 <!-- Source: HotKeyCache.java:336-358 -->
 
 ```
+
 HotKey.invalidateAll(keys...) / invalidateAll(Collection)
 └─ HotKeyCache.invalidateAll(keys)
-      ├─ stream().filter(k → !invalidCacheKey(k)).toList()      [skip null/empty]
-      ├─ empty list → log.debug, return
-      │
-      ├─ TransactionSupport.runNowOrAfterCommit()
-      │    ├─ (tx) → deferred to afterCommit
-      │    └─ (non-tx) → sync
-      │
-      ├─ caffeineCache.invalidateAll(validKeys)                 [L1 batch remove]
-      │
-      └─ (has syncPublisher)
-           └─ CacheSyncPublisher.broadcastLocalInvalidateAll(validKeys)
-                └─ single AMQP message
-                     │    body = JSON array [key1, key2, ...]
-                     │    header: type=INVALIDATE_ALL
-                     ↓
-                 ┌─ remote: CacheSyncListener.handleInvalidateAll(msg)
-                 │    └─ caffeineCache.invalidateAll(keys)       [L1 batch remove]
-                 │    [⚠ no Redis reload, no version check]
-                 └─
+├─ stream().filter(k → !invalidCacheKey(k)).toList() [skip null/empty]
+├─ empty list → log.debug, return
+│
+├─ TransactionSupport.runNowOrAfterCommit()
+│ ├─ (tx) → deferred to afterCommit
+│ └─ (non-tx) → sync
+│
+├─ caffeineCache.invalidateAll(validKeys) [L1 batch remove]
+│
+└─ (has syncPublisher)
+└─ CacheSyncPublisher.broadcastLocalInvalidateAll(validKeys)
+└─ single AMQP message
+│ body = JSON array [key1, key2, ...]
+│ header: type=INVALIDATE_ALL
+↓
+┌─ remote: CacheSyncListener.handleInvalidateAll(msg)
+│ └─ caffeineCache.invalidateAll(keys) [L1 batch remove]
+│ [⚠ no Redis reload, no version check]
+└─
+
 ```
 
 ### State Query — `isLocalHotKey`
@@ -527,12 +539,14 @@ HotKey.invalidateAll(keys...) / invalidateAll(Collection)
 <!-- Source: HotKeyCache.java:164-168 -->
 
 ```
+
 HotKey.isLocalHotKey(cacheKey)
 └─ HotKeyCache.isLocalHotKey(cacheKey)
-      └─ caffeineCache.getIfPresent(key)
-           ├─ exists and keyState == HOT → true
-           └─ otherwise → false
-           [⚠ pure L1 lookup, no side effects]
+└─ caffeineCache.getIfPresent(key)
+├─ exists and keyState == HOT → true
+└─ otherwise → false
+[⚠ pure L1 lookup, no side effects]
+
 ```
 
 ### State Query — `isWorkerHotKey`
@@ -540,11 +554,13 @@ HotKey.isLocalHotKey(cacheKey)
 <!-- Source: HotKey.java (delegates to workerTopKAlgorithm) -->
 
 ```
+
 HotKey.isWorkerHotKey(cacheKey)
 └─ workerTopKAlgorithm.list().stream().anyMatch(item -> item.key().equals(cacheKey))
-      ├─ key in Worker TopK → true
-      └─ not in → false
-      [⚠ iterates Worker TopK list, O(n); no network call]
+├─ key in Worker TopK → true
+└─ not in → false
+[⚠ iterates Worker TopK list, O(n); no network call]
+
 ```
 
 ### TopK Query Methods
@@ -552,35 +568,37 @@ HotKey.isWorkerHotKey(cacheKey)
 <!-- Source: HotKey.java -->
 
 ```
+
 HotKey.returnLocalHotKeys()
 └─ (topKAlgorithm != null)
-      ├─ yes → topKAlgorithm.list()                             [local HeavyKeeper Top-K]
-      └─ no  → Collections.emptyList()
+├─ yes → topKAlgorithm.list() [local HeavyKeeper Top-K]
+└─ no → Collections.emptyList()
 
 HotKey.returnLocalExpelledHotKeys()
 └─ (topKAlgorithm != null)
-      ├─ yes → topKAlgorithm.expelled()                    [expelled hot key queue]
-      └─ no  → empty LinkedBlockingQueue
+├─ yes → topKAlgorithm.expelled() [expelled hot key queue]
+└─ no → empty LinkedBlockingQueue
 
 HotKey.returnLocalTotalDataStreams()
 └─ (topKAlgorithm != null)
-      ├─ yes → topKAlgorithm.total()                 [total access count]
-      └─ no  → 0L
+├─ yes → topKAlgorithm.total() [total access count]
+└─ no → 0L
 
 HotKey.returnWorkerHotKeys()
 └─ (workerTopKAlgorithm != null)
-      ├─ yes → workerTopKAlgorithm.list()                       [Worker-side cluster Top-K]
-      └─ no  → Collections.emptyList()
+├─ yes → workerTopKAlgorithm.list() [Worker-side cluster Top-K]
+└─ no → Collections.emptyList()
 
 HotKey.returnWorkerExpelledHotKeys()
 └─ (workerTopKAlgorithm != null)
-      ├─ yes → workerTopKAlgorithm.expelled()
-      └─ no  → empty LinkedBlockingQueue
+├─ yes → workerTopKAlgorithm.expelled()
+└─ no → empty LinkedBlockingQueue
 
 HotKey.returnWorkerTotalDataStreams()
 └─ (workerTopKAlgorithm != null)
-      ├─ yes → workerTopKAlgorithm.total()
-      └─ no  → 0L
+├─ yes → workerTopKAlgorithm.total()
+└─ no → 0L
+
 ```
 
 > **TopK null safety:** All 6 query methods above return empty/0 when the corresponding TopK is unavailable (Worker-only mode or not configured). This differs from `get`/`putThrough` etc., which throw `UnsupportedOperationException` in Worker-only mode via `requireCache()`.
@@ -590,55 +608,57 @@ HotKey.returnWorkerTotalDataStreams()
 <!-- Source: RuleMatcher.java -->
 
 ```
+
 HotKey.addBlacklist(keyPattern)
 └─ HotKeyCache.addBlacklist(keyPattern)
-      └─ ruleMatcher.addRule(Rule.of(keyPattern, BLOCK))
-           ├─ [if Redis] → persist to Redis
-           └─ [if syncPublisher] → broadcastAllLocalRules()
-           [auto-detects pattern type: exact, prefix (* suffix), wildcard, regex]
+└─ ruleMatcher.addRule(Rule.of(keyPattern, BLOCK))
+├─ [if Redis] → persist to Redis
+└─ [if syncPublisher] → broadcastAllLocalRules()
+[auto-detects pattern type: exact, prefix (* suffix), wildcard, regex]
 
 HotKey.removeBlacklist(keyPattern)
 └─ HotKeyCache.unBlacklist(keyPattern)
-      └─ ruleMatcher.removeRule(keyPattern, BLOCK)
-           ├─ [if Redis] → persist to Redis
-           └─ [if syncPublisher] → broadcastAllLocalRules()
+└─ ruleMatcher.removeRule(keyPattern, BLOCK)
+├─ [if Redis] → persist to Redis
+└─ [if syncPublisher] → broadcastAllLocalRules()
 
 HotKey.addWhitelist(keyPattern)
 └─ HotKeyCache.addWhitelist(keyPattern)
-      └─ ruleMatcher.addRule(Rule.of(keyPattern, ALLOW_NO_REPORT))
-           ├─ [if Redis] → persist to Redis
-           └─ [if syncPublisher] → broadcastAllLocalRules()
+└─ ruleMatcher.addRule(Rule.of(keyPattern, ALLOW_NO_REPORT))
+├─ [if Redis] → persist to Redis
+└─ [if syncPublisher] → broadcastAllLocalRules()
 
 HotKey.removeWhitelist(keyPattern)
 └─ HotKeyCache.unWhitelist(keyPattern)
-      └─ ruleMatcher.removeRule(keyPattern, ALLOW_NO_REPORT)
-           ├─ [if Redis] → persist to Redis
-           └─ [if syncPublisher] → broadcastAllLocalRules()
+└─ ruleMatcher.removeRule(keyPattern, ALLOW_NO_REPORT)
+├─ [if Redis] → persist to Redis
+└─ [if syncPublisher] → broadcastAllLocalRules()
 
 HotKey.evaluateRule(cacheKey)
 └─ ruleMatcher.evaluateRule(cacheKey)
-      └─ returns BLOCK / ALLOW_NO_REPORT / ALLOW
-      [called internally by get/putThrough/putBeforeInvalidate; public for manual check]
+└─ returns BLOCK / ALLOW_NO_REPORT / ALLOW
+[called internally by get/putThrough/putBeforeInvalidate; public for manual check]
 
 HotKey.getAllRules()
 └─ HotKeyCache.getAllRules()
-      └─ ruleMatcher.getAllRules() → List<Rule>
-      [snapshot of current rules in evaluation order; empty if no cache]
+└─ ruleMatcher.getAllRules() → List<Rule>
+[snapshot of current rules in evaluation order; empty if no cache]
 
 HotKey.clearAllRules()
 └─ HotKeyCache.clearAllRules()
-      └─ ruleMatcher.clearAllRules()
-           ├─ [if Redis] → delete from Redis
-           └─ [if syncPublisher] → broadcastAllLocalRules()
-      [removes both blacklist and whitelist rules]
+└─ ruleMatcher.clearAllRules()
+├─ [if Redis] → delete from Redis
+└─ [if syncPublisher] → broadcastAllLocalRules()
+[removes both blacklist and whitelist rules]
 
 HotKey.broadcastAllLocalRulesManually()
 └─ HotKeyCache.broadcastAllLocalRulesManually()
-      └─ ruleMatcher.exportRulesJson()
-           └─ CacheSyncPublisher.broadcastAllLocalRules(json)
-                └─ single AMQP message, body = JSON rule array
-                     header: type=RULES_SYNC
-      [manual trigger for initial cluster sync]
+└─ ruleMatcher.exportRulesJson()
+└─ CacheSyncPublisher.broadcastAllLocalRules(json)
+└─ single AMQP message, body = JSON rule array
+header: type=RULES_SYNC
+[manual trigger for initial cluster sync]
+
 ```
 
 ---
@@ -656,36 +676,38 @@ This approach solves the **single-instance blind spot** — an app instance's lo
      WorkerBroadcaster.java, WorkerListener.java -->
 
 ```
-┌─────────────────────┐      RabbitMQ fanout      ┌───────────────────────┐
-│  App Instance 1     │  ─── report (periodic) ──→│  Worker Node          │
-│  HotKeyReporter     │                           │                       │
-├─────────────────────┤                           │  ┌─────────────────┐  │
-│  App Instance 2     │  ─── report (periodic) ──→│  │ ReportConsumer  │  │
-│  HotKeyReporter     │                           │  │ (AMQP consumer) │  │
-├─────────────────────┤                           │  └────────┬────────┘  │
-│  App Instance N     │                           │           │           │
-│  HotKeyReporter     │  ─── report (periodic) ──→│           ↓           │
-└─────────────────────┘                           │  ┌─────────────────┐  │
-                                                  │  │HotKeyStateMachine│ │
-                                                  │  │ (per-key FSM)   │  │
-                                                  │  └────────┬────────┘  │
-                                                  │           │           │
-                                                  │  ┌─────────────────┐  │
-                                                  │  │WorkerBroadcaster│  │
-                                                  │  │ (HOT/COOL via   │  │
-                                                  │  │  RabbitMQ)      │  │
-                                                  │  └────────┬────────┘  │
-                                                  └───────────┼───────────┘
-                                                              │
-                          RabbitMQ (hotkey.broadcast.exchange)
-                                                              │
-                                                              ↓
-                           ┌──────────────────────────────────────────┐
-                           │   All App Instances (WorkerListener)     │
-                           │  ┌──────────┐  ┌──────────┐  ┌────────┐  │
-                           │  │Instance 1│  │Instance 2│  │  ...   │  │
-                           │  └──────────┘  └──────────┘  └────────┘  │
-                           └──────────────────────────────────────────┘
+
+┌─────────────────────┐ RabbitMQ fanout ┌───────────────────────┐
+│ App Instance 1 │ ─── report (periodic) ──→│ Worker Node │
+│ HotKeyReporter │ │ │
+├─────────────────────┤ │ ┌─────────────────┐ │
+│ App Instance 2 │ ─── report (periodic) ──→│ │ ReportConsumer │ │
+│ HotKeyReporter │ │ │ (AMQP consumer) │ │
+├─────────────────────┤ │ └────────┬────────┘ │
+│ App Instance N │ │ │ │
+│ HotKeyReporter │ ─── report (periodic) ──→│ ↓ │
+└─────────────────────┘ │ ┌─────────────────┐ │
+│ │HotKeyStateMachine│ │
+│ │ (per-key FSM) │ │
+│ └────────┬────────┘ │
+│ │ │
+│ ┌─────────────────┐ │
+│ │WorkerBroadcaster│ │
+│ │ (HOT/COOL via │ │
+│ │ RabbitMQ) │ │
+│ └────────┬────────┘ │
+└───────────┼───────────┘
+│
+RabbitMQ (hotkey.broadcast.exchange)
+│
+↓
+┌──────────────────────────────────────────┐
+│ All App Instances (WorkerListener) │
+│ ┌──────────┐ ┌──────────┐ ┌────────┐ │
+│ │Instance 1│ │Instance 2│ │ ... │ │
+│ └──────────┘ └──────────┘ └────────┘ │
+└──────────────────────────────────────────┘
+
 ```
 
 ### Report Flow
@@ -719,6 +741,7 @@ Each key maintains an array of `long` counters indexed by time slice. On each re
 Each tracked key follows a lifecycle managed by `HotKeyStateMachine`:
 
 ```
+
                     ┌─────────────────────────────────────────────────┐
                     │                                                 │
                     ↓                                                 │
@@ -733,10 +756,11 @@ Each tracked key follows a lifecycle managed by `HotKeyStateMachine`:
           │     COLD      │ ←──────────────────── │   COLD       │
           └───────────────┘                       └──────────────┘
 
-  COLD ─────────── below threshold ──→ PRE_COOLING (grace period)
-  PRE_COOLING ──── grace expired ────→ COLD (broadcast TYPE_COOL)
-  PRE_COOLING ──── re-heat (silent) ─→ CONFIRMED_HOT (no broadcast)
-  CONFIRMED_HOT ── below threshold for (coolCount - grace) ──→ PRE_COOLING (grace period)
+COLD ─────────── below threshold ──→ PRE_COOLING (grace period)
+PRE_COOLING ──── grace expired ────→ COLD (broadcast TYPE_COOL)
+PRE_COOLING ──── re-heat (silent) ─→ CONFIRMED_HOT (no broadcast)
+CONFIRMED_HOT ── below threshold for (coolCount - grace) ──→ PRE_COOLING (grace period)
+
 ```
 
 - **COLD**: Key exists but below hot threshold. Access tracked but no broadcast sent.
@@ -752,6 +776,7 @@ Each tracked key follows a lifecycle managed by `HotKeyStateMachine`:
 | `hotkey.worker.state-machine.confirm-duration-ms` | `300`   | Duration above threshold to confirm HOT (300ms)        |
 | `hotkey.worker.state-machine.cool-duration-ms`    | `15000` | Duration below threshold to confirm COOL (15s)         |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`   | `5000`  | Grace period for silent re-heat (5s)                   |
+| `hotkey.worker.state-machine.evict-interval-ms`   | `30000` | Stale state eviction interval; must be >= cool-duration-ms * 2 |
 
 ### Runtime State Machine Configuration
 
@@ -766,35 +791,39 @@ The state machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) 
 
 When a Worker's state machine parameters are changed via POST, the new values are **broadcast to all peer Workers** through a heartbeat-based AMQP mechanism:
 
-1. **Shared broadcast exchange** — The existing `hotkey.broadcast.exchange` (the same exchange used for HOT/COOL decisions) is reused for config sync. Each Worker's `workerConfigQueue` binds directly to this exchange.
-2. **Per-node auto-delete queue** — Each Worker declares its own `hotkey.worker.config.<nodeId>` queue and binds it to the broadcast exchange. When a Worker disconnects, its queue is automatically removed.
-3. **Heartbeat headers** — `WorkerBroadcaster` piggybacks the current `confirmCount`, `coolCount`, `preCoolGraceCount`, and `configTimestamp` on every heartbeat message sent to the shared broadcast exchange.
+1. **Dedicated heartbeat exchange** — A TopicExchange (`hotkey.heartbeat.exchange`) is used exclusively for structured heartbeats, fully isolated from HOT/COOL decision traffic (which uses `hotkey.broadcast.exchange`). Each Worker's `workerConfigQueue` binds to this exchange with routing key `heartbeat.*`.
+2. **Per-node auto-delete queue** — Each Worker declares its own `hotkey.worker.config.<nodeId>` queue and binds it to the heartbeat exchange. When a Worker disconnects, its queue is automatically removed.
+3. **Structured heartbeat fields** — `WorkerHeartbeatProducer` sends heartbeats every `ping-interval-ms` (default 1s) containing: `epoch`, `configTimestamp`, `decisionVersionHwm`, `confirmCount`, `coolCount`, `preCoolGraceCount`, `loadFactor`, `readyToServe`, and `configFingerprint`.
 4. **WorkerConfigNegotiator** — A `@RabbitListener` on each Worker receives peer heartbeats. If the incoming `configTimestamp` is strictly newer than the local timestamp, it updates its own `HotKeyStateMachine` fields.
 5. **Startup compensation** — On startup, each Worker waits up to 3 seconds for the first peer heartbeat. If none arrives, it logs a WARN and continues with `WorkerProperties` defaults.
 
 ```
-                           hotkey.broadcast.exchange
+
+                      hotkey.heartbeat.exchange
                     ┌─────────────────────────────────┐
-                    │  (shared fanout — same exchange │
-                    │   used for HOT/COOL decisions)  │
+                    │  (dedicated TopicExchange, rk   │
+                    │   "heartbeat.{workerId}")      │
                     └──┬──────────────────────────┬───┘
                        │                          │
-         heartbeat(AMQP)              heartbeat(AMQP)
+              routing_key="heartbeat.A"  routing_key="heartbeat.B"
                        │                          │
               ┌────────▼────────┐       ┌─────────▼────────┐
               │  Worker A       │       │  Worker B        │
               │  StateMachine   │       │  StateMachine    │
               │  confTs=15      │       │  confTs=0        │
+              │  epoch=1        │       │  epoch=1         │
+              │  ready=true     │       │  ready=true      │
               │                 │       │                  │
               │  POST /state    │       │  receives hb     │
               │  → increment(16)│       │  → 16 > 0, apply │
               └─────────────────┘       └──────────────────┘
 
 > [!NOTE]
+>
 > - `configTimestampCounter` starts at `0` — a first remote heartbeat with `configTimestamp > 0` is always applied.
 > - There is no separate "config change" AMQP message — changes diffuse within the next periodic heartbeat (≤1s latency).
 > - Changing `confirmDurationMs`/`coolDurationMs`/`preCoolGraceMs` in `WorkerProperties` does not update the runtime `confirmCount`/`coolCount`/`preCoolGraceCount`. The POST endpoint is the only way to change runtime values after startup. Consider adding a startup hook that initializes runtime counts from `WorkerProperties` if needed.
-> - `workerConfigQueue` binds directly to the existing `hotkey.broadcast.exchange` (no separate exchange). This ensures heartbeats from `WorkerBroadcaster` reach all peer `WorkerConfigNegotiator` instances.
+> - `workerConfigQueue` binds to the dedicated heartbeat exchange (`hotkey.heartbeat.exchange`, routing key `heartbeat.*`), not the broadcast exchange. This isolates config gossip from HOT/COOL decision traffic.
 
 ### Dynamic Threshold (Global QPS)
 
@@ -806,12 +835,12 @@ hotThreshold = max(minCount, estimatedGlobalQPS \* hotThresholdRatio)
 
 ```
 
-| Property                                                                     | Default  | Description                                          |
-| ---------------------------------------------------------------------------- | -------- | ---------------------------------------------------- |
-| `hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms`         | `60000`  | Recalculation interval (60s)                         |
-| `hotkey.worker.global-qps-dynamic-threshold.qps-change-tolerance`            | `0.5`    | ±50% QPS change required to trigger threshold update |
-| `hotkey.worker.global-qps-dynamic-threshold.learning-period-ms`              | `30000`  | Learning period for QPS estimation                   |
-| `hotkey.worker.global-qps-dynamic-threshold.hot-threshold-ratio`             | `0.01`   | Hot threshold as fraction of estimated global QPS    |
+| Property                                                             | Default | Description                                          |
+| -------------------------------------------------------------------- | ------- | ---------------------------------------------------- |
+| `hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms` | `60000` | Recalculation interval (60s)                         |
+| `hotkey.worker.global-qps-dynamic-threshold.qps-change-tolerance`    | `0.5`   | ±50% QPS change required to trigger threshold update |
+| `hotkey.worker.global-qps-dynamic-threshold.learning-period-ms`      | `30000` | Learning period for QPS estimation                   |
+| `hotkey.worker.global-qps-dynamic-threshold.hot-threshold-ratio`     | `0.01`  | Hot threshold as fraction of estimated global QPS    |
 
 The `qps-change-tolerance` prevents threshold churn during normal traffic fluctuations — only significant QPS shifts trigger a recalculation.
 
@@ -819,11 +848,11 @@ The `qps-change-tolerance` prevents threshold churn during normal traffic fluctu
 
 The Worker periodically validates the app-side HeavyKeeper Top-K against its own cluster-wide Top-K, ensuring consistency and enabling pre-warming.
 
-| Property                                                      | Default | Description                              |
-| ------------------------------------------------------------- | ------- | ---------------------------------------- |
-| `hotkey.worker.topk-validation.validate-interval-ms`          | `60000` | Cross-validation interval (60s)          |
-| `hotkey.worker.topk-validation.pre-warm-count`                | `5`     | Top-K entries eligible for pre-warming   |
-| `hotkey.worker.topk-validation.pre-warm-min-appearances`      | `2`     | Min consecutive appearances for pre-warm |
+| Property                                                 | Default | Description                              |
+| -------------------------------------------------------- | ------- | ---------------------------------------- |
+| `hotkey.worker.topk-validation.validate-interval-ms`     | `60000` | Cross-validation interval (60s)          |
+| `hotkey.worker.topk-validation.pre-warm-count`           | `5`     | Top-K entries eligible for pre-warming   |
+| `hotkey.worker.topk-validation.pre-warm-min-appearances` | `2`     | Min consecutive appearances for pre-warm |
 
 Top-K entries appearing in the Worker's Top-K across consecutive validation intervals are candidates for pre-warming. The Worker can proactively push these keys to app instances before they would naturally be detected locally.
 
@@ -831,10 +860,10 @@ Top-K entries appearing in the Worker's Top-K across consecutive validation inte
 
 Two deployment modes:
 
-| Mode                     | `worker.enabled` | Active Beans                                                                          |
-| ------------------------ | ---------------- | ------------------------------------------------------------------------------------- |
-| App-only                 | `false` (default)| `HotKeyCache`, TopK detector, reporter, actuator, sync                                |
-| Worker-only              | `true`           | Worker-only (SlidingWindow, StateMachine, ReportConsumer, Broadcaster)                |
+| Mode        | `worker.enabled`  | Active Beans                                                           |
+| ----------- | ----------------- | ---------------------------------------------------------------------- |
+| App-only    | `false` (default) | `HotKeyCache`, TopK detector, reporter, actuator, sync                 |
+| Worker-only | `true`            | Worker-only (SlidingWindow, StateMachine, ReportConsumer, Broadcaster) |
 
 In **Worker-only** mode, `HotKey.isLocalHotKey()` / `get()` / `putThrough()` throw `UnsupportedOperationException` — these operations require the app-side cache. Worker-TopK queries (`returnWorkerHotKeys()`) remain available.
 
@@ -848,8 +877,6 @@ hotkey:
 
     routing:
       app-name: my-service
-      shard-count: 1
-      shard-index: 0
 
     sliding-window:
       duration-ms: 1000
@@ -862,6 +889,7 @@ hotkey:
       confirm-duration-ms: 300
       cool-duration-ms: 15000
       pre-cool-grace-ms: 5000
+      evict-interval-ms: 30000
 
     global-qps-dynamic-threshold:
       recalculate-interval-ms: 60000
@@ -925,12 +953,12 @@ hotkey:
 
 ### Failure Behavior
 
-| Failure                  | Impact                                                                     | Recovery                                          |
-| ------------------------ | -------------------------------------------------------------------------- | ------------------------------------------------- |
+| Failure                  | Impact                                                                                      | Recovery                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | Worker crashes (all)     | Local TopK drives L1 TTLs; COOL entries promoted to HOT; Worker verdicts degrade gracefully | Restart Worker cluster; Worker broadcast overrides local promotions |
-| Worker crashes (partial) | Unaffected shards continue normally                                       | Restart crashed Worker; auto-reconnect            |
-| Report channel fails     | App reports queued/buffered (RabbitMQ persistence)                         | Auto-recover on RabbitMQ restoration              |
-| Worker broadcast fails   | No cross-instance HOT/COOL sync; local TopK still functional               | Restart Worker broadcaster                        |
+| Worker crashes (partial) | Unaffected shards continue normally                                                         | Restart crashed Worker; auto-reconnect                              |
+| Report channel fails     | App reports queued/buffered (RabbitMQ persistence)                                          | Auto-recover on RabbitMQ restoration                                |
+| Worker broadcast fails   | No cross-instance HOT/COOL sync; local TopK still functional                                | Restart Worker broadcaster                                          |
 
 ---
 
@@ -1046,9 +1074,9 @@ hotkey:
                                │  TopK Heap (min-heap, K=100)                │
                                │  isHotKey() = heap.contains(key)            │
                                │  list()          → current hot keys         │
-                               │  expelled() → recently evicted         │
+                               │  expelled() → recently evicted              │
                                │  fading()        → exp decay per entry      │
-                               │  total() → total access count    │
+                               │  total() → total access count               │
                                └─────────────────────────────────────────────┘
 ```
 

@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.reporting;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
@@ -62,7 +63,8 @@ class HotKeyReporterTest {
       1000,
       100,
       1,
-      new RingManager(150)
+      new RingManager(150),
+      new ClusterHealthView(0, 30000, 3)
     );
   }
 

@@ -23,17 +23,18 @@ import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.*;
+import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import java.util.concurrent.Executors;
+import org.springframework.beans.factory.ObjectProvider;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
-import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -128,7 +129,8 @@ public class HotKeyAmqpAutoConfiguration {
       ReportPublisher reportPublisher,
       ScheduledExecutorService hotKeyReportScheduler,
       HotKeyProperties properties,
-      RingManager ringManager
+      RingManager ringManager,
+      ObjectProvider<ClusterHealthView> healthViewProvider
     ) {
       return new HotKeyReporter(
         reportPublisher,
@@ -138,7 +140,8 @@ public class HotKeyAmqpAutoConfiguration {
         properties.getQueueCapacity(),
         properties.getQueueOfferTimeoutMs(),
         properties.effectiveConsumerCount(),
-        ringManager
+        ringManager,
+        healthViewProvider.getIfAvailable(() -> new ClusterHealthView(0, 3000, 2))
       );
     }
 
@@ -304,6 +307,31 @@ public class HotKeyAmqpAutoConfiguration {
       return BindingBuilder.bind(hotkeyWorkerQueue).to(hotkeyWorkerExchange);
     }
 
+    @Bean
+    public TopicExchange hotkeyHeartbeatExchange(HotKeyProperties properties) {
+      return new TopicExchange(properties.getHeartbeat().getExchangeName(), true, false);
+    }
+
+    @Bean
+    public Queue hotkeyHeartbeatQueue() {
+      return QueueBuilder.nonDurable("hotkey.heartbeat:" + InstanceIdGenerator.get()).autoDelete().build();
+    }
+
+    @Bean
+    public Binding hotkeyHeartbeatBinding(Queue hotkeyHeartbeatQueue, TopicExchange hotkeyHeartbeatExchange) {
+      return BindingBuilder.bind(hotkeyHeartbeatQueue).to(hotkeyHeartbeatExchange).with("heartbeat.*");
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ClusterHealthView clusterHealthView(RingManager ringManager, HotKeyProperties properties) {
+      return new ClusterHealthView(
+        ringManager.nodeCount(),
+        properties.getHeartbeat().getTimeoutMs(),
+        properties.getHeartbeat().getDegradeAfterFailures()
+      );
+    }
+
     /**
      * Create the listener that processes HOT/COOL decisions broadcast by the Worker.
      */
@@ -314,16 +342,14 @@ public class HotKeyAmqpAutoConfiguration {
       Function<String, Object> hotKeyRedisLoader,
       WorkerListenerProperties properties,
       ScheduledExecutorService hotKeyWorkerScheduler,
-      CacheExpireManager expireManager,
-      RingManager ringManager
+      CacheExpireManager expireManager
     ) {
       return new WorkerListener(
         hotLocalCache,
         hotKeyRedisLoader,
         properties,
         hotKeyWorkerScheduler,
-        expireManager,
-        ringManager
+        expireManager
       );
     }
 
@@ -331,21 +357,40 @@ public class HotKeyAmqpAutoConfiguration {
      * Create the AMQP message listener container that drives the Worker listener.
      */
     @Bean
-    public SimpleMessageListenerContainer workerListenerContainer(
+    public SimpleMessageListenerContainer heartbeatContainer(
       ConnectionFactory connectionFactory,
-      WorkerListener workerListener,
-      WorkerListenerProperties properties
+      ClusterHealthView healthView,
+      Queue hotkeyHeartbeatQueue
     ) {
       SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
-      container.setQueueNames(properties.getQueueName());
-      container.setAutoStartup(properties.isAutoStartup());
-      container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
-      container.setConcurrentConsumers(properties.getConcurrentConsumers());
-      container.setPrefetchCount(properties.getPrefetchCount());
-      container.setMessageListener(
-        (ChannelAwareMessageListener) (msg, channel) -> workerListener.handleWorkerMessage(channel, msg)
-      );
+      container.setQueueNames(hotkeyHeartbeatQueue.getName());
+      container.setAcknowledgeMode(AcknowledgeMode.NONE);
+      container.setConcurrentConsumers(1);
+      container.setPrefetchCount(100);
+      container.setMessageListener(msg -> {
+        WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
+        if (hb != null) {
+          healthView.onHeartbeat(hb);
+        }
+      });
       return container;
+    }
+
+    @Bean(initMethod = "start", destroyMethod = "stop")
+    @ConditionalOnMissingBean
+    public WorkerHeartbeatVerifier workerHeartbeatVerifier(
+      RabbitTemplate rabbitTemplate,
+      ClusterHealthView healthView,
+      HotKeyProperties properties
+    ) {
+      return new WorkerHeartbeatVerifier(
+        rabbitTemplate,
+        healthView,
+        properties.getInstanceId(),
+        properties.getHeartbeat().getVerifyIntervalMs(),
+        properties.getHeartbeat().getPingTimeoutMs(),
+        properties.getHeartbeat().getDegradeAfterFailures()
+      );
     }
 
     /**

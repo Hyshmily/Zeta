@@ -26,6 +26,7 @@ import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -34,6 +35,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 
@@ -75,6 +77,12 @@ public class HotKeyEndpoint {
   private final CacheSyncPublisher cacheSyncPublisher;
   /** Worker-side hot-key state machine. */
   private final HotKeyStateMachine hotKeyStateMachine;
+  /** Cluster health view provider (optional — unavailable in Worker-only mode). */
+  private final ObjectProvider<ClusterHealthView> healthViewProvider;
+
+  private ClusterHealthView healthView() {
+    return healthViewProvider.getIfAvailable();
+  }
 
   /**
    * Collect all diagnostic metrics into a three-section response map:
@@ -211,8 +219,9 @@ public class HotKeyEndpoint {
       worker.putAll(heavyKeeperConfig(workerTopK));
     }
 
-    if (ringManager != null) {
-      worker.put("health", ringManager.getWorkerHealth());
+    ClusterHealthView v = healthView();
+    if (v != null) {
+      worker.put("health", v.isClusterHealthy() ? "healthy" : "unhealthy");
     }
 
     if (hotKeyStateMachine != null) {

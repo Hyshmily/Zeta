@@ -15,7 +15,8 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.sync.WorkerMessage.*;
+import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_COOL;
+import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_HOT;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
@@ -24,7 +25,6 @@ import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import java.io.IOException;
 import java.util.Optional;
@@ -65,9 +65,6 @@ public class WorkerListener {
 
   /** Computes expiry timestamps for HOT-promoted and default-TTL entries. */
   private final CacheExpireManager expireManager;
-
-  /** Tracks Worker heartbeat liveness across shards. */
-  private final RingManager ringManager;
 
   /**
    * RabbitMQ message callback.  Acknowledges the message immediately after parsing;
@@ -121,7 +118,6 @@ public class WorkerListener {
     switch (msg.type()) {
       case TYPE_HOT -> handleHot(msg);
       case TYPE_COOL -> handleCool(msg);
-      case TYPE_PING -> handlePing(msg);
       default -> log.warn("Unknown worker message type: {}, cacheKey: {}", msg.type(), msg.cacheKey());
     }
   }
@@ -254,18 +250,6 @@ public class WorkerListener {
     } catch (Exception e) {
       log.warn("handleHot: Redis load failed for key={}, trying degraded entry", wm.cacheKey(), e);
       return null;
-    }
-  }
-
-  /**
-   * Processes a Worker heartbeat ping, updating the health monitor with the
-   * shard or node liveness timestamp.
-   *
-   * @param msg the worker message containing heartbeat data
-   */
-  private void handlePing(WorkerMessage msg) {
-    if (msg.nodeId() != null) {
-      ringManager.onHeartbeat(msg.nodeId(), msg.timestamp());
     }
   }
 }
