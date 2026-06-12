@@ -366,9 +366,11 @@ HotKey.getWithSoftExpire(key, reader[, softTtlMs][, hardTtlMs, softTtlMs])
       │                   └─ release refreshLimiter
 
 ```
+
 ### 窥视路径 — `peek`
 
 <!-- Source: HotKeyCache.java:170-180 -->
+
 ```
 
 HotKey.peek(cacheKey)
@@ -383,6 +385,7 @@ HotKey.peek(cacheKey)
 暴露底层 Caffeine `Cache<String, Object>`，用于 Caffeine 特定操作（`asMap`、`policy`、`cleanUp`）。
 
 <!-- Source: HotKeyCache.java:542-544 -->
+
 ```
 
 HotKey.getLocalCache()
@@ -453,7 +456,6 @@ HotKey.putBeforeInvalidate(key, mutation)
 └─ CacheSyncPublisher.broadcastLocalInvalidate(key, version, degraded)
 └─ 同 putThrough（但 type=INVALIDATE 非 REFRESH）
 ```
-
 
 > [!NOTE] `mutation.run()` 和 L1 失效之间存在约 1ms 窗口，并发 `get()` 可能命中旧值。这是故意的权衡——先失效再变更会导致 `get()` 读取到老数据并重新填充 L1，窗口更长。
 
@@ -786,14 +788,14 @@ CONFIRMED_HOT ── 低于阈值持续 (coolCount - grace) ──→ PRE_COOLIN
 
 ### 状态机配置
 
-| 属性                                              | 默认值  | 说明                                 |
-| ------------------------------------------------- | ------- | ------------------------------------ |
-| `hotkey.worker.threshold.hot-threshold`           | `1000`  | 绝对热阈值（设为 -1 启用比率模式）   |
-| `hotkey.worker.threshold.hot-threshold-ratio`     | `0.01`  | 热阈值占估计全局 QPS 的比例          |
-| `hotkey.worker.state-machine.confirm-duration-ms` | `300`   | 高于阈值确认 HOT 的持续时间（300ms） |
-| `hotkey.worker.state-machine.cool-duration-ms`    | `15000` | 低于阈值确认 COOL 的持续时间（15s）  |
-| `hotkey.worker.state-machine.pre-cool-grace-ms`   | `5000`  | 静默重新升温的宽限期（5s）           |
-| `hotkey.worker.state-machine.evict-interval-ms`   | `30000` | 过期状态擦除间隔；必须 >= cool-duration-ms * 2 |
+| 属性                                              | 默认值  | 说明                                            |
+| ------------------------------------------------- | ------- | ----------------------------------------------- |
+| `hotkey.worker.threshold.hot-threshold`           | `1000`  | 绝对热阈值（设为 -1 启用比率模式）              |
+| `hotkey.worker.threshold.hot-threshold-ratio`     | `0.01`  | 热阈值占估计全局 QPS 的比例                     |
+| `hotkey.worker.state-machine.confirm-duration-ms` | `300`   | 高于阈值确认 HOT 的持续时间（300ms）            |
+| `hotkey.worker.state-machine.cool-duration-ms`    | `15000` | 低于阈值确认 COOL 的持续时间（15s）             |
+| `hotkey.worker.state-machine.pre-cool-grace-ms`   | `5000`  | 静默重新升温的宽限期（5s）                      |
+| `hotkey.worker.state-machine.evict-interval-ms`   | `30000` | 过期状态擦除间隔；必须 >= cool-duration-ms \* 2 |
 
 ### 运行时状态机配置
 
@@ -834,6 +836,7 @@ CONFIRMED_HOT ── 低于阈值持续 (coolCount - grace) ──→ PRE_COOLIN
               │  POST /state    │       │  收到心跳        │
               │  → increment(16)│       │  → 16 > 0, 应用  │
               └─────────────────┘       └──────────────────┘
+```
 
 > [!NOTE]
 >
@@ -846,9 +849,7 @@ CONFIRMED_HOT ── 低于阈值持续 (coolCount - grace) ──→ PRE_COOLIN
 
 Worker 根据流量模式自适应调整热阈值：
 
-```
 hotThreshold = max(minCount, estimatedGlobalQPS \* hotThresholdRatio)
-```
 
 | 属性                                                                 | 默认值  | 说明                                    |
 | -------------------------------------------------------------------- | ------- | --------------------------------------- |
