@@ -28,6 +28,7 @@ Via [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch varian
 HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) (JD's open-source hot key middleware). Algorithm support comes from [Aegis](https://github.com/go-kratos/aegis) (Kratos' HeavyKeeper implementation).
 
 ## Features
+
 <details>
 <summary><b>Click to expand detailed HotKey features</b></summary>
 
@@ -108,7 +109,7 @@ See the [Benchmark Report](docs/HotKey_Benchmark_Report.en.md).
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.4</version>
+    <version>1.1.4-SNAPSHOT</version>
 </dependency>
 ```
 
@@ -121,15 +122,15 @@ Default local configuration works for most scenarios.
 
 **Optional feature configuration:**
 
-| Feature              | How to Enable                              | Description                            |
-| -------------------- | ------------------------------------------ | -------------------------------------- |
-| Redis L2 cache       | Add `RedisTemplate` Bean                   | Two-level cache, L2 fallback           |
-| Cross-instance sync  | `hotkey.sync.enabled=true`                 | RabbitMQ-based cache invalidation      |
-| Worker Listener      | `hotkey.worker-listener.enabled=true`      | Receive HOT/COOL decisions from Worker |
-| Worker mode          | `hotkey.worker.enabled=true`               | Run dedicated Worker nodes             |
-| `@HotKey` annotation | `hotkey.annotation.enabled=true` + AspectJ | Declarative caching                    |
-| Access reporting     | `hotkey.report.enabled=true` (default)     | Report access counts to Worker         |
-| Reporter self-protection | `hotkey.local.reporter.enabled=true` (default) | BBR backpressure on Reporter flush |
+| Feature                  | How to Enable                                  | Description                            |
+| ------------------------ | ---------------------------------------------- | -------------------------------------- |
+| Redis L2 cache           | Add `RedisTemplate` Bean                       | Two-level cache, L2 fallback           |
+| Cross-instance sync      | `hotkey.sync.enabled=true`                     | RabbitMQ-based cache invalidation      |
+| Worker Listener          | `hotkey.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker |
+| Worker mode              | `hotkey.worker.enabled=true`                   | Run dedicated Worker nodes             |
+| `@HotKey` annotation     | `hotkey.annotation.enabled=true` + AspectJ     | Declarative caching                    |
+| Access reporting         | `hotkey.report.enabled=true` (default)         | Report access counts to Worker         |
+| Reporter self-protection | `hotkey.local.reporter.enabled=true` (default) | BBR backpressure on Reporter flush     |
 
 See [Configuration](#configuration) for all options. Full property reference: [CONFIG.md](docs/CONFIG.md).
 
@@ -173,7 +174,6 @@ hotkey:
     routing:
       app-name: myapp # [Required] Must match App-side hotkey.local.app-name
       # Consistent hashing is the default; Workers auto-register via heartbeats
-
 
 # Multi-Worker example: 3 machines, same app-name
 # Consistent hashing auto-routes keys to the correct Worker via heartbeats
@@ -667,13 +667,13 @@ Write path failure behavior:
 
 Worker mode failure behavior:
 
-| Failed Component         | Impact                                                                                      | Recovery                                                            |
-| ------------------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Worker crash (all)       | Local TopK drives L1 TTLs; COOL entries promoted to HOT; Worker verdicts degrade gracefully | Restart Worker cluster; Worker broadcasts override local promotions |
-| Worker crash (partial)   | Unaffected shards continue normally                                                         | Restart crashed Worker; auto-reconnect                              |
-| Report channel failure   | Reports queue/buffer (RabbitMQ)                                                             | Auto-recovery when RabbitMQ recovers                                |
-| Worker broadcast failure | No cross-instance HOT/COOL sync; local TopK works fine                                      | Restart Worker broadcaster                                          |
-| Reporter BBR backpressure | BBR drops batch when concurrency exceeds budget (CPU≥threshold); permissive below threshold | Auto-throttles when load subsides                       |
+| Failed Component          | Impact                                                                                      | Recovery                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Worker crash (all)        | Local TopK drives L1 TTLs; COOL entries promoted to HOT; Worker verdicts degrade gracefully | Restart Worker cluster; Worker broadcasts override local promotions |
+| Worker crash (partial)    | Unaffected shards continue normally                                                         | Restart crashed Worker; auto-reconnect                              |
+| Report channel failure    | Reports queue/buffer (RabbitMQ)                                                             | Auto-recovery when RabbitMQ recovers                                |
+| Worker broadcast failure  | No cross-instance HOT/COOL sync; local TopK works fine                                      | Restart Worker broadcaster                                          |
+| Reporter BBR backpressure | BBR drops batch when concurrency exceeds budget (CPU≥threshold); permissive below threshold | Auto-throttles when load subsides                                   |
 
 ## HotKey Facade API Reference
 
@@ -693,7 +693,7 @@ The recommended entry point is the `HotKey` facade (auto-configured as a Spring 
 | `putBeforeInvalidate(key, mutation)`                   | Write then invalidate, for incremental collection operations (LPUSH, SADD, ZADD)                                                                                                                                                               |
 | `isLocalHotKey(cacheKey)`                              | Check if key is HOT in L1 (O(1))                                                                                                                                                                                                               |
 | `isWorkerHotKey(cacheKey)`                             | Check if key is a cluster hot key in Worker TopK (O(n))                                                                                                                                                                                        |
-| `notifyLocalDetector(cacheKey)`                        | Triggers local HotKeyDetector tracking for a key without performing a full cache read. Used by `@Intercept` to keep TopK accurate when the method body is skipped.                                                                                |
+| `notifyLocalDetector(cacheKey)`                        | Triggers local HotKeyDetector tracking for a key without performing a full cache read. Used by `@Intercept` to keep TopK accurate when the method body is skipped.                                                                             |
 | `invalidate(cacheKey)`                                 | Invalidate a single key across all cache layers                                                                                                                                                                                                |
 | `invalidateAll(cacheKeys...)`                          | Varargs overload — batch invalidate multiple keys                                                                                                                                                                                              |
 | `invalidateAll(Collection)`                            | Collection overload                                                                                                                                                                                                                            |
