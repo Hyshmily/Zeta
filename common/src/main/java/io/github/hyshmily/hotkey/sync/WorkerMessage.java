@@ -15,10 +15,11 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+import org.springframework.amqp.core.Message;
 
 import java.nio.charset.StandardCharsets;
-import org.springframework.amqp.core.Message;
+
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
  * Message from Worker to app instances carrying hot/cool decisions.
@@ -41,10 +42,14 @@ public record WorkerMessage(String cacheKey, String type, long decisionVersion, 
 
   /**
    * Deserialize a {@code WorkerMessage} from an AMQP message body and headers.
-   * Returns {@code null} when the body is empty.
+   * <p>
+   * The cache key is read from the message body (UTF-8 decoded). The type,
+   * decision version, timestamp, and node ID are read from message headers.
+   * Missing or non-numeric version headers default to {@code VERSION_DEFAULT} (0L).
+   * Missing or non-String node ID defaults to {@code null}.
    *
-   * @param msg the incoming AMQP message
-   * @return a parsed {@link WorkerMessage}, or {@code null}
+   * @param msg the incoming AMQP message; must not be null
+   * @return a parsed {@link WorkerMessage}, or {@code null} if the body is empty
    */
   public static WorkerMessage from(Message msg) {
     byte[] body = msg.getBody();

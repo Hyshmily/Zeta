@@ -15,10 +15,8 @@
  */
 package io.github.hyshmily.hotkey.worker.ingest;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING_WINDOW;
-
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
@@ -27,9 +25,12 @@ import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
-import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+
+import java.util.Map;
+
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING_WINDOW;
 
 /**
  * Worker‑side message consumer that receives batched per‑key access counts
@@ -104,7 +105,7 @@ public class ReportConsumer {
         // Feed the global Worker TopK with the aggregated report count.
         // This populates the Worker-side HeavyKeeper so TopKValidator can
         // pre-warm keys based on cross-instance frequency.
-        workerTopK.add(key, (int) Math.min(count, Integer.MAX_VALUE));
+        workerTopK.addDirect(key, (int) Math.min(count, Integer.MAX_VALUE));
 
         // addCount atomically increments the current time slice and returns
         // true if the sum of the last windowSize slices exceeds the threshold.

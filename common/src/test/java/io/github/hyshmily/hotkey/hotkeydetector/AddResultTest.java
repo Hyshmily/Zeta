@@ -13,11 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.algorithm;
+package io.github.hyshmily.hotkey.hotkeydetector;
+
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
-
-import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link AddResult}, the result record returned by HeavyKeeper.add() covering hot-key,

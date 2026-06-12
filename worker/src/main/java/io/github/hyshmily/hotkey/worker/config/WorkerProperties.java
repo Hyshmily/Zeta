@@ -24,7 +24,7 @@ import org.springframework.validation.annotation.Validated;
 /**
  * Configuration for the standalone HotKey Worker server.
  *
- * <p>Prefix: {@code hotkey.worker}.
+ * <p>Prefix: {@code hotkeydetector.worker}.
  *
  * <p>Groups cover routing, AMQP exchange names, sliding-window parameters,
  * threshold settings, state-machine timings, dynamic threshold adaptation,

@@ -17,16 +17,16 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.cache.*;
-import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import java.util.Optional;
-import java.util.concurrent.Executor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.VersionController;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -38,6 +38,9 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
+
+import java.util.Optional;
+import java.util.concurrent.Executor;
 
 /**
  * Redis-enhanced auto-configuration that overrides the default
@@ -92,14 +95,13 @@ public class HotKeyRedisAutoConfiguration {
    * @param redisTemplateProvider optional provider for StringRedisTemplate (version tracking)
    * @param properties         the HotKey configuration properties
    * @param ruleMatcher        the rule matcher instance
-   * @param workerHealthMonitor the worker health monitor
    * @return a new Redis-backed HotKeyCache instance
    */
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean(RedisTemplate.class)
   public HotKeyCache hotKeyCache(
-    @Qualifier("hotKeyDetector") TopK hotKeyDetector,
+    @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,
     SingleFlight singleFlight,
     CacheExpireManager expireManager,
@@ -145,7 +147,7 @@ public class HotKeyRedisAutoConfiguration {
   @Bean
   @ConditionalOnBean(HotKeyCache.class)
   @ConditionalOnMissingBean
-  public HotKey hotKey(HotKeyCache hotKeyCache, @Qualifier("hotKeyDetector") TopK hotKeyDetector) {
+  public HotKey hotKey(HotKeyCache hotKeyCache, @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector) {
     return new HotKey(hotKeyCache, hotKeyDetector);
   }
 }

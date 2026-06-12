@@ -16,31 +16,32 @@
 package io.github.hyshmily.hotkey.endpoint;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
-import io.github.hyshmily.hotkey.algorithm.Item;
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.sync.VersionController;
-import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
-import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 /**
- * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics
+ * Actuator {@code /actuator/hotkeydetector} endpoint that exposes runtime diagnostics
  * and rule management operations.
  *
  * <p>The response includes both app-side and Worker-side TopK rankings, L1
@@ -49,7 +50,7 @@ import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
  * dedup, identity, and instance-level health. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
  */
-@Endpoint(id = "hotkey")
+@Endpoint(id = "hotkeydetector")
 @RequiredArgsConstructor
 public class HotKeyEndpoint {
 
@@ -80,6 +81,12 @@ public class HotKeyEndpoint {
   /** Cluster health view provider (optional — unavailable in Worker-only mode). */
   private final ObjectProvider<ClusterHealthView> healthViewProvider;
 
+  /**
+   * Obtain the cluster health view if available, or {@code null} if the
+   * health view provider is not present (e.g. in Worker-only mode).
+   *
+   * @return the {@link ClusterHealthView} instance, or {@code null}
+   */
   private ClusterHealthView healthView() {
     return healthViewProvider.getIfAvailable();
   }

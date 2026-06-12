@@ -15,11 +15,8 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
-import io.github.hyshmily.hotkey.algorithm.Item;
-import io.github.hyshmily.hotkey.algorithm.TopK;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.Collectors;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +26,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
 /**
  * Scheduled tasks for periodic TopK maintenance.
  *
@@ -37,7 +38,7 @@ import org.springframework.scheduling.annotation.Scheduled;
  * to support both the app-side and Worker-side TopK instances when they
  * coexist in the same JVM.
  *
- * <p>Enabled by default; controlled via {@code hotkey.scheduling.enabled}.
+ * <p>Enabled by default; controlled via   {@code hotkey.scheduling.enabled}.
  */
 @AutoConfiguration(after = HotKeyAutoConfiguration.class)
 @ConditionalOnProperty(name = "hotkey.scheduling.enabled", havingValue = "true", matchIfMissing = true)
@@ -53,7 +54,7 @@ public class HotKeySchedulingConfiguration {
 
   /**
    * Periodically decay the HeavyKeeper counters for all registered TopK instances.
-   * Controlled by {@code hotkey.decay-period} (default 20 seconds).
+    * Controlled by {@code hotkey.decay-period} (default 20 seconds).
    */
   @Scheduled(fixedDelayString = "${hotkey.decay-period:20}", timeUnit = java.util.concurrent.TimeUnit.SECONDS)
   public void cleanHotKeys() {
@@ -63,7 +64,7 @@ public class HotKeySchedulingConfiguration {
 
   /**
    * Periodically drain expelled hot keys from all registered TopK instances.
-   * Logs a truncated summary of up to 20 sample keys.  Runs every 60 seconds.
+   * Logs a truncated summary of up to 20 sample keys. Runs every 10 seconds.
    */
   @Scheduled(fixedDelay = 10_000)
   public void drainExpelled() {

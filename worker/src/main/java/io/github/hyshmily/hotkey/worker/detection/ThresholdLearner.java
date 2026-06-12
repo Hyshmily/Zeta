@@ -46,6 +46,14 @@ public class ThresholdLearner implements Runnable {
    * threshold is retained.  After the learning period the current QPS is
    * multiplied by the configured ratio to derive a new threshold value;
    * small fluctuations within the tolerance window are ignored.
+   *
+   * <p>Edge cases handled internally:
+   * <ul>
+   *   <li>Zero or negative QPS → update is skipped (logged at debug).</li>
+   *   <li>Computed threshold below 10 → clamped to 10 to prevent noise.</li>
+   *   <li>Non-positive tolerance → all changes are applied unconditionally.</li>
+   *   <li>Any exception during calculation → logged as error without crashing the scheduler.</li>
+   * </ul>
    */
   @Override
   public void run() {

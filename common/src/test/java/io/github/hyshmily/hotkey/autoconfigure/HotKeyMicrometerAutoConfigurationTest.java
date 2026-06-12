@@ -15,37 +15,35 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.algorithm.Item;
-import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
-import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.micrometer.core.instrument.MeterRegistry;
+import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.Semaphore;
-import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
+import java.util.function.Consumer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
 
 /**
  * Tests for {@link HotKeyMicrometerAutoConfiguration}.
@@ -99,7 +97,7 @@ class HotKeyMicrometerAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the custom MeterBinder registers all hotkey-specific metrics when all optional dependencies are present.
+   * Verifies that the custom MeterBinder registers all hotkeydetector-specific metrics when all optional dependencies are present.
    */
   @Test
   void customMeterBinder_registersAllMetrics_whenAllDepsPresent() {
@@ -123,6 +121,9 @@ class HotKeyMicrometerAutoConfigurationTest {
     HotKeyStateMachine sm = mock(HotKeyStateMachine.class);
     when(sm.getTrackedKeys()).thenReturn(12);
 
+    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
+    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
+
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
       providerThatReturns(workerTopK),
@@ -132,26 +133,28 @@ class HotKeyMicrometerAutoConfigurationTest {
       providerThatReturns(vc),
       providerThatReturns(csp),
       providerThatReturns(sm),
-      providerThatReturns(healthView)
+      providerThatReturns(healthView),
+      providerThatReturns(cpuMonitor)
     );
     binder.bindTo(registry);
 
-    assertGaugeValue("hotkey.topk.size", "type", "local", 5.0);
-    assertGaugeValue("hotkey.topk.total", "type", "local", 100.0);
-    assertGaugeExists("hotkey.expelled.queue.size");
-    assertGaugeExists("hotkey.expelled.queue.remaining");
-    assertGaugeValue("hotkey.singleflight.inflight", 2.0);
-    assertGaugeValue("hotkey.reporter.queue.depth", 10.0);
-    assertGaugeValue("hotkey.reporter.queue.dropped.total", 5.0);
-    assertGaugeValue("hotkey.reporter.queue.expired.total", 3.0);
-    assertGaugeValue("hotkey.reporter.pending.keys", 200.0);
-    assertGaugeValue("hotkey.expire.refresh.available", 8.0);
-    assertGaugeValue("hotkey.version.degraded.total", 7.0);
-    assertGaugeValue("hotkey.sync.dedup.size", 15.0);
-    assertGaugeValue("hotkey.topk.size", "type", "worker", 3.0);
-    assertGaugeValue("hotkey.topk.total", "type", "worker", 500.0);
-    assertGaugeValue("hotkey.worker.alive", 1.0);
-    assertGaugeValue("hotkey.worker.tracked.keys", 12.0);
+    assertGaugeValue("hotkeydetector.topk.size", "type", "local", 5.0);
+    assertGaugeValue("hotkeydetector.topk.total", "type", "local", 100.0);
+    assertGaugeExists("hotkeydetector.expelled.queue.size");
+    assertGaugeExists("hotkeydetector.expelled.queue.remaining");
+    assertGaugeValue("hotkeydetector.singleflight.inflight", 2.0);
+    assertGaugeValue("hotkeydetector.reporter.queue.depth", 10.0);
+    assertGaugeValue("hotkeydetector.reporter.queue.dropped.total", 5.0);
+    assertGaugeValue("hotkeydetector.reporter.queue.expired.total", 3.0);
+    assertGaugeValue("hotkeydetector.reporter.pending.keys", 200.0);
+    assertGaugeValue("hotkeydetector.expire.refresh.available", 8.0);
+    assertGaugeValue("hotkeydetector.version.degraded.total", 7.0);
+    assertGaugeValue("hotkeydetector.sync.dedup.size", 15.0);
+    assertGaugeValue("hotkeydetector.topk.size", "type", "worker", 3.0);
+    assertGaugeValue("hotkeydetector.topk.total", "type", "worker", 500.0);
+    assertGaugeValue("hotkeydetector.worker.alive", 1.0);
+    assertGaugeValue("hotkeydetector.worker.tracked.keys", 12.0);
+    assertGaugeValue("hotkeydetector.cpu.load", 0.5);
   }
 
   /**
@@ -160,6 +163,7 @@ class HotKeyMicrometerAutoConfigurationTest {
   @Test
   void customMeterBinder_handlesNoDeps() {
     MeterBinder binder = config.hotKeyCustomMetrics(
+      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -192,11 +196,12 @@ class HotKeyMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
+      providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);
 
-    assertThat(registry.find("hotkey.expire.refresh.available").gauge()).isNull();
+    assertThat(registry.find("hotkeydetector.expire.refresh.available").gauge()).isNull();
     assertThat(registry.getMeters()).isEmpty();
   }
 
@@ -218,21 +223,22 @@ class HotKeyMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
+      providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);
 
-    assertGaugeValue("hotkey.topk.size", "type", "local", 3.0);
-    assertGaugeValue("hotkey.topk.total", "type", "local", 50.0);
-    assertGaugeExists("hotkey.expelled.queue.size");
-    assertGaugeExists("hotkey.expelled.queue.remaining");
-    assertGaugeValue("hotkey.singleflight.inflight", 1.0);
+    assertGaugeValue("hotkeydetector.topk.size", "type", "local", 3.0);
+    assertGaugeValue("hotkeydetector.topk.total", "type", "local", 50.0);
+    assertGaugeExists("hotkeydetector.expelled.queue.size");
+    assertGaugeExists("hotkeydetector.expelled.queue.remaining");
+    assertGaugeValue("hotkeydetector.singleflight.inflight", 1.0);
 
-    assertThat(registry.find("hotkey.topk.size").tags("type", "worker").gauge()).isNull();
-    assertThat(registry.find("hotkey.reporter.queue.depth").gauge()).isNull();
-    assertThat(registry.find("hotkey.worker.alive").gauge()).isNull();
-    assertThat(registry.find("hotkey.worker.tracked.keys").gauge()).isNull();
-    assertThat(registry.find("hotkey.sync.dedup.size").gauge()).isNull();
+    assertThat(registry.find("hotkeydetector.topk.size").tags("type", "worker").gauge()).isNull();
+    assertThat(registry.find("hotkeydetector.reporter.queue.depth").gauge()).isNull();
+    assertThat(registry.find("hotkeydetector.worker.alive").gauge()).isNull();
+    assertThat(registry.find("hotkeydetector.worker.tracked.keys").gauge()).isNull();
+    assertThat(registry.find("hotkeydetector.sync.dedup.size").gauge()).isNull();
   }
 
   @SuppressWarnings("unchecked")

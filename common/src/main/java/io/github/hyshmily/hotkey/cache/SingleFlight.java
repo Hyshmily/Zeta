@@ -31,9 +31,13 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
  * <p>
  * Only the first caller executes the supplier; subsequent callers wait for
  * the same {@link CompletableFuture}. On normal completion, the future
- * remains cached (TTL-based expiry) so late-arriving callers reuse the
- * result without re-execution. On timeout or exception, the entry is
- * evicted immediately to allow a subsequent retry.
+ * remains cached (TTL-based expiry via {@code expireAfterWrite}) so
+ * late-arriving callers reuse the result without re-execution. On timeout or
+ * exception, the entry is evicted immediately to allow a subsequent retry.
+ * <p>
+ * The internal dedup cache is bounded by {@code maxSize} (LRU eviction) and
+ * entries expire after the configured {@code ttlSec} seconds from write.
+ * This class is thread-safe.
  */
 public class SingleFlight {
 
@@ -77,9 +81,10 @@ public class SingleFlight {
 
   /**
    * Load a value via the supplier, deduplicating concurrent requests for the same key.
+   * Thread-safe: concurrent calls for the same key share a single future.
    *
    * @param cacheKey the key to load
-   * @param reader   the value supplier
+   * @param reader   the value supplier (should not return {@code null})
    * @param <T>      the value type
    * @return the loaded value, or empty if the load failed or timed out
    */

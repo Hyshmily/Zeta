@@ -70,6 +70,12 @@ public class Rule {
   /**
    * Construct a rule with the given type, pattern, and action.
    * Pre-compiles the regex immediately for REGEX type rules.
+   *
+   * @param type    the pattern type (EXACT, PREFIX, WILDCARD, or REGEX)
+   * @param pattern the pattern string to match against cache keys
+   * @param action  the action to take when a key matches this rule
+   * @throws java.util.regex.PatternSyntaxException if type is REGEX and the pattern is not a valid
+   *     regular expression
    */
   public Rule(RuleType type, String pattern, RuleAction action) {
     this.id = UUID.randomUUID().toString();
@@ -87,6 +93,9 @@ public class Rule {
    *
    * @param key the cache key to test
    * @return {@code true} if the key matches this rule's pattern
+   * @throws NullPointerException if {@code key} is {@code null}
+   * @throws java.util.regex.PatternSyntaxException if the underlying pattern (REGEX or WILDCARD)
+   *     has not been prepared yet and compilation fails
    */
   public boolean match(String key) {
     return switch (type) {
@@ -111,6 +120,12 @@ public class Rule {
    * Lazily compile the internal pattern if not already compiled.
    * For REGEX type, the pattern is used as-is.
    * For WILDCARD type, converts glob syntax ( {@code *}, {@code ?} ) to regex.
+   * <p>
+   * This method is safe for concurrent calls; {@code compiledPattern} is volatile
+   * and {@link java.util.regex.Pattern#compile} is idempotent.
+   *
+   * @throws java.util.regex.PatternSyntaxException if the type is REGEX or WILDCARD and the pattern
+   *     cannot be compiled into a valid regular expression
    */
   public void prepare() {
     if (type == RuleType.REGEX) {

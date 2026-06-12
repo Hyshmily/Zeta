@@ -17,8 +17,10 @@ package io.github.hyshmily.hotkey.worker.detection;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.algorithm.Item;
-import io.github.hyshmily.hotkey.algorithm.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.logging.DefaultLogger;
+import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
 import lombok.RequiredArgsConstructor;
 
@@ -31,8 +33,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_TOPK_PRE_WARM;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 
 /**
  * Validates Top-K candidates and triggers pre-warming broadcasts for stable hot keys.

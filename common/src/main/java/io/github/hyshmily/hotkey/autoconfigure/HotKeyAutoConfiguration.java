@@ -19,25 +19,21 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
-import java.util.Optional;
-import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -50,10 +46,15 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import java.util.Optional;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+
 /**
  * App-side autoconfiguration for the HotKey library.
  *
- * <p>Creates the app-side {@link TopK} detector (HeavyKeeper), L1 Caffeine
+ * <p>Creates the app-side {@link io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK} detector (HeavyKeeper), L1 Caffeine
  * cache, {@link SingleFlight} deduplication layer, executor, and the
  * primary {@link HotKeyCache} (without Redis version tracking when Redis
  * is absent).
@@ -78,21 +79,21 @@ public class HotKeyAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  public TopK hotKeyDetector(HotKeyProperties properties) {
-    return new HeavyKeeper(
+  public HotKeyDetector hotKeyDetector(HotKeyProperties properties) {
+    return new HotKeyDetector(new HeavyKeeper(
       properties.getTopK(),
       properties.getWidth(),
       properties.getDepth(),
       properties.getDecay(),
       properties.getMinCount(),
       properties.getExpelledQueueCapacity()
-    );
+    ));
   }
 
   /**
    * Create the SingleFlight deduplication layer for concurrent cache-load requests.
    *
-   * @param properties    the HotKey configuration properties
+   * @param properties     the HotKey configuration properties
    * @param hotKeyExecutor the dedicated HotKey executor
    * @return a new SingleFlight instance
    */
@@ -180,13 +181,12 @@ public class HotKeyAutoConfiguration {
    * @param hotKeyExecutor            the dedicated HotKey executor
    * @param properties                the HotKey configuration properties
    * @param ruleMatcher               the rule matcher instance
-   * @param workerHealthMonitorProvider optional provider for worker health monitor
    * @return a new HotKeyCache instance
    */
   @Bean
   @ConditionalOnMissingBean(type = "org.springframework.data.redis.core.RedisTemplate")
   public HotKeyCache hotKeyCache(
-    @Qualifier("hotKeyDetector") TopK hotKeyDetector,
+    @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,
     SingleFlight singleFlight,
     CacheExpireManager expireManager,
@@ -228,7 +228,7 @@ public class HotKeyAutoConfiguration {
   @Bean
   @ConditionalOnBean(HotKeyCache.class)
   @ConditionalOnMissingBean
-  public HotKey hotKey(HotKeyCache hotKeyCache, @Qualifier("hotKeyDetector") TopK hotKeyDetector) {
+  public HotKey hotKey(HotKeyCache hotKeyCache, @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector) {
     return new HotKey(hotKeyCache, hotKeyDetector);
   }
 
@@ -241,6 +241,9 @@ public class HotKeyAutoConfiguration {
    * with {@code hardExpireAtMs == Long.MAX_VALUE} are purely logical-expiry
    * — Caffeine never evicts them by time; they live until size eviction or
    * manual invalidation.
+   *
+   * @param properties the HotKey configuration properties
+   * @return a configured Caffeine {@link Cache} instance
    */
   @Bean
   @ConditionalOnMissingBean
@@ -254,6 +257,11 @@ public class HotKeyAutoConfiguration {
            * Returns {@link Long#MAX_VALUE} for pure logical-expiry entries
            * (where {@code hardExpireAtMs == Long.MAX_VALUE}); otherwise
            * computes the remaining wall-clock time.
+           *
+           * @param key              the cache key
+           * @param value            the cache value (expected to be a {@link CacheEntry})
+           * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
+           * @return the expiry duration in nanoseconds, or {@link Long#MAX_VALUE} for no expiry
            */
           @Override
           public long expireAfterCreate(@NonNull Object key, @NonNull Object value, long currentTimeNanos) {
@@ -273,6 +281,12 @@ public class HotKeyAutoConfiguration {
            * Re-compute the expiry duration after an entry is updated.
            * Preserves pure logical expiry across updates; otherwise
            * recalculates from the entry's {@code hardExpireAtMs}.
+           *
+           * @param key              the cache key
+           * @param value            the cache value (expected to be a {@link CacheEntry})
+           * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
+           * @param currentDuration  the current expiry duration in nanoseconds
+           * @return the updated expiry duration in nanoseconds, or {@link Long#MAX_VALUE} for no expiry
            */
           @Override
           public long expireAfterUpdate(
@@ -295,6 +309,12 @@ public class HotKeyAutoConfiguration {
           /**
            * Preserve the current expiry duration on read — reads never
            * extend or shorten the entry's time-to-live.
+           *
+           * @param key              the cache key
+           * @param value            the cache value
+           * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
+           * @param currentDuration  the current expiry duration in nanoseconds
+           * @return the unchanged expiry duration in nanoseconds
            */
           @Override
           public long expireAfterRead(

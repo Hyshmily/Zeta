@@ -46,6 +46,7 @@ public final class TransactionSupport {
   /**
    * Defer a task to after transaction commit, or submit to async executor outside a transaction.
    * Used by {@link HotKeyCache#putThrough} for async write-through.
+   * Errors during async execution are logged but not propagated to the caller.
    *
    * @param task     the task to execute
    * @param executor async executor for the non-transactional case
@@ -73,6 +74,7 @@ public final class TransactionSupport {
    * Defer a task to after transaction commit, or execute synchronously outside a transaction.
    * Used by {@link HotKeyCache#invalidate}, {@link HotKeyCache#invalidateAll},
    * and {@link HotKeyCache#putBeforeInvalidate}.
+   * Exceptions propagate directly to the caller when executed outside a transaction.
    *
    * @param task the task to execute
    */

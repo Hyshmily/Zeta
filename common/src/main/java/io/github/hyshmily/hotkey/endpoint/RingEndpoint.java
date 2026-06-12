@@ -50,8 +50,12 @@ public class RingEndpoint {
   /**
    * Return the current ring topology, mode (auto/manual), node count,
    * virtual node count, and the sorted list of live nodes.
+   * <p>In {@code auto} mode the ring is rebuilt from heartbeat-discovered
+   * nodes; in {@code manual} mode the topology is operator-defined via
+   * {@link #addNode(Map)} / {@link #removeNode(String)}.</p>
    *
-   * @return a map containing ring status fields
+   * @return a map containing {@code mode}, {@code nodeCount},
+   *         {@code virtualNodes}, and {@code nodes} entries
    */
   @GetMapping
   public Map<String, Object> ringInfo() {
@@ -65,9 +69,13 @@ public class RingEndpoint {
 
   /**
    * Determine which node is responsible for the given key.
+   * <p>When the cluster health view is unavailable (e.g. no Workers have
+   * ever connected), a fallback view with zero expected nodes is used,
+   * which may route the key to a local placeholder.</p>
    *
-   * @param key the cache key to look up
+   * @param key the cache key to look up; must not be empty
    * @return a map containing the key and its assigned node ID
+   * @throws IllegalArgumentException if {@code key} is empty
    */
   @GetMapping("/{key}")
   public Map<String, Object> keyMapping(@PathVariable String key) {
@@ -83,7 +91,9 @@ public class RingEndpoint {
   }
 
   /**
-   * Add a physical node to the ring.  Switches to manual mode if not already active.
+   * Add a physical node to the ring.  If the ring is currently in auto
+   * mode, this call implicitly switches it to manual mode so the topology
+   * stays under operator control.
    *
    * @param body a map containing the {@code "nodeId"} to add
    * @return a status map confirming the action
@@ -97,10 +107,13 @@ public class RingEndpoint {
   }
 
   /**
-   * Remove a physical node from the ring.  Switches to manual mode if not already active.
+   * Remove a physical node from the ring.  If the ring is currently in auto
+   * mode, this call implicitly switches it to manual mode so the topology
+   * stays under operator control.
    *
-   * @param nodeId the ID of the node to remove
+   * @param nodeId the ID of the node to remove; must not be empty
    * @return a status map confirming the action
+   * @throws IllegalArgumentException if {@code nodeId} is empty
    */
   @DeleteMapping("/{nodeId}")
   public Map<String, Object> removeNode(@PathVariable String nodeId) {
@@ -110,8 +123,9 @@ public class RingEndpoint {
   }
 
   /**
-   * Reset the ring to auto mode, allowing the next heartbeat reconciliation
-   * to rebuild the topology from discovered nodes.
+   * Reset the ring to auto mode, reverting any previous manual topology
+   * changes.  The next heartbeat reconciliation cycle will rebuild the
+   * ring from the set of currently discovered Worker nodes.
    *
    * @return a status map confirming the switch to auto mode
    */

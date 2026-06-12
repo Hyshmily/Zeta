@@ -15,38 +15,38 @@
  */
 package io.github.hyshmily.hotkey.cache;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.algorithm.AddResult;
-import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.model.CacheEntry;
-import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
-import io.github.hyshmily.hotkey.cache.*;
-import io.github.hyshmily.hotkey.sync.VersionController;
-import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.hotkey.model.CacheEntry;
+import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.VersionController;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link HotKeyCache}, covering peek, get, invalidate, and blacklist behaviors.
  */
 class HotKeyCacheTest {
 
-  private TopK hotKeyDetector;
+  private HotKeyDetector hotKeyDetector;
   private Cache<String, Object> caffeineCache;
   private SingleFlight singleFlight;
   private CacheExpireManager expireManager;
@@ -55,8 +55,8 @@ class HotKeyCacheTest {
 
   @BeforeEach
   void setUp() {
-    hotKeyDetector = mock(TopK.class);
-    when(hotKeyDetector.add(anyString(), anyInt())).thenReturn(new AddResult(null, false, ""));
+    hotKeyDetector = mock(HotKeyDetector.class);
+    when(hotKeyDetector.contains(anyString())).thenReturn(false);
     caffeineCache = Caffeine.newBuilder().maximumSize(100).build();
     singleFlight = mock(SingleFlight.class);
     executor = Runnable::run;
@@ -193,7 +193,6 @@ class HotKeyCacheTest {
   @Test
   void get_shouldLoadAndCacheOnMiss() {
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loadedValue"));
-    when(hotKeyDetector.add(anyString(), anyInt())).thenReturn(new AddResult(null, false, "key1"));
 
     Optional<String> result = hotKeyCache.get("key1", () -> "loadedValue");
     assertThat(result).contains("loadedValue");

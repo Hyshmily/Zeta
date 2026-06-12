@@ -19,12 +19,17 @@ Most local caches store every entry in Caffeine. But under massive key volumes:
 
 - **Memory waste** — most keys are read only once
 - **Broadcast storms** — full cache invalidation means broadcast messages grow linearly with key count
+- **Cache avalanche** — massive keys share the same TTL, expire simultaneously and all penetrate to the DB
 
 HotKey's strategy: **only cache the truly hot data.**
 
 Via [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant), it enables **cluster-level hot key detection**: deploy Worker nodes that aggregate access reports from all instances — solving the problem of "accessed 100 times by the same pod" vs "accessed once each by 100 pods" that is indistinguishable locally.
 
+HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) (JD's open-source hot key middleware). Algorithm support comes from [Aegis](https://github.com/go-kratos/aegis) (Kratos' HeavyKeeper implementation).
+
 ## Features
+<details>
+<summary><b>Click to expand detailed HotKey features</b></summary>
 
 - **HeavyKeeper algorithm** — Count-Min Sketch + probabilistic top-K detection with exponential conflict decay
 - **Multi-level cache** — Caffeine (L1) → optional reader callback (L2, e.g. Redis) + DB fallback via caller's `Optional.orElseGet()`, automatic hot key promotion
@@ -35,9 +40,16 @@ Via [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch varian
 - **Hot key synchronization** — Optional RabbitMQ fanout (via `hotkey.sync.*`) for cross-instance cache invalidation; dedicated worker-listener (via `hotkey.worker-listener.*`) receives HOT/COOL decisions from Worker
 - **Worker mode** — Dedicated cluster-level hot key detection nodes; cross-instance consensus via sliding window + state machine pipeline; runtime state machine configuration via `/actuator/hotkey/worker/state` REST endpoint with heartbeat-based peer-to-peer config propagation; see [Worker Mode](#worker-mode)
 - **Report aggregation** — Every `get()` / `getWithSoftExpire()` call reports to the local `HotKeyReporter`, which periodically batches access counts to Worker nodes (RabbitMQ) for cluster-level hot key detection
-- **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies &#177;10% random jitter to each hard/soft TTL via `ThreadLocalRandom`, scattering expiration timestamps to prevent cache avalanches
+- **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies ±10% random jitter to each hard/soft TTL via `ThreadLocalRandom`, scattering expiration timestamps to prevent cache avalanches
 - **Consistent hashing (default)** — Murmur3_32-based consistent hash ring for dynamic Worker routing via heartbeats; elastic scaling without static shard configuration
+- **BBR adaptive rate limiting** — Self-protection via BBR congestion control fused with CPU EMA monitoring; backpressure at the Reporter flush path to prevent RabbitMQ/Worker overload
+- **SRE adaptive rate limiting** — WorkerListener HOT-path backpressure using Google SRE formula (`K = 1 / successThreshold`, probabilistic drop when success rate degrades); independent of BBR, protects the HOT decision consumption path
+- **CPU monitoring with EMA smoothing** — Dedicated daemon thread polls process CPU load every 500ms with configurable EMA decay for stable overload detection
 - **Spring Boot auto-configuration** — Add the dependency and it works, zero boilerplate
+- **Annotation-driven caching** — `@HotKey` + `@HotKeyCacheTTL` + `@Intercept` + `@Fallback` for zero-boilerplate integration; SpEL key resolution, `softExpire` toggle, TTL inheritance
+- **Transaction support** — `TransactionSupport` defers cache writes until after Spring `@Transactional` commits, ensuring cache-data consistency on the write path
+
+</details>
 
 ## Latency & Performance
 
@@ -105,7 +117,7 @@ See the [Benchmark Report](docs/HotKey_Benchmark_Report.en.md).
 Default local configuration works for most scenarios.
 
 > [!IMPORTANT]
-> In distributed deployments, the author strongly recommends adding Redis alongside RabbitMQ for best results, although many fallback mechanisms are built into the core call chain.
+> In distributed deployments, RabbitMQ and Redis are required.
 
 **Optional feature configuration:**
 
@@ -117,6 +129,7 @@ Default local configuration works for most scenarios.
 | Worker mode          | `hotkey.worker.enabled=true`               | Run dedicated Worker nodes             |
 | `@HotKey` annotation | `hotkey.annotation.enabled=true` + AspectJ | Declarative caching                    |
 | Access reporting     | `hotkey.report.enabled=true` (default)     | Report access counts to Worker         |
+| Reporter self-protection | `hotkey.local.reporter.enabled=true` (default) | BBR backpressure on Reporter flush |
 
 See [Configuration](#configuration) for all options. Full property reference: [CONFIG.md](docs/CONFIG.md).
 
@@ -236,6 +249,16 @@ hotkey:
       ping-timeout-ms: 2000                  # Direct reply-to PING timeout
       degrade-after-failures: 2              # Degrade after N consecutive PING failures
 
+    # ——— Reporter rate limiter (BBR + CPU fusion) ———
+    reporter:
+      enabled: true                          # BBR adaptive rate-limiting
+      cpu-threshold: 800                     # CPU threshold (0-1000, 800=80%)
+      cpu-poll-interval-ms: 500              # CPU polling interval (ms)
+      cpu-decay: 0.95                        # EMA decay factor for CPU smoothing
+      bbr-window-ms: 10000                   # BBR sliding window (ms)
+      bbr-window-buckets: 100                # BBR sliding window buckets
+      bbr-cooldown-ms: 1000                  # Cooldown after drop (ms)
+
   # Feature toggles
   report:
     enabled: true                          # App&#8594;Worker report publishing
@@ -257,6 +280,14 @@ hotkey:
     concurrent-consumers: 2                # Concurrent consumers
     scheduler-pool-size: 2                 # Delayed task thread pool size
     prefetch-count: 5                      # AMQP prefetch count per consumer
+
+    # SRE Adaptive Rate Limiter (HOT decision processing path)
+    sre:
+      enabled: true                        # Enable SRE rate limiter
+      window-ms: 3000                      # Sliding window duration (ms)
+      buckets: 10                          # Number of buckets in the sliding window
+      min-samples: 20                      # Minimum samples before throttling
+      success-threshold: 0.6               # Success ratio threshold (0.0-1.0)
 
   # App-side — Cross-instance cache sync
   sync:
@@ -642,6 +673,7 @@ Worker mode failure behavior:
 | Worker crash (partial)   | Unaffected shards continue normally                                                         | Restart crashed Worker; auto-reconnect                              |
 | Report channel failure   | Reports queue/buffer (RabbitMQ)                                                             | Auto-recovery when RabbitMQ recovers                                |
 | Worker broadcast failure | No cross-instance HOT/COOL sync; local TopK works fine                                      | Restart Worker broadcaster                                          |
+| Reporter BBR backpressure | BBR drops batch when concurrency exceeds budget (CPU≥threshold); permissive below threshold | Auto-throttles when load subsides                       |
 
 ## HotKey Facade API Reference
 
@@ -661,7 +693,7 @@ The recommended entry point is the `HotKey` facade (auto-configured as a Spring 
 | `putBeforeInvalidate(key, mutation)`                   | Write then invalidate, for incremental collection operations (LPUSH, SADD, ZADD)                                                                                                                                                               |
 | `isLocalHotKey(cacheKey)`                              | Check if key is HOT in L1 (O(1))                                                                                                                                                                                                               |
 | `isWorkerHotKey(cacheKey)`                             | Check if key is a cluster hot key in Worker TopK (O(n))                                                                                                                                                                                        |
-| `notifyLocalDetector(cacheKey)`                        | Triggers local HeavyKeeper tracking for a key without performing a full cache read. Used by `@Intercept` to keep TopK accurate when the method body is skipped.                                                                                |
+| `notifyLocalDetector(cacheKey)`                        | Triggers local HotKeyDetector tracking for a key without performing a full cache read. Used by `@Intercept` to keep TopK accurate when the method body is skipped.                                                                                |
 | `invalidate(cacheKey)`                                 | Invalidate a single key across all cache layers                                                                                                                                                                                                |
 | `invalidateAll(cacheKeys...)`                          | Varargs overload — batch invalidate multiple keys                                                                                                                                                                                              |
 | `invalidateAll(Collection)`                            | Collection overload                                                                                                                                                                                                                            |

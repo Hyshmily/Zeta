@@ -63,6 +63,10 @@ public class WorkerHeartbeatVerifier {
    * <p>Every {@code verifyIntervalMs} milliseconds, iterates over all Workers in
    * {@link ClusterHealthView} that have exceeded the heartbeat timeout and sends
    * a PING via Direct reply-to. Updates the health view on PONG or failure.
+   * <p>
+   * The verification runs on a daemon background thread named {@code hb-verifier}.
+   * This method is idempotent — calling it multiple times creates additional
+   * schedulers.
    */
   public void start() {
     scheduler.scheduleAtFixedRate(
@@ -83,6 +87,15 @@ public class WorkerHeartbeatVerifier {
     scheduler.shutdown();
   }
 
+  /**
+   * Iterates over all Workers that are registered but not currently alive,
+   * sends each a PING via Direct reply-to, and updates the health view
+   * based on the response.
+   * <p>
+   * If cumulative failures across all suspected Workers reach
+   * {@code degradeAfterFailures} and the cluster is still unhealthy,
+   * the cluster is marked as degraded via {@link ClusterHealthView#setDegraded}.
+   */
   void verifySuspectedWorkers() {
     if (healthView.isClusterHealthy()) {
       return;
@@ -119,6 +132,17 @@ public class WorkerHeartbeatVerifier {
     }
   }
 
+  /**
+   * Sends a PING message to the given Worker's dedicated verification queue
+     * ({@code hotkey.verify.ping.{workerId}}) and waits for a PONG
+   * response via Direct reply-to.
+   * <p>
+   * The PING carries the app instance ID so the Worker can identify the requester.
+   *
+   * @param workerId the Worker to ping
+   * @return {@code true} if a PONG response was received within {@code pingTimeoutMs};
+   *         {@code false} if the request timed out or the queue is unreachable
+   */
   boolean sendPingAndWaitPong(String workerId) {
     MessageProperties props = new MessageProperties();
     props.setHeader(AMQP_HEADER_VERIFY_TYPE, AMQP_HEADER_VERIFY_PING);

@@ -15,30 +15,24 @@
  */
 package io.github.hyshmily.hotkey.worker.ingest;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
-import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.Map;
+
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
 /**
  * Tests for {@link ReportConsumer}.
@@ -82,8 +76,8 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(workerTopK).add("key1", 5);
-    verify(workerTopK).add("key2", 3);
+    verify(workerTopK).addDirect("key1", 5);
+    verify(workerTopK).addDirect("key2", 3);
     verify(detector).addCount("key1", 5L);
     verify(detector).addCount("key2", 3L);
     verify(globalQpsEstimator).addTotal(8L);
@@ -127,7 +121,7 @@ class ReportConsumerTest {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
     consumer.onReport(message);
 
-    verify(workerTopK, never()).add(anyString(), anyInt());
+    verify(workerTopK, never()).addDirect(anyString(), anyInt());
     verify(detector, never()).addCount(anyString(), anyLong());
     verify(stateMachine, never()).evaluate(anyString(), anyBoolean());
   }

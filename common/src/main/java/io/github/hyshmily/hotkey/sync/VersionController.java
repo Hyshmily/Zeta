@@ -63,9 +63,14 @@ public class VersionController {
    * Atomically increment the version counter for the given cache key.
    * Uses a Lua script for atomic INCR + EXPIRE in Redis.
    * Falls back to {@link #fallbackVersion()} on any Redis failure.
+   * <p>
+   * The Redis key is prefixed with {@link HotKeyConstants#REDIS_VERSION_KEY_PREFIX}.
+   * If Redis is not configured, the local fallback is used directly.
    *
-   * @param cacheKey the key to version
-   * @return a {@link VersionResult} containing the new version and degraded flag
+   * @param cacheKey the key to version; must not be null or empty
+   * @return a {@link VersionResult} containing the new version and degraded flag;
+   *         {@code degraded} is {@code true} when the version came from the
+   *         local fallback (Redis unavailable or not configured)
    */
   public VersionResult nextVersion(String cacheKey) {
     return redisTemplate
@@ -98,18 +103,33 @@ public class VersionController {
    * This guarantees the {@code sendDeduped} numeric comparison in
    * {@link io.github.hyshmily.hotkey.sync.CacheSyncPublisher} correctly
    * prefers normal broadcasts over degraded ones without flag-aware logic.
+   *
+   * @return a {@link VersionResult} with a negative version and {@code degraded=true}
    */
   public VersionResult fallbackVersion() {
     long version = Long.MIN_VALUE + fallbackVersionCounter.incrementAndGet();
     return new VersionResult(version, true);
   }
 
-  /** Whether Redis is configured for version tracking. */
+  /**
+   * Whether Redis is configured for version tracking.
+   *
+   * @return {@code true} if a {@link StringRedisTemplate} bean is available;
+   *         {@code false} if only local fallback is possible
+   */
   public boolean isRedisConfigured() {
     return redisTemplate.isPresent();
   }
 
-  /** Cumulative count of fallbacks to the local degraded counter. */
+  /**
+   * Cumulative count of fallbacks to the local degraded counter.
+   * <p>
+   * Each call to {@link #fallbackVersion()} increments this counter.
+   * A non-zero value indicates that Redis was unavailable at some point
+   * during this JVM's lifetime.
+   *
+   * @return the total number of degraded version allocations since startup
+   */
   public long getDegradedVersionCount() {
     return fallbackVersionCounter.get();
   }

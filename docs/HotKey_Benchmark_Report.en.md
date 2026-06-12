@@ -311,7 +311,7 @@ Worker decisions (HOT/COOL) injected via `hotkey.broadcast.exchange` (fanout). 2
 
 #### 5.5.4 Cross-Instance Sync
 
-5,000 INVALIDATE broadcasts via `hotkey.sync.exchange` (direct). Sync propagation P50=0.30ms, P99=97.31ms — the P99 tail is driven by `CacheExpireManager` polling interval rather than AMQP delivery latency. Zero sync errors.
+5,000 INVALIDATE broadcasts via `hotkey.sync.exchange` (fanout). Sync propagation P50=0.30ms, P99=97.31ms — the P99 tail is driven by `CacheExpireManager` polling interval rather than AMQP delivery latency. Zero sync errors.
 
 ### 5.7 Propagation Delay
 
@@ -436,4 +436,4 @@ Verified against `HotKeyProperties.java`:
 
 ---
 
-_All data sourced from test execution outputs in `integration-tests/src/test/resources/testresult/`. Source code defaults verified against `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java`._
+_All data sourced from test execution outputs in `integration-tests/src/test/resources/testresult/`. Source code defaults verified against `common/src/main/java/io/github/hyshmily/hotkey/autoconfigure/HotKeyProperties.java`._

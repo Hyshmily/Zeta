@@ -35,8 +35,11 @@ public record HotKeyDecision(DecisionType type, String cacheKey) {
    * </ul>
    */
   public enum DecisionType {
+    /** Key exceeds the frequency threshold and should be promoted to L1 cache. */
     HOT,
+    /** Key frequency has dropped below the cooldown threshold and should be evicted from L1. */
     COOL,
+    /** No action is required for this key during this evaluation cycle. */
     NONE,
   }
 

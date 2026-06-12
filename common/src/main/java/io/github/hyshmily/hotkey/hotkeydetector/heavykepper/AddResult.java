@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.algorithm;
+package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 
 /**
  * Result of a single {@link TopK#add} operation.

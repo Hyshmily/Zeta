@@ -16,15 +16,14 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.endpoint.RingEndpoint;
 import io.github.hyshmily.hotkey.endpoint.StateMachineEndpoint;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
@@ -60,8 +59,23 @@ import org.springframework.context.annotation.Bean;
 public class HotKeyActuatorAutoConfiguration {
 
   /**
-   * Create the Actuator endpoint.  All dependencies are optional via {@link ObjectProvider}
+   * Create the Actuator endpoint. All dependencies are optional via {@link ObjectProvider}
    * so the endpoint works in any deployment mode.
+   *
+   * @param hotKeyDetectorProvider      provider for the app-side TopK detector
+   * @param workerTopKProvider          provider for the Worker-side TopK detector
+   * @param hotLocalCacheProvider       provider for the L1 Caffeine cache
+   * @param singleFlightProvider        provider for the SingleFlight dedup layer
+   * @param hotKeyReporterProvider      provider for the HotKey reporter
+   * @param ruleMatcherProvider         provider for the rule matcher
+   * @param ringManagerProvider         provider for the consistent-hash ring manager
+   * @param expireManagerProvider       provider for the cache expiry manager
+   * @param versionControllerProvider   provider for the version controller
+   * @param cacheSyncPublisherProvider  provider for the cache sync publisher
+   * @param stateMachineProvider        provider for the Worker state machine
+   * @param healthViewProvider          provider for the cluster health view
+   * @param properties                  the HotKey configuration properties
+   * @return a new {@link HotKeyEndpoint} instance
    */
   @Bean
   @ConditionalOnMissingBean
@@ -99,10 +113,12 @@ public class HotKeyActuatorAutoConfiguration {
 
   /**
    * Create the RingEndpoint for consistent-hash ring CRUD.
-   * Only active when {@code hotkey.local.consistent-hashing.enabled=true}
+    * Only active when {@code hotkey.local.consistent-hashing.enabled=true}
    * and Spring MVC (RestController) is on the classpath.
    *
-   * @param ringManager the ring manager for consistent-hash topology
+   * @param ringManager        the ring manager for consistent-hash topology
+   * @param healthViewProvider optional provider for the cluster health view
+   * @return a new {@link RingEndpoint} instance
    */
   @Bean
   @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
@@ -122,8 +138,8 @@ public class HotKeyActuatorAutoConfiguration {
    * <p>Only active when a {@link HotKeyStateMachine} bean is present
    * (i.e. in Worker mode) and Spring MVC is on the classpath.
    *
-   * @param stateMachine              the worker's state machine
-   * @param configTimestampCounterProvider optional config-change timestamp counter
+   * @param stateMachine                    the Worker state machine
+   * @param configTimestampCounterProvider  optional provider for the config-change timestamp counter
    * @return a new {@link StateMachineEndpoint} instance
    */
   @Bean

@@ -56,8 +56,6 @@ hotkey:
     ## Routing
     routing:
       app-name: default
-      shard-count: 1
-      shard-index: 0
 
     ## Messaging
     messaging:

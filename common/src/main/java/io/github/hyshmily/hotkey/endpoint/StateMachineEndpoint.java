@@ -16,16 +16,12 @@
 package io.github.hyshmily.hotkey.endpoint;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.web.bind.annotation.*;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
 
 /**
  * Actuator endpoint for reading and updating the Worker's state-machine
@@ -46,8 +42,8 @@ public class StateMachineEndpoint {
   /** Shared atomic counter bumped on each config change; broadcast via heartbeat. */
   private final ObjectProvider<AtomicLong> configTimestampCounter;
 
-  @Autowired
-  public StateMachineEndpoint(HotKeyStateMachine stateMachine,
+  public StateMachineEndpoint(
+      HotKeyStateMachine stateMachine,
       ObjectProvider<AtomicLong> configTimestampCounter) {
     this.stateMachine = stateMachine;
     this.configTimestampCounter = configTimestampCounter;
@@ -71,6 +67,10 @@ public class StateMachineEndpoint {
 
   /**
    * Updates the state-machine configuration parameters at runtime.
+   * <p>Changes are propagated to peer Workers via the next heartbeat
+   * broadcast (the {@code configTimestampCounter} is bumped, causing
+   * {@code WorkerHeartbeatProducer} to include the updated config
+   * fingerprint in the next heartbeat message).</p>
    *
    * <p>Accepts a JSON body with optional integer fields:
    * <ul>

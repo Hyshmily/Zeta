@@ -68,6 +68,8 @@ public class RuleMatcher {
    * <p>
    * If Redis is not configured or unreachable, the rule list starts empty –
    * the application still operates normally.
+   *
+   * @see #loadRulesFromRedis
    */
   @PostConstruct
   void initRules() {
@@ -82,6 +84,13 @@ public class RuleMatcher {
    * RuleMatcher.of("order:*-detail", ALLOW_NO_REPORT) -> WILDCARD
    * RuleMatcher.of("regex:user:\\d+", BLOCK)      -> REGEX
    * }</pre>
+   *
+   * @param pattern the key pattern; a leading {@code regex:} prefix forces REGEX type,
+   *     a trailing wildcard without interior wildcards is optimised to PREFIX,
+   *     patterns containing {@code *} or {@code ?} are treated as WILDCARD,
+   *     otherwise the pattern is treated as EXACT
+   * @param action  the action to assign to the created rule
+   * @return a new {@link Rule} with an auto-detected type matching the given pattern
    */
   public static Rule of(String pattern, RuleAction action) {
     if (pattern.startsWith("regex:")) {
@@ -100,6 +109,8 @@ public class RuleMatcher {
   /**
    * Append a rule.  The change is immediately visible locally, persisted
    * to Redis (if available), and broadcast to sibling instances.
+   *
+   * @param rule the rule to append; must not be {@code null}
    */
   public void addRule(Rule rule) {
     rule.prepare();
@@ -108,8 +119,10 @@ public class RuleMatcher {
   }
 
   /**
-   * Remove the first rule matching the given pattern and action.
+   * Remove all rules matching the given pattern and action.
    *
+   * @param pattern the pattern string to match
+   * @param action  the action to match
    * @return {@code true} if at least one rule was removed
    */
   public boolean removeRule(String pattern, RuleAction action) {
@@ -125,6 +138,8 @@ public class RuleMatcher {
 
   /**
    * Drop every rule and propagate the empty list.
+   *
+   * @see #persistAndBroadcastRules
    */
   public void clearRules() {
     rulesList.clear();
@@ -135,6 +150,7 @@ public class RuleMatcher {
   /**
    * Remove all rules with a given action.
    *
+   * @param action the action to match; rules with this action are removed
    * @return the number of rules removed
    */
   public int removeRulesByAction(RuleAction action) {
@@ -148,6 +164,8 @@ public class RuleMatcher {
 
   /**
    * Remove a rule by its index in the list.  Silently ignores out-of-bounds indices.
+   *
+   * @param index the index of the rule to remove
    */
   public void removeRule(int index) {
     if (index >= 0 && index < rulesList.size()) {
@@ -161,6 +179,8 @@ public class RuleMatcher {
    * <p>
    * This method <b>does not broadcast</b> the change – it only updates
    * the local list and Redis to avoid a broadcast storm.
+   *
+   * @param json the JSON-serialised rule list to apply; may be {@code null} or empty
    */
   public void syncRules(String json) {
     try {
@@ -177,6 +197,9 @@ public class RuleMatcher {
    * Atomically swap the rule list.  Does <b>not</b> persist or broadcast.
    * <p>
    * Primarily used internally by {@link #syncRules} and for tests.
+   *
+   * @param newRules the new rule list; each element is {@link Rule#prepare() prepared} before
+   *     insertion, must not be {@code null}
    */
   public void replaceRules(List<Rule> newRules) {
     List<Rule> replacement = new CopyOnWriteArrayList<>();
@@ -205,6 +228,9 @@ public class RuleMatcher {
    *
    * @param cacheKey  the key being accessed
    * @param operation a label used only in log messages (e.g. "get", "getWithSoftExpire")
+   * @return {@link Optional#empty()} if the rule action is {@link RuleAction#BLOCK},
+   *         {@code Optional.of(true)} if the rule action is {@link RuleAction#ALLOW_NO_REPORT},
+   *         {@code Optional.of(false)} if no rule matches or the action is {@link RuleAction#ALLOW}
    */
   public Optional<Boolean> isAllowNoReport(String cacheKey, String operation) {
     RuleAction action = evaluateRule(cacheKey);
@@ -272,9 +298,9 @@ public class RuleMatcher {
   }
 
   /**
-   * Load persisted rules from Redis (if available) and append them to the local
-   * rule list.  Failures are logged but never propagated — the application
-   * continues with an empty or partially-loaded rule set.
+   * Load persisted rules from Redis (if available) and replace the local rule list
+   * with the loaded rules.  Failures are logged but never propagated — the
+   * application continues with the current rule set if loading fails.
    */
   private void loadRulesFromRedis() {
     redisTemplate.ifPresent(r -> {

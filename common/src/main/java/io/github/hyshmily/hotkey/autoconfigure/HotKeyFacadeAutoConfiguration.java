@@ -16,9 +16,8 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -64,9 +63,14 @@ public class HotKeyFacadeAutoConfiguration {
   }
 
   /**
-   * Create the {@link HotKey} facade bean.  Each dependency is optional — the bean
+   * Create the {@link HotKey} facade bean. Each dependency is optional — the bean
    * adapts to whatever TopK / cache resources are available in the current deployment
    * mode.
+   *
+   * @param hotKeyCacheProvider provider for the HotKeyCache (app-only or coexistence mode)
+   * @param appTopKProvider     provider for the app-side TopK detector
+   * @param workerTopKProvider  provider for the Worker-side TopK detector
+   * @return a new {@link HotKey} facade instance
    */
   @Bean
   @ConditionalOnMissingBean

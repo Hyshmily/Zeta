@@ -56,6 +56,36 @@ public class WorkerListenerProperties {
   /** AMQP prefetch count per consumer. */
   private int prefetchCount = 5;
 
+  /** Configuration for the SRE adaptive rate limiter on HOT decision processing. */
+  private Sre sre = new Sre();
+
+  /**
+   * SRE adaptive rate limiter settings for HOT decision processing.
+   *
+   * <p>Uses the Google SRE formula ({@code requests = K × accepts}) to
+   * probabilistically drop HOT promotions when the success rate falls below
+   * {@link #successThreshold}.  This provides backpressure when downstream
+   * resources (Redis, CPU) are saturated.
+   */
+  @Data
+  public static class Sre {
+
+    /** Whether the SRE rate limiter is enabled. */
+    private boolean enabled = true;
+
+    /** Sliding window duration in milliseconds. */
+    private long windowMs = 3000;
+
+    /** Number of buckets in the window. */
+    private int buckets = 10;
+
+    /** Minimum total samples before throttling starts. */
+    private int minSamples = 20;
+
+    /** Success ratio threshold (0.0–1.0). K = 1 / successThreshold. */
+    private double successThreshold = 0.6;
+  }
+
   /**
    * Returns the unique per-instance queue name for Worker decision listener.
    *

@@ -236,7 +236,13 @@ public class HotKeyAspect {
     return invokeFallbackMethod(pjp);
   }
 
-  /** Evaluates a SpEL fallback expression with method parameters as context variables. */
+  /**
+   * Evaluates a SpEL fallback expression with method parameters as context variables.
+   *
+   * @param pjp        the join point providing method arguments
+   * @param expression the SpEL expression to evaluate
+   * @return the evaluated fallback value
+   */
   private Object resolveSpelFallback(ProceedingJoinPoint pjp, String expression) {
     return evalSpel(pjp, expression, Object.class);
   }
@@ -287,6 +293,9 @@ public class HotKeyAspect {
   /**
    * Resolves the concrete {@link Method} for the join point, unwrapping interface
    * methods to the implementation class when necessary.
+   *
+   * @param pjp the join point whose method to resolve
+   * @return the resolved concrete method
    */
   private Method resolveMethod(ProceedingJoinPoint pjp) {
     MethodSignature sig = (MethodSignature) pjp.getSignature();
@@ -304,6 +313,9 @@ public class HotKeyAspect {
   /**
    * Builds a {@link StandardEvaluationContext} with method parameters registered
    * as context variables.  Parameter names are resolved once and cached per method.
+   *
+   * @param pjp the join point providing method arguments
+   * @return a configured evaluation context with method parameters as variables
    */
   private StandardEvaluationContext buildEvaluationContext(ProceedingJoinPoint pjp) {
     MethodSignature sig = (MethodSignature) pjp.getSignature();
@@ -330,6 +342,9 @@ public class HotKeyAspect {
    * Returns a cached {@link Expression} for the given expression string, parsing it
    * on first access.  Annotation-level expressions are compile-time constants so
    * caching is safe and eliminates repeated lexing/AST construction.
+   *
+   * @param expressionString the SpEL expression string to retrieve or parse
+   * @return the cached or freshly parsed expression
    */
   private Expression getExpression(String expressionString) {
     return expressionCache.computeIfAbsent(expressionString, parser::parseExpression);

@@ -28,11 +28,7 @@ import lombok.Getter;
 @Getter
 public class HotKeyBlockedException extends RuntimeException {
 
-  /**
-   * -- GETTER --
-   *  Return the key that was blocked.
-   *
-   */
+  /** The cache key that was blocked by a blacklist rule. */
   private final String cacheKey;
 
   /**

@@ -21,6 +21,10 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
+
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.nio.file.Files;
@@ -29,9 +33,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import lombok.RequiredArgsConstructor;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * Enhanced Worker heartbeat sender.
@@ -71,7 +72,7 @@ public class WorkerHeartbeatProducer {
   /** Interval between consecutive heartbeat sends (milliseconds). */
   private final long pingIntervalMs;
 
-  private static final String EPOCH_REDIS_KEY_PREFIX = "hotkey:worker:epoch:";
+  private static final String EPOCH_REDIS_KEY_PREFIX = "hotkeydetector:worker:epoch:";
 
   /**
    * Initialises the epoch by atomically incrementing a Redis counter.
@@ -95,14 +96,18 @@ public class WorkerHeartbeatProducer {
   }
 
   /**
-   * Fallback epoch initialisation using a local temp file when Redis is
+   * Fallback epoch initialization using a local temp file when Redis is
    * unavailable.  Reads the previous value, increments, and writes back.
    *
-   * @return the new epoch value
+   * <p>If both Redis and local file fallback fail, falls back to
+   * {@code System.currentTimeMillis()} as a last resort epoch value
+   * (non-monotonic risk across restarts is logged at error level).
+   *
+   * @return the new epoch value, or {@code System.currentTimeMillis()} on complete failure
    */
   private long initEpochFromLocalFile() {
     try {
-      Path path = Path.of(System.getProperty("java.io.tmpdir"), "hotkey-epoch-" + workerId);
+      Path path = Path.of(System.getProperty("java.io.tmpdir"), "hotkeydetector-epoch-" + workerId);
       long next = 1;
       if (Files.exists(path)) {
         String content = Files.readString(path);
@@ -161,6 +166,8 @@ public class WorkerHeartbeatProducer {
 
   /**
    * Starts the periodic heartbeat sender at the configured ping interval.
+   *
+   * <p>First heartbeat is sent immediately on startup (initial delay = 0).
    */
   @PostConstruct
   public void start() {
@@ -179,6 +186,10 @@ public class WorkerHeartbeatProducer {
    * Builds and sends a single heartbeat message containing epoch, decision
    * version watermark, load factor, ready-to-serve flag, config fingerprint,
    * and state-machine config gossip fields.
+   *
+   * <p>Published to the configured heartbeat exchange with routing key
+   * {@code heartbeat.<workerId>}.  Silently drops if the channel or
+   * connection is unavailable (fire-and-forget).
    */
   void sendHeartbeat() {
     WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(

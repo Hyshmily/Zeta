@@ -13,9 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.algorithm;
+package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 
 /**
@@ -32,10 +33,18 @@ public interface TopK {
    *
    * @param key       the accessed key
    * @param increment the number of accesses to record
-   * @return the add result indicating whether the key became hot and whether another key was evicted
+   * @return the  result indicating whether the key became hot and whether another key was evicted
    */
-  AddResult add(String key, int increment);
+  AddResult addDirect(String key, int increment);
 
+  /**
+   * Record accesses for multiple keys.
+   * <p>Always updates both the sketch counters and the TopK heap.
+   *
+   * @param keyCounts map of keys to their access counts
+   * @return list of {@link AddResult} for keys that entered the TopK set
+   */
+  List<AddResult> add(Map<String, Long> keyCounts);
   /**
    * Return the current TopK list sorted by frequency (descending).
    *

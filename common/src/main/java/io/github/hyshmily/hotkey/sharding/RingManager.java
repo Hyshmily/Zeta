@@ -16,9 +16,10 @@
 package io.github.hyshmily.hotkey.sharding;
 
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import lombok.Getter;
+
 import java.util.HashSet;
 import java.util.Set;
-import lombok.Getter;
 
 /**
  * Manages the consistent-hash ring for Worker shard routing.
@@ -54,7 +55,8 @@ public class RingManager {
   /**
    * Rebuild the ring from the health view (auto mode) or the override set (manual mode).
    *
-   * @param healthView the current cluster health view
+   * @param healthView the current cluster health view; must not be {@code null}
+   * @throws NullPointerException if {@code healthView} is {@code null}
    */
   public synchronized void reconcileFromHealthView(ClusterHealthView healthView) {
     if (overrideNodes != null) {
@@ -72,7 +74,8 @@ public class RingManager {
   /**
    * Add a physical node to the ring. Switches to manual mode.
    *
-   * @param nodeId the node identifier to add
+   * @param nodeId the node identifier to add; must not be {@code null}
+   * @throws NullPointerException if {@code nodeId} is {@code null}
    */
   public synchronized void addNode(String nodeId) {
     if (overrideNodes == null) {
@@ -85,7 +88,8 @@ public class RingManager {
   /**
    * Remove a physical node from the ring. Switches to manual mode.
    *
-   * @param nodeId the node identifier to remove
+   * @param nodeId the node identifier to remove; must not be {@code null}
+   * @throws NullPointerException if {@code nodeId} is {@code null}
    */
   public synchronized void removeNode(String nodeId) {
     if (overrideNodes == null) {
@@ -132,9 +136,10 @@ public class RingManager {
   /**
    * Route a key to the responsible Worker node.
    *
-   * @param key        the cache key to route
-   * @param healthView the current cluster health view
+   * @param key        the cache key to route; must not be {@code null}
+   * @param healthView the current cluster health view; must not be {@code null}
    * @return the node identifier that owns the key, or {@code null} if no node is available
+   * @throws NullPointerException if {@code key} or {@code healthView} is {@code null}
    */
   public String routeNode(String key, ClusterHealthView healthView) {
     Set<String> alive = healthView.getAliveWorkerIds();

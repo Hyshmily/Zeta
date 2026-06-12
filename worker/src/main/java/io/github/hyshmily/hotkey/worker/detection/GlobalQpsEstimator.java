@@ -51,9 +51,14 @@ public class GlobalQpsEstimator {
   }
 
   /**
-   * Add a total count (sum of all key counts in a batch) to the current time slice.
+   * Adds the sum of all per-key counts in a batch to the current time slice.
    *
-   * @param totalCount the total number of access counts to record
+   * <p>Also clears stale slices that have fallen out of the window, keeping
+   * the circular buffer consistent.  Must be called from a single consumer
+   * thread (or externally synchronised) to avoid races on the clear + add
+   * sequence.
+   *
+   * @param totalCount the total number of access counts across all keys in the batch
    */
   public void addTotal(long totalCount) {
     long now = System.currentTimeMillis();
@@ -88,7 +93,10 @@ public class GlobalQpsEstimator {
   /**
    * Returns the estimated queries per second based on the current window.
    *
-   * @return the estimated QPS value
+   * <p>The estimate is computed as {@code getWindowTotal() / windowDurationSeconds}.
+   * Returns {@code 0.0} if no accesses have been recorded in the current window.
+   *
+   * @return the estimated QPS value (may be {@code 0.0})
    */
   public double getQps() {
     long total = getWindowTotal();

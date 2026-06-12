@@ -16,9 +16,9 @@
 package io.github.hyshmily.hotkey.cache;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
@@ -57,8 +57,8 @@ public class HotKeyCache {
   /** Logger for this class. */
   private static final HotKeyLogger log = new DefaultLogger(HotKeyCache.class);
 
-  /** Local TopK detector (HeavyKeeper) for identifying hot keys. */
-  private final TopK hotKeyDetector;
+  /** Local TopK detector (HotKeyDetector) for identifying hot keys. */
+  private final HotKeyDetector hotKeyDetector;
   /** Underlying L1 Caffeine cache storing {@link CacheEntry} or raw values. */
   private final Cache<String, Object> caffeineCache;
   /** Deduplicator preventing concurrent in-flight loads for the same key. */
@@ -177,6 +177,12 @@ public class HotKeyCache {
   /**
    * Get a value from L1 or load it via the reader.
    * Hot keys are promoted to L1 with configured hot TTLs; normal keys use default TTLs.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader) {
     return get(cacheKey, reader, 0L, 0L);
@@ -186,8 +192,13 @@ public class HotKeyCache {
    * Get with explicit TTL overrides.
    * Pass 0 to use the configured default for that TTL type.
    *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses
    * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
    * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   @SuppressWarnings("unchecked")
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
@@ -222,6 +233,12 @@ public class HotKeyCache {
    * Get with soft-expire (stale-while-revalidate). Returns cached value immediately
    * even if soft TTL expired, while triggering async refresh in background.
    * Only HOT and COOL entries are subject to soft expire.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses / refreshes
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader) {
     return getWithSoftExpire(cacheKey, reader, 0L, 0L);
@@ -230,7 +247,12 @@ public class HotKeyCache {
   /**
    * Get with soft-expire and explicit soft TTL override.
    *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses / refreshes
    * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long softTtlMs) {
     return getWithSoftExpire(cacheKey, reader, 0L, softTtlMs);
@@ -239,8 +261,13 @@ public class HotKeyCache {
   /**
    * Get with soft-expire and explicit hard/soft TTL overrides.
    *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses / refreshes
    * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry — entry never hard-evicted, only soft-expire or Caffeine {@code maximumSize})
    * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   @SuppressWarnings("unchecked")
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
@@ -325,7 +352,8 @@ public class HotKeyCache {
         long effectiveHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHardTtlMs();
         long effectiveSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveSoftTtlMs();
 
-        if (hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR).isHotKey()) {
+        hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
+        if (hotKeyDetector.contains(cacheKey)) {
           long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
           long hotSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveHotSoftTtlMs();
 
@@ -400,9 +428,12 @@ public class HotKeyCache {
   private void promoteLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
     if (
       raw instanceof CacheEntry ce &&
-      isPromotableState(ce.getKeyState()) &&
-      hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR).isHotKey()
+      isPromotableState(ce.getKeyState())
     ) {
+      hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
+      if (!hotKeyDetector.contains(cacheKey)) {
+        return;
+      }
       long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
       long hotSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveHotSoftTtlMs();
 
@@ -427,8 +458,6 @@ public class HotKeyCache {
             .normalSoftTtlMs(ce.getNormalSoftTtlMs())
             .build();
         });
-
-
     }
   }
 
@@ -488,6 +517,7 @@ public class HotKeyCache {
    * @param value    the value to cache
    * @param writer   the data-source mutation to execute before caching
    * @param <T>      the value type
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer) {
     putThrough(cacheKey, value, writer, 0L, 0L);

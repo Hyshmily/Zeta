@@ -18,7 +18,7 @@
 
 - **App** — The user's Spring Boot application that pulls `hotkey` as a dependency. Runs local L1 (Caffeine), optional L2 (Redis), local TopK, and the Reporter-to-Worker AMQP link.
 - **Worker** — Standalone Spring Boot application (`hotkey-worker`). Consumes App reports via AMQP, runs its own TopK, emits HOT/COOL decisions back to Apps via broadcast. Published as a separate module, never deployed to Maven Central.
-- **TopK** — Interface for the hot key detection algorithm. Implemented by HeavyKeeper (Count-Min Sketch variant). Tracks the `K` most frequent keys.
+- **TopK** — Interface for the hot key detection algorithm. Implemented by `HeavyKeeper` (Count-Min Sketch variant). Tracks the `K` most frequent keys. The app-side facade is **HotKeyDetector** which wraps HeavyKeeper and adds a buffered `add` path for batched frequency updates.
 - **SingleFlight** — Deduplication mechanism that coalesces concurrent concurrent loads for the same key into a single execution. Prevents thundering herd.
 
 ## Versions

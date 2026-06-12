@@ -13,24 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.algorithm;
-
-import static org.assertj.core.api.Assertions.assertThat;
-
-import org.junit.jupiter.api.Test;
+package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 
 /**
- * Tests for {@link Item}, the immutable key-count pair record used by the HeavyKeeper algorithm.
+ * A hot-key item with its tracked access count.
+ *
+ * @param key   the hot key
+ * @param count the estimated access count
  */
-class ItemTest {
-
-  /**
-   * Verifies that an Item record is created with the correct key and count fields.
-   */
-  @Test
-  void shouldCreateItemWithKeyAndCount() {
-    Item item = new Item("key1", 42);
-    assertThat(item.key()).isEqualTo("key1");
-    assertThat(item.count()).isEqualTo(42);
-  }
-}
+public record Item(String key, long count) {}

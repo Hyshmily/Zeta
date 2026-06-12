@@ -15,10 +15,10 @@
  */
 package io.github.hyshmily.hotkey.worker.config;
 
-import io.github.hyshmily.hotkey.algorithm.HeavyKeeper;
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
@@ -130,7 +130,16 @@ public class WorkerAutoConfiguration {
     );
   }
 
-  /** Creates the per‑key lifecycle state machine. */
+  /**
+   * Creates the per‑key lifecycle state machine.
+   *
+   * @param properties worker configuration properties providing confirm, cool, and
+   *                   pre-cool grace window counts (converted from durations via
+   *                   {@link WorkerProperties#getConfirmWindows()},
+   *                   {@link WorkerProperties#getCoolWindows()}, and
+   *                   {@link WorkerProperties#getPreCoolGraceWindows()})
+   * @return a new {@link HotKeyStateMachine} instance
+   */
   @Bean
   public HotKeyStateMachine hotKeyStateMachine(WorkerProperties properties) {
     return new HotKeyStateMachine(
@@ -147,6 +156,10 @@ public class WorkerAutoConfiguration {
    * {@code "workerTopK"} so that it can be distinguished from any other
    * Top‑K instance that might be defined in the application context
    * (e.g. for dashboard queries).
+   *
+   * @param properties worker configuration providing HeavyKeeper algorithm parameters
+   *                   (top-K count, width, depth, decay, minimum count)
+   * @return a new {@link HeavyKeeper} instance qualified as {@code workerTopK}
    */
   @Bean
   public TopK workerTopK(WorkerProperties properties) {
@@ -162,6 +175,12 @@ public class WorkerAutoConfiguration {
   /**
    * Top‑K validator that periodically inspects the worker's Top‑K list
    * and pre‑warms keys that appear consistently.
+   *
+   * @param workerTopK  the worker-scoped HeavyKeeper sketch for frequency estimation
+   * @param broadcaster the worker broadcaster used to emit pre-warm HOT decisions
+   * @param properties  worker configuration providing TopK validation parameters
+   *                    (pre-warm count and minimum consecutive appearances)
+   * @return a new {@link TopKValidator} instance
    */
   @Bean
   public TopKValidator topKValidator(
@@ -182,6 +201,14 @@ public class WorkerAutoConfiguration {
    *
    * <p>Injects the worker‑scoped Top‑K so that every consumed report also
    * feeds the frequency estimator.
+   *
+   * @param detector           the sliding-window detector for per-key access tracking
+   * @param stateMachine       the per-key lifecycle state machine for HOT/COOL transitions
+   * @param broadcaster        publishes HOT and COOL decisions to all application instances
+   * @param topKValidator      pre-warm validator for cross-instance frequency-based confirmation
+   * @param workerTopK         the worker-scoped HeavyKeeper sketch for frequency estimation
+   * @param globalQpsEstimator the global QPS estimator tracking overall throughput
+   * @return a new {@link ReportConsumer} instance
    */
   @Bean
   public ReportConsumer reportConsumer(
@@ -195,7 +222,15 @@ public class WorkerAutoConfiguration {
     return new ReportConsumer(detector, stateMachine, broadcaster, topKValidator, workerTopK, globalQpsEstimator);
   }
 
-  /** Broadcasts HOT / COOL decisions to all application instances. */
+  /**
+   * Broadcasts HOT / COOL decisions to all application instances.
+   *
+   * @param rabbitTemplate         the RabbitMQ template used to publish messages
+   * @param properties             worker configuration providing exchange and routing settings
+   * @param stateMachine           the state machine providing config gossip fields for heartbeats
+   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @return a new {@link WorkerBroadcaster} instance
+   */
   @Bean
   public WorkerBroadcaster workerBroadcaster(
     RabbitTemplate rabbitTemplate,
@@ -215,6 +250,8 @@ public class WorkerAutoConfiguration {
   /**
    * Shared scheduler for worker‑internal periodic tasks (eviction, etc.).
    * Threads are daemon so they don't block JVM shutdown.
+   *
+   * @return a {@link ScheduledExecutorService} with 2 daemon threads
    */
   @Bean(destroyMethod = "shutdown")
   public ScheduledExecutorService hotKeyWorkerScheduler() {
@@ -228,6 +265,9 @@ public class WorkerAutoConfiguration {
   /**
    * Direct exchange to which clients publish report messages.
    * Routing keys follow the pattern {@code report.<appName>.<nodeId>}.
+   *
+   * @param properties worker configuration providing the report exchange name
+   * @return a durable, non-auto-delete {@link DirectExchange}
    */
   @Bean
   public DirectExchange reportExchange(WorkerProperties properties) {
@@ -238,6 +278,9 @@ public class WorkerAutoConfiguration {
    * Queue that this Worker binds to.
    * Queue name is {@code hotkey.report.<appName>.<nodeId>},
    * guaranteeing that a key always lands on the same Worker.
+   *
+   * @param properties worker configuration providing the routing app name
+   * @return a durable {@link Queue} with the shard-specific name
    */
   @Bean
   public Queue reportQueue(WorkerProperties properties) {
@@ -245,7 +288,15 @@ public class WorkerAutoConfiguration {
     return QueueBuilder.durable(queueName).build();
   }
 
-  /** Binds the queue to the report exchange with the matching routing key. */
+  /**
+   * Binds the report queue to the report exchange using the shard-specific
+   * routing key {@code report.<appName>.<nodeId>}.
+   *
+   * @param reportQueue    the shard-specific report queue
+   * @param reportExchange the report exchange
+   * @param properties     worker configuration providing the routing app name
+   * @return a {@link Binding} connecting the queue to the exchange
+   */
   @Bean
   public Binding reportBinding(Queue reportQueue, DirectExchange reportExchange, WorkerProperties properties) {
     String routingKey = HotKeyConstants.ROUTING_KEY_REPORT + properties.getRouting().getAppName() + "." + nodeId;
@@ -260,13 +311,22 @@ public class WorkerAutoConfiguration {
    * {@code hotkey.worker.config.<nodeId>}, which is automatically removed
    * when the Worker disconnects.  The queue is bound to the
    * {@code heartbeatExchange} with routing key {@code heartbeat.*}.
+   *
+   * @return a non-durable, auto-delete {@link Queue} unique to this Worker node
    */
   @Bean
   public Queue workerConfigQueue() {
     return QueueBuilder.nonDurable("hotkey.worker.config." + nodeId).autoDelete().build();
   }
 
-  /** Binds the per-Worker config queue to the heartbeat exchange. */
+  /**
+   * Binds the per-Worker config queue to the heartbeat exchange with the
+   * routing key pattern {@code heartbeat.*}.
+   *
+   * @param workerConfigQueue the per-Worker config queue to bind
+   * @param heartbeatExchange the heartbeat topic exchange
+   * @return a {@link Binding} connecting the config queue to the heartbeat exchange
+   */
   @Bean
   public Binding workerConfigBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
     return BindingBuilder
@@ -275,7 +335,12 @@ public class WorkerAutoConfiguration {
       .with("heartbeat.*");
   }
 
-  /** Topic exchange for epoch-aware structured heartbeats from Workers. */
+  /**
+   * Topic exchange for epoch-aware structured heartbeats from Workers.
+   *
+   * @param properties worker configuration providing the heartbeat exchange name
+   * @return a durable, non-auto-delete {@link TopicExchange}
+   */
   @Bean
   public TopicExchange heartbeatExchange(WorkerProperties properties) {
     return new TopicExchange(properties.getMessaging().getHeartbeatExchange(), true, false);
@@ -287,6 +352,8 @@ public class WorkerAutoConfiguration {
    * <p>Every {@code POST /actuator/worker/state} call increments this counter.
    * Receiving Workers compare their own counter against the incoming value;
    * only strictly newer configs are applied.
+   *
+   * @return a new {@link AtomicLong} initialised to {@code 0}
    */
   @Bean
   @Qualifier("configTimestampCounter")
@@ -301,6 +368,11 @@ public class WorkerAutoConfiguration {
    * <p>The eviction threshold is set to {@code 2 * coolDurationMs},
    * giving keys a generous grace period after their last access before
    * their data structures are reclaimed.
+   *
+   * @param detector     the sliding-window detector whose idle keys will be evicted
+   * @param stateMachine the state machine whose idle entries will be evicted
+   * @param properties   worker configuration providing the cool duration for stale threshold
+   * @return a new {@link EvictStaleTask} instance
    */
   @Bean
   public EvictStaleTask evictStaleTask(
@@ -340,6 +412,9 @@ public class WorkerAutoConfiguration {
    *
    * <p>Interval is controlled by {@code hotkey.worker.topk-validation.validate-interval-ms}
    * (default 60 seconds).
+   *
+   * @param topKValidator the TopK validator whose {@link TopKValidator#validate()} will be scheduled
+   * @return a new {@link TopKValidationTask} instance
    */
   @Bean
   public TopKValidationTask topKValidationTask(TopKValidator topKValidator) {
@@ -448,19 +523,34 @@ public class WorkerAutoConfiguration {
 
   /**
    * Auto-delete queue for on-demand verification requests (PING) from Apps.
+   * Queue name: {@code hotkey.verify.ping.<nodeId>}.
+   *
+   * @return a non-durable, auto-delete {@link Queue} for PING/PONG verification
    */
   @Bean
   public Queue verifyPingQueue() {
     return QueueBuilder.nonDurable("hotkey.verify.ping." + nodeId).autoDelete().build();
   }
 
-  /** Handles PING requests from Apps, replies PONG via Direct reply-to. */
+  /**
+   * Handles PING requests from Apps, replies PONG via Direct reply-to.
+   *
+   * @param rabbitTemplate the RabbitMQ template used to send PONG responses
+   * @return a new {@link VerifyConsumer} instance for this Worker node
+   */
   @Bean
   public VerifyConsumer verifyConsumer(RabbitTemplate rabbitTemplate) {
     return new VerifyConsumer(rabbitTemplate, nodeId);
   }
 
-  /** Container for the verification ping queue (NONE ack, on-demand only). */
+  /**
+   * Container for the verification ping queue (NONE ack, on-demand only).
+   *
+   * @param connectionFactory the RabbitMQ connection factory
+   * @param verifyPingQueue   the auto-delete ping queue
+   * @param verifyConsumer    the consumer whose {@link VerifyConsumer#handlePing} handles messages
+   * @return a configured {@link SimpleMessageListenerContainer} with NONE acknowledgement mode
+   */
   @Bean
   public SimpleMessageListenerContainer verifyPingContainer(
     ConnectionFactory connectionFactory,
@@ -479,6 +569,13 @@ public class WorkerAutoConfiguration {
    * load factor, decision-version watermark, and state-machine config gossip.
    *
    * <p>Replaces the old ping-only heartbeat approach. Uses its own internal scheduler.
+   *
+   * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
+   * @param properties             worker configuration providing exchange and interval settings
+   * @param stateMachine           the state machine providing config gossip fields
+   * @param broadcaster            the broadcaster for reading the current decision version watermark
+   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @return a new {@link WorkerHeartbeatProducer} instance
    */
   @Bean
   public WorkerHeartbeatProducer workerHeartbeatProducer(

@@ -55,6 +55,18 @@
 | ------------------------------- | ------- | ---------------------------------------------------------------------------- |
 | `hotkey.report.enabled`        | `true`   | Enable app-to-Worker report aggregation (requires `RabbitTemplate` bean)      |
 
+### Reporter Rate Limiter (`hotkey.local.reporter.*`)
+
+| Property | Default | Description |
+| -------- | ------- | ----------- |
+| `hotkey.local.reporter.enabled` | `true` | Enable BBR adaptive rate-limiting on the Reporter flush path |
+| `hotkey.local.reporter.cpu-threshold` | `800` | CPU threshold on a 0–1000 scale (800 = 80%). Below this the limiter is permissive (admits if concurrency ≤ budget **or** not in cooldown); at or above this, strict enforcement (only admits if concurrency ≤ budget) |
+| `hotkey.local.reporter.cpu-poll-interval-ms` | `500` | CPU polling interval (ms). A daemon thread polls `com.sun.management.OperatingSystemMXBean.getCpuLoad()` at this rate |
+| `hotkey.local.reporter.cpu-decay` | `0.95` | EMA decay factor for CPU load smoothing (0.0–1.0). Higher = smoother but slower to react |
+| `hotkey.local.reporter.bbr-window-ms` | `10000` | BBR sliding window duration (ms) for tracking max pass rate and min round-trip time |
+| `hotkey.local.reporter.bbr-window-buckets` | `100` | Number of buckets dividing the BBR sliding window |
+| `hotkey.local.reporter.bbr-cooldown-ms` | `1000` | Cooldown period (ms) after a batch is dropped — the limiter refuses all admits during cooldown regardless of CPU state |
+
 ### Scheduling (`hotkey.scheduling.*`, `hotkey.decay-period`)
 
 | Property                          | Default | Description                                                                  |
@@ -102,6 +114,12 @@
 | `hotkey.worker-listener.scheduler-pool-size`       | `2`                         | Thread pool size for deferred Redis reads in Worker listener           |
 | `hotkey.worker-listener.prefetch-count`            | `5`                         | AMQP prefetch count per worker-listener consumer                     |
 | `hotkey.worker-listener.auto-startup`              | `true`                      | Whether the worker listener container starts automatically with the application |
+| **`hotkey.worker-listener.sre.*`**                              |                            | **SRE Adaptive Rate Limiter**                                |
+| `hotkey.worker-listener.sre.enabled`                            | `true`                     | Enable SRE rate limiter on HOT decision processing path       |
+| `hotkey.worker-listener.sre.window-ms`                          | `3000`                     | Sliding window duration for rate calculation (ms)             |
+| `hotkey.worker-listener.sre.buckets`                            | `10`                       | Number of buckets in the sliding window                       |
+| `hotkey.worker-listener.sre.min-samples`                        | `20`                       | Minimum total samples before throttling starts                |
+| `hotkey.worker-listener.sre.success-threshold`                  | `0.6`                      | Success ratio threshold (0.0–1.0); throttles when success rate drops below this |
 
 ### Worker Node (`hotkey.worker.*`)
 
@@ -148,7 +166,7 @@
 | Module                 | Dependency                                                    | Auto-Config                                            |
 | ---------------------- | ------------------------------------------------------------- | ------------------------------------------------------- |
 | `facade`               | none                                                          | always                                                 |
-| `algorithm`            | none                                                          | always                                                 |
+| `hotkeydetector`       | none                                                          | always                                                 |
 | `report`               | `spring-boot-starter-amqp`                                    | `@ConditionalOnBean(RabbitTemplate.class)` + property (`hotkey.report.enabled`) |
 | `annotation`           | `spring-boot-starter-aop`                                     | `@ConditionalOnClass(Aspect.class)` + `@ConditionalOnBean(HotKey.class)` + property (`hotkey.annotation.enabled`) |
 | `cache` (Redis)        | `spring-boot-starter-data-redis`                              | `@ConditionalOnClass(RedisTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` |

@@ -81,10 +81,15 @@ public record WorkerHeartbeatMessage(
    * Deserializes a {@link WorkerHeartbeatMessage} from an AMQP {@link Message}.
    *
    * <p>All fields are extracted from message headers. Returns {@code null} if the
-   * message type header does not match {@value #TYPE}.
+   * message type header does not match {@value #TYPE} or if the message properties
+   * are null.
+   * <p>
+   * Missing or malformed header values are silently defaulted (0, 0.0, false, or
+   * empty string as appropriate) rather than causing a parse failure.
    *
-   * @param msg the incoming AMQP message
-   * @return the deserialized heartbeat, or {@code null} if the type is wrong
+   * @param msg the incoming AMQP message; may be null (returns null)
+   * @return the deserialized heartbeat, or {@code null} if the type is wrong or
+   *         properties are null
    */
   public static WorkerHeartbeatMessage from(Message msg) {
     var h = msg.getMessageProperties();

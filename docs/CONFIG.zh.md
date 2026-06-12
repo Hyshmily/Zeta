@@ -55,6 +55,18 @@
 | ---------------------------- | -------- | ---------------------------------------------------- |
 | `hotkey.report.enabled`     | `true`    | 启用 App 到 Worker 的报告聚合（需要 `RabbitTemplate` Bean） |
 
+### Reporter 速率限制器（`hotkey.local.reporter.*`）
+
+| 属性 | 默认值 | 说明 |
+| ---- | ------ | ---- |
+| `hotkey.local.reporter.enabled` | `true` | 启用 BBR 自适应速率限制，作用于 Reporter 刷盘路径 |
+| `hotkey.local.reporter.cpu-threshold` | `800` | CPU 阈值（0–1000 刻度，800 = 80%）。低于此值时限制器宽松（并发≤预算 **或** 不在冷却期即准入）；达到或超过此值时严格（仅并发≤预算才准入） |
+| `hotkey.local.reporter.cpu-poll-interval-ms` | `500` | CPU 轮询间隔（ms）。守护线程以此频率调用 `com.sun.management.OperatingSystemMXBean.getCpuLoad()` |
+| `hotkey.local.reporter.cpu-decay` | `0.95` | CPU 负载 EMA 平滑衰减因子（0.0–1.0）。值越高越平滑，但响应越慢 |
+| `hotkey.local.reporter.bbr-window-ms` | `10000` | BBR 滑动窗口时长（ms），用于追踪最大通过率和最小往返时间 |
+| `hotkey.local.reporter.bbr-window-buckets` | `100` | BBR 滑动窗口的桶数 |
+| `hotkey.local.reporter.bbr-cooldown-ms` | `1000` | 批次丢弃后的冷却时间（ms）。冷却期内无论 CPU 状态如何，限制器拒绝所有准入 |
+
 ### 调度配置（`hotkey.scheduling.*`，`hotkey.decay-period`）
 
 | 属性                           | 默认值   | 说明                                                      |
@@ -102,6 +114,12 @@
 | `hotkey.worker-listener.scheduler-pool-size`          | `2`                        | Worker 监听器延迟 Redis 读取的线程池大小                 |
 | `hotkey.worker-listener.prefetch-count`               | `5`                        | Worker 监听器每个消费者的 AMQP 预取数量                  |
 | `hotkey.worker-listener.auto-startup`                 | `true`                     | Worker 监听器容器是否随应用自动启动                     |
+| **`hotkey.worker-listener.sre.*`**                              |                            | **SRE 自适应速率限制器**                                        |
+| `hotkey.worker-listener.sre.enabled`                            | `true`                     | 在 HOT 决策处理路径上启用 SRE 速率限制器                        |
+| `hotkey.worker-listener.sre.window-ms`                          | `3000`                     | 速率计算的滑动窗口时长（毫秒）                                  |
+| `hotkey.worker-listener.sre.buckets`                            | `10`                       | 滑动窗口的桶数                                                  |
+| `hotkey.worker-listener.sre.min-samples`                        | `20`                       | 限流开始前的最小总样本数                                        |
+| `hotkey.worker-listener.sre.success-threshold`                  | `0.6`                      | 成功率阈值（0.0–1.0）；成功率低于此值时触发限流                |
 
 ### Worker 节点（`hotkey.worker.*`）
 
@@ -148,7 +166,7 @@
 | 模块                    | 依赖                                                           | 自动配置条件                                            |
 | ----------------------- | -------------------------------------------------------------- | ------------------------------------------------------- |
 | `facade`                | 无                                                             | 始终启用                                                |
-| `algorithm`             | 无                                                             | 始终启用                                                |
+| `hotkeydetector`        | 无                                                             | 始终启用                                                |
 | `report`                | `spring-boot-starter-amqp`                                     | `@ConditionalOnBean(RabbitTemplate.class)` + 属性（`hotkey.report.enabled`） |
 | `annotation`            | `spring-boot-starter-aop`                                      | `@ConditionalOnClass(Aspect.class)` + `@ConditionalOnBean(HotKey.class)` + 属性（`hotkey.annotation.enabled`） |
 | `cache`（Redis）        | `spring-boot-starter-data-redis`                               | `@ConditionalOnClass(RedisTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` |

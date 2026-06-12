@@ -25,7 +25,7 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 /**
  * Worker-side verification request handler — receives PING from App, replies PONG.
  *
- * <p>Queue: hotkey.verify.ping.{workerId}
+ * <p>Queue: hotkeydetector.verify.ping.{workerId}
  * Uses Direct reply-to (amq.rabbitmq.reply-to) for the response.
  */
 @AllArgsConstructor

@@ -1,0 +1,7 @@
+# BBR + CPU Fusion for Reporter Self-Protection
+
+The Reporter could saturate RabbitMQ and the Worker under high traffic when every `get()` call triggers a `record()` that eventually flushes to RabbitMQ — if the App or Worker is overwhelmed, reports pile up, latency spikes, and the whole system degrades. We fused a BBR (congestion control) rate limiter with a CPU EMA monitor into the Reporter flush path: `BbrRateLimiter.tryAcquire()` runs before each flush cycle, and either admits or drops the batch based on Little's Law concurrency budget and the current CPU load.
+
+The decision surface has two zones — below `cpuThreshold` (80%) the limiter is permissive (admits if concurrency is within budget OR if not in cooldown); above it, strict enforcement kicks in (only admits if concurrency is within budget). This prevents an already-loaded process from amplifying its own congestion while letting a healthy process tolerate brief concurrency bursts. CPU is smoothed via EMA (`cpuDecay=0.95`, 500ms poll interval) to avoid thrashing on transient spikes. BBR's sliding window (10s, 100 buckets) tracks max pass rate + min RT to compute the safe concurrency limit.
+
+The net result is backpressure at the Reporter layer — batch drops are logged at DEBUG level (`hotkey.reporter.bbr.dropped` gauge) and the system self-throttles before the bottleneck (RabbitMQ or Worker) gets overloaded. The feature is enabled by default (`hotkey.local.reporter.enabled=true`) and introduces zero overhead when the system is healthy.

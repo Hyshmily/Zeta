@@ -1,4 +1,4 @@
-[← Back to Home](README.md)
+[← Back to Home](../README.md)
 
 # HotKey Architecture — Complete Reference
 
@@ -315,7 +315,8 @@ CacheEntry maintains **two independent version spaces** with different semantics
 ```
 HotKey.get(cacheKey, reader[, hardTtlMs, softTtlMs])
 └─ HotKeyCache.get(cacheKey, reader, effectiveHardTtl, effectiveSoftTtl)
-      ├─ TransactionSupport.runNowOrAfterCommit()              [tx-aware, L2 async write path only]
+      ├─ ensureNotBlocked(key, "get")                          [RuleMatcher → BLOCK? throw]
+      ├─ isWhitelisted(key)?                                   [RuleMatcher → ALLOW_NO_REPORT? skip report]
       ├─ caffeineCache.getIfPresent(key)                       [L1 lookup]
       │    ├─ hit → unwrap CacheEntry
       │    │    ├─ KeyState == HOT → use hot TTLs (hotHardTtl / hotSoftTtl)
@@ -325,21 +326,26 @@ HotKey.get(cacheKey, reader[, hardTtlMs, softTtlMs])
       │    ├─ hotKeyReporter.record(key)                       [app→Worker report]
       │    └─ return Optional.of(entry.value)
       │
-      └─ miss → SingleFlight.execute(key, supplier)            [concurrency dedup]
-           ├─ supplier.get() → reader.get()                    [caller-supplied L2/DB read]
-           ├─ hotKeyDetector.add(key, 1)
-           ├─ hotKeyReporter.record(key)
-           └─ loadAndCache (inside SingleFlight):
-                ├─ hotKeyDetector.add(cacheKey, 1).isHotKey()
-                │    ├─ hot  → CacheEntry(keyState=HOT, hot TTLs)
-                │    │         [dataVersion=0L, decisionVersion=0L]
-                │    └─ cold → CacheEntry(keyState=NORMAL, normal TTLs)
-                │              [dataVersion=0L, decisionVersion=0L]
-                ├─ caffeineCache.put(key, entry)
-                └─ return Optional.of(value)
+      └─ miss → ensureNotBlocked(key, "get")                   [RuleMatcher → BLOCK? throw]
+           └─ SingleFlight.execute(key, supplier)               [concurrency dedup]
+                ├─ supplier.get() → reader.get()                [caller-supplied L2/DB read]
+                ├─ ensureNotBlocked(key, "get")                 [RuleMatcher 2nd check → BLOCK? throw (TOCTOU guard)]
+                ├─ hotKeyDetector.add(key, 1)
+                ├─ hotKeyReporter.record(key)
+                 └─ loadAndCache:
+                      ├─ hotKeyDetector.add(cacheKey, 1)         [buffered→flush→heap]
+                 ├─ hotKeyDetector.contains(cacheKey)             [heap check]
+                 │    ├─ true → CacheEntry(keyState=HOT, hot TTLs)
+                 │    │         [dataVersion=0L, decisionVersion=0L]
+                 │    └─ false → CacheEntry(keyState=NORMAL, normal TTLs)
+                 │               [dataVersion=0L, decisionVersion=0L]
+                 ├─ caffeineCache.put(key, entry)
+                 └─ return Optional.of(value)
 ```
 
 > [!NOTE] When L1 is hit, the `CacheEntry` was written by a sync broadcast (REFRESH/INVALIDATE/INVALIDATE_ALL) or Worker decision (HOT/COOL). The `dataVersion` and `decisionVersion` are determined by the sender. L1 miss entries are created by `loadAndCache` with version fields set to 0. `loadAndCache` caches all loaded keys (not just hot ones), differentiating TTLs by `KeyState`.
+
+> [!NOTE] `hotKeyDetector.add()` is now buffered (async). It batches frequency increments into a buffer that flushes to the HeavyKeeper heap periodically (~500ms interval). This means the first read of a key will NOT immediately detect it as hot — detection is delayed until the buffer flush populates the heap. `hotKeyDetector.contains()` performs a synchronous heap check and is safe to call after `add()` for the same key in the same path (the add populates the buffer, but contains reads the heap; they are not synchronized).
 
 ### Soft Expire Read Path — `getWithSoftExpire`
 
@@ -367,18 +373,17 @@ HotKey.getWithSoftExpire(key, reader[, softTtlMs][, hardTtlMs, softTtlMs])
       │                   │    └─ if existing evicted → fallback to keyState=NORMAL
       │                   └─ release refreshLimiter
 
+```
 ### Peek Path — `peek`
 
 <!-- Source: HotKeyCache.java:170-180 -->
 
 ```
-
 HotKey.peek(cacheKey)
 └─ HotKeyCache.peek(cacheKey)
 └─ caffeineCache.getIfPresent(key) [L1 only, no side effects]
 └─ return Optional.ofNullable(entry.value)
 [⚠ does not call hotKeyDetector.add / hotKeyReporter.record / L2 reader]
-
 ```
 
 ### Raw Cache Access — `getLocalCache`
@@ -388,12 +393,10 @@ Exposes the underlying Caffeine `Cache<String, Object>` for Caffeine-specific op
 <!-- Source: HotKeyCache.java:542-544 -->
 
 ```
-
 HotKey.getLocalCache()
 └─ HotKeyCache.getLocalCache()
 └─ return caffeineCache [direct Caffeine reference]
 [⚠ bypasses HotKey orchestration — version tracking, broadcast, expiry management are skipped]
-
 ```
 
 > [!WARNING]
@@ -404,7 +407,6 @@ HotKey.getLocalCache()
 <!-- Source: HotKeyCache.java:375-416 -->
 
 ```
-
 HotKey.putThrough(key, value, writer[, hardTtlMs, softTtlMs])
 └─ HotKeyCache.putThrough(key, value, writer, effectiveHardTtl, effectiveSoftTtl)
 ├─ (tx) → TransactionSupport.registerAfterCommit()
@@ -437,7 +439,6 @@ HotKey.putThrough(key, value, writer[, hardTtlMs, softTtlMs])
 │ └─ return == version → send message
 └─ rabbitTemplate.send(exchange, "", msg)
 [header: type=REFRESH, version, isVersionDegraded]
-
 ```
 
 ### Collection Write Path — `putBeforeInvalidate`
@@ -445,7 +446,6 @@ HotKey.putThrough(key, value, writer[, hardTtlMs, softTtlMs])
 <!-- Source: HotKeyCache.java:422-446 -->
 
 ```
-
 HotKey.putBeforeInvalidate(key, mutation)
 └─ HotKeyCache.putBeforeInvalidate(key, mutation)
 ├─ (tx) → TransactionSupport.registerAfterCommit()
@@ -460,7 +460,6 @@ HotKey.putBeforeInvalidate(key, mutation)
 ├─ caffeineCache.invalidate(key) [L1 remove, not put]
 └─ CacheSyncPublisher.broadcastLocalInvalidate(key, version, degraded)
 └─ same as putThrough (but type=INVALIDATE instead of REFRESH)
-
 ```
 
 > [!NOTE] There is a ~1ms window between `mutation.run()` and L1 invalidation where a concurrent `get()` may hit the stale L1 value. This is a deliberate trade-off — invalidating before the mutation would cause a worse race where `get()` re-populates L1 with old data, creating a longer window.
@@ -470,7 +469,6 @@ HotKey.putBeforeInvalidate(key, mutation)
 <!-- Source: HotKeyCache.java:321-358 -->
 
 ```
-
 HotKey.invalidate(cacheKey)
 └─ HotKeyCache.invalidate(cacheKey)
 ├─ invalidCacheKey(key) → return [skip null/empty]
@@ -501,7 +499,6 @@ HotKey.invalidate(cacheKey)
 │ │ [decisionVersion=preserve existing]
 │ └─ return
 └─
-
 ```
 
 ### Batch Invalidate — `invalidateAll`
@@ -509,7 +506,6 @@ HotKey.invalidate(cacheKey)
 <!-- Source: HotKeyCache.java:336-358 -->
 
 ```
-
 HotKey.invalidateAll(keys...) / invalidateAll(Collection)
 └─ HotKeyCache.invalidateAll(keys)
 ├─ stream().filter(k → !invalidCacheKey(k)).toList() [skip null/empty]
@@ -531,7 +527,6 @@ HotKey.invalidateAll(keys...) / invalidateAll(Collection)
 │ └─ caffeineCache.invalidateAll(keys) [L1 batch remove]
 │ [⚠ no Redis reload, no version check]
 └─
-
 ```
 
 ### State Query — `isLocalHotKey`
@@ -539,14 +534,12 @@ HotKey.invalidateAll(keys...) / invalidateAll(Collection)
 <!-- Source: HotKeyCache.java:164-168 -->
 
 ```
-
 HotKey.isLocalHotKey(cacheKey)
 └─ HotKeyCache.isLocalHotKey(cacheKey)
 └─ caffeineCache.getIfPresent(key)
 ├─ exists and keyState == HOT → true
 └─ otherwise → false
 [⚠ pure L1 lookup, no side effects]
-
 ```
 
 ### State Query — `isWorkerHotKey`
@@ -554,20 +547,16 @@ HotKey.isLocalHotKey(cacheKey)
 <!-- Source: HotKey.java (delegates to workerTopKAlgorithm) -->
 
 ```
-
 HotKey.isWorkerHotKey(cacheKey)
 └─ workerTopKAlgorithm.list().stream().anyMatch(item -> item.key().equals(cacheKey))
 ├─ key in Worker TopK → true
 └─ not in → false
 [⚠ iterates Worker TopK list, O(n); no network call]
-
 ```
 
 ### TopK Query Methods
-
-<!-- Source: HotKey.java -->
-
 ```
+<!-- Source: HotKey.java -->
 
 HotKey.returnLocalHotKeys()
 └─ (topKAlgorithm != null)
@@ -600,15 +589,12 @@ HotKey.returnWorkerTotalDataStreams()
 └─ no → 0L
 
 ```
-
 > **TopK null safety:** All 6 query methods above return empty/0 when the corresponding TopK is unavailable (Worker-only mode or not configured). This differs from `get`/`putThrough` etc., which throw `UnsupportedOperationException` in Worker-only mode via `requireCache()`.
 
 ### Rule Management API
 
 <!-- Source: RuleMatcher.java -->
-
 ```
-
 HotKey.addBlacklist(keyPattern)
 └─ HotKeyCache.addBlacklist(keyPattern)
 └─ ruleMatcher.addRule(Rule.of(keyPattern, BLOCK))
@@ -661,6 +647,7 @@ header: type=RULES_SYNC
 
 ```
 
+
 ---
 
 ## Worker Mode
@@ -676,38 +663,74 @@ This approach solves the **single-instance blind spot** — an app instance's lo
      WorkerBroadcaster.java, WorkerListener.java -->
 
 ```
-
-┌─────────────────────┐ RabbitMQ fanout ┌───────────────────────┐
-│ App Instance 1 │ ─── report (periodic) ──→│ Worker Node │
-│ HotKeyReporter │ │ │
-├─────────────────────┤ │ ┌─────────────────┐ │
-│ App Instance 2 │ ─── report (periodic) ──→│ │ ReportConsumer │ │
-│ HotKeyReporter │ │ │ (AMQP consumer) │ │
-├─────────────────────┤ │ └────────┬────────┘ │
-│ App Instance N │ │ │ │
-│ HotKeyReporter │ ─── report (periodic) ──→│ ↓ │
-└─────────────────────┘ │ ┌─────────────────┐ │
-│ │HotKeyStateMachine│ │
-│ │ (per-key FSM) │ │
-│ └────────┬────────┘ │
-│ │ │
-│ ┌─────────────────┐ │
-│ │WorkerBroadcaster│ │
-│ │ (HOT/COOL via │ │
-│ │ RabbitMQ) │ │
-│ └────────┬────────┘ │
-└───────────┼───────────┘
-│
-RabbitMQ (hotkey.broadcast.exchange)
-│
-↓
-┌──────────────────────────────────────────┐
-│ All App Instances (WorkerListener) │
-│ ┌──────────┐ ┌──────────┐ ┌────────┐ │
-│ │Instance 1│ │Instance 2│ │ ... │ │
-│ └──────────┘ └──────────┘ └────────┘ │
-└──────────────────────────────────────────┘
-
+                          App Instance (every get/getWithSoftExpire)
+ ┌──────────────────────────────────────────────────────────────────────────────────┐
+ │  record(key) → HotKeyReporter                                                    │
+ │    └─ Caffeine<key, LongAdder> counter (30s expire, 100k max)                    │
+ │                                                                                  │
+ │  [every reportIntervalMs] flush()                                                │
+ │    ├─ RingManager.routeNode(key, healthView) → consistent-hash shard target      │
+ │    ├─ ReportDispatcher (bounded queue, per-consumer-thread pool)                 │
+ │    └─ ReportPublisher.publish(target, ReportMessage)                             │
+ │         └─ rabbitTemplate.send(reportExchange, routingKey, msg)                  │
+ │              routingKey = "report.{appName}.{nodeId}"                            │
+ └────────────────────────────────┬─────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+ ┌──────────────────────────────────────────────────────────────────────────────────┐
+ │  RabbitMQ                                                                        │
+ │    hotkey.report.exchange (direct)                                              │
+ │      └─ hotkey.report.{appName}.{nodeId} queue (auto-delete, per Worker shard)   │
+ └────────────────────────────────┬─────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+ ┌──────────────────────────────────────────────────────────────────────────────────┐
+ │  Worker (one shard)                                                              │
+ │                                                                                  │
+ │  ReportConsumer.onReport(ReportMessage)                                          │
+ │    ├─ stale check > 5s → discard                                                 │
+ │    ├─ workerTopK.add(key, count)  ──── HeavyKeeper sketch                        │
+ │    ├─ SlidingWindowDetector.addCount(key, count)                                 │
+ │    │    └─ circular buffer of AtomicLong slices → sum >= threshold → isHot       │
+ │    ├─ HotKeyStateMachine.evaluate(key, isHot)                                    │
+ │    │    ├─ COLD → confirm duration → CONFIRMED_HOT                               │
+ │    │    ├─ CONFIRMED_HOT → cool duration → PRE_COOLING → COLD                    │
+ │    │    └─ PRE_COOLING → re-heat → CONFIRMED_HOT (silent, no broadcast)          │
+ │    ├─ WorkerBroadcaster.broadcastHot/Cool(key)                                   │
+ │    │    ├─ decisionVersionCounter.incrementAndGet()  ──── AtomicLong             │
+ │    │    └─ rabbitTemplate.send(broadcastExchange, rk, msg)                       │
+ │    │         headers: {type, version, isVersionDegraded=false}                   │
+ │    └─ GlobalQpsEstimator.addTotal(qps)                                           │
+ └────────────────────────────────┬─────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+ ┌──────────────────────────────────────────────────────────────────────────────────┐
+ │  RabbitMQ                                                                        │
+ │    hotkey.broadcast.exchange (fanout)                                            │
+ │      └─ all App instances (per-app auto-delete queue)                            │
+ └────────────────────────────────┬─────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+ ┌──────────────────────────────────────────────────────────────────────────────────┐
+ │  All App Instances                                                               │
+ │                                                                                  │
+ │  WorkerListener.handleWorkerMessage(Channel, Message)                            │
+ │    ├─ ack immediately                                                            │
+ │    ├─ deserialize → WorkerMessage(type, cacheKey, decisionVersion)               │
+ │    └─ schedule with random jitter (DelayUtil.floatTimeDelay)                     │
+ │                                                                                  │
+ │    TYPE_HOT → handleHot(wm):                                                     │
+ │    ├─ VersionGuard.shouldSkipForWorker(caffeineCache, key, decisionVersion)      │
+ │    │   ├─ degraded entry → accept unconditionally                                │
+ │    │   └─ normal entry → skip if existing.decisionVersion >= incoming            │
+ │    ├─ redisLoader.apply(key) → load value from Redis                             │
+ │    │   └─ Redis fail → fallback to degraded L1 entry                             │
+ │    └─ L1 compute(): new CacheEntry(keyState=HOT, extended TTLs, decisionVersion) │
+ │                                                                                  │
+ │    TYPE_COOL → handleCool(wm):                                                   │
+ │    ├─ VersionGuard check inside compute()                                        │
+ │    └─ L1 compute(): keyState=COOL, normal TTL, softExpire disabled               │
+ └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Report Flow
@@ -741,7 +764,6 @@ Each key maintains an array of `long` counters indexed by time slice. On each re
 Each tracked key follows a lifecycle managed by `HotKeyStateMachine`:
 
 ```
-
                     ┌─────────────────────────────────────────────────┐
                     │                                                 │
                     ↓                                                 │
@@ -760,7 +782,6 @@ COLD ─────────── below threshold ──→ PRE_COOLING (gr
 PRE_COOLING ──── grace expired ────→ COLD (broadcast TYPE_COOL)
 PRE_COOLING ──── re-heat (silent) ─→ CONFIRMED_HOT (no broadcast)
 CONFIRMED_HOT ── below threshold for (coolCount - grace) ──→ PRE_COOLING (grace period)
-
 ```
 
 - **COLD**: Key exists but below hot threshold. Access tracked but no broadcast sent.
@@ -798,7 +819,6 @@ When a Worker's state machine parameters are changed via POST, the new values ar
 5. **Startup compensation** — On startup, each Worker waits up to 3 seconds for the first peer heartbeat. If none arrives, it logs a WARN and continues with `WorkerProperties` defaults.
 
 ```
-
                       hotkey.heartbeat.exchange
                     ┌─────────────────────────────────┐
                     │  (dedicated TopicExchange, rk   │
@@ -818,6 +838,7 @@ When a Worker's state machine parameters are changed via POST, the new values ar
               │  → increment(16)│       │  → 16 > 0, apply │
               └─────────────────┘       └──────────────────┘
 
+```
 > [!NOTE]
 >
 > - `configTimestampCounter` starts at `0` — a first remote heartbeat with `configTimestamp > 0` is always applied.
@@ -829,11 +850,9 @@ When a Worker's state machine parameters are changed via POST, the new values ar
 
 The Worker adapts to traffic patterns by periodically recalculating the hot threshold based on estimated global QPS:
 
-```
 
 hotThreshold = max(minCount, estimatedGlobalQPS \* hotThresholdRatio)
 
-```
 
 | Property                                                             | Default | Description                                          |
 | -------------------------------------------------------------------- | ------- | ---------------------------------------------------- |
@@ -1042,7 +1061,7 @@ hotkey:
 
 ### HeavyKeeper Decay Pipeline
 
-<!-- Source: algorithm/HeavyKeeper.java, HotKeySchedulingConfiguration.java -->
+<!-- Source: hotkeydetector/heavykepper/HeavyKeeper.java, HotKeySchedulingConfiguration.java -->
 
 ```
 ┌────────────┐   add(key, 1)    ┌─────────────────────────────────────────────┐
@@ -1118,6 +1137,74 @@ hotkey:
   shard-count default = 1; increase to linearly reduce per-queue throughput
   hash routing ensures: same key → same shard across Worker restarts
   consumer-count = max(1, shardCount / 2) default
+```
+
+### HeavyKeeper addDirect — Binomial Sampling (O(1) Decay)
+
+```
+addDirect(key, increment)
+│
+├─ fingerprint = Murmur3_32(key)                          [Guava, fixed seed]
+│
+├─ for each depth row i:
+│    │  bucketIndex = Math.floorMod(hash ^ (i * golden), width)
+│    │  lock = lockStripes[index & lockMask]              [256-way stripe]
+│    │  synchronized (lock) {
+│    │
+│    │    if counts[index] == 0:                           [empty slot]
+│    │      → fingerprints[index] = itemFingerprint
+│    │      → counts[index] = increment
+│    │
+│    │    elif fingerprints[index] == itemFingerprint:     [same key, hit]
+│    │      → counts[index] += increment
+│    │
+│    │    else:                                             [collision]
+│    │      decayProb = lookupTable[counts[index]]          [pre-computed pow(decay, count)]
+│    │      decays = sampleBinomial(increment, decayProb)   [O(1) → 4 cases]
+│    │        │  n≤10:      loop n times                     [tiny, still O(1)]
+│    │        │  np≥10:     normal approx with correction    [O(1)]
+│    │        │  nq≥10:     normal approx                    [O(1)]
+│    │        │  otherwise: loop n times                     [bounded by min(n, .)]
+│    │      if decays ≥ counts[index]:
+│    │        → take over: fingerprints[index] = fp, count = increment
+│    │      else:
+│    │        → counts[index] -= decays
+│    │    }
+│
+├─ total.add(increment)
+│
+└─ maxCount ≥ minCount?
+     ├─ YES → update sortedTopK heap
+     │     ├─ key in heap? → update count
+     │     └─ key NOT in heap? → insert; if heap full, expel lowest
+     └─ NO  → return AddResult(expelledKey=null, isHot=false)
+```
+
+### BBR + CPU Reporter Backpressure Flow
+
+```
+HotKeyReporter.flush()
+│
+├─ bbrRateLimiter != null?
+│    └─ tryAcquire() → BBR fused decision:
+│         ├─ CPU load (EMA, decay=0.95, 500ms poll) < cpuThreshold (80%)?
+│         │    └─ YES (permissive):
+│         │         ├─ concurrency ≤ maxConcurrency? → admit
+│         │         └─ in cooldown?                   → admit
+│         │              └─ else                      → drop
+│         └─ NO (strict):
+│              └─ concurrency ≤ maxConcurrency?       → admit
+│                   └─ else                           → drop
+│
+├─ ADMIT → drain Caffeine counters, shard by target, enqueue
+│         └─ BbrRateLimiter.onEnqueue(batchTimestamp)
+│              └─ on publish success → onSuccess(RTT)
+│                   ├─ sliding window (10s, 100 buckets): maxPass + minRtt
+│                   └─ maxConcurrency = maxPass * minRtt (Little's Law)
+│
+└─ DROP → counters stay in Caffeine (next flush retries)
+         └─ bbrRateLimiter.onDrop()
+              └─ enter cooldown (cooldownMs = 1000ms, refuses all)
 ```
 
 ---

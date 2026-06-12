@@ -15,23 +15,17 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
-import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import java.util.Optional;
-import java.util.concurrent.Executor;
+import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -39,6 +33,12 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.data.redis.core.StringRedisTemplate;
+
+import java.util.Optional;
+import java.util.concurrent.Executor;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 /**
  * Tests for {@link HotKeyRedisAutoConfiguration}.
@@ -67,7 +67,7 @@ class HotKeyRedisAutoConfigurationTest {
   @Test
   void hotKeyCacheBeanIsCreatedWithRequiredDependencies() {
     HotKeyProperties properties = new HotKeyProperties();
-    TopK detector = mock(TopK.class);
+    HotKeyDetector detector = mock(HotKeyDetector.class);
     Cache<String, Object> localCache = mock(Cache.class);
     SingleFlight singleFlight = mock(SingleFlight.class);
     CacheExpireManager expireManager = mock(CacheExpireManager.class);
@@ -100,7 +100,7 @@ class HotKeyRedisAutoConfigurationTest {
   @Test
   void hotKeyCacheBeanAcceptsOptionalDependencies() {
     HotKeyProperties properties = new HotKeyProperties();
-    TopK detector = mock(TopK.class);
+    HotKeyDetector detector = mock(HotKeyDetector.class);
     Cache<String, Object> localCache = mock(Cache.class);
     SingleFlight singleFlight = mock(SingleFlight.class);
     CacheExpireManager expireManager = mock(CacheExpireManager.class);
@@ -135,7 +135,7 @@ class HotKeyRedisAutoConfigurationTest {
   @Test
   void fallbackHotKeyBeanIsCreatedWhenCacheExists() {
     HotKeyCache cache = mock(HotKeyCache.class);
-    TopK detector = mock(TopK.class);
+    HotKeyDetector detector = mock(HotKeyDetector.class);
 
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKey hotKey = config.hotKey(cache, detector);
@@ -151,7 +151,7 @@ class HotKeyRedisAutoConfigurationTest {
     // RedisTemplate class is not on test classpath, so @ConditionalOnClass prevents loading
     // and @ConditionalOnBean(RedisTemplate.class) would not match
     new ApplicationContextRunner()
-      .withBean(TopK.class, () -> mock(TopK.class))
+      .withBean(HotKeyDetector.class, () -> mock(HotKeyDetector.class))
       .withBean(Cache.class, () -> mock(Cache.class))
       .withBean(SingleFlight.class, () -> mock(SingleFlight.class))
       .withBean(CacheExpireManager.class, () -> mock(CacheExpireManager.class))

@@ -18,16 +18,15 @@ package io.github.hyshmily.hotkey.autoconfigure;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.*;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
-import java.util.concurrent.Executors;
-import org.springframework.beans.factory.ObjectProvider;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Function;
+import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
+import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -35,6 +34,7 @@ import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -47,6 +47,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
+
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.function.Function;
 
 /**
  * Unified AMQP auto-configuration for HotKey messaging: app-to-Worker reporting,
@@ -86,6 +90,9 @@ public class HotKeyAmqpAutoConfiguration {
      * Declare the DirectExchange for report routing (app → Worker).
      * Routing keys ({@code report.<appName>.<nodeId>}) ensure each key's
      * messages land on the correct worker queue.
+     *
+     * @param properties the HotKey configuration properties
+     * @return a durable, non-auto-delete {@link DirectExchange}
      */
     @Bean
     public DirectExchange hotkeyReportExchange(HotKeyProperties properties) {
@@ -93,10 +100,12 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
-     * Create the {@link ReportPublisher} for sending batched access-count reports to the Worker.
+     * Create the {@link MessageConverter} for serializing report messages to JSON.
      * <p>
      * Uses Jackson JSON serialization (not Java serialization) for efficiency and cross-version
      * compatibility.
+     *
+     * @return a new {@link Jackson2JsonMessageConverter} instance
      */
     @Bean
     @ConditionalOnMissingBean(MessageConverter.class)
@@ -104,6 +113,13 @@ public class HotKeyAmqpAutoConfiguration {
       return new Jackson2JsonMessageConverter();
     }
 
+    /**
+     * Create the {@link ReportPublisher} for sending batched access-count reports to the Worker.
+     *
+     * @param rabbitTemplate the RabbitMQ template for publishing messages
+     * @param properties     the HotKey configuration properties
+     * @return a new {@link ReportPublisher} instance
+     */
     @Bean
     @ConditionalOnMissingBean
     public ReportPublisher reportPublisher(RabbitTemplate rabbitTemplate, HotKeyProperties properties) {
@@ -112,6 +128,9 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Create the {@link RingManager} for consistent-hashing report routing.
+     *
+     * @param properties the HotKey configuration properties
+     * @return a new {@link RingManager} instance
      */
     @Bean
     @ConditionalOnMissingBean
@@ -120,8 +139,61 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
+     * Create the system CPU monitor with EMA smoothing.
+     * <p>
+     * Uses the JDK platform MXBean ({@link com.sun.management.OperatingSystemMXBean})
+     * which is already used by the Worker-side heartbeat producer. The monitor
+     * starts sampling on creation and stops on context close.
+     *
+     * @param properties the HotKey configuration properties
+     * @return a new {@link SystemLoadMonitor} instance
+     */
+    @Bean(initMethod = "start", destroyMethod = "stop")
+    @ConditionalOnMissingBean
+    public SystemLoadMonitor hotKeyCpuMonitor(HotKeyProperties properties) {
+      HotKeyProperties.ReporterLimiter cfg = properties.getReporter();
+      return new SystemLoadMonitor(cfg.getCpuPollIntervalMs(), cfg.getCpuDecay());
+    }
+
+    /**
+     * Create the BBR adaptive rate limiter for the report publisher.
+     * <p>
+     * Uses the CPU monitor and the configured BBR parameters. When disabled
+     * (or when the CPU monitor itself hasn't been fully initialized yet),
+     * the limiter falls back to a permissive mode.
+     *
+     * @param cpuMonitor the system CPU load monitor
+     * @param properties the HotKey configuration properties
+     * @return a new {@link BbrRateLimiter} instance
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "hotkey.local.reporter", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public BbrRateLimiter hotKeyBbrRateLimiter(
+      SystemLoadMonitor cpuMonitor,
+      HotKeyProperties properties
+    ) {
+      HotKeyProperties.ReporterLimiter cfg = properties.getReporter();
+      return new BbrRateLimiter(
+        cpuMonitor,
+        cfg.getCpuThreshold(),
+        cfg.getBbrWindowMs(),
+        cfg.getBbrWindowBuckets(),
+        cfg.getBbrCooldownMs()
+      );
+    }
+
+    /**
      * Create the {@link HotKeyReporter} that aggregates per-key counts and flushes them
      * at the configured interval.
+     *
+     * @param reportPublisher       the report publisher for sending batches
+     * @param hotKeyReportScheduler the dedicated scheduler for periodic flushing
+     * @param properties            the HotKey configuration properties
+     * @param ringManager           the consistent-hash ring manager
+     * @param healthViewProvider    optional provider for the cluster health view
+     * @param bbrRateLimiterProvider optional provider for the BBR rate limiter
+     * @return a new {@link HotKeyReporter} instance
      */
     @Bean(initMethod = "start", destroyMethod = "stop")
     @ConditionalOnMissingBean
@@ -130,9 +202,10 @@ public class HotKeyAmqpAutoConfiguration {
       ScheduledExecutorService hotKeyReportScheduler,
       HotKeyProperties properties,
       RingManager ringManager,
-      ObjectProvider<ClusterHealthView> healthViewProvider
+      ObjectProvider<ClusterHealthView> healthViewProvider,
+      ObjectProvider<BbrRateLimiter> bbrRateLimiterProvider
     ) {
-      return new HotKeyReporter(
+      HotKeyReporter reporter = new HotKeyReporter(
         reportPublisher,
         hotKeyReportScheduler,
         properties.getReportIntervalMs(),
@@ -143,10 +216,14 @@ public class HotKeyAmqpAutoConfiguration {
         ringManager,
         healthViewProvider.getIfAvailable(() -> new ClusterHealthView(0, 3000, 2))
       );
+      bbrRateLimiterProvider.ifAvailable(reporter::setBbrRateLimiter);
+      return reporter;
     }
 
     /**
      * Dedicated scheduler for periodic report flushing.
+     *
+     * @return a single-threaded {@link ScheduledExecutorService}
      */
     @Bean(destroyMethod = "shutdown")
     public ScheduledExecutorService hotKeyReportScheduler() {
@@ -162,7 +239,7 @@ public class HotKeyAmqpAutoConfiguration {
    * Inner configuration for instance-to-instance cache synchronization.
    * Creates a FanoutExchange, per-instance queue with TTL, binding, publisher,
    * Redis loader, sync listener, and a dedicated scheduled executor.
-   * Requires Redis and {@code hotkey.sync.enabled=true}.
+    * Requires Redis and {@code hotkey.sync.enabled=true}.
    */
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
@@ -172,6 +249,9 @@ public class HotKeyAmqpAutoConfiguration {
     /**
      * Create the FanoutExchange for broadcasting INVALIDATE/REFRESH messages
      * to all app instances.
+     *
+     * @param properties the cache sync configuration properties
+     * @return a durable, non-auto-delete {@link FanoutExchange}
      */
     @Bean
     public FanoutExchange hotkeySyncExchange(CacheSyncProperties properties) {
@@ -180,6 +260,9 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Create the per-instance sync queue with a 60-second TTL.
+     *
+     * @param properties the cache sync configuration properties
+     * @return a durable {@link Queue} with {@code x-message-ttl} of 60 seconds
      */
     @Bean
     public Queue hotkeySyncQueue(CacheSyncProperties properties) {
@@ -188,6 +271,10 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Bind the per-instance queue to the sync exchange.
+     *
+     * @param hotkeySyncQueue    the per-instance sync queue
+     * @param hotkeySyncExchange the sync FanoutExchange
+     * @return a {@link Binding} connecting the queue to the exchange
      */
     @Bean
     public Binding hotkeySyncBinding(Queue hotkeySyncQueue, FanoutExchange hotkeySyncExchange) {
@@ -196,6 +283,10 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Create the cache sync publisher for sending INVALIDATE/REFRESH messages.
+     *
+     * @param rabbitTemplate the RabbitMQ template for publishing messages
+     * @param properties     the cache sync configuration properties
+     * @return a new {@link CacheSyncPublisher} instance
      */
     @Bean
     @ConditionalOnMissingBean
@@ -205,6 +296,9 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Default Redis loader used by the sync listener to refresh cache entries via {@code GET}.
+     *
+     * @param stringRedisTemplate the String-based Redis template for reading values
+     * @return a {@link Function} that reads a key from Redis and returns its value
      */
     @Bean
     @ConditionalOnMissingBean(name = "hotKeyRedisLoader")
@@ -214,6 +308,14 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Create the sync listener that handles incoming INVALIDATE/REFRESH messages from peers.
+     *
+     * @param hotLocalCache       the L1 Caffeine cache
+     * @param hotKeyRedisLoader   the function for loading values from Redis
+     * @param properties          the cache sync configuration properties
+     * @param hotKeySyncScheduler the dedicated scheduler for deferred Redis reads
+     * @param expireManager       the cache expiry manager
+     * @param ruleMatcher         the rule matcher for key matching
+     * @return a new {@link CacheSyncListener} instance
      */
     @Bean
     @ConditionalOnMissingBean
@@ -237,6 +339,11 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Create the AMQP message listener container that drives the sync listener.
+     *
+     * @param connectionFactory  the RabbitMQ connection factory
+     * @param cacheSyncListener  the sync message handler
+     * @param properties         the cache sync configuration properties
+     * @return a configured {@link SimpleMessageListenerContainer}
      */
     @Bean
     @ConditionalOnBean(ConnectionFactory.class)
@@ -259,6 +366,9 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Scheduled executor for deferred Redis reads in the sync handler.
+     *
+     * @param properties the cache sync configuration properties
+     * @return a scheduled thread pool {@link ScheduledExecutorService}
      */
     @Bean(destroyMethod = "shutdown")
     public ScheduledExecutorService hotKeySyncScheduler(CacheSyncProperties properties) {
@@ -274,7 +384,7 @@ public class HotKeyAmqpAutoConfiguration {
    * Inner configuration for receiving Worker HOT/COOL decisions.
    * Creates a FanoutExchange, per-instance queue with TTL, binding, worker listener,
    * listener container, and a dedicated scheduled executor.
-   * Requires Redis and {@code hotkey.worker-listener.enabled=true}.
+    * Requires Redis and {@code hotkey.worker-listener.enabled=true}.
    */
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
@@ -285,6 +395,9 @@ public class HotKeyAmqpAutoConfiguration {
     /**
      * Create the FanoutExchange for broadcasting Worker HOT/COOL decisions
      * to all app instances.
+     *
+     * @param properties the Worker listener configuration properties
+     * @return a durable, non-auto-delete {@link FanoutExchange}
      */
     @Bean
     public FanoutExchange hotkeyWorkerExchange(WorkerListenerProperties properties) {
@@ -293,6 +406,9 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Create the per-instance Worker listener queue with a 60-second TTL.
+     *
+     * @param properties the Worker listener configuration properties
+     * @return a durable {@link Queue} with {@code x-message-ttl} of 60 seconds
      */
     @Bean
     public Queue hotkeyWorkerQueue(WorkerListenerProperties properties) {
@@ -301,27 +417,56 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Bind the per-instance queue to the Worker exchange.
+     *
+     * @param hotkeyWorkerQueue    the per-instance Worker listener queue
+     * @param hotkeyWorkerExchange the Worker FanoutExchange
+     * @return a {@link Binding} connecting the queue to the exchange
      */
     @Bean
     public Binding hotkeyWorkerBinding(Queue hotkeyWorkerQueue, FanoutExchange hotkeyWorkerExchange) {
       return BindingBuilder.bind(hotkeyWorkerQueue).to(hotkeyWorkerExchange);
     }
 
+    /**
+     * Create the TopicExchange for Worker heartbeat broadcasts.
+     *
+     * @param properties the HotKey configuration properties
+     * @return a durable, non-auto-delete {@link TopicExchange}
+     */
     @Bean
     public TopicExchange hotkeyHeartbeatExchange(HotKeyProperties properties) {
       return new TopicExchange(properties.getHeartbeat().getExchangeName(), true, false);
     }
 
+    /**
+     * Create the per-instance non-durable heartbeat queue that auto-deletes on disconnect.
+     *
+     * @return a non-durable, auto-delete {@link Queue}
+     */
     @Bean
     public Queue hotkeyHeartbeatQueue() {
       return QueueBuilder.nonDurable("hotkey.heartbeat:" + InstanceIdGenerator.get()).autoDelete().build();
     }
 
+    /**
+     * Bind the per-instance heartbeat queue to the heartbeat exchange with routing key {@code heartbeat.*}.
+     *
+     * @param hotkeyHeartbeatQueue    the per-instance heartbeat queue
+     * @param hotkeyHeartbeatExchange the heartbeat TopicExchange
+     * @return a {@link Binding} connecting the queue to the exchange
+     */
     @Bean
     public Binding hotkeyHeartbeatBinding(Queue hotkeyHeartbeatQueue, TopicExchange hotkeyHeartbeatExchange) {
       return BindingBuilder.bind(hotkeyHeartbeatQueue).to(hotkeyHeartbeatExchange).with("heartbeat.*");
     }
 
+    /**
+     * Create the {@link ClusterHealthView} for tracking Worker cluster health.
+     *
+     * @param ringManager the consistent-hash ring manager
+     * @param properties  the HotKey configuration properties
+     * @return a new {@link ClusterHealthView} instance
+     */
     @Bean
     @ConditionalOnMissingBean
     public ClusterHealthView clusterHealthView(RingManager ringManager, HotKeyProperties properties) {
@@ -333,7 +478,36 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
+     * Create the SRE adaptive rate limiter for WorkerListener HOT-path throttling.
+     * <p>
+     * Disabled when {@code hotkey.worker-listener.sre.enabled=false}.
+     *
+     * @param properties the Worker listener configuration properties
+     * @return a new {@link SreRateLimiter} instance
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "hotkey.worker-listener.sre", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public SreRateLimiter hotKeySreRateLimiter(WorkerListenerProperties properties) {
+      WorkerListenerProperties.Sre sreConfig = properties.getSre();
+      return new SreRateLimiter(
+        sreConfig.getWindowMs(),
+        sreConfig.getBuckets(),
+        1.0 / sreConfig.getSuccessThreshold(),
+        sreConfig.getMinSamples()
+      );
+    }
+
+    /**
      * Create the listener that processes HOT/COOL decisions broadcast by the Worker.
+     *
+     * @param hotLocalCache          the L1 Caffeine cache
+     * @param hotKeyRedisLoader      the function for loading values from Redis
+     * @param properties             the Worker listener configuration properties
+     * @param hotKeyWorkerScheduler  the dedicated scheduler for deferred Redis reads
+     * @param expireManager          the cache expiry manager
+     * @param sreRateLimiterProvider optional provider for the SRE rate limiter
+     * @return a new {@link WorkerListener} instance
      */
     @Bean
     @ConditionalOnMissingBean
@@ -342,19 +516,26 @@ public class HotKeyAmqpAutoConfiguration {
       Function<String, Object> hotKeyRedisLoader,
       WorkerListenerProperties properties,
       ScheduledExecutorService hotKeyWorkerScheduler,
-      CacheExpireManager expireManager
+      CacheExpireManager expireManager,
+      ObjectProvider<SreRateLimiter> sreRateLimiterProvider
     ) {
       return new WorkerListener(
         hotLocalCache,
         hotKeyRedisLoader,
         properties,
         hotKeyWorkerScheduler,
-        expireManager
+        expireManager,
+        sreRateLimiterProvider.getIfAvailable()
       );
     }
 
     /**
-     * Create the AMQP message listener container that drives the Worker listener.
+     * Create the AMQP message listener container that processes Worker heartbeat messages.
+     *
+     * @param connectionFactory   the RabbitMQ connection factory
+     * @param healthView          the cluster health view to update on heartbeat reception
+     * @param hotkeyHeartbeatQueue the heartbeat queue
+     * @return a configured {@link SimpleMessageListenerContainer}
      */
     @Bean
     public SimpleMessageListenerContainer heartbeatContainer(
@@ -376,6 +557,15 @@ public class HotKeyAmqpAutoConfiguration {
       return container;
     }
 
+    /**
+     * Create the {@link WorkerHeartbeatVerifier} that periodically PINGs Workers
+     * to verify they are alive.
+     *
+     * @param rabbitTemplate the RabbitMQ template for sending PING messages
+     * @param healthView     the cluster health view to update on verification results
+     * @param properties     the HotKey configuration properties
+     * @return a new {@link WorkerHeartbeatVerifier} instance
+     */
     @Bean(initMethod = "start", destroyMethod = "stop")
     @ConditionalOnMissingBean
     public WorkerHeartbeatVerifier workerHeartbeatVerifier(
@@ -395,6 +585,9 @@ public class HotKeyAmqpAutoConfiguration {
 
     /**
      * Scheduled executor for deferred Redis reads in the Worker listener.
+     *
+     * @param properties the Worker listener configuration properties
+     * @return a scheduled thread pool {@link ScheduledExecutorService}
      */
     @Bean(destroyMethod = "shutdown")
     public ScheduledExecutorService hotKeyWorkerScheduler(WorkerListenerProperties properties) {

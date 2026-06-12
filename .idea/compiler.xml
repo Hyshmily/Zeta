@@ -13,7 +13,6 @@
         <outputRelativeToContentRoot value="true" />
         <processorPath useClasspath="false">
           <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/1.18.38/lombok-1.18.38.jar" />
-          <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/1.18.38/lombok-1.18.38.jar" />
         </processorPath>
         <module name="hotkey-worker" />
       </profile>
@@ -39,6 +38,7 @@
     <option name="ADDITIONAL_OPTIONS_OVERRIDE">
       <module name="hotkey" options="-parameters" />
       <module name="hotkey-integration-tests" options="-parameters" />
+      <module name="hotkey-parent" options="-parameters" />
       <module name="hotkey-spring-boot-starter" options="-parameters" />
       <module name="hotkey-worker" options="-parameters" />
     </option>

@@ -19,6 +19,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Positive;
+import lombok.AccessLevel;
 import lombok.Data;
 import lombok.Getter;
 import lombok.Setter;
@@ -123,6 +124,8 @@ public class HotKeyProperties {
   /**
    * Effective hard TTL for normal keys.
    * Returns the override value if set, otherwise the default.
+   *
+   * @return the effective hard TTL in milliseconds
    */
   public long effectiveHardTtlMs() {
     return hardTtlMs > 0 ? hardTtlMs : defaultHardTtlMs;
@@ -131,6 +134,8 @@ public class HotKeyProperties {
   /**
    * Effective hard TTL for hot keys.
    * Returns the override value if set, otherwise the default.
+   *
+   * @return the effective hot-key hard TTL in milliseconds
    */
   public long effectiveHotHardTtlMs() {
     return hotHardTtlMs > 0 ? hotHardTtlMs : defaultHotHardTtlMs;
@@ -139,6 +144,8 @@ public class HotKeyProperties {
   /**
    * Effective soft TTL for normal keys.
    * Returns the override value if set, otherwise the default. Returns 0 if disabled.
+   *
+   * @return the effective soft TTL in milliseconds, or 0 if disabled
    */
   public long effectiveSoftTtlMs() {
     return softTtlMs > 0 ? softTtlMs : defaultSoftTtlMs;
@@ -147,12 +154,18 @@ public class HotKeyProperties {
   /**
    * Effective soft TTL for hot keys.
    * Returns the override value if set, otherwise the default. Returns 0 if disabled.
+   *
+   * @return the effective hot-key soft TTL in milliseconds, or 0 if disabled
    */
   public long effectiveHotSoftTtlMs() {
     return hotSoftTtlMs > 0 ? hotSoftTtlMs : defaultHotSoftTtlMs;
   }
 
-  /** Whether any soft TTL is configured (normal or hot). */
+  /**
+   * Whether any soft TTL is configured (normal or hot).
+   *
+   * @return {@code true} if either normal or hot key soft TTL is enabled
+   */
   public boolean isSoftExpireEnabled() {
     return effectiveSoftTtlMs() > 0 || effectiveHotSoftTtlMs() > 0;
   }
@@ -205,8 +218,7 @@ public class HotKeyProperties {
    * shard for each key, ensuring the same key always maps to the same Worker
    * shard even when the shard set changes.
    */
-  @Setter
-  @Getter
+  @Data
   public static class ConsistentHashing {
 
     /** Whether consistent-hashing mode is enabled. */
@@ -221,14 +233,49 @@ public class HotKeyProperties {
   @Valid
   private ConsistentHashing consistentHashing = new ConsistentHashing();
 
+  /** Reporting BBR adaptive rate-limiter and CPU monitor configuration. */
+  @Valid
+  private ReporterLimiter reporter = new ReporterLimiter();
+
+  @Data
+  public static class ReporterLimiter {
+
+    /** Whether BBR adaptive rate-limiting is enabled. */
+    @Getter(AccessLevel.NONE)
+    private boolean enabled = true;
+
+    /** CPU threshold (0–1000, default 800 = 80 %). */
+    @Min(0)
+    @Max(1000)
+    private int cpuThreshold = 800;
+
+    /** CPU polling interval in milliseconds. */
+    @Min(100)
+    private long cpuPollIntervalMs = 500;
+
+    /** EMA decay factor for CPU smoothing (0.0 – 1.0). */
+    private double cpuDecay = 0.95;
+
+    /** BBR sliding window size in milliseconds. */
+    @Min(100)
+    private long bbrWindowMs = 10_000;
+
+    /** Number of buckets in the BBR sliding window. */
+    @Min(2)
+    private int bbrWindowBuckets = 100;
+
+    /** Cooldown period in ms after a drop before allowing again. */
+    @Min(0)
+    private long bbrCooldownMs = 1_000;
+  }
+
   /**
    * Explicit instance ID for queue naming.
    * Falls back to {@code server.port-HOSTNAME} (or {@code server.port-UUID} if {@code HOSTNAME} is unset) if empty.
    */
   private String instanceId = "";
 
-  @Getter
-  @Setter
+  @Data
   public static class Heartbeat {
 
     /** Heartbeat exchange name. */

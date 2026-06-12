@@ -249,6 +249,9 @@ public class SlidingWindowDetector {
   /**
    * Returns the number of keys currently being tracked by this detector.
    *
+   * <p>This includes all keys with allocated circular buffers, regardless
+   * of whether they have expired but have not yet been evicted.
+   *
    * @return the count of active keys in the windows map
    */
   public int getActiveKeyCount() {

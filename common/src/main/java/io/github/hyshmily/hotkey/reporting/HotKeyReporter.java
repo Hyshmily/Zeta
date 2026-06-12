@@ -21,6 +21,8 @@ import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import lombok.Setter;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -32,7 +34,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
-import lombok.RequiredArgsConstructor;
 
 
 /**
@@ -53,8 +54,13 @@ import lombok.RequiredArgsConstructor;
  * RabbitMQ publisher.  When the queue is full, {@code flush()} drops
  * batches after a configurable timeout, and the Caffeine eviction
  * provides natural rate-limiting.
+ *
+ * <p>When a {@link BbrRateLimiter} is configured, each flush cycle is submitted
+ * to the BBR for admission control.  If the pipeline is saturated (high CPU
+ * and/or excessive in-flight batches), the flush is skipped and counters
+ * remain in the local Caffeine cache for the next cycle.  This provides
+ * adaptive back-pressure proportional to system load.
  */
-@RequiredArgsConstructor
 public class HotKeyReporter {
 
   private static final HotKeyLogger log = new DefaultLogger(HotKeyReporter.class);
@@ -81,12 +87,50 @@ public class HotKeyReporter {
   private final RingManager ringManager;
   /** Cluster health view for filtering dead Workers. */
   private final ClusterHealthView healthView;
+  /** Optional BBR adaptive rate limiter; null disables BBR gating. */
+  @Setter
+  private volatile BbrRateLimiter bbrRateLimiter;
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
   /** The report dispatcher instance; created on start(). */
   private ReportDispatcher dispatcher;
 
   /**
+   * Creates a new reporter that periodically flushes access counts to RabbitMQ.
+   *
+   * @param reportPublisher     the publisher used to send report messages to RabbitMQ
+   * @param scheduler           the scheduler for periodic flush cycles
+   * @param reportIntervalMs    fixed delay between consecutive flushes in milliseconds
+   * @param appName             name of this application instance, included in report messages
+   * @param queueCapacity       maximum capacity of the dispatcher work queue
+   * @param queueOfferTimeoutMs timeout for offering a batch to the dispatcher queue before dropping
+   * @param consumerCount       number of consumer threads draining the dispatcher queue
+   * @param ringManager         consistent-hashing ring manager for Worker node routing
+   * @param healthView          cluster health view for filtering dead Workers
+   */
+  public HotKeyReporter(
+    ReportPublisher reportPublisher,
+    ScheduledExecutorService scheduler,
+    long reportIntervalMs,
+    String appName,
+    int queueCapacity,
+    int queueOfferTimeoutMs,
+    int consumerCount,
+    RingManager ringManager,
+    ClusterHealthView healthView
+  ) {
+    this.reportPublisher = reportPublisher;
+    this.scheduler = scheduler;
+    this.reportIntervalMs = reportIntervalMs;
+    this.appName = appName;
+    this.queueCapacity = queueCapacity;
+    this.queueOfferTimeoutMs = queueOfferTimeoutMs;
+    this.consumerCount = consumerCount;
+    this.ringManager = ringManager;
+    this.healthView = healthView;
+  }
+
+    /**
    * A batch of key-count mappings destined for a single Worker target.
    *
    * @param target    the Worker nodeId for this batch
@@ -152,10 +196,20 @@ public class HotKeyReporter {
    * dropped (logged at WARN).  Caffeine eviction provides additional
    * backpressure — counters for cold keys are silently discarded.
    *
+   * <p>When BBR rate limiting is active, {@code flush()} first checks
+   * {@link BbrRateLimiter#tryAcquire()}.  If the limiter rejects the cycle,
+   * the counters remain in the local cache and are merged with the next
+   * flush.  This provides adaptive back-pressure proportional to system load.
+   *
    * <p>Called periodically by the scheduler at {@code reportIntervalMs}.
    */
   private void flush() {
     if (counters.estimatedSize() == 0) {
+      return;
+    }
+
+    if (bbrRateLimiter != null && !bbrRateLimiter.tryAcquire()) {
+      bbrRateLimiter.onDrop();
       return;
     }
 
@@ -193,6 +247,8 @@ public class HotKeyReporter {
             dropped
           );
         }
+      } else if (bbrRateLimiter != null) {
+        bbrRateLimiter.onEnqueue();
       }
     });
   }
@@ -230,6 +286,34 @@ public class HotKeyReporter {
    */
   public long getPendingKeyCount() {
     return counters.estimatedSize();
+  }
+
+  /**
+   * @return total flush cycles passed by the BBR limiter, or {@code -1} if BBR is disabled
+   */
+  public long bbrPassed() {
+    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalPassed();
+  }
+
+  /**
+   * @return total flush cycles dropped by the BBR limiter, or {@code -1} if BBR is disabled
+   */
+  public long bbrDropped() {
+    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalDropped();
+  }
+
+  /**
+   * @return current BBR in-flight count, or {@code -1} if BBR is disabled
+   */
+  public long bbrInFlight() {
+    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getInFlight();
+  }
+
+  /**
+   * @return current BBR max-in-flight budget, or {@code -1} if BBR is disabled
+   */
+  public long bbrMaxInFlight() {
+    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxInFlight();
   }
 
   /**
@@ -339,6 +423,9 @@ public class HotKeyReporter {
      * <p>Staleness guard: batches that waited longer than 5 s in the queue
      * are discarded rather than published, preventing the Worker from receiving
      * stale access patterns during prolonged backpressure.
+     *
+     * <p>When BBR rate limiting is active, on a successful publishing the
+     * round-trip time is recorded via {@link BbrRateLimiter#onSuccess(long)}.
      */
     private void consumeLoop() {
       while (running) {
@@ -355,6 +442,9 @@ public class HotKeyReporter {
           }
 
           reportPublisher.publish(batch.target(), new ReportMessage(appName, batch.timestamp(), batch.counts()));
+          if (bbrRateLimiter != null) {
+            bbrRateLimiter.onSuccess(System.currentTimeMillis() - batch.timestamp());
+          }
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
         } catch (RuntimeException e) {

@@ -15,9 +15,6 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_COOL;
-import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_HOT;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
@@ -26,12 +23,17 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.util.DelayUtil;
+import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.core.Message;
+
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
-import lombok.RequiredArgsConstructor;
-import org.springframework.amqp.core.Message;
+
+import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_COOL;
+import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_HOT;
 
 /**
  * Listens for Worker hot/cool decisions via {@code hotkey.worker.exchange} (FanoutExchange).
@@ -44,6 +46,11 @@ import org.springframework.amqp.core.Message;
  * <p>
  * Acknowledge is sent before the cache update (the update is jittered to spread
  * Redis load), so ack and data mutation are decoupled.
+ * <p>
+ * HOT promotion can be throttled by an optional {@link SreRateLimiter} to provide
+ * backpressure when downstream resources are saturated.  When the limiter drops a
+ * request the decision is ignored — the entry keeps its current state and the
+ * next Worker heartbeat may re-drive the promotion.
  */
 @RequiredArgsConstructor
 public class WorkerListener {
@@ -65,6 +72,9 @@ public class WorkerListener {
 
   /** Computes expiry timestamps for HOT-promoted and default-TTL entries. */
   private final CacheExpireManager expireManager;
+
+  /** Optional SRE adaptive rate limiter for HOT processing; null = disabled. */
+  private final SreRateLimiter sreRateLimiter;
 
   /**
    * RabbitMQ message callback.  Acknowledges the message immediately after parsing;
@@ -137,6 +147,13 @@ public class WorkerListener {
    * @param wm the worker message containing the HOT decision
    */
   private void handleHot(WorkerMessage wm) {
+    // SRE rate limiter gate — skip HOT promotion when the system is overloaded
+    if (sreRateLimiter != null && !sreRateLimiter.tryAcquire()) {
+      sreRateLimiter.onFailed();
+      log.debug("SRE throttled HOT promotion for key={}", wm.cacheKey());
+      return;
+    }
+
     // DCL first check – cheap, outside the compute lock
     if (VersionGuard.shouldSkipForWorker(caffeineCache, wm.cacheKey(), wm.decisionVersion())) {
       log.debug("handleHot: HotKey already up-to-date in L1: {}", wm.cacheKey());
@@ -191,6 +208,9 @@ public class WorkerListener {
           .build();
       });
     log.debug("HotKey promoted by Worker: {}", wm.cacheKey());
+    if (sreRateLimiter != null) {
+      sreRateLimiter.onSuccess();
+    }
   }
 
   /**

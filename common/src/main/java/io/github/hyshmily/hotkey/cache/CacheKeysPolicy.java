@@ -16,7 +16,11 @@
 package io.github.hyshmily.hotkey.cache;
 
 /**
- * Validates cache key inputs across the library.
+ * Static utility for validating cache key inputs across the library.
+ * <p>
+ * Defines the contract for what constitutes a valid cache key:
+ * keys must be non-null and non-blank. Invalid keys are silently skipped
+ * by all cache operations in {@link HotKeyCache}.
  */
 public final class CacheKeysPolicy {
 

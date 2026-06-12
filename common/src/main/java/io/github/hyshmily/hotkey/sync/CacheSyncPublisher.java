@@ -66,7 +66,9 @@ public class CacheSyncPublisher {
   private static final int BATCH_SIZE = 1000;
 
   /**
-   * Initializes the dedup cache. Called by Spring after construction.
+   * Initializes the dedup cache with an expiry of {@code dedupWindowSeconds}
+   * and a maximum of {@code dedupMaxSize} entries.
+   * Called automatically by Spring after construction via {@link PostConstruct}.
    */
   @PostConstruct
   public void init() {
@@ -76,7 +78,11 @@ public class CacheSyncPublisher {
       .build();
   }
 
-  /** Current size of the deduplication cache. */
+  /**
+   * Returns the current estimated size of the deduplication cache.
+   *
+   * @return estimated number of entries in the dedup cache, or 0 if not yet initialized
+   */
   public long getDedupCacheSize() {
     return recentBroadcasts == null ? 0L : recentBroadcasts.estimatedSize();
   }
@@ -85,7 +91,9 @@ public class CacheSyncPublisher {
    * Send a REFRESH sync message to all peers,
    * deduplicating against recent broadcasts of the same type+key with a higher version.
    *
-   * @param version the {@code dataVersion} at which the operation occurred
+   * @param cacheKey the affected cache key
+   * @param version  the {@code dataVersion} at which the operation occurred
+   * @param degraded whether the version was obtained in degraded mode
    */
   public void broadcastRefresh(String cacheKey, long version, boolean degraded) {
     sendDeduped(cacheKey, SyncMessage.TYPE_REFRESH, version, degraded);
@@ -95,7 +103,9 @@ public class CacheSyncPublisher {
    * Send an INVALIDATE sync message to all peers,
    * deduplicating against recent broadcasts of the same type+key with a higher version.
    *
-   * @param version the {@code dataVersion} at which the operation occurred
+   * @param cacheKey the affected cache key
+   * @param version  the {@code dataVersion} at which the operation occurred
+   * @param degraded whether the version was obtained in degraded mode
    */
   public void broadcastLocalInvalidate(String cacheKey, long version, boolean degraded) {
     sendDeduped(cacheKey, SyncMessage.TYPE_INVALIDATE, version, degraded);
@@ -105,6 +115,13 @@ public class CacheSyncPublisher {
    * Batch-invalidate multiple keys in a single AMQP message.
    * The body is a JSON array of key strings; the receiver calls
    * {@code caffeineCache.invalidateAll()} once.
+   * <p>
+   * If the collection is null or empty, the call is a no-op.
+   * Batches are split into chunks of at most {@value #BATCH_SIZE} keys per
+   * AMQP message to stay within reasonable message size limits.
+   * Serialization failures are logged and do not propagate.
+   *
+   * @param keys the keys to invalidate; null or empty is silently ignored
    */
   public void broadcastLocalInvalidateAll(Collection<String> keys) {
     if (keys == null || keys.isEmpty()) {
@@ -132,6 +149,11 @@ public class CacheSyncPublisher {
   /**
    * Broadcast a full rules-JSON payload to all peers.
    * Receivers replace their entire rule set to keep cross-instance consistency.
+   * <p>
+   * If the payload is null or blank, the call is a no-op.
+   * AMQP publish failures are logged at ERROR level and do not propagate.
+   *
+   * @param rulesJson the serialized ruleset JSON; null or blank is silently ignored
    */
   public void broadcastAllLocalRules(String rulesJson) {
     if (rulesJson == null || rulesJson.isBlank()) {

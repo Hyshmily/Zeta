@@ -13,10 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.algorithm;
+package io.github.hyshmily.hotkey.hotkeydetector;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -24,8 +27,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Tests for {@link HeavyKeeper}, covering construction validation, single-key and multi-key tracking,
@@ -63,7 +67,7 @@ class HeavyKeeperTest {
    */
   @Test
   void add_shouldTrackSingleKey() {
-    AddResult result = keeper.add("key1", 10);
+    AddResult result = keeper.addDirect("key1", 10);
     assertThat(result.isHotKey()).isTrue();
     assertThat(result.currentKey()).isEqualTo("key1");
     assertThat(result.expelledKey()).isNull();
@@ -75,12 +79,12 @@ class HeavyKeeperTest {
   @Test
   void add_shouldReturnExpelledKeyWhenTopKFull() {
     for (int i = 0; i < TOP_K; i++) {
-      AddResult result = keeper.add("key" + i, 50);
+      AddResult result = keeper.addDirect("key" + i, 50);
       assertThat(result.isHotKey()).isTrue();
       assertThat(result.expelledKey()).isNull();
     }
 
-    AddResult result = keeper.add("newKey", 100);
+    AddResult result = keeper.addDirect("newKey", 100);
     assertThat(result.isHotKey()).isTrue();
     assertThat(result.expelledKey()).isNotNull();
   }
@@ -91,7 +95,7 @@ class HeavyKeeperTest {
   @Test
   void add_keysBelowMinCountShouldNotBeHot() {
     keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 100);
-    AddResult result = keeper.add("lowFreqKey", 1);
+    AddResult result = keeper.addDirect("lowFreqKey", 1);
     assertThat(result.isHotKey()).isFalse();
     assertThat(result.expelledKey()).isNull();
   }
@@ -101,10 +105,10 @@ class HeavyKeeperTest {
    */
   @Test
   void list_shouldReturnKeysInDescendingOrder() {
-    keeper.add("keyA", 5);
-    keeper.add("keyB", 50);
-    keeper.add("keyC", 500);
-    keeper.add("keyD", 500);
+    keeper.addDirect("keyA", 5);
+    keeper.addDirect("keyB", 50);
+    keeper.addDirect("keyC", 500);
+    keeper.addDirect("keyD", 500);
 
     List<Item> items = keeper.list();
     assertThat(items).isNotEmpty();
@@ -119,7 +123,7 @@ class HeavyKeeperTest {
   @Test
   void listTopN_shouldReturnAtMostNItems() {
     for (int i = 0; i < 10; i++) {
-      keeper.add("key" + i, 20 + i);
+      keeper.addDirect("key" + i, 20 + i);
     }
     assertThat(keeper.listTopN(2)).hasSize(2);
     assertThat(keeper.listTopN(100)).hasSizeLessThanOrEqualTo(TOP_K);
@@ -130,7 +134,7 @@ class HeavyKeeperTest {
    */
   @Test
   void contains_shouldReturnTrueForHotKey() {
-    keeper.add("hotKey", 50);
+    keeper.addDirect("hotKey", 50);
     assertThat(keeper.contains("hotKey")).isTrue();
   }
 
@@ -147,9 +151,9 @@ class HeavyKeeperTest {
    */
   @Test
   void total_shouldTrackAllAdditions() {
-    keeper.add("k1", 10);
-    keeper.add("k2", 20);
-    keeper.add("k1", 30);
+    keeper.addDirect("k1", 10);
+    keeper.addDirect("k2", 20);
+    keeper.addDirect("k1", 30);
     assertThat(keeper.total()).isEqualTo(60);
   }
 
@@ -159,7 +163,7 @@ class HeavyKeeperTest {
   @Test
   void expelled_shouldReturnNonEmptyQueueAfterEviction() {
     for (int i = 0; i < TOP_K + 5; i++) {
-      keeper.add("key" + i, 50);
+      keeper.addDirect("key" + i, 50);
     }
     assertThat(keeper.expelled()).isNotEmpty();
   }
@@ -169,7 +173,7 @@ class HeavyKeeperTest {
    */
   @Test
   void fading_shouldHalveCounts() {
-    keeper.add("k1", 100);
+    keeper.addDirect("k1", 100);
     long before = keeper.total();
     keeper.fading();
     assertThat(keeper.total()).isLessThan(before);
@@ -180,7 +184,7 @@ class HeavyKeeperTest {
    */
   @Test
   void fading_shouldClearZeroCountKeys() {
-    keeper.add("k1", 1);
+    keeper.addDirect("k1", 1);
     keeper.fading();
     assertThat(keeper.contains("k1")).isFalse();
   }
@@ -202,7 +206,7 @@ class HeavyKeeperTest {
         try {
           for (int i = 0; i < iterations; i++) {
             try {
-              keeper.add("key" + threadId, 1);
+              keeper.addDirect("key" + threadId, 1);
             } catch (Exception e) {
               errors.incrementAndGet();
             }

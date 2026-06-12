@@ -16,12 +16,14 @@
 package io.github.hyshmily.hotkey;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.algorithm.Item;
-import io.github.hyshmily.hotkey.algorithm.TopK;
-import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import lombok.RequiredArgsConstructor;
+
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
@@ -29,7 +31,6 @@ import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Supplier;
-import lombok.RequiredArgsConstructor;
 
 /**
  * Public facade for the HotKey library.
@@ -161,6 +162,7 @@ public class HotKey {
    * @param <T>       the value type
    * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
     requireCache();
@@ -279,12 +281,15 @@ public class HotKey {
    * Notify the local TopK detector that a key was accessed, without triggering
    * a report to the Worker. Used by {@code @Intercept} path to keep the local
    * frequency sketch accurate without flooding the Worker with reports.
+   * Null keys are silently ignored.
    *
-   * @param cacheKey the accessed key
+   * @param cacheKey the accessed key (may be {@code null}, silently ignored)
    */
   public void notifyLocalDetector(String cacheKey) {
-    if (cacheKey == null) return;
-    topKAlgorithm.add(cacheKey, io.github.hyshmily.hotkey.constants.HotKeyConstants.TOPK_INCR);
+    if (cacheKey == null) {
+        return;
+    }
+    topKAlgorithm.addDirect(cacheKey, io.github.hyshmily.hotkey.constants.HotKeyConstants.TOPK_INCR);
   }
 
   /**
@@ -292,7 +297,8 @@ public class HotKey {
    * Worker-side global detector.
    *
    * @param cacheKey the key to inspect
-   * @return {@code true} if the key appears in the Worker TopK list
+   * @return {@code true} if the key appears in the Worker TopK list;
+   *         {@code false} if the key is {@code null} or no Worker is active
    */
   public boolean isWorkerHotKey(String cacheKey) {
     return workerTopKAlgorithm != null && cacheKey != null && workerTopKAlgorithm.contains(cacheKey);
@@ -302,7 +308,8 @@ public class HotKey {
    * Return the current top-K hot keys (key + count) from the local detector,
    * ordered by frequency.
    *
-   * @return the local top-K list, or an empty list if no detector is available
+   * @return the local top-K list, or an empty list if no detector is available;
+   *         the returned list is a point-in-time snapshot
    */
   public List<Item> returnLocalHotKeys() {
     return topKAlgorithm != null ? topKAlgorithm.list() : List.of();
@@ -332,7 +339,8 @@ public class HotKey {
    * ordered by frequency. These keys reflect cross-instance aggregated access
    * counts and are updated via periodic reports from all application instances.
    *
-   * @return the cluster-wide top-K list, or an empty list if no Worker is active
+   * @return the cluster-wide top-K list, or an empty list if no Worker is active;
+   *         the returned list is a point-in-time snapshot
    */
   public List<Item> returnWorkerHotKeys() {
     return workerTopKAlgorithm != null ? workerTopKAlgorithm.list() : List.of();
@@ -429,7 +437,8 @@ public class HotKey {
   /**
    * Return a snapshot of all current rules in evaluation order.
    *
-   * @return list of rules, or an empty list if no cache is available
+   * @return list of rules, or an empty list if no cache is available;
+   *         the returned list is unmodifiable
    */
   public List<Rule> getAllRules() {
     if (hotKeyCache == null) {

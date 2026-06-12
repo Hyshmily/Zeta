@@ -15,12 +15,13 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import org.springframework.amqp.core.Message;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import org.springframework.amqp.core.Message;
+
+import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
  * Message between app instances for cache synchronization (INVALIDATE / REFRESH).
@@ -53,10 +54,18 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
 
   /**
    * Deserialize a {@code SyncMessage} from an AMQP message body and headers.
-   * Returns {@code null} when the body is empty or the cache key is invalid.
+   * <p>
+   * The cache key is read from the message body (UTF-8 decoded). The type,
+   * version, and degraded flag are read from message headers. For batch types
+   * ({@link #TYPE_INVALIDATE_ALL}, {@link #TYPE_RULES_SYNC}), the key validity
+   * check is skipped — those types carry a payload rather than a single key.
+   * <p>
+   * Returns {@code null} when the body is empty or the cache key is invalid
+   * (for non-batch types).
    *
-   * @param msg the incoming AMQP message
-   * @return a parsed {@link SyncMessage}, or {@code null}
+   * @param msg the incoming AMQP message; must not be null
+   * @return a parsed {@link SyncMessage}, or {@code null} if the body is empty
+   *         or the key is invalid
    */
 
   public static SyncMessage from(Message msg) {

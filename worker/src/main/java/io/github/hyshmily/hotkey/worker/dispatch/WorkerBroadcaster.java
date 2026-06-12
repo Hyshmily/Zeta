@@ -15,18 +15,19 @@
  */
 package io.github.hyshmily.hotkey.worker.dispatch;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
-
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.sync.WorkerMessage;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
-import java.nio.charset.StandardCharsets;
-import java.util.concurrent.atomic.AtomicLong;
+import io.github.hyshmily.hotkey.sync.WorkerMessage;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
  * Publishes HOT and COOL decisions to all application instances via the
@@ -89,7 +90,10 @@ public class WorkerBroadcaster {
 
   /**
    * Returns the current decision version without incrementing.
-   * Used by {@link WorkerHeartbeatProducer} for the heartbeat's decisionVersionHwm field.
+   *
+   * <p>Used by {@link WorkerHeartbeatProducer} for the heartbeat's decisionVersionHwm field.
+   *
+   * @return the current decision version counter value
    */
   public long getCurrentDecisionVersion() {
     return decisionVersionCounter.get();

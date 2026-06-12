@@ -305,7 +305,7 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 #### 5.5.4 跨实例同步
 
-通过 `hotkey.sync.exchange`（direct）广播 5,000 条 INVALIDATE。同步传播 P50=0.30ms，P99=97.31ms——P99 尾部延迟由 `CacheExpireManager` 轮询间隔驱动而非 AMQP 投递延迟。零同步错误。
+通过 `hotkey.sync.exchange`（fanout）广播 5,000 条 INVALIDATE。同步传播 P50=0.30ms，P99=97.31ms——P99 尾部延迟由 `CacheExpireManager` 轮询间隔驱动而非 AMQP 投递延迟。零同步错误。
 
 ### 5.7 传播延迟
 
@@ -430,4 +430,4 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ---
 
-_所有数据来源于 `integration-tests/src/test/resources/testresult/` 下的测试执行输出。源码默认值已与 `common/src/main/java/io/github/hyshmily/hotkey/hotkeycache/HotKeyProperties.java` 逐一核对。_
+_所有数据来源于 `integration-tests/src/test/resources/testresult/` 下的测试执行输出。源码默认值已与 `common/src/main/java/io/github/hyshmily/hotkey/autoconfigure/HotKeyProperties.java` 逐一核对。_

@@ -224,6 +224,10 @@ public class CacheExpireManager {
    * overwriting newer data or Worker decisions.
    * Acquired permits are released after the refresh completes (success or failure).
    * Skipped silently if the refresh limiter is exhausted or soft expire is disabled.
+   *
+   * @param cacheKey  the key to refresh in the background
+   * @param reader    the value supplier for generating the refreshed value
+   * @param softTtlMs the soft TTL duration in milliseconds applied to the refreshed entry
    */
   public void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs) {
     // Ordering constraint: isSoftExpireEnabled() MUST appear before refreshLimiter.tryAcquire().

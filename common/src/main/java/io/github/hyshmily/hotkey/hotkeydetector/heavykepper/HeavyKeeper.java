@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.algorithm;
+package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
@@ -117,7 +117,7 @@ public class HeavyKeeper implements TopK {
    * @param depth                 depth of the Count-Min Sketch (number of rows / hash functions)
    * @param decay                 probabilistic decay factor (0.0–1.0); higher values preserve counts longer
    * @param minCount              minimum count threshold before a key can enter the TopK set
-   * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled keys
+   * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled items
    */
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount, int expelledQueueCapacity) {
     if (k <= 0) {
@@ -161,7 +161,7 @@ public class HeavyKeeper implements TopK {
    * @return an {@link AddResult} with expelled key (or null), hot status, and the input key
    */
   @Override
-  public AddResult add(String key, int increment) {
+  public AddResult addDirect(String key, int increment) {
     /* Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key -> same fingerprint) */
     long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
     long maxCount = 0L;
@@ -176,9 +176,11 @@ public class HeavyKeeper implements TopK {
         if (counts[index] == 0) {
           fingerprints[index] = itemFingerprint;
           counts[index] = increment;
+
           maxCount = Math.max(maxCount, increment);
         } else if (fingerprints[index] == itemFingerprint) {
           counts[index] += increment;
+
           maxCount = Math.max(maxCount, counts[index]);
         } else {
           // HeavyKeeper probabilistic decay: sample the decay count from a
@@ -232,8 +234,108 @@ public class HeavyKeeper implements TopK {
         isHot = true;
       }
       return new AddResult(expelled, isHot, key);
+
     }
   }
+  
+
+  /**
+   * Record accesses for multiple keys.
+   *
+   * <p>Updates sketch counters for all keys, then updates the TopK heap with
+   * keys whose estimated count meets the minimum threshold.  Returns results
+   * only for keys that entered the TopK set (possibly displacing others).
+   *
+   * @param keyCounts map of keys to their access counts
+   * @return list of {@link AddResult} for keys that entered the TopK set
+   */
+  @Override
+  public List<AddResult> add(Map<String, Long> keyCounts) {
+    Map<String, Long> maxCounts = new HashMap<>(keyCounts.size());
+    for (var entry : keyCounts.entrySet()) {
+      long max = addToSketch(entry.getKey(), entry.getValue());
+      maxCounts.put(entry.getKey(), max);
+    }
+
+    List<AddResult> results = new ArrayList<>();
+
+    synchronized (sortedTopK) {
+      for (var entry : keyCounts.entrySet()) {
+        String key = entry.getKey();
+        long maxCount = maxCounts.get(key);
+        if (maxCount < minCount) {
+            continue;
+        }
+
+        Node existing = heapIndex.remove(key);
+        if (existing != null) {
+            sortedTopK.remove(existing);
+        }
+
+        boolean shouldInsert = sortedTopK.size() < k
+                || maxCount >= sortedTopK.firstKey().count;
+        if (shouldInsert) {
+          Node newNode = new Node(key, maxCount);
+          String expelledKey = null;
+          if (sortedTopK.size() >= k) {
+            Node removed = sortedTopK.pollFirstEntry().getKey();
+            expelledKey = removed.key;
+            heapIndex.remove(removed.key);
+            if (!expelledQueue.offer(new Item(removed.key, removed.count))) {
+              log.warn("Expelled queue full, dropping key: {}", removed.key);
+            }
+          }
+          sortedTopK.put(newNode, Boolean.TRUE);
+          heapIndex.put(key, newNode);
+          results.add(new AddResult(expelledKey, true, key));
+        }
+      }
+    }
+    return results;
+  }
+
+  private long addToSketch(String key, long increment) {
+    long itemFingerprint = Hashing.murmur3_32_fixed()
+            .hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
+    long maxCount = 0;
+
+    for (int i = 0; i < depth; i++) {
+      int hash = (int) (itemFingerprint ^ (i * 0x9e3779b97f4a7c15L));
+      int bucketIndex = Math.floorMod(hash, width);
+      int index = i * width + bucketIndex;
+      Object lock = lockStripes[index & lockMask];
+
+      synchronized (lock) {
+        if (counts[index] == 0) {
+          fingerprints[index] = itemFingerprint;
+          counts[index] = increment;
+
+          maxCount = Math.max(maxCount, increment);
+        } else if (fingerprints[index] == itemFingerprint) {
+          counts[index] += increment;
+
+          maxCount = Math.max(maxCount, counts[index]);
+        } else {
+          ThreadLocalRandom rng = ThreadLocalRandom.current();
+          double decayProb = (counts[index] < LOOKUP_TABLE_SIZE)
+                  ? lookupTable[(int) counts[index]]
+                  : lookupTable[LOOKUP_TABLE_SIZE - 1];
+          int decays = sampleBinomial((int) Math.min(increment, Integer.MAX_VALUE), decayProb, rng);
+
+          if (decays >= counts[index]) {
+            fingerprints[index] = itemFingerprint;
+            counts[index] = increment;
+          } else {
+            counts[index] -= decays;
+          }
+          maxCount = Math.max(maxCount, counts[index]);
+        }
+      }
+    }
+    total.add(increment);
+    return maxCount;
+  }
+
 
   /**
    * Return all keys currently in the TopK set, sorted by estimated count descending.
@@ -266,6 +368,9 @@ public class HeavyKeeper implements TopK {
 
   /**
    * Return the blocking queue holding items that have been evicted from the TopK set.
+   * Consumers should drain this queue periodically for asynchronous processing.
+   *
+   * @return a blocking queue of evicted items
    */
   @Override
   public BlockingQueue<Item> expelled() {
@@ -310,6 +415,8 @@ public class HeavyKeeper implements TopK {
 
   /**
    * Return the total number of data streams tracked since startup or last reset.
+   *
+   * @return total access count
    */
   @Override
   public long total() {
@@ -318,6 +425,9 @@ public class HeavyKeeper implements TopK {
 
   /**
    * Return the top {@code n} hot keys.
+   *
+   * @param n maximum number of keys to return
+   * @return list of at most {@code n} {@link Item} entries
    */
   @Override
   public List<Item> listTopN(int n) {
@@ -349,16 +459,24 @@ public class HeavyKeeper implements TopK {
    * moderate n.
    */
   private static int sampleBinomial(int n, double p, ThreadLocalRandom rng) {
-    if (n <= 0) return 0;
-    if (p >= 1.0) return n;
-    if (p <= 0.0) return 0;
+    if (n <= 0) {
+        return 0;
+    }
+    if (p >= 1.0) {
+        return n;
+    }
+    if (p <= 0.0) {
+        return 0;
+    }
 
     double q = 1.0 - p;
 
     if (n <= 10) {
       int k = 0;
       for (int i = 0; i < n; i++) {
-        if (rng.nextDouble() < p) k++;
+        if (rng.nextDouble() < p) {
+            k++;
+        }
       }
       return k;
     }
@@ -373,7 +491,9 @@ public class HeavyKeeper implements TopK {
 
     int k = 0;
     for (int i = 0; i < n; i++) {
-      if (rng.nextDouble() < p) k++;
+      if (rng.nextDouble() < p) {
+          k++;
+      }
     }
     return k;
   }

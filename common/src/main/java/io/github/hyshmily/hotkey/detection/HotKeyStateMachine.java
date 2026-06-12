@@ -169,9 +169,13 @@ public class HotKeyStateMachine {
   }
 
   /**
-   * Number of keys currently tracked by the state machine.
+   * Approximate number of keys currently tracked by the state machine.
+   * <p>The returned value is approximate due to the underlying
+   * {@link java.util.concurrent.ConcurrentHashMap#size()} semantics
+   * — it reflects a snapshot and may not account for concurrent
+   * insertions or removals at the exact moment of the call.</p>
    *
-   * @return the count of tracked keys
+   * @return approximate count of keys currently tracked
    */
   public int getTrackedKeys() {
     return states.size();

@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.sync.SyncMessage.*;
-
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
@@ -27,12 +25,15 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.util.DelayUtil;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.core.Message;
+
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
-import lombok.RequiredArgsConstructor;
-import org.springframework.amqp.core.Message;
+
+import static io.github.hyshmily.hotkey.sync.SyncMessage.*;
 
 /**
  * Listens for cache synchronization messages (INVALIDATE / REFRESH) from peer instances
@@ -79,9 +80,14 @@ public class CacheSyncListener {
   /**
    * RabbitMQ message callback for sync messages. Acknowledges immediately after parsing;
    * the actual cache update is executed asynchronously with random jitter.
+   * <p>
+   * On success, the message is acked via {@link Channel#basicAck}. On any processing
+   * failure, the message is nacked and not requeued ({@code requeue=false}) to avoid
+   * poison-message loops.
    *
-   * @param channel the AMQP channel
-   * @param msg     the raw message
+   * @param channel the AMQP channel used for ack/nack
+   * @param msg     the raw AMQP message, whose body and headers carry the sync payload
+   * @throws IOException if the ack or nack operation on the channel fails
    */
   public void handleSyncMessage(Channel channel, Message msg) throws IOException {
     long tag = msg.getMessageProperties().getDeliveryTag();
@@ -97,8 +103,11 @@ public class CacheSyncListener {
   /**
    * Decodes the message and schedules the appropriate handler with a random delay
    * to distribute Redis reads evenly.
+   * <p>
+   * If the message body is empty or cannot be parsed into a {@link SyncMessage},
+   * the message is silently dropped without scheduling any task.
    *
-   * @param msg the raw AMQP message
+   * @param msg the raw AMQP message (may have null or empty body)
    */
   private void processSync(Message msg) {
     SyncMessage sm = SyncMessage.from(msg);
@@ -143,8 +152,11 @@ public class CacheSyncListener {
    * <p>
    * A second DCL check inside the atomic {@code compute} body prevents a
    * concurrent refresh from being wiped by a stale degraded INVALIDATE.
+   * Thread-safe via {@link com.github.benmanes.caffeine.cache.Cache#asMap()}
+   * atomic {@code compute}.
    *
-   * @param sm the sync message containing the key to invalidate
+   * @param sm the sync message containing the key to invalidate; if the key
+   *           is null or invalid, the invalidation is silently skipped
    */
   private void handleLocalInvalidate(SyncMessage sm) {
     boolean unconditional = sm.version() == 0L && !sm.isVersionDegraded();
@@ -207,8 +219,12 @@ public class CacheSyncListener {
    * The refreshed entry retains the original metadata (hard/soft TTLs, normal TTLs,
    * key state, decision version, degradation flag) except for the value and data
    * version which are taken from the incoming message and Redis.
+   * <p>
+   * If the key is absent from the local cache before refresh, or if the Redis load
+   * returns null, the refresh is aborted and the existing entry (if any) is preserved.
    *
-   * @param sm the sync message containing the key and version to refresh
+   * @param sm the sync message containing the key and version to refresh;
+   *           must not be null
    */
   private void handleRefresh(SyncMessage sm) {
     // DCL first check – cheap, outside the compute lock
@@ -256,9 +272,13 @@ public class CacheSyncListener {
 
   /**
    * Loads the current value from Redis for the key carried in the sync message.
+   * <p>
+   * Any exception thrown by the {@code redisLoader} (e.g. connection timeout,
+   * key not found) is caught and logged at WARN level.
    *
    * @param sm the sync message containing the cache key to load
-   * @return the value from Redis, or {@code null} if the load failed
+   * @return the value from Redis, or {@code null} if the key is absent in Redis
+   *         or the load failed with an exception
    */
   private Object loadFromRedis(SyncMessage sm) {
     try {

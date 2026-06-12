@@ -31,7 +31,7 @@ mvn source:jar                       # Generate source JAR (common only)
 
 | Layer | Package | Key Classes |
 |---|---|---|
-| `algorithm/` | Detection engine | `HeavyKeeper` (TopK impl), `Item`, `AddResult` |
+| `algorithm/` | Detection engine | `HotKeyDetector` (facade, `implements TopK`), `HeavyKeeper` (TopK impl), `Item`, `AddResult` |
 | `cache/` | Cache orchestration | `HotKeyCache`, `SingleFlight`, `CacheExpireManager`, `TransactionSupport`, `CacheKeysPolicy` |
 | `sync/` | Cross-instance sync | `CacheSyncPublisher`, `CacheSyncListener`, `SyncMessage`, `VersionGuard`, `VersionController` |
 | `sync/` + `broadcast` | Worker decision listener | `WorkerListener`, `WorkerMessage`, `WorkerListenerProperties` |
@@ -65,12 +65,12 @@ Registered in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfig
 | Configuration | Condition | Creates |
 |---|---|---|
 | `HotKeyFacadeAutoConfiguration` | Always | `HotKey` facade |
-| `HotKeyAutoConfiguration` | !Worker-only | TopK, Caffeine, SingleFlight, non-Redis HotKeyCache |
+| `HotKeyAutoConfiguration` | !Worker-only | `HotKeyDetector`, Caffeine, SingleFlight, non-Redis HotKeyCache |
 | `HotKeyRedisAutoConfiguration` | `RedisTemplate` present | Redis-backed HotKeyCache + version tracking |
 | `HotKeyActuatorAutoConfiguration` | `Endpoint.class` on classpath | `/actuator/hotkey` + `/actuator/hotkeyring` + `/actuator/hotkey/worker/state` |
 | `HotKeyMicrometerAutoConfiguration` | `MeterBinder.class` on classpath | Caffeine metrics + custom business gauges |
 | `HotKeyAmqpAutoConfiguration` | `RabbitTemplate` present | Report, sync, worker-listener AMQP infrastructure |
-| `HotKeySchedulingConfiguration` | TopK bean present | Periodic decay + expelled drain |
+| `HotKeySchedulingConfiguration` | HotKeyDetector bean present | Periodic decay + expelled drain |
 | `HotKeyAnnotationAutoConfiguration` | `Aspect` + `HotKey` bean + `hotkey.annotation.enabled=true` | `HotKeyAspect` |
 
 Worker module has its own `WorkerAutoConfiguration` (activated by `@SpringBootApplication` scan when `hotkey.worker.enabled=true`).

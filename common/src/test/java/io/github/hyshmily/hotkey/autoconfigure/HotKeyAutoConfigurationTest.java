@@ -15,21 +15,22 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.algorithm.TopK;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
-import java.util.concurrent.Executor;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+
+import java.util.concurrent.Executor;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 /**
  * Tests for {@link HotKeyAutoConfiguration}.
@@ -47,8 +48,8 @@ class HotKeyAutoConfigurationTest {
   @Test
   void allBeansAreCreatedByDefault() {
     runner.run(ctx -> {
-      assertThat(ctx).hasSingleBean(TopK.class);
-      assertThat(ctx.getBean("hotKeyDetector")).isInstanceOf(TopK.class);
+      assertThat(ctx).hasSingleBean(HotKeyDetector.class);
+      assertThat(ctx.getBean("hotKeyDetector")).isInstanceOf(HotKeyDetector.class);
       assertThat(ctx).hasSingleBean(Cache.class);
       assertThat(ctx).hasSingleBean(SingleFlight.class);
       assertThat(ctx).hasSingleBean(CacheExpireManager.class);
@@ -68,7 +69,7 @@ class HotKeyAutoConfigurationTest {
       .withPropertyValues("hotkey.worker.enabled=true")
       .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class))
       .run(ctx -> {
-        assertThat(ctx).doesNotHaveBean(TopK.class);
+        assertThat(ctx).doesNotHaveBean(HotKeyDetector.class);
         assertThat(ctx).doesNotHaveBean(HotKeyCache.class);
         assertThat(ctx).doesNotHaveBean(HotKey.class);
       });
@@ -80,12 +81,12 @@ class HotKeyAutoConfigurationTest {
   @Test
   void hotKeyDetectorCanBeOverridden() {
     new ApplicationContextRunner()
-      .withBean("hotKeyDetector", TopK.class, () -> mock(TopK.class))
+      .withBean("hotKeyDetector", HotKeyDetector.class, () -> mock(HotKeyDetector.class))
       .withPropertyValues("hotkey.local.topK=200")
       .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class))
       .run(ctx -> {
-        assertThat(ctx).hasSingleBean(TopK.class);
-        assertThat(ctx.getBean("hotKeyDetector")).isSameAs(ctx.getBean(TopK.class));
+        assertThat(ctx).hasSingleBean(HotKeyDetector.class);
+        assertThat(ctx.getBean("hotKeyDetector")).isSameAs(ctx.getBean(HotKeyDetector.class));
       });
   }
 
