@@ -444,6 +444,7 @@ public class HotKeyCache {
       log.debug("invalidate: invalid cacheKey");
       return;
     }
+
     TransactionSupport.runNowOrAfterCommit(() -> {
       var vr = versionController.nextVersion(cacheKey);
       caffeineCache.invalidate(cacheKey);
@@ -469,6 +470,7 @@ public class HotKeyCache {
       log.debug("invalidateAll: all cacheKeys are invalid");
       return;
     }
+
     TransactionSupport.runNowOrAfterCommit(() -> {
       caffeineCache.invalidateAll(validKeys);
       cacheSyncPublisher.ifPresentOrElse(
