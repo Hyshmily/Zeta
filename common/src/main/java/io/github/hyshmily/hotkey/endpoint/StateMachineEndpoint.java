@@ -42,6 +42,13 @@ public class StateMachineEndpoint {
   /** Shared atomic counter bumped on each config change; broadcast via heartbeat. */
   private final ObjectProvider<AtomicLong> configTimestampCounter;
 
+  /**
+   * Creates a new endpoint for the given state machine instance.
+   *
+   * @param stateMachine           the hot-key state machine whose config is exposed
+   * @param configTimestampCounter shared atomic counter bumped on each config change;
+   *                               propagated to peer Workers via heartbeat broadcast
+   */
   public StateMachineEndpoint(
       HotKeyStateMachine stateMachine,
       ObjectProvider<AtomicLong> configTimestampCounter) {

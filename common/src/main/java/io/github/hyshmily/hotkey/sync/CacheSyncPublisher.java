@@ -147,21 +147,24 @@ public class CacheSyncPublisher {
   }
 
   /**
-   * Broadcast a full rules-JSON payload to all peers.
-   * Receivers replace their entire rule set to keep cross-instance consistency.
+   * Broadcast a rules-JSON payload to all peers with the current rulesVersion.
+   * Receivers merge (not replace) the incoming rules with their local set,
+   * guarded by the rulesVersion to prevent stale overwrites.
    * <p>
    * If the payload is null or blank, the call is a no-op.
    * AMQP publish failures are logged at ERROR level and do not propagate.
    *
-   * @param rulesJson the serialized ruleset JSON; null or blank is silently ignored
+   * @param rulesJson    the serialized ruleset JSON (new format with version wrapper)
+   * @param rulesVersion the current rulesVersion at the time of serialization
    */
-  public void broadcastAllLocalRules(String rulesJson) {
+  public void broadcastAllLocalRules(String rulesJson, long rulesVersion) {
     if (rulesJson == null || rulesJson.isBlank()) {
       return;
     }
     try {
       MessageProperties props = new MessageProperties();
       props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
+      props.setHeader(AMQP_HEADER_RULES_VERSION, rulesVersion);
       Message message = new Message(rulesJson.getBytes(StandardCharsets.UTF_8), props);
       rabbitTemplate.send(properties.getExchangeName(), "", message);
     } catch (AmqpException e) {

@@ -168,7 +168,7 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(scheduler).isNotNull();
     scheduler.execute(() -> {
       String threadName = Thread.currentThread().getName();
-      assertThat(threadName).contains("hotkeydetector-report");
+      assertThat(threadName).contains("hotkey-report");
     });
     scheduler.shutdown();
   }

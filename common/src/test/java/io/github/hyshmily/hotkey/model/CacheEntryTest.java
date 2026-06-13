@@ -87,4 +87,117 @@ class CacheEntryTest {
     assertThat(entry.isVersionDegraded()).isTrue();
     assertThat(entry.getDataVersion()).isEqualTo(Long.MIN_VALUE + 1);
   }
+
+  @Test
+  void builderDefaults_shouldBeNullForObjectZeroForLongFalseForBoolean() {
+    CacheEntry entry = CacheEntry.builder().build();
+    assertThat(entry.getValue()).isNull();
+    assertThat(entry.getDataVersion()).isZero();
+    assertThat(entry.isVersionDegraded()).isFalse();
+    assertThat(entry.getDecisionVersion()).isZero();
+    assertThat(entry.getHardTtlMs()).isZero();
+    assertThat(entry.getHardExpireAtMs()).isZero();
+    assertThat(entry.getSoftTtlMs()).isZero();
+    assertThat(entry.getSoftExpireAtMs()).isZero();
+    assertThat(entry.getKeyState()).isNull();
+    assertThat(entry.getNormalHardTtlMs()).isZero();
+    assertThat(entry.getNormalSoftTtlMs()).isZero();
+  }
+
+  @Test
+  void infiniteHardExpiry_shouldAcceptMaxValue() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("infinite")
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .build();
+    assertThat(entry.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
+  }
+
+  @Test
+  void keyStateCOOL_shouldBuildCorrectly() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("cooling")
+      .keyState(KeyState.COOL)
+      .build();
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.COOL);
+  }
+
+  @Test
+  void keyStatePRE_COOL_shouldBuildCorrectly() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("precooling")
+      .keyState(KeyState.PRE_COOL)
+      .build();
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.PRE_COOL);
+  }
+
+  @Test
+  void valueAsString_shouldBeStored() {
+    CacheEntry entry = CacheEntry.builder().value("hello").build();
+    assertThat(entry.getValue()).isEqualTo("hello");
+  }
+
+  @Test
+  void valueAsInteger_shouldBeStored() {
+    CacheEntry entry = CacheEntry.builder().value(123).build();
+    assertThat(entry.getValue()).isEqualTo(123);
+  }
+
+  @Test
+  void valueAsNull_shouldBeAccepted() {
+    CacheEntry entry = CacheEntry.builder().value(null).build();
+    assertThat(entry.getValue()).isNull();
+  }
+
+  @Test
+  void isVersionDegradedTrue_combinedWithDecisionVersion() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("degraded-hot")
+      .isVersionDegraded(true)
+      .decisionVersion(10L)
+      .build();
+    assertThat(entry.isVersionDegraded()).isTrue();
+    assertThat(entry.getDecisionVersion()).isEqualTo(10L);
+  }
+
+  @Test
+  void isVersionDegradedFalse_combinedWithDecisionVersion() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("non-degraded")
+      .isVersionDegraded(false)
+      .decisionVersion(20L)
+      .build();
+    assertThat(entry.isVersionDegraded()).isFalse();
+    assertThat(entry.getDecisionVersion()).isEqualTo(20L);
+  }
+
+  @Test
+  void toBuilder_shouldCopyAllFields() {
+    CacheEntry original = CacheEntry.builder()
+      .value("original")
+      .dataVersion(1L)
+      .isVersionDegraded(true)
+      .keyState(KeyState.HOT)
+      .build();
+    CacheEntry copy = original.toBuilder().value("modified").build();
+    assertThat(copy.getValue()).isEqualTo("modified");
+    assertThat(copy.getDataVersion()).isEqualTo(1L);
+    assertThat(copy.isVersionDegraded()).isTrue();
+    assertThat(copy.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  @Test
+  void equalsAndHashCode_shouldWorkForIdenticalEntries() {
+    CacheEntry a = CacheEntry.builder().value("x").dataVersion(1L).build();
+    CacheEntry b = CacheEntry.builder().value("x").dataVersion(1L).build();
+    assertThat(a).isEqualTo(b);
+    assertThat(a).hasSameHashCodeAs(b);
+  }
+
+  @Test
+  void equalsAndHashCode_shouldDistinguishDifferentEntries() {
+    CacheEntry a = CacheEntry.builder().value("x").dataVersion(1L).build();
+    CacheEntry b = CacheEntry.builder().value("y").dataVersion(1L).build();
+    assertThat(a).isNotEqualTo(b);
+  }
 }

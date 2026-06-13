@@ -97,6 +97,14 @@ hotkey:
       decay: 0.9
       min-count: 10
 
+    ## Persistence (opt-in; restart warm-start)
+    persistence:
+      enabled: false
+      persist-interval-ms: 30000
+      topk-count: 100
+      redis-key-prefix: "hotkey:topk:worker:"
+      ttl-days: 3
+
 logging:
   level:
     io.github.hyshmily: INFO

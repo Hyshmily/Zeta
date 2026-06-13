@@ -15,22 +15,25 @@
  */
 package io.github.hyshmily.hotkey.rule;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.REDIS_KEY_RULES;
-
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
-import jakarta.annotation.PostConstruct;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.CopyOnWriteArrayList;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
+
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.REDIS_KEY_RULES;
 
 /**
  * Central component for evaluating cache-key rules (blocking, reporting suppression, etc.).
@@ -55,6 +58,33 @@ public class RuleMatcher {
     false
   );
 
+  /** Lua compare-and-set script: writes only if incoming version > current Redis version. */
+  private static final RedisScript<Long> RULE_CAS_SCRIPT;
+
+  static {
+    DefaultRedisScript<Long> s = new DefaultRedisScript<>();
+    s.setScriptText(
+      """
+      local current = redis.call('GET', KEYS[1])
+      if current == false then
+        redis.call('SET', KEYS[1], ARGV[1])
+        return 1
+      end
+      local ok, decoded = pcall(cjson.decode, current)
+      local curVer = 0
+      if ok and type(decoded) == 'table' and decoded['rulesVersion'] then
+        curVer = decoded['rulesVersion']
+      end
+      if tonumber(ARGV[2]) > curVer then
+        redis.call('SET', KEYS[1], ARGV[1])
+        return 1
+      end
+      return 0"""
+    );
+    s.setResultType(Long.class);
+    RULE_CAS_SCRIPT = s;
+  }
+
   /** Optional Redis template for rule persistence across restarts. */
   private final Optional<StringRedisTemplate> redisTemplate;
   /** Optional publisher for broadcasting rule changes to sibling instances. */
@@ -62,6 +92,9 @@ public class RuleMatcher {
 
   /** Thread-safe list of all active rules, evaluated in order. */
   private volatile List<Rule> rulesList = new CopyOnWriteArrayList<>();
+
+  /** Monotonically increasing version for rule set changes. Never degraded. */
+  private final AtomicLong rulesVersion = new AtomicLong(0L);
 
   /**
    * Load persisted rules from Redis (if available) at startup.
@@ -86,7 +119,7 @@ public class RuleMatcher {
    * }</pre>
    *
    * @param pattern the key pattern; a leading {@code regex:} prefix forces REGEX type,
-   *     a trailing wildcard without interior wildcards is optimised to PREFIX,
+   *     a trailing wildcard without interior wildcards is optimized to PREFIX,
    *     patterns containing {@code *} or {@code ?} are treated as WILDCARD,
    *     otherwise the pattern is treated as EXACT
    * @param action  the action to assign to the created rule
@@ -97,7 +130,7 @@ public class RuleMatcher {
       return new Rule(Rule.RuleType.REGEX, pattern.substring(6), action);
     }
     if (pattern.contains("*") || pattern.contains("?")) {
-      // A single trailing '*' with no '?' -> PREFIX optimisation
+      // A single trailing '*' with no '?' -> PREFIX optimization
       if (pattern.endsWith("*") && pattern.indexOf('*') == pattern.length() - 1 && !pattern.contains("?")) {
         return new Rule(Rule.RuleType.PREFIX, pattern.substring(0, pattern.length() - 1), action);
       }
@@ -115,6 +148,8 @@ public class RuleMatcher {
   public void addRule(Rule rule) {
     rule.prepare();
     rulesList.add(rule);
+    rulesVersion.incrementAndGet()
+    ;
     persistAndBroadcastRules();
   }
 
@@ -131,6 +166,8 @@ public class RuleMatcher {
       existing -> existing.getPattern().equals(pattern) && existing.getAction() == action
     );
     if (removed) {
+      rulesVersion.incrementAndGet();
+
       persistAndBroadcastRules();
     }
     return removed;
@@ -143,6 +180,8 @@ public class RuleMatcher {
    */
   public void clearRules() {
     rulesList.clear();
+    rulesVersion.incrementAndGet();
+
     persistAndBroadcastRules();
     log.info("All rules cleared and broadcasted");
   }
@@ -156,7 +195,10 @@ public class RuleMatcher {
   public int removeRulesByAction(RuleAction action) {
     int before = rulesList.size();
     rulesList.removeIf(r -> r.getAction() == action);
+
     if (rulesList.size() < before) {
+      rulesVersion.incrementAndGet();
+
       persistAndBroadcastRules();
     }
     return before - rulesList.size();
@@ -170,24 +212,44 @@ public class RuleMatcher {
   public void removeRule(int index) {
     if (index >= 0 && index < rulesList.size()) {
       rulesList.remove(index);
+      rulesVersion.incrementAndGet();
+
       persistAndBroadcastRules();
     }
   }
 
   /**
-   * Replace the current rule set with the one received from a peer.
+   * Merge the incoming rule set into the local rule set, guarded by version.
    * <p>
-   * This method <b>does not broadcast</b> the change – it only updates
-   * the local list and Redis to avoid a broadcast storm.
+   * If {@code incomingVersion > 0} and {@code <= localVersion}, the sync is skipped
+   * (stale broadcast). Otherwise the rules are merged by pattern (incoming overwrites
+   * same-pattern entries, local-only entries are preserved), the local version is
+   * bumped past the incoming version, and the result is persisted to Redis.
+   * <p>
+   * This method <b>does not broadcast</b> — only updates local list and Redis,
+   * avoiding a broadcast storm.
    *
-   * @param json the JSON-serialised rule list to apply; may be {@code null} or empty
+   * @param json            the JSON-serialized rule list (may be old-format array or
+   *                        new-format wrapper)
+   * @param incomingVersion the rulesVersion from the incoming message header,
+   *                        or {@code 0L} for pre-version broadcasts
    */
-  public void syncRules(String json) {
+  public void syncRules(String json, long incomingVersion) {
+    if (incomingVersion > 0L && incomingVersion <= rulesVersion.get()) {
+      log.debug("Stale rules sync ignored: incomingVersion={}, localVersion={}", incomingVersion, rulesVersion.get());
+      return;
+    }
     try {
-      List<Rule> newRules = OBJECT_MAPPER.readValue(json, new TypeReference<>() {});
-      replaceRules(newRules);
-      redisTemplate.ifPresent(r -> r.opsForValue().set(REDIS_KEY_RULES, json));
-      log.info("Rules synced from broadcast, total: {}", newRules.size());
+      List<Rule> incomingRules = parseRulesJson(json);
+      List<Rule> merged = mergeRules(rulesList, incomingRules);
+
+      replaceRules(merged);
+
+      long newVersion = rulesVersion.updateAndGet(v -> Math.max(v, incomingVersion)) + 1;
+
+      String outJson = serializeRules(merged, newVersion);
+      redisTemplate.ifPresent(r -> persistToRedis(r, outJson, newVersion));
+      log.info("Rules synced from broadcast, version={}, total: {}", newVersion, merged.size());
     } catch (Exception e) {
       log.error("Failed to sync rules from broadcast", e);
     }
@@ -257,40 +319,106 @@ public class RuleMatcher {
   }
 
   /**
-   * Serialize the current rule list to JSON, push it to Redis (if available),
-   * and broadcast it via the publisher.
+   * Serialize the current rule list to the versioned JSON format, write it to Redis
+   * (if available) via Lua compare-and-set, and broadcast it via AMQP (if available).
    * <p>
-   * Failures are logged but never propagated – the in‑memory copy is already
-   * up‑to‑date and a single persistence miss is acceptable.
+   * Both channels are invoked independently — the XOR pattern has been replaced
+   * by both/and. Failures are logged but never propagated.
    */
   private void persistAndBroadcastRules() {
     try {
-      String json = OBJECT_MAPPER.writeValueAsString(rulesList);
-      redisTemplate.ifPresentOrElse(
-        r -> r.opsForValue().set(REDIS_KEY_RULES, json),
-        () -> cacheSyncPublisher.ifPresent(p -> p.broadcastAllLocalRules(json))
-      );
+      long version = rulesVersion.get();
+      String json = serializeRules(new ArrayList<>(rulesList), version);
 
-      log.debug("Rules persisted, total: {}", rulesList.size());
+      redisTemplate.ifPresent(r -> persistToRedis(r, json, version));
+      cacheSyncPublisher.ifPresent(p -> p.broadcastAllLocalRules(json, version));
+
+      log.debug("Rules persisted (version={}), total: {}", version, rulesList.size());
     } catch (Exception e) {
       log.error("Failed to persist rules", e);
     }
   }
 
   /**
+   * Write the versioned JSON rule set to Redis via Lua compare-and-set.
+   * Falls back to plain SET if the Lua script fails.
+   */
+  private void persistToRedis(StringRedisTemplate r, String json, long version) {
+    try {
+      r.execute(RULE_CAS_SCRIPT, List.of(REDIS_KEY_RULES), json, String.valueOf(version));
+    } catch (Exception e) {
+      log.warn("Lua compare-and-set failed for rules (version={}), fallback to plain set", version, e);
+      try {
+        r.opsForValue().set(REDIS_KEY_RULES, json);
+      } catch (Exception e2) {
+        log.error("Redis fallback set also failed, skipping persist", e2);
+      }
+    }
+  }
+
+  /**
+   * Serialize a rule list into the versioned JSON wrapper format.
+   *
+   * <pre>{@code {"rulesVersion":5,"rules":[{"pattern":"x","action":"BLOCK"}]}}</pre>
+   */
+  private String serializeRules(List<Rule> rules, long version) throws JsonProcessingException {
+    Map<String, Object> wrapper = new LinkedHashMap<>();
+    wrapper.put("rulesVersion", version);
+    wrapper.put("rules", rules);
+
+    return OBJECT_MAPPER.writeValueAsString(wrapper);
+  }
+
+  /**
+   * Merge two rule lists by pattern (key = {@code rule.getPattern()}).
+   * Incoming rules overwrite same-pattern local rules at the local position;
+   * incoming rules with new patterns are appended at the end.
+   */
+  private static List<Rule> mergeRules(List<Rule> local, List<Rule> incoming) {
+    Map<String, Rule> map = new LinkedHashMap<>();
+    for (Rule rule : local) {
+      map.put(rule.getPattern(), rule);
+    }
+    for (Rule rule : incoming) {
+      map.put(rule.getPattern(), rule);
+    }
+    return new ArrayList<>(map.values());
+  }
+
+  /**
+   * Parse a JSON string into a {@code List<Rule>}, supporting both old-format
+   * arrays ({@code [...]}) and new-format versioned wrappers ({@code {"rules":...}}).
+   */
+  private static List<Rule> parseRulesJson(String json) throws JsonProcessingException {
+    String trimmed = json.trim();
+    if (trimmed.startsWith("[")) {
+      return OBJECT_MAPPER.readValue(json, new TypeReference<>() {});
+    }
+
+    Map<String, Object> wrapper = OBJECT_MAPPER.readValue(json, new TypeReference<>() {});
+    Object raw = wrapper.get("rules");
+    if (raw instanceof List<?>) {
+      return OBJECT_MAPPER.convertValue(raw, new TypeReference<>() {});
+    }
+    return List.of();
+  }
+
+  /**
    * Explicitly broadcast the complete rule set to sibling instances.
    * <p>
-   * Useful in deployments without Redis, e.g. after an operator manually
+   * Useful for initial cluster sync, e.g. after an operator manually
    * adjusted rules on one node and wants the whole cluster to adopt them.
    */
   public void broadcastAllLocalRulesManually() {
     loadRulesFromRedis();
+
     if (cacheSyncPublisher.isPresent()) {
       try {
-        String json = OBJECT_MAPPER.writeValueAsString(rulesList);
-        cacheSyncPublisher.get().broadcastAllLocalRules(json);
+        long version = rulesVersion.get();
+        String json = serializeRules(new ArrayList<>(rulesList), version);
+        cacheSyncPublisher.get().broadcastAllLocalRules(json, version);
 
-        log.info("Rules serialized ({} bytes), broadcast not yet wired", json.length());
+        log.info("Rules broadcast manually (version={}), total: {}", version, rulesList.size());
       } catch (Exception e) {
         log.error("Failed to serialize rules", e);
       }

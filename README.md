@@ -47,6 +47,7 @@ HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 
 - **SRE adaptive rate limiting** — WorkerListener HOT-path backpressure using Google SRE formula (`K = 1 / successThreshold`, probabilistic drop when success rate degrades); independent of BBR, protects the HOT decision consumption path
 - **CPU monitoring with EMA smoothing** — Dedicated daemon thread polls process CPU load every 500ms with configurable EMA decay for stable overload detection
 - **Spring Boot auto-configuration** — Add the dependency and it works, zero boilerplate
+- **Worker TopK persistence** — Periodic snapshots of the Worker's HeavyKeeper to Redis; restart recovery in seconds instead of hours of re-accumulation
 - **Annotation-driven caching** — `@HotKey` + `@HotKeyCacheTTL` + `@Intercept` + `@Fallback` for zero-boilerplate integration; SpEL key resolution, `softExpire` toggle, TTL inheritance
 - **Transaction support** — `TransactionSupport` defers cache writes until after Spring `@Transactional` commits, ensuring cache-data consistency on the write path
 
@@ -128,6 +129,7 @@ Default local configuration works for most scenarios.
 | Cross-instance sync      | `hotkey.sync.enabled=true`                     | RabbitMQ-based cache invalidation      |
 | Worker Listener          | `hotkey.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker |
 | Worker mode              | `hotkey.worker.enabled=true`                   | Run dedicated Worker nodes             |
+| Worker TopK persistence  | `hotkey.worker.persistence.enabled=true`        | Warm-start from Redis after restart     |
 | `@HotKey` annotation     | `hotkey.annotation.enabled=true` + AspectJ     | Declarative caching                    |
 | Access reporting         | `hotkey.report.enabled=true` (default)         | Report access counts to Worker         |
 | Reporter self-protection | `hotkey.local.reporter.enabled=true` (default) | BBR backpressure on Reporter flush     |
@@ -349,6 +351,13 @@ hotkey:
 
     heartbeat:
       ping-interval-ms: 1000               # Heartbeat broadcast interval (ms)
+
+    persistence:
+      enabled: false                       # Periodic TopK snapshot to Redis (opt-in)
+      persist-interval-ms: 30000           # Snapshot interval (ms)
+      topk-count: 100                      # Keys per snapshot
+      redis-key-prefix: "hotkey:topk:worker:"  # Redis key prefix
+      ttl-days: 3                          # Redis TTL (days)
 ```
 
 </details>
@@ -600,6 +609,14 @@ Two deployment modes:
 
 In **Worker-only** mode, cache operations throw `UnsupportedOperationException`.
 
+**Worker TopK persistence (warm-start):**
+
+When `hotkey.worker.persistence.enabled=true`, the Worker periodically snapshots its current TopK list to Redis. On restart, the `TopKPersistService` loads the last snapshot and replays it into the HeavyKeeper sketch via `@PostConstruct`, cutting warm-up from hours to seconds.
+
+- Redis key: `hotkey:topk:worker:<appName>:<nodeId>` — each Worker persists independently
+- Persisted data: top `N` key-count pairs as JSON (`List<Item>`)
+- Restore: `TopK.add(Map)` re-hashes historical keys into the (empty) sketch — approximate but sufficient
+
 **J. @HotKey annotation**
 
 > Full documentation: [`docs/ANNOTATION.md`](docs/ANNOTATION.md) — covers companion annotations (`@Fallback`, `@Intercept`, `@HotKeyCacheTTL`), priority chain, SpEL condition/unless support, return type handling, and complete examples.
@@ -673,7 +690,8 @@ Worker mode failure behavior:
 | Worker crash (partial)    | Unaffected shards continue normally                                                         | Restart crashed Worker; auto-reconnect                              |
 | Report channel failure    | Reports queue/buffer (RabbitMQ)                                                             | Auto-recovery when RabbitMQ recovers                                |
 | Worker broadcast failure  | No cross-instance HOT/COOL sync; local TopK works fine                                      | Restart Worker broadcaster                                          |
-| Reporter BBR backpressure | BBR drops batch when concurrency exceeds budget (CPU≥threshold); permissive below threshold | Auto-throttles when load subsides                                   |
+| Reporter BBR backpressure | BBR drops batch when concurrency exceeds budget (CPU≥threshold); permissive below threshold | Auto-throttles when load subsides |
+| Worker TopK persistence   | Redis unavailable → persist silently skipped, `error` logged; Worker restarts cold (no warm-start) | Redis recovers → next scheduled persist succeeds |
 
 ## HotKey Facade API Reference
 

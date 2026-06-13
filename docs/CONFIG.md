@@ -160,13 +160,19 @@
 | `hotkey.worker.heavy-keeper.min-count`                                    | `10`                       | Worker-side minimum count threshold                                  |
 | **`hotkey.worker.heartbeat.*`**                                           |                            | **Heartbeat**                                                        |
 | `hotkey.worker.heartbeat.ping-interval-ms`                                | `1000`                     | Interval (ms) between structured heartbeat sends                     |
+| **`hotkey.worker.persistence.*`**                                         |                            | **TopK Persistence (warm-start)**                                     |
+| `hotkey.worker.persistence.enabled`                                       | `false`                    | Enable periodic TopK snapshot to Redis (opt-in)                       |
+| `hotkey.worker.persistence.persist-interval-ms`                           | `30000`                    | Interval (ms) between TopK snapshots                                  |
+| `hotkey.worker.persistence.topk-count`                                    | `100`                      | Number of top keys to persist per snapshot                            |
+| `hotkey.worker.persistence.redis-key-prefix`                              | `"hotkey:topk:worker:"`    | Redis key prefix; final key = prefix + appName + ":" + nodeId        |
+| `hotkey.worker.persistence.ttl-days`                                      | `3`                        | TTL (days) for persisted TopK data in Redis                           |
 
 ## Modules
 
 | Module                 | Dependency                                                    | Auto-Config                                            |
 | ---------------------- | ------------------------------------------------------------- | ------------------------------------------------------- |
 | `facade`               | none                                                          | always                                                 |
-| `hotkeydetector`       | none                                                          | always                                                 |
+| `hotkey`              | none                                                          | always                                                 |
 | `report`               | `spring-boot-starter-amqp`                                    | `@ConditionalOnBean(RabbitTemplate.class)` + property (`hotkey.report.enabled`) |
 | `annotation`           | `spring-boot-starter-aop`                                     | `@ConditionalOnClass(Aspect.class)` + `@ConditionalOnBean(HotKey.class)` + property (`hotkey.annotation.enabled`) |
 | `cache` (Redis)        | `spring-boot-starter-data-redis`                              | `@ConditionalOnClass(RedisTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` |

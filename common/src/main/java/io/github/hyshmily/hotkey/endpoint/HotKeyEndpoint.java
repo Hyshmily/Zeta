@@ -41,7 +41,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Actuator {@code /actuator/hotkeydetector} endpoint that exposes runtime diagnostics
+ * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics
  * and rule management operations.
  *
  * <p>The response includes both app-side and Worker-side TopK rankings, L1
@@ -50,7 +50,7 @@ import java.util.Map;
  * dedup, identity, and instance-level health. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
  */
-@Endpoint(id = "hotkeydetector")
+@Endpoint(id = "hotkey")
 @RequiredArgsConstructor
 public class HotKeyEndpoint {
 

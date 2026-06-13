@@ -60,4 +60,75 @@ class HotKeyDecisionTest {
   void decisionType_shouldHaveExpectedValues() {
     assertThat(DecisionType.values()).containsExactly(DecisionType.HOT, DecisionType.COOL, DecisionType.NONE);
   }
+
+  @Test
+  void hot_shouldAcceptNullKey() {
+    HotKeyDecision decision = HotKeyDecision.hot(null);
+    assertThat(decision.type()).isEqualTo(DecisionType.HOT);
+    assertThat(decision.cacheKey()).isNull();
+  }
+
+  @Test
+  void cool_shouldAcceptNullKey() {
+    HotKeyDecision decision = HotKeyDecision.cool(null);
+    assertThat(decision.type()).isEqualTo(DecisionType.COOL);
+    assertThat(decision.cacheKey()).isNull();
+  }
+
+  @Test
+  void none_shouldAcceptNullKey() {
+    HotKeyDecision decision = HotKeyDecision.none(null);
+    assertThat(decision.type()).isEqualTo(DecisionType.NONE);
+    assertThat(decision.cacheKey()).isNull();
+  }
+
+  @Test
+  void hot_shouldAcceptEmptyKey() {
+    HotKeyDecision decision = HotKeyDecision.hot("");
+    assertThat(decision.type()).isEqualTo(DecisionType.HOT);
+    assertThat(decision.cacheKey()).isEmpty();
+  }
+
+  @Test
+  void decisionWithNullCacheKey_shouldCreateCorrectly() {
+    HotKeyDecision decision = new HotKeyDecision(DecisionType.HOT, null);
+    assertThat(decision.type()).isEqualTo(DecisionType.HOT);
+    assertThat(decision.cacheKey()).isNull();
+  }
+
+  @Test
+  void decisionTypeHOT_shouldHaveCorrectName() {
+    assertThat(DecisionType.HOT.name()).isEqualTo("HOT");
+  }
+
+  @Test
+  void decisionTypeCOOL_shouldHaveCorrectName() {
+    assertThat(DecisionType.COOL.name()).isEqualTo("COOL");
+  }
+
+  @Test
+  void decisionTypeNONE_shouldHaveCorrectName() {
+    assertThat(DecisionType.NONE.name()).isEqualTo("NONE");
+  }
+
+  @Test
+  void decisionTypeHOT_shouldHaveOrdinalZero() {
+    assertThat(DecisionType.HOT.ordinal()).isZero();
+  }
+
+  @Test
+  void decisionTypeCOOL_shouldHaveOrdinalOne() {
+    assertThat(DecisionType.COOL.ordinal()).isOne();
+  }
+
+  @Test
+  void decisionTypeNONE_shouldHaveOrdinalTwo() {
+    assertThat(DecisionType.NONE.ordinal()).isEqualTo(2);
+  }
+
+  @Test
+  void toString_shouldNotBeNull() {
+    HotKeyDecision decision = HotKeyDecision.hot("testKey");
+    assertThat(decision.toString()).isNotNull();
+  }
 }

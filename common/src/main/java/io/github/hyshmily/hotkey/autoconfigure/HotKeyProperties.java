@@ -237,6 +237,12 @@ public class HotKeyProperties {
   @Valid
   private ReporterLimiter reporter = new ReporterLimiter();
 
+  /**
+   * Configuration for the BBR adaptive rate-limiter and CPU monitor.
+   * <p>
+   * Controls CPU threshold, polling interval, EMA decay factor, BBR sliding
+   * window parameters, and the cooldown period after a rate-limit drop.
+   */
   @Data
   public static class ReporterLimiter {
 
@@ -275,6 +281,13 @@ public class HotKeyProperties {
    */
   private String instanceId = "";
 
+  /**
+   * Configuration for Worker heartbeat exchange and liveliness detection.
+   * <p>
+   * Controls the exchange name, timeout intervals for heartbeat reception,
+   * PING verification, and the number of consecutive failures before
+   * graceful degradation is triggered.
+   */
   @Data
   public static class Heartbeat {
 

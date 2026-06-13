@@ -19,6 +19,7 @@ Two Maven modules under `hotkey-parent:1.1.4`:
 ```bash
 mvn clean package                    # Build all modules (JARs)
 mvn clean package -P release         # Build with GPG signing for Maven Central
+mvn test                             # Run all unit tests (531 total: 459 common + 72 worker)
 mvn javadoc:jar                      # Generate Javadoc JAR (common only)
 mvn source:jar                       # Generate source JAR (common only)
 ```
@@ -31,20 +32,25 @@ mvn source:jar                       # Generate source JAR (common only)
 
 | Layer | Package | Key Classes |
 |---|---|---|
-| `algorithm/` | Detection engine | `HotKeyDetector` (facade, `implements TopK`), `HeavyKeeper` (TopK impl), `Item`, `AddResult` |
+| `hotkeydetector/` | Detection engine | `HotKeyDetector` (facade, `implements TopK`), `HeavyKeeper` (TopK impl), `Item`, `AddResult` |
+| `hotkeydetector/doublebuffer/` | Buffered counting | `BufferedCounter` (double-buffer flush to heap) |
 | `cache/` | Cache orchestration | `HotKeyCache`, `SingleFlight`, `CacheExpireManager`, `TransactionSupport`, `CacheKeysPolicy` |
 | `sync/` | Cross-instance sync | `CacheSyncPublisher`, `CacheSyncListener`, `SyncMessage`, `VersionGuard`, `VersionController` |
-| `sync/` + `broadcast` | Worker decision listener | `WorkerListener`, `WorkerMessage`, `WorkerListenerProperties` |
-| `reporting/` | App→Worker reporting | `HotKeyReporter`, `ReportPublisher`, `ReportMessage` |
+| `sync/` (broadcast) | Worker decision listener | `WorkerListener`, `WorkerMessage`, `WorkerListenerProperties` |
+| `reporting/` | App→Worker reporting | `HotKeyReporter`, `ReportPublisher`, `ReportMessage`, `BbrRateLimiter` |
 | `model/` | Data types | `CacheEntry` (with `dataVersion` + `isVersionDegraded` + `decisionVersion`), `KeyState`, `HotKeyDecision` |
 | `detection/` | Worker state machine | `HotKeyStateMachine` |
 | `sharding/` | Consistent hash ring | `ConsistentHashRing`, `RingManager` |
 | `annotation/` | `@HotKey` + companions | `HotKeyAspect`, `@HotKeyCacheTTL`, `@Intercept`, `@Fallback` |
-| `autoconfigure/` | Spring Boot auto-config | 8 auto-config classes + `WorkerAutoConfiguration` |
+| `autoconfigure/` | Spring Boot auto-config | 8 auto-config classes |
 | `endpoint/` | Actuator endpoints | `HotKeyEndpoint`, `RingEndpoint`, `StateMachineEndpoint` |
 | `constants/` | Shared constants | `HotKeyConstants` (AMQP headers, thread prefixes, routing keys) |
+| `rule/` | Rule management | `Rule`, `RuleMatcher` |
+| `logging/` | Logging abstraction | `HotKeyLogger`, `DefaultLogger` |
+| `exception/` | Custom exceptions | `HotKeyBlockedException` |
+| `util/` | Utilities | `SystemLoadMonitor`, `SreRateLimiter`, `RollingWindow`, `DelayUtil`, `InstanceIdGenerator` |
 
-Worker-only components (`worker/` module): `SlidingWindowDetector`, `TopKValidator`, `WorkerBroadcaster`, `ReportConsumer`, `WorkerConfigNegotiator`, `GlobalQpsEstimator`, `ThresholdLearner`, `WorkerProperties`.
+Worker-only components (`worker/` module): `SlidingWindowDetector`, `TopKValidator`, `WorkerBroadcaster`, `ReportConsumer`, `WorkerConfigNegotiator`, `GlobalQpsEstimator`, `ThresholdLearner`, `WorkerProperties`, `TopKPersistService`, `VerifyConsumer`, `WorkerHeartbeatProducer`.
 
 ### Public API
 
@@ -143,6 +149,9 @@ See `CONTEXT.md` for canonical definitions of **Local-Hot**, **Worker-Hot**, **W
 | `0007` | **No Publisher Confirms** — fire-and-forget broadcast; lost messages tolerated by next cycle. |
 | `0008` | **Dual Version Space** — `dataVersion` (may degrade) for sync, `decisionVersion` (never degrades) for HOT/COOL. Orthogonal. |
 | `0009` | **Graceful Degradation** — when all Workers dead, local TopK assumes authority; self-heals on Worker recovery. |
+| `0010` | **Epoch-Driven Heartbeat** — dual-queue isolation for control vs report traffic, epoch-based identity. |
+| `0011` | **BBR + CPU Fusion for Reporter Self-Protection** — CPU-based BBR rate limiting for reporter backpressure. |
+| `0012` | **Versioned Rule Merge** — rule list shipped with version metadata for cross-instance consistency. |
 
 ## Design Principles
 

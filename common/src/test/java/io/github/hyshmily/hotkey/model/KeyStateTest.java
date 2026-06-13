@@ -31,4 +31,77 @@ class KeyStateTest {
   void shouldHaveExpectedEnumValues() {
     assertThat(KeyState.values()).containsExactly(KeyState.HOT, KeyState.COOL, KeyState.PRE_COOL, KeyState.NORMAL);
   }
+
+  @Test
+  void hot_shouldHaveCorrectName() {
+    assertThat(KeyState.HOT.name()).isEqualTo("HOT");
+  }
+
+  @Test
+  void cool_shouldHaveCorrectName() {
+    assertThat(KeyState.COOL.name()).isEqualTo("COOL");
+  }
+
+  @Test
+  void preCool_shouldHaveCorrectName() {
+    assertThat(KeyState.PRE_COOL.name()).isEqualTo("PRE_COOL");
+  }
+
+  @Test
+  void normal_shouldHaveCorrectName() {
+    assertThat(KeyState.NORMAL.name()).isEqualTo("NORMAL");
+  }
+
+  @Test
+  void hot_shouldHaveOrdinalZero() {
+    assertThat(KeyState.HOT.ordinal()).isZero();
+  }
+
+  @Test
+  void cool_shouldHaveOrdinalOne() {
+    assertThat(KeyState.COOL.ordinal()).isOne();
+  }
+
+  @Test
+  void preCool_shouldHaveOrdinalTwo() {
+    assertThat(KeyState.PRE_COOL.ordinal()).isEqualTo(2);
+  }
+
+  @Test
+  void normal_shouldHaveOrdinalThree() {
+    assertThat(KeyState.NORMAL.ordinal()).isEqualTo(3);
+  }
+
+  @Test
+  void valueOf_shouldResolveHOT() {
+    assertThat(KeyState.valueOf("HOT")).isEqualTo(KeyState.HOT);
+  }
+
+  @Test
+  void valueOf_shouldResolveCOOL() {
+    assertThat(KeyState.valueOf("COOL")).isEqualTo(KeyState.COOL);
+  }
+
+  @Test
+  void valueOf_shouldResolvePRE_COOL() {
+    assertThat(KeyState.valueOf("PRE_COOL")).isEqualTo(KeyState.PRE_COOL);
+  }
+
+  @Test
+  void valueOf_shouldResolveNORMAL() {
+    assertThat(KeyState.valueOf("NORMAL")).isEqualTo(KeyState.NORMAL);
+  }
+
+  @Test
+  void switch_shouldCoverAllCases() {
+    for (KeyState state : KeyState.values()) {
+      boolean covered = switch (state) {
+        case HOT    -> true;
+        case COOL   -> true;
+        case PRE_COOL -> true;
+        case NORMAL -> true;
+      };
+      assertThat(covered).isTrue();
+    }
+  }
 }

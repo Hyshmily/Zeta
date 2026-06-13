@@ -160,13 +160,19 @@
 | `hotkey.worker.heavy-keeper.min-count`                                    | `10`                        | Worker 端最低计数阈值                                      |
 | **`hotkey.worker.heartbeat.*`**                                           |                             | **心跳**                                                    |
 | `hotkey.worker.heartbeat.ping-interval-ms`                                | `1000`                      | 结构化心跳发送间隔（毫秒）                                  |
+| **`hotkey.worker.persistence.*`**                                         |                             | **TopK 持久化（热启动）**                                    |
+| `hotkey.worker.persistence.enabled`                                       | `false`                     | 启用周期性 TopK 快照到 Redis（需手动开启）                    |
+| `hotkey.worker.persistence.persist-interval-ms`                           | `30000`                     | TopK 快照间隔（毫秒）                                        |
+| `hotkey.worker.persistence.topk-count`                                    | `100`                       | 每次快照保存的 top key 数量                                  |
+| `hotkey.worker.persistence.redis-key-prefix`                              | `"hotkey:topk:worker:"`    | Redis key 前缀；最终 key = prefix + appName + ":" + nodeId |
+| `hotkey.worker.persistence.ttl-days`                                      | `3`                         | Redis 中 TopK 数据的过期时间（天）                            |
 
 ## 模块说明
 
 | 模块                    | 依赖                                                           | 自动配置条件                                            |
 | ----------------------- | -------------------------------------------------------------- | ------------------------------------------------------- |
 | `facade`                | 无                                                             | 始终启用                                                |
-| `hotkeydetector`        | 无                                                             | 始终启用                                                |
+| `hotkey`               | 无                                                             | 始终启用                                                |
 | `report`                | `spring-boot-starter-amqp`                                     | `@ConditionalOnBean(RabbitTemplate.class)` + 属性（`hotkey.report.enabled`） |
 | `annotation`            | `spring-boot-starter-aop`                                      | `@ConditionalOnClass(Aspect.class)` + `@ConditionalOnBean(HotKey.class)` + 属性（`hotkey.annotation.enabled`） |
 | `cache`（Redis）        | `spring-boot-starter-data-redis`                               | `@ConditionalOnClass(RedisTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)` |

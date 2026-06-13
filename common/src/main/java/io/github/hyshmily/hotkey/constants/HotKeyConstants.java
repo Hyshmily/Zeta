@@ -60,14 +60,14 @@ public final class HotKeyConstants {
   public static final String AMQP_HEADER_VERIFY_PONG = "PONG";
 
 
-  /** Thread name prefix for general hotkeydetector operations. */
-  public static final String THREAD_PREFIX_HOTKEY = "hotkeydetector-";
+  /** Thread name prefix for general hotkey operations. */
+  public static final String THREAD_PREFIX_HOTKEY = "hotkey-";
   /** Thread name prefix for cross-instance sync tasks. */
-  public static final String THREAD_PREFIX_SYNC = "hotkeydetector-sync";
+  public static final String THREAD_PREFIX_SYNC = "hotkey-sync";
   /** Thread name prefix for worker-mode tasks. */
-  public static final String THREAD_PREFIX_WORKER = "hotkeydetector-worker";
+  public static final String THREAD_PREFIX_WORKER = "hotkey-worker";
   /** Thread name prefix for report submission tasks. */
-  public static final String THREAD_PREFIX_REPORT = "hotkeydetector-report";
+  public static final String THREAD_PREFIX_REPORT = "hotkey-report";
 
   /** Routing key prefix for broadcast decisions (HOT/COOL) sent from worker to apps. */
   public static final String ROUTING_KEY_BROADCAST = "broadcast.";
@@ -82,7 +82,7 @@ public final class HotKeyConstants {
   public static final String SOURCE_TOPK_PRE_WARM = "topk_pre_warm";
 
   /** Redis key prefix for version tracking entries. */
-  public static final String REDIS_VERSION_KEY_PREFIX = "hotkeydetector:ver:";
+  public static final String REDIS_VERSION_KEY_PREFIX = "hotkey:ver:";
 
   /** Default initial version value when no prior version exists. */
   public static final long VERSION_DEFAULT = 0L;
@@ -92,6 +92,9 @@ public final class HotKeyConstants {
   /** Warning message logged when sync publisher is not available. */
   public static final String NO_SYNC_PUBLISHER = "No sync publisher found, please enable hotkey.sync";
 
+  /** AMQP message header key for the rule set version (rulesVersion). */
+  public static final String AMQP_HEADER_RULES_VERSION = "rulesVersion";
+
   /** Redis key for the dynamic rules hash (blacklist / whitelist entries). */
-  public static final String REDIS_KEY_RULES = "hotkeydetector:rules";
+  public static final String REDIS_KEY_RULES = "hotkey:rules";
 }

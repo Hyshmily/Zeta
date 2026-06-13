@@ -39,10 +39,10 @@ class HotKeyConstantsTest {
    */
   @Test
   void shouldHaveExpectedThreadPrefixes() {
-    assertThat(HotKeyConstants.THREAD_PREFIX_HOTKEY).isEqualTo("hotkeydetector-");
-    assertThat(HotKeyConstants.THREAD_PREFIX_SYNC).isEqualTo("hotkeydetector-sync");
-    assertThat(HotKeyConstants.THREAD_PREFIX_WORKER).isEqualTo("hotkeydetector-worker");
-    assertThat(HotKeyConstants.THREAD_PREFIX_REPORT).isEqualTo("hotkeydetector-report");
+    assertThat(HotKeyConstants.THREAD_PREFIX_HOTKEY).isEqualTo("hotkey-");
+    assertThat(HotKeyConstants.THREAD_PREFIX_SYNC).isEqualTo("hotkey-sync");
+    assertThat(HotKeyConstants.THREAD_PREFIX_WORKER).isEqualTo("hotkey-worker");
+    assertThat(HotKeyConstants.THREAD_PREFIX_REPORT).isEqualTo("hotkey-report");
   }
 
   /**
@@ -76,7 +76,7 @@ class HotKeyConstantsTest {
    */
   @Test
   void shouldHaveExpectedRedisKeyPrefix() {
-    assertThat(HotKeyConstants.REDIS_VERSION_KEY_PREFIX).isEqualTo("hotkeydetector:ver:");
+    assertThat(HotKeyConstants.REDIS_VERSION_KEY_PREFIX).isEqualTo("hotkey:ver:");
   }
 
   /**

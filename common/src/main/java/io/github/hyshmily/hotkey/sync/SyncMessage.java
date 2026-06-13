@@ -31,8 +31,9 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
  * @param type             the operation type ({@link #TYPE_INVALIDATE} or {@link #TYPE_REFRESH})
  * @param version          the {@code dataVersion} at which the operation occurred
  * @param isVersionDegraded whether the dataVersion was obtained in degraded mode (node-local counter fallback)
+ * @param rulesVersion     the rulesVersion for RULES_SYNC messages; {@link HotKeyConstants#VERSION_DEFAULT} for other types
  */
-public record SyncMessage(String cacheKey, String type, long version, boolean isVersionDegraded) {
+public record SyncMessage(String cacheKey, String type, long version, boolean isVersionDegraded, long rulesVersion) {
   /** Invalidates a single cache key across all peer instances. */
   public static final String TYPE_INVALIDATE = "INVALIDATE";
 
@@ -84,7 +85,9 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
       msg.getMessageProperties().getHeader(AMQP_HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
     boolean isVersionDegraded =
       msg.getMessageProperties().getHeader(AMQP_HEADER_IS_VERSION_DEGRADED) instanceof Boolean b ? b : false;
+    long rulesVersion =
+      msg.getMessageProperties().getHeader(AMQP_HEADER_RULES_VERSION) instanceof Number n2 ? n2.longValue() : VERSION_DEFAULT;
 
-    return new SyncMessage(cacheKey, type, version, isVersionDegraded);
+    return new SyncMessage(cacheKey, type, version, isVersionDegraded, rulesVersion);
   }
 }

@@ -128,19 +128,41 @@ public class BufferedCounter implements InitializingBean, Destroyable {
         private final ConcurrentHashMap<String, LongAdder> counters = new ConcurrentHashMap<>();
         private final LongAdder totalSize = new LongAdder();
 
+        /**
+         * Record one or more accesses for the given key in this buffer.
+         *
+         * @param key   the accessed key
+         * @param delta the number of accesses to record
+         */
         void add(String key, long delta) {
             counters.computeIfAbsent(key, k -> new LongAdder()).add(delta);
             totalSize.add(delta);
         }
 
+        /**
+         * Return the number of distinct keys held in this buffer.
+         *
+         * @return the number of distinct keys
+         */
         int size() {
             return counters.size();
         }
 
+        /**
+         * Return whether this buffer holds no entries.
+         *
+         * @return {@code true} if the buffer is empty
+         */
         boolean isEmpty() {
             return counters.isEmpty();
         }
 
+        /**
+         * Atomically drain all counters and return a snapshot of the accumulated
+         * counts. After this call the buffer is empty and ready for reuse.
+         *
+         * @return a map of keys to their accumulated counts, never {@code null}
+         */
         Map<String, Long> Cohesion() {
 
             Map<String, LongAdder> oldCounters = counters;

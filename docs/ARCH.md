@@ -267,18 +267,20 @@ When `hotkey.sync.enabled=true`, all write operations (`putThrough`, `putBeforeI
 
 <!-- Source: model/CacheEntry.java, VersionGuard.java, HotKeyStateMachine.java -->
 
-CacheEntry maintains **two independent version spaces** with different semantics:
+CacheEntry maintains **two independent version spaces** (`dataVersion`, `decisionVersion`). A third version (`rulesVersion`) lives on `RuleMatcher` and is orthogonal to both:
 
 | Version Field     | Source                                                                    | Degraded possible? | Used By                                                |
 | ----------------- | ------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------ |
 | `dataVersion`     | `HotKeyCache.nextVersion()` — Redis INCR or node-local fallback           | Yes                | `VersionGuard.shouldSkipForSync()` (CacheSyncListener) |
 | `decisionVersion` | `WorkerBroadcaster.decisionVersionCounter` — `AtomicLong`, never degraded | No                 | `VersionGuard.shouldSkipForWorker()` (WorkerListener)  |
+| `rulesVersion`    | `RuleMatcher.rulesVersion` — `AtomicLong`, rule-local                     | No                 | Lua compare-and-set + AMQP header (rule sync)          |
 
 **Rules:**
 
 - `dataVersion` tracks the actual data mutation version for cross-instance cache sync. It can degrade to a node-local counter if Redis is unavailable.
 - `decisionVersion` tracks Worker HOT/COOL decision ordering. It is always a clean `AtomicLong` on the Worker — never degraded.
-- These versions are **orthogonal**: a data mutation does not affect `decisionVersion`, and a Worker decision does not affect `dataVersion`.
+- `rulesVersion` tracks rule set change ordering across App instances. It is always a clean `AtomicLong` — never degraded.
+- These versions are **mutually orthogonal**: a data mutation does not affect `decisionVersion`, a Worker decision does not affect `dataVersion`, and a rule change does not affect either.
 - `putThrough` preserves existing `decisionVersion` from the prior CacheEntry (new entry inherits 0L if none existed).
 - `loadAndCache` sets `decisionVersion=0L` (no Worker decision on first load).
 - `CacheSyncListener` preserves `decisionVersion` from the existing entry during cross-instance sync refreshes.
@@ -598,27 +600,32 @@ HotKey.returnWorkerTotalDataStreams()
 HotKey.addBlacklist(keyPattern)
 └─ HotKeyCache.addBlacklist(keyPattern)
 └─ ruleMatcher.addRule(Rule.of(keyPattern, BLOCK))
-├─ [if Redis] → persist to Redis
-└─ [if syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [if Redis] → Lua compare-and-set by version (both/and)
+└─ [if syncPublisher] → broadcastAllLocalRules() with rulesVersion header
 [auto-detects pattern type: exact, prefix (* suffix), wildcard, regex]
+[merge-on-receive: incoming overwrites same pattern, local preserves unique patterns]
 
 HotKey.removeBlacklist(keyPattern)
 └─ HotKeyCache.unBlacklist(keyPattern)
 └─ ruleMatcher.removeRule(keyPattern, BLOCK)
-├─ [if Redis] → persist to Redis
-└─ [if syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [if Redis] → Lua compare-and-set by version (both/and)
+└─ [if syncPublisher] → broadcastAllLocalRules() with rulesVersion header
 
 HotKey.addWhitelist(keyPattern)
 └─ HotKeyCache.addWhitelist(keyPattern)
 └─ ruleMatcher.addRule(Rule.of(keyPattern, ALLOW_NO_REPORT))
-├─ [if Redis] → persist to Redis
-└─ [if syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [if Redis] → Lua compare-and-set by version (both/and)
+└─ [if syncPublisher] → broadcastAllLocalRules() with rulesVersion header
 
 HotKey.removeWhitelist(keyPattern)
 └─ HotKeyCache.unWhitelist(keyPattern)
 └─ ruleMatcher.removeRule(keyPattern, ALLOW_NO_REPORT)
-├─ [if Redis] → persist to Redis
-└─ [if syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [if Redis] → Lua compare-and-set by version (both/and)
+└─ [if syncPublisher] → broadcastAllLocalRules() with rulesVersion header
 
 HotKey.evaluateRule(cacheKey)
 └─ ruleMatcher.evaluateRule(cacheKey)
@@ -633,16 +640,17 @@ HotKey.getAllRules()
 HotKey.clearAllRules()
 └─ HotKeyCache.clearAllRules()
 └─ ruleMatcher.clearAllRules()
-├─ [if Redis] → delete from Redis
-└─ [if syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [if Redis] → Lua compare-and-set by version (both/and)
+└─ [if syncPublisher] → broadcastAllLocalRules() with rulesVersion header
 [removes both blacklist and whitelist rules]
 
 HotKey.broadcastAllLocalRulesManually()
 └─ HotKeyCache.broadcastAllLocalRulesManually()
 └─ ruleMatcher.exportRulesJson()
-└─ CacheSyncPublisher.broadcastAllLocalRules(json)
-└─ single AMQP message, body = JSON rule array
-header: type=RULES_SYNC
+└─ CacheSyncPublisher.broadcastAllLocalRules(json, rulesVersion)
+└─ single AMQP message, body = JSON rule wrapper
+header: type=RULES_SYNC, rulesVersion=<version>
 [manual trigger for initial cluster sync]
 
 ```
@@ -1061,7 +1069,7 @@ hotkey:
 
 ### HeavyKeeper Decay Pipeline
 
-<!-- Source: hotkeydetector/heavykepper/HeavyKeeper.java, HotKeySchedulingConfiguration.java -->
+<!-- Source: hotkey/heavykepper/HeavyKeeper.java, HotKeySchedulingConfiguration.java -->
 
 ```
 ┌────────────┐   add(key, 1)    ┌─────────────────────────────────────────────┐

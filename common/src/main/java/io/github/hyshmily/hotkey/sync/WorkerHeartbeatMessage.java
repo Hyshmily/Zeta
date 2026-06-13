@@ -45,6 +45,7 @@ public record WorkerHeartbeatMessage(
     int configGraceCount,
     long configTimestamp) {
 
+  /** Message type discriminator for heartbeat messages ({@value}). */
   public static final String TYPE = "WORKER_HB";
 
   /**

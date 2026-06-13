@@ -201,12 +201,12 @@ public class CacheSyncListener {
   }
 
   /**
-   * Replace the entire rule set with the incoming JSON payload.
+   * Merge the incoming rule set with the local rules, guarded by rulesVersion.
    *
-   * @param sm the sync message containing the ruleset JSON
+   * @param sm the sync message containing the ruleset JSON and rulesVersion
    */
   private void handleRulesSync(SyncMessage sm) {
-    ruleMatcher.syncRules(sm.cacheKey());
+    ruleMatcher.syncRules(sm.cacheKey(), sm.rulesVersion());
   }
 
   /**

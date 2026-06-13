@@ -259,18 +259,20 @@ invalidateAll(cacheKeys)
 
 <!-- Source: model/CacheEntry.java, VersionGuard.java, HotKeyStateMachine.java -->
 
-CacheEntry 维护**两个独立的版本空间**：
+CacheEntry 维护**两个独立版本空间**（`dataVersion`、`decisionVersion`）。第三个版本 `rulesVersion` 位于 `RuleMatcher`，与两者正交：
 
-| 版本字段          | 来源                                                                | 可能退化？ | 使用方                                                 |
-| ----------------- | ------------------------------------------------------------------- | ---------- | ------------------------------------------------------ |
-| `dataVersion`     | `HotKeyCache.nextVersion()` — Redis INCR 或节点本地回退             | 是         | `VersionGuard.shouldSkipForSync()` (CacheSyncListener) |
-| `decisionVersion` | `WorkerBroadcaster.decisionVersionCounter` — `AtomicLong`，永不退化 | 否         | `VersionGuard.shouldSkipForWorker()` (WorkerListener)  |
+| 版本字段          | 来源                                                              | 可能退化？ | 使用方                                                       |
+| ----------------- | ----------------------------------------------------------------- | ---------- | ------------------------------------------------------------ |
+| `dataVersion`     | `HotKeyCache.nextVersion()` — Redis INCR 或节点本地回退           | 是         | `VersionGuard.shouldSkipForSync()` (CacheSyncListener)       |
+| `decisionVersion` | `WorkerBroadcaster.decisionVersionCounter` — `AtomicLong`，永不退化 | 否         | `VersionGuard.shouldSkipForWorker()` (WorkerListener)        |
+| `rulesVersion`    | `RuleMatcher.rulesVersion` — `AtomicLong`，规则本地                | 否         | Lua compare-and-set + AMQP 消息头（规则同步）                |
 
 **规则：**
 
 - `dataVersion` 跟踪实际数据变更版本，用于跨实例缓存同步。Redis 不可用时退化到节点本地计数器。
 - `decisionVersion` 跟踪 Worker HOT/COOL 决策顺序。始终是 Worker 上干净的 `AtomicLong`——永不退化。
-- 两个版本**正交**：数据变更不影响 `decisionVersion`，Worker 决策不影响 `dataVersion`。
+- `rulesVersion` 跟踪 App 实例间的规则变更顺序。始终是干净的 `AtomicLong` —— 永不退化。
+- 三个版本**相互正交**：数据变更不影响 `decisionVersion`，Worker 决策不影响 `dataVersion`，规则变更不影响两者。
 - `putThrough` 保留现有 CacheEntry 的 `decisionVersion`（无现有 entry 时设为 0L）。
 - `loadAndCache` 设置 `decisionVersion=0L`（首次加载尚无 Worker 决策）。
 - `CacheSyncListener` 在跨实例同步刷新期间保留现有条目的 `decisionVersion`。
@@ -595,27 +597,32 @@ HotKey.returnWorkerTotalDataStreams()
 HotKey.addBlacklist(keyPattern)
 └─ HotKeyCache.addBlacklist(keyPattern)
 └─ ruleMatcher.addRule(Rule.of(keyPattern, BLOCK))
-├─ [有 Redis] → 持久化到 Redis
-└─ [有 syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [有 Redis] → Lua compare-and-set 按版本写（both/and）
+└─ [有 syncPublisher] → broadcastAllLocalRules() 携带 rulesVersion
 [自动检测模式类型: 精确、前缀、通配符、正则]
+[收到时合并：同 pattern 用 incoming 覆盖，本地独有规则保留]
 
 HotKey.removeBlacklist(keyPattern)
 └─ HotKeyCache.unBlacklist(keyPattern)
 └─ ruleMatcher.removeRule(keyPattern, BLOCK)
-├─ [有 Redis] → 持久化到 Redis
-└─ [有 syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [有 Redis] → Lua compare-and-set 按版本写（both/and）
+└─ [有 syncPublisher] → broadcastAllLocalRules() 携带 rulesVersion
 
 HotKey.addWhitelist(keyPattern)
 └─ HotKeyCache.addWhitelist(keyPattern)
 └─ ruleMatcher.addRule(Rule.of(keyPattern, ALLOW_NO_REPORT))
-├─ [有 Redis] → 持久化到 Redis
-└─ [有 syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [有 Redis] → Lua compare-and-set 按版本写（both/and）
+└─ [有 syncPublisher] → broadcastAllLocalRules() 携带 rulesVersion
 
 HotKey.removeWhitelist(keyPattern)
 └─ HotKeyCache.unWhitelist(keyPattern)
 └─ ruleMatcher.removeRule(keyPattern, ALLOW_NO_REPORT)
-├─ [有 Redis] → 持久化到 Redis
-└─ [有 syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [有 Redis] → Lua compare-and-set 按版本写（both/and）
+└─ [有 syncPublisher] → broadcastAllLocalRules() 携带 rulesVersion
 
 HotKey.evaluateRule(cacheKey)
 └─ ruleMatcher.evaluateRule(cacheKey)
@@ -630,16 +637,17 @@ HotKey.getAllRules()
 HotKey.clearAllRules()
 └─ HotKeyCache.clearAllRules()
 └─ ruleMatcher.clearAllRules()
-├─ [有 Redis] → 删除 Redis 中规则
-└─ [有 syncPublisher] → broadcastAllLocalRules()
+├─ rulesVersion.incrementAndGet()
+├─ [有 Redis] → Lua compare-and-set 按版本写（both/and）
+└─ [有 syncPublisher] → broadcastAllLocalRules() 携带 rulesVersion
 [移除黑名单和白名单规则]
 
 HotKey.broadcastAllLocalRulesManually()
 └─ HotKeyCache.broadcastAllLocalRulesManually()
 └─ ruleMatcher.exportRulesJson()
-└─ CacheSyncPublisher.broadcastAllLocalRules(json)
-└─ 单条 AMQP 消息，body = JSON 规则数组
-header: type=RULES_SYNC
+└─ CacheSyncPublisher.broadcastAllLocalRules(json, rulesVersion)
+└─ 单条 AMQP 消息，body = JSON 规则包装对象
+header: type=RULES_SYNC, rulesVersion=<版本号>
 [手动触发初始化集群同步]
 
 ```
@@ -1058,7 +1066,7 @@ hotkey:
 
 ### HeavyKeeper 衰减管道
 
-<!-- Source: hotkeydetector/heavykepper/HeavyKeeper.java, HotKeySchedulingConfiguration.java -->
+<!-- Source: hotkey/heavykepper/HeavyKeeper.java, HotKeySchedulingConfiguration.java -->
 
 ```
 ┌────────────┐   add(key, 1)   ┌─────────────────────────────────────────────┐

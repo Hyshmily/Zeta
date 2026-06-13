@@ -24,7 +24,7 @@ import org.springframework.validation.annotation.Validated;
 /**
  * Configuration for the standalone HotKey Worker server.
  *
- * <p>Prefix: {@code hotkeydetector.worker}.
+ * <p>Prefix: {@code hotkey.worker}.
  *
  * <p>Groups cover routing, AMQP exchange names, sliding-window parameters,
  * threshold settings, state-machine timings, dynamic threshold adaptation,
@@ -117,6 +117,26 @@ public class WorkerProperties {
     private int pingIntervalMs = 1_000;
   }
 
+  /** TopK persistence to Redis for warm-start after Worker restart. */
+  @Data
+  public static class Persistence {
+
+    /** Whether persistence is enabled. */
+    private boolean enabled = false;
+
+    /** Interval (ms) between periodic TopK snapshots. */
+    private long persistIntervalMs = 30_000;
+
+    /** Number of top keys to persist per snapshot. */
+    private int topKCount = 100;
+
+    /** Redis key prefix; final key = prefix + appName + ":" + nodeId. */
+    private String redisKeyPrefix = "hotkey:topk:worker:";
+
+    /** TTL (days) for persisted TopK data in Redis. */
+    private int ttlDays = 3;
+  }
+
   private boolean enabled = false;
 
   @Valid
@@ -145,6 +165,9 @@ public class WorkerProperties {
 
   @Valid
   private Heartbeat heartbeat = new Heartbeat();
+
+  @Valid
+  private Persistence persistence = new Persistence();
 
   /**
    * Number of sliding-window slices that fit within the CONFIRM duration.

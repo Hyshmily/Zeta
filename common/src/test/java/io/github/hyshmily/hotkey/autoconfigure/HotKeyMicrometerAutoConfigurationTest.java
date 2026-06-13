@@ -97,7 +97,7 @@ class HotKeyMicrometerAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the custom MeterBinder registers all hotkeydetector-specific metrics when all optional dependencies are present.
+   * Verifies that the custom MeterBinder registers all hotkey-specific metrics when all optional dependencies are present.
    */
   @Test
   void customMeterBinder_registersAllMetrics_whenAllDepsPresent() {
@@ -138,23 +138,23 @@ class HotKeyMicrometerAutoConfigurationTest {
     );
     binder.bindTo(registry);
 
-    assertGaugeValue("hotkeydetector.topk.size", "type", "local", 5.0);
-    assertGaugeValue("hotkeydetector.topk.total", "type", "local", 100.0);
-    assertGaugeExists("hotkeydetector.expelled.queue.size");
-    assertGaugeExists("hotkeydetector.expelled.queue.remaining");
-    assertGaugeValue("hotkeydetector.singleflight.inflight", 2.0);
-    assertGaugeValue("hotkeydetector.reporter.queue.depth", 10.0);
-    assertGaugeValue("hotkeydetector.reporter.queue.dropped.total", 5.0);
-    assertGaugeValue("hotkeydetector.reporter.queue.expired.total", 3.0);
-    assertGaugeValue("hotkeydetector.reporter.pending.keys", 200.0);
-    assertGaugeValue("hotkeydetector.expire.refresh.available", 8.0);
-    assertGaugeValue("hotkeydetector.version.degraded.total", 7.0);
-    assertGaugeValue("hotkeydetector.sync.dedup.size", 15.0);
-    assertGaugeValue("hotkeydetector.topk.size", "type", "worker", 3.0);
-    assertGaugeValue("hotkeydetector.topk.total", "type", "worker", 500.0);
-    assertGaugeValue("hotkeydetector.worker.alive", 1.0);
-    assertGaugeValue("hotkeydetector.worker.tracked.keys", 12.0);
-    assertGaugeValue("hotkeydetector.cpu.load", 0.5);
+    assertGaugeValue("hotkey.topk.size", "type", "local", 5.0);
+    assertGaugeValue("hotkey.topk.total", "type", "local", 100.0);
+    assertGaugeExists("hotkey.expelled.queue.size");
+    assertGaugeExists("hotkey.expelled.queue.remaining");
+    assertGaugeValue("hotkey.singleflight.inflight", 2.0);
+    assertGaugeValue("hotkey.reporter.queue.depth", 10.0);
+    assertGaugeValue("hotkey.reporter.queue.dropped.total", 5.0);
+    assertGaugeValue("hotkey.reporter.queue.expired.total", 3.0);
+    assertGaugeValue("hotkey.reporter.pending.keys", 200.0);
+    assertGaugeValue("hotkey.expire.refresh.available", 8.0);
+    assertGaugeValue("hotkey.version.degraded.total", 7.0);
+    assertGaugeValue("hotkey.sync.dedup.size", 15.0);
+    assertGaugeValue("hotkey.topk.size", "type", "worker", 3.0);
+    assertGaugeValue("hotkey.topk.total", "type", "worker", 500.0);
+    assertGaugeValue("hotkey.worker.alive", 1.0);
+    assertGaugeValue("hotkey.worker.tracked.keys", 12.0);
+    assertGaugeValue("hotkey.cpu.load", 0.5);
   }
 
   /**
@@ -201,7 +201,7 @@ class HotKeyMicrometerAutoConfigurationTest {
     );
     binder.bindTo(registry);
 
-    assertThat(registry.find("hotkeydetector.expire.refresh.available").gauge()).isNull();
+    assertThat(registry.find("hotkey.expire.refresh.available").gauge()).isNull();
     assertThat(registry.getMeters()).isEmpty();
   }
 
@@ -228,17 +228,17 @@ class HotKeyMicrometerAutoConfigurationTest {
     );
     binder.bindTo(registry);
 
-    assertGaugeValue("hotkeydetector.topk.size", "type", "local", 3.0);
-    assertGaugeValue("hotkeydetector.topk.total", "type", "local", 50.0);
-    assertGaugeExists("hotkeydetector.expelled.queue.size");
-    assertGaugeExists("hotkeydetector.expelled.queue.remaining");
-    assertGaugeValue("hotkeydetector.singleflight.inflight", 1.0);
+    assertGaugeValue("hotkey.topk.size", "type", "local", 3.0);
+    assertGaugeValue("hotkey.topk.total", "type", "local", 50.0);
+    assertGaugeExists("hotkey.expelled.queue.size");
+    assertGaugeExists("hotkey.expelled.queue.remaining");
+    assertGaugeValue("hotkey.singleflight.inflight", 1.0);
 
-    assertThat(registry.find("hotkeydetector.topk.size").tags("type", "worker").gauge()).isNull();
-    assertThat(registry.find("hotkeydetector.reporter.queue.depth").gauge()).isNull();
-    assertThat(registry.find("hotkeydetector.worker.alive").gauge()).isNull();
-    assertThat(registry.find("hotkeydetector.worker.tracked.keys").gauge()).isNull();
-    assertThat(registry.find("hotkeydetector.sync.dedup.size").gauge()).isNull();
+    assertThat(registry.find("hotkey.topk.size").tags("type", "worker").gauge()).isNull();
+    assertThat(registry.find("hotkey.reporter.queue.depth").gauge()).isNull();
+    assertThat(registry.find("hotkey.worker.alive").gauge()).isNull();
+    assertThat(registry.find("hotkey.worker.tracked.keys").gauge()).isNull();
+    assertThat(registry.find("hotkey.sync.dedup.size").gauge()).isNull();
   }
 
   @SuppressWarnings("unchecked")

@@ -129,7 +129,7 @@ class CacheSyncListenerTest {
   void handleSyncMessage_withRulesSync_shouldCallRuleMatcher() throws IOException {
     Message msg = syncMessage("rule-payload", SyncMessage.TYPE_RULES_SYNC, 0L, false);
     listener.handleSyncMessage(channel, msg);
-    verify(ruleMatcher).syncRules("rule-payload");
+    verify(ruleMatcher).syncRules("rule-payload", 0L);
     verify(channel).basicAck(anyLong(), eq(false));
   }
 

@@ -15,10 +15,13 @@
  */
 package io.github.hyshmily.hotkey;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.rule.Rule;
+import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -31,9 +34,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-/**
- * Tests for the {@link HotKey} facade verifying delegation to HotKeyCache, TopK, and worker mode.
- */
 class HotKeyTest {
 
   private HotKeyCache hotKeyCache;
@@ -50,9 +50,6 @@ class HotKeyTest {
     hotKey = new HotKey(hotKeyCache, topK, workerTopK);
   }
 
-  /**
-   * Verifies that isLocalHotKey delegates to HotKeyCache and returns the expected result.
-   */
   @Test
   void isLocalHotKey_shouldDelegateToCache() {
     when(hotKeyCache.isLocalHotKey("key1")).thenReturn(true);
@@ -60,9 +57,6 @@ class HotKeyTest {
     verify(hotKeyCache).isLocalHotKey("key1");
   }
 
-  /**
-   * Verifies that peek delegates to HotKeyCache and returns the cached value if present.
-   */
   @Test
   void peek_shouldDelegateToCache() {
     when(hotKeyCache.peek("key1")).thenReturn(Optional.of("value"));
@@ -70,9 +64,6 @@ class HotKeyTest {
     verify(hotKeyCache).peek("key1");
   }
 
-  /**
-   * Verifies that get(key, supplier) delegates to HotKeyCache.
-   */
   @Test
   void get_shouldDelegateToCache() {
     when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.of("value"));
@@ -80,9 +71,6 @@ class HotKeyTest {
     verify(hotKeyCache).get(anyString(), any());
   }
 
-  /**
-   * Verifies that get(key, supplier, hardTtlMs, softTtlMs) delegates to HotKeyCache with TTL parameters.
-   */
   @Test
   void get_withTtl_shouldDelegateToCache() {
     when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
@@ -90,9 +78,6 @@ class HotKeyTest {
     verify(hotKeyCache).get(anyString(), any(), anyLong(), anyLong());
   }
 
-  /**
-   * Verifies that getWithSoftExpire delegates to HotKeyCache.
-   */
   @Test
   void getWithSoftExpire_shouldDelegateToCache() {
     when(hotKeyCache.getWithSoftExpire(anyString(), any())).thenReturn(Optional.of("v"));
@@ -100,97 +85,70 @@ class HotKeyTest {
     verify(hotKeyCache).getWithSoftExpire(anyString(), any());
   }
 
-  /**
-   * Verifies that invalidate delegates to HotKeyCache to remove the key.
-   */
   @Test
   void invalidate_shouldDelegateToCache() {
     hotKey.invalidate("key1");
     verify(hotKeyCache).invalidate("key1");
   }
 
-  /**
-   * Verifies that invalidateAll with varargs delegates to HotKeyCache with the key list.
-   */
   @Test
   void invalidateAll_varargs_shouldDelegateToCache() {
     hotKey.invalidateAll("k1", "k2");
     verify(hotKeyCache).invalidateAll(List.of("k1", "k2"));
   }
 
-  /**
-   * Verifies that putThrough delegates to HotKeyCache.
-   */
   @Test
   void putThrough_shouldDelegateToCache() {
     hotKey.putThrough("key1", "value", () -> {});
     verify(hotKeyCache).putThrough(anyString(), any(), any());
   }
 
-  /**
-   * Verifies that putBeforeInvalidate delegates to HotKeyCache.
-   */
+  @Test
+  void putThrough_withTtl_shouldDelegateToCache() {
+    hotKey.putThrough("key1", "value", () -> {}, 2000L, 200L);
+    verify(hotKeyCache).putThrough(anyString(), any(), any(), anyLong(), anyLong());
+  }
+
   @Test
   void putBeforeInvalidate_shouldDelegateToCache() {
     hotKey.putBeforeInvalidate("key1", () -> {});
     verify(hotKeyCache).putBeforeInvalidate(anyString(), any());
   }
 
-  /**
-   * Verifies that returnLocalHotKeys returns items from the local TopK instance.
-   */
   @Test
   void returnHotKeys_shouldReturnLocalFromTopK() {
     when(topK.list()).thenReturn(List.of(new Item("k1", 10)));
     assertThat(hotKey.returnLocalHotKeys()).hasSize(1);
   }
 
-  /**
-   * Verifies that returnLocalHotKeys returns an empty list when the local TopK is null.
-   */
   @Test
   void returnHotKeys_shouldReturnLocalEmptyWhenTopKNull() {
     HotKey hk = new HotKey(hotKeyCache, null);
     assertThat(hk.returnLocalHotKeys()).isEmpty();
   }
 
-  /**
-   * Verifies that returnWorkerHotKeys returns items from the worker TopK instance.
-   */
   @Test
   void returnWorkerHotKeys_shouldReturnFromWorkerTopK() {
     when(workerTopK.list()).thenReturn(List.of(new Item("k1", 5)));
     assertThat(hotKey.returnWorkerHotKeys()).hasSize(1);
   }
 
-  /**
-   * Verifies that returnWorkerHotKeys returns an empty list when the worker TopK is null.
-   */
   @Test
   void returnWorkerHotKeys_shouldReturnEmptyWhenWorkerTopKNull() {
     assertThat(new HotKey(hotKeyCache, topK, null).returnWorkerHotKeys()).isEmpty();
   }
 
-  /**
-   * Verifies that returnLocalTotalDataStreams returns the total count from the local TopK.
-   */
   @Test
   void returnTotalDataStreams_shouldReturnLocalFromTopK() {
     when(topK.total()).thenReturn(100L);
     assertThat(hotKey.returnLocalTotalDataStreams()).isEqualTo(100L);
   }
 
-  /**
-   * Verifies that returnLocalTotalDataStreams returns zero when the local TopK is null.
-   */
   @Test
   void returnTotalDataStreams_shouldReturnLocalZeroWhenTopKNull() {
     assertThat(new HotKey(hotKeyCache, null).returnLocalTotalDataStreams()).isZero();
   }
 
-  /**
-   * Verifies that returnLocalExpelledHotKeys returns expelled items from the local TopK.
-   */
   @Test
   void returnExpelledHotKeys_shouldReturnLocalFromTopK() {
     LinkedBlockingQueue<Item> queue = new LinkedBlockingQueue<>();
@@ -199,9 +157,6 @@ class HotKeyTest {
     assertThat(hotKey.returnLocalExpelledHotKeys()).hasSize(1);
   }
 
-  /**
-   * Verifies that cache methods throw UnsupportedOperationException in worker-only mode (null HotKeyCache).
-   */
   @Test
   void cacheMethods_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, topK);
@@ -219,14 +174,247 @@ class HotKeyTest {
       .isInstanceOf(UnsupportedOperationException.class);
   }
 
-  /**
-   * Verifies that HotKeyBlockedException from HotKeyCache propagates through the facade.
-   */
   @Test
   void get_shouldPropagateHotKeyBlockedException() {
     when(hotKeyCache.get(anyString(), any()))
       .thenThrow(new HotKeyBlockedException("secret"));
     assertThatThrownBy(() -> hotKey.get("secret", () -> "v"))
       .isInstanceOf(HotKeyBlockedException.class);
+  }
+
+  // ── Additional getWithSoftExpire overloads ──
+
+  @Test
+  void getWithSoftExpire_withSoftTtl_shouldDelegateToCache() {
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong())).thenReturn(Optional.of("v"));
+    assertThat(hotKey.getWithSoftExpire("key1", () -> "v", 200L)).contains("v");
+    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), anyLong());
+  }
+
+  @Test
+  void getWithSoftExpire_withHardSoftTtl_shouldDelegateToCache() {
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    assertThat(hotKey.getWithSoftExpire("key1", () -> "v", 5000L, 500L)).contains("v");
+    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), anyLong(), anyLong());
+  }
+
+  // ── isWorkerHotKey ──
+
+  @Test
+  void isWorkerHotKey_shouldDelegateToWorkerTopK() {
+    when(workerTopK.contains("hot-key")).thenReturn(true);
+    assertThat(hotKey.isWorkerHotKey("hot-key")).isTrue();
+    verify(workerTopK).contains("hot-key");
+  }
+
+  @Test
+  void isWorkerHotKey_shouldReturnFalseWhenNotInWorkerTopK() {
+    when(workerTopK.contains("cold-key")).thenReturn(false);
+    assertThat(hotKey.isWorkerHotKey("cold-key")).isFalse();
+  }
+
+  @Test
+  void isWorkerHotKey_shouldReturnFalseWhenWorkerTopKNull() {
+    HotKey hk = new HotKey(hotKeyCache, topK, null);
+    assertThat(hk.isWorkerHotKey("any")).isFalse();
+  }
+
+  @Test
+  void isWorkerHotKey_shouldReturnFalseWhenNullKey() {
+    assertThat(hotKey.isWorkerHotKey(null)).isFalse();
+    verifyNoInteractions(workerTopK);
+  }
+
+  // ── returnWorkerExpelledHotKeys ──
+
+  @Test
+  void returnWorkerExpelledHotKeys_shouldReturnFromWorkerTopK() {
+    LinkedBlockingQueue<Item> queue = new LinkedBlockingQueue<>();
+    queue.add(new Item("wk1", 3));
+    when(workerTopK.expelled()).thenReturn(queue);
+    assertThat(hotKey.returnWorkerExpelledHotKeys()).hasSize(1);
+  }
+
+  @Test
+  void returnWorkerExpelledHotKeys_shouldReturnEmptyQueueWhenWorkerTopKNull() {
+    HotKey hk = new HotKey(hotKeyCache, topK, null);
+    assertThat(hk.returnWorkerExpelledHotKeys()).isEmpty();
+  }
+
+  // ── returnWorkerTotalDataStreams ──
+
+  @Test
+  void returnWorkerTotalDataStreams_shouldReturnFromWorkerTopK() {
+    when(workerTopK.total()).thenReturn(999L);
+    assertThat(hotKey.returnWorkerTotalDataStreams()).isEqualTo(999L);
+  }
+
+  @Test
+  void returnWorkerTotalDataStreams_shouldReturnZeroWhenWorkerTopKNull() {
+    HotKey hk = new HotKey(hotKeyCache, topK, null);
+    assertThat(hk.returnWorkerTotalDataStreams()).isZero();
+  }
+
+  // ── returnLocalExpelledHotKeys null guard ──
+
+  @Test
+  void returnExpelledHotKeys_shouldReturnEmptyQueueWhenTopKNull() {
+    HotKey hk = new HotKey(hotKeyCache, null);
+    assertThat(hk.returnLocalExpelledHotKeys()).isEmpty();
+  }
+
+  // ── returnLocalTotalDataStreams null guard (full 3-arg ctor) ──
+
+  @Test
+  void returnTotalDataStreams_shouldReturnLocalZeroWhenTopKNullThreeArg() {
+    HotKey hk = new HotKey(hotKeyCache, null, workerTopK);
+    assertThat(hk.returnLocalTotalDataStreams()).isZero();
+  }
+
+  // ── getLocalCache ──
+
+  @SuppressWarnings("unchecked")
+  @Test
+  void getLocalCache_shouldDelegateToCache() {
+    Cache<String, Object> caffeine = mock(Cache.class);
+    when(hotKeyCache.getLocalCache()).thenReturn(caffeine);
+    assertThat(hotKey.getLocalCache()).isSameAs(caffeine);
+    verify(hotKeyCache).getLocalCache();
+  }
+
+  @Test
+  void getLocalCache_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThatThrownBy(workerOnly::getLocalCache)
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── addBlacklist / removeBlacklist / addWhitelist / removeWhitelist ──
+
+  @Test
+  void addBlacklist_shouldDelegateToCache() {
+    hotKey.addBlacklist("secret-*");
+    verify(hotKeyCache).addBlacklist("secret-*");
+  }
+
+  @Test
+  void addBlacklist_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThatThrownBy(() -> workerOnly.addBlacklist("x"))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  @Test
+  void removeBlacklist_shouldDelegateToCache() {
+    hotKey.removeBlacklist("old-rule");
+    verify(hotKeyCache).unBlacklist("old-rule");
+  }
+
+  @Test
+  void removeBlacklist_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThatThrownBy(() -> workerOnly.removeBlacklist("x"))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  @Test
+  void addWhitelist_shouldDelegateToCache() {
+    hotKey.addWhitelist("health-*");
+    verify(hotKeyCache).addWhitelist("health-*");
+  }
+
+  @Test
+  void addWhitelist_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThatThrownBy(() -> workerOnly.addWhitelist("x"))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  @Test
+  void removeWhitelist_shouldDelegateToCache() {
+    hotKey.removeWhitelist("health-*");
+    verify(hotKeyCache).unWhitelist("health-*");
+  }
+
+  @Test
+  void removeWhitelist_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThatThrownBy(() -> workerOnly.removeWhitelist("x"))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── getAllRules ──
+
+  @Test
+  void getAllRules_shouldDelegateToCache() {
+    Rule rule = new Rule(Rule.RuleType.EXACT, "blocked", RuleAction.BLOCK);
+    when(hotKeyCache.getAllRules()).thenReturn(List.of(rule));
+    assertThat(hotKey.getAllRules()).containsExactly(rule);
+    verify(hotKeyCache).getAllRules();
+  }
+
+  @Test
+  void getAllRules_shouldReturnEmptyWhenCacheNull() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThat(workerOnly.getAllRules()).isEmpty();
+  }
+
+  // ── evaluateRule ──
+
+  @Test
+  void evaluateRule_shouldDelegateToCache() {
+    when(hotKeyCache.evaluateRule("secret")).thenReturn(RuleAction.BLOCK);
+    assertThat(hotKey.evaluateRule("secret")).isEqualTo(RuleAction.BLOCK);
+    verify(hotKeyCache).evaluateRule("secret");
+  }
+
+  @Test
+  void evaluateRule_shouldReturnAllowWhenCacheNull() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThat(workerOnly.evaluateRule("any")).isEqualTo(RuleAction.ALLOW);
+  }
+
+  // ── clearAllRules ──
+
+  @Test
+  void clearAllRules_shouldDelegateToCache() {
+    hotKey.clearAllRules();
+    verify(hotKeyCache).clearAllRules();
+  }
+
+  @Test
+  void clearAllRules_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThatThrownBy(workerOnly::clearAllRules)
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── broadcastAllLocalRulesManually ──
+
+  @Test
+  void broadcastAllLocalRulesManually_shouldDelegateToCache() {
+    hotKey.broadcastAllLocalRulesManually();
+    verify(hotKeyCache).broadcastAllLocalRulesManually();
+  }
+
+  @Test
+  void broadcastAllLocalRulesManually_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, topK);
+    assertThatThrownBy(workerOnly::broadcastAllLocalRulesManually)
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── notifyLocalDetector ──
+
+  @Test
+  void notifyLocalDetector_shouldDelegateToTopK() {
+    hotKey.notifyLocalDetector("my-key");
+    verify(topK).addDirect("my-key", 1);
+  }
+
+  @Test
+  void notifyLocalDetector_shouldIgnoreNullKey() {
+    hotKey.notifyLocalDetector(null);
+    verifyNoInteractions(topK);
   }
 }

@@ -63,7 +63,7 @@ public final class RollingWindow {
     tick();
     long s = 0;
     for (long v : buckets) {
-        s += v;
+      s += v;
     }
     return s;
   }
@@ -77,9 +77,9 @@ public final class RollingWindow {
     tick();
     long m = 0;
     for (long v : buckets) {
-        if (v > m) {
-            m = v;
-        }
+      if (v > m) {
+        m = v;
+      }
     }
     return m;
   }
@@ -92,9 +92,9 @@ public final class RollingWindow {
     tick();
     long m = Long.MAX_VALUE;
     for (long v : buckets) {
-        if (v > 0 && v < m) {
-            m = v;
-        }
+      if (v > 0 && v < m) {
+        m = v;
+      }
     }
     return m;
   }
@@ -115,14 +115,12 @@ public final class RollingWindow {
     return windowSize;
   }
 
-  // ── internal ──
-
   /** Advance the window, zeroing buckets that have elapsed. */
   private void tick() {
     long now = System.currentTimeMillis();
     long elapsed = now - windowStart;
     if (elapsed < bucketDurationMs) {
-        return;
+      return;
     }
 
     int steps = (int) Math.min(elapsed / bucketDurationMs, windowSize);

@@ -25,6 +25,7 @@
 
 - **dataVersion** — Monotonically increasing counter (Redis INCR or node-local fallback). Orders data mutations across instances. May be **degraded** (local counter) when Redis is unavailable.
 - **decisionVersion** — Monotonically increasing `AtomicLong` on the Worker. Orders HOT/COOL decisions. Never degraded. Independent of dataVersion.
+- **rulesVersion** — Monotonically increasing `AtomicLong` in `RuleMatcher`. Orders rule set changes across instances. Used to prevent stale rule broadcasts from overwriting newer rule sets. Independent of both dataVersion and decisionVersion.
 - **Degraded Version** — A dataVersion produced by the node-local fallback counter (`Long.MIN_VALUE + counter`). Marked with `isVersionDegraded=true`. Never wins against a normal (Redis) version in broadcast comparisons.
 
 ## Lifecycle

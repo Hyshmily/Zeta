@@ -21,7 +21,6 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -44,7 +43,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Epoch is persisted to Redis (fallback to local file), incremented
  * atomically on each process start for restart detection by Apps.
  */
-@RequiredArgsConstructor
 public class WorkerHeartbeatProducer {
 
   private static final HotKeyLogger log = new DefaultLogger(WorkerHeartbeatProducer.class);
@@ -60,19 +58,42 @@ public class WorkerHeartbeatProducer {
   /** Broadcaster for reading the current decision version watermark. */
   private final WorkerBroadcaster broadcaster;
   /** Monotonically increasing epoch, persisted across restarts. */
-  private final long epoch = initEpoch(new StringRedisTemplate());
+  private final long epoch;
   /** JVM start timestamp used for the ready-to-serve grace period. */
-  private final long startTime = System.currentTimeMillis();
+  private final long startTime;
   /** Single-thread scheduler for periodic heartbeat sends. */
-  private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r ->
-    new Thread(r, "hb-producer")
-  );
+  private final ScheduledExecutorService scheduler;
   /** Shared monotonic counter for config-change timestamps embedded in heartbeats. */
   private final AtomicLong configTimestampCounter;
   /** Interval between consecutive heartbeat sends (milliseconds). */
   private final long pingIntervalMs;
 
-  private static final String EPOCH_REDIS_KEY_PREFIX = "hotkeydetector:worker:epoch:";
+  private static final String EPOCH_REDIS_KEY_PREFIX = "hotkey:worker:epoch:";
+
+  /**
+   * Creates a new heartbeat producer.
+   *
+   * <p>Note: {@code workerId} must be assigned before {@link #initEpoch} is called so that
+   * the Redis key and local file name are correct.  This is why the constructor is written
+   * manually rather than relying on {@code @RequiredArgsConstructor} which assigns fields
+   * <em>after</em> field initializers run.
+   */
+  public WorkerHeartbeatProducer(
+    RabbitTemplate rabbitTemplate, String heartbeatExchange, String workerId,
+    HotKeyStateMachine stateMachine, WorkerBroadcaster broadcaster,
+    AtomicLong configTimestampCounter, long pingIntervalMs
+  ) {
+    this.rabbitTemplate = rabbitTemplate;
+    this.heartbeatExchange = heartbeatExchange;
+    this.workerId = workerId;
+    this.stateMachine = stateMachine;
+    this.broadcaster = broadcaster;
+    this.epoch = initEpoch(new StringRedisTemplate());
+    this.startTime = System.currentTimeMillis();
+    this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "hb-producer"));
+    this.configTimestampCounter = configTimestampCounter;
+    this.pingIntervalMs = pingIntervalMs;
+  }
 
   /**
    * Initialises the epoch by atomically incrementing a Redis counter.
@@ -107,7 +128,7 @@ public class WorkerHeartbeatProducer {
    */
   private long initEpochFromLocalFile() {
     try {
-      Path path = Path.of(System.getProperty("java.io.tmpdir"), "hotkeydetector-epoch-" + workerId);
+      Path path = Path.of(System.getProperty("java.io.tmpdir"), "hotkey-epoch-" + workerId);
       long next = 1;
       if (Files.exists(path)) {
         String content = Files.readString(path);

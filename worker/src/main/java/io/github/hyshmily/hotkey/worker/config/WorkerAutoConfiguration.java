@@ -30,7 +30,12 @@ import io.github.hyshmily.hotkey.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.hotkey.worker.ingest.ReportConsumer;
+import io.github.hyshmily.hotkey.worker.persistence.TopKPersistService;
 import jakarta.annotation.PostConstruct;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -38,17 +43,14 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
-
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Auto‑configuration for the <b>hot‑key Worker</b>.
@@ -92,6 +94,57 @@ public class WorkerAutoConfiguration {
    * messages to identify this Worker instance uniquely.
    */
   private final String nodeId = InstanceIdGenerator.get();
+
+  /**
+   * Worker TopK snapshot service that persists the current hot-key list to
+   * Redis and restores it on startup.
+   *
+   * <p>Only active when {@code hotkey.worker.persistence.enabled=true}.
+   */
+  @Bean
+  @ConditionalOnProperty(prefix = "hotkey.worker.persistence", name = "enabled", havingValue = "true")
+  public TopKPersistService topKPersistService(
+    @Qualifier("workerTopK") TopK workerTopK,
+    StringRedisTemplate redisTemplate,
+    WorkerProperties properties
+  ) {
+    return new TopKPersistService(
+      workerTopK,
+      redisTemplate,
+      properties.getRouting().getAppName(),
+      nodeId,
+      properties.getPersistence()
+    );
+  }
+
+  /**
+   * Dedicated scheduler for TopK persistence. Daemon thread, does not block JVM shutdown.
+   */
+  @Bean(destroyMethod = "shutdown")
+  @ConditionalOnBean(TopKPersistService.class)
+  public ScheduledExecutorService topKPersistScheduler() {
+    return Executors.newSingleThreadScheduledExecutor(r -> {
+      Thread t = new Thread(r, "topk-persist");
+      t.setDaemon(true);
+      return t;
+    });
+  }
+
+  /**
+   * Schedules periodic TopK snapshot persistence. The returned placeholder bean
+   * keeps the task alive in the context.
+   */
+  @Bean
+  @ConditionalOnBean(TopKPersistService.class)
+  public Object topKPersistTask(
+    TopKPersistService service,
+    WorkerProperties properties,
+    @Qualifier("topKPersistScheduler") ScheduledExecutorService scheduler
+  ) {
+    long interval = properties.getPersistence().getPersistIntervalMs();
+    scheduler.scheduleAtFixedRate(service::persistToRedis, interval, interval, TimeUnit.MILLISECONDS);
+    return new Object();
+  }
 
   /**
    * Validates that the sliding-window duration is evenly divisible by the
@@ -329,10 +382,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public Binding workerConfigBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
-    return BindingBuilder
-      .bind(workerConfigQueue)
-      .to(heartbeatExchange)
-      .with("heartbeat.*");
+    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with("heartbeat.*");
   }
 
   /**
