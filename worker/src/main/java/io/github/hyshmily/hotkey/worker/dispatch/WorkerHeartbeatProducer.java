@@ -21,17 +21,20 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.data.redis.core.StringRedisTemplate;
-
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import lombok.AccessLevel;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * Enhanced Worker heartbeat sender.
@@ -43,6 +46,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Epoch is persisted to Redis (fallback to local file), incremented
  * atomically on each process start for restart detection by Apps.
  */
+@RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public class WorkerHeartbeatProducer {
 
   private static final HotKeyLogger log = new DefaultLogger(WorkerHeartbeatProducer.class);
@@ -61,48 +65,94 @@ public class WorkerHeartbeatProducer {
   private final long epoch;
   /** JVM start timestamp used for the ready-to-serve grace period. */
   private final long startTime;
-  /** Single-thread scheduler for periodic heartbeat sends. */
+  /** Scheduler for periodic heartbeat sends. */
   private final ScheduledExecutorService scheduler;
+  /** Whether this instance owns the scheduler (self-created). */
+  private final boolean ownsScheduler;
   /** Shared monotonic counter for config-change timestamps embedded in heartbeats. */
   private final AtomicLong configTimestampCounter;
   /** Interval between consecutive heartbeat sends (milliseconds). */
   private final long pingIntervalMs;
+  /** Handle for the scheduled heartbeat task. */
+  private ScheduledFuture<?> heartbeatTask;
 
   private static final String EPOCH_REDIS_KEY_PREFIX = "hotkey:worker:epoch:";
 
   /**
-   * Creates a new heartbeat producer.
-   *
-   * <p>Note: {@code workerId} must be assigned before {@link #initEpoch} is called so that
-   * the Redis key and local file name are correct.  This is why the constructor is written
-   * manually rather than relying on {@code @RequiredArgsConstructor} which assigns fields
-   * <em>after</em> field initializers run.
+   * Creates a new heartbeat producer with a shared external scheduler.
    */
   public WorkerHeartbeatProducer(
-    RabbitTemplate rabbitTemplate, String heartbeatExchange, String workerId,
-    HotKeyStateMachine stateMachine, WorkerBroadcaster broadcaster,
-    AtomicLong configTimestampCounter, long pingIntervalMs
+    RabbitTemplate rabbitTemplate,
+    String heartbeatExchange,
+    String workerId,
+    HotKeyStateMachine stateMachine,
+    WorkerBroadcaster broadcaster,
+    AtomicLong configTimestampCounter,
+    RedisConnectionFactory redisConnectionFactory,
+    long pingIntervalMs,
+    ScheduledExecutorService scheduler
   ) {
-    this.rabbitTemplate = rabbitTemplate;
-    this.heartbeatExchange = heartbeatExchange;
-    this.workerId = workerId;
-    this.stateMachine = stateMachine;
-    this.broadcaster = broadcaster;
-    this.epoch = initEpoch(new StringRedisTemplate());
-    this.startTime = System.currentTimeMillis();
-    this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "hb-producer"));
-    this.configTimestampCounter = configTimestampCounter;
-    this.pingIntervalMs = pingIntervalMs;
+    this(
+      rabbitTemplate,
+      heartbeatExchange,
+      workerId,
+      stateMachine,
+      broadcaster,
+      initEpoch(workerId, redisConnectionFactory),
+      System.currentTimeMillis(),
+      scheduler,
+      false,
+      configTimestampCounter,
+      pingIntervalMs
+    );
   }
 
   /**
-   * Initialises the epoch by atomically incrementing a Redis counter.
+   * Creates a new heartbeat producer with its own internal scheduler
+   * (primarily for testing, with mocked Redis).
+   */
+  public WorkerHeartbeatProducer(
+    RabbitTemplate rabbitTemplate,
+    String heartbeatExchange,
+    String workerId,
+    HotKeyStateMachine stateMachine,
+    WorkerBroadcaster broadcaster,
+    AtomicLong configTimestampCounter,
+    long pingIntervalMs
+  ) {
+    this(
+      rabbitTemplate,
+      heartbeatExchange,
+      workerId,
+      stateMachine,
+      broadcaster,
+      initEpoch(workerId, null),
+      System.currentTimeMillis(),
+      Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "hb-producer");
+        t.setDaemon(true);
+        return t;
+      }),
+      true,
+      configTimestampCounter,
+      pingIntervalMs
+    );
+  }
+
+  private static long initEpoch(String workerId, RedisConnectionFactory redisConnectionFactory) {
+    StringRedisTemplate template = new StringRedisTemplate(redisConnectionFactory);
+    template.afterPropertiesSet();
+    return doInitEpoch(template, workerId);
+  }
+
+  /**
+   * Initializes the epoch by atomically incrementing a Redis counter.
    * Falls back to a local file if Redis is unavailable.
    *
    * @param redis the Redis template (created ad-hoc for this one-time operation)
    * @return the new epoch value for this Worker incarnation
    */
-  private long initEpoch(StringRedisTemplate redis) {
+  private static long doInitEpoch(StringRedisTemplate redis, String workerId) {
     try {
       String key = EPOCH_REDIS_KEY_PREFIX + workerId;
       String val = redis.opsForValue().get(key);
@@ -112,7 +162,7 @@ public class WorkerHeartbeatProducer {
       return next;
     } catch (Exception e) {
       log.warn("Redis unavailable for epoch, using local file fallback", e);
-      return initEpochFromLocalFile();
+      return initEpochFromLocalFile(workerId);
     }
   }
 
@@ -126,7 +176,7 @@ public class WorkerHeartbeatProducer {
    *
    * @return the new epoch value, or {@code System.currentTimeMillis()} on complete failure
    */
-  private long initEpochFromLocalFile() {
+  private static long initEpochFromLocalFile(String workerId) {
     try {
       Path path = Path.of(System.getProperty("java.io.tmpdir"), "hotkey-epoch-" + workerId);
       long next = 1;
@@ -192,15 +242,22 @@ public class WorkerHeartbeatProducer {
    */
   @PostConstruct
   public void start() {
-    scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, pingIntervalMs, TimeUnit.MILLISECONDS);
+    heartbeatTask = scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, pingIntervalMs, TimeUnit.MILLISECONDS);
   }
 
   /**
-   * Shuts down the heartbeat scheduler gracefully.
+   * Gracefully stops the heartbeat sender.
+   *
+   * <p>Cancels the scheduled task; shuts down the scheduler only if owned.
    */
   @PreDestroy
   public void stop() {
-    scheduler.shutdown();
+    if (heartbeatTask != null) {
+      heartbeatTask.cancel(false);
+    }
+    if (ownsScheduler) {
+      scheduler.shutdown();
+    }
   }
 
   /**
@@ -213,19 +270,23 @@ public class WorkerHeartbeatProducer {
    * connection is unavailable (fire-and-forget).
    */
   void sendHeartbeat() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
-      workerId,
-      epoch,
-      System.currentTimeMillis(),
-      broadcaster.getCurrentDecisionVersion(),
-      computeLoadFactor(),
-      isReadyToServe(),
-      computeConfigFingerprint(),
-      stateMachine.getConfirmCount(),
-      stateMachine.getCoolCount(),
-      stateMachine.getPreCoolGraceCount(),
-      configTimestampCounter.get()
-    );
-    rabbitTemplate.send(heartbeatExchange, "heartbeat." + workerId, hb.toMessage());
+    try {
+      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
+        workerId,
+        epoch,
+        System.currentTimeMillis(),
+        broadcaster.getCurrentDecisionVersion(),
+        computeLoadFactor(),
+        isReadyToServe(),
+        computeConfigFingerprint(),
+        stateMachine.getConfirmCount(),
+        stateMachine.getCoolCount(),
+        stateMachine.getPreCoolGraceCount(),
+        configTimestampCounter.get()
+      );
+      rabbitTemplate.send(heartbeatExchange, "heartbeat." + workerId, hb.toMessage());
+    } catch (Exception e) {
+      log.error("Scheduled sendHeartbeat failed", e);
+    }
   }
 }

@@ -68,6 +68,8 @@ public final class HotKeyConstants {
   public static final String THREAD_PREFIX_WORKER = "hotkey-worker";
   /** Thread name prefix for report submission tasks. */
   public static final String THREAD_PREFIX_REPORT = "hotkey-report";
+  /** Thread name prefix for the shared scheduler pool. */
+  public static final String THREAD_PREFIX_SCHEDULER = "hotkey-scheduler";
 
   /** Routing key prefix for broadcast decisions (HOT/COOL) sent from worker to apps. */
   public static final String ROUTING_KEY_BROADCAST = "broadcast.";

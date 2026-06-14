@@ -108,7 +108,7 @@ public class SlidingWindowDetector {
    * whether the key is "hot" in the current window.
    *
    * @param key   the cache key
-   * @param count the number of accesses to add (typically the batched count
+   * @param count the number of accesses to addDirect (typically the batched count
    *              reported by an application instance)
    * @return {@code true} if the sum of the last {@link #windowSize} slices
    *         meets or exceeds {@link #threshold}
@@ -137,7 +137,7 @@ public class SlidingWindowDetector {
       slices[currentIndex] = new AtomicLong(0);
     }
 
-    // Atomically add the reported count to the current slice.
+    // Atomically addDirect the reported count to the current slice.
     slices[currentIndex].addAndGet(count);
 
     // Return the window‑level verdict.

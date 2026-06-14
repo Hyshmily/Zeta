@@ -204,53 +204,57 @@ public class HotKeyReporter {
    * <p>Called periodically by the scheduler at {@code reportIntervalMs}.
    */
   private void flush() {
-    if (counters.estimatedSize() == 0) {
-      return;
-    }
+    try {
+      if (counters.estimatedSize() == 0) {
+        return;
+      }
 
-    if (bbrRateLimiter != null && !bbrRateLimiter.tryAcquire()) {
-      bbrRateLimiter.onDrop();
-      return;
-    }
+      if (bbrRateLimiter != null && !bbrRateLimiter.tryAcquire()) {
+        bbrRateLimiter.onDrop();
+        return;
+      }
 
-    // Reconcile ring with alive Worker nodes (from heartbeat state), then route via consistent hash
-    ringManager.reconcileFromHealthView(healthView);
+      // Reconcile ring with alive Worker nodes (from heartbeat state), then route via consistent hash
+      ringManager.reconcileFromHealthView(healthView);
 
-    Map<String, Map<String, Long>> sharded = new HashMap<>();
-    long now = System.currentTimeMillis();
+      Map<String, Map<String, Long>> sharded = new HashMap<>();
+      long now = System.currentTimeMillis();
 
-    counters
-      .asMap()
-      .forEach((key, adder) -> {
-        long val = adder.sumThenReset();
+      counters
+        .asMap()
+        .forEach((key, adder) -> {
+          long val = adder.sumThenReset();
 
-        if (val > 0) {
-          String target = ringManager.routeNode(key, healthView);
+          if (val > 0) {
+            String target = ringManager.routeNode(key, healthView);
 
-          if (target != null) {
-            sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);
+            if (target != null) {
+              sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);
+            }
           }
+        });
+
+      sharded.forEach((target, counts) -> {
+        if (!dispatcher.enqueue(new ShardBatch(target, now, counts))) {
+          long dropped = dispatcher.dropped();
+
+          if (dropped % 100 == 0 || dropped == 1) {
+            log.warn(
+              "report queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
+              target,
+              counts.size(),
+              dispatcher.depth(),
+              queueCapacity,
+              dropped
+            );
+          }
+        } else if (bbrRateLimiter != null) {
+          bbrRateLimiter.onEnqueue();
         }
       });
-
-    sharded.forEach((target, counts) -> {
-      if (!dispatcher.enqueue(new ShardBatch(target, now, counts))) {
-        long dropped = dispatcher.dropped();
-
-        if (dropped % 100 == 0 || dropped == 1) {
-          log.warn(
-            "report queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
-            target,
-            counts.size(),
-            dispatcher.depth(),
-            queueCapacity,
-            dropped
-          );
-        }
-      } else if (bbrRateLimiter != null) {
-        bbrRateLimiter.onEnqueue();
-      }
-    });
+    } catch (Exception e) {
+      log.error("Scheduled reporter flush failed", e);
+    }
   }
 
   /**

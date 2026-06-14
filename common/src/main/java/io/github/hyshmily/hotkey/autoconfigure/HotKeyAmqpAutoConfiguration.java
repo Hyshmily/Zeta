@@ -35,6 +35,7 @@ import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -48,7 +49,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 
@@ -150,9 +150,12 @@ public class HotKeyAmqpAutoConfiguration {
      */
     @Bean(initMethod = "start", destroyMethod = "stop")
     @ConditionalOnMissingBean
-    public SystemLoadMonitor hotKeyCpuMonitor(HotKeyProperties properties) {
+    public SystemLoadMonitor hotKeyCpuMonitor(
+      HotKeyProperties properties,
+      @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
+    ) {
       HotKeyProperties.ReporterLimiter cfg = properties.getReporter();
-      return new SystemLoadMonitor(cfg.getCpuPollIntervalMs(), cfg.getCpuDecay());
+      return new SystemLoadMonitor(hotKeyScheduler, cfg.getCpuPollIntervalMs(), cfg.getCpuDecay());
     }
 
     /**
@@ -199,7 +202,7 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean
     public HotKeyReporter hotKeyReporter(
       ReportPublisher reportPublisher,
-      ScheduledExecutorService hotKeyReportScheduler,
+      @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
       HotKeyProperties properties,
       RingManager ringManager,
       ObjectProvider<ClusterHealthView> healthViewProvider,
@@ -207,7 +210,7 @@ public class HotKeyAmqpAutoConfiguration {
     ) {
       HotKeyReporter reporter = new HotKeyReporter(
         reportPublisher,
-        hotKeyReportScheduler,
+        hotKeyScheduler,
         properties.getReportIntervalMs(),
         properties.getAppName(),
         properties.getQueueCapacity(),
@@ -218,20 +221,6 @@ public class HotKeyAmqpAutoConfiguration {
       );
       bbrRateLimiterProvider.ifAvailable(reporter::setBbrRateLimiter);
       return reporter;
-    }
-
-    /**
-     * Dedicated scheduler for periodic report flushing.
-     *
-     * @return a single-threaded {@link ScheduledExecutorService}
-     */
-    @Bean(destroyMethod = "shutdown")
-    public ScheduledExecutorService hotKeyReportScheduler() {
-      return Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_REPORT);
-        t.setDaemon(true);
-        return t;
-      });
     }
   }
 
@@ -323,7 +312,7 @@ public class HotKeyAmqpAutoConfiguration {
       Cache<String, Object> hotLocalCache,
       Function<String, Object> hotKeyRedisLoader,
       CacheSyncProperties properties,
-      ScheduledExecutorService hotKeySyncScheduler,
+      @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
       CacheExpireManager expireManager,
       RuleMatcher ruleMatcher
     ) {
@@ -331,7 +320,7 @@ public class HotKeyAmqpAutoConfiguration {
         hotLocalCache,
         hotKeyRedisLoader,
         properties,
-        hotKeySyncScheduler,
+        hotKeyScheduler,
         expireManager,
         ruleMatcher
       );
@@ -362,21 +351,6 @@ public class HotKeyAmqpAutoConfiguration {
         (ChannelAwareMessageListener) (msg, channel) -> cacheSyncListener.handleSyncMessage(channel, msg)
       );
       return container;
-    }
-
-    /**
-     * Scheduled executor for deferred Redis reads in the sync handler.
-     *
-     * @param properties the cache sync configuration properties
-     * @return a scheduled thread pool {@link ScheduledExecutorService}
-     */
-    @Bean(destroyMethod = "shutdown")
-    public ScheduledExecutorService hotKeySyncScheduler(CacheSyncProperties properties) {
-      return Executors.newScheduledThreadPool(properties.getSchedulerPoolSize(), r -> {
-        Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_SYNC);
-        t.setDaemon(true);
-        return t;
-      });
     }
   }
 
@@ -515,7 +489,7 @@ public class HotKeyAmqpAutoConfiguration {
       Cache<String, Object> hotLocalCache,
       Function<String, Object> hotKeyRedisLoader,
       WorkerListenerProperties properties,
-      ScheduledExecutorService hotKeyWorkerScheduler,
+      @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
       CacheExpireManager expireManager,
       ObjectProvider<SreRateLimiter> sreRateLimiterProvider
     ) {
@@ -523,7 +497,7 @@ public class HotKeyAmqpAutoConfiguration {
         hotLocalCache,
         hotKeyRedisLoader,
         properties,
-        hotKeyWorkerScheduler,
+        hotKeyScheduler,
         expireManager,
         sreRateLimiterProvider.getIfAvailable()
       );
@@ -571,7 +545,8 @@ public class HotKeyAmqpAutoConfiguration {
     public WorkerHeartbeatVerifier workerHeartbeatVerifier(
       RabbitTemplate rabbitTemplate,
       ClusterHealthView healthView,
-      HotKeyProperties properties
+      HotKeyProperties properties,
+      @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
     ) {
       return new WorkerHeartbeatVerifier(
         rabbitTemplate,
@@ -579,23 +554,9 @@ public class HotKeyAmqpAutoConfiguration {
         properties.getInstanceId(),
         properties.getHeartbeat().getVerifyIntervalMs(),
         properties.getHeartbeat().getPingTimeoutMs(),
-        properties.getHeartbeat().getDegradeAfterFailures()
+        properties.getHeartbeat().getDegradeAfterFailures(),
+        hotKeyScheduler
       );
-    }
-
-    /**
-     * Scheduled executor for deferred Redis reads in the Worker listener.
-     *
-     * @param properties the Worker listener configuration properties
-     * @return a scheduled thread pool {@link ScheduledExecutorService}
-     */
-    @Bean(destroyMethod = "shutdown")
-    public ScheduledExecutorService hotKeyWorkerScheduler(WorkerListenerProperties properties) {
-      return Executors.newScheduledThreadPool(properties.getSchedulerPoolSize(), r -> {
-        Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_WORKER);
-        t.setDaemon(true);
-        return t;
-      });
     }
   }
 }

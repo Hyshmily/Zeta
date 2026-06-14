@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
+import static io.github.hyshmily.hotkey.sync.SyncMessage.*;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
@@ -25,15 +27,12 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.util.DelayUtil;
-import lombok.RequiredArgsConstructor;
-import org.springframework.amqp.core.Message;
-
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
-
-import static io.github.hyshmily.hotkey.sync.SyncMessage.*;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.core.Message;
 
 /**
  * Listens for cache synchronization messages (INVALIDATE / REFRESH) from peer instances
@@ -173,7 +172,9 @@ public class CacheSyncListener {
       .asMap()
       .compute(sm.cacheKey(), (key, existing) -> {
         if (
-          !unconditional && existing instanceof CacheEntry ce && VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())
+          !unconditional &&
+          existing instanceof CacheEntry ce &&
+          VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())
         ) {
           return existing;
         }
@@ -243,28 +244,21 @@ public class CacheSyncListener {
       .asMap()
       .compute(sm.cacheKey(), (key, existing) -> {
         // DCL second check – atomic with to write
-        if (existing instanceof CacheEntry ce && VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())) {
+        if (
+          (existing instanceof CacheEntry ce &&
+            VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())) ||
+          !(existing instanceof CacheEntry cacheEntry)
+        ) {
           return existing; // keep existing if guard rejects
         }
-        if (!(existing instanceof CacheEntry cacheEntry)) {
-          return existing;
-        }
 
-        long hardTtlMs = cacheEntry.getHardTtlMs();
-        long softTtlMs = cacheEntry.getSoftTtlMs();
-
-        return CacheEntry.builder()
+        return cacheEntry
+          .toBuilder()
           .value(value)
           .dataVersion(sm.version())
           .isVersionDegraded(sm.isVersionDegraded())
-          .decisionVersion(cacheEntry.getDecisionVersion())
-          .hardTtlMs(hardTtlMs)
-          .hardExpireAtMs(expireManager.computeHardExpireAt(hardTtlMs))
-          .softTtlMs(softTtlMs)
-          .softExpireAtMs(expireManager.computeSoftExpireAt(softTtlMs))
-          .keyState(cacheEntry.getKeyState())
-          .normalHardTtlMs(cacheEntry.getNormalHardTtlMs())
-          .normalSoftTtlMs(cacheEntry.getNormalSoftTtlMs())
+          .hardExpireAtMs(expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs()))
+          .softExpireAtMs(expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs()))
           .build();
       });
     log.debug("Refreshed by sync: {}", sm.cacheKey());

@@ -17,9 +17,10 @@ package io.github.hyshmily.hotkey.reporting;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_REPORT;
 
-import lombok.RequiredArgsConstructor;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
@@ -48,7 +49,16 @@ public class ReportPublisher {
   public void publish(String target, ReportMessage message) {
     String routingKey = ROUTING_KEY_REPORT + appName + "." + target;
 
-    rabbitTemplate.convertAndSend(reportExchange, routingKey, message);
+    try {
+      rabbitTemplate.convertAndSend(reportExchange, routingKey, message);
+    } catch (AmqpException e) {
+      log.error(
+        "Failed to publish report: target={}, keys={}, error={}",
+        target,
+        message.counts().size(),
+        e.getMessage()
+      );
+    }
     log.debug("Published report: target={}, keys={}", target, message.counts().size());
   }
 }

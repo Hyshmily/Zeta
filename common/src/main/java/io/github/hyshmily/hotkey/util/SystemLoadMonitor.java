@@ -21,6 +21,7 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -45,9 +46,11 @@ public class SystemLoadMonitor {
   private final long pollIntervalMs;
   private final double decay;
   private final ScheduledExecutorService scheduler;
+  private final boolean ownsScheduler;
 
   private final AtomicLong emaCpuLoadBits = new AtomicLong(Double.doubleToLongBits(0.0));
   private final AtomicBoolean running = new AtomicBoolean(false);
+  private ScheduledFuture<?> flushTask;
 
   /** @deprecated Use {@link #SystemLoadMonitor(long, double)} for explicit configuration. */
   @Deprecated
@@ -57,6 +60,7 @@ public class SystemLoadMonitor {
 
   /**
    * Creates a CPU load monitor with the given polling interval and EMA decay factor.
+   * Creates its own scheduler (deprecated, prefer shared scheduler).
    *
    * @param pollIntervalMs polling interval in milliseconds; must be positive, otherwise the
    *                       default (500 ms) is used
@@ -64,13 +68,29 @@ public class SystemLoadMonitor {
    *                       values outside (0, 1) fall back to the default (0.95)
    */
   public SystemLoadMonitor(long pollIntervalMs, double decay) {
-    this.pollIntervalMs = pollIntervalMs > 0 ? pollIntervalMs : DEFAULT_POLL_MS;
-    this.decay = (decay > 0 && decay < 1) ? decay : DEFAULT_DECAY;
-    this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+    this(Executors.newSingleThreadScheduledExecutor(r -> {
       Thread t = new Thread(r, "cpu-monitor");
       t.setDaemon(true);
       return t;
-    });
+    }), pollIntervalMs, decay, true);
+  }
+
+  /**
+   * Creates a CPU load monitor with a shared external scheduler.
+   *
+   * @param scheduler      the shared scheduler (not shut down on stop)
+   * @param pollIntervalMs polling interval in milliseconds
+   * @param decay          EMA decay factor in (0, 1)
+   */
+  public SystemLoadMonitor(ScheduledExecutorService scheduler, long pollIntervalMs, double decay) {
+    this(scheduler, pollIntervalMs, decay, false);
+  }
+
+  private SystemLoadMonitor(ScheduledExecutorService scheduler, long pollIntervalMs, double decay, boolean ownsScheduler) {
+    this.pollIntervalMs = pollIntervalMs > 0 ? pollIntervalMs : DEFAULT_POLL_MS;
+    this.decay = (decay > 0 && decay < 1) ? decay : DEFAULT_DECAY;
+    this.scheduler = scheduler;
+    this.ownsScheduler = ownsScheduler;
   }
 
   /** Start periodic CPU sampling. Idempotent. */
@@ -78,21 +98,26 @@ public class SystemLoadMonitor {
     if (!running.compareAndSet(false, true)) {
       return;
     }
-    scheduler.scheduleAtFixedRate(this::sample, 0, pollIntervalMs, TimeUnit.MILLISECONDS);
+    flushTask = scheduler.scheduleAtFixedRate(this::sample, 0, pollIntervalMs, TimeUnit.MILLISECONDS);
     log.debug("SystemLoadMonitor started: pollIntervalMs={}, decay={}", pollIntervalMs, decay);
   }
 
   /** Stop the background sampler. */
   public void stop() {
     running.set(false);
-    scheduler.shutdown();
-    try {
-      if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+    if (flushTask != null) {
+      flushTask.cancel(false);
+    }
+    if (ownsScheduler) {
+      scheduler.shutdown();
+      try {
+        if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+          scheduler.shutdownNow();
+        }
+      } catch (InterruptedException e) {
         scheduler.shutdownNow();
+        Thread.currentThread().interrupt();
       }
-    } catch (InterruptedException e) {
-      scheduler.shutdownNow();
-      Thread.currentThread().interrupt();
     }
   }
 

@@ -83,7 +83,7 @@ public class TopKPersistService {
         return;
       }
 
-      topK.add(items.stream().collect(Collectors.toMap(Item::key, Item::count)));
+      topK.addDirect(items.stream().collect(Collectors.toMap(Item::key, Item::count)));
       log.info("Restored {} hot keys from Redis for Worker [{}]", items.size(), redisKey);
     } catch (Exception e) {
       log.error("Failed to restore TopK from Redis at key: {}", redisKey, e);

@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.rule;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.REDIS_KEY_RULES;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -24,16 +26,13 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import jakarta.annotation.PostConstruct;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
-
-import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.atomic.AtomicLong;
-
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.REDIS_KEY_RULES;
 
 /**
  * Central component for evaluating cache-key rules (blocking, reporting suppression, etc.).
@@ -148,8 +147,7 @@ public class RuleMatcher {
   public void addRule(Rule rule) {
     rule.prepare();
     rulesList.add(rule);
-    rulesVersion.incrementAndGet()
-    ;
+    rulesVersion.incrementAndGet();
     persistAndBroadcastRules();
   }
 
@@ -434,12 +432,16 @@ public class RuleMatcher {
     redisTemplate.ifPresent(r -> {
       try {
         String json = r.opsForValue().get(REDIS_KEY_RULES);
-        if (json != null && !json.isEmpty()) {
-          List<Rule> saved = OBJECT_MAPPER.readValue(json, new TypeReference<>() {});
-          replaceRules(saved);
 
-          log.info("Rules loaded from Redis: {} rules", saved.size());
+        if (json == null || json.isEmpty()) {
+          log.info("No rules found in Redis, starting with empty rule set");
+          return;
         }
+
+        List<Rule> saved = parseRulesJson(json);
+        replaceRules(saved);
+
+        log.info("Rules loaded from Redis: {} rules", saved.size());
       } catch (Exception e) {
         log.error("Failed to load rules from Redis", e);
       }

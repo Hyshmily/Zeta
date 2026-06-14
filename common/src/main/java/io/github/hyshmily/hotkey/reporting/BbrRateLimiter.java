@@ -113,16 +113,16 @@ public class BbrRateLimiter {
   public boolean tryAcquire() {
     synchronized (bucketLock) {
       tick();
-    }
 
-    long currentInFlight = inFlight.get();
-    long maxInFlight = maxInFlight();
+      long currentInFlight = inFlight.get();
+      long maxInFlight = maxInFlight();
 
-    double cpuLoad = cpuMonitor.getCpuLoadEMA() * 1000.0; // convert 0-1 → 0-1000
-    if (cpuLoad < cpuThreshold) {
+      double cpuLoad = cpuMonitor.getCpuLoadEMA() * 1000.0; // convert 0-1 → 0-1000
+      if (cpuLoad < cpuThreshold) {
         return currentInFlight <= maxInFlight || !isCooldown();
-    } else {
+      } else {
         return currentInFlight <= maxInFlight;
+      }
     }
   }
 
@@ -173,9 +173,11 @@ public class BbrRateLimiter {
 
   /** Current computed max concurrency limit. */
   public long getCurrentMaxInFlight() {
-    return maxInFlight();
+    synchronized (bucketLock) {
+      tick();
+      return maxInFlight();
+    }
   }
-
 
   /** Advance the sliding window forward, zeroing any buckets that have elapsed. */
   private void tick() {
@@ -194,17 +196,18 @@ public class BbrRateLimiter {
     windowStart += steps * bucketDurationMs;
   }
 
-  /** Compute the concurrency budget: floor(maxPASS × minRT × bucketPerSecond / 1000 + 0.5). */
+  /** Compute the concurrency budget: floor(maxPASS × minRT × bucketPerSecond / 1000 + 0.5). Caller must hold bucketLock. */
   private long maxInFlight() {
     long mp = maxPASS();
     long mr = minRT();
+
     if (mp == 0 || mr == 0) {
       return Long.MAX_VALUE;
     }
-    return (long) Math.floor((double) mp * mr * bucketPerSecond / 1000.0 + 0.5);
+    return (long) Math.floor(((double) mp * mr * bucketPerSecond) / 1000.0 + 0.5);
   }
 
-  /** Peak pass rate per bucket in the sliding window. */
+  /** Peak pass rate per bucket in the sliding window. Caller must hold bucketLock. */
   private long maxPASS() {
     long max = 0;
     for (long v : passBuckets) {
@@ -220,7 +223,7 @@ public class BbrRateLimiter {
     return max;
   }
 
-  /** Minimum average response time per bucket in the sliding window. */
+  /** Minimum average response time per bucket in the sliding window. Caller must hold bucketLock. */
   private long minRT() {
     long min = Long.MAX_VALUE;
     for (int i = 0; i < bucketCount; i++) {

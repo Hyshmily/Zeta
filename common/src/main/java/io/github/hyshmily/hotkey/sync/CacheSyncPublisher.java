@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
+import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
@@ -22,21 +25,17 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
-import org.springframework.amqp.AmqpException;
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.core.MessageProperties;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
-
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
  * Publishes cache synchronization messages (INVALIDATE / REFRESH) to peer instances
@@ -166,6 +165,7 @@ public class CacheSyncPublisher {
       props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
       props.setHeader(AMQP_HEADER_RULES_VERSION, rulesVersion);
       Message message = new Message(rulesJson.getBytes(StandardCharsets.UTF_8), props);
+
       rabbitTemplate.send(properties.getExchangeName(), "", message);
     } catch (AmqpException e) {
       log.error("Failed to send rules sync message", e);
@@ -204,15 +204,19 @@ public class CacheSyncPublisher {
       });
 
     if (!skipped.get()) {
-      MessageProperties props = new MessageProperties();
+      try {
+        MessageProperties props = new MessageProperties();
 
-      props.setHeader(AMQP_HEADER_TYPE, type);
-      props.setHeader(AMQP_HEADER_VERSION, version);
-      props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, degraded);
+        props.setHeader(AMQP_HEADER_TYPE, type);
+        props.setHeader(AMQP_HEADER_VERSION, version);
+        props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, degraded);
 
-      Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
+        Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
 
-      rabbitTemplate.send(properties.getExchangeName(), "", message);
+        rabbitTemplate.send(properties.getExchangeName(), "", message);
+      } catch (AmqpException e) {
+        log.error("Failed to send sync message", e);
+      }
     }
   }
 }

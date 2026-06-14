@@ -22,6 +22,8 @@ import io.github.hyshmily.hotkey.worker.detection.ThresholdLearner;
 import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.hotkey.worker.ingest.ReportConsumer;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -31,6 +33,7 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -94,7 +97,8 @@ class WorkerAutoConfigurationTest {
   }
 
   /**
-   * Minimal configuration providing mocked RabbitTemplate and ConnectionFactory for the context runner.
+   * Minimal configuration providing mocked RabbitTemplate, ConnectionFactory, and
+   * the shared scheduler for the context runner.
    */
   @Configuration
   static class MinimalMockConfiguration {
@@ -107,6 +111,16 @@ class WorkerAutoConfigurationTest {
     @Bean
     ConnectionFactory connectionFactory() {
       return org.mockito.Mockito.mock(ConnectionFactory.class);
+    }
+
+    @Bean
+    RedisConnectionFactory redisConnectionFactory() {
+      return org.mockito.Mockito.mock(RedisConnectionFactory.class);
+    }
+
+    @Bean("hotKeyScheduler")
+    ScheduledExecutorService hotKeyScheduler() {
+      return Executors.newSingleThreadScheduledExecutor();
     }
   }
 }

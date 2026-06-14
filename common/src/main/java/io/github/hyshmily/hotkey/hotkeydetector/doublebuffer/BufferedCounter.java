@@ -15,8 +15,9 @@
  */
 package io.github.hyshmily.hotkey.hotkeydetector.doublebuffer;
 
+import io.github.hyshmily.hotkey.logging.DefaultLogger;
+import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.scheduling.annotation.Scheduled;
 
 import javax.security.auth.Destroyable;
 import java.util.HashMap;
@@ -39,6 +40,8 @@ import java.util.function.Consumer;
  * lock-free.
  */
 public class BufferedCounter implements InitializingBean, Destroyable {
+    private static final HotKeyLogger log = new DefaultLogger(BufferedCounter.class);
+
     /** Maximum number of distinct keys held in one buffer before forced swap ({@value}). */
     private static final int MAX_BUFFER_SIZE = 10_000;
 
@@ -53,17 +56,35 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
     private final ScheduledExecutorService scheduler;
 
+    private final boolean ownsScheduler;
+
     /**
      * Creates a buffered counter that flushes aggregated counts to the given consumer.
+     * Creates its own single-thread scheduler (backward-compatible).
      *
      * @param batchConsumer callback receiving the aggregated key-count map on each flush
      */
     public BufferedCounter(Consumer<Map<String, Long>> batchConsumer) {
+        this(batchConsumer, Executors.newSingleThreadScheduledExecutor(
+                r -> new Thread(r, "buffered-counter-flusher")), true);
+    }
+
+    /**
+     * Creates a buffered counter with an externally provided scheduler.
+     *
+     * @param batchConsumer callback receiving the aggregated key-count map on each flush
+     * @param scheduler     the shared scheduler (not shut down on destroy)
+     */
+    public BufferedCounter(Consumer<Map<String, Long>> batchConsumer, ScheduledExecutorService scheduler) {
+        this(batchConsumer, scheduler, false);
+    }
+
+    private BufferedCounter(Consumer<Map<String, Long>> batchConsumer, ScheduledExecutorService scheduler, boolean ownsScheduler) {
         this.batchConsumer = batchConsumer;
         this.active = new AtomicReference<>(new CounterBuffer());
         this.standby = new CounterBuffer();
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(
-                r -> new Thread(r, "buffered-counter-flusher"));
+        this.scheduler = scheduler;
+        this.ownsScheduler = ownsScheduler;
     }
 
     /**
@@ -90,16 +111,19 @@ public class BufferedCounter implements InitializingBean, Destroyable {
         return oldBuffer;
     }
 
-    @Scheduled(fixedRate = FLUSH_INTERVAL_MS)
     private void flushStandby() {
-        CounterBuffer readyTOFlush = trySwitch();
-        if (readyTOFlush.isEmpty()) {
-            return;
-        }
+        try {
+            CounterBuffer readyTOFlush = trySwitch();
+            if (readyTOFlush.isEmpty()) {
+                return;
+            }
 
-        Map<String, Long> snapshot = readyTOFlush.Cohesion();
-        if (!snapshot.isEmpty()) {
-            batchConsumer.accept(snapshot);
+            Map<String, Long> snapshot = readyTOFlush.Cohesion();
+            if (!snapshot.isEmpty()) {
+                batchConsumer.accept(snapshot);
+            }
+        } catch (Exception e) {
+            log.error("Scheduled flushStandby failed", e);
         }
     }
 
@@ -114,13 +138,17 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     }
 
     /**
-     * Shut down the flush scheduler and perform a final drain of any
-     * remaining buffered counts.  Called by the Spring container during
-     * context close.
+     * Perform a final drain of any remaining buffered counts and shut down
+     * the scheduler only if owned (self-created). For a shared scheduler
+     * the task is simply cancelled.
+     *
+     * <p>Called by the Spring container during context close.
      */
     @Override
     public void destroy() {
-        scheduler.shutdown();
+        if (ownsScheduler) {
+            scheduler.shutdown();
+        }
         flushStandby();
     }
 

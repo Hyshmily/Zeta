@@ -89,6 +89,14 @@ public class ClusterHealthView {
     });
 
     lastAnyHeartbeatTime = System.currentTimeMillis();
+    if (degraded && isClusterHealthy()) {
+      log.info(
+        "Cluster has recovered from degraded state. Alive workers: {}/{}, clearing degraded flag.",
+        getAliveWorkerIds().size(),
+        knownWorkerCount
+      );
+      this.degraded = false;
+    }
   }
 
   /**
@@ -105,6 +113,15 @@ public class ClusterHealthView {
       r.verifyFailures = 0;
       return r;
     });
+
+    if (degraded && isClusterHealthy()) {
+      log.info(
+        "Cluster has recovered from degraded state via pong. Alive workers: {}/{}, clearing degraded flag.",
+        getAliveWorkerIds().size(),
+        knownWorkerCount
+      );
+      this.degraded = false;
+    }
   }
 
   /**

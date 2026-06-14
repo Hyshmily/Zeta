@@ -82,7 +82,7 @@ class WorkerHeartbeatProducerTest {
 
   /** First start with Redis available and no prior epoch → epoch = 1. */
   @Test
-  void constructor_shouldInitEpochFromRedis_whenFirstStart() {
+  void constructor_shouldDoInitEpochFromRedis_whenFirstStart() {
     try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
       var producer = newProducer();
       producer.sendHeartbeat();
@@ -95,7 +95,7 @@ class WorkerHeartbeatProducerTest {
 
   /** Subsequent start: Redis returns previous epoch "5" → epoch = 6. */
   @Test
-  void constructor_shouldInitEpochFromRedis_whenRestart() {
+  void constructor_shouldDoInitEpochFromRedis_whenRestart() {
     try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning("5"))) {
       var producer = newProducer();
       producer.sendHeartbeat();

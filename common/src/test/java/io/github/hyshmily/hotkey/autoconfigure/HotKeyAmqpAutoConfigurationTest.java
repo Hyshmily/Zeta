@@ -145,35 +145,6 @@ class HotKeyAmqpAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the report scheduler is created and not shut down.
-   */
-  @Test
-  void hotKeyReportSchedulerIsCreated() {
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
-    ScheduledExecutorService scheduler = config.hotKeyReportScheduler();
-
-    assertThat(scheduler).isNotNull();
-    assertThat(scheduler.isShutdown()).isFalse();
-    scheduler.shutdown();
-  }
-
-  /**
-   * Verifies that threads created by the report scheduler have the expected thread name prefix.
-   */
-  @Test
-  void hotKeyReportSchedulerThreadNameContainsReport() {
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
-    ScheduledExecutorService scheduler = config.hotKeyReportScheduler();
-
-    assertThat(scheduler).isNotNull();
-    scheduler.execute(() -> {
-      String threadName = Thread.currentThread().getName();
-      assertThat(threadName).contains("hotkey-report");
-    });
-    scheduler.shutdown();
-  }
-
-  /**
    * Verifies that SyncConfiguration is skipped when hotkey.sync.enabled is false.
    */
   @Test
@@ -272,22 +243,6 @@ class HotKeyAmqpAutoConfigurationTest {
     );
 
     assertThat(listener).isNotNull();
-  }
-
-  /**
-   * Verifies that the sync scheduler is created with the configured pool size.
-   */
-  @Test
-  void hotKeySyncSchedulerIsCreated() {
-    CacheSyncProperties props = new CacheSyncProperties();
-    props.setSchedulerPoolSize(2);
-
-    HotKeyAmqpAutoConfiguration.SyncConfiguration config = new HotKeyAmqpAutoConfiguration.SyncConfiguration();
-    ScheduledExecutorService scheduler = config.hotKeySyncScheduler(props);
-
-    assertThat(scheduler).isNotNull();
-    assertThat(scheduler.isShutdown()).isFalse();
-    scheduler.shutdown();
   }
 
   /**
@@ -395,20 +350,4 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(listener).isNotNull();
   }
 
-  /**
-   * Verifies that the worker scheduler is created with the configured pool size.
-   */
-  @Test
-  void hotKeyWorkerSchedulerIsCreated() {
-    WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setSchedulerPoolSize(2);
-
-    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
-      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    ScheduledExecutorService scheduler = config.hotKeyWorkerScheduler(props);
-
-    assertThat(scheduler).isNotNull();
-    assertThat(scheduler.isShutdown()).isFalse();
-    scheduler.shutdown();
-  }
 }

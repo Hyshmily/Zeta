@@ -31,7 +31,7 @@ import org.springframework.web.bind.annotation.*;
  * <ul>
  *   <li>{@code GET /actuator/hotkeyring} — ring topology and mode
  *   <li>{@code GET /actuator/hotkeyring/{key}} — query which node handles a key
- *   <li>{@code POST /actuator/hotkeyring} — add a node (body: {@code {"nodeId":"..."}})
+ *   <li>{@code POST /actuator/hotkeyring} — addDirect a node (body: {@code {"nodeId":"..."}})
  *   <li>{@code DELETE /actuator/hotkeyring/{nodeId}} — remove a node
  *   <li>{@code POST /actuator/hotkeyring/rebuild} — switch back to auto mode
  * </ul>
@@ -95,7 +95,7 @@ public class RingEndpoint {
    * mode, this call implicitly switches it to manual mode so the topology
    * stays under operator control.
    *
-   * @param body a map containing the {@code "nodeId"} to add
+   * @param body a map containing the {@code "nodeId"} to addDirect
    * @return a status map confirming the action
    */
   @PostMapping

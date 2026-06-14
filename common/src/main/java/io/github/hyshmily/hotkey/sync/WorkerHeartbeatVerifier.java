@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.sync;
 
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
+import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Message;
@@ -26,6 +27,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -38,7 +40,7 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
  * exceeded {@code heartbeatTimeoutMs} without a heartbeat, sends a PING
  * via Direct reply-to, and updates the health view on PONG or failure.
  */
-@RequiredArgsConstructor
+@RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public class WorkerHeartbeatVerifier {
 
   private static final HotKeyLogger log = new DefaultLogger(WorkerHeartbeatVerifier.class);
@@ -49,13 +51,46 @@ public class WorkerHeartbeatVerifier {
   private final long verifyIntervalMs;
   private final long pingTimeoutMs;
   private final int degradeAfterFailures;
-  private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-    Thread t = new Thread(r, "hb-verifier");
-    t.setDaemon(true);
-    return t;
-  });
+  private final ScheduledExecutorService scheduler;
+  private final boolean ownsScheduler;
+  private ScheduledFuture<?> verifyTask;
 
   private static final String QUEUE_VERIFY_PING_PREFIX = "hotkey.verify.ping.";
+
+  /**
+   * Creates a verifier with its own scheduler (backward-compatible for tests).
+   */
+  public WorkerHeartbeatVerifier(
+    RabbitTemplate rabbitTemplate,
+    ClusterHealthView healthView,
+    String appInstanceId,
+    long verifyIntervalMs,
+    long pingTimeoutMs,
+    int degradeAfterFailures
+  ) {
+    this(rabbitTemplate, healthView, appInstanceId, verifyIntervalMs, pingTimeoutMs, degradeAfterFailures,
+      Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "hb-verifier");
+        t.setDaemon(true);
+        return t;
+      }), true);
+  }
+
+  /**
+   * Creates a verifier with a shared external scheduler.
+   */
+  public WorkerHeartbeatVerifier(
+    RabbitTemplate rabbitTemplate,
+    ClusterHealthView healthView,
+    String appInstanceId,
+    long verifyIntervalMs,
+    long pingTimeoutMs,
+    int degradeAfterFailures,
+    ScheduledExecutorService scheduler
+  ) {
+    this(rabbitTemplate, healthView, appInstanceId, verifyIntervalMs, pingTimeoutMs, degradeAfterFailures,
+      scheduler, false);
+  }
 
   /**
    * Starts the periodic heartbeat verification at a fixed rate.
@@ -69,7 +104,7 @@ public class WorkerHeartbeatVerifier {
    * schedulers.
    */
   public void start() {
-    scheduler.scheduleAtFixedRate(
+    verifyTask = scheduler.scheduleAtFixedRate(
       this::verifySuspectedWorkers,
       verifyIntervalMs,
       verifyIntervalMs,
@@ -78,13 +113,17 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
-   * Gracefully shuts down the heartbeat verification scheduler.
+   * Gracefully stops the heartbeat verification.
    *
-   * <p>Already-running tasks are allowed to complete; no new verification
-   * cycles will be scheduled.
+   * <p>Cancels the scheduled task; shuts down the scheduler only if owned.
    */
   public void stop() {
-    scheduler.shutdown();
+    if (verifyTask != null) {
+      verifyTask.cancel(false);
+    }
+    if (ownsScheduler) {
+      scheduler.shutdown();
+    }
   }
 
   /**
@@ -97,38 +136,42 @@ public class WorkerHeartbeatVerifier {
    * the cluster is marked as degraded via {@link ClusterHealthView#setDegraded}.
    */
   void verifySuspectedWorkers() {
-    if (healthView.isClusterHealthy()) {
-      return;
-    }
-
-    Set<String> suspected = healthView
-      .getAllWorkerIds()
-      .stream()
-      .filter(id -> !healthView.getAliveWorkerIds().contains(id))
-      .collect(Collectors.toSet());
-
-    if (suspected.isEmpty()) {
-      return;
-    }
-
-    log.info("Verifying suspected workers: {}", suspected);
-
-    int failures = 0;
-    for (String workerId : suspected) {
-      boolean alive = sendPingAndWaitPong(workerId);
-      if (!alive) {
-        failures++;
-        healthView.markVerificationFailed(workerId);
-        log.warn("Worker {} verification failed (failures={})", workerId, failures);
-      } else {
-        log.debug("Worker {} verification succeeded", workerId);
-        healthView.recordPong(workerId);
+    try {
+      if (healthView.isClusterHealthy()) {
+        return;
       }
-    }
 
-    if (failures >= degradeAfterFailures && !healthView.isClusterHealthy()) {
-      log.warn("Cluster degraded: {} workers unreachable after verification (threshold={})", failures, degradeAfterFailures);
-      healthView.setDegraded(true);
+      Set<String> suspected = healthView
+        .getAllWorkerIds()
+        .stream()
+        .filter(id -> !healthView.getAliveWorkerIds().contains(id))
+        .collect(Collectors.toSet());
+
+      if (suspected.isEmpty()) {
+        return;
+      }
+
+      log.info("Verifying suspected workers: {}", suspected);
+
+      int failures = 0;
+      for (String workerId : suspected) {
+        boolean alive = sendPingAndWaitPong(workerId);
+        if (!alive) {
+          failures++;
+          healthView.markVerificationFailed(workerId);
+          log.warn("Worker {} verification failed (failures={})", workerId, failures);
+        } else {
+          log.debug("Worker {} verification succeeded", workerId);
+          healthView.recordPong(workerId);
+        }
+      }
+
+      if (failures >= degradeAfterFailures && !healthView.isClusterHealthy()) {
+        log.warn("Cluster degraded: {} workers unreachable after verification (threshold={})", failures, degradeAfterFailures);
+        healthView.setDegraded(true);
+      }
+    } catch (Exception e) {
+      log.error("Scheduled verifySuspectedWorkers failed", e);
     }
   }
 

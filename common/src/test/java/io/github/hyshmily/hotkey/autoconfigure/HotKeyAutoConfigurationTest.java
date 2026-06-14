@@ -40,7 +40,9 @@ class HotKeyAutoConfigurationTest {
 
   private final ApplicationContextRunner runner = new ApplicationContextRunner()
     .withPropertyValues("hotkey.local.topK=200")
-    .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class));
+    .withConfiguration(AutoConfigurations.of(
+      HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
+    ));
 
   /**
    * Verifies that all default beans (TopK, Cache, SingleFlight, CacheExpireManager, Executor, HotKeyCache, HotKey) are created.
@@ -53,7 +55,7 @@ class HotKeyAutoConfigurationTest {
       assertThat(ctx).hasSingleBean(Cache.class);
       assertThat(ctx).hasSingleBean(SingleFlight.class);
       assertThat(ctx).hasSingleBean(CacheExpireManager.class);
-      assertThat(ctx).hasSingleBean(Executor.class);
+      assertThat(ctx).hasBean("hotKeyExecutor");
       assertThat(ctx.getBean("hotKeyExecutor")).isInstanceOf(Executor.class);
       assertThat(ctx).hasSingleBean(HotKeyCache.class);
       assertThat(ctx).hasSingleBean(HotKey.class);
@@ -83,7 +85,9 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean("hotKeyDetector", HotKeyDetector.class, () -> mock(HotKeyDetector.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class))
+      .withConfiguration(AutoConfigurations.of(
+        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
+      ))
       .run(ctx -> {
         assertThat(ctx).hasSingleBean(HotKeyDetector.class);
         assertThat(ctx.getBean("hotKeyDetector")).isSameAs(ctx.getBean(HotKeyDetector.class));
@@ -99,7 +103,9 @@ class HotKeyAutoConfigurationTest {
       .withAllowBeanDefinitionOverriding(true)
       .withBean("hotLocalCache", Cache.class, () -> mock(Cache.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class))
+      .withConfiguration(AutoConfigurations.of(
+        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
+      ))
       .run(ctx -> assertThat(ctx).hasSingleBean(Cache.class));
   }
 
@@ -111,7 +117,9 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean(SingleFlight.class, () -> mock(SingleFlight.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class))
+      .withConfiguration(AutoConfigurations.of(
+        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
+      ))
       .run(ctx -> assertThat(ctx).hasSingleBean(SingleFlight.class));
   }
 
@@ -123,7 +131,9 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean(CacheExpireManager.class, () -> mock(CacheExpireManager.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class))
+      .withConfiguration(AutoConfigurations.of(
+        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
+      ))
       .run(ctx -> assertThat(ctx).hasSingleBean(CacheExpireManager.class));
   }
 
@@ -135,10 +145,12 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean("hotKeyExecutor", Executor.class, () -> mock(Executor.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class))
+      .withConfiguration(AutoConfigurations.of(
+        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
+      ))
       .run(ctx -> {
-        assertThat(ctx).hasSingleBean(Executor.class);
-        assertThat(ctx.getBean("hotKeyExecutor")).isSameAs(ctx.getBean(Executor.class));
+        assertThat(ctx).hasBean("hotKeyExecutor");
+        assertThat(ctx.getBean("hotKeyExecutor")).isInstanceOf(Executor.class);
       });
   }
 
@@ -172,7 +184,9 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean(HotKey.class, () -> mock(HotKey.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(HotKeyAutoConfiguration.class))
+      .withConfiguration(AutoConfigurations.of(
+        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
+      ))
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKey.class));
   }
 }

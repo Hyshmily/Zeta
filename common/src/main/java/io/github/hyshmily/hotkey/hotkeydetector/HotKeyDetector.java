@@ -20,10 +20,12 @@ import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
-
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
 
 /**
  * Unified facade for hot key detection.
@@ -32,136 +34,152 @@ import java.util.concurrent.BlockingQueue;
  * batched) paths for recording key accesses, along with read-only introspection
  * of the underlying HeavyKeeper state.
  */
-public class HotKeyDetector implements TopK {
+public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
 
-    private final HeavyKeeper heavyKeeper;
-    private final BufferedCounter bufferedCounter;
+  private final HeavyKeeper heavyKeeper;
+  private final BufferedCounter bufferedCounter;
 
-    /**
-     * Creates a detector that wraps the given HeavyKeeper instance.
-     *
-     * <p>The buffered path ({@link #add(String)}, {@link #addAll(Map)})
-     * aggregates counts and flushes them to {@code heavyKeeper.add(Map)},
-     * which always updates both the sketch and the TopK heap.
-     *
-     * @param heavyKeeper the underlying sketch-based TopK implementation
-     */
-    public HotKeyDetector(HeavyKeeper heavyKeeper) {
-        this.heavyKeeper = heavyKeeper;
-        this.bufferedCounter = new BufferedCounter(heavyKeeper::add);
+  /**
+   * Creates a detector that wraps the given HeavyKeeper instance.
+   * Creates its own scheduler for buffered counter flushing.
+   *
+   * @param heavyKeeper the underlying sketch-based TopK implementation
+   */
+  public HotKeyDetector(HeavyKeeper heavyKeeper) {
+    this.heavyKeeper = heavyKeeper;
+    this.bufferedCounter = new BufferedCounter(heavyKeeper::addDirect);
+  }
+
+  /**
+   * Creates a detector with a shared external scheduler.
+   *
+   * @param heavyKeeper the underlying sketch-based TopK implementation
+   * @param scheduler   the shared scheduler (not shut down on destroy)
+   */
+  public HotKeyDetector(HeavyKeeper heavyKeeper, ScheduledExecutorService scheduler) {
+    this.heavyKeeper = heavyKeeper;
+    this.bufferedCounter = new BufferedCounter(heavyKeeper::addDirect, scheduler);
+  }
+
+  @Override
+  public void afterPropertiesSet() {
+    bufferedCounter.afterPropertiesSet();
+  }
+
+  @Override
+  public void destroy() {
+    bufferedCounter.destroy();
+  }
+
+  /**
+   * Record an access directly to the sketch and TopK heap.
+   *
+   * @param key       the accessed key
+   * @param increment the frequency increment
+   * @return result indicating whether the key became hot
+   */
+  @Override
+  public AddResult addDirect(String key, int increment) {
+    return heavyKeeper.addDirect(key, increment);
+  }
+
+  /**
+   * Record accesses for multiple keys. Delegates to the underlying HeavyKeeper.
+   *
+   * @param keyCounts map of keys to their access counts
+   * @return list of {@link AddResult} for keys that entered the TopK set
+   */
+  @Override
+  public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+    return heavyKeeper.addDirect(keyCounts);
+  }
+
+  /**
+   * Record single access for the given key through the buffer.
+   *
+   * @param key the accessed key
+   */
+  public void add(String key) {
+    bufferedCounter.count(key, 1);
+  }
+
+  /**
+   * Record multiple accesses for the given key through the buffer.
+   *
+   * @param key   the accessed key
+   * @param delta the number of accesses
+   */
+  public void add(String key, long delta) {
+    bufferedCounter.count(key, delta);
+  }
+
+  /**
+   * Record accesses for multiple keys through the buffer.
+   *
+   * @param keyCounts map of keys to their access counts
+   */
+  public void add(Map<String, Long> keyCounts) {
+    for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
+      bufferedCounter.count(entry.getKey(), entry.getValue());
     }
+  }
 
+  /**
+   * Return all keys currently in the TopK set, sorted by estimated count descending.
+   */
+  @Override
+  public List<Item> list() {
+    return heavyKeeper.list();
+  }
 
-    /**
-     * Record an access directly to the sketch and TopK heap.
-     *
-     * @param key       the accessed key
-     * @param increment the frequency increment
-     * @return result indicating whether the key became hot
-     */
-    @Override
-    public AddResult addDirect(String key, int increment) {
-        return heavyKeeper.addDirect(key, increment);
-    }
+  /**
+   * Return the top N hot keys from the underlying HeavyKeeper.
+   *
+   * @param n maximum number of keys to return
+   * @return list of at most {@code n} {@link Item} entries, never null
+   */
+  @Override
+  public List<Item> listTopN(int n) {
+    return heavyKeeper.listTopN(n);
+  }
 
-    /**
-     * Record accesses for multiple keys. Delegates to the underlying HeavyKeeper.
-     *
-     * @param keyCounts map of keys to their access counts
-     * @return list of {@link AddResult} for keys that entered the TopK set
-     */
-    @Override
-    public List<AddResult> add(Map<String, Long> keyCounts) {
-        return heavyKeeper.add(keyCounts);
-    }
+  /**
+   * Check whether the given key is currently in the TopK set.
+   *
+   * @param key the key to check
+   * @return {@code true} if the key is present in the current TopK ranking
+   */
+  @Override
+  public boolean contains(String key) {
+    return heavyKeeper.contains(key);
+  }
 
-    /**
-     * Record single access for the given key through the buffer.
-     *
-     * @param key the accessed key
-     */
-    public void add(String key) {
-        bufferedCounter.count(key, 1);
-    }
+  /**
+   * Return the total number of data streams tracked since startup or last reset.
+   *
+   * @return total access count
+   */
+  @Override
+  public long total() {
+    return heavyKeeper.total();
+  }
 
-    /**
-     * Record multiple accesses for the given key through the buffer.
-     *
-     * @param key   the accessed key
-     * @param delta the number of accesses
-     */
-    public void add(String key, long delta) {
-        bufferedCounter.count(key, delta);
-    }
+  /**
+   * Return the blocking queue holding items that have been evicted from the TopK set.
+   *
+   * @return a blocking queue of evicted items
+   */
+  @Override
+  public BlockingQueue<Item> expelled() {
+    return heavyKeeper.expelled();
+  }
 
-    /**
-     * Record accesses for multiple keys through the buffer.
-     *
-     * @param keyCounts map of keys to their access counts
-     */
-    public void addAll(Map<String, Long> keyCounts) {
-        for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
-            bufferedCounter.count(entry.getKey(), entry.getValue());
-        }
-    }
-
-
-    /**
-     * Return all keys currently in the TopK set, sorted by estimated count descending.
-     */
-    @Override
-    public List<Item> list() {
-        return heavyKeeper.list();
-    }
-
-    /**
-     * Return the top N hot keys from the underlying HeavyKeeper.
-     *
-     * @param n maximum number of keys to return
-     * @return list of at most {@code n} {@link Item} entries, never null
-     */
-    @Override
-    public List<Item> listTopN(int n) {
-        return heavyKeeper.listTopN(n);
-    }
-
-    /**
-     * Check whether the given key is currently in the TopK set.
-     *
-     * @param key the key to check
-     * @return {@code true} if the key is present in the current TopK ranking
-     */
-    @Override
-    public boolean contains(String key) {
-        return heavyKeeper.contains(key);
-    }
-
-    /**
-     * Return the total number of data streams tracked since startup or last reset.
-     *
-     * @return total access count
-     */
-    @Override
-    public long total() {
-        return heavyKeeper.total();
-    }
-
-    /**
-     * Return the blocking queue holding items that have been evicted from the TopK set.
-     *
-     * @return a blocking queue of evicted items
-     */
-    @Override
-    public BlockingQueue<Item> expelled() {
-        return heavyKeeper.expelled();
-    }
-    /**
-     * Decay all frequency counts to age out historical data.
-     * Delegates to the underlying HeavyKeeper.
-     */
-    @Override
-    public void fading() {
-        heavyKeeper.fading();
-    }
-
+  /**
+   * Decay all frequency counts to age out historical data.
+   * Delegates to the underlying HeavyKeeper.
+   */
+  @Override
+  public void fading() {
+    heavyKeeper.fading();
+  }
 }

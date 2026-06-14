@@ -16,10 +16,9 @@
 package io.github.hyshmily.hotkey.sharding;
 
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import lombok.Getter;
-
 import java.util.HashSet;
 import java.util.Set;
+import lombok.Getter;
 
 /**
  * Manages the consistent-hash ring for Worker shard routing.
@@ -74,7 +73,7 @@ public class RingManager {
   /**
    * Add a physical node to the ring. Switches to manual mode.
    *
-   * @param nodeId the node identifier to add; must not be {@code null}
+   * @param nodeId the node identifier to addDirect; must not be {@code null}
    * @throws NullPointerException if {@code nodeId} is {@code null}
    */
   public synchronized void addNode(String nodeId) {

@@ -15,21 +15,20 @@
  */
 package io.github.hyshmily.hotkey.hotkeydetector;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link HeavyKeeper}, covering construction validation, single-key and multi-key tracking,
@@ -56,17 +55,19 @@ class HeavyKeeperTest {
    */
   @Test
   void constructor_shouldRejectInvalidK() {
-    assertThatThrownBy(() -> new HeavyKeeper(0, WIDTH, DEPTH, DECAY, MIN_COUNT))
-      .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(() -> new HeavyKeeper(-1, WIDTH, DEPTH, DECAY, MIN_COUNT))
-      .isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new HeavyKeeper(0, WIDTH, DEPTH, DECAY, MIN_COUNT)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThatThrownBy(() -> new HeavyKeeper(-1, WIDTH, DEPTH, DECAY, MIN_COUNT)).isInstanceOf(
+      IllegalArgumentException.class
+    );
   }
 
   /**
    * Verifies that adding a single key with sufficient count marks it as hot.
    */
   @Test
-  void add_shouldTrackSingleKey() {
+  void add_Direct_shouldTrackSingleKey() {
     AddResult result = keeper.addDirect("key1", 10);
     assertThat(result.isHotKey()).isTrue();
     assertThat(result.currentKey()).isEqualTo("key1");
@@ -77,7 +78,7 @@ class HeavyKeeperTest {
    * Verifies that when the TopK set is full, adding a high-count key expels the least frequent key.
    */
   @Test
-  void add_shouldReturnExpelledKeyWhenTopKFull() {
+  void add_Direct_shouldReturnExpelledKeyWhenTopKFull() {
     for (int i = 0; i < TOP_K; i++) {
       AddResult result = keeper.addDirect("key" + i, 50);
       assertThat(result.isHotKey()).isTrue();
@@ -93,7 +94,7 @@ class HeavyKeeperTest {
    * Verifies that keys added with a count below the minimum threshold are not promoted to hot.
    */
   @Test
-  void add_keysBelowMinCountShouldNotBeHot() {
+  void add_Direct_keysBelowMinCountShouldNotBeHot() {
     keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 100);
     AddResult result = keeper.addDirect("lowFreqKey", 1);
     assertThat(result.isHotKey()).isFalse();
@@ -193,7 +194,7 @@ class HeavyKeeperTest {
    * Verifies that concurrent additions from multiple threads are safe and all counts are accurately tracked.
    */
   @Test
-  void add_shouldBeThreadSafe() throws InterruptedException {
+  void add_Direct_shouldBeThreadSafe() throws InterruptedException {
     int threadCount = 10;
     int iterations = 100;
     ExecutorService executor = Executors.newFixedThreadPool(threadCount);

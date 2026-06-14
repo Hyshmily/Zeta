@@ -22,7 +22,6 @@ import jakarta.validation.constraints.Positive;
 import lombok.AccessLevel;
 import lombok.Data;
 import lombok.Getter;
-import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
@@ -92,6 +91,10 @@ public class HotKeyProperties {
   /** Queue capacity for the HotKey async executor before rejection. */
   @Min(1)
   private int executorQueueCapacity = 2000;
+
+  /** Pool size for the shared HotKey scheduler (periodic tasks). */
+  @Min(1)
+  private int schedulerPoolSize = 8;
 
   /** Capacity of the expelled-key queue in HeavyKeeper. */
   @Min(1)

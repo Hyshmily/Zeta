@@ -32,7 +32,6 @@ import io.github.hyshmily.hotkey.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.hotkey.worker.ingest.ReportConsumer;
 import io.github.hyshmily.hotkey.worker.persistence.TopKPersistService;
 import jakarta.annotation.PostConstruct;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -48,6 +47,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -118,19 +118,6 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Dedicated scheduler for TopK persistence. Daemon thread, does not block JVM shutdown.
-   */
-  @Bean(destroyMethod = "shutdown")
-  @ConditionalOnBean(TopKPersistService.class)
-  public ScheduledExecutorService topKPersistScheduler() {
-    return Executors.newSingleThreadScheduledExecutor(r -> {
-      Thread t = new Thread(r, "topk-persist");
-      t.setDaemon(true);
-      return t;
-    });
-  }
-
-  /**
    * Schedules periodic TopK snapshot persistence. The returned placeholder bean
    * keeps the task alive in the context.
    */
@@ -139,7 +126,7 @@ public class WorkerAutoConfiguration {
   public Object topKPersistTask(
     TopKPersistService service,
     WorkerProperties properties,
-    @Qualifier("topKPersistScheduler") ScheduledExecutorService scheduler
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
     long interval = properties.getPersistence().getPersistIntervalMs();
     scheduler.scheduleAtFixedRate(service::persistToRedis, interval, interval, TimeUnit.MILLISECONDS);
@@ -301,21 +288,6 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Shared scheduler for worker‑internal periodic tasks (eviction, etc.).
-   * Threads are daemon so they don't block JVM shutdown.
-   *
-   * @return a {@link ScheduledExecutorService} with 2 daemon threads
-   */
-  @Bean(destroyMethod = "shutdown")
-  public ScheduledExecutorService hotKeyWorkerScheduler() {
-    return Executors.newScheduledThreadPool(2, r -> {
-      Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_WORKER);
-      t.setDaemon(true);
-      return t;
-    });
-  }
-
-  /**
    * Direct exchange to which clients publish report messages.
    * Routing keys follow the pattern {@code report.<appName>.<nodeId>}.
    *
@@ -449,10 +421,14 @@ public class WorkerAutoConfiguration {
      */
     @Scheduled(fixedDelayString = "${hotkey.worker.state-machine.evict-interval-ms:30000}")
     public void evictStale() {
-      long staleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
-      detector.evictStale(staleAfterMs);
-      stateMachine.evictStale(staleAfterMs);
-      log.debug("Evicted stale Worker state: staleAfterMs={}", staleAfterMs);
+      try {
+        long staleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
+        detector.evictStale(staleAfterMs);
+        stateMachine.evictStale(staleAfterMs);
+        log.debug("Evicted stale Worker state: staleAfterMs={}", staleAfterMs);
+      } catch (Exception e) {
+        log.error("Scheduled evictStale failed", e);
+      }
     }
   }
 
@@ -484,7 +460,11 @@ public class WorkerAutoConfiguration {
      */
     @Scheduled(fixedDelayString = "${hotkey.worker.topk-validation.validate-interval-ms:60000}")
     public void validate() {
-      topKValidator.validate();
+      try {
+        topKValidator.validate();
+      } catch (Exception e) {
+        log.error("Scheduled TopK validation failed", e);
+      }
     }
   }
 
@@ -560,7 +540,7 @@ public class WorkerAutoConfiguration {
   public Object thresholdLearningTask(
     ThresholdLearner learner,
     WorkerProperties properties,
-    @Qualifier("hotKeyWorkerScheduler") ScheduledExecutorService scheduler
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
     scheduler.scheduleAtFixedRate(
       learner,
@@ -633,7 +613,9 @@ public class WorkerAutoConfiguration {
     WorkerProperties properties,
     HotKeyStateMachine stateMachine,
     WorkerBroadcaster broadcaster,
-    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter
+    RedisConnectionFactory redisConnectionFactory,
+    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter,
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
     return new WorkerHeartbeatProducer(
       rabbitTemplate,
@@ -642,7 +624,9 @@ public class WorkerAutoConfiguration {
       stateMachine,
       broadcaster,
       configTimestampCounter,
-      properties.getHeartbeat().getPingIntervalMs()
+      redisConnectionFactory,
+      properties.getHeartbeat().getPingIntervalMs(),
+      scheduler
     );
   }
 }

@@ -55,7 +55,7 @@ public class GlobalQpsEstimator {
    *
    * <p>Also clears stale slices that have fallen out of the window, keeping
    * the circular buffer consistent.  Must be called from a single consumer
-   * thread (or externally synchronised) to avoid races on the clear + add
+   * thread (or externally synchronised) to avoid races on the clear + addDirect
    * sequence.
    *
    * @param totalCount the total number of access counts across all keys in the batch

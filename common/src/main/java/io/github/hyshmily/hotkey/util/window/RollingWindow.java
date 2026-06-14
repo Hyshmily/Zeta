@@ -47,7 +47,7 @@ public final class RollingWindow {
   /**
    * Add {@code value} to the current bucket.  Thread-safe.
    *
-   * @param value the value to add to the current bucket
+   * @param value the value to addDirect to the current bucket
    */
   public synchronized void add(long value) {
     tick();

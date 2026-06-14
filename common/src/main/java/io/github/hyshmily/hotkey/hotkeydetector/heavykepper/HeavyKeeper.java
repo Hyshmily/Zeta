@@ -18,9 +18,6 @@ package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.hotkey.logging.DefaultLogger;
 import io.github.hyshmily.hotkey.logging.HotKeyLogger;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -28,6 +25,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking.
@@ -50,24 +49,27 @@ public class HeavyKeeper implements TopK {
   /** Number of lock stripes for fine-grained concurrency ({@value}). Must be a power of two. */
   private static final int LOCK_STRIPES = 256;
 
-    /**
-     * -- GETTER --
-     * Maximum number of hot keys tracked.
-     */
-    @Getter
-    private final int k;
-    /**
-     * -- GETTER --
-     * Width of the Count-Min Sketch (columns per row).
-     */
-    @Getter
-    private final int width;
-    /**
-     * -- GETTER --
-     * Depth of the Count-Min Sketch (rows / hash functions).
-     */
-    @Getter
-    private final int depth;
+  /**
+   * -- GETTER --
+   * Maximum number of hot keys tracked.
+   */
+  @Getter
+  private final int k;
+
+  /**
+   * -- GETTER --
+   * Width of the Count-Min Sketch (columns per row).
+   */
+  @Getter
+  private final int width;
+
+  /**
+   * -- GETTER --
+   * Depth of the Count-Min Sketch (rows / hash functions).
+   */
+  @Getter
+  private final int depth;
+
   /** Pre-computed decay probabilities: {@code decay^i} for {@code i in [0, LOOKUP_TABLE_SIZE)}. */
   private final double[] lookupTable;
   /** Per-slot fingerprint values for collision verification in the Count-Min Sketch. */
@@ -89,12 +91,13 @@ public class HeavyKeeper implements TopK {
   private final BlockingQueue<Item> expelledQueue;
   /** Running total of all tracked data streams since startup or last {@link #fading()}. */
   private final LongAdder total;
-    /**
-     * -- GETTER --
-     * Minimum count threshold before a key can enter the TopK set.
-     */
-    @Getter
-    private final int minCount;
+
+  /**
+   * -- GETTER --
+   * Minimum count threshold before a key can enter the TopK set.
+   */
+  @Getter
+  private final int minCount;
 
   /**
    * Construct a HeavyKeeper instance.
@@ -234,10 +237,8 @@ public class HeavyKeeper implements TopK {
         isHot = true;
       }
       return new AddResult(expelled, isHot, key);
-
     }
   }
-  
 
   /**
    * Record accesses for multiple keys.
@@ -250,7 +251,7 @@ public class HeavyKeeper implements TopK {
    * @return list of {@link AddResult} for keys that entered the TopK set
    */
   @Override
-  public List<AddResult> add(Map<String, Long> keyCounts) {
+  public List<AddResult> addDirect(Map<String, Long> keyCounts) {
     Map<String, Long> maxCounts = new HashMap<>(keyCounts.size());
     for (var entry : keyCounts.entrySet()) {
       long max = addToSketch(entry.getKey(), entry.getValue());
@@ -264,16 +265,15 @@ public class HeavyKeeper implements TopK {
         String key = entry.getKey();
         long maxCount = maxCounts.get(key);
         if (maxCount < minCount) {
-            continue;
+          continue;
         }
 
         Node existing = heapIndex.remove(key);
         if (existing != null) {
-            sortedTopK.remove(existing);
+          sortedTopK.remove(existing);
         }
 
-        boolean shouldInsert = sortedTopK.size() < k
-                || maxCount >= sortedTopK.firstKey().count;
+        boolean shouldInsert = sortedTopK.size() < k || maxCount >= sortedTopK.firstKey().count;
         if (shouldInsert) {
           Node newNode = new Node(key, maxCount);
           String expelledKey = null;
@@ -295,8 +295,7 @@ public class HeavyKeeper implements TopK {
   }
 
   private long addToSketch(String key, long increment) {
-    long itemFingerprint = Hashing.murmur3_32_fixed()
-            .hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
+    long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
     long maxCount = 0;
 
     for (int i = 0; i < depth; i++) {
@@ -318,8 +317,8 @@ public class HeavyKeeper implements TopK {
         } else {
           ThreadLocalRandom rng = ThreadLocalRandom.current();
           double decayProb = (counts[index] < LOOKUP_TABLE_SIZE)
-                  ? lookupTable[(int) counts[index]]
-                  : lookupTable[LOOKUP_TABLE_SIZE - 1];
+            ? lookupTable[(int) counts[index]]
+            : lookupTable[LOOKUP_TABLE_SIZE - 1];
           int decays = sampleBinomial((int) Math.min(increment, Integer.MAX_VALUE), decayProb, rng);
 
           if (decays >= counts[index]) {
@@ -335,7 +334,6 @@ public class HeavyKeeper implements TopK {
     total.add(increment);
     return maxCount;
   }
-
 
   /**
    * Return all keys currently in the TopK set, sorted by estimated count descending.
@@ -377,7 +375,7 @@ public class HeavyKeeper implements TopK {
     return expelledQueue;
   }
 
-    /**
+  /**
    * Halve all frequency counters in the sketch and the sorted heap,
    * removing entries whose count drops to zero.  Also halves the
    * running total.
@@ -385,7 +383,7 @@ public class HeavyKeeper implements TopK {
   @Override
   public void fading() {
     // Halve all sketch counters. long writes are NOT atomic per JLS 17.7,
-    // so concurrent add() may observe a torn value during fading. This is
+    // so concurrent addDirect() may observe a torn value during fading. This is
     // an acceptable precision trade-off for ~200K fewer locks.
     for (int i = 0; i < counts.length; i++) {
       counts[i] >>= 1;
@@ -460,13 +458,13 @@ public class HeavyKeeper implements TopK {
    */
   private static int sampleBinomial(int n, double p, ThreadLocalRandom rng) {
     if (n <= 0) {
-        return 0;
+      return 0;
     }
     if (p >= 1.0) {
-        return n;
+      return n;
     }
     if (p <= 0.0) {
-        return 0;
+      return 0;
     }
 
     double q = 1.0 - p;
@@ -475,7 +473,7 @@ public class HeavyKeeper implements TopK {
       int k = 0;
       for (int i = 0; i < n; i++) {
         if (rng.nextDouble() < p) {
-            k++;
+          k++;
         }
       }
       return k;
@@ -492,7 +490,7 @@ public class HeavyKeeper implements TopK {
     int k = 0;
     for (int i = 0; i < n; i++) {
       if (rng.nextDouble() < p) {
-          k++;
+        k++;
       }
     }
     return k;

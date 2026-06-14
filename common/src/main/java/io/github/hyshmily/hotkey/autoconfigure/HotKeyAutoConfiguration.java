@@ -34,6 +34,11 @@ import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
+import java.util.Optional;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -45,11 +50,6 @@ import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
-
-import java.util.Optional;
-import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 
 /**
  * App-side autoconfiguration for the HotKey library.
@@ -72,22 +72,31 @@ public class HotKeyAutoConfiguration {
   private static final HotKeyLogger log = new DefaultLogger(HotKeyAutoConfiguration.class);
 
   /**
-   * Create the app-side TopK detector (HeavyKeeper).
+   * Create the app-side TopK instance (HeavyKeeper) as a standalone bean.
    *
    * @param properties the HotKey configuration properties
    * @return a new HeavyKeeper TopK instance
    */
   @Bean
   @ConditionalOnMissingBean
-  public HotKeyDetector hotKeyDetector(HotKeyProperties properties) {
-    return new HotKeyDetector(new HeavyKeeper(
+  public HeavyKeeper heavyKeeper(HotKeyProperties properties) {
+    return new HeavyKeeper(
       properties.getTopK(),
       properties.getWidth(),
       properties.getDepth(),
       properties.getDecay(),
       properties.getMinCount(),
       properties.getExpelledQueueCapacity()
-    ));
+    );
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public HotKeyDetector hotKeyDetector(
+    HeavyKeeper heavyKeeper,
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
+  ) {
+    return new HotKeyDetector(heavyKeeper, hotKeyScheduler);
   }
 
   /**

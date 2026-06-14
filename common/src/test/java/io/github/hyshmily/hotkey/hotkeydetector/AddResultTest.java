@@ -15,13 +15,13 @@
  */
 package io.github.hyshmily.hotkey.hotkeydetector;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
 import org.junit.jupiter.api.Test;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 /**
- * Tests for {@link AddResult}, the result record returned by HeavyKeeper.add() covering hot-key,
+ * Tests for {@link AddResult}, the result record returned by HeavyKeeper.addDirect() covering hot-key,
  * non-hot, and expelled-key scenarios.
  */
 class AddResultTest {

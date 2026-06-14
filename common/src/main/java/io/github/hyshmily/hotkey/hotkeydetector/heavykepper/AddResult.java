@@ -16,7 +16,7 @@
 package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 
 /**
- * Result of a single {@link TopK#add} operation.
+ * Result of a single {@link TopK#addDirect} operation.
  *
  * @param expelledKey the key evicted from the TopK set by this operation, or {@code null} if none
  * @param isHotKey    whether the current key entered the TopK hot set

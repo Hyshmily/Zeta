@@ -58,8 +58,12 @@ public class HotKeySchedulingConfiguration {
    */
   @Scheduled(fixedDelayString = "${hotkey.decay-period:20}", timeUnit = java.util.concurrent.TimeUnit.SECONDS)
   public void cleanHotKeys() {
-    topKInstances.forEach(TopK::fading);
-    log.debug("HeavyKeeper count has decayed for {} TopK instance(s)", topKInstances.size());
+    try {
+      topKInstances.forEach(TopK::fading);
+      log.debug("HeavyKeeper count has decayed for {} TopK instance(s)", topKInstances.size());
+    } catch (Exception e) {
+      log.error("Scheduled cleanHotKeys failed", e);
+    }
   }
 
   /**
@@ -68,24 +72,28 @@ public class HotKeySchedulingConfiguration {
    */
   @Scheduled(fixedDelay = 10_000)
   public void drainExpelled() {
-    int totalDrained = 0;
-    List<String> sampleKeys = new ArrayList<>();
-    for (TopK topK : topKInstances) {
-      List<Item> items = new ArrayList<>();
-      topK.expelled().drainTo(items, 100_000);
-      totalDrained += items.size();
-      items.stream().map(Item::key).limit(20).forEach(sampleKeys::add);
-    }
-    if (totalDrained > 0) {
-      String keys = sampleKeys.stream().limit(20).collect(Collectors.joining(","));
-      boolean truncated = totalDrained > 20;
-      log.info(
-        "Drained {} expelled hot keys from {} TopK instance(s): {}{}",
-        totalDrained,
-        topKInstances.size(),
-        keys,
-        truncated ? "..." : ""
-      );
+    try {
+      int totalDrained = 0;
+      List<String> sampleKeys = new ArrayList<>();
+      for (TopK topK : topKInstances) {
+        List<Item> items = new ArrayList<>();
+        topK.expelled().drainTo(items, 100_000);
+        totalDrained += items.size();
+        items.stream().map(Item::key).limit(20).forEach(sampleKeys::add);
+      }
+      if (totalDrained > 0) {
+        String keys = sampleKeys.stream().limit(20).collect(Collectors.joining(","));
+        boolean truncated = totalDrained > 20;
+        log.info(
+          "Drained {} expelled hot keys from {} TopK instance(s): {}{}",
+          totalDrained,
+          topKInstances.size(),
+          keys,
+          truncated ? "..." : ""
+        );
+      }
+    } catch (Exception e) {
+      log.error("Scheduled drainExpelled failed", e);
     }
   }
 }

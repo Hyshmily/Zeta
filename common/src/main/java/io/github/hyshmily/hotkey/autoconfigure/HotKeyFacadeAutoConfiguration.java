@@ -17,9 +17,12 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import jakarta.annotation.PostConstruct;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -48,6 +51,20 @@ import org.springframework.context.annotation.Bean;
 public class HotKeyFacadeAutoConfiguration {
 
   private final HotKeyProperties properties;
+
+  /**
+   * Shared scheduler for all periodic tasks (flush, monitor, heartbeat, persist, etc.).
+   * Pool size configurable via {@code hotkey.scheduler-pool-size} (default 4).
+   */
+  @Bean("hotKeyScheduler")
+  @ConditionalOnMissingBean(name = "hotKeyScheduler")
+  public ScheduledExecutorService hotKeyScheduler() {
+    return Executors.newScheduledThreadPool(properties.getSchedulerPoolSize(), r -> {
+      Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_SCHEDULER);
+      t.setDaemon(true);
+      return t;
+    });
+  }
 
   /**
    * Initialize the explicit instance ID override, if configured, so that

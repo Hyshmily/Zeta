@@ -177,34 +177,35 @@ public class WorkerListener {
       .asMap()
       .compute(wm.cacheKey(), (key, existing) -> {
         // DCL second check – atomic with to write
-        if (existing instanceof CacheEntry ce && VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion())) {
-          return existing;
-        }
+        if (existing instanceof CacheEntry ce) {
+          if (VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion())) {
+            return existing;
+          }
 
-        long dataVersion = 0;
-        boolean isVersionDegraded = false;
-        long normalHardTtlMs = expireManager.getEffectiveHardTtlMs();
-        long normalSoftTtlMs = expireManager.getEffectiveSoftTtlMs();
-
-        if (existing instanceof CacheEntry cacheEntry) {
-          dataVersion = cacheEntry.getDataVersion();
-          isVersionDegraded = cacheEntry.isVersionDegraded();
-          normalHardTtlMs = cacheEntry.getNormalHardTtlMs();
-          normalSoftTtlMs = cacheEntry.getNormalSoftTtlMs();
+          return ce
+            .toBuilder()
+            .value(value)
+            .decisionVersion(wm.decisionVersion())
+            .hardTtlMs(expireManager.getEffectiveHotHardTtlMs())
+            .hardExpireAtMs(expireManager.computeHotHardExpireAt())
+            .softTtlMs(expireManager.getEffectiveHotSoftTtlMs())
+            .softExpireAtMs(expireManager.computeHotSoftExpireAt())
+            .keyState(KeyState.HOT)
+            .build();
         }
 
         return CacheEntry.builder()
           .value(value)
-          .dataVersion(dataVersion)
-          .isVersionDegraded(isVersionDegraded)
+          .dataVersion(0)
+          .isVersionDegraded(false)
           .decisionVersion(wm.decisionVersion())
           .hardTtlMs(expireManager.getEffectiveHotHardTtlMs())
           .hardExpireAtMs(expireManager.computeHotHardExpireAt())
           .softTtlMs(expireManager.getEffectiveHotSoftTtlMs())
           .softExpireAtMs(expireManager.computeHotSoftExpireAt())
           .keyState(KeyState.HOT)
-          .normalHardTtlMs(normalHardTtlMs)
-          .normalSoftTtlMs(normalSoftTtlMs)
+          .normalHardTtlMs(expireManager.getEffectiveHardTtlMs())
+          .normalSoftTtlMs(expireManager.getEffectiveSoftTtlMs())
           .build();
       });
     log.debug("HotKey promoted by Worker: {}", wm.cacheKey());
@@ -234,10 +235,8 @@ public class WorkerListener {
         }
 
         if (existing instanceof CacheEntry cacheEntry) {
-          long normalHardTtlMs = cacheEntry.getNormalHardTtlMs();
-          long normalSoftTtlMs = cacheEntry.getNormalSoftTtlMs();
-
-          return CacheEntry.builder()
+          return cacheEntry
+            .toBuilder()
             .value(cacheEntry.getValue())
             .dataVersion(cacheEntry.getDataVersion())
             .isVersionDegraded(cacheEntry.isVersionDegraded())
@@ -247,8 +246,6 @@ public class WorkerListener {
             .softTtlMs(0L)
             .softExpireAtMs(0L)
             .keyState(KeyState.COOL)
-            .normalHardTtlMs(normalHardTtlMs)
-            .normalSoftTtlMs(normalSoftTtlMs)
             .build();
         }
 

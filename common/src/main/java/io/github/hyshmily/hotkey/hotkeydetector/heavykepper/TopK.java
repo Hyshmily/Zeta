@@ -27,7 +27,6 @@ import java.util.concurrent.BlockingQueue;
  * current ranking, expelled items, and total request count.
  */
 public interface TopK {
-
   /**
    * Record one or more accesses for the given key.
    *
@@ -44,7 +43,7 @@ public interface TopK {
    * @param keyCounts map of keys to their access counts
    * @return list of {@link AddResult} for keys that entered the TopK set
    */
-  List<AddResult> add(Map<String, Long> keyCounts);
+  List<AddResult> addDirect(Map<String, Long> keyCounts);
   /**
    * Return the current TopK list sorted by frequency (descending).
    *
@@ -92,5 +91,4 @@ public interface TopK {
       .stream()
       .anyMatch(item -> item.key().equals(key));
   }
-
 }

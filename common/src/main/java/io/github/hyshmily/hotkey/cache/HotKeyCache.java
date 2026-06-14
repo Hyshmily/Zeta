@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.cache;
 
+import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
@@ -31,15 +33,12 @@ import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
-import lombok.RequiredArgsConstructor;
-
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
-
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import lombok.RequiredArgsConstructor;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -167,7 +166,10 @@ public class HotKeyCache {
       log.debug("peek: invalid cacheKey");
       return Optional.empty();
     }
-    ensureNotBlocked(cacheKey, "peek");
+
+    if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
+      throw new HotKeyBlockedException(cacheKey);
+    }
 
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).map(raw ->
       raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw
@@ -207,8 +209,11 @@ public class HotKeyCache {
       return Optional.empty();
     }
 
-    ensureNotBlocked(cacheKey, "get");
-    boolean skipReport = isWhitelisted(cacheKey);
+    RuleAction action = ruleMatcher.evaluateRule(cacheKey);
+    if (action == RuleAction.BLOCK) {
+      throw new HotKeyBlockedException(cacheKey);
+    }
+    boolean skipReport = action == RuleAction.ALLOW_NO_REPORT;
 
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
       .flatMap(raw -> {
@@ -276,8 +281,11 @@ public class HotKeyCache {
       return Optional.empty();
     }
 
-    ensureNotBlocked(cacheKey, "getWithSoftExpire");
-    boolean skipReport = isWhitelisted(cacheKey);
+    RuleAction action = ruleMatcher.evaluateRule(cacheKey);
+    if (action == RuleAction.BLOCK) {
+      throw new HotKeyBlockedException(cacheKey);
+    }
+    boolean skipReport = action == RuleAction.ALLOW_NO_REPORT;
 
     if (!expireManager.isSoftExpireEnabled()) {
       log.debug("getWithSoftExpire: soft expire not enabled, fallback to get()");
@@ -426,10 +434,7 @@ public class HotKeyCache {
    * @param softTtlMs soft TTL override (0 = use configured hot soft TTL)
    */
   private void promoteLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
-    if (
-      raw instanceof CacheEntry ce &&
-      isPromotableState(ce.getKeyState())
-    ) {
+    if (raw instanceof CacheEntry ce && isPromotableState(ce.getKeyState())) {
       hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
       if (!hotKeyDetector.contains(cacheKey)) {
         return;
@@ -440,8 +445,19 @@ public class HotKeyCache {
       caffeineCache
         .asMap()
         .compute(cacheKey, (k, existing) -> {
-          if (existing instanceof CacheEntry entry && !isPromotableState(entry.getKeyState())) {
-            return existing;
+          if (existing instanceof CacheEntry entry) {
+            if (!isPromotableState(entry.getKeyState())) {
+              return existing;
+            }
+
+            return entry
+              .toBuilder()
+              .hardTtlMs(hotHard)
+              .softTtlMs(hotSoft)
+              .hardExpireAtMs(expireManager.computeHardExpireAt(hotHard))
+              .softExpireAtMs(expireManager.computeSoftExpireAt(hotSoft))
+              .keyState(KeyState.HOT)
+              .build();
           }
 
           return CacheEntry.builder()
@@ -758,27 +774,5 @@ public class HotKeyCache {
    */
   public Cache<String, Object> getLocalCache() {
     return caffeineCache;
-  }
-
-  /**
-   * Check whether a key is blocked; throws {@link HotKeyBlockedException} if so.
-   *
-   * @param cacheKey  the key to check
-   * @param operation the operation being performed (for diagnostics)
-   */
-  private void ensureNotBlocked(String cacheKey, String operation) {
-    if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
-      throw new HotKeyBlockedException(cacheKey);
-    }
-  }
-
-  /**
-   * Check whether a key is whitelisted (ALLOW_NO_REPORT). Throws if blocked.
-   *
-   * @param cacheKey  the key to check
-   * @return {@code true} if the key is on the ALLOW_NO_REPORT list
-   */
-  private boolean isWhitelisted(String cacheKey) {
-    return ruleMatcher.evaluateRule(cacheKey) == RuleAction.ALLOW_NO_REPORT;
   }
 }
