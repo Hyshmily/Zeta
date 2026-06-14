@@ -1,10 +1,6 @@
 # HotKey
 
 <p align="center">
-  <img src="img/HotKey.png" alt="HotKey" width="300">
-</p>
-
-<p align="center">
   <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
@@ -13,15 +9,15 @@
 
 [**中文**](README.zh.md)
 
-HotKey is a high-performance, low-cost, lightweight distributed caching framework that integrates **cache read/write (get/put), automatic hot key detection, multi-level cache warming, cross-instance broadcast synchronization, AOP annotation interception, and blacklist/whitelist filtering**.
+HotKey is a highly customizable, [high-performance](docs/HotKey_Benchmark_Report.en.md), low-cost, lightweight distributed caching framework that integrates **cache read/write (get/put), automatic hot key detection, multi-level cache pre-warming, cross-instance broadcast synchronization, AOP annotation interception, and allow/blocklist filtering**.
 
-Most local caches store every entry in Caffeine. But under massive key volumes:
+Most local caches store every entry uniformly in Caffeine. But under a massive key space:
 
 - **Memory waste** — most keys are read only once
 - **Broadcast storms** — full cache invalidation means broadcast messages grow linearly with key count
 - **Cache avalanche** — massive keys share the same TTL, expire simultaneously and all penetrate to the DB
 
-HotKey's strategy: **only cache the truly hot data.**
+HotKey's strategy: **cache only the truly hot data.**
 
 Via [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant), it enables **cluster-level hot key detection**: deploy Worker nodes that aggregate access reports from all instances — solving the problem of "accessed 100 times by the same pod" vs "accessed once each by 100 pods" that is indistinguishable locally.
 
@@ -58,40 +54,38 @@ HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 
 > [!WARNING]
 > **Extreme performance**
 >
-> Setting some parameters to extreme values can compress end-to-end latency to **~9ms** (P50), but the author **does not recommend** this for production.
+> Setting certain parameters to extreme values can reduce full-chain latency to **~9ms** (P50).
 >
-> HotKey's defaults are conservative — the framework should prioritize distributed cluster reliability over extreme latency:
->
-> The extreme tuning demonstrates **this framework's full-chain performance ceiling** (~9ms) and serves as a reference for extreme scenarios. Unless you fully understand and accept the trade-offs (higher false positive rate, reduced statistical accuracy, increased client CPU load, etc.), use the defaults or thoroughly tested parameters.
+> HotKey's default parameters are conservatively tuned and support extensive customization to suit different performance requirements.
 
 <details>
-<summary><b>Click to expand — full end-to-end latency breakdown and extreme tuning details</b></summary>
+<summary><b>Click to expand — full chain latency breakdown and extreme tuning guide</b></summary>
 
 See the [Benchmark Report](docs/HotKey_Benchmark_Report.en.md).
 
-**Extreme parameter adjustments**
+**Extreme parameter tuning**
 
-| Parameter                                             | Extreme value           | Effect                                                                                   | Limitation                                        |
-| ----------------------------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `hotkey.local.report-interval-ms`                     | 0 &#8594; min 1         | Nearly disables batching, `record()` flushes almost immediately                          | `ScheduledExecutorService` requires period > 0    |
-| `hotkey.worker-listener.warmup-jitter-ms`             | 0                       | Disables warmup jitter (herd effect protection lost), Worker decisions execute instantly | —                                                 |
-| `hotkey.sync.warmup-jitter-ms`                        | 0                       | Same as above, cross-instance sync listener                                              | —                                                 |
-| `hotkey.worker.state-machine.confirm-duration-ms`     | 0                       | Disables state machine confirmation window, first hot window immediately broadcasts HOT  | —                                                 |
-| `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 &#8594; 100/100 | Time slice from 100ms to 1ms, reduces tick wait (avg ~50ms &#8594; ~0.5ms)               | Window statistical accuracy significantly reduced |
+| Parameter                                             | Extreme value     | Effect                                                                                          | Limitation                                       |
+| ----------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `hotkey.local.report-interval-ms`                     | 0 → min 1         | Nearly disables report batching, `record()` flushes almost instantly                            | `ScheduledExecutorService` requires period > 0   |
+| `hotkey.worker-listener.warmup-jitter-ms`             | 0                 | Disables warm-up jitter (thundering herd protection lost), Worker decisions execute immediately | —                                                |
+| `hotkey.sync.warmup-jitter-ms`                        | 0                 | Same, cross-instance sync listener                                                              | —                                                |
+| `hotkey.worker.state-machine.confirm-duration-ms`     | 0                 | Disables state machine confirmation window, broadcasts HOT from the first hot window            | —                                                |
+| `hotkey.worker.sliding-window.duration-ms` / `slices` | 1000/10 → 100/100 | Time slice from 100ms down to 1ms, reduces tick wait (avg ~50ms → ~0.5ms)                       | Window statistics accuracy significantly reduced |
 
-**Measured extreme latency** ([Extreme tuning comparison](docs/img/extreme_tuning_comparison.png)):
+**Measured extreme latency** ([extreme tuning comparison](docs/img/extreme_tuning_comparison.png)):
 
-| Scenario                 | Default (3 confirm windows) P50 | Extreme (0 confirm windows) P50 | Extreme P95 | Extreme P99 |
-| ------------------------ | ------------------------------- | ------------------------------- | ----------- | ----------- |
-| Worker decision pipeline | 56.38 ms                        | **2.41 ms**                     | 11.89 ms    | 12.40 ms    |
-| SM confirmation pipeline | 246.46 ms                       | **7.71 ms**                     | 8.53 ms     | 8.53 ms     |
-| Full chain               | 298.19 ms                       | **9.23 ms**                     | 10.93 ms    | 10.93 ms    |
+| Scenario                 | Default (3 confirm windows) P50 | Extreme (0 confirm) P50 | Extreme P95 | Extreme P99 |
+| ------------------------ | ------------------------------- | ----------------------- | ----------- | ----------- |
+| Worker decision pipeline | 56.38 ms                        | **2.41 ms**             | 11.89 ms    | 12.40 ms    |
+| SM confirmation pipeline | 246.46 ms                       | **7.71 ms**             | 8.53 ms     | 8.53 ms     |
+| Full chain               | 298.19 ms                       | **9.23 ms**             | 10.93 ms    | 10.93 ms    |
 
-**The state machine broadcasts only once per key per lifecycle**, fundamentally eliminating redundant broadcasts that cause client CPU overload and self-inflicted congestion. In extreme testing, the SM 0-confirm path generated only 10 broadcasts, while the stateless-machine path generated massive redundant broadcasts, dramatically amplifying latency.
+**The state machine broadcasts each key only once per lifetime**, fundamentally eliminating redundant broadcast-induced CPU overload and self-inflicted congestion. In extreme tests, the SM 0-confirm path produced only 10 broadcasts, while the stateless path produced massive redundant broadcasts, dramatically amplifying latency.
 
-**The default 300ms confirmation window** (3 confirm windows &#215; 100ms slices) is not sluggishness — it uses 300ms of continuous observation to achieve near-zero false positives in global decision-making. During those 300ms, local HeavyKeeper provides nanosecond-level protection, with zero blocking on user requests.
+**The default 300ms confirmation window** (3 confirm windows × 100ms slices) is not about sluggishness — it trades 300ms of continuous observation for near-zero false positives in global decisions. During that 300ms, the local HeavyKeeper provides nanosecond-scale protection with zero blocking on user requests.
 
-**Warmup jitter and batch intervals** are classic distributed-system mechanisms for "anti-herd" and "load smoothing", sacrificing tens of milliseconds of latency for cluster-wide stability.
+**Warm-up jitter and batch intervals** are classic distributed system techniques — sacrificing tens of milliseconds of latency for cluster-wide stability.
 
 </details>
 
@@ -116,34 +110,34 @@ See the [Benchmark Report](docs/HotKey_Benchmark_Report.en.md).
 
 ### 2. Configuration
 
-Default local configuration works for most scenarios.
+Default local configuration (suitable for most scenarios):
 
 > [!IMPORTANT]
 > In distributed deployments, RabbitMQ and Redis are required.
 
 **Optional feature configuration:**
 
-| Feature                  | How to Enable                                  | Description                            |
+| Feature                  | How to enable                                  | Description                            |
 | ------------------------ | ---------------------------------------------- | -------------------------------------- |
-| Redis L2 cache           | Add `RedisTemplate` Bean                       | Two-level cache, L2 fallback           |
+| Redis L2 cache           | Add `RedisTemplate` bean                       | Two-level cache, L2 fallback           |
 | Cross-instance sync      | `hotkey.sync.enabled=true`                     | RabbitMQ-based cache invalidation      |
 | Worker Listener          | `hotkey.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker |
-| Worker mode              | `hotkey.worker.enabled=true`                   | Run dedicated Worker nodes             |
-| Worker TopK persistence  | `hotkey.worker.persistence.enabled=true`        | Warm-start from Redis after restart     |
+| Worker mode              | `hotkey.worker.enabled=true`                   | Run dedicated Worker node              |
+| Worker TopK persistence  | `hotkey.worker.persistence.enabled=true`       | Hot start from Redis after restart     |
 | `@HotKey` annotation     | `hotkey.annotation.enabled=true` + AspectJ     | Declarative caching                    |
 | Access reporting         | `hotkey.report.enabled=true` (default)         | Report access counts to Worker         |
 | Reporter self-protection | `hotkey.local.reporter.enabled=true` (default) | BBR backpressure on Reporter flush     |
 
-See [Configuration](#configuration) for all options. Full property reference: [CONFIG.md](docs/CONFIG.md).
+All options listed under [Configuration](#configuration). Full property reference at [CONFIG.md](docs/CONFIG.md).
 
 <details>
-<summary><b>Quick deployment YAML templates</b></summary>
+<summary><b>Quick deploy YAML template</b></summary>
 
-**Local (App-side)** — Add the `hotkey` dependency and you're ready; uncomment optional features as needed.
+**Local (App side)** — just add the `hotkey` dependency; uncomment as needed:
 
 ```yaml
 hotkey:
-  # All local parameters use defaults; explicit config is optional
+  # local parameters all use defaults, no explicit config needed
 
   # —— Optional features, uncomment as needed ——
 
@@ -159,158 +153,160 @@ hotkey:
   # worker-listener:
   #   enabled: true
   # sync:
-  #   enabled: true     # worker-listener requires hotKeyRedisLoader Bean
+  #   enabled: true     # worker-listener depends on hotKeyRedisLoader bean
 
-  # Consistent hashing is enabled by default (dynamic Worker routing via heartbeats)
+  # Consistent hashing enabled by default (dynamic Worker routing via heartbeats)
   # local:
   #   consistent-hashing:
-  #     enabled: true     # (already default)
+  #     enabled: true     # (enabled by default)
 ```
 
-**Single Worker (standalone node)** — Add `spring-boot-starter-amqp`
+**Single Worker (standalone node)** — add `spring-boot-starter-amqp`:
 
 ```yaml
 hotkey:
   worker:
     enabled: true
     routing:
-      app-name: myapp # [Required] Must match App-side hotkey.local.app-name
-      # Consistent hashing is the default; Workers auto-register via heartbeats
+      app-name: myapp # 【required】must match App-side hotkey.local.app-name
+      # Consistent hashing enabled by default; Worker auto-registers via heartbeat
 
 # Multi-Worker example: 3 machines, same app-name
-# Consistent hashing auto-routes keys to the correct Worker via heartbeats
-# No static shard configuration needed — just add more machines
+# Consistent hashing routes keys to the correct Worker automatically via heartbeat
+# No static shard configuration needed — just add machines
 ```
 
-**All parameters (overriding defaults)**
+**Full parameters (override defaults):**
 
 ```yaml
 hotkey:
   local:
-    # ——— Must match across nodes (App-side and Worker-side) ———
-    app-name: "default"                    # Must match worker.routing.app-name
+    # ——— Must match across all nodes (App and Worker sides) ———
+    app-name: "default"                     # must match worker.routing.app-name
 
-    # ——— Instance identification ———
-    instance-id: ""                        # Explicit instance ID ("" = auto-generated)
+    # ——— Instance identity ———
+    instance-id: ""                         # explicit instance ID (empty = auto-generated)
 
     # ——— Report publishing ———
     report-exchange: "hotkey.report.exchange"
-    report-interval-ms: 100                # Batch send interval (ms)
-    queue-capacity: 10000                  # Report queue capacity
-    queue-offer-timeout-ms: 100            # Queue write timeout (ms)
-    consumer-count: 0                      # Consumer thread count (0=auto)
+    report-interval-ms: 100                 # batch send interval (ms)
+    queue-capacity: 10000                   # report queue capacity
+    queue-offer-timeout-ms: 100             # queue write timeout (ms)
+    consumer-count: 0                       # consumer thread count (0=auto)
+    shard-count: 1                          # report shard count
 
     # ——— HeavyKeeper algorithm ———
-    topK: 100                              # Hot keys to retain
-    width: 50000                           # Count-Min Sketch width
-    depth: 5                               # Count-Min Sketch depth
-    decay: 0.92                            # Decay factor
-    minCount: 10                           # Minimum access count for hot key
-    expelled-queue-capacity: 50000         # Expelled hot key queue capacity
+    topK: 100                               # number of hot keys to track
+    width: 50000                            # Count-Min Sketch width
+    depth: 5                                # Count-Min Sketch depth
+    decay: 0.92                             # decay factor
+    minCount: 10                            # minimum access count for hot key
+    expelled-queue-capacity: 50000          # expelled hot key queue capacity
 
     # ——— L1 Caffeine cache ———
-    local-cache-max-size: 1000             # Maximum entries
-    local-cache-ttl-minutes: 5             # Cache expiry (minutes)
+    local-cache-max-size: 1000             # maximum entries
+    local-cache-ttl-minutes: 5             # cache TTL (minutes)
 
-    # ——— SingleFlight deduplication ———
-    inflight-max-size: 50000               # Maximum dedup keys
-    inflight-ttl-seconds: 5                # Dedup record TTL (must > L2 response time)
-    inflight-timeout-seconds: 3            # Async result wait timeout (must < inflight-ttl-seconds)
+    # ——— SingleFlight dedup ———
+    inflight-max-size: 50000                # max dedup key count
+    inflight-ttl-seconds: 5                 # dedup record TTL (must > L2 response time)
+    inflight-timeout-seconds: 3             # async result wait timeout (must < inflight-ttl-seconds)
 
     # ——— Async executor ———
-    executor-core-pool-size: 8             # Core threads
-    executor-max-pool-size: 32             # Max threads
-    executor-queue-capacity: 2000          # Work queue capacity
+    executor-core-pool-size: 8              # core threads
+    executor-max-pool-size: 32              # max threads
+    executor-queue-capacity: 2000           # work queue capacity
+    scheduler-pool-size: 8                  # scheduled task thread pool
 
     # ——— Refresh & version control ———
-    refresh-max-pools: 100                 # Refresh thread pool limit
-    version-key-ttl-minutes: 60            # Redis version key TTL
+    refresh-max-pools: 100                  # refresh thread pool limit
+    version-key-ttl-minutes: 60             # Redis version key TTL
 
     # ——— Normal key TTL ———
-    default-hard-ttl-ms: 300000            # Default hard expiry (5min)
-    hard-ttl-ms: 0                         # Override (0=use default)
-    default-soft-ttl-ms: 30000             # Default soft expiry (30s)
-    soft-ttl-ms: 0                         # Override (0=use default)
+    default-hard-ttl-ms: 300000             # default hard expiry (5min)
+    hard-ttl-ms: 0                          # override (0=use default)
+    default-soft-ttl-ms: 30000              # default soft expiry (30s)
+    soft-ttl-ms: 0                          # override (0=use default)
 
-    # ——— Hot key TTL (active after Worker marks HOT) ———
-    default-hot-hard-ttl-ms: 3600000       # Default hot hard expiry (1h)
-    hot-hard-ttl-ms: 0                     # Override (0=use default)
-    default-hot-soft-ttl-ms: 300000        # Default hot soft expiry (5min)
-    hot-soft-ttl-ms: 0                     # Override (0=use default)
+    # ——— Hot key TTL (takes effect after Worker marks as HOT) ———
+    default-hot-hard-ttl-ms: 3600000        # default hot key hard expiry (1h)
+    hot-hard-ttl-ms: 0                      # override (0=use default)
+    default-hot-soft-ttl-ms: 300000         # default hot key soft expiry (5min)
+    hot-soft-ttl-ms: 0                      # override (0=use default)
 
-    # ——— Consistent hashing (default; dynamic Worker routing) ———
+    # ——— Consistent hashing (default enabled; dynamic Worker routing) ———
     consistent-hashing:
-      enabled: true                        # Dynamic Worker routing via heartbeats
-      virtual-nodes: 500                   # Virtual nodes per physical Worker
+      enabled: true                         # dynamic Worker routing via heartbeat
+      virtual-nodes: 500                    # virtual nodes per physical Worker
 
-    # ——— Heartbeat (App-side; Worker health monitoring) ———
+    # ——— Heartbeat (App side; Worker health monitoring) ———
     heartbeat:
       exchange-name: "hotkey.heartbeat.exchange"
-      timeout-ms: 3000                       # Worker considered dead after this silent window
-      verify-interval-ms: 1500               # Suspect verification interval
-      ping-timeout-ms: 2000                  # Direct reply-to PING timeout
-      degrade-after-failures: 2              # Degrade after N consecutive PING failures
+      timeout-ms: 3000                        # no heartbeat within window marks Worker dead
+      verify-interval-ms: 1500                # suspicious Worker verification interval
+      ping-timeout-ms: 2000                   # Direct reply-to PING timeout
+      degrade-after-failures: 2               # degrade after N consecutive PING failures
 
     # ——— Reporter rate limiter (BBR + CPU fusion) ———
     reporter:
-      enabled: true                          # BBR adaptive rate-limiting
-      cpu-threshold: 800                     # CPU threshold (0-1000, 800=80%)
-      cpu-poll-interval-ms: 500              # CPU polling interval (ms)
-      cpu-decay: 0.95                        # EMA decay factor for CPU smoothing
-      bbr-window-ms: 10000                   # BBR sliding window (ms)
-      bbr-window-buckets: 100                # BBR sliding window buckets
-      bbr-cooldown-ms: 1000                  # Cooldown after drop (ms)
+      enabled: true                           # BBR adaptive rate limiting
+      cpu-threshold: 800                      # CPU threshold (0-1000, 800=80%)
+      cpu-poll-interval-ms: 500               # CPU poll interval (ms)
+      cpu-decay: 0.95                         # EMA smoothing decay factor
+      bbr-window-ms: 10000                    # BBR sliding window (ms)
+      bbr-window-buckets: 100                 # BBR sliding window buckets
+      bbr-cooldown-ms: 1000                   # cool-down after drop (ms)
 
   # Feature toggles
   report:
-    enabled: true                          # App&#8594;Worker report publishing
+    enabled: true                           # App→Worker reporting
   sync:
-    enabled: false                         # Cross-instance cache sync (requires Redis + RabbitMQ)
+    enabled: false                          # cross-instance sync (requires Redis + RabbitMQ)
   annotation:
-    enabled: false                         # @HotKey annotation support (requires spring-boot-starter-aop)
+    enabled: false                          # @HotKey annotation support (requires spring-boot-starter-aop)
   scheduling:
-    enabled: true                          # Periodic decay & expelled key cleanup
-  decay-period: 20                         # HeavyKeeper fading interval (seconds), applies when scheduling enabled
+    enabled: true                           # periodic decay & expelled cleanup
+  decay-period: 20                          # HeavyKeeper fading interval (s), effective when scheduling enabled
 
-  # App-side — Worker decision listener (receives HOT / COOL)
+  # App side — Worker decision listener (receives HOT / COOL)
   worker-listener:
-    enabled: false                         # Requires Redis + RabbitMQ
+    enabled: false                          # requires Redis + RabbitMQ
     exchange-name: "hotkey.broadcast.exchange"
     queue-prefix: "hotkey.worker"
-    auto-startup: true                     # Start with application
-    warmup-jitter-ms: 100                  # Random delay before processing (anti-herd)
-    concurrent-consumers: 2                # Concurrent consumers
-    scheduler-pool-size: 2                 # Delayed task thread pool size
-    prefetch-count: 5                      # AMQP prefetch count per consumer
+    auto-startup: true                      # start with application
+    warmup-jitter-ms: 100                   # random delay before processing (anti-thundering-herd)
+    concurrent-consumers: 2                 # concurrent consumers
+    scheduler-pool-size: 2                  # delayed task thread pool size
+    prefetch-count: 5                       # AMQP prefetch per consumer
 
-    # SRE Adaptive Rate Limiter (HOT decision processing path)
+    # SRE adaptive rate limiter (HOT decision processing path)
     sre:
-      enabled: true                        # Enable SRE rate limiter
-      window-ms: 3000                      # Sliding window duration (ms)
-      buckets: 10                          # Number of buckets in the sliding window
-      min-samples: 20                      # Minimum samples before throttling
-      success-threshold: 0.6               # Success ratio threshold (0.0-1.0)
+      enabled: true                         # enable SRE rate limiter
+      window-ms: 3000                       # sliding window (ms)
+      buckets: 10                           # sliding window buckets
+      min-samples: 20                       # minimum samples before rate limiting
+      success-threshold: 0.6                # success rate threshold (0.0-1.0)
 
-  # App-side — Cross-instance cache sync
+  # App side — cross-instance cache sync
   sync:
     enabled: false
     exchange-name: "hotkey.sync.exchange"
     queue-prefix: "hotkey.sync"
     auto-startup: true
-    dedup-window-seconds: 10               # Message dedup window
-    dedup-max-size: 10000                  # Dedup cache limit
-    warmup-jitter-ms: 100                  # Random delay before processing (anti-herd)
-    concurrent-consumers: 3                # Concurrent consumers
-    scheduler-pool-size: 4                 # Delayed task thread pool size
-    prefetch-count: 5                      # AMQP prefetch count per consumer
+    dedup-window-seconds: 10                # message dedup window
+    dedup-max-size: 10000                   # dedup cache limit
+    warmup-jitter-ms: 100                   # random delay before processing (anti-thundering-herd)
+    concurrent-consumers: 3                 # concurrent consumers
+    scheduler-pool-size: 4                  # delayed task thread pool size
+    prefetch-count: 5                       # AMQP prefetch per consumer
 
-  # Worker-side — Standalone deployment node
+  # Worker side — standalone node
   worker:
     enabled: false
 
     routing:
-      app-name: "default"                  # Must match local.app-name
-      # Routing is auto-managed via consistent hashing and heartbeats
+      app-name: "default"                   # must match local.app-name
+      # routing managed via consistent hashing and heartbeats
 
     messaging:
       report-exchange: "hotkey.report.exchange"
@@ -318,53 +314,53 @@ hotkey:
       heartbeat-exchange: "hotkey.heartbeat.exchange"
 
     sliding-window:
-      duration-ms: 1000                    # Window duration (ms)
-      slices: 10                           # Window slices (must divide duration-ms evenly)
+      duration-ms: 1000                     # window duration (ms)
+      slices: 10                            # window slices (must divide duration-ms)
 
     threshold:
-      hot-threshold: 1000                  # Absolute QPS threshold (&#8804;0 = use ratio threshold)
-      hot-threshold-ratio: 0.01            # Relative QPS ratio threshold (1%)
+      hot-threshold: 1000                   # absolute QPS threshold (≤0 = use ratio)
+      hot-threshold-ratio: 0.01             # relative QPS ratio (1%)
 
     state-machine:
-      confirm-duration-ms: 300             # Confirmation window (ms), sustained heat beyond this = HOT
-      cool-duration-ms: 15000              # Cooling window (ms), sustained cool beyond this = COOL
-      pre-cool-grace-ms: 5000              # Pre-cooling grace period (ms)
-      evict-interval-ms: 30000             # Stale state eviction interval (ms), must be >= coolDurationMs * 2
+      confirm-duration-ms: 300              # confirmation window (ms); sustained heat beyond this = HOT
+      cool-duration-ms: 15000               # cooling window (ms); sustained cool beyond this = COOL
+      pre-cool-grace-ms: 5000               # pre-cool grace period (ms)
+      evict-interval-ms: 30000              # expired state cleanup interval (ms), must >= coolDurationMs * 2
 
     global-qps-dynamic-threshold:
-      qps-change-tolerance: 0.5            # QPS change tolerance multiplier
-      learning-period-ms: 30000            # Learning period (ms)
-      hot-threshold-ratio: 0.01            # Dynamic threshold ratio
-      recalculate-interval-ms: 60000       # Recalculation interval (ms)
+      qps-change-tolerance: 0.5             # QPS change tolerance multiplier
+      learning-period-ms: 30000             # learning period (ms)
+      hot-threshold-ratio: 0.01             # dynamic threshold ratio
+      recalculate-interval-ms: 60000        # recalculation interval (ms)
 
     topk-validation:
-      validate-interval-ms: 60000          # Validation interval (ms)
-      pre-warm-count: 5                    # Pre-warm count
-      pre-warm-min-appearances: 2          # Minimum appearances
+      validate-interval-ms: 60000           # validation period (ms)
+      pre-warm-count: 5                     # pre-warm count
+      pre-warm-min-appearances: 2           # minimum appearances
 
     heavy-keeper:
-      top-k: 100                           # Hot keys to retain
-      width: 20000                         # Sketch width
-      depth: 10                            # Sketch depth
-      decay: 0.9                           # Decay factor
-      min-count: 10                        # Minimum count
+      top-k: 100                            # hot keys to track
+      width: 20000                          # Sketch width
+      depth: 10                             # Sketch depth
+      decay: 0.9                            # decay factor
+      min-count: 10                         # minimum count
 
     heartbeat:
-      ping-interval-ms: 1000               # Heartbeat broadcast interval (ms)
+      ping-interval-ms: 1000                # heartbeat broadcast interval (ms)
 
     persistence:
-      enabled: false                       # Periodic TopK snapshot to Redis (opt-in)
-      persist-interval-ms: 30000           # Snapshot interval (ms)
-      topk-count: 100                      # Keys per snapshot
-      redis-key-prefix: "hotkey:topk:worker:"  # Redis key prefix
-      ttl-days: 3                          # Redis TTL (days)
+      enabled: false                        # periodic TopK snapshot to Redis (manual enable)
+      persist-interval-ms: 30000            # snapshot interval (ms)
+      topk-count: 100                       # keys per snapshot
+      redis-key-prefix: "hotkey:topk:worker:" # Redis key prefix
+      ttl-days: 3                           # Redis data TTL (days)
 ```
 
 </details>
 
 ### 3. Usage
 
-**A. Local cache only (no L2)**
+**A. Local-only cache (no L2)**
 
 ```java
 @Autowired
@@ -373,7 +369,7 @@ private HotKey hotKey;
 Optional<String> r = hotKey.peek("user:123"); // L1 only, no hot key tracking
 ```
 
-Equivalent to `peek(cacheKey)` — returns `Optional.empty()` on L1 miss, fully skipping secondary storage.
+L1-only lookup, no hot key tracking. Returns `Optional.empty()` on L1 miss, completely bypasses secondary storage.
 
 **B. Two-level cache (Redis or any backend)**
 
@@ -388,7 +384,7 @@ Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().ge
 hotKey.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 ```
 
-**C. Database fallback**
+**C. DB fallback**
 
 ```java
 Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
@@ -396,7 +392,8 @@ if (r.isEmpty()) {
     String value = userService.getById(123);                         // DB fallback
     redisTemplate.opsForValue().set("user:123", value);
 }
-// Note: if reader returns null, HotKey treats it as a miss (Optional.empty()). Callers must handle null values themselves (e.g., with a sentinel object).
+// Note: if the reader returns null, HotKey treats it as a miss (Optional.empty()).
+// The caller should handle null values themselves (e.g. sentinel object wrapper).
 
 @Autowired
 private HotKey hotKey;
@@ -404,11 +401,12 @@ private HotKey hotKey;
 public String getUserName(String userId) {
   String cacheKey = "user:" + userId;
 
+  // Use hotKey.get() to encapsulate the full fallback chain in the reader
   Optional<Object> result = hotKey.get(cacheKey, () -> {
-    // 1. Check Redis first
+    // 1. Query Redis first
     String value = redisTemplate.opsForValue().get(cacheKey);
     if (value != null) {
-      return value; // Redis hit
+      return value; // Redis hit, return directly
     }
 
     // 2. Redis miss, query DB
@@ -420,11 +418,12 @@ public String getUserName(String userId) {
       return userName;
     }
 
-    // 4. DB miss too, return sentinel to prevent cache penetration
+    // 4. DB miss, cache a short-lived empty sentinel to prevent cache penetration
     redisTemplate.opsForValue().set(cacheKey, "", Duration.ofMinutes(1));
     return NULL_SENTINEL;
   });
 
+  // 5. Process the result
   return result
     .filter(val -> val != NULL_SENTINEL)
     .map(Object::toString)
@@ -433,18 +432,18 @@ public String getUserName(String userId) {
 ```
 
 > [!WARNING]
-> **Cache penetration protection — why HotKey does not include a Bloom filter?**
+> **Cache penetration protection — why doesn't HotKey ship with a Bloom filter?**
 >
-> HotKey does not include a built-in Bloom filter. Cache penetration protection is **the caller's responsibility**, not the framework's:
+> HotKey does not include a built-in Bloom filter. Cache penetration protection is the **caller's responsibility**, not the framework's:
 >
-> | Strategy                  | HotKey's Position                                                 |
-> | ------------------------- | ----------------------------------------------------------------- |
-> | `NULL_SENTINEL` sentinel  | Caller implements in the `reader` (demonstrated above)            |
-> | `@Blacklist` rule engine  | Built-in — intercepts known attack patterns like `user:-\\d+`     |
-> | Bloom filter (Guava)      | Caller adds in the `reader` — false positive cost is the caller's |
-> | Gateway layer (Nginx/WAF) | Most effective — intercepted before reaching the app              |
+> | Approach                       | HotKey's stance                                                              |
+> | ------------------------------ | ---------------------------------------------------------------------------- |
+> | `NULL_SENTINEL` sentinel value | Caller implements in the `reader` (demonstrated above)                       |
+> | `@Blacklist` rule engine       | Built-in — blocks known attack patterns like `user:-\d+`                     |
+> | Bloom filter (Guava)           | Caller adds in the `reader` — false positive cost is caller's responsibility |
+> | Gateway-layer (Nginx/WAF)      | Most effective — intercepted before reaching the application                 |
 >
-> If you still want a Bloom filter, add one line in your reader:
+> If you still want a Bloom filter, add one line to the reader:
 >
 > ```java
 > BloomFilter<String> bf = BloomFilter.create(Funnels.stringFunnel(UTF_8), 10_000, 0.01);
@@ -457,7 +456,7 @@ public String getUserName(String userId) {
 > });
 > ```
 
-**D. Helper class to avoid repeating lambdas**
+**D. Encapsulate helper to avoid repeated lambdas**
 
 ```java
 @Component
@@ -490,7 +489,7 @@ User user = r.orElseGet(() -> createDefaultUser());
 
 **F. Redis collection types (List, Set, ZSet)**
 
-`putThrough` requires the full new value to update L1, but incremental collection operations (LPUSH, SADD, ZADD) only modify individual elements — the caller cannot know the full new value. Use `putBeforeInvalidate` to invalidate L1 after mutation; the next `get()` will fall back to Redis, guaranteeing consistency.
+`putThrough` requires the full new value to update L1, but collection mutations (LPUSH, SADD, ZADD) only modify individual elements — the caller cannot obtain the full new value. Use `putBeforeInvalidate` to invalidate L1 after mutation; the next `get()` will automatically fall back to Redis, ensuring consistency.
 
 ```java
 @Component
@@ -526,28 +525,28 @@ public class CollectionHotKeyCache {
 }
 ```
 
-**G. Soft expiry — replacing traditional logical expiration**
+**G. Soft expiry — alternative to traditional logical expiration**
 
-Soft expiry returns stale data immediately while refreshing asynchronously in the background (stale-while-revalidate). Unlike traditional logical expiration (embedding an `expireTime` in the Redis value), HotKey manages expiration entirely at the L1 Caffeine layer — **Redis stores plain values with no wrapping**.
+Soft expiry returns stale data immediately while refreshing asynchronously in the background (stale-while-revalidate). Unlike traditional logical expiry (embedding `expireTime` in the Redis value), HotKey manages expiration entirely at the L1 Caffeine layer — **Redis stores plain values with no wrapping**.
 
-| Dimension      | Traditional Logical Expiry                              | HotKey Soft Expiry                                         |
+| Dimension      | Traditional logical expiry                              | HotKey soft expiry                                         |
 | -------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
 | Expiry storage | Embedded in Redis value (`RedisData{data, expireTime}`) | L1 Caffeine metadata (`softExpireAt`)                      |
-| Stale return   | Parse wrapper, return stale data                        | Return L1 stale value directly                             |
-| Async rebuild  | Redis distributed lock + custom thread pool             | Singleflight (local) + `hotKeyExecutor` + `refreshLimiter` |
+| Stale return   | Parse wrapper, return old data                          | Return L1 value directly                                   |
+| Async refresh  | Redis distributed lock + custom thread pool             | SingleFlight (local) + `hotKeyExecutor` + `refreshLimiter` |
 | Redis format   | Wrapped JSON                                            | Plain value (no wrapper)                                   |
 | DB fallback    | Manual locking logic                                    | Native `orElseGet` / `orElseThrow`                         |
 
 ```java
-// Traditional approach (no longer needed):
+// Old way (no longer needed):
 //   redisData.setExpireTime(LocalDateTime.now().plusSeconds(30L));
 //   stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
 
 // HotKey: Redis stores plain values, soft expiry managed by L1
 Optional<String> r = hotKey.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-// L1 hit but soft-expired &#8594; return stale value + trigger async refresh
-// L1 miss &#8594; singleflight fallback (same as get())
+// L1 hit but soft-expired → return stale value + trigger async refresh
+// L1 miss → singleflight fallback (same as get())
 
 // Custom per-call softTtl (overrides global default)
 Optional<String> r2 = hotKey.getWithSoftExpire("user:456", () -> redisTemplate.opsForValue().get("user:456"), 3000);
@@ -572,56 +571,70 @@ User user = JSONUtil.toBean(json, User.class);
 
 **H. Custom per-entry hard TTL**
 
-By default, hot keys and normal keys use different TTLs. Use `get(key, reader, hardTtlMs, softTtlMs)` or `putThrough(key, value, writer, hardTtlMs, softTtlMs)` to set independent hard and soft TTLs for a single entry.
+HotKey uses **differentiated TTL**: hot keys and normal keys have independent default hard and soft TTLs. Per-call overrides apply on top of these defaults.
+
+Default TTLs by key state:
+
+| Key state | Hard TTL (Caffeine eviction)   | Soft TTL (stale-while-revalidate) |
+| --------- | ------------------------------ | --------------------------------- |
+| Normal    | `default-hard-ttl-ms` (5min)   | `default-soft-ttl-ms` (30s)       |
+| Hot       | `default-hot-hard-ttl-ms` (1h) | `default-hot-soft-ttl-ms` (5min)  |
+
+Override via `hard-ttl-ms`, `hot-hard-ttl-ms`, `soft-ttl-ms`, `hot-soft-ttl-ms` (0 = use default).
+
+> [!NOTE]
+> **Cache avalanche protection:** `CacheExpireManager` applies ±10% uniform random jitter via `ThreadLocalRandom` when computing each expiry timestamp. A 5-minute hard TTL actually expires between 4.5 ~ 5.5 minutes, preventing mass simultaneous expiry. The jitter ratio is hardcoded at 10%.
+
+By default, hot keys and normal keys use different TTLs. Per-entry TTLs can be set via `get(key, reader, hardTtlMs, softTtlMs)` or `putThrough(key, value, writer, hardTtlMs, softTtlMs)`.
 
 ```java
-// 5-minute hard TTL + 30-second soft TTL
+// 5min hard TTL + 30s soft TTL
 Optional<Shop> shop = hotKey.get("shop:" + shopId,
     () -> redisTemplate.opsForValue().get("shop:" + shopId),
     TimeUnit.MINUTES.toMillis(5),   // hardTtlMs
     TimeUnit.SECONDS.toMillis(30)); // softTtlMs
 
-// 30-second hard TTL, no soft TTL
+// 30s hard TTL, no soft TTL
 hotKey.putThrough("weather:" + city, weatherData,
     () -> redisTemplate.opsForValue().set("weather:" + city, weatherData),
     TimeUnit.SECONDS.toMillis(30),  // hardTtlMs
-    0);                              // softTtlMs (uses default)
+    0);                              // softTtlMs (use default)
 ```
 
 > [!TIP]
 > Per-call TTL semantics:
 >
-> Per-call `hardTtlMs`/`softTtlMs` only apply to the current invocation. On the next call without TTL params, it falls back to the key state's (hot or normal) default TTL.
-> Passing `0` means "use the config default for this key state."
-> **Fully logical expiry (soft-only, hard TTL never evicts):** Pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)`. The entry stays in Caffeine permanently — hard TTL will never remove it. After `softExpireAt` passes, reads return stale data immediately and trigger async refresh (soft expiry **does not** evict the entry). Without `Long.MAX_VALUE`, the default hard TTL may evict the entry from Caffeine first (L1 miss &#8594; higher latency) rather than taking the stale+refresh path.
-> Passing `Long.MAX_VALUE` as `hardTtlMs` implements permanent caching — the entry will never be TTL-evicted (only evictable via Caffeine `maximumSize`). Caffeine's `Expiry` Javadoc explicitly supports this: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
+> Per-call `hardTtlMs`/`softTtlMs` only apply to the current invocation. The next call without these parameters falls back to the TTL defaults for the key's current state (hot or normal).
+> Passing `0` means "use the configured default for this key state."
+> For pure soft expiry (hard TTL never evicts): pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)`. The entry stays in Caffeine forever — the hard TTL will never remove it. After `softExpireAt` expires, reads immediately return the stale value and trigger async refresh (soft expiry **does not evict** the entry). Without `Long.MAX_VALUE`, the default hard TTL may evict the entry from Caffeine first (L1 miss → higher latency) instead of taking the stale-value + async-refresh path.
+> This usage is explicitly supported by Caffeine's `Expiry` Javadoc: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
 
 **I. Worker mode**
 
-Worker mode provides cluster-level hot key detection via dedicated nodes. App instances periodically report access counts, Workers run a sliding window + state machine pipeline, and broadcast HOT/COOL decisions to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state` — changes propagate to all peer Workers through epoch-driven heartbeat gossip on a dedicated TopicExchange (isolated from decision traffic). Workers also emit structured heartbeats every 1s (configurable) containing epoch, decision version watermark, load factor, and config fingerprint — enabling immediate restart detection and cluster health evaluation via majority quorum.
+Worker mode provides cluster-level hot key detection via dedicated nodes. App instances periodically report access counts; Workers run a sliding window + state machine pipeline and broadcast HOT/COOL decisions back to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state` — changes propagate to all peer Workers via epoch-based heartbeat gossip (dedicated TopicExchange, isolated from decision traffic). Workers emit structured heartbeats every second (configurable), containing epoch, decision version watermark, load factor, and config fingerprint — enabling instant restart detection and majority-vote-based cluster health assessment.
 
 Two deployment modes:
 
-| Mode        | `worker.enabled`  | Activated Beans                                                                        |
-| ----------- | ----------------- | -------------------------------------------------------------------------------------- |
-| App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                                          |
-| Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throws `UnsupportedOperationException`) |
+| Mode        | `worker.enabled`  | Activated beans                                                                       |
+| ----------- | ----------------- | ------------------------------------------------------------------------------------- |
+| App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                                         |
+| Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `UnsupportedOperationException`) |
 
 In **Worker-only** mode, cache operations throw `UnsupportedOperationException`.
 
-**Worker TopK persistence (warm-start):**
+**Worker TopK persistence (hot start):**
 
-When `hotkey.worker.persistence.enabled=true`, the Worker periodically snapshots its current TopK list to Redis. On restart, the `TopKPersistService` loads the last snapshot and replays it into the HeavyKeeper sketch via `@PostConstruct`, cutting warm-up from hours to seconds.
+When `hotkey.worker.persistence.enabled=true`, the Worker periodically snapshots its current TopK list to Redis. On restart, `TopKPersistService` loads the last snapshot via `@PostConstruct` and replays it into the HeavyKeeper sketch, reducing warm-up from hours to seconds.
 
 - Redis key: `hotkey:topk:worker:<appName>:<nodeId>` — each Worker persists independently
-- Persisted data: top `N` key-count pairs as JSON (`List<Item>`)
-- Restore: `TopK.add(Map)` re-hashes historical keys into the (empty) sketch — approximate but sufficient
+- Persisted data: JSON of top N key-count pairs (`List<Item>`)
+- Recovery: `TopK.add(Map)` re-hashes historical keys into the (empty) sketch — approximate but does not affect correctness
 
 **J. @HotKey annotation**
 
 > Full documentation: [`docs/ANNOTATION.md`](docs/ANNOTATION.md) — covers companion annotations (`@Fallback`, `@Intercept`, `@HotKeyCacheTTL`), priority chain, SpEL condition/unless support, return type handling, and complete examples.
 
-`@HotKey` provides declarative caching for method return values — an AOP-based alternative that eliminates the need for explicit `hotKey.get()` / `putBeforeInvalidate()` / `invalidate()` calls.
+`@HotKey` provides declarative caching for method return values — an AOP-based alternative that avoids explicit `hotKey.get()` / `putBeforeInvalidate()` / `invalidate()` calls.
 
 ```java
 @HotKey(key = "'user:' + #id")
@@ -638,137 +651,19 @@ hotkey:
 
 Requires `spring-boot-starter-aop` on the classpath (provides AspectJ). SpEL parameter name resolution requires the `-parameters` compiler flag (enabled by default in HotKey's parent POM).
 
-### 4. Degradation
-
-HotKey provides a three-level degradation chain via `supplier` callbacks:
-
-```
-hotKey.get(key, supplier)
-  ├─ L1(Caffeine) hit &#8594; promote if locally hot &#8594; return directly
-  ├─ L1 miss &#8594; supplier()
-  │    ├─ returns data &#8594; hot key? &#8594; write L1 (with appropriate TTL) + return
-  │    ├─ returns null &#8594; Optional.empty() &#8594; caller's orElseGet/orElseThrow
-  │    │                     (null = miss. HotKey follows Caffeine convention;
-  │    │                      if your backend stores nullable values,
-  │    │                      wrap them with a sentinel object on the caller side)
-  │    │
-  │    │                     Example: Redis stores nullable values
-  │    │                     private static final Object NULL_SENTINEL = new Object();
-  │    │                     Optional<Object> r = hotKey.get("k", () -> {
-  │    │                         Object val = redisTemplate.opsForValue().get("k");
-  │    │                         return val != null ? val : NULL_SENTINEL;
-  │    │                     });
-  │    │                     Object actual = r.orElse(null); // sentinel back to null
-  │    └─ throws exception &#8594; SingleFlight.load() catches &#8594; Optional.empty() &#8594; caller fallback
-  └─ HotKey internal error &#8594; exception &#8594; degradation (@Fallback if present) &#8594; caller
-```
-
-Component failure behavior:
-
-| Failed Component          | Impact                                                  | Recovery                            |
-| ------------------------- | ------------------------------------------------------- | ----------------------------------- |
-| HotKey itself             | L1 unavailable; exception or degraded mode (if enabled) | App restart                         |
-| L2 backend (Redis/DB/API) | Each request falls through to caller                    | Auto-recovery when backend recovers |
-| L1 Caffeine OOM/eviction  | Single key evicted, next read falls back to source      | Automatic (Caffeine internal)       |
-
-> Callers must always handle `Optional.empty()` — HotKey never hides backend failures.
-
-Write path failure behavior:
-
-| Write method                                        | Failure scenario                | Behavior                                                                                      |
-| --------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
-| `putThrough`                                        | Thread pool queue full (non-tx) | `RejectedExecutionException` propagated to caller                                             |
-| `putThrough`                                        | `writer.run()` / Redis fails    | Error logged, L1 version not updated, no broadcast sent                                       |
-| `putBeforeInvalidate`                               | `mutation.run()` throws         | Mutation exception caught and logged; local invalidation and broadcast skipped                |
-| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails     | Falls back to node-local counter (`Long.MIN_VALUE + counter`, non-persisted, `degraded=true`) |
-
-Worker mode failure behavior:
-
-| Failed Component          | Impact                                                                                      | Recovery                                                            |
-| ------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Worker crash (all)        | Local TopK drives L1 TTLs; COOL entries promoted to HOT; Worker verdicts degrade gracefully | Restart Worker cluster; Worker broadcasts override local promotions |
-| Worker crash (partial)    | Unaffected shards continue normally                                                         | Restart crashed Worker; auto-reconnect                              |
-| Report channel failure    | Reports queue/buffer (RabbitMQ)                                                             | Auto-recovery when RabbitMQ recovers                                |
-| Worker broadcast failure  | No cross-instance HOT/COOL sync; local TopK works fine                                      | Restart Worker broadcaster                                          |
-| Reporter BBR backpressure | BBR drops batch when concurrency exceeds budget (CPU≥threshold); permissive below threshold | Auto-throttles when load subsides |
-| Worker TopK persistence   | Redis unavailable → persist silently skipped, `error` logged; Worker restarts cold (no warm-start) | Redis recovers → next scheduled persist succeeds |
-
-## HotKey Facade API Reference
-
-The recommended entry point is the `HotKey` facade (auto-configured as a Spring Bean). In addition to the `get`/`peek`/`putThrough`/`putBeforeInvalidate` methods shown above:
-
-| Method                                                 | Description                                                                                                                                                                                                                                    |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `peek(key)`                                            | L1 lookup only, no frequency tracking, no L2 read, no reporting                                                                                                                                                                                |
-| `getLocalCache()`                                      | Exposes the raw Caffeine `Cache<String, Object>` for Caffeine-specific operations (asMap, policy, cleanUp). &#9888;&#65039; Bypasses HotKey orchestration — version tracking, broadcast, and expiry management are all skipped. Local L1 only. |
-| `get(key, reader)`                                     | Read from L1 or L2 reader; every access triggers local TopK tracking + App&#8594;Worker reporting; hot keys promoted to L1 (with hot TTL), normal keys use normal TTL                                                                          |
-| `get(key, reader, hardTtlMs, softTtlMs)`               | Same as above, with per-entry hard and soft TTL override (pass 0 to use default)                                                                                                                                                               |
-| `getWithSoftExpire(key, reader)`                       | Soft expiry — returns stale data + triggers async refresh; every access triggers local TopK tracking + App&#8594;Worker reporting; uses global default TTLs based on key state                                                                 |
-| `getWithSoftExpire(key, reader, softTtlMs)`            | Same as above, with per-call soft TTL override (ms)                                                                                                                                                                                            |
-| `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | Same as above, with both per-entry hard TTL and per-call soft TTL override (ms)                                                                                                                                                                |
-| `putThrough(key, value, writer)`                       | Write-through: writer.run(), nextVersion(), L1 update (with effective TTL based on key state), optional sync                                                                                                                                   |
-| `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | Same as above, with per-entry hard and soft TTL override (pass 0 to use default)                                                                                                                                                               |
-| `putBeforeInvalidate(key, mutation)`                   | Write then invalidate, for incremental collection operations (LPUSH, SADD, ZADD)                                                                                                                                                               |
-| `isLocalHotKey(cacheKey)`                              | Check if key is HOT in L1 (O(1))                                                                                                                                                                                                               |
-| `isWorkerHotKey(cacheKey)`                             | Check if key is a cluster hot key in Worker TopK (O(n))                                                                                                                                                                                        |
-| `notifyLocalDetector(cacheKey)`                        | Triggers local HotKeyDetector tracking for a key without performing a full cache read. Used by `@Intercept` to keep TopK accurate when the method body is skipped.                                                                             |
-| `invalidate(cacheKey)`                                 | Invalidate a single key across all cache layers                                                                                                                                                                                                |
-| `invalidateAll(cacheKeys...)`                          | Varargs overload — batch invalidate multiple keys                                                                                                                                                                                              |
-| `invalidateAll(Collection)`                            | Collection overload                                                                                                                                                                                                                            |
-| `returnLocalHotKeys()`                                 | App-side Top-K snapshot (key + count)                                                                                                                                                                                                          |
-| `returnLocalExpelledHotKeys()`                         | Get app-side expelled hot key queue; periodically drained by internal timer                                                                                                                                                                    |
-| `returnLocalTotalDataStreams()`                        | Cumulative reads through app-side HeavyKeeper                                                                                                                                                                                                  |
-| `returnWorkerHotKeys()`                                | Worker-side (cluster-level) Top-K snapshot                                                                                                                                                                                                     |
-| `returnWorkerExpelledHotKeys()`                        | Worker-side expelled hot key queue                                                                                                                                                                                                             |
-| `returnWorkerTotalDataStreams()`                       | Worker-side HeavyKeeper cumulative reads                                                                                                                                                                                                       |
-
-> [!NOTE]
-> `invalidate()` generates a monotonic version number via Redis `INCR` and broadcasts `TYPE_REFRESH` — the peer reloads from Redis via `CacheSyncListener`, skipping stale versions. `invalidateAll()` does **not** call `INCR` — it broadcasts `TYPE_INVALIDATE_ALL` (no version header), and all peers unconditionally remove all listed keys from L1.
-
-## TTL Reference
-
-HotKey uses **differentiated TTLs**: hot keys and normal keys have independent default hard and soft TTLs. Per-call overrides apply on top of these.
-
-Default TTLs by key state:
-
-| Key State | Hard TTL (Caffeine eviction)   | Soft TTL (stale-while-revalidate) |
-| --------- | ------------------------------ | --------------------------------- |
-| Normal    | `default-hard-ttl-ms` (5min)   | `default-soft-ttl-ms` (30s)       |
-| Hot       | `default-hot-hard-ttl-ms` (1h) | `default-hot-soft-ttl-ms` (5min)  |
-
-Override via `hard-ttl-ms`, `hot-hard-ttl-ms`, `soft-ttl-ms`, `hot-soft-ttl-ms` (0 = use default).
-
-> [!NOTE]
-> **Cache avalanche protection:** `CacheExpireManager` applies &#177;10% uniform random jitter via `ThreadLocalRandom` when calculating each expiration timestamp. A 5-minute hard TTL actually expires between 4.5 ~ 5.5 minutes, preventing many keys from expiring simultaneously. The jitter ratio is hardcoded at 10%.
-
-Method-level TTL behavior:
-
-| Method                                                 | TTL Meaning                                                                            |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------- |
-| `get(key, reader)`                                     | Uses effective TTL based on current key state (hot uses hot TTL, otherwise normal TTL) |
-| `get(key, reader, hardTtlMs, softTtlMs)`               | Overrides hard and soft TTL; pass 0 to use config defaults                             |
-| `getWithSoftExpire(key, reader)`                       | Returns stale data immediately + async refresh; TTL determined by key state            |
-| `getWithSoftExpire(key, reader, softTtlMs)`            | Same as above, with per-call soft TTL override (hard TTL from defaults)                |
-| `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | Same as above, overriding both                                                         |
-| `putThrough(key, value, writer)`                       | L1 entry always uses normal key TTL (stored with `KeyState.NORMAL`)                    |
-| `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | L1 entry uses override TTL (0 = use config default)                                    |
-| Legacy `local-cache-ttl-minutes`                       | Write TTL (under `hotkey.local.*`; supplemented by differentiated TTL)                 |
-
-> **Per-call semantics:** All per-call TTL overrides (hard and soft) are one-shot — the next call without params falls back to the key state's default TTL. The sole exception is that soft-expiry background refresh preserves the original per-entry hard TTL.
-
 ## Cache Synchronization
 
 Enable with `hotkey.sync.enabled=true`.
 
-Each instance declares an exclusive queue (`hotkey.sync:<instanceID>`) bound to a fanout exchange. Four message types:
+Each instance declares its own queue (`hotkey.sync:<instanceID>`) bound to a fanout exchange. Four message types:
 
-- **`TYPE_REFRESH`** — Refresh with version number. Peers `CacheSyncListener.handleRefresh()` reload from Redis, skipping stale updates based on `dataVersion`. A 4-case comparison (normal-normal, normal-degraded, degraded-normal, degraded-degraded) ensures that normal (Redis INCR) `dataVersion` always takes priority over degraded (node-local) versions. Sent by `invalidate()` and `putThrough()`.
-- **`TYPE_INVALIDATE`** — Single-key invalidation (with version guard). Peers only remove the L1 entry if the incoming `dataVersion` is not stale. Sent by `putBeforeInvalidate()`.
-- **`TYPE_INVALIDATE_ALL`** — Batch invalidation (no version guard). Peers immediately remove all listed keys from L1, no reload. Sent by `invalidateAll()`.
-- **`TYPE_RULES_SYNC`** — Rule set replacement. Body is a JSON-serialized `List<Rule>`; the receiver calls `RuleMatcher.syncRules()` to atomically replace the local rule list. Does not trigger secondary broadcast.
+- **`TYPE_REFRESH`** — Versioned refresh. The peer calls `CacheSyncListener.handleRefresh()` to reload from Redis, skipping stale updates based on `dataVersion`. A 4-case comparison (normal-normal, normal-degraded, degraded-normal, degraded-degraded) ensures normal (Redis INCR) dataVersion always wins over degraded (node-local) versions. Sent by `invalidate()` and `putThrough()`.
+- **`TYPE_INVALIDATE`** — Single key invalidation (with version guard). The peer removes the L1 entry only when the incoming `dataVersion` is not stale. Sent by `putBeforeInvalidate()`.
+- **`TYPE_INVALIDATE_ALL`** — Batch invalidation (no version guard). The peer immediately removes all listed keys from L1 without reloading. Sent by `invalidateAll()`.
+- **`TYPE_RULES_SYNC`** — Rule set replacement. The body is a JSON-serialized `List<Rule>`; the receiver calls `RuleMatcher.syncRules()` to atomically replace the local rule list. Does not trigger a secondary broadcast.
 
 > [!SECURITY]
-> All three RabbitMQ exchanges (`hotkey.sync.exchange`, `hotkey.report.exchange`, `hotkey.broadcast.exchange`) default to plain AMQP connections. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*` properties:
+> All three RabbitMQ exchanges (`hotkey.sync.exchange`, `hotkey.report.exchange`, `hotkey.broadcast.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*` properties:
 >
 > ```yaml
 > spring:
@@ -785,28 +680,28 @@ Each instance declares an exclusive queue (`hotkey.sync:<instanceID>`) bound to 
 
 ## Rule System
 
-Enable `hotkey.sync.enabled=true` to enable cross-instance rule sync. The rule system provides two actions:
+Enable `hotkey.sync.enabled=true` to enable cross-instance rule synchronization. The rule system provides two actions:
 
-| Action            | Effect on matching keys                                                                    |
-| ----------------- | ------------------------------------------------------------------------------------------ |
-| `BLOCK`           | `get()` / `getWithSoftExpire()` throws `HotKeyBlockedException`; `putThrough()` skips      |
-| `ALLOW_NO_REPORT` | Normal processing but skips Worker reporting (reduces noise from frequently accessed keys) |
+| Action            | Effect on matching keys                                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------- |
+| `BLOCK`           | `get()` / `getWithSoftExpire()` throws `HotKeyBlockedException`; `putThrough()` skipped  |
+| `ALLOW_NO_REPORT` | Normal processing but skip Worker reporting (reduces noise for frequently accessed keys) |
 
 ### Pattern Types
 
-`RuleMatcher.of(pattern, action)` auto-detects the pattern:
+`RuleMatcher.of(pattern, action)` auto-detects the pattern type:
 
-| Pattern             | Type       | Matches                    |
-| ------------------- | ---------- | -------------------------- |
-| `"user:123"`        | `EXACT`    | Exact key                  |
-| `"temp:*"`          | `PREFIX`   | Keys starting with `temp:` |
-| `"order:*-detail"`  | `WILDCARD` | Glob-style (`*` / `?`)     |
-| `"regex:user:\\d+"` | `REGEX`    | Java regex                 |
+| Pattern             | Type       | Matches                         |
+| ------------------- | ---------- | ------------------------------- |
+| `"user:123"`        | `EXACT`    | Exact key                       |
+| `"temp:*"`          | `PREFIX`   | Keys starting with `temp:`      |
+| `"order:*-detail"`  | `WILDCARD` | Glob-style (`*` / `?`) matching |
+| `"regex:user:\\d+"` | `REGEX`    | Java regex                      |
 
-### Persistence & Broadcast
+### Persistence & Broadcasting
 
-- **With Redis:** Every `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `HotKeyConstants.REDIS_KEY_RULES` (`"hotkey:rules"`). `RuleMatcher.initRules()` loads from Redis on startup. Changes also broadcast via `TYPE_RULES_SYNC` — peers call `RuleMatcher.syncRules()` for atomic replacement, no secondary broadcast (storm prevention).
-- **Without Redis:** Same operations broadcast via `CacheSyncPublisher` fanout exchange to all peers. Each peer holds the full rule set in memory.
+- **With Redis:** Each `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `HotKeyConstants.REDIS_KEY_RULES` (`"hotkey:rules"`). On startup, `RuleMatcher.initRules()` loads from Redis. Changes are also broadcast via `TYPE_RULES_SYNC` — the peer atomically replaces its rules via `RuleMatcher.syncRules()`, which does not trigger a secondary broadcast (no storm).
+- **Without Redis:** Same operations broadcast via `CacheSyncPublisher` fanout exchange to all peers. Each peer holds its own in-memory rule set.
 - **Manual broadcast:** `hotKey.broadcastAllLocalRulesManually()` loads from Redis (if available) and re-broadcasts the current rule set to all peers.
 
 ### Programmatic Usage
@@ -822,12 +717,46 @@ hotKey.addWhitelist("metrics:*");
 
 // Inspect rules
 List<Rule> rules = hotKey.getAllRules();
-RuleAction action = hotKey.evaluateRule("user:123"); // BLOCK / ALLOW_NO_REPORT / ALLOW
+Rule.RuleAction action = hotKey.evaluateRule("user:123"); // BLOCK / ALLOW_NO_REPORT / ALLOW
 
 // Remove rules
 hotKey.removeBlacklist("secret:*");
 hotKey.clearAllRules();
 ```
+
+### Degradation
+
+HotKey forms a three-level degradation chain via `supplier` callbacks:
+
+Component failure behavior:
+
+| Failed component           | Impact                                                    | Recovery                            |
+| -------------------------- | --------------------------------------------------------- | ----------------------------------- |
+| HotKey itself              | L1 unavailable; exception or hot degradation (if enabled) | Application restart                 |
+| L2 backend (Redis/DB/API)  | Every request penetrates to caller fallback               | Auto-recovery when backend recovers |
+| L1 Caffeine OOM / eviction | Single key evicted, re-fetched on next read               | Automatic (Caffeine internal)       |
+
+> The caller must always handle `Optional.empty()` — HotKey does not hide backend failures.
+
+Write path failure behavior:
+
+| Write method                                        | Failure scenario                           | Behavior                                                                                       |
+| --------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `putThrough`                                        | Thread pool queue full (non-transactional) | `RejectedExecutionException` propagated to caller                                              |
+| `putThrough`                                        | `writer.run()` / Redis fails               | Error logged, L1 version not updated, no broadcast sent                                        |
+| `putBeforeInvalidate`                               | `mutation.run()` throws                    | Mutation exception caught and logged; local invalidation and broadcast skipped                 |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails                | Falls back to node-local counter (`Long.MIN_VALUE + counter`, non-persistent, `degraded=true`) |
+
+Worker mode failure behavior:
+
+| Failed component          | Impact                                                                                                | Recovery                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| All Workers down          | Local TopK drives L1 TTL; COOL entries can upgrade to HOT; Worker decisions gracefully degrade        | Restart Worker cluster; Worker broadcast overrides local promotion |
+| Partial Workers down      | Unaffected shards continue working normally                                                           | Restart failed Workers; auto-reconnect                             |
+| Report channel failure    | Reports queued/buffered (RabbitMQ)                                                                    | Auto-recover when RabbitMQ recovers                                |
+| Worker broadcast failure  | No cross-instance HOT/COOL sync; local TopK continues normally                                        | Restart Worker broadcaster                                         |
+| Reporter BBR backpressure | BBR drops batches when concurrency exceeds budget (CPU ≥ threshold); lenient below threshold          | Auto-recover when load decreases                                   |
+| Worker TopK persistence   | Redis unavailable → silently skip persistence, `error` log recorded; Worker cold start (no hot start) | Next scheduled persistence succeeds when Redis recovers            |
 
 ## Monitoring
 
