@@ -763,9 +763,7 @@ HotKey 提供两种互补的监控机制
 
 完整响应格式和字段说明见 [MONITOR.zh.md](docs/MONITOR.zh.md)（[英文版](docs/MONITOR.md)）。
 
-## 架构和设计细节
-
-详见 [ARCH.md](docs/ARCH.md)（英文）和 [ARCH.zh.md](docs/ARCH.zh.md)（中文）。
+## 设计细节
 
 领域术语定义见 [CONTEXT.md](CONTEXT.md)。
 架构决策记录（ADR）维护在 [docs/adr/](docs/adr/0001-local-promotion-worker-fallback.md)。

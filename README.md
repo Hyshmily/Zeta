@@ -764,9 +764,7 @@ HotKey provides two complementary monitoring mechanisms.
 
 See [MONITOR.md](docs/MONITOR.md) for full response formats and field descriptions.
 
-## Architecture & Design Details
-
-See [ARCH.md](docs/ARCH.md) for detailed architecture documentation.
+## Design Details
 
 For domain terminology definitions, see [CONTEXT.md](CONTEXT.md).
 Architectural Decision Records (ADRs) are maintained in [docs/adr/](docs/adr/0001-local-promotion-worker-fallback.md).
