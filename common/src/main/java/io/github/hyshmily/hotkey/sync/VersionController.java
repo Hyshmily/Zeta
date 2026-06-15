@@ -14,13 +14,12 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync;
+import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -33,10 +32,10 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
  * ordering without flag-aware comparison logic.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class VersionController {
 
   /** Logger for this class. */
-  private static final HotKeyLogger log = new DefaultLogger(VersionController.class);
 
   /**
    * Result of a version allocation.

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.autoconfigure;
+import lombok.extern.slf4j.Slf4j;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -25,8 +26,6 @@ import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -66,10 +65,10 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 @AutoConfiguration(after = RedisAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "hotkey.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
 @EnableConfigurationProperties(HotKeyProperties.class)
+@Slf4j
 public class HotKeyAutoConfiguration {
 
   /** Logger for this configuration class. */
-  private static final HotKeyLogger log = new DefaultLogger(HotKeyAutoConfiguration.class);
 
   /**
    * Create the app-side TopK instance (HeavyKeeper) as a standalone bean.
@@ -90,6 +89,14 @@ public class HotKeyAutoConfiguration {
     );
   }
 
+  /**
+   * Create the app-side {@link HotKeyDetector} facade that wraps the HeavyKeeper TopK
+   * and schedules periodic decay.
+   *
+   * @param heavyKeeper      the HeavyKeeper TopK instance
+   * @param hotKeyScheduler  the shared scheduler for periodic tasks
+   * @return a new HotKeyDetector instance
+   */
   @Bean
   @ConditionalOnMissingBean
   public HotKeyDetector hotKeyDetector(

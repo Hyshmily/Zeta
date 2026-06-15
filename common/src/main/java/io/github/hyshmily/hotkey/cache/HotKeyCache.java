@@ -18,12 +18,12 @@ package io.github.hyshmily.hotkey.cache;
 import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
+import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
@@ -33,12 +33,14 @@ import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
+import jakarta.annotation.Nullable;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -50,11 +52,10 @@ import lombok.RequiredArgsConstructor;
  * cross-instance synchronization via {@link CacheSyncPublisher}.
  * All write operations are transaction-aware via {@link TransactionSupport}.
  */
+@SuppressWarnings("DuplicatedCode")
 @RequiredArgsConstructor
+@Slf4j
 public class HotKeyCache {
-
-  /** Logger for this class. */
-  private static final HotKeyLogger log = new DefaultLogger(HotKeyCache.class);
 
   /** Local TopK detector (HotKeyDetector) for identifying hot keys. */
   private final HotKeyDetector hotKeyDetector;
@@ -168,11 +169,11 @@ public class HotKeyCache {
     }
 
     if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
-      throw new HotKeyBlockedException(cacheKey);
+      throw new HotKeyBlockedException("HotKeyCache", cacheKey);
     }
 
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).map(raw ->
-      raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw
+      raw instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) raw
     );
   }
 
@@ -205,13 +206,12 @@ public class HotKeyCache {
   @SuppressWarnings("unchecked")
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
     if (invalidCacheKey(cacheKey)) {
-      log.debug("get: invalid cacheKey");
-      return Optional.empty();
+      throw new IllegalArgumentException("Invalid cacheKey: " + cacheKey);
     }
 
     RuleAction action = ruleMatcher.evaluateRule(cacheKey);
     if (action == RuleAction.BLOCK) {
-      throw new HotKeyBlockedException(cacheKey);
+      throw new HotKeyBlockedException("HotKeyCache", cacheKey);
     }
     boolean skipReport = action == RuleAction.ALLOW_NO_REPORT;
 
@@ -222,14 +222,14 @@ public class HotKeyCache {
           log.debug("get: logically expired, reloading: {}", cacheKey);
           return Optional.empty();
         }
-        T val = raw instanceof CacheEntry vv ? (T) vv.getValue() : (T) raw;
+        T val = raw instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) raw;
 
         promoteLocalHotkeyIfNeeded(cacheKey, raw, val, hardTtlMs, softTtlMs);
         if (!skipReport) {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
         }
 
-        return Optional.of(val);
+        return Optional.ofNullable(val);
       })
       .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
   }
@@ -277,13 +277,12 @@ public class HotKeyCache {
   @SuppressWarnings("unchecked")
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
     if (invalidCacheKey(cacheKey)) {
-      log.debug("getWithSoftExpire: invalid cacheKey");
-      return Optional.empty();
+      throw new IllegalArgumentException("Invalid cacheKey: " + cacheKey);
     }
 
     RuleAction action = ruleMatcher.evaluateRule(cacheKey);
     if (action == RuleAction.BLOCK) {
-      throw new HotKeyBlockedException(cacheKey);
+      throw new HotKeyBlockedException("HotKeyCache", cacheKey);
     }
     boolean skipReport = action == RuleAction.ALLOW_NO_REPORT;
 
@@ -300,7 +299,7 @@ public class HotKeyCache {
           return Optional.empty();
         }
 
-        T cached = v instanceof CacheEntry vv ? (T) vv.getValue() : (T) v;
+        T cached = v instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) v;
 
         if (
           v instanceof CacheEntry cacheEntry &&
@@ -325,7 +324,7 @@ public class HotKeyCache {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
         }
 
-        return Optional.of(cached);
+        return Optional.ofNullable(cached);
       })
       .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
   }
@@ -348,13 +347,13 @@ public class HotKeyCache {
   ) {
     // Secondary check: rule may have been added after the entry check in get/getWithSoftExpire
     if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
-      throw new HotKeyBlockedException(cacheKey);
+      throw new HotKeyBlockedException("HotKeyCache", cacheKey);
     }
     return singleFlight
       .load(cacheKey, reader)
       .map(value -> {
         if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
-          throw new HotKeyBlockedException(cacheKey);
+          throw new HotKeyBlockedException("HotKeyCache", cacheKey);
         }
 
         long effectiveHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHardTtlMs();
@@ -617,7 +616,7 @@ public class HotKeyCache {
     }
 
     return CacheEntry.builder()
-      .value(value)
+      .value(value != null ? value : NullValue.INSTANCE)
       .dataVersion(vr.dataVersion())
       .isVersionDegraded(vr.degraded())
       .decisionVersion(decisionVersion)
@@ -763,6 +762,67 @@ public class HotKeyCache {
   }
 
   /**
+   * Estimated number of entries currently in the L1 cache.
+   *
+   * @return best-effort estimate of the current entry count
+   */
+  public long estimatedSize() {
+    return caffeineCache.estimatedSize();
+  }
+
+  /**
+   * Return a snapshot of basic L1 cache statistics.
+   * <p>
+   * Hit/miss/eviction counters are populated only when Caffeine's
+   * {@code recordStats()} is enabled.  {@code estimatedSize} is always
+   * available.
+   *
+   * @return a {@link HotKeyCacheStats} record; hit/miss counters are {@code 0}
+   *         if stats recording is not enabled
+   */
+  public HotKeyCacheStats stats() {
+    CacheStats cs = caffeineCache.stats();
+    return new HotKeyCacheStats(
+      cs.hitCount(),
+      cs.missCount(),
+      cs.hitRate(),
+      cs.evictionCount(),
+      caffeineCache.estimatedSize()
+    );
+  }
+
+  /**
+   * Check whether the given key is blacklisted.
+   *
+   * @param cacheKey the key to check
+   * @return {@code true} if a blacklist rule matches the key
+   */
+
+  public boolean isBlacklisted(String cacheKey) {
+    return ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK;
+  }
+
+  /**
+   * Check whether the given key is whitelisted (skips Worker reporting).
+   *
+   * @param cacheKey the key to check
+   * @return {@code true} if a whitelist rule matches the key
+   */
+  public boolean isWhitelisted(String cacheKey) {
+    return ruleMatcher.evaluateRule(cacheKey) == RuleAction.ALLOW_NO_REPORT;
+  }
+
+  /**
+   * Invalidate all entries from the L1 cache without broadcasting.
+   * <p>
+   * This is an emergency flush — all cached values are removed immediately.
+   * No cross-instance sync messages are sent.
+   */
+  public void invalidateAll() {
+    caffeineCache.invalidateAll();
+  }
+
+  /**
    * Return the underlying Caffeine cache for direct access.
    *
    * <p>This provides access to Caffeine-specific operations such as
@@ -774,5 +834,20 @@ public class HotKeyCache {
    */
   public Cache<String, Object> getLocalCache() {
     return caffeineCache;
+  }
+
+  /**
+   * Unwrap a {@link NullValue} sentinel back to {@code null}.
+   * <p>
+   * When called from the extraction paths of {@link #get}, {@link #getWithSoftExpire},
+   * and {@link #peek}, this ensures that null values stored via the sentinel are
+   * transparently returned as {@code null} to callers.
+   *
+   * @param value the raw value from a {@link CacheEntry}
+   * @return {@code null} if the sentinel, otherwise the original value
+   */
+  @Nullable
+  private static Object unwrapNull(@Nullable Object value) {
+    return value == NullValue.INSTANCE ? null : value;
   }
 }

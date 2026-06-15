@@ -14,14 +14,13 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.cache;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 
 /**
  * Executes tasks with awareness of Spring transaction boundaries.
@@ -33,10 +32,8 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
  *   <li>{@link #runNowOrAfterCommit} executes synchronously on the caller's thread</li>
  * </ul>
  */
+@Slf4j
 public final class TransactionSupport {
-
-  /** Logger for this class. */
-  private static final HotKeyLogger log = new DefaultLogger(TransactionSupport.class);
 
   /**
    * Utility class — no instantiation.

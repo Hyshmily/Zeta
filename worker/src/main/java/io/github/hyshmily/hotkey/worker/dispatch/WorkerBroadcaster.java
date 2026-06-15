@@ -14,10 +14,9 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.dispatch;
+import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.sync.WorkerMessage;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.core.Message;
@@ -42,9 +41,9 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
  * differentiates message type via the {@code AMQP_HEADER_TYPE} header.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class WorkerBroadcaster {
 
-  private static final HotKeyLogger log = new DefaultLogger(WorkerBroadcaster.class);
 
   /** RabbitMQ template used to publish HOT/COOL decisions and heartbeats. */
   private final RabbitTemplate rabbitTemplate;

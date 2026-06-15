@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.util;
+import lombok.extern.slf4j.Slf4j;
 
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.util.concurrent.Executors;
@@ -36,9 +35,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Polling interval defaults to 500 ms. The monitor is started and stopped
  * explicitly via {@link #start()} / {@link #stop()}.
  */
+@Slf4j
 public class SystemLoadMonitor {
 
-  private static final HotKeyLogger log = new DefaultLogger(SystemLoadMonitor.class);
 
   private static final double DEFAULT_DECAY = 0.95;
   private static final long DEFAULT_POLL_MS = 500;

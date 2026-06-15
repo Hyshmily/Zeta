@@ -61,11 +61,19 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
     this.bufferedCounter = new BufferedCounter(heavyKeeper::addDirect, scheduler);
   }
 
+  /**
+   * Start the buffered counter flush scheduler.
+   * Called by the Spring container after all bean properties have been set.
+   */
   @Override
   public void afterPropertiesSet() {
     bufferedCounter.afterPropertiesSet();
   }
 
+  /**
+   * Shut down the buffered counter and its scheduler.
+   * Called by the Spring container during context close.
+   */
   @Override
   public void destroy() {
     bufferedCounter.destroy();
@@ -126,6 +134,8 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
 
   /**
    * Return all keys currently in the TopK set, sorted by estimated count descending.
+   *
+   * @return an unmodifiable-style list of {@link Item} entries, from highest to lowest count
    */
   @Override
   public List<Item> list() {

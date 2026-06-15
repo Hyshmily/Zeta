@@ -44,7 +44,7 @@ HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 
 - **CPU monitoring with EMA smoothing** — Dedicated daemon thread polls process CPU load every 500ms with configurable EMA decay for stable overload detection
 - **Spring Boot auto-configuration** — Add the dependency and it works, zero boilerplate
 - **Worker TopK persistence** — Periodic snapshots of the Worker's HeavyKeeper to Redis; restart recovery in seconds instead of hours of re-accumulation
-- **Annotation-driven caching** — `@HotKey` + `@HotKeyCacheTTL` + `@Intercept` + `@Fallback` for zero-boilerplate integration; SpEL key resolution, `softExpire` toggle, TTL inheritance
+- **Spring Cache integration** — Standard `@Cacheable` / `@CachePut` / `@CacheEvict` with HotKey hot-key detection, soft-expire, cross-instance sync, and companion annotations (`@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, `@NullCaching`) for TTL, intercept, fallback, and null-caching; gated by `hotkey.spring-cache.enabled=true`
 - **Transaction support** — `TransactionSupport` defers cache writes until after Spring `@Transactional` commits, ensuring cache-data consistency on the write path
 
 </details>
@@ -124,9 +124,9 @@ Default local configuration (suitable for most scenarios):
 | Worker Listener          | `hotkey.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker |
 | Worker mode              | `hotkey.worker.enabled=true`                   | Run dedicated Worker node              |
 | Worker TopK persistence  | `hotkey.worker.persistence.enabled=true`       | Hot start from Redis after restart     |
-| `@HotKey` annotation     | `hotkey.annotation.enabled=true` + AspectJ     | Declarative caching                    |
 | Access reporting         | `hotkey.report.enabled=true` (default)         | Report access counts to Worker         |
 | Reporter self-protection | `hotkey.local.reporter.enabled=true` (default) | BBR backpressure on Reporter flush     |
+| Spring Cache integration | `hotkey.spring-cache.enabled=true`             | `@Cacheable` / `@CachePut` / `@CacheEvict` with HotKey hot-key detection |
 
 All options listed under [Configuration](#configuration). Full property reference at [CONFIG.md](docs/CONFIG.md).
 
@@ -145,8 +145,8 @@ hotkey:
   # sync:
   #   enabled: true
 
-  # @HotKey annotation (requires spring-boot-starter-aop)
-  # annotation:
+  # Spring Cache integration (requires spring-boot-starter-cache)
+  # spring-cache:
   #   enabled: true
 
   # Worker decision listener (requires spring-boot-starter-amqp + spring-boot-starter-data-redis)
@@ -262,8 +262,6 @@ hotkey:
     enabled: true                           # App→Worker reporting
   sync:
     enabled: false                          # cross-instance sync (requires Redis + RabbitMQ)
-  annotation:
-    enabled: false                          # @HotKey annotation support (requires spring-boot-starter-aop)
   scheduling:
     enabled: true                           # periodic decay & expelled cleanup
   decay-period: 20                          # HeavyKeeper fading interval (s), effective when scheduling enabled
@@ -630,26 +628,38 @@ When `hotkey.worker.persistence.enabled=true`, the Worker periodically snapshots
 - Persisted data: JSON of top N key-count pairs (`List<Item>`)
 - Recovery: `TopK.add(Map)` re-hashes historical keys into the (empty) sketch — approximate but does not affect correctness
 
-**J. @HotKey annotation**
+**J. Spring Cache integration**
 
-> Full documentation: [`docs/ANNOTATION.md`](docs/ANNOTATION.md) — covers companion annotations (`@Fallback`, `@Intercept`, `@HotKeyCacheTTL`), priority chain, SpEL condition/unless support, return type handling, and complete examples.
+Enable with `hotkey.spring-cache.enabled=true` (requires `spring-boot-starter-cache` on the classpath).
 
-`@HotKey` provides declarative caching for method return values — an AOP-based alternative that avoids explicit `hotKey.get()` / `putBeforeInvalidate()` / `invalidate()` calls.
+Standard Spring Cache annotations (`@Cacheable` / `@CachePut` / `@CacheEvict`) are automatically routed through HotKey's hot-key detection, soft-expire, and cross-instance sync. Companion annotations remain functional on `@Cacheable` methods:
 
+| Annotation | Role on `@Cacheable` |
+|---|---|
+| `@HotKeyCacheTTL` | Override hard/soft TTL |
+| `@Intercept` | Fire intercept callback on cache hit + resolve via `@Fallback` |
+| `@Fallback` | Supply fallback value when interceptor blocks |
+| `@NullCaching` | Opt-in to caching null return values (default `true`) |
+
+**Example:**
 ```java
-@HotKey(key = "'user:' + #id")
+@Cacheable(cacheNames = "users", key = "#id")
+@HotKeyCacheTTL(softTtlMs = 1000)
+@Intercept
+@Fallback
 public User getUser(Long id) { ... }
 ```
 
 **Prerequisites:**
-
 ```yaml
 hotkey:
-  annotation:
+  spring-cache:
     enabled: true
 ```
 
-Requires `spring-boot-starter-aop` on the classpath (provides AspectJ). SpEL parameter name resolution requires the `-parameters` compiler flag (enabled by default in HotKey's parent POM).
+Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classpath. A `@EnableCaching` on any `@Configuration` class activates the standard Spring Caching infrastructure.
+
+---
 
 ## Cache Synchronization
 
@@ -718,10 +728,19 @@ hotKey.addWhitelist("metrics:*");
 // Inspect rules
 List<Rule> rules = hotKey.getAllRules();
 Rule.RuleAction action = hotKey.evaluateRule("user:123"); // BLOCK / ALLOW_NO_REPORT / ALLOW
+boolean blocked = hotKey.isBlacklisted("user:123");         // true if BLOCK
+boolean skipReport = hotKey.isWhitelisted("health:ping");   // true if ALLOW_NO_REPORT
 
 // Remove rules
 hotKey.removeBlacklist("secret:*");
 hotKey.clearAllRules();
+
+// Cache introspection
+long size = hotKey.estimatedSize();    // L1 entry count
+HotKeyCacheStats s = hotKey.stats();   // hit rate, eviction, etc.
+
+// Emergency flush (no broadcast)
+hotKey.invalidateAll();
 ```
 
 ### Degradation

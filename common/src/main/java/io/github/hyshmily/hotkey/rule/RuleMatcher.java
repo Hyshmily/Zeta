@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.rule;
+import lombok.extern.slf4j.Slf4j;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.REDIS_KEY_RULES;
 
@@ -21,8 +22,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import jakarta.annotation.PostConstruct;
@@ -47,9 +46,9 @@ import org.springframework.data.redis.core.script.RedisScript;
  * through the {@link CacheSyncPublisher}.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class RuleMatcher {
 
-  private static final HotKeyLogger log = new DefaultLogger(RuleMatcher.class);
 
   /** Shared Jackson mapper; ignores unknown properties for forward compatibility. */
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().configure(

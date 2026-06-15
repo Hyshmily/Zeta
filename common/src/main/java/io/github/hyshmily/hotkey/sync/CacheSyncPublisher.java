@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync;
+import lombok.extern.slf4j.Slf4j;
 
 import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
@@ -22,8 +23,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import jakarta.annotation.PostConstruct;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -44,10 +43,10 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * Does NOT handle HOT/COOL — those are Worker's responsibility via {@code WorkerBroadcaster}.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class CacheSyncPublisher {
 
   /** Logger for this class. */
-  private static final HotKeyLogger log = new DefaultLogger(CacheSyncPublisher.class);
 
   /** RabbitMQ template for publishing to the sync FanoutExchange. */
   private final RabbitTemplate rabbitTemplate;

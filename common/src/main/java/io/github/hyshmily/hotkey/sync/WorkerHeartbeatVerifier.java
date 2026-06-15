@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync;
+import lombok.extern.slf4j.Slf4j;
 
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.AmqpTimeoutException;
@@ -41,9 +40,9 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
  * via Direct reply-to, and updates the health view on PONG or failure.
  */
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
+@Slf4j
 public class WorkerHeartbeatVerifier {
 
-  private static final HotKeyLogger log = new DefaultLogger(WorkerHeartbeatVerifier.class);
 
   private final RabbitTemplate rabbitTemplate;
   private final ClusterHealthView healthView;
@@ -100,10 +99,12 @@ public class WorkerHeartbeatVerifier {
    * a PING via Direct reply-to. Updates the health view on PONG or failure.
    * <p>
    * The verification runs on a daemon background thread named {@code hb-verifier}.
-   * This method is idempotent — calling it multiple times creates additional
-   * schedulers.
+   * This method is idempotent — subsequent calls are silently ignored.
    */
   public void start() {
+    if (verifyTask != null) {
+      return;
+    }
     verifyTask = scheduler.scheduleAtFixedRate(
       this::verifySuspectedWorkers,
       verifyIntervalMs,

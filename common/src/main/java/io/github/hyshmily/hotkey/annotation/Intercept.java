@@ -33,7 +33,7 @@ import java.lang.annotation.Target;
  *   <li>If the key is <b>not</b> hot, the cache lookup proceeds normally.</li>
  * </ul>
  * <p>
- * Only applies to {@link HotKey.OperationType#READ} operations.
+ * Only applies to {@link org.springframework.cache.annotation.Cacheable @Cacheable} READ operations.
  * Ignored on WRITE and INVALIDATE.
  */
 @Target(ElementType.METHOD)

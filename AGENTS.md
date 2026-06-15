@@ -59,8 +59,8 @@ Worker-only components (`worker/` module): `SlidingWindowDetector`, `TopKValidat
 - **Read:** `get()`, `getWithSoftExpire()`, `peek()` (side-effect-free)
 - **Write:** `putThrough()`, `putBeforeInvalidate()`
 - **Invalidate:** `invalidate()`, `invalidateAll()`
-- **Introspection:** `isLocalHotKey()`, `isWorkerHotKey()`, `returnLocalHotKeys()`, `returnWorkerHotKeys()`, `returnLocalExpelledHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnLocalTotalDataStreams()`, `returnWorkerTotalDataStreams()`, `getLocalCache()` (raw Caffeine — introspection only, never write through)
-- **Rule management:** `addBlacklist()`, `removeBlacklist()`, `addWhitelist()`, `removeWhitelist()`, `getAllRules()`, `evaluateRule()`, `clearAllRules()`, `broadcastAllLocalRulesManually()`
+- **Introspection:** `isLocalHotKey()`, `isWorkerHotKey()`, `returnLocalHotKeys()`, `returnWorkerHotKeys()`, `returnLocalExpelledHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnLocalTotalDataStreams()`, `returnWorkerTotalDataStreams()`, `estimatedSize()`, `stats()`, `getLocalCache()` (raw Caffeine — introspection only, never write through)
+- **Rule management:** `addBlacklist()`, `removeBlacklist()`, `addWhitelist()`, `removeWhitelist()`, `getAllRules()`, `evaluateRule()`, `isBlacklisted()`, `isWhitelisted()`, `clearAllRules()`, `broadcastAllLocalRulesManually()`
 
 `@HotKey` + `@HotKeyCacheTTL` + `@Intercept` + `@Fallback` — annotation-based entry point via `HotKeyAspect`.
 

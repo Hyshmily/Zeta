@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync;
+import lombok.extern.slf4j.Slf4j;
 
 import static io.github.hyshmily.hotkey.sync.SyncMessage.*;
 
@@ -22,8 +23,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.util.DelayUtil;
@@ -50,10 +49,10 @@ import org.springframework.amqp.core.Message;
  * redelivery and to avoid thundering herds on Redis.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class CacheSyncListener {
 
   /** Logger for this class. */
-  private static final HotKeyLogger log = new DefaultLogger(CacheSyncListener.class);
 
   /** Shared Jackson mapper for deserializing batch-invalidation key lists. */
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();

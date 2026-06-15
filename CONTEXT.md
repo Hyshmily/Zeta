@@ -33,6 +33,10 @@
 - **Graceful Degradation** — When all Workers are detected as dead (`RingManager.isAnyWorkerAlive()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
 - **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `promoteLocalHotkeyIfNeeded`) or by Worker broadcast (in `handleHot`).
 - **Expire** — Two-tier: **soft expire** (stale-while-revalidate, returns stale data + async refresh) and **hard expire** (absolute TTL, entry invalidated). Soft expire only applies to HOT and COOL entries.
+- **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `HotKeyCacheManager` (implements `CacheManager`) and `HotKeySpringCache` (implements `Cache`). Enabled via `hotkey.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
+- **HotKeyCacheContext** — ThreadLocal singleton holding TTL (`hardTtlMs`, `softTtlMs`) and `allowNull` context for the current cache operation. `HotKeyCacheExtensionAspect` snapshots/restores these values around each `@Cacheable` invocation. `HotKeySpringCache.get(Object, Callable)` reads them from context.
+- **HotKeyCacheExtensionAspect** — Companion aspect at `@Order(HIGHEST_PRECEDENCE)` that intercepts `@Cacheable` methods, resolves SpEL key, applies `@Intercept`/`@Fallback`/`@HotKeyCacheTTL`/`@NullCaching`, and sets `HotKeyCacheContext` before delegating to Spring's `CacheInterceptor`.
+- **@NullCaching** — Opt-in annotation for caching `null` return values. When enabled, `null` is stored as internal `NullValue` sentinel inside `CacheEntry`. `HotKeySpringCache` tracks null-cached keys in a `nullCachedKeys` set to distinguish "cached null" from "cache miss".
 
 ## Operations
 
@@ -40,8 +44,8 @@
 - **L2** — Optional Redis cache (or any backend via the `Supplier<T>` reader). Async fallback on L1 miss.
 - **Report** — Per-key frequency count sent from App to Worker via AMQP. Aggregated locally (Caffeine, 30s, 100k max) before batching.
 - **Broadcast** — AMQP exchange `hotkey.broadcast.exchange` for cross-instance sync (cache values, HOT/COOL decisions) and Worker-to-App decision delivery.
-- **@Intercept** — AOP annotation for read-side interception. Calls `hotKeyDetector.add()` (keeps TopK accurate) but skips `reporter.record()` (avoids flooding Worker). Does NOT trigger Worker report flow.
-- **@HotKeyCacheTtl** — Per-key TTL override annotation for write operations. Replaces inline TTL parameters previously on `@HotKey`. READ TTLs remain application-config global.
+- **@Intercept** — AOP annotation for read-side interception. Calls `hotKeyDetector.add()` (keeps TopK accurate) but skips `reporter.record()` (avoids flooding Worker). Does NOT trigger Worker report flow. Applied via `HotKeyCacheExtensionAspect` on `@Cacheable` methods.
+- **@HotKeyCacheTTL** — Per-key TTL override annotation for read operations. Applied via `HotKeyCacheExtensionAspect` on `@Cacheable` methods.
 
 ## Failure Behavior
 

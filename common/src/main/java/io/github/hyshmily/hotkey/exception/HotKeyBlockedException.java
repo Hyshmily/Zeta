@@ -26,7 +26,7 @@ import lombok.Getter;
  * catch this exception or let it propagate.
  */
 @Getter
-public class HotKeyBlockedException extends RuntimeException {
+public class HotKeyBlockedException extends HotKeyContextException {
 
   /** The cache key that was blocked by a blacklist rule. */
   private final String cacheKey;
@@ -34,10 +34,11 @@ public class HotKeyBlockedException extends RuntimeException {
   /**
    * Creates a new exception for the blocked key.
    *
-   * @param cacheKey the key that was blocked by a blacklist rule
+   * @param sourceClass the simple name of the class that detected the block
+   * @param cacheKey    the key that was blocked by a blacklist rule
    */
-  public HotKeyBlockedException(String cacheKey) {
-    super("Cache key blocked by rule: " + cacheKey);
+  public HotKeyBlockedException(String sourceClass, String cacheKey) {
+    super(sourceClass, "Cache key blocked by rule: " + cacheKey);
     this.cacheKey = cacheKey;
   }
 }

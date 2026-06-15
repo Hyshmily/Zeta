@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync;
+import lombok.extern.slf4j.Slf4j;
 
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
@@ -34,9 +33,9 @@ import java.util.stream.Collectors;
  * and detects Worker restarts via epoch changes.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class ClusterHealthView {
 
-  private static final HotKeyLogger log = new DefaultLogger(ClusterHealthView.class);
 
   private final ConcurrentMap<String, WorkerHealthRecord> records = new ConcurrentHashMap<>();
   private final int knownWorkerCount;

@@ -6,6 +6,8 @@
 | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `peek(key)`                                            | 仅查 L1，不做频率追踪，不读 L2，不上报                                                                                                                                      |
 | `getLocalCache()`                                      | 暴露原始 Caffeine {@code Cache<String, Object>}，用于 Caffeine 特定操作（asMap、policy、cleanUp）。⚠️ 绕过 HotKey 编排层——版本追踪、广播和过期管理均被跳过。仅操作本地 L1。 |
+| `estimatedSize()`                                      | L1 缓存当前条目的估算数量（最佳估算）                                                                                                                                       |
+| `stats()`                                              | L1 缓存统计快照：命中数、未命中数、命中率、驱逐数、估算大小                                                                                                                |
 | `get(key, reader)`                                     | 从 L1 或 L2 reader 读取；每次访问触发本地 TopK 追踪 + App→Worker 上报；热点 key 提升到 L1（使用热点 TTL），普通 key 使用普通 TTL                                            |
 | `get(key, reader, hardTtlMs, softTtlMs)`               | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                 |
 | `getWithSoftExpire(key, reader)`                       | 软失效——返回过期旧值+触发异步刷新；每次访问触发本地 TopK 追踪 + App→Worker 上报；根据 key 状态使用全局默认 TTL                                                              |
@@ -17,7 +19,10 @@
 | `isLocalHotKey(cacheKey)`                              | 检查 key 是否在 L1 中为 HOT 状态（O(1)）                                                                                                                                    |
 | `isWorkerHotKey(cacheKey)`                             | 检查 key 是否在 Worker TopK 中为集群热点（O(n)）                                                                                                                            |
 | `notifyLocalDetector(cacheKey)`                        | 触发本地 HotKeyDetector 追踪指定 key，无需执行完整缓存读取。被 `@Intercept` 用于在方法体被跳过时保持 TopK 准确。                                                            |
+| `isBlacklisted(cacheKey)`                              | 快速检查 key 是否被黑名单规则封锁                                                                                                                                           |
+| `isWhitelisted(cacheKey)`                              | 快速检查 key 是否在白名单中（跳过 Worker 上报）                                                                                                                             |
 | `invalidate(cacheKey)`                                 | 使单个 key 在所有缓存层失效                                                                                                                                                 |
+| `invalidateAll()`                                      | 紧急清空——无广播地失效所有 L1 条目                                                                                                                                         |
 | `invalidateAll(cacheKeys...)`                          | 可变参数重载 — 批量失效多个 key                                                                                                                                             |
 | `invalidateAll(Collection)`                            | Collection 重载                                                                                                                                                             |
 | `returnLocalHotKeys()`                                 | 应用端 Top-K 快照（key + 计数）                                                                                                                                             |
@@ -106,11 +111,14 @@
 | `hotkey.local.consistent-hashing.enabled`       | `true` | 启用一致性哈希动态 Worker 路由（默认）；设为 `false` 禁用 |
 | `hotkey.local.consistent-hashing.virtual-nodes` | `500`  | 每个物理 Worker 节点的虚拟节点数，用于哈希空间分布        |
 
-### 注解配置（`hotkey.annotation.*`）
+### Spring Cache 集成（`hotkey.spring-cache.*`）
 
-| 属性                        | 默认值  | 说明                                                                     |
-| --------------------------- | ------- | ------------------------------------------------------------------------ |
-| `hotkey.annotation.enabled` | `false` | 启用 `@HotKey` 注解支持（需要 classpath 包含 `spring-boot-starter-aop`） |
+| 属性                                 | 默认值  | 说明                                                                    |
+| ------------------------------------ | ------- | ----------------------------------------------------------------------- |
+| `hotkey.spring-cache.enabled`        | `false` | 启用 Spring Cache 集成（将 `HotKeyCacheManager` 暴露为 CacheManager）    |
+| `hotkey.spring-cache.key-separator`  | `::`    | 缓存区名称与 key 之间的分隔符（例如 `"users::123"`）                   |
+
+支持标准 `@Cacheable` / `@CachePut` / `@CacheEvict` 触发热键检测、软过期和跨实例广播。同伴注解 `@HotKeyCacheTTL`、`@Intercept`、`@Fallback` 和 `@NullCaching` 在 `@Cacheable` 上继续有效。
 
 ### 缓存同步（`hotkey.sync.*`）
 
@@ -199,7 +207,7 @@
 | `facade`                                                 | 无                                                                                     | 始终启用                                                                                                                                                         |
 | `hotkey`                                                 | 无                                                                                     | 始终启用                                                                                                                                                         |
 | `report`                                                 | `spring-boot-starter-amqp`                                                             | `@ConditionalOnBean(RabbitTemplate.class)` + 属性（`hotkey.report.enabled`）                                                                                     |
-| `annotation`                                             | `spring-boot-starter-aop`                                                              | `@ConditionalOnClass(Aspect.class)` + `@ConditionalOnBean(HotKey.class)` + 属性（`hotkey.annotation.enabled`）                                                   |
+| `spring-cache`                                            | `spring-boot-starter-cache`                                                         | `@ConditionalOnClass(AbstractValueAdaptingCache.class)` + `@ConditionalOnBean(HotKey.class)` + 属性（`hotkey.spring-cache.enabled`）                                  |
 | `cache`（Redis）                                         | `spring-boot-starter-data-redis`                                                       | `@ConditionalOnClass(RedisTemplate.class)` + `@ConditionalOnBean(RedisTemplate.class)`                                                                           |
 | `amqp`（RabbitMQ，合并到 `HotKeyAmqpAutoConfiguration`） | `spring-boot-starter-amqp`（+ `spring-boot-starter-data-redis`，worker-listener 需要） | `@ConditionalOnClass(RabbitTemplate.class)` + 内部 `@ConditionalOnClass(RedisTemplate.class)` + 属性（`hotkey.sync.enabled` / `hotkey.worker-listener.enabled`） |
 | `worker`                                                 | `spring-boot-starter-amqp`（+ `spring-boot-starter-data-redis`）                       | `@ConditionalOnBean(RabbitTemplate.class)` + 属性（`hotkey.worker.enabled`）                                                                                     |

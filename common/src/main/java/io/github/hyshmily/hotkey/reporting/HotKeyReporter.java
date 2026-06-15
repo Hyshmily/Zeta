@@ -14,11 +14,10 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.reporting;
+import lombok.extern.slf4j.Slf4j;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import lombok.Setter;
@@ -61,9 +60,9 @@ import java.util.concurrent.atomic.LongAdder;
  * remain in the local Caffeine cache for the next cycle.  This provides
  * adaptive back-pressure proportional to system load.
  */
+@Slf4j
 public class HotKeyReporter {
 
-  private static final HotKeyLogger log = new DefaultLogger(HotKeyReporter.class);
   /** Caffeine cache acting as a temporary counter store; entries evict after 30 s of inactivity. */
   private final Cache<String, LongAdder> counters = Caffeine.newBuilder()
     .expireAfterAccess(30, TimeUnit.SECONDS)

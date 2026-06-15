@@ -15,19 +15,18 @@
  */
 
 package io.github.hyshmily.hotkey.worker.detection;
+import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.worker.config.WorkerProperties;
 import lombok.RequiredArgsConstructor;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 
 /**
  * Periodically recalculates the hot‑key threshold based on estimated global QPS
  * and updates the {@link SlidingWindowDetector}.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class ThresholdLearner implements Runnable {
-  private static final HotKeyLogger log = new DefaultLogger(ThresholdLearner.class);
 
   /** Global QPS estimator providing the overall throughput baseline. */
   private final GlobalQpsEstimator qpsEstimator;

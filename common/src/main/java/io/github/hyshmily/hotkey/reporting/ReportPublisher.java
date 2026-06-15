@@ -14,11 +14,10 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.reporting;
+import lombok.extern.slf4j.Slf4j;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_REPORT;
 
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -29,9 +28,9 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * {@code report.<appName>.<nodeId>} routing key.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class ReportPublisher {
 
-  private static final HotKeyLogger log = new DefaultLogger(ReportPublisher.class);
 
   /** RabbitMQ template for message publishing. */
   private final RabbitTemplate rabbitTemplate;

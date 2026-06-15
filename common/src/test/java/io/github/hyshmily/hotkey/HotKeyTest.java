@@ -177,7 +177,7 @@ class HotKeyTest {
   @Test
   void get_shouldPropagateHotKeyBlockedException() {
     when(hotKeyCache.get(anyString(), any()))
-      .thenThrow(new HotKeyBlockedException("secret"));
+      .thenThrow(new HotKeyBlockedException("HotKeyCache", "secret"));
     assertThatThrownBy(() -> hotKey.get("secret", () -> "v"))
       .isInstanceOf(HotKeyBlockedException.class);
   }

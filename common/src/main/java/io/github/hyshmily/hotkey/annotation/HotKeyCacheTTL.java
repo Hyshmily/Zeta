@@ -21,7 +21,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Per-method override for hard and soft TTLs on a {@link HotKey @HotKey} READ operation.
+ * Per-method override for hard and soft TTLs on a {@link org.springframework.cache.annotation.Cacheable @Cacheable} READ operation.
  * <p>
  * When present, the specified TTL values take precedence over the global defaults
  * from {@code hotkey.local.*} configuration. A value of {@code 0} means "use the

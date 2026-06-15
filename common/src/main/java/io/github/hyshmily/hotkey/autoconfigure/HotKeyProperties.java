@@ -306,6 +306,27 @@ public class HotKeyProperties {
     private int degradeAfterFailures = 2;
   }
 
+  /** Worker heartbeat and liveliness detection configuration. */
   @Valid
   private Heartbeat heartbeat = new Heartbeat();
+
+  /**
+   * Configuration for Spring {@code @Cacheable} / {@code @CachePut} / {@code @CacheEvict} integration.
+   *
+   * <p>When enabled, HotKey detects hot keys on all Spring Cache reads and applies
+   * dynamic TTL via Caffeine L1.
+   */
+  @Data
+  public static class SpringCache {
+
+    /** Whether Spring Cache integration is enabled ({@code hotkey.spring-cache.enabled}). */
+    private boolean enabled = false;
+
+    /** Separator between cache name and key in the internal cache key string. */
+    private String keySeparator = "::";
+  }
+
+  /** Spring Cache integration configuration. */
+  @Valid
+  private SpringCache springCache = new SpringCache();
 }

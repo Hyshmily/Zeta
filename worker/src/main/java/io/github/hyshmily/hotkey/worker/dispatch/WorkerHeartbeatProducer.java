@@ -14,10 +14,9 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.dispatch;
+import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -47,9 +46,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * atomically on each process start for restart detection by Apps.
  */
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
+@Slf4j
 public class WorkerHeartbeatProducer {
 
-  private static final HotKeyLogger log = new DefaultLogger(WorkerHeartbeatProducer.class);
 
   /** RabbitMQ template for publishing heartbeat messages. */
   private final RabbitTemplate rabbitTemplate;

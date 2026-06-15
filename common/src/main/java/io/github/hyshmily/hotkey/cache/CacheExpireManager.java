@@ -14,13 +14,12 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.cache;
+import lombok.extern.slf4j.Slf4j;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.VERSION_DEFAULT;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import java.util.Optional;
@@ -38,10 +37,10 @@ import lombok.Getter;
  * Each has a normal-key and hot-key variant, with an optional override taking precedence over the default.
  */
 @Getter
+@Slf4j
 public class CacheExpireManager {
 
   /** Logger for this class. */
-  private static final HotKeyLogger log = new DefaultLogger(CacheExpireManager.class);
 
   /** The underlying L1 Caffeine cache instance. */
   private final Cache<String, Object> caffeineCache;
@@ -89,6 +88,9 @@ public class CacheExpireManager {
   /**
    * Hard expire timestamp from an explicit TTL duration.
    * Falls back to the normal-key default if {@code hardTtlMs <= 0}.
+   *
+   * @param hardTtlMs the hard TTL duration in milliseconds (<= 0 uses configured default)
+   * @return absolute epoch-ms timestamp for hard expiry
    */
   public long computeHardExpireAt(long hardTtlMs) {
     long effective = hardTtlMs > 0 ? hardTtlMs : ttlConfig.effectiveHardTtlMs();
@@ -117,6 +119,9 @@ public class CacheExpireManager {
   /**
    * Soft expire timestamp from an explicit TTL duration.
    * Falls back to the normal-key default if {@code softTtlMs <= 0}. Returns 0 if soft expire is disabled.
+   *
+   * @param softTtlMs the soft TTL duration in milliseconds (<= 0 uses configured default)
+   * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
    */
   public long computeSoftExpireAt(long softTtlMs) {
     if (!isSoftExpireEnabled()) {

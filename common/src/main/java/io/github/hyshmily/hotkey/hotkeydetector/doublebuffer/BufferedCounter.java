@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.hotkeydetector.doublebuffer;
+import lombok.extern.slf4j.Slf4j;
 
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import org.springframework.beans.factory.InitializingBean;
 
 import javax.security.auth.Destroyable;
@@ -39,8 +38,8 @@ import java.util.function.Consumer;
  * exceeds 80 % capacity the buffers are swapped eagerly, keeping the hot path
  * lock-free.
  */
+@Slf4j
 public class BufferedCounter implements InitializingBean, Destroyable {
-    private static final HotKeyLogger log = new DefaultLogger(BufferedCounter.class);
 
     /** Maximum number of distinct keys held in one buffer before forced swap ({@value}). */
     private static final int MAX_BUFFER_SIZE = 10_000;
@@ -118,7 +117,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
                 return;
             }
 
-            Map<String, Long> snapshot = readyTOFlush.Cohesion();
+            Map<String, Long> snapshot = readyTOFlush.drain();
             if (!snapshot.isEmpty()) {
                 batchConsumer.accept(snapshot);
             }
@@ -191,8 +190,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
          *
          * @return a map of keys to their accumulated counts, never {@code null}
          */
-        Map<String, Long> Cohesion() {
-
+        Map<String, Long> drain() {
             Map<String, LongAdder> oldCounters = counters;
 
             Map<String, Long> result = new HashMap<>(oldCounters.size());

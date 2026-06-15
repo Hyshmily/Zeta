@@ -14,13 +14,12 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.config;
+import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
@@ -81,9 +80,9 @@ import org.springframework.scheduling.annotation.Scheduled;
 @EnableConfigurationProperties(WorkerProperties.class)
 @EnableScheduling
 @RequiredArgsConstructor
+@Slf4j
 public class WorkerAutoConfiguration {
 
-  private static final HotKeyLogger log = new DefaultLogger(WorkerAutoConfiguration.class);
 
   private final WorkerProperties properties;
 

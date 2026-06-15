@@ -20,10 +20,9 @@ import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import lombok.RequiredArgsConstructor;
-
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
@@ -31,6 +30,7 @@ import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Supplier;
+import lombok.RequiredArgsConstructor;
 
 /**
  * Public facade for the HotKey library.
@@ -249,6 +249,38 @@ public class HotKey {
   }
 
   /**
+   * Estimated number of entries currently in the L1 cache.
+   * <p>
+   * This is a lightweight, best-effort estimate from the underlying Caffeine
+   * cache, suitable for monitoring dashboards and capacity planning.
+   *
+   * @return estimated entry count, or {@code 0} in Worker-only mode
+   */
+  public long estimatedSize() {
+    if (hotKeyCache == null) {
+      return 0L;
+    }
+    return hotKeyCache.estimatedSize();
+  }
+
+  /**
+   * Return a snapshot of basic L1 cache statistics.
+   * <p>
+   * Hit/miss/eviction counters are populated only when Caffeine's
+   * {@code recordStats()} is enabled. {@code estimatedSize} is always
+   * available.
+   *
+   * @return a {@link HotKeyCacheStats} record, or {@code null} in Worker-only mode;
+   *         hit/miss counters are {@code 0} if stats recording is not enabled
+   */
+  public HotKeyCacheStats stats() {
+    if (hotKeyCache == null) {
+      return null;
+    }
+    return hotKeyCache.stats();
+  }
+
+  /**
    * Return the underlying Caffeine cache for direct access.
    *
    * <p>Useful for Caffeine-specific operations such as {@code asMap()},
@@ -261,6 +293,23 @@ public class HotKey {
   public Cache<String, Object> getLocalCache() {
     requireCache();
     return hotKeyCache.getLocalCache();
+  }
+
+  /**
+   * Invalidate all entries from the L1 cache without broadcasting.
+   * <p>
+   * This is an emergency flush — all cached values are removed immediately.
+   * No cross-instance sync messages are sent. Subsequent {@link #get} calls
+   * will reload data from the reader.
+   * <p>
+   * Use with caution: flushing the local cache increases load on the backend
+   * until entries are re-cached.
+   *
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void invalidateAll() {
+    requireCache();
+    hotKeyCache.invalidateAll();
   }
 
   //------------------------------------------------------------------------
@@ -283,11 +332,11 @@ public class HotKey {
    * frequency sketch accurate without flooding the Worker with reports.
    * Null keys are silently ignored.
    *
-   * @param cacheKey the accessed key (may be {@code null}, silently ignored)
+   * @param cacheKey the accessed key (maybe {@code null}, silently ignored)
    */
   public void notifyLocalDetector(String cacheKey) {
     if (cacheKey == null) {
-        return;
+      return;
     }
     topKAlgorithm.addDirect(cacheKey, io.github.hyshmily.hotkey.constants.HotKeyConstants.TOPK_INCR);
   }
@@ -432,6 +481,40 @@ public class HotKey {
       return Rule.RuleAction.ALLOW;
     }
     return hotKeyCache.evaluateRule(cacheKey);
+  }
+
+  /**
+   * Quickly check whether the given key is blocked by any blacklist rule.
+   * <p>
+   * Equivalent to {@code evaluateRule(key) == BLOCK}, provided as a convenience
+   * for guard clauses before expensive operations.
+   *
+   * @param cacheKey the key to check
+   * @return {@code true} if a blacklist rule matches the key, {@code false} if no
+   *         rule matches or no cache is available (Worker-only mode)
+   */
+  public boolean isBlacklisted(String cacheKey) {
+    if (hotKeyCache == null) {
+      return false;
+    }
+    return hotKeyCache.isBlacklisted(cacheKey);
+  }
+
+  /**
+   * Quickly check whether the given key is whitelisted (skips Worker reporting).
+   * <p>
+   * Equivalent to {@code evaluateRule(key) == ALLOW_NO_REPORT}, provided as a
+   * convenience for debugging and monitoring.
+   *
+   * @param cacheKey the key to check
+   * @return {@code true} if a whitelist rule matches the key, {@code false} if no
+   *         rule matches or no cache is available (Worker-only mode)
+   */
+  public boolean isWhitelisted(String cacheKey) {
+    if (hotKeyCache == null) {
+      return false;
+    }
+    return hotKeyCache.isWhitelisted(cacheKey);
   }
 
   /**

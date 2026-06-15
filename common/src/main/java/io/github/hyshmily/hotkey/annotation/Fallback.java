@@ -21,7 +21,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Declares a fallback value or method for a {@link HotKey @HotKey} READ operation.
+ * Declares a fallback value or method for a {@link org.springframework.cache.annotation.Cacheable @Cacheable} READ operation.
  * <p>
  * The fallback is invoked in three scenarios:
  * <ol>

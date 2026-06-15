@@ -17,13 +17,13 @@ package io.github.hyshmily.hotkey.cache;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 
 
 /**
@@ -39,10 +39,8 @@ import io.github.hyshmily.hotkey.logging.HotKeyLogger;
  * entries expire after the configured {@code ttlSec} seconds from write.
  * This class is thread-safe.
  */
+@Slf4j
 public class SingleFlight {
-
-  /** Logger for this class. */
-  private static final HotKeyLogger log = new DefaultLogger(SingleFlight.class);
 
   /** Caffeine cache tracking currently in-flight loads (key -> CompletableFuture). */
   private final Cache<String, CompletableFuture<Object>> inflightLoads;
@@ -105,6 +103,7 @@ public class SingleFlight {
     } catch (Exception e) {
       log.warn("singleflight join failed: key={}", cacheKey, e);
       inflightLoads.invalidate(cacheKey);
+
       return Optional.empty();
     }
   }

@@ -14,10 +14,9 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
+import lombok.extern.slf4j.Slf4j;
 
 import com.google.common.hash.Hashing;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -39,10 +38,10 @@ import lombok.Getter;
  * <p>This implementation is thread-safe: per-bucket {@code synchronized}
  * blocks for sketch updates and a shared lock for the sorted TopK heap.
  */
+@Slf4j
 public class HeavyKeeper implements TopK {
 
   /** Class logger. */
-  private static final HotKeyLogger log = new DefaultLogger(HeavyKeeper.class);
 
   /** Pre-computed decay probability lookup table size ({@value}). */
   private static final int LOOKUP_TABLE_SIZE = 256;

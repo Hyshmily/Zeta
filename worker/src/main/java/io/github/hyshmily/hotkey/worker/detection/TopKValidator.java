@@ -14,13 +14,12 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.detection;
+import lombok.extern.slf4j.Slf4j;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
 import lombok.RequiredArgsConstructor;
 
@@ -45,8 +44,8 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_TOPK_PR
  * trigger unnecessary broadcasts.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class TopKValidator {
-  private static final HotKeyLogger log = new DefaultLogger(TopKValidator.class);
 
   /** Algorithm that tracks approximate Top-K frequencies. */
   private final TopK topK;

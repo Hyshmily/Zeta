@@ -14,11 +14,10 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.ingest;
+import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
@@ -60,9 +59,9 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING
  * without cross‑worker coordination.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class ReportConsumer {
 
-  private static final HotKeyLogger log = new DefaultLogger(ReportConsumer.class);
 
   /** Sliding-window detector that tracks per-key access counts and returns hot/cold verdicts. */
   private final SlidingWindowDetector detector;

@@ -14,13 +14,12 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.persistence;
+import lombok.extern.slf4j.Slf4j;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.worker.config.WorkerProperties.Persistence;
 import jakarta.annotation.PostConstruct;
 import java.util.List;
@@ -33,9 +32,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * HeavyKeeper sketch can be warmed with historical data, drastically
  * reducing the time needed to re-accumulate the hot-key set.
  */
+@Slf4j
 public class TopKPersistService {
 
-  private static final HotKeyLogger log = new DefaultLogger(TopKPersistService.class);
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
   private final TopK topK;

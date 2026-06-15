@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync;
+import lombok.extern.slf4j.Slf4j;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.util.DelayUtil;
@@ -53,10 +52,10 @@ import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_HOT;
  * next Worker heartbeat may re-drive the promotion.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class WorkerListener {
 
   /** Logger for this class. */
-  private static final HotKeyLogger log = new DefaultLogger(WorkerListener.class);
 
   /** Local Caffeine L1 cache — target for HOT promotion and COOL downgrade. */
   private final Cache<String, Object> caffeineCache;

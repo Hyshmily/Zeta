@@ -14,11 +14,10 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.autoconfigure;
+import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
-import io.github.hyshmily.hotkey.logging.DefaultLogger;
-import io.github.hyshmily.hotkey.logging.HotKeyLogger;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -45,9 +44,9 @@ import java.util.stream.Collectors;
 @ConditionalOnBean(TopK.class)
 @EnableScheduling
 @RequiredArgsConstructor
+@Slf4j
 public class HotKeySchedulingConfiguration {
 
-  private static final HotKeyLogger log = new DefaultLogger(HotKeySchedulingConfiguration.class);
 
   /** All registered TopK instances (both app-side and worker-side). */
   private final List<TopK> topKInstances;

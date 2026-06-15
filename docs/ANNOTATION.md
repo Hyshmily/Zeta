@@ -1,71 +1,28 @@
-# @HotKey Annotation Reference
+# Annotation Reference
 
-## Quick Start
+## Overview
 
-```java
-@HotKey(key = "'user:' + #id")
-public User getUser(Long id) { ... }
-```
+HotKey provides a set of **companion annotations** that refine caching behavior. They are applied alongside standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations via the Spring Cache integration (`hotkey.spring-cache.enabled=true`).
 
-**Prerequisites:**
+## Prerequisites
 
 | Requirement                            | Detail                                                                        |
 | -------------------------------------- | ----------------------------------------------------------------------------- |
-| `hotkey.annotation.enabled=true`       | Enable annotation processing                                                  |
-| `spring-boot-starter-aop` on classpath | Provides AspectJ weaver                                                       |
+| `hotkey.spring-cache.enabled=true`     | Enable Spring Cache integration                                               |
+| `spring-boot-starter-cache` on classpath | Provides Spring's caching abstraction                                       |
+| `spring-boot-starter-aop` on classpath | Provides AspectJ weaver for the companion aspect                              |
+| `@EnableCaching` on any `@Configuration` | Activates standard Spring Cache infrastructure                              |
 | `-parameters` compiler flag            | Enables SpEL parameter name resolution (enabled by default in the parent POM) |
 
 ```yaml
 hotkey:
-  annotation:
+  spring-cache:
     enabled: true
-```
-
-## Annotation Attributes
-
-| Attribute    | Type            | Default  | Description                                                                                                                   |
-| ------------ | --------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `key`        | `String`        | Required | SpEL expression — method parameters via `#paramName`. Falls back to `arg0, arg1, ...` without `-parameters`.                  |
-| `operation`  | `OperationType` | `READ`   | `READ` / `WRITE` / `INVALIDATE`                                                                                               |
-| `condition`  | `String`        | `""`     | SpEL condition — `false` or `null` bypasses cache entirely; parameters available as `#paramName`                              |
-| `unless`     | `String`        | `""`     | SpEL exclusion — evaluated after cache load succeeds. The special variable `#result` holds the loaded value.                  |
-| `softExpire` | `boolean`       | `true`   | When enabled (default), stale entries are served immediately with background refresh. When `false`, behaves as plain `get()`. **Only applies to `READ`** — silently ignored for `WRITE` and `INVALIDATE`. |
-
-## Operation Types
-
-| Mode             | Facade Method                   | Behavior                                                                                                                                                                                                                                                           |
-| ---------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `READ` (default) | `getWithSoftExpire()` / `get()` | Method body acts as value supplier. `softExpire=true` → stale-value + async refresh; `false` → synchronous `get()`. Return type is `Optional`-aware — if method returns `Optional`, it is passed through directly; otherwise `orElse(null)` unwrapping is applied. |
-| `WRITE`          | `putBeforeInvalidate()`         | Method executes as mutation: run, version bump, L1 invalidate, send INVALIDATE broadcast. `softExpire` is silently ignored — WRITE always uses `putBeforeInvalidate` which does not accept TTL parameters. Exceptions are caught and re-thrown after the facade call completes. |
-| `INVALIDATE`     | `invalidate()`                  | Invalidate L1 + version bump + broadcast TYPE_REFRESH (versioned) to peers, then execute the method. `softExpire` is silently ignored — INVALIDATE always clears the entry regardless.                                          |
-
-## SpEL Key Examples
-
-```java
-// Single parameter
-@HotKey(key = "'user:' + #id")
-public User getUser(Long id) { ... }
-
-// Multiple parameters
-@HotKey(key = "'shop:' + #shopId + ':item:' + #itemId")
-public Item getItem(Long shopId, Long itemId) { ... }
-
-// Nested property access
-@HotKey(key = "#user.id.toString()")
-public Profile getProfile(User user) { ... }
-
-// WRITE operation
-@HotKey(key = "'user:' + #id", operation = OperationType.WRITE)
-public User updateUser(Long id, UserUpdate dto) { ... }
-
-// INVALIDATE operation
-@HotKey(key = "'user:' + #id", operation = OperationType.INVALIDATE)
-public void clearCache(Long id) { ... }
 ```
 
 ## Companion Annotations
 
-Three companion annotations refine `@HotKey` behavior. All are optional — `@HotKey` alone works with default configuration.
+Four companion annotations refine method-level caching behavior for `@Cacheable` methods.
 
 ### @Fallback
 
@@ -85,13 +42,13 @@ Declares a fallback value or method when the cache path is blocked or fails.
 | Naming convention | `value` empty (default) | Looks for `{methodName}Fallback` with identical parameter types on the same bean |
 
 ```java
-@HotKey(key = "'user:' + #id")
+@Cacheable(cacheNames = "users", key = "#id")
 @Fallback(value = "'fallback-user'")
 public User getUser(Long id) { ... }
 ```
 
 ```java
-@HotKey(key = "'user:' + #id")
+@Cacheable(cacheNames = "users", key = "#id")
 @Fallback  // empty value → naming convention
 public User getUser(Long id) { ... }
 
@@ -110,22 +67,22 @@ Marker annotation that intercepts READ operations when the cache key is classifi
 | Key is not hot                   | Cache lookup proceeds normally                               |
 
 ```java
-@HotKey(key = "'user:' + #id")
+@Cacheable(cacheNames = "users", key = "#id")
 @Intercept
 public User getUser(Long id) {
-  // Skipped entirely when 'user:{id}' is a local hot key
+  // Skipped entirely when 'users:{id}' is a local hot key
   return userService.getById(id);
 }
 ```
 
-Only applies to `READ` operations. Ignored on `WRITE` and `INVALIDATE`.
+Only applies to `@Cacheable` methods (READ operations). Ignored on `@CachePut` and `@CacheEvict`.
 
 ### @HotKeyCacheTTL
 
 Per-method override for hard and soft TTLs.
 
 ```java
-@HotKey(key = "'user:' + #id")
+@Cacheable(cacheNames = "users", key = "#id")
 @HotKeyCacheTTL(hardTtlMs = 60000, softTtlMs = 5000)
 public User getUser(Long id) { ... }
 ```
@@ -135,90 +92,47 @@ public User getUser(Long id) { ... }
 | `hardTtlMs` | `0`     | Hard TTL in ms. `0` = use global default. |
 | `softTtlMs` | `0`     | Soft TTL in ms. `0` = use global default. |
 
-## Priority Chain (READ)
+### @NullCaching
 
-For `@HotKey(operation = READ)`, the AOP aspect evaluates the following steps in order:
+Opt-in to caching `null` return values. By default, `null` results from a cache loader are treated as "no value" and not stored. When `@NullCaching(true)` is present, `null` is stored as an internal sentinel (`NullValue`) and returned as `null` on subsequent lookups.
 
-| Priority    | Step          | Description                                                                         |
-| ----------- | ------------- | ----------------------------------------------------------------------------------- |
-| 1 (highest) | **Blacklist** | `Rule.RuleAction#BLOCK` → fallback or `HotKeyBlockedException`                      |
-| 2           | **Condition** | SpEL `condition()` evaluates to `false` → skip cache, execute method directly       |
-| 3           | **Intercept** | `@Intercept` + `isLocalHotKey()` → return fallback or `peek()`                      |
-| 4           | **TTL**       | `@HotKeyCacheTTL` override, or `0` → use global default per key state               |
-| 5           | **Cache**     | `getWithSoftExpire()` / `get()` with loader; fallback on `RuntimeException`         |
-| 6           | **Unless**    | SpEL `unless()` evaluated with `#result` variable (value remains cached per design) |
-
-## Return Type Handling
-
-The aspect is `Optional`-aware:
+| Attribute | Type      | Default | Description                                                       |
+| --------- | --------- | ------- | ----------------------------------------------------------------- |
+| `value`   | `boolean` | `true`  | Whether to cache `null` return values. Set `false` to disable.    |
 
 ```java
-// Method returns Optional → passed through as-is
-@HotKey(key = "'user:' + #id")
-public Optional<User> getUser(Long id) { ... }
-```
-
-```java
-// Method returns concrete type → orElse(null) unwrapping
-@HotKey(key = "'user:' + #id")
+@Cacheable(cacheNames = "users", key = "#id")
+@NullCaching(true)
 public User getUser(Long id) { ... }
 ```
 
-## Complete Example
+Only applies to `@Cacheable` methods (READ operations). Ignored on `@CachePut` and `@CacheEvict`.
+
+### Spring Cache Companion Aspect
+
+When `hotkey.spring-cache.enabled=true`, `HotKeyCacheExtensionAspect` activates alongside standard Spring Cache annotations (`@Cacheable` / `@CachePut` / `@CacheEvict`). It applies the same companion annotations to `@Cacheable` methods:
+
+| Annotation    | Role on `@Cacheable`                                            |
+| ------------- | --------------------------------------------------------------- |
+| `@HotKeyCacheTTL` | Override hard/soft TTL                                     |
+| `@Intercept`      | Fire intercept callback on cache hit, resolve via `@Fallback` |
+| `@Fallback`       | Supply fallback value when interceptor blocks                |
+| `@NullCaching`    | Opt-in to caching `null` return values                       |
+
+The aspect runs at `@Order(HIGHEST_PRECEDENCE)` — before Spring's `CacheInterceptor` — allowing it to set TTL and null-caching context parameters that `HotKeySpringCache` reads during the `get(Callable)` call.
+
+**Limitation:** The companion aspect intercepts only `@Cacheable` (not `@CachePut` / `@CacheEvict`), and SpEL key resolution is duplicated with `CacheInterceptor` (acceptable overhead).
 
 ```java
-@Service
-public class UserService {
-
-  @Autowired
-  private HotKey hotKey;
-
-  // ---- Declarative (AOP) ----
-
-  @HotKey(key = "'user:' + #id", softExpire = true)
-  @HotKeyCacheTTL(hardTtlMs = 300000, softTtlMs = 30000)
-  @Intercept
-  @Fallback
-  public User getUser(Long id) {
-    return userMapper.selectById(id);
-  }
-
-  public User getUserFallback(Long id) {
-    return new User("guest");
-  }
-
-  @HotKey(key = "'user:' + #id", operation = OperationType.WRITE)
-  public User updateUser(Long id, UserUpdate dto) {
-    userMapper.update(id, dto);
-    return userMapper.selectById(id);
-  }
-
-  @HotKey(key = "'user:' + #id", operation = OperationType.INVALIDATE)
-  public void evictUser(Long id) {
-    // nothing to do — cache invalidation is handled by the aspect
-  }
-
-  // ---- Equivalent imperative API ----
-
-  public User getUserImperative(Long id) {
-    String key = "user:" + id;
-    return hotKey.getWithSoftExpire(key, () -> userMapper.selectById(id), 300000, 30000).orElse(null);
-  }
-
-  public void updateUserImperative(Long id, UserUpdate dto) {
-    hotKey.putBeforeInvalidate("user:" + id, () -> {
-      userMapper.update(id, dto);
-    });
-  }
-
-  public void evictUserImperative(Long id) {
-    hotKey.invalidate("user:" + id);
-  }
-}
+@Cacheable(cacheNames = "users", key = "#id")
+@HotKeyCacheTTL(softTtlMs = 1000)
+@Intercept
+@Fallback
+public User getUser(Long id) { ... }
 ```
 
 ## See Also
 
 - [HotKey README](../README.md) — full framework documentation
 - [CONFIG.md](CONFIG.md) — complete configuration reference
-- [HotKeyAspect.java](../common/src/main/java/io/github/hyshmily/hotkey/annotation/HotKeyAspect.java) — aspect implementation
+- [HotKeyCacheExtensionAspect.java](../common/src/main/java/io/github/hyshmily/hotkey/annotation/HotKeyCacheExtensionAspect.java) — Spring Cache companion aspect implementation
