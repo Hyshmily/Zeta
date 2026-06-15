@@ -206,15 +206,20 @@ public class HotKeyStateMachine {
    * map and updated under the key-level concurrency guarantees of
    * {@link ConcurrentHashMap}.
    */
+  /**
+   * Mutable per-key state, updated under {@link ConcurrentHashMap#computeIfAbsent} insert
+   * but with unsynchronised field mutations from the {@link ReportConsumer} thread pool.
+   * {@code volatile} guarantees cross-thread visibility of the three mutable fields.
+   */
   private static class KeyState {
 
     /** Current lifecycle stage. */
-    State currentState = State.COLD;
+    volatile State currentState = State.COLD;
 
     /** Number of consecutive windows above the hot threshold. */
-    int hotStreak = 0;
+    volatile int hotStreak = 0;
 
     /** Number of consecutive windows below the hot threshold. */
-    int coolStreak = 0;
+    volatile int coolStreak = 0;
   }
 }

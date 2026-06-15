@@ -132,6 +132,7 @@ public class HotKeyCacheExtensionAspect {
       long hardTtlMs = (ttl != null && ttl.hardTtlMs() > 0) ? ttl.hardTtlMs() : 0L;
       long softTtlMs = (ttl != null && ttl.softTtlMs() > 0) ? ttl.softTtlMs() : 0L;
       boolean allowNull = nullCaching != null && nullCaching.value();
+
       HotKeyCacheContext.get().apply(hardTtlMs, softTtlMs, allowNull);
       return pjp.proceed();
     } catch (Throwable e) {

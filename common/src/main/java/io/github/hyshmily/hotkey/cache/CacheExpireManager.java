@@ -24,6 +24,7 @@ import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
@@ -51,6 +52,8 @@ public class CacheExpireManager {
   /** Semaphore limiting concurrent background refresh operations (null if soft expire disabled). */
   // null when soft expire is disabled; always guarded by isSoftExpireEnabled() check
   private final Semaphore refreshLimiter;
+  /** Per-key dedup for background refreshes — prevents concurrent refresh for the same key. */
+  private final ConcurrentHashMap<String, CompletableFuture<Void>> pendingRefreshes = new ConcurrentHashMap<>();
   /** Jitter ratio applied to TTLs (±10%) to prevent cache stampedes. */
   private static final double ttlJitterRatio = 0.1;
 
@@ -227,7 +230,9 @@ public class CacheExpireManager {
    * The refreshed entry preserves the existing {@code dataVersion},
    * {@code isVersionDegraded}, and {@code decisionVersion} to avoid
    * overwriting newer data or Worker decisions.
-   * Acquired permits are released after the refresh completes (success or failure).
+   * <p>Per-key dedup via {@link #pendingRefreshes} prevents concurrent refreshes
+   * for the same key (TOCTOU stampede protection).  Rate-limited by a global
+   * semaphore to bound total concurrent refreshes across all keys.
    * Skipped silently if the refresh limiter is exhausted or soft expire is disabled.
    *
    * @param cacheKey  the key to refresh in the background
@@ -235,13 +240,29 @@ public class CacheExpireManager {
    * @param softTtlMs the soft TTL duration in milliseconds applied to the refreshed entry
    */
   public void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs) {
-    // Ordering constraint: isSoftExpireEnabled() MUST appear before refreshLimiter.tryAcquire().
-    // refreshLimiter is null when soft expire is disabled; the || short-circuit protects against NPE.
-    // Do NOT reorder or extract !isSoftExpireEnabled() into a separate variable.
-    if (!isSoftExpireEnabled() || !refreshLimiter.tryAcquire()) {
-      if (isSoftExpireEnabled()) {
-        log.debug("Refresh limiter blocked, skip background refresh: {}", cacheKey);
-      }
+    if (!isSoftExpireEnabled()) {
+      return;
+    }
+
+    // Per-key dedup: fast path — skip if a refresh is already in-flight for this key
+    CompletableFuture<Void> inflight = pendingRefreshes.get(cacheKey);
+    if (inflight != null && !inflight.isDone()) {
+      return;
+    }
+
+    // refreshLimiter is null when soft expire is disabled; isSoftExpireEnabled() above
+    // guarantees it is non-null here.
+    if (!refreshLimiter.tryAcquire()) {
+      log.debug("Refresh limiter blocked, skip background refresh: {}", cacheKey);
+      return;
+    }
+
+    // Atomically register this key as in-progress
+    CompletableFuture<Void> marker = new CompletableFuture<>();
+    CompletableFuture<Void> race = pendingRefreshes.putIfAbsent(cacheKey, marker);
+    if (race != null) {
+      // Lost the race — another thread already registered
+      refreshLimiter.release();
       return;
     }
 
@@ -270,18 +291,10 @@ public class CacheExpireManager {
                     return cacheEntry;
                   }
 
-                  return CacheEntry.builder()
+                  return cacheEntry.toBuilder()
                     .value(value)
-                    .dataVersion(cacheEntry.getDataVersion())
-                    .isVersionDegraded(cacheEntry.isVersionDegraded())
-                    .decisionVersion(cacheEntry.getDecisionVersion())
-                    .hardTtlMs(cacheEntry.getHardTtlMs())
-                    .hardExpireAtMs(cacheEntry.getHardExpireAtMs())
                     .softTtlMs(softTtlMs)
                     .softExpireAtMs(computeSoftExpireAt(softTtlMs))
-                    .keyState(cacheEntry.getKeyState())
-                    .normalHardTtlMs(cacheEntry.getNormalHardTtlMs())
-                    .normalSoftTtlMs(cacheEntry.getNormalSoftTtlMs())
                     .build();
                 })
                 .orElseGet(() ->
@@ -303,6 +316,8 @@ public class CacheExpireManager {
         }
       } finally {
         refreshLimiter.release();
+        pendingRefreshes.remove(cacheKey);
+        marker.complete(null);
       }
     });
   }

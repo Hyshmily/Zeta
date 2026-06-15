@@ -17,6 +17,8 @@ package io.github.hyshmily.hotkey.sharding;
 
 import com.google.common.hash.Hashing;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.Predicate;
@@ -30,6 +32,7 @@ import java.util.function.Predicate;
  * lock-free reads on the hot path.
  */
 @RequiredArgsConstructor
+@Slf4j
 public class ConsistentHashRing {
 
   /**
@@ -44,6 +47,9 @@ public class ConsistentHashRing {
   private final int virtualNodeCount;
   /** Current immutable ring snapshot; read lock-free, replaced atomically via {@link #rebuild(Set)}. */
   private volatile RingState currentState = new RingState(Collections.emptyNavigableMap(), Collections.emptySet());
+
+  /** Safety limit to prevent infinite-loop when the ring is corrupt or all nodes are dead. */
+  private static final int MAX_PROBES = 512;
 
   /**
    * Atomically replace the ring with one built from the given live nodes.
@@ -88,6 +94,8 @@ public class ConsistentHashRing {
     int startHash = entry.getKey();
     int currentHash = startHash;
 
+    int probes=0;
+
     do {
       String physicalNode = currentRing.get(currentHash);
       if (physicalNode != null && isAlive.test(physicalNode)) {
@@ -100,6 +108,11 @@ public class ConsistentHashRing {
       }
 
       currentHash = next.getKey();
+
+      if (++probes > MAX_PROBES) {
+        log.warn("Exhausted {} probes in consistent hash ring for key '{}', all workers appear dead or ring is corrupt. Discarding this key.", MAX_PROBES, key);
+        break;
+      }
     } while (currentHash != startHash);
 
     return null;

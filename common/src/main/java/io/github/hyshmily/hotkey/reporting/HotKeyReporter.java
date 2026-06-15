@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.reporting;
-import lombok.extern.slf4j.Slf4j;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -427,32 +427,52 @@ public class HotKeyReporter {
      * are discarded rather than published, preventing the Worker from receiving
      * stale access patterns during prolonged backpressure.
      *
-     * <p>When BBR rate limiting is active, on a successful publishing the
-     * round-trip time is recorded via {@link BbrRateLimiter#onSuccess(long)}.
+     * <p>When BBR rate limiting is active:
+     * <ul>
+     *   <li>Successful publish records round-trip time via {@link BbrRateLimiter#onSuccess(long)}</li>
+     *   <li>Stale batches (5s+ wait) or publish failures trigger {@link BbrRateLimiter#onDrop()},
+     *       allowing BBR to back off the send rate and prevent cascading overload</li>
+     *   <li>InterruptedException is handled separately (break, not logged as error)
+     *       to avoid noise during orderly shutdown</li>
+     * </ul>
      */
-    private void consumeLoop() {
+    private void consumeLoop()  {
       while (running) {
+
+        ShardBatch batch;
         try {
-          ShardBatch batch = queue.poll(1, TimeUnit.SECONDS);
-          if (batch == null) {
-            continue;
-          }
-
-          // 5s stale check — discard data that waited too long in the queue
-          if (System.currentTimeMillis() - batch.timestamp() > 5_000) {
-            expiredCount.incrementAndGet();
-            continue;
-          }
-
-          reportPublisher.publish(batch.target(), new ReportMessage(appName, batch.timestamp(), batch.counts()));
-          if (bbrRateLimiter != null) {
-            bbrRateLimiter.onSuccess(System.currentTimeMillis() - batch.timestamp());
-          }
+          batch = queue.poll(1, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
+          log.warn("ReportDispatcher consumer interrupted, shutting down");
           Thread.currentThread().interrupt();
-        } catch (RuntimeException e) {
-          log.error("Report publish failed, continuing", e);
+          break;
         }
+
+        if (batch == null) {
+          continue;
+        }
+
+        // 5s stale check — discard data that waited too long in the queue
+        if (System.currentTimeMillis() - batch.timestamp() > 5_000) {
+          expiredCount.incrementAndGet();
+          if (bbrRateLimiter != null) {
+              bbrRateLimiter.onDrop();
+          }
+          continue;
+        }
+
+        try {
+            reportPublisher.publish(batch.target(), new ReportMessage(appName, batch.timestamp(), batch.counts()));
+            if (bbrRateLimiter != null) {
+              bbrRateLimiter.onSuccess(System.currentTimeMillis() - batch.timestamp());
+            }
+        } catch (Exception e) {
+            log.error("Failed to publish report batch for target={}, keys={}", batch.target(), batch.counts().size(), e);
+            if (bbrRateLimiter != null) {
+              bbrRateLimiter.onDrop();
+            }
+        }
+
       }
     }
   }

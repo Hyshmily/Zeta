@@ -303,13 +303,18 @@ public class WorkerAutoConfiguration {
    * Queue name is {@code hotkey.report.<appName>.<nodeId>},
    * guaranteeing that a key always lands on the same Worker.
    *
+   * <p>The queue has a 7-day idle expiry ({@code x-expires}) since shard queues
+   * are fixed-count and long-lived.
+   *
    * @param properties worker configuration providing the routing app name
    * @return a durable {@link Queue} with the shard-specific name
    */
   @Bean
   public Queue reportQueue(WorkerProperties properties) {
     String queueName = HotKeyConstants.QUEUE_PREFIX_REPORT + properties.getRouting().getAppName() + "." + nodeId;
-    return QueueBuilder.durable(queueName).build();
+    return QueueBuilder.durable(queueName)
+        .withArgument("x-expires", 604_800_000)
+        .build();
   }
 
   /**

@@ -17,7 +17,6 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
@@ -191,7 +190,6 @@ public class HotKeyAmqpAutoConfiguration {
      * at the configured interval.
      *
      * @param reportPublisher       the report publisher for sending batches
-     * @param hotKeyReportScheduler the dedicated scheduler for periodic flushing
      * @param properties            the HotKey configuration properties
      * @param ringManager           the consistent-hash ring manager
      * @param healthViewProvider    optional provider for the cluster health view
@@ -243,19 +241,25 @@ public class HotKeyAmqpAutoConfiguration {
      * @return a durable, non-auto-delete {@link FanoutExchange}
      */
     @Bean
+    @ConditionalOnClass(name = "org.springframework.amqp.core.FanoutExchange")
     public FanoutExchange hotkeySyncExchange(CacheSyncProperties properties) {
       return new FanoutExchange(properties.getExchangeName(), true, false);
     }
 
     /**
-     * Create the per-instance sync queue with a 60-second TTL.
+     * Create the per-instance sync queue with a 60-second message TTL and 24-hour idle expiry.
      *
      * @param properties the cache sync configuration properties
      * @return a durable {@link Queue} with {@code x-message-ttl} of 60 seconds
+     *         and {@code x-expires} of 24 hours
      */
     @Bean
+    @ConditionalOnClass(name = "org.springframework.amqp.core.Queue")
     public Queue hotkeySyncQueue(CacheSyncProperties properties) {
-      return QueueBuilder.durable(properties.getQueueName()).withArgument("x-message-ttl", 60_000).build();
+      return QueueBuilder.durable(properties.getQueueName())
+          .withArgument("x-message-ttl", 60_000)
+          .withArgument("x-expires", 86_400_000)
+          .build();
     }
 
     /**
@@ -301,7 +305,6 @@ public class HotKeyAmqpAutoConfiguration {
      * @param hotLocalCache       the L1 Caffeine cache
      * @param hotKeyRedisLoader   the function for loading values from Redis
      * @param properties          the cache sync configuration properties
-     * @param hotKeySyncScheduler the dedicated scheduler for deferred Redis reads
      * @param expireManager       the cache expiry manager
      * @param ruleMatcher         the rule matcher for key matching
      * @return a new {@link CacheSyncListener} instance
@@ -374,19 +377,25 @@ public class HotKeyAmqpAutoConfiguration {
      * @return a durable, non-auto-delete {@link FanoutExchange}
      */
     @Bean
+    @ConditionalOnMissingBean(name = "hotkeyWorkerExchange")
     public FanoutExchange hotkeyWorkerExchange(WorkerListenerProperties properties) {
       return new FanoutExchange(properties.getExchangeName(), true, false);
     }
 
     /**
-     * Create the per-instance Worker listener queue with a 60-second TTL.
+     * Create the per-instance Worker listener queue with a 60-second message TTL and 24-hour idle expiry.
      *
      * @param properties the Worker listener configuration properties
      * @return a durable {@link Queue} with {@code x-message-ttl} of 60 seconds
+     *         and {@code x-expires} of 24 hours
      */
     @Bean
+    @ConditionalOnMissingBean(name = "hotkeyWorkerQueue")
     public Queue hotkeyWorkerQueue(WorkerListenerProperties properties) {
-      return QueueBuilder.durable(properties.getQueueName()).withArgument("x-message-ttl", 60_000).build();
+      return QueueBuilder.durable(properties.getQueueName())
+          .withArgument("x-message-ttl", 60_000)
+          .withArgument("x-expires", 86_400_000)
+          .build();
     }
 
     /**
@@ -408,6 +417,7 @@ public class HotKeyAmqpAutoConfiguration {
      * @return a durable, non-auto-delete {@link TopicExchange}
      */
     @Bean
+    @ConditionalOnMissingBean(name = "hotkeyHeartbeatExchange")
     public TopicExchange hotkeyHeartbeatExchange(HotKeyProperties properties) {
       return new TopicExchange(properties.getHeartbeat().getExchangeName(), true, false);
     }
@@ -478,7 +488,6 @@ public class HotKeyAmqpAutoConfiguration {
      * @param hotLocalCache          the L1 Caffeine cache
      * @param hotKeyRedisLoader      the function for loading values from Redis
      * @param properties             the Worker listener configuration properties
-     * @param hotKeyWorkerScheduler  the dedicated scheduler for deferred Redis reads
      * @param expireManager          the cache expiry manager
      * @param sreRateLimiterProvider optional provider for the SRE rate limiter
      * @return a new {@link WorkerListener} instance
@@ -512,6 +521,7 @@ public class HotKeyAmqpAutoConfiguration {
      * @return a configured {@link SimpleMessageListenerContainer}
      */
     @Bean
+    @ConditionalOnMissingBean(name = "hotkeyHeartbeatContainer")
     public SimpleMessageListenerContainer heartbeatContainer(
       ConnectionFactory connectionFactory,
       ClusterHealthView healthView,

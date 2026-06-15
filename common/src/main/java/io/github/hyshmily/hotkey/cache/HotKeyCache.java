@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.hotkey.cache;
 
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
@@ -34,13 +32,16 @@ import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
 import jakarta.annotation.Nullable;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -92,10 +93,30 @@ public class HotKeyCache {
    * @param entry the cache entry to inspect
    * @return {@code true} if the entry has logically expired
    */
-  static boolean isLogicallyExpired(CacheEntry entry) {
+  private static boolean isLogicallyExpired(CacheEntry entry) {
     return entry.getHardExpireAtMs() != Long.MAX_VALUE && System.currentTimeMillis() >= entry.getHardExpireAtMs();
   }
 
+  /**
+   * Check whether the given raw cache value is a logically expired {@link CacheEntry}
+   * and, if so, invalidate it and return {@code true}.
+   * <p>Eliminates code duplication between {@link #get} and {@link #getWithSoftExpire}
+   * which both perform this check before and after side effects (TOCTOU guard).
+   *
+   * @param cacheKey the cache key to invalidate if expired
+   * @param raw      the raw value from the Caffeine cache
+   * @return {@code true} if the entry was expired and has been invalidated
+   */
+  private boolean invalidateIfIsLogicallyExpired(String cacheKey, Object raw) {
+    if (raw instanceof CacheEntry ce && isLogicallyExpired(ce)) {
+      caffeineCache.invalidate(cacheKey);
+      log.debug("Cache entry logically expired during processing, reloading: {}", cacheKey);
+      return true;
+    }
+    return false;
+  }
+
+  /**
   /**
    * Check whether an existing cache entry is managed by the Worker (HOT or COOL).
    * Worker-managed entries preserve their original normal TTLs through writes.
@@ -128,7 +149,9 @@ public class HotKeyCache {
       }
       return KeyState.HOT == ce.getKeyState();
     }
-    return false;
+    // Fallback to HeavyKeeper for keys that are hot in the detection engine but not yet
+    // promoted to L1 with a CacheEntry wrapper (e.g., during the first detection window).
+    return hotKeyDetector.contains(cacheKey);
   }
 
   /**
@@ -205,8 +228,11 @@ public class HotKeyCache {
    */
   @SuppressWarnings("unchecked")
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
+    // Graceful degradation: invalid cache key is a caller-side issue, not a HotKey internal
+    // failure. Return empty rather than throwing to keep callers operational.
     if (invalidCacheKey(cacheKey)) {
-      throw new IllegalArgumentException("Invalid cacheKey: " + cacheKey);
+      log.debug("get: invalid cacheKey");
+      return Optional.empty();
     }
 
     RuleAction action = ruleMatcher.evaluateRule(cacheKey);
@@ -217,16 +243,20 @@ public class HotKeyCache {
 
     return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
       .flatMap(raw -> {
-        if (raw instanceof CacheEntry ce && isLogicallyExpired(ce)) {
-          caffeineCache.invalidate(cacheKey);
-          log.debug("get: logically expired, reloading: {}", cacheKey);
+        if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
           return Optional.empty();
         }
+
         T val = raw instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) raw;
 
         promoteLocalHotkeyIfNeeded(cacheKey, raw, val, hardTtlMs, softTtlMs);
         if (!skipReport) {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+        }
+
+        // TOCTOU: re-check after side effects (promote/record may have taken time)
+        if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
+          return Optional.empty();
         }
 
         return Optional.ofNullable(val);
@@ -277,7 +307,8 @@ public class HotKeyCache {
   @SuppressWarnings("unchecked")
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
     if (invalidCacheKey(cacheKey)) {
-      throw new IllegalArgumentException("Invalid cacheKey: " + cacheKey);
+      log.debug("getWithSoftExpire: invalid cacheKey");
+      return Optional.empty();
     }
 
     RuleAction action = ruleMatcher.evaluateRule(cacheKey);
@@ -293,9 +324,7 @@ public class HotKeyCache {
     Object raw = caffeineCache.getIfPresent(cacheKey);
     return Optional.ofNullable(raw)
       .flatMap(v -> {
-        if (v instanceof CacheEntry ce && isLogicallyExpired(ce)) {
-          caffeineCache.invalidate(cacheKey);
-          log.debug("getWithSoftExpire: logically expired, reloading: {}", cacheKey);
+        if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
           return Optional.empty();
         }
 
@@ -322,6 +351,11 @@ public class HotKeyCache {
         promoteLocalHotkeyIfNeeded(cacheKey, raw, cached, hardTtlMs, softTtlMs);
         if (!skipReport) {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+        }
+
+        // TOCTOU: re-check after side effects (promote/record may have taken time)
+        if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
+          return Optional.empty();
         }
 
         return Optional.ofNullable(cached);
