@@ -15,7 +15,11 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_COOL;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_FP;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_GRACE;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_DV_HWM;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_EPOCH;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_LOAD;
@@ -48,10 +52,10 @@ class WorkerHeartbeatMessageTest {
     assertThat((Boolean) h.getHeader(AMQP_HEADER_HEARTBEAT_READY)).isTrue();
     assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP)).intValue()).isEqualTo(12345);
     assertThat((String) h.getHeader(AMQP_HEADER_NODE_ID)).isEqualTo("worker-1");
-    assertThat(((Number) h.getHeader("hbConfigConfirm")).intValue()).isEqualTo(3);
-    assertThat(((Number) h.getHeader("hbConfigCool")).intValue()).isEqualTo(10);
-    assertThat(((Number) h.getHeader("hbConfigGrace")).intValue()).isEqualTo(2);
-    assertThat(((Number) h.getHeader("hbConfigTs")).longValue()).isEqualTo(9999L);
+    assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM)).intValue()).isEqualTo(3);
+    assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL)).intValue()).isEqualTo(10);
+    assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE)).intValue()).isEqualTo(2);
+    assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP)).longValue()).isEqualTo(9999L);
   }
 
   @Test
@@ -122,10 +126,10 @@ class WorkerHeartbeatMessageTest {
     props.setHeader(AMQP_HEADER_HEARTBEAT_LOAD, "bad");
     props.setHeader(AMQP_HEADER_HEARTBEAT_READY, "not-boolean");
     props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP, "bad");
-    props.setHeader("hbConfigConfirm", "bad");
-    props.setHeader("hbConfigCool", "bad");
-    props.setHeader("hbConfigGrace", "bad");
-    props.setHeader("hbConfigTs", "bad");
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, "bad");
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, "bad");
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, "bad");
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, "bad");
     Message msg = new Message("body".getBytes(StandardCharsets.UTF_8), props);
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
     assertThat(hb.workerId()).isEmpty();

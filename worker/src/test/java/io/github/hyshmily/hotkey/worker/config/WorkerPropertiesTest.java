@@ -144,4 +144,73 @@ class WorkerPropertiesTest {
     assertThat(properties.getTopKValidation().getPreWarmCount()).isEqualTo(5);
     assertThat(properties.getTopKValidation().getPreWarmMinAppearances()).isEqualTo(2);
   }
+
+  /**
+   * Verifies that {@code confirmWindows} with a non-exact division rounds up via ceil.
+   * Edge case: confirmDurationMs=350, sliceMs=100 → 350/100 = 3.5 → ceil = 4.
+   */
+  @Test
+  void shouldComputeConfirmWindowsWithRounding() {
+    properties.getStateMachine().setConfirmDurationMs(350);
+    // sliceMs = 1000/10 = 100
+    assertThat(properties.getConfirmWindows()).isEqualTo(4);
+  }
+
+  /**
+   * Verifies that {@code coolWindows} with a non-exact division rounds up via ceil.
+   */
+  @Test
+  void shouldComputeCoolWindowsWithRounding() {
+    properties.getStateMachine().setCoolDurationMs(15500);
+    // sliceMs = 1000/10 = 100
+    assertThat(properties.getCoolWindows()).isEqualTo(155);
+  }
+
+  /**
+   * Verifies that {@code preCoolGraceWindows} with zero preCoolGraceMs produces zero.
+   * Edge case: zero duration.
+   */
+  @Test
+  void shouldComputeZeroGraceWindows() {
+    properties.getStateMachine().setPreCoolGraceMs(0);
+    assertThat(properties.getPreCoolGraceWindows()).isZero();
+  }
+
+  /**
+   * Verifies the default values of the {@code heartbeat} sub-properties.
+   */
+  @Test
+  void shouldHaveDefaultHeartbeatValues() {
+    assertThat(properties.getHeartbeat().getPingIntervalMs()).isEqualTo(1000);
+  }
+
+  /**
+   * Verifies the default values of the {@code persistence} sub-properties.
+   */
+  @Test
+  void shouldHaveDefaultPersistenceValues() {
+    assertThat(properties.getPersistence().isEnabled()).isFalse();
+    assertThat(properties.getPersistence().getPersistIntervalMs()).isEqualTo(30_000);
+    assertThat(properties.getPersistence().getTopKCount()).isEqualTo(100);
+    assertThat(properties.getPersistence().getRedisKeyPrefix()).isEqualTo("hotkey:topk:worker:");
+    assertThat(properties.getPersistence().getTtlDays()).isEqualTo(3);
+  }
+
+  /**
+   * Verifies that setting custom values on all nested config objects works correctly.
+   */
+  @Test
+  void shouldAcceptCustomValues() {
+    properties.getSlidingWindow().setDurationMs(2000);
+    properties.getSlidingWindow().setSlices(20);
+    properties.getThreshold().setHotThreshold(5000);
+    properties.getThreshold().setHotThresholdRatio(0.05);
+    properties.getStateMachine().setEvictIntervalMs(60000);
+
+    assertThat(properties.getSlidingWindow().getDurationMs()).isEqualTo(2000);
+    assertThat(properties.getSlidingWindow().getSlices()).isEqualTo(20);
+    assertThat(properties.getThreshold().getHotThreshold()).isEqualTo(5000);
+    assertThat(properties.getThreshold().getHotThresholdRatio()).isEqualTo(0.05);
+    assertThat(properties.getStateMachine().getEvictIntervalMs()).isEqualTo(60000);
+  }
 }

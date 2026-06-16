@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.rule;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import java.util.List;
@@ -273,5 +274,90 @@ class RuleMatcherTest {
   void removeRuleByIndex_shouldHandleOutOfBounds() {
     ruleMatcher.removeRule(99);
     ruleMatcher.removeRule(-1);
+  }
+
+  @Test
+  void evaluateRule_withNullKey_shouldThrowNullPointerException() {
+    ruleMatcher.addRule(RuleMatcher.of("test", RuleAction.BLOCK));
+    assertThatNullPointerException().isThrownBy(() -> ruleMatcher.evaluateRule(null));
+  }
+
+  @Test
+  void evaluateRule_withEmptyKey_shouldBeAllowedByDefault() {
+    assertThat(ruleMatcher.evaluateRule("")).isEqualTo(RuleAction.ALLOW);
+  }
+
+  @Test
+  void evaluateRule_withEmptyKey_shouldMatchExactEmptyRule() {
+    ruleMatcher.addRule(RuleMatcher.of("", RuleAction.BLOCK));
+    assertThat(ruleMatcher.evaluateRule("")).isEqualTo(RuleAction.BLOCK);
+    assertThat(ruleMatcher.evaluateRule("x")).isEqualTo(RuleAction.ALLOW);
+  }
+
+  @Test
+  void isAllowNoReport_withBlockRule_shouldReturnEmpty() {
+    ruleMatcher.addRule(RuleMatcher.of("blockme", RuleAction.BLOCK));
+    assertThat(ruleMatcher.isAllowNoReport("blockme", "get")).isEmpty();
+  }
+
+  @Test
+  void isAllowNoReport_withAllowRule_shouldReturnFalse() {
+    assertThat(ruleMatcher.isAllowNoReport("anykey", "get")).contains(false);
+  }
+
+  @Test
+  void isAllowNoReport_withAllowNoReportRule_shouldReturnTrue() {
+    ruleMatcher.addRule(RuleMatcher.of("noreport:*", RuleAction.ALLOW_NO_REPORT));
+    assertThat(ruleMatcher.isAllowNoReport("noreport:test", "get")).contains(true);
+  }
+
+  @Test
+  void of_withEmptyString_shouldDetectExact() {
+    Rule r = RuleMatcher.of("", RuleAction.ALLOW);
+    assertThat(r.getType()).isEqualTo(Rule.RuleType.EXACT);
+  }
+
+  @Test
+  void of_withOnlyStar_shouldDetectPrefixWithEmptyPattern() {
+    Rule r = RuleMatcher.of("*", RuleAction.ALLOW);
+    assertThat(r.getType()).isEqualTo(Rule.RuleType.PREFIX);
+    assertThat(r.getPattern()).isEmpty();
+  }
+
+  @Test
+  void of_withOnlyQuestionMark_shouldDetectWildcard() {
+    Rule r = RuleMatcher.of("?", RuleAction.BLOCK);
+    assertThat(r.getType()).isEqualTo(Rule.RuleType.WILDCARD);
+  }
+
+  @Test
+  void removeRuleByIndex_shouldHandleAllOutOfBoundsIndices() {
+    ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
+    ruleMatcher.removeRule(-5);
+    assertThat(ruleMatcher.evaluateRule("k1")).isEqualTo(RuleAction.BLOCK);
+    ruleMatcher.removeRule(5);
+    assertThat(ruleMatcher.evaluateRule("k1")).isEqualTo(RuleAction.BLOCK);
+  }
+
+  @Test
+  void clearRules_onEmptySet_shouldNotThrow() {
+    ruleMatcher.clearRules();
+    assertThat(ruleMatcher.getAllRules()).isEmpty();
+  }
+
+  @Test
+  void addAndRemoveMultipleRules_shouldTrackVersionIncrement() {
+    ruleMatcher.addRule(RuleMatcher.of("a", RuleAction.BLOCK));
+    ruleMatcher.addRule(RuleMatcher.of("b", RuleAction.ALLOW_NO_REPORT));
+    ruleMatcher.addRule(RuleMatcher.of("c", RuleAction.ALLOW));
+    assertThat(ruleMatcher.getAllRules()).hasSize(3);
+    ruleMatcher.removeRule("a", RuleAction.BLOCK);
+    ruleMatcher.removeRule("b", RuleAction.ALLOW_NO_REPORT);
+    assertThat(ruleMatcher.getAllRules()).hasSize(1);
+  }
+
+  @Test
+  void replaceRules_withNullElement_shouldThrow() {
+    assertThatNullPointerException().isThrownBy(() -> ruleMatcher.replaceRules(List.of(null)));
   }
 }

@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_NODE_ID;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TIMESTAMP;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TYPE;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_VERSION;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,5 +77,48 @@ class WorkerMessageTest {
   void shouldHaveExpectedTypeConstants() {
     assertThat(WorkerMessage.TYPE_HOT).isEqualTo("HOT");
     assertThat(WorkerMessage.TYPE_COOL).isEqualTo("COOL");
+  }
+
+  /**
+   * Verifies that timestamp and nodeId headers are parsed correctly.
+   */
+  @Test
+  void from_withTimestampAndNodeId_shouldParse() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(AMQP_HEADER_VERSION, 10L);
+    props.setHeader(AMQP_HEADER_TIMESTAMP, 123456L);
+    props.setHeader(AMQP_HEADER_NODE_ID, "worker-1");
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    WorkerMessage wm = WorkerMessage.from(msg);
+    assertThat(wm.timestamp()).isEqualTo(123456L);
+    assertThat(wm.nodeId()).isEqualTo("worker-1");
+  }
+
+  /**
+   * Verifies that missing timestamp and nodeId headers default to 0 and null respectively.
+   */
+  @Test
+  void from_withMissingTimestampAndNodeId_shouldDefault() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(AMQP_HEADER_VERSION, 10L);
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    WorkerMessage wm = WorkerMessage.from(msg);
+    assertThat(wm.timestamp()).isZero();
+    assertThat(wm.nodeId()).isNull();
+  }
+
+  /**
+   * Verifies that a version header stored as Integer (not Long) is parsed correctly.
+   */
+  @Test
+  void from_withVersionAsInteger_shouldHandle() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(AMQP_HEADER_VERSION, 42);
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    WorkerMessage wm = WorkerMessage.from(msg);
+    assertThat(wm.decisionVersion()).isEqualTo(42L);
   }
 }

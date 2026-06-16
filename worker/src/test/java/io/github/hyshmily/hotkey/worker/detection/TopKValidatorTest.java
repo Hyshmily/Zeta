@@ -111,4 +111,69 @@ class TopKValidatorTest {
     validator.validate();
     verify(broadcaster).broadcastHot(eq("key1"), any());
   }
+
+  /**
+   * Verifies that an empty TopK list does not trigger any broadcasts or throw exceptions.
+   */
+  @Test
+  void shouldHandleEmptyTopKList() {
+    when(topK.listTopN(5)).thenReturn(List.of());
+    validator.validate();
+    verifyNoInteractions(broadcaster);
+  }
+
+  /**
+   * Verifies that when {@code preWarmMinAppearances = 1}, a key is broadcast immediately
+   * on the first validation cycle it appears.
+   */
+  @Test
+  void shouldBroadcastImmediatelyWhenMinAppearancesIsOne() {
+    validator = new TopKValidator(topK, broadcaster, 5, 1);
+    when(topK.listTopN(5)).thenReturn(List.of(new Item("fastKey", 50)));
+    validator.validate();
+    verify(broadcaster).broadcastHot(eq("fastKey"), any());
+  }
+
+  /**
+   * Verifies that a key's appearance counter is reset when it drops out of the TopK list
+   * and reappears later. It must re-meet the min appearances threshold.
+   */
+  @Test
+  void shouldResetAppearanceCounterWhenKeyDropsOut() {
+    when(topK.listTopN(5)).thenReturn(List.of(new Item("key", 100)));
+    validator.validate(); // appearance = 1
+    // key drops out
+    when(topK.listTopN(5)).thenReturn(List.of());
+    validator.validate();
+    // key reappears
+    when(topK.listTopN(5)).thenReturn(List.of(new Item("key", 100)));
+    validator.validate(); // appearance = 1 (reset), not enough
+    verify(broadcaster, never()).broadcastHot(any(), any());
+    validator.validate(); // appearance = 2, now should broadcast
+    verify(broadcaster).broadcastHot(eq("key"), any());
+  }
+
+  /**
+   * Verifies that multiple keys reaching min appearances simultaneously are all broadcast.
+   */
+  @Test
+  void shouldBroadcastMultipleKeysSimultaneously() {
+    when(topK.listTopN(5)).thenReturn(List.of(new Item("k1", 100), new Item("k2", 200)));
+    validator.validate();
+    validator.validate(); // both reach min appearances
+    verify(broadcaster).broadcastHot(eq("k1"), any());
+    verify(broadcaster).broadcastHot(eq("k2"), any());
+  }
+
+  /**
+   * Verifies that a key with zero count in the TopK list is still tracked and can be
+   * broadcast if it appears the minimum number of times.
+   */
+  @Test
+  void shouldHandleKeyWithZeroCount() {
+    when(topK.listTopN(5)).thenReturn(List.of(new Item("zeroKey", 0)));
+    validator.validate();
+    validator.validate();
+    verify(broadcaster).broadcastHot(eq("zeroKey"), any());
+  }
 }

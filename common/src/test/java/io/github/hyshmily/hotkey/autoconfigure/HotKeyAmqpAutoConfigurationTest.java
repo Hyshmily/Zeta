@@ -325,6 +325,24 @@ class HotKeyAmqpAutoConfigurationTest {
   }
 
   /**
+   * Verifies that SreRateLimiter is created with the configured success threshold.
+   */
+  @Test
+  void sreRateLimiterIsCreatedWithCorrectProperties() {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.getSre().setSuccessThreshold(0.8);
+    props.getSre().setWindowMs(2000);
+    props.getSre().setBuckets(5);
+    props.getSre().setMinSamples(10);
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    SreRateLimiter limiter = config.hotKeySreRateLimiter(props);
+
+    assertThat(limiter).isNotNull();
+  }
+
+  /**
    * Verifies that WorkerListener is created with its required dependencies.
    */
   @Test

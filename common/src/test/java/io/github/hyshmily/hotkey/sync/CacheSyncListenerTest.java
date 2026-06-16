@@ -200,6 +200,141 @@ class CacheSyncListenerTest {
     return new Message(key.getBytes(StandardCharsets.UTF_8), props);
   }
 
+  /**
+   * Verifies that an empty body message is acknowledged without cache interaction.
+   */
+  @Test
+  void handleSyncMessage_withEmptyBody_shouldAckAndReturn() throws IOException {
+    MessageProperties props = new MessageProperties();
+    Message msg = new Message(new byte[0], props);
+    listener.handleSyncMessage(channel, msg);
+    verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  /**
+   * Verifies that an INVALIDATE_ALL message with valid JSON batch invalidates all keys.
+   */
+  @Test
+  void handleSyncMessage_withInvalidateAll_shouldBatchInvalidate() throws IOException {
+    cache.put("k1", "v1");
+    cache.put("k2", "v2");
+    cache.put("k3", "v3");
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+    Message msg = new Message("[\"k1\",\"k2\"]".getBytes(StandardCharsets.UTF_8), props);
+    listener.handleSyncMessage(channel, msg);
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("k1")).isNull();
+    assertThat(cache.getIfPresent("k2")).isNull();
+    assertThat(cache.getIfPresent("k3")).isNotNull();
+  }
+
+  /**
+   * Verifies that an INVALIDATE_ALL message with malformed JSON is nacked gracefully.
+   */
+  @Test
+  void handleSyncMessage_withInvalidateAllMalformedJson_shouldNack() throws IOException {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+    Message msg = new Message("not-json".getBytes(StandardCharsets.UTF_8), props);
+    listener.handleSyncMessage(channel, msg);
+    verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  /**
+   * Verifies that a refresh with Redis loader exception is acknowledged gracefully.
+   */
+  @Test
+  void handleSyncMessage_withRefreshAndRedisException_shouldAck() throws IOException {
+    Function<String, Object> failingLoader = k -> { throw new RuntimeException("Redis down"); };
+    CacheSyncProperties props = new CacheSyncProperties();
+    props.setWarmupJitterMs(0);
+    HotKeyProperties ttlConfig = new HotKeyProperties();
+    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    CacheSyncListener failingListener = new CacheSyncListener(cache, failingLoader, props, scheduler, expireManager, ruleMatcher);
+
+    cache.put("key1", entry(1, false, 0));
+    failingListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  /**
+   * Verifies that a refresh with stale incoming degraded version is skipped (existing normal wins).
+   */
+  @Test
+  void handleSyncMessage_withRefreshStaleDegradedIncoming_shouldSkip() throws IOException {
+    cache.put("key1", entry(5, false, 0));
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 10L, true));
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(5);
+  }
+
+  /**
+   * Verifies that a normal incoming refresh overwrites an existing degraded entry.
+   */
+  @Test
+  void handleSyncMessage_withRefreshExistingDegradedIncomingNormal_shouldAccept() throws IOException {
+    cache.put("key1", entry(1, true, 0));
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("key1")).satisfies(o -> {
+      CacheEntry ce = (CacheEntry) o;
+      assertThat(ce.getDataVersion()).isEqualTo(2L);
+      assertThat(ce.isVersionDegraded()).isFalse();
+    });
+  }
+
+  /**
+   * Verifies that a refresh on a missing cache key creates a new CacheEntry from the Redis loader.
+   */
+  @Test
+  void handleSyncMessage_withRefreshOnMissingKey_shouldCreateEntry() throws IOException {
+    listener.handleSyncMessage(channel, syncMessage("nonexistent", SyncMessage.TYPE_REFRESH, 2L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("nonexistent")).isNotNull().isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) cache.getIfPresent("nonexistent")).getValue()).isEqualTo("refreshed");
+  }
+
+  /**
+   * Verifies that a refresh with null loader return on a plain string value preserves it.
+   */
+  @Test
+  void handleSyncMessage_withRefreshOnStringValueAndNullLoaderReturn_shouldPreserve() throws IOException {
+    Function<String, Object> nullLoader = k -> null;
+    CacheSyncProperties props = new CacheSyncProperties();
+    props.setWarmupJitterMs(0);
+    HotKeyProperties ttlConfig = new HotKeyProperties();
+    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    CacheSyncListener nullListener = new CacheSyncListener(cache, nullLoader, props, scheduler, expireManager, ruleMatcher);
+
+    cache.put("key1", entry(5, false, 0));
+    nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 6L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(5);
+  }
+
+  /**
+   * Verifies that an invalidate with degraded incoming on normal existing entry is skipped.
+   */
+  @Test
+  void handleSyncMessage_withInvalidateDegradedIncomingOnNormal_shouldSkip() throws IOException {
+    cache.put("key1", entry(5, false, 0));
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 3L, true));
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("key1")).isNotNull();
+  }
+
+  /**
+   * Verifies that both-degraded refresh with equal version is skipped.
+   */
+  @Test
+  void handleSyncMessage_withRefreshBothDegradedEqualVersion_shouldSkip() throws IOException {
+    cache.put("key1", entry(5, true, 0));
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, true));
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("key1")).isNotNull();
+  }
+
   private static CacheEntry entry(long dataVersion, boolean degraded, long decisionVersion) {
     return CacheEntry.builder()
       .value("v")

@@ -183,4 +183,71 @@ class VersionControllerTest {
     assertThat(controller.nextVersion("key-a").dataVersion()).isEqualTo(100L);
     assertThat(controller.nextVersion("key-b").dataVersion()).isEqualTo(200L);
   }
+
+  /**
+   * Verifies that fallbackVersion does not wrap to positive long even after many calls.
+   */
+  @Test
+  void fallbackVersion_shouldNotOverflowToPositive() {
+    VersionController vc = new VersionController(Optional.empty(), 10);
+    for (int i = 0; i < 100_000; i++) {
+      VersionResult r = vc.fallbackVersion();
+      assertThat(r.dataVersion()).isNegative();
+      assertThat(r.degraded()).isTrue();
+    }
+  }
+
+  /**
+   * Verifies that getDegradedVersionCount increments on each fallback call.
+   */
+  @Test
+  void getDegradedVersionCount_shouldIncrementOnEachFallback() {
+    assertThat(controller.getDegradedVersionCount()).isZero();
+    controller.fallbackVersion();
+    assertThat(controller.getDegradedVersionCount()).isEqualTo(1);
+    controller.fallbackVersion();
+    assertThat(controller.getDegradedVersionCount()).isEqualTo(2);
+  }
+
+  /**
+   * Verifies isRedisConfigured returns true when Redis template is present.
+   */
+  @Test
+  void isRedisConfigured_withRedis_shouldReturnTrue() {
+    assertThat(controller.isRedisConfigured()).isTrue();
+  }
+
+  /**
+   * Verifies isRedisConfigured returns false when Redis template is absent.
+   */
+  @Test
+  void isRedisConfigured_withoutRedis_shouldReturnFalse() {
+    VersionController noRedis = new VersionController(Optional.empty(), 10);
+    assertThat(noRedis.isRedisConfigured()).isFalse();
+  }
+
+  /**
+   * Verifies that nextVersion with blank key still produces a result via Redis.
+   */
+  @Test
+  void nextVersion_withBlankKey_shouldStillWork() {
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
+      .thenReturn(99L);
+    VersionResult result = controller.nextVersion("  ");
+    assertThat(result.dataVersion()).isEqualTo(99L);
+    assertThat(result.degraded()).isFalse();
+  }
+
+  /**
+   * Verifies that version key TTL of zero skips the EXPIRE call and still increments.
+   */
+  @Test
+  void nextVersion_withZeroTtl_shouldStillIncrement() {
+    VersionController zeroTtl = new VersionController(Optional.of(redisTemplate), 0);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
+      .thenReturn(7L);
+    VersionResult result = zeroTtl.nextVersion("key1");
+    assertThat(result.dataVersion()).isEqualTo(7L);
+    assertThat(result.degraded()).isFalse();
+  }
 }

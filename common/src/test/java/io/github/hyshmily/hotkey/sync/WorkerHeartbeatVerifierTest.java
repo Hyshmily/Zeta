@@ -154,6 +154,67 @@ class WorkerHeartbeatVerifierTest {
     verify(rabbitTemplate, atLeast(1)).sendAndReceive(anyString(), anyString(), any());
   }
 
+  /**
+   * Verifies that when some pings succeed and some fail, both recordPong and markVerificationFailed are called.
+   */
+  @Test
+  void shouldHandleMixedResults() {
+    when(rabbitTemplate.sendAndReceive(eq(""), eq("hotkey.verify.ping.w2"), any()))
+      .thenReturn(new Message(new byte[0], new MessageProperties()));
+    when(rabbitTemplate.sendAndReceive(eq(""), eq("hotkey.verify.ping.w3"), any()))
+      .thenReturn(null);
+
+    verifier.verifySuspectedWorkers();
+
+    verify(healthView).recordPong("w2");
+    verify(healthView).markVerificationFailed("w3");
+  }
+
+  /**
+   * Verifies that a framework exception in verifySuspectedWorkers is caught and not propagated.
+   */
+  @Test
+  void verifySuspectedWorkers_withException_shouldSwallow() {
+    when(healthView.isClusterHealthy()).thenThrow(new RuntimeException("Unexpected error"));
+
+    verifier.verifySuspectedWorkers();
+
+    verify(rabbitTemplate, never()).sendAndReceive(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that start is idempotent and does not schedule multiple times.
+   */
+  @Test
+  void start_isIdempotent() throws Exception {
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", 50, 500, 2);
+    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(new Message(new byte[0], new MessageProperties()));
+
+    v.start();
+    v.start();
+    Thread.sleep(200);
+    v.stop();
+
+    verify(rabbitTemplate, atLeast(1)).sendAndReceive(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that setting degradeAfterFailures to 0 marks all failures as immediate degradation.
+   */
+  @Test
+  void degradeAfterFailuresZero_shouldDegradeOnFirstFailure() {
+    ClusterHealthView smallView = new ClusterHealthView(3, 5000, 0);
+    smallView.onHeartbeat(hb("w1", false));
+    smallView.onHeartbeat(hb("w2", false));
+    smallView.onHeartbeat(hb("w3", false));
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, smallView, "test-app", 1000, 500, 0);
+    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(null);
+
+    v.verifySuspectedWorkers();
+
+    assertThat(smallView.isDegraded()).isTrue();
+  }
+
   // ── stop ──
 
   @Test

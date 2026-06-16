@@ -97,4 +97,93 @@ class SlidingWindowDetectorTest {
     detector.addCount("c", 1);
     assertThat(detector.getActiveKeyCount()).isEqualTo(3);
   }
+
+  /**
+   * Verifies that addCount returns true when the window sum exactly equals the threshold.
+   * Boundary: {@code >= threshold} includes equality.
+   */
+  @Test
+  void shouldReturnTrueWhenWindowSumEqualsThreshold() {
+    SlidingWindowDetector detector = new SlidingWindowDetector(1000, 10, 5);
+    assertThat(detector.addCount("key", 5)).isTrue();
+  }
+
+  /**
+   * Verifies that adding zero count does not change the hot verdict for a tracked key,
+   * and the window sum remains unchanged.
+   */
+  @Test
+  void shouldHandleZeroCount() {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 100);
+    detector.addCount("key", 50);
+    long sumBefore = detector.getWindowSum("key");
+    assertThat(detector.addCount("key", 0)).isFalse();
+    assertThat(detector.getWindowSum("key")).isEqualTo(sumBefore);
+  }
+
+  /**
+   * Verifies that adding a negative count does not cause failures and decreases the window sum.
+   */
+  @Test
+  void shouldHandleNegativeCount() {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 100);
+    detector.addCount("key", 50);
+    assertThat(detector.addCount("key", -20)).isFalse();
+    assertThat(detector.getWindowSum("key")).isEqualTo(30);
+  }
+
+  /**
+   * Verifies that {@code getWindowSum} returns zero for a key that has been evicted.
+   */
+  @Test
+  void shouldReturnZeroForEvictedKey() throws InterruptedException {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 100);
+    detector.addCount("ephemeral", 42);
+    assertThat(detector.getWindowSum("ephemeral")).isPositive();
+    Thread.sleep(10);
+    detector.evictStale(1);
+    assertThat(detector.getWindowSum("ephemeral")).isZero();
+  }
+
+  /**
+   * Verifies that getWindowSum correctly aggregates across multiple time slices when
+   * time advances enough to rotate into a new slice.
+   */
+  @Test
+  void shouldAggregateAcrossMultipleSlices() throws InterruptedException {
+    // 10 second window, 1000ms per slice — long slices so rotation doesn't lose data
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 100);
+    detector.addCount("key", 30);
+    Thread.sleep(150); // advance past at least one slice boundary
+    detector.addCount("key", 20);
+    // the sum should include both additions (within the window)
+    assertThat(detector.getWindowSum("key")).isEqualTo(50);
+  }
+
+  /**
+   * Verifies that evictStale with staleAfterMs = 0 eventually evicts all keys
+   * that were accessed in the past (boundary: zero stale timeout).
+   */
+  @Test
+  void shouldEvictAllWithZeroStaleTimeout() throws InterruptedException {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
+    detector.addCount("key", 1);
+    Thread.sleep(1);
+    detector.evictStale(0);
+    assertThat(detector.getActiveKeyCount()).isZero();
+  }
+
+  /**
+   * Verifies that getWindowSum handles Long.MAX_VALUE without overflow.
+   */
+  @Test
+  void shouldHandleMaxLongCount() {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, Long.MAX_VALUE);
+    boolean firstResult = detector.addCount("key", Long.MAX_VALUE);
+    assertThat(firstResult).isTrue(); // Long.MAX_VALUE >= Long.MAX_VALUE (threshold)
+    assertThat(detector.getWindowSum("key")).isPositive();
+    // adding zero should not change sum
+    detector.addCount("key", 0);
+    assertThat(detector.getWindowSum("key")).isEqualTo(Long.MAX_VALUE);
+  }
 }

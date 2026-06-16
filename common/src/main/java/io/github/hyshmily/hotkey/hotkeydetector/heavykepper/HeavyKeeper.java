@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
-import lombok.extern.slf4j.Slf4j;
 
 import com.google.common.hash.Hashing;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +25,7 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking.
@@ -81,8 +81,9 @@ public class HeavyKeeper implements TopK {
   private final int lockMask;
   /** Sorted map of current TopK entries, ordered by count ascending then key lexicographically.
    * Boolean.TRUE is a structural placeholder.  A TreeSet would not safely remove a Node
-   * whose count has changed because the Comparator includes the count; TreeMap.remove()
-   * uses identity equality (Node lacks equals/hashCode), so the heapIndex reference works. */
+   * whose count had changed because the Comparator includes the count; TreeMap.remove()
+   * uses the comparator (not identity — Node lacks equals/hashCode), but since Node. Count
+   * is final the comparator result for a given Node instance is stable and removal works. */
   private final TreeMap<Node, Boolean> sortedTopK;
   /** Reverse index from key to its {@link Node} in the sorted map, for O(1) lookups. */
   private final Map<String, Node> heapIndex;
@@ -151,7 +152,7 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Record an access to the given key.
+   * Record access to the given key.
    *
    * <p>The returned {@link AddResult} carries an {@code expelledKey} when the key
    * entered the TopK set by displacing a previous member (non-null expelledKey and
@@ -381,11 +382,13 @@ public class HeavyKeeper implements TopK {
    */
   @Override
   public void fading() {
-    // Halve all sketch counters. long writes are NOT atomic per JLS 17.7,
-    // so concurrent addDirect() may observe a torn value during fading. This is
-    // an acceptable precision trade-off for ~200K fewer locks.
+    // Halve all sketch counters under per-stripe locks to prevent concurrent
+    // addDirect() from observing torn long values (JLS 17.7).
+    // Lock overhead is negligible — called once per decay interval (~30 s).
     for (int i = 0; i < counts.length; i++) {
-      counts[i] >>= 1;
+      synchronized (lockStripes[i & lockMask]) {
+        counts[i] >>= 1;
+      }
     }
 
     // Rebuild the TopK set: halve all counts and discard entries that drop to 0.

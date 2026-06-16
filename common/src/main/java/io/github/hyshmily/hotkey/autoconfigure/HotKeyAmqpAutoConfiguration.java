@@ -26,6 +26,7 @@ import io.github.hyshmily.hotkey.sync.*;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -441,7 +442,7 @@ public class HotKeyAmqpAutoConfiguration {
      */
     @Bean
     public Binding hotkeyHeartbeatBinding(Queue hotkeyHeartbeatQueue, TopicExchange hotkeyHeartbeatExchange) {
-      return BindingBuilder.bind(hotkeyHeartbeatQueue).to(hotkeyHeartbeatExchange).with("heartbeat.*");
+      return BindingBuilder.bind(hotkeyHeartbeatQueue).to(hotkeyHeartbeatExchange).with(ROUTING_KEY_HEARTBEAT + "*");
     }
 
     /**

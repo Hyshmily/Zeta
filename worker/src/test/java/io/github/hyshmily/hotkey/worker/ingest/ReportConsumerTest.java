@@ -139,4 +139,112 @@ class ReportConsumerTest {
     // should not propagate — other keys still processed
     verify(globalQpsEstimator).addTotal(1L);
   }
+
+  /**
+   * Verifies that a report message with an empty counts map is handled without error
+   * and the QPS estimator receives zero.
+   */
+  @Test
+  void shouldHandleEmptyCountsMap() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of());
+    consumer.onReport(message);
+    verify(globalQpsEstimator).addTotal(0L);
+    verifyNoInteractions(workerTopK);
+  }
+
+  /**
+   * Verifies that a count value at the Integer.MAX_VALUE boundary is passed correctly
+   * to {@code workerTopK.addDirect}.
+   */
+  @Test
+  void shouldHandleCountAtMaxIntegerBoundary() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("bigKey", (long) Integer.MAX_VALUE));
+    when(detector.addCount("bigKey", Integer.MAX_VALUE)).thenReturn(false);
+    when(stateMachine.evaluate("bigKey", false)).thenReturn(HotKeyDecision.none("bigKey"));
+
+    consumer.onReport(message);
+
+    verify(workerTopK).addDirect("bigKey", Integer.MAX_VALUE);
+    verify(globalQpsEstimator).addTotal((long) Integer.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that a count exceeding Integer.MAX_VALUE is clamped to Integer.MAX_VALUE
+   * when passed to TopK.
+   */
+  @Test
+  void shouldClampCountToMaxIntForTopK() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hugeKey", (long) Integer.MAX_VALUE + 1));
+    when(detector.addCount("hugeKey", (long) Integer.MAX_VALUE + 1)).thenReturn(false);
+    when(stateMachine.evaluate("hugeKey", false)).thenReturn(HotKeyDecision.none("hugeKey"));
+
+    consumer.onReport(message);
+
+    verify(workerTopK).addDirect("hugeKey", Integer.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that a report with negative count values does not cause failures.
+   */
+  @Test
+  void shouldHandleNegativeCounts() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("negKey", -5L));
+    when(detector.addCount("negKey", -5L)).thenReturn(false);
+    when(stateMachine.evaluate("negKey", false)).thenReturn(HotKeyDecision.none("negKey"));
+
+    consumer.onReport(message);
+
+    verify(detector).addCount("negKey", -5L);
+    verify(globalQpsEstimator).addTotal(-5L);
+  }
+
+  /**
+   * Verifies that a report message just under the staleness boundary (4999ms old)
+   * is still processed (boundary: > 5000 means stale).
+   */
+  @Test
+  void shouldProcessMessageJustUnderStalenessBoundary() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis() - 4999, Map.of("key", 1L));
+    when(detector.addCount("key", 1L)).thenReturn(false);
+    when(stateMachine.evaluate("key", false)).thenReturn(HotKeyDecision.none("key"));
+
+    consumer.onReport(message);
+
+    verify(detector).addCount("key", 1L);
+  }
+
+  /**
+   * Verifies that the NONE decision type does not trigger any broadcast or marking.
+   */
+  @Test
+  void shouldNotBroadcastWhenDecisionIsNone() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("key", 1L));
+    when(detector.addCount("key", 1L)).thenReturn(false);
+    when(stateMachine.evaluate("key", false)).thenReturn(HotKeyDecision.none("key"));
+
+    consumer.onReport(message);
+
+    verify(broadcaster, never()).broadcastHot(anyString(), anyString());
+    verify(broadcaster, never()).broadcastCool(anyString());
+    verify(topKValidator, never()).markConfirmed(anyString());
+    verify(topKValidator, never()).markCooled(anyString());
+  }
+
+  /**
+   * Verifies that all entries are processed even when one entry's stateMachine evaluation throws.
+   */
+  @Test
+  void shouldContinueProcessingAfterStateMachineError() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("goodKey", 1L, "badKey", 2L));
+    when(detector.addCount("goodKey", 1L)).thenReturn(false);
+    when(detector.addCount("badKey", 2L)).thenReturn(true);
+    when(stateMachine.evaluate("goodKey", false)).thenReturn(HotKeyDecision.none("goodKey"));
+    when(stateMachine.evaluate("badKey", true)).thenThrow(new RuntimeException("state machine error"));
+
+    consumer.onReport(message);
+
+    // goodKey still processed despite badKey error
+    verify(stateMachine).evaluate("goodKey", false);
+    verify(globalQpsEstimator).addTotal(3L);
+  }
 }

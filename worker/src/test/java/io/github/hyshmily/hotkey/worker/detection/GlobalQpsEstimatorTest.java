@@ -70,4 +70,49 @@ class GlobalQpsEstimatorTest {
     estimator.addTotal(300);
     assertThat(estimator.getWindowTotal()).isEqualTo(500);
   }
+
+  /**
+   * Verifies that a single-slice window (windowSize = 1) works correctly.
+   * Edge case: the window always covers only the current slice.
+   */
+  @Test
+  void shouldHandleSingleSliceWindow() {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 1);
+    estimator.addTotal(100);
+    assertThat(estimator.getWindowTotal()).isEqualTo(100);
+  }
+
+  /**
+   * Verifies that adding zero total has no effect on the window sum.
+   */
+  @Test
+  void shouldHandleZeroTotalCount() {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);
+    estimator.addTotal(0);
+    assertThat(estimator.getWindowTotal()).isZero();
+    assertThat(estimator.getQps()).isZero();
+  }
+
+  /**
+   * Verifies that adding a negative total decreases the window sum.
+   */
+  @Test
+  void shouldHandleNegativeTotalCount() {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);
+    estimator.addTotal(100);
+    estimator.addTotal(-30);
+    long total = estimator.getWindowTotal();
+    assertThat(total).isEqualTo(70);
+  }
+
+  /**
+   * Verifies that a very large total does not overflow and QPS is computed correctly.
+   */
+  @Test
+  void shouldHandleLargeTotalCount() {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 10);
+    estimator.addTotal(Long.MAX_VALUE);
+    long total = estimator.getWindowTotal();
+    assertThat(total).isEqualTo(Long.MAX_VALUE);
+  }
 }

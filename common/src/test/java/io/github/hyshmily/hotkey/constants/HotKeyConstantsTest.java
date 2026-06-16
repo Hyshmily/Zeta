@@ -94,4 +94,81 @@ class HotKeyConstantsTest {
   void shouldHaveExpectedTopKIncrement() {
     assertThat(HotKeyConstants.TOPK_INCR).isEqualTo(1);
   }
+
+  /**
+   * Verifies the AMQP header constants for node ID and timestamp.
+   */
+  @Test
+  void shouldHaveExpectedNodeAndTimestampHeaders() {
+    assertThat(HotKeyConstants.AMQP_HEADER_NODE_ID).isEqualTo("nodeId");
+    assertThat(HotKeyConstants.AMQP_HEADER_TIMESTAMP).isEqualTo("timestamp");
+  }
+
+  /**
+   * Verifies the AMQP header constants for heartbeat fields.
+   */
+  @Test
+  void shouldHaveExpectedHeartbeatHeaders() {
+    assertThat(HotKeyConstants.AMQP_HEADER_HEARTBEAT_EPOCH).isEqualTo("hbEpoch");
+    assertThat(HotKeyConstants.AMQP_HEADER_HEARTBEAT_LOAD).isEqualTo("hbLoad");
+    assertThat(HotKeyConstants.AMQP_HEADER_HEARTBEAT_READY).isEqualTo("hbReady");
+    assertThat(HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_FP).isEqualTo("hbConfigFp");
+    assertThat(HotKeyConstants.AMQP_HEADER_HEARTBEAT_DV_HWM).isEqualTo("hbDvHwm");
+  }
+
+  /**
+   * Verifies the AMQP header constants for verify/ping-pong fields.
+   */
+  @Test
+  void shouldHaveExpectedVerifyHeaders() {
+    assertThat(HotKeyConstants.AMQP_HEADER_VERIFY_TYPE).isEqualTo("verifyType");
+    assertThat(HotKeyConstants.AMQP_HEADER_VERIFY_APP_INSTANCE).isEqualTo("verifyAppInstance");
+    assertThat(HotKeyConstants.AMQP_HEADER_VERIFY_WORKER_ID).isEqualTo("verifyWorkerId");
+    assertThat(HotKeyConstants.AMQP_HEADER_VERIFY_PING).isEqualTo("PING");
+    assertThat(HotKeyConstants.AMQP_HEADER_VERIFY_PONG).isEqualTo("PONG");
+  }
+
+  /**
+   * Verifies the scheduler thread name prefix constant.
+   */
+  @Test
+  void shouldHaveExpectedSchedulerThreadPrefix() {
+    assertThat(HotKeyConstants.THREAD_PREFIX_SCHEDULER).isEqualTo("hotkey-scheduler");
+  }
+
+  /**
+   * Verifies the NO_SYNC_PUBLISHER warning message constant.
+   */
+  @Test
+  void shouldHaveExpectedNoSyncPublisherMessage() {
+    assertThat(HotKeyConstants.NO_SYNC_PUBLISHER)
+      .isEqualTo("No sync publisher found, please enable hotkey.sync");
+  }
+
+  /**
+   * Verifies the rules version AMQP header constant.
+   */
+  @Test
+  void shouldHaveExpectedRulesVersionHeader() {
+    assertThat(HotKeyConstants.AMQP_HEADER_RULES_VERSION).isEqualTo("rulesVersion");
+  }
+
+  /**
+   * Verifies the Redis key for dynamic rules.
+   */
+  @Test
+  void shouldHaveExpectedRedisKeyRules() {
+    assertThat(HotKeyConstants.REDIS_KEY_RULES).isEqualTo("hotkey:rules");
+  }
+
+  /**
+   * Verifies that the utility class has a private constructor for coverage.
+   */
+  @Test
+  void privateConstructor_shouldBeAccessibleViaReflection() throws Exception {
+    var ctor = HotKeyConstants.class.getDeclaredConstructor();
+    ctor.setAccessible(true);
+    var instance = ctor.newInstance();
+    assertThat(instance).isNotNull();
+  }
 }

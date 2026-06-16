@@ -54,4 +54,27 @@ class AddResultTest {
     AddResult result = new AddResult(null, false, "key1");
     assertThat(result.isHotKey()).isFalse();
   }
+
+  @Test
+  void shouldHandleNullCurrentKey() {
+    AddResult result = new AddResult(null, true, null);
+    assertThat(result.currentKey()).isNull();
+    assertThat(result.isHotKey()).isTrue();
+  }
+
+  @Test
+  void shouldVerifyEqualsAndHashCode() {
+    AddResult r1 = new AddResult("expelled", true, "current");
+    AddResult r2 = new AddResult("expelled", true, "current");
+    AddResult r3 = new AddResult("expelled", false, "current");
+    assertThat(r1).isEqualTo(r2);
+    assertThat(r1).hasSameHashCodeAs(r2);
+    assertThat(r1).isNotEqualTo(r3);
+  }
+
+  @Test
+  void shouldVerifyToString() {
+    AddResult result = new AddResult("expelled", true, "current");
+    assertThat(result.toString()).contains("expelled", "true", "current");
+  }
 }

@@ -341,6 +341,69 @@ class HotKeyEndpointTest {
     assertThat(local).doesNotContainKey("refreshPoolAvailable");
   }
 
+  /* non-HeavyKeeper TopK should not expose algorithm params */
+
+  /**
+   * Verifies that the local section does NOT contain HeavyKeeper-specific keys when a non-HeavyKeeper TopK impl is used.
+   */
+  @Test
+  void localSection_shouldNotExposeHeavyKeeperParamsForNonHeavyKeeper() {
+    TopK customTopK = mock(TopK.class);
+    when(customTopK.list()).thenReturn(List.of(new Item("k1", 1)));
+    when(customTopK.total()).thenReturn(10L);
+    when(customTopK.expelled()).thenReturn(new LinkedBlockingQueue<>());
+    when(caffeineCache.estimatedSize()).thenReturn(0L);
+    HotKeyEndpoint ep = new HotKeyEndpoint(
+      customTopK, null, caffeineCache, null, properties, null, null,
+      null, null, null, null, null, healthViewProvider);
+
+    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> local = (Map<String, Object>) info.get("local");
+
+    assertThat(local).containsKey("topKCount");
+    assertThat(local).doesNotContainKeys("topKCapacity", "sketchWidth", "sketchDepth", "minCountThreshold");
+  }
+
+  /* worker section with null health view */
+
+  /**
+   * Verifies that the worker section omits health when the health view provider returns null.
+   */
+  @Test
+  void workerSection_shouldOmitHealthWhenHealthViewNull() {
+    mockTopK(workerTopK, List.of(new Item("wk", 1)), 5L);
+    ObjectProvider<ClusterHealthView> nullHvProvider = mock(ObjectProvider.class);
+    when(nullHvProvider.getIfAvailable()).thenReturn(null);
+    HotKeyEndpoint ep = new HotKeyEndpoint(
+      null, workerTopK, null, null, properties, null, null, workerHealthMonitor,
+      null, null, null, hotKeyStateMachine, nullHvProvider);
+
+    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> worker = (Map<String, Object>) info.get("worker");
+
+    assertThat(worker).doesNotContainKey("health");
+  }
+
+  /* expelled queue edge cases */
+
+  /**
+   * Verifies that the local section reports expelled queue metrics even when the queue is empty.
+   */
+  @Test
+  void localSection_shouldReportExpelledQueueMetricsWhenEmpty() {
+    when(hotKeyDetector.list()).thenReturn(List.of());
+    when(hotKeyDetector.total()).thenReturn(0L);
+    when(hotKeyDetector.expelled()).thenReturn(new LinkedBlockingQueue<>());
+    when(workerTopK.expelled()).thenReturn(new LinkedBlockingQueue<>());
+    when(caffeineCache.estimatedSize()).thenReturn(0L);
+    HotKeyEndpoint ep = endpointWithAll();
+    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> local = (Map<String, Object>) info.get("local");
+
+    assertThat(local).containsKey("expelledQueueSize");
+    assertThat(local).containsKey("expelledQueueRemaining");
+  }
+
   /* topK list values match mock data */
 
   /**

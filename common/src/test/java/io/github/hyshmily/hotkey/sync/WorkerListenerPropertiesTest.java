@@ -45,4 +45,30 @@ class WorkerListenerPropertiesTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     assertThat(props.getQueueName()).startsWith("hotkey.worker:");
   }
+
+  /**
+   * Verifies SRE sub-properties have expected defaults.
+   */
+  @Test
+  void sreProperties_shouldHaveDefaults() {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    assertThat(props.getSre()).isNotNull();
+    assertThat(props.getSre().isEnabled()).isTrue();
+    assertThat(props.getSre().getWindowMs()).isEqualTo(3000);
+    assertThat(props.getSre().getBuckets()).isEqualTo(10);
+    assertThat(props.getSre().getMinSamples()).isEqualTo(20);
+    assertThat(props.getSre().getSuccessThreshold()).isEqualTo(0.6);
+  }
+
+  /**
+   * Verifies all remaining default values.
+   */
+  @Test
+  void shouldHaveAllDefaultValues() {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    assertThat(props.getConcurrentConsumers()).isEqualTo(2);
+    assertThat(props.getSchedulerPoolSize()).isEqualTo(2);
+    assertThat(props.getPrefetchCount()).isEqualTo(5);
+    assertThat(props.isAutoStartup()).isTrue();
+  }
 }

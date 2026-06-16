@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.hotkey.cache.TransactionSupport;
 import java.util.concurrent.CountDownLatch;
@@ -56,5 +57,52 @@ class TransactionSupportTest {
 
     assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
     assertThat(executed).isTrue();
+  }
+
+  /**
+   * Verifies that an exception thrown inside {@code runNowOrAfterCommit} propagates to the caller
+   * when called outside a transaction (fault mode: exception propagation).
+   */
+  @Test
+  void runNowOrAfterCommit_withException_shouldPropagate() {
+    assertThatThrownBy(() ->
+      TransactionSupport.runNowOrAfterCommit(() -> {
+        throw new RuntimeException("task-failed");
+      })
+    ).isInstanceOf(RuntimeException.class).hasMessage("task-failed");
+  }
+
+  /**
+   * Verifies that an exception thrown inside {@code runAsyncAfterCommit} is caught and logged,
+   * NOT propagated to the caller (fault mode: exception suppression).
+   */
+  @Test
+  void runAsyncAfterCommit_withException_shouldNotPropagate() throws InterruptedException {
+    AtomicBoolean executed = new AtomicBoolean(false);
+    CountDownLatch latch = new CountDownLatch(1);
+    Executor executor = Executors.newSingleThreadExecutor();
+
+    TransactionSupport.runAsyncAfterCommit(() -> {
+      executed.set(true);
+      latch.countDown();
+      throw new RuntimeException("async-fail");
+    }, executor);
+
+    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(executed).isTrue();
+    // No exception should reach here — the exceptionally callback swallows it
+  }
+
+  /**
+   * Verifies that {@code runNowOrAfterCommit} executes the task even when the task throws,
+   * and the exception is not wrapped (fault mode: bare exception propagation).
+   */
+  @Test
+  void runNowOrAfterCommit_withCheckedExceptionInRunnable_shouldPropagate() {
+    assertThatThrownBy(() ->
+      TransactionSupport.runNowOrAfterCommit(() -> {
+        throw new IllegalStateException("state-error");
+      })
+    ).isInstanceOf(IllegalStateException.class).hasMessage("state-error");
   }
 }

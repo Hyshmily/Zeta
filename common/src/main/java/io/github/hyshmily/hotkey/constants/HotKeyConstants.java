@@ -48,6 +48,15 @@ public final class HotKeyConstants {
   /** AMQP message header key for the sender's data version high-water mark. */
   public static final String AMQP_HEADER_HEARTBEAT_DV_HWM = "hbDvHwm";
 
+  /** AMQP message header key for the sender's config confirm count. */
+  public static final String AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM = "hbConfigConfirm";
+  /** AMQP message header key for the sender's config cool count. */
+  public static final String AMQP_HEADER_HEARTBEAT_CONFIG_COOL = "hbConfigCool";
+  /** AMQP message header key for the sender's config grace count. */
+  public static final String AMQP_HEADER_HEARTBEAT_CONFIG_GRACE = "hbConfigGrace";
+  /** AMQP message header key for the sender's config timestamp. */
+  public static final String AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP = "hbConfigTs";
+
   /** AMQP message header key for the verification message type (PING or PONG). */
   public static final String AMQP_HEADER_VERIFY_TYPE = "verifyType";
   /** AMQP message header key for the originating app instance identifier. */
@@ -75,6 +84,8 @@ public final class HotKeyConstants {
   public static final String ROUTING_KEY_BROADCAST = "broadcast.";
   /** Routing key prefix for report messages from apps to worker. */
   public static final String ROUTING_KEY_REPORT = "report.";
+  /** Routing key prefix for heartbeat messages from workers to apps. */
+  public static final String ROUTING_KEY_HEARTBEAT = "heartbeat.";
   /** Queue name prefix for report queues (appended with app name). */
   public static final String QUEUE_PREFIX_REPORT = "hotkey.report.";
 

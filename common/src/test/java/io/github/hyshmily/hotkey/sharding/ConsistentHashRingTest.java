@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.sharding;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -215,5 +216,63 @@ class ConsistentHashRingTest {
         return null;
       })
     );
+  }
+
+  @Test
+  void allNodesDead_shouldReturnNull() {
+    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ring.rebuild(Set.of("node-a", "node-b"));
+    assertThat(ring.locateNode("any-key", s -> false)).isNull();
+  }
+
+  @Test
+  void locateNode_withNullKey_shouldThrowNullPointer() {
+    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ring.rebuild(Set.of("node-a"));
+    assertThatNullPointerException().isThrownBy(() -> ring.locateNode(null, s -> true));
+  }
+
+  @Test
+  void locateNode_withNullPredicate_shouldThrowNullPointer() {
+    ConsistentHashRing ring = new ConsistentHashRing(10);
+    ring.rebuild(Set.of("node-a"));
+    assertThatNullPointerException().isThrownBy(() -> ring.locateNode("key", null));
+  }
+
+  @Test
+  void singleVirtualNode_shouldStillRouteConsistently() {
+    ConsistentHashRing ring = new ConsistentHashRing(1);
+    ring.rebuild(Set.of("node-a"));
+    for (int i = 0; i < 100; i++) {
+      assertThat(ring.locateNode("key-" + i, s -> true)).isEqualTo("node-a");
+    }
+  }
+
+  @Test
+  void getNodes_onEmptyRing_shouldBeEmpty() {
+    ConsistentHashRing ring = new ConsistentHashRing(10);
+    assertThat(ring.getNodes()).isEmpty();
+  }
+
+  @Test
+  void rebuild_withNull_shouldThrowNullPointer() {
+    ConsistentHashRing ring = new ConsistentHashRing(10);
+    assertThatNullPointerException().isThrownBy(() -> ring.rebuild(null));
+  }
+
+  @Test
+  void largeRing_shouldRouteAllKeys() {
+    ConsistentHashRing ring = new ConsistentHashRing(50);
+    Set<String> nodes = IntStream.range(0, 100).mapToObj(i -> "node-" + i).collect(java.util.stream.Collectors.toSet());
+    ring.rebuild(nodes);
+    for (int i = 0; i < 1000; i++) {
+      assertThat(ring.locateNode("key-" + i, s -> true)).startsWith("node-");
+    }
+  }
+
+  @Test
+  void nodeCount_withNoNodes_shouldReturnZero() {
+    ConsistentHashRing ring = new ConsistentHashRing(10);
+    assertThat(ring.nodeCount()).isZero();
   }
 }

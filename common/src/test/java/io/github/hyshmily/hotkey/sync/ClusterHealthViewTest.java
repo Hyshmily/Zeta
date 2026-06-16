@@ -264,6 +264,91 @@ class ClusterHealthViewTest {
     executor.shutdown();
   }
 
+  /**
+   * Verifies that onHeartbeat clears the degraded flag when cluster recovers.
+   */
+  @Test
+  void onHeartbeat_withDegradedFlag_shouldRecover() {
+    view.setDegraded(true);
+    view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w2", 1, true));
+    assertThat(view.isDegraded()).isFalse();
+  }
+
+  /**
+   * Verifies that recordPong clears the degraded flag when cluster recovers.
+   */
+  @Test
+  void recordPong_withDegradedFlag_shouldRecover() {
+    view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w2", 1, true));
+    view.setDegraded(true);
+    view.recordPong("w3");
+    assertThat(view.isDegraded()).isFalse();
+  }
+
+  /**
+   * Verifies that onHeartbeat updates the decision version HWM to the max.
+   */
+  @Test
+  void onHeartbeat_shouldUpdateDecisionVersionHwm() {
+    view.onHeartbeat(hbWithHwm("w1", 1, true, 10));
+    view.onHeartbeat(hbWithHwm("w1", 1, true, 20));
+    view.onHeartbeat(hbWithHwm("w1", 1, true, 5));
+    assertThat(view.getAliveWorkerIds()).contains("w1");
+  }
+
+  /**
+   * Verifies that an epoch change resets the record including decisionVersionHwm.
+   */
+  @Test
+  void onHeartbeat_higherEpoch_shouldReplaceRecord() {
+    view.onHeartbeat(hbWithHwm("w1", 1, true, 100));
+    view.onHeartbeat(hbWithHwm("w1", 2, false, 0));
+    assertThat(view.getAliveWorkerIds()).doesNotContain("w1");
+  }
+
+  /**
+   * Verifies that isAlive returns false when exactly at the timeout boundary (elapsed == timeoutMs).
+   */
+  @Test
+  void isAlive_exactTimeoutBoundary_shouldReturnFalse() {
+    ClusterHealthView.WorkerHealthRecord r = new ClusterHealthView.WorkerHealthRecord();
+    r.readyToServe = true;
+    r.stale = false;
+    r.lastHeartbeatTime = System.currentTimeMillis() - 5000;
+    assertThat(r.isAlive(5000)).isFalse();
+  }
+
+  /**
+   * Verifies that knownWorkerCount of 0 excludes all workers from healthy check.
+   */
+  @Test
+  void isClusterHealthy_withZeroKnownWorkers_shouldReturnFalseEvenWithRecords() {
+    ClusterHealthView empty = new ClusterHealthView(0, 5000, 2);
+    empty.onHeartbeat(hb("w1", 1, true));
+    empty.onHeartbeat(hb("w2", 1, true));
+    assertThat(empty.isClusterHealthy()).isFalse();
+  }
+
+  /**
+   * Verifies that isClusterHealthy with exactly majority alive returns true.
+   */
+  @Test
+  void isClusterHealthy_exactMajority_shouldReturnTrue() {
+    view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w2", 1, true));
+    assertThat(view.isClusterHealthy()).isTrue();
+  }
+
+  /** An alternative to the private hbWithHwm method in this file. */
+  @Test
+  void shouldHandleHeartbeatForSingleWorker() {
+    view.onHeartbeat(hb("w1", 1, true));
+    assertThat(view.getAliveWorkerIds()).containsExactly("w1");
+    assertThat(view.getAllWorkerIds()).containsExactly("w1");
+  }
+
   // ── Integration ──
 
   @Test

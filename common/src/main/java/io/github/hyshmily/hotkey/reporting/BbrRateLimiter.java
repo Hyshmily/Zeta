@@ -105,7 +105,7 @@ public class BbrRateLimiter {
    * Check whether the current flush cycle is allowed.
    * <p>
    * If allowed, the caller <b>must</b> call {@link #onSuccess(long)} or
-   * {@link #onDrop()} afterwards.  {@link #onEnqueue()} must be called after
+   *  afterward.  {@link #onEnqueue()} must be called after
    * a successful enqueue.
    *
    * @return {@code true} if the flush is allowed
@@ -150,8 +150,15 @@ public class BbrRateLimiter {
     totalPassed.incrementAndGet();
   }
 
-  /** Record a dropped flush (back-pressure applied). */
-  public void onDrop() {
+  /** Record a dropped flush from the consumer (stale/failed batch — was enqueued, so decrement inFlight). */
+  public void onConsumerDrop() {
+    lastDropTime = System.currentTimeMillis();
+    totalDropped.incrementAndGet();
+    inFlight.decrementAndGet();
+  }
+
+  /** Record a dropped flush from the gate (tryAcquire failed — never enqueued, inFlight unchanged). */
+  public void onGateDrop() {
     lastDropTime = System.currentTimeMillis();
     totalDropped.incrementAndGet();
   }

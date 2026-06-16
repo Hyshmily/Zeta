@@ -87,7 +87,7 @@ class WorkerHeartbeatProducerTest {
       var producer = newProducer();
       producer.sendHeartbeat();
 
-      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq("heartbeat." + WORKER_ID), messageCaptor.capture());
+      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
       assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
         .containsEntry(AMQP_HEADER_HEARTBEAT_EPOCH, 1L);
     }
@@ -100,7 +100,7 @@ class WorkerHeartbeatProducerTest {
       var producer = newProducer();
       producer.sendHeartbeat();
 
-      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq("heartbeat." + WORKER_ID), messageCaptor.capture());
+      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
       assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
         .containsEntry(AMQP_HEADER_HEARTBEAT_EPOCH, 6L);
     }
@@ -190,7 +190,7 @@ class WorkerHeartbeatProducerTest {
       var producer = newProducer();
       producer.sendHeartbeat();
 
-      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq("heartbeat." + WORKER_ID), messageCaptor.capture());
+      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
       var headers = messageCaptor.getValue().getMessageProperties().getHeaders();
 
       assertThat(headers).containsEntry(AMQP_HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
@@ -200,10 +200,10 @@ class WorkerHeartbeatProducerTest {
       assertThat(headers.get(AMQP_HEADER_HEARTBEAT_LOAD)).isInstanceOf(Double.class);
       assertThat((Double) headers.get(AMQP_HEADER_HEARTBEAT_LOAD)).isBetween(0.0, 1.0);
       assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_READY, true);
-      assertThat(headers).containsEntry("hbConfigConfirm", 3);
-      assertThat(headers).containsEntry("hbConfigCool", 10);
-      assertThat(headers).containsEntry("hbConfigGrace", 3);
-      assertThat(headers).containsEntry("hbConfigTs", configTs);
+      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, 3);
+      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, 10);
+      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, 3);
+      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTs);
       // confirm=3, cool=10, grace=3 → fingerprint = 31*(31*3+10)+3 = 3196
       assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_FP, 3196);
     }
@@ -264,6 +264,47 @@ class WorkerHeartbeatProducerTest {
       var scheduler = (ScheduledExecutorService) ReflectionTestUtils.getField(producer, "scheduler");
       assertThat(scheduler).isNotNull();
       assertThat(scheduler.isShutdown()).isTrue();
+    }
+  }
+
+  // ── Fault tolerance ──
+
+  /**
+   * {@code sendHeartbeat} catches exceptions from {@code rabbitTemplate.send}
+   * and does not propagate them.
+   */
+  @Test
+  void sendHeartbeat_shouldCatchRabbitMqException() {
+    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
+      when(broadcaster.getCurrentDecisionVersion()).thenReturn(0L);
+      when(configTimestampCounter.get()).thenReturn(0L);
+      doThrow(new RuntimeException("RabbitMQ unavailable"))
+        .when(rabbitTemplate).send(anyString(), anyString(), any());
+
+      var producer = newProducer();
+      producer.sendHeartbeat();
+      // must not throw — exception caught in catch block
+    }
+  }
+
+  /**
+   * Verifies that when the local epoch file contains invalid content (not a number),
+   * the epoch falls back to {@code System.currentTimeMillis()} as a last resort.
+   */
+  @Test
+  void constructor_shouldFallbackToCurrentTimeMillisForCorruptedEpochFile() throws Exception {
+    var origTmpdir = System.setProperty("java.io.tmpdir", tempDir.toString());
+    try (var ignored = mockConstruction(StringRedisTemplate.class, redisThrowing())) {
+      Files.writeString(epochFilePath(), "not-a-number");
+      var producer = newProducer();
+      producer.sendHeartbeat();
+      verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
+      var epoch =
+        (Long)
+          messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_HEARTBEAT_EPOCH);
+      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000L);
+    } finally {
+      System.setProperty("java.io.tmpdir", origTmpdir);
     }
   }
 

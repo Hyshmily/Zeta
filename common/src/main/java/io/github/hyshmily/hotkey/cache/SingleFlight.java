@@ -17,13 +17,12 @@ package io.github.hyshmily.hotkey.cache;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import lombok.extern.slf4j.Slf4j;
 
 
 /**
@@ -94,9 +93,20 @@ public class SingleFlight {
 
     CompletableFuture<Object> future = inflightLoads
       .asMap()
-      .computeIfAbsent(cacheKey, k ->
-        CompletableFuture.supplyAsync(() -> (Object) reader.get(), executor).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
-      );
+      .computeIfAbsent(cacheKey, k -> {
+        CompletableFuture<Object> cf = CompletableFuture.supplyAsync(() -> (Object) reader.get(), executor).orTimeout(
+          timeoutSeconds,
+          TimeUnit.SECONDS
+        );
+        cf.exceptionally(ex -> {
+          if (ex.getCause() instanceof InterruptedException) {
+            cf.cancel(true);
+          }
+          return null;
+        });
+
+        return cf;
+      });
 
     try {
       return Optional.ofNullable((T) future.join());

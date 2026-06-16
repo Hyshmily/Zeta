@@ -358,7 +358,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public Binding workerConfigBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
-    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with("heartbeat.*");
+    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with(HotKeyConstants.ROUTING_KEY_HEARTBEAT + "*");
   }
 
   /**

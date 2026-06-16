@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.model;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -199,5 +200,79 @@ class CacheEntryTest {
     CacheEntry a = CacheEntry.builder().value("x").dataVersion(1L).build();
     CacheEntry b = CacheEntry.builder().value("y").dataVersion(1L).build();
     assertThat(a).isNotEqualTo(b);
+  }
+
+  @Test
+  void dataVersionMinMax_shouldAcceptBoundaryValues() {
+    CacheEntry min = CacheEntry.builder().value("min").dataVersion(Long.MIN_VALUE).build();
+    CacheEntry max = CacheEntry.builder().value("max").dataVersion(Long.MAX_VALUE).build();
+    assertThat(min.getDataVersion()).isEqualTo(Long.MIN_VALUE);
+    assertThat(max.getDataVersion()).isEqualTo(Long.MAX_VALUE);
+  }
+
+  @Test
+  void decisionVersionMinMax_shouldAcceptBoundaryValues() {
+    CacheEntry min = CacheEntry.builder().value("min").decisionVersion(Long.MIN_VALUE).build();
+    CacheEntry max = CacheEntry.builder().value("max").decisionVersion(Long.MAX_VALUE).build();
+    assertThat(min.getDecisionVersion()).isEqualTo(Long.MIN_VALUE);
+    assertThat(max.getDecisionVersion()).isEqualTo(Long.MAX_VALUE);
+  }
+
+  @Test
+  void hardExpireAtMsInPast_shouldAcceptExpiredEntry() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("expired").hardExpireAtMs(-1L).build();
+    assertThat(entry.getHardExpireAtMs()).isNegative();
+  }
+
+  @Test
+  void negativeTtlValues_shouldBeAccepted() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("neg").hardTtlMs(-100L).softTtlMs(-50L).build();
+    assertThat(entry.getHardTtlMs()).isNegative();
+    assertThat(entry.getSoftTtlMs()).isNegative();
+  }
+
+  @Test
+  void veryLongValue_shouldBeStored() {
+    String longStr = "a".repeat(10_000);
+    CacheEntry entry = CacheEntry.builder().value(longStr).build();
+    assertThat(entry.getValue()).isEqualTo(longStr);
+  }
+
+  @Test
+  void specialCharactersInValue_shouldBeStored() {
+    String specials = "hello\n\t\r\0unicode:\u00E9\u4E2D\u6587";
+    CacheEntry entry = CacheEntry.builder().value(specials).build();
+    assertThat(entry.getValue()).isEqualTo(specials);
+  }
+
+  @Test
+  void toBuilder_shouldPreserveAllFieldsExceptModified() {
+    CacheEntry original = CacheEntry.builder()
+      .value("orig").dataVersion(1L).isVersionDegraded(true).decisionVersion(2L)
+      .hardTtlMs(100L).hardExpireAtMs(200L).softTtlMs(10L).softExpireAtMs(20L)
+      .keyState(KeyState.HOT).normalHardTtlMs(100L).normalSoftTtlMs(10L)
+      .build();
+    CacheEntry copy = original.toBuilder().value("modified").build();
+    assertThat(copy.getValue()).isEqualTo("modified");
+    assertThat(copy.getDataVersion()).isEqualTo(1L);
+    assertThat(copy.isVersionDegraded()).isTrue();
+    assertThat(copy.getDecisionVersion()).isEqualTo(2L);
+    assertThat(copy.getHardTtlMs()).isEqualTo(100L);
+    assertThat(copy.getHardExpireAtMs()).isEqualTo(200L);
+    assertThat(copy.getSoftTtlMs()).isEqualTo(10L);
+    assertThat(copy.getSoftExpireAtMs()).isEqualTo(20L);
+    assertThat(copy.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(copy.getNormalHardTtlMs()).isEqualTo(100L);
+    assertThat(copy.getNormalSoftTtlMs()).isEqualTo(10L);
+  }
+
+  @Test
+  void equalsWithNullValue_shouldWork() {
+    CacheEntry a = CacheEntry.builder().value(null).dataVersion(1L).build();
+    CacheEntry b = CacheEntry.builder().value(null).dataVersion(1L).build();
+    assertThat(a).isEqualTo(b);
+    assertThat(a).hasSameHashCodeAs(b);
   }
 }

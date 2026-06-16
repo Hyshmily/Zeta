@@ -3,9 +3,11 @@ package io.github.hyshmily.hotkey.rule;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.Rule.RuleType;
+import java.util.regex.PatternSyntaxException;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -224,5 +226,81 @@ class RuleTest {
     rule.setPattern("\\d+");
     rule.prepare();
     assertThat(rule.getCompiledPattern()).isNotNull();
+  }
+
+  @Test
+  void invalidRegexPattern_shouldThrowPatternSyntaxException() {
+    assertThrows(PatternSyntaxException.class, () -> new Rule(RuleType.REGEX, "[invalid", RuleAction.BLOCK));
+  }
+
+  @Test
+  void wildcardEscapesBracket_shouldNotThrow() {
+    var rule = new Rule(RuleType.WILDCARD, "[invalid", RuleAction.BLOCK);
+    assertThat(rule.match("[invalid")).isTrue();
+  }
+
+  @Test
+  void emptyPatternForExact_shouldMatchOnlyEmptyString() {
+    var rule = new Rule(RuleType.EXACT, "", RuleAction.BLOCK);
+    assertThat(rule.match("")).isTrue();
+    assertThat(rule.match("a")).isFalse();
+  }
+
+  @Test
+  void emptyPatternForPrefix_shouldMatchAll() {
+    var rule = new Rule(RuleType.PREFIX, "", RuleAction.BLOCK);
+    assertThat(rule.match("")).isTrue();
+    assertThat(rule.match("anything")).isTrue();
+  }
+
+  @Test
+  void emptyPatternForWildcard_shouldMatchOnlyEmptyString() {
+    var rule = new Rule(RuleType.WILDCARD, "", RuleAction.BLOCK);
+    assertThat(rule.match("")).isTrue();
+    assertThat(rule.match("x")).isFalse();
+  }
+
+  @Test
+  void wildcardOnlyQuestionMarks_shouldMatchExactLength() {
+    var rule = new Rule(RuleType.WILDCARD, "???", RuleAction.BLOCK);
+    assertThat(rule.match("abc")).isTrue();
+    assertThat(rule.match("ab")).isFalse();
+    assertThat(rule.match("abcd")).isFalse();
+  }
+
+  @Test
+  void wildcardEscapesBracketsAndParens() {
+    var rule = new Rule(RuleType.WILDCARD, "test[0]*", RuleAction.BLOCK);
+    assertThat(rule.match("test[0]xyz")).isTrue();
+    assertThat(rule.match("test0xyz")).isFalse();
+  }
+
+  @Test
+  void wildcardEscapesAllRegexSpecials() {
+    var rule = new Rule(RuleType.WILDCARD, "a.+b", RuleAction.BLOCK);
+    assertThat(rule.match("a.+b")).isTrue();
+    assertThat(rule.match("aXb")).isFalse();
+    assertThat(rule.match("aXXb")).isFalse();
+  }
+
+  @Test
+  void matchEmptyKeyForRegex_shouldRespectFindSemantics() {
+    var rule = new Rule(RuleType.REGEX, "", RuleAction.BLOCK);
+    assertThat(rule.match("")).isTrue();
+    assertThat(rule.match("x")).isTrue();
+  }
+
+  @Test
+  void matchWithEmptyKeyForExact_shouldWork() {
+    var rule = new Rule(RuleType.EXACT, "test", RuleAction.BLOCK);
+    assertThat(rule.match("")).isFalse();
+  }
+
+  @Test
+  void regexWithBackslash_shouldMatchCorrectly() {
+    var rule = new Rule(RuleType.REGEX, "\\d{2,4}", RuleAction.BLOCK);
+    assertThat(rule.match("123")).isTrue();
+    assertThat(rule.match("12")).isTrue();
+    assertThat(rule.match("1")).isFalse();
   }
 }

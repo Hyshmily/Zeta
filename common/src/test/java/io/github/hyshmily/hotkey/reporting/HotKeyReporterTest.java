@@ -17,10 +17,13 @@ package io.github.hyshmily.hotkey.reporting;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -196,5 +199,84 @@ class HotKeyReporterTest {
     reporter.start();
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 200);
     assertThat(testPublisher.publishCount).isZero();
+  }
+
+  @Test
+  void stop_beforeStart_shouldNotThrow() {
+    reporter.stop();
+  }
+
+  @Test
+  void start_andStopMultipleTimes_shouldBeSafe() {
+    reporter.start();
+    reporter.stop();
+    reporter.start();
+    reporter.stop();
+  }
+
+  @Test
+  void record_withEmptyKey_shouldWork() throws Exception {
+    registerWorker(healthView, "worker-1");
+    reporter.start();
+    reporter.record("");
+    awaitPublish(1);
+    assertThat(testPublisher.publishCount).isPositive();
+  }
+
+  @Test
+  void record_withVeryLongKey_shouldWork() throws Exception {
+    registerWorker(healthView, "worker-1");
+    reporter.start();
+    reporter.record("k".repeat(10_000));
+    awaitPublish(1);
+    assertThat(testPublisher.publishCount).isPositive();
+  }
+
+  @Test
+  void bbrMethods_withoutBbr_shouldReturnMinusOne() {
+    assertThat(reporter.bbrPassed()).isEqualTo(-1);
+    assertThat(reporter.bbrDropped()).isEqualTo(-1);
+    assertThat(reporter.bbrInFlight()).isEqualTo(-1);
+    assertThat(reporter.bbrMaxInFlight()).isEqualTo(-1);
+  }
+
+  @Test
+  void dispatcherExpired_shouldBeZeroInitially() {
+    reporter.start();
+    assertThat(reporter.dispatcherExpired()).isZero();
+  }
+
+  @Test
+  void dispatcherDropped_shouldBeZeroInitially() {
+    reporter.start();
+    assertThat(reporter.dispatcherDropped()).isZero();
+  }
+
+  @Test
+  void flush_withManyKeys_shouldNotLoseCounts() throws Exception {
+    registerWorker(healthView, "worker-1");
+    reporter.start();
+    for (int i = 0; i < 100; i++) {
+      reporter.record("bulk-key-" + i);
+    }
+    awaitPublish(1);
+    assertThat(testPublisher.publishCount).isPositive();
+    long total = testPublisher.messages.stream()
+      .flatMap(m -> m.counts().values().stream())
+      .mapToLong(Long::longValue)
+      .sum();
+    assertThat(total).isEqualTo(100);
+  }
+
+  @Test
+  void flush_withBbrRateLimiter_shouldWireCorrectly() {
+    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
+    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.9);
+    BbrRateLimiter bbr = new BbrRateLimiter(cpuMonitor, 800, 500, 5, 1000);
+    reporter.setBbrRateLimiter(bbr);
+    assertThat(reporter.bbrPassed()).isZero();
+    assertThat(reporter.bbrDropped()).isZero();
+    assertThat(reporter.bbrInFlight()).isZero();
+    assertThat(reporter.bbrMaxInFlight()).isZero();
   }
 }

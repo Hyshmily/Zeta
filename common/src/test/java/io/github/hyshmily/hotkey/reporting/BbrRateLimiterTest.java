@@ -94,7 +94,7 @@ class BbrRateLimiterTest {
     for (int i = 0; i < 7; i++) {
       limiter.onEnqueue();
     }
-    limiter.onDrop();
+    limiter.onGateDrop();
     // isCooldown() = true, inFlight > maxInFlight -> deny.
     assertThat(limiter.tryAcquire()).isFalse();
   }
@@ -147,19 +147,19 @@ class BbrRateLimiterTest {
     assertThat(limiter.getTotalPassed()).isEqualTo(2);
   }
 
-  // ── onDrop ──
+  // ── onDrop variants ──
 
   @Test
-  void onDrop_shouldIncrementTotalDropped() {
+  void onGateDrop_shouldIncrementTotalDropped() {
     assertThat(limiter.getTotalDropped()).isEqualTo(0);
-    limiter.onDrop();
+    limiter.onGateDrop();
     assertThat(limiter.getTotalDropped()).isEqualTo(1);
-    limiter.onDrop();
+    limiter.onGateDrop();
     assertThat(limiter.getTotalDropped()).isEqualTo(2);
   }
 
   @Test
-  void onDrop_shouldEnterCooldown() {
+  void onGateDrop_shouldEnterCooldown() {
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.3);
     for (int i = 0; i < 5; i++) {
       limiter.onEnqueue();
@@ -169,7 +169,7 @@ class BbrRateLimiterTest {
       limiter.onEnqueue();
     }
     assertThat(limiter.tryAcquire()).isTrue();
-    limiter.onDrop();
+    limiter.onGateDrop();
     assertThat(limiter.tryAcquire()).isFalse();
   }
 
@@ -187,7 +187,7 @@ class BbrRateLimiterTest {
   @Test
   void getTotalDropped_shouldReflectCurrentState() {
     assertThat(limiter.getTotalDropped()).isEqualTo(0);
-    limiter.onDrop();
+    limiter.onGateDrop();
     assertThat(limiter.getTotalDropped()).isEqualTo(1);
   }
 
@@ -425,7 +425,7 @@ class BbrRateLimiterTest {
     for (int i = 0; i < 7; i++) {
       limiter.onEnqueue();
     }
-    limiter.onDrop();
+    limiter.onGateDrop();
     // Cooldown active -> isCooldown() = true -> permissive false branch.
     assertThat(limiter.tryAcquire()).isFalse();
   }
@@ -440,7 +440,7 @@ class BbrRateLimiterTest {
     for (int i = 0; i < 7; i++) {
       limiter.onEnqueue();
     }
-    limiter.onDrop();
+    limiter.onGateDrop();
     assertThat(limiter.tryAcquire()).isFalse();
 
     // Simulate cooldown expiry via reflection.
@@ -469,10 +469,67 @@ class BbrRateLimiterTest {
     limiter.onSuccess(50);
     assertThat(limiter.getInFlight()).isEqualTo(2);
     assertThat(limiter.getTotalPassed()).isEqualTo(6);
-    limiter.onDrop();
+    limiter.onConsumerDrop();
     assertThat(limiter.getTotalDropped()).isEqualTo(1);
+    assertThat(limiter.getInFlight()).isEqualTo(1); // consumerDrop decrements inFlight
   }
 
+
+  // ── Edge Cases ──
+
+  @Test
+  void onSuccess_withZeroRt_shouldNotDivideByZero() {
+    limiter.onEnqueue();
+    limiter.onSuccess(0);
+    assertThat(limiter.getTotalPassed()).isEqualTo(1);
+    assertThat(limiter.getCurrentMaxInFlight()).isGreaterThanOrEqualTo(0);
+  }
+
+  @Test
+  void onSuccess_withNegativeRt_shouldBeHandled() {
+    limiter.onEnqueue();
+    limiter.onSuccess(-10);
+    assertThat(limiter.getTotalPassed()).isEqualTo(1);
+    assertThat(limiter.getInFlight()).isEqualTo(0);
+  }
+
+  @Test
+  void onSuccess_withoutOnEnqueue_shouldGoNegative() {
+    limiter.onSuccess(10);
+    assertThat(limiter.getInFlight()).isNegative();
+  }
+
+  @Test
+  void multipleConsecutiveGateDrops_shouldTrackCorrectly() {
+    for (int i = 0; i < 10; i++) {
+      limiter.onGateDrop();
+    }
+    assertThat(limiter.getTotalDropped()).isEqualTo(10);
+  }
+
+  @Test
+  void tryAcquire_withVeryHighInFlight_shouldNotOverflow() {
+    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.3);
+    for (int i = 0; i < 5; i++) {
+      limiter.onEnqueue();
+      limiter.onSuccess(100);
+    }
+    for (int i = 0; i < 1_000_000; i++) {
+      limiter.onEnqueue();
+    }
+    assertThat(limiter.tryAcquire()).isTrue();
+  }
+
+  @Test
+  void tryAcquire_afterFullWindowZeroData_shouldFallbackToCache() throws Exception {
+    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.3);
+    for (int i = 0; i < 5; i++) {
+      limiter.onEnqueue();
+      limiter.onSuccess(100);
+    }
+    forceZeroAllBuckets();
+    assertThat(limiter.tryAcquire()).isTrue();
+  }
 
   // ── Reflection helpers ──
 

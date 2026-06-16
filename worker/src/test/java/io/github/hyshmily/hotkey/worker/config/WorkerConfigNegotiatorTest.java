@@ -43,10 +43,10 @@ class WorkerConfigNegotiatorTest {
     MessageProperties props = new MessageProperties();
     props.setHeader(AMQP_HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
     props.setHeader(AMQP_HEADER_NODE_ID, workerId);
-    props.setHeader("hbConfigTs", configTs);
-    props.setHeader("hbConfigConfirm", 5);
-    props.setHeader("hbConfigCool", 10);
-    props.setHeader("hbConfigGrace", 3);
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTs);
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, 5);
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, 10);
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, 3);
     props.setHeader(AMQP_HEADER_HEARTBEAT_EPOCH, 1L);
     props.setHeader(AMQP_HEADER_TIMESTAMP, System.currentTimeMillis());
     props.setHeader(AMQP_HEADER_HEARTBEAT_DV_HWM, 0L);
@@ -178,6 +178,54 @@ class WorkerConfigNegotiatorTest {
     verify(stateMachine).setCoolCount(10);
     verify(stateMachine).setPreCoolGraceCount(3);
     assertThat(configTimestampCounter.get()).isEqualTo(15);
+  }
+
+  /**
+   * Verifies that a heartbeat with zero config timestamp is skipped when the local
+   * counter is also at zero, because {@code remoteTs <= localTs} (0 <= 0).
+   */
+  @Test
+  void shouldSkipConfigWithEqualZeroTimestamp() {
+    Message msg = createHeartbeatMessage("worker-2", 0);
+    negotiator.onHeartbeat(msg);
+
+    verifyNoInteractions(stateMachine);
+    assertThat(configTimestampCounter.get()).isEqualTo(0);
+  }
+
+  /**
+   * Verifies that multiple heartbeat messages with increasing timestamps are all
+   * applied, each updating the config to the latest values.
+   */
+  @Test
+  void shouldApplyMultipleHeartbeatUpdatesInOrder() {
+    Message msg1 = createHeartbeatMessage("worker-2", 10);
+    negotiator.onHeartbeat(msg1);
+    assertThat(configTimestampCounter.get()).isEqualTo(10);
+
+    Message msg2 = createHeartbeatMessage("worker-2", 20);
+    negotiator.onHeartbeat(msg2);
+    assertThat(configTimestampCounter.get()).isEqualTo(20);
+
+    Message msg3 = createHeartbeatMessage("worker-2", 30);
+    negotiator.onHeartbeat(msg3);
+    assertThat(configTimestampCounter.get()).isEqualTo(30);
+  }
+
+  /**
+   * Verifies that a null (malformed) heartbeat message is silently ignored.
+   */
+  @Test
+  void shouldIgnoreMessageWithWrongHeaders() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
+    // Missing required headers (nodeId, configTs, etc.) → WorkerHeartbeatMessage.from returns null
+    Message msg = new Message("worker-2".getBytes(), props);
+
+    negotiator.onHeartbeat(msg);
+
+    verifyNoInteractions(stateMachine);
+    assertThat(configTimestampCounter.get()).isZero();
   }
 
   private Thread findDaemonThread() {

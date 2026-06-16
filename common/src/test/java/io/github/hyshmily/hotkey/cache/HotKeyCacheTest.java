@@ -39,7 +39,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 
 /**
  * Tests for {@link HotKeyCache}, covering peek, get, invalidate, and blacklist behaviors.
@@ -267,5 +271,315 @@ class HotKeyCacheTest {
     assertThatThrownBy(() -> hotKeyCache.getWithSoftExpire("secret", () -> "db")).isInstanceOf(
       HotKeyBlockedException.class
     );
+  }
+
+  /**
+   * Verifies that getWithSoftExpire falls back to get() when soft expire is disabled.
+   */
+  @Test
+  void getWithSoftExpire_whenDisabled_shouldFallbackToGet() {
+    HotKeyProperties props = new HotKeyProperties();
+    props.setDefaultSoftTtlMs(0);
+    props.setDefaultHotSoftTtlMs(0);
+    CacheExpireManager noSoft = new CacheExpireManager(caffeineCache, executor, props, 10);
+
+    when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loaded"));
+
+    HotKeyCache cache = new HotKeyCache(
+      hotKeyDetector, caffeineCache, singleFlight, noSoft,
+      executor, Optional.empty(), Optional.empty(),
+      new RuleMatcher(Optional.empty(), Optional.empty()),
+      new VersionController(Optional.empty(), 60),
+      mock(RingManager.class), mock(ClusterHealthView.class)
+    );
+
+    assertThat(cache.getWithSoftExpire("key", () -> "loaded")).contains("loaded");
+  }
+
+  /**
+   * Verifies that getWithSoftExpire returns the cached value when the soft TTL has not expired.
+   */
+  @Test
+  void getWithSoftExpire_notExpired_shouldReturnCachedValue() {
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("cached").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 60_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "should-not-load")).contains("cached");
+  }
+
+  /**
+   * Verifies that getWithSoftExpire with an expired soft TTL returns the stale value and
+   * schedules a background refresh (stale-while-revalidate).
+   */
+  @Test
+  void getWithSoftExpire_expired_shouldReturnStaleAndTriggerRefresh() {
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("stale").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() - 1)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    // Should return stale value immediately (stale-while-revalidate)
+    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh")).contains("stale");
+  }
+
+  /**
+   * Verifies that peek throws HotKeyBlockedException when the key matches a blacklist rule.
+   */
+  @Test
+  void peek_withBlacklistedKey_shouldThrow() {
+    hotKeyCache.addBlacklist("secret");
+    assertThatThrownBy(() -> hotKeyCache.peek("secret"))
+      .isInstanceOf(HotKeyBlockedException.class);
+  }
+
+  /**
+   * Verifies that peek returns a raw (non-CacheEntry) value directly.
+   */
+  @Test
+  void peek_shouldReturnRawValue() {
+    caffeineCache.put("raw", "rawValue");
+    assertThat(hotKeyCache.peek("raw")).contains("rawValue");
+  }
+
+  /**
+   * Verifies that isLocalHotKey returns false for a logically expired CacheEntry
+   * even when the entry is still present in the Caffeine cache.
+   */
+  @Test
+  void isLocalHotKey_withExpiredEntry_shouldReturnFalse() {
+    caffeineCache.put("expired", CacheEntry.builder()
+      .value("v").dataVersion(0).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(1).hardExpireAtMs(1)
+      .softTtlMs(0).softExpireAtMs(0)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    assertThat(hotKeyCache.isLocalHotKey("expired")).isFalse();
+  }
+
+  /**
+   * Verifies that putThrough caches the value and preserves it for subsequent reads.
+   */
+  @Test
+  void putThrough_shouldWriteThroughAndCache() {
+    hotKeyCache.putThrough("key1", "newValue", () -> {});
+
+    assertThat(hotKeyCache.peek("key1")).contains("newValue");
+  }
+
+  /**
+   * Verifies that putThrough throws HotKeyBlockedException when the key is blacklisted.
+   */
+  @Test
+  void putThrough_withBlacklistedKey_shouldThrow() {
+    hotKeyCache.addBlacklist("secret");
+    assertThatThrownBy(() -> hotKeyCache.putThrough("secret", "value", () -> {}))
+      .isInstanceOf(HotKeyBlockedException.class)
+      .hasFieldOrPropertyWithValue("cacheKey", "secret");
+  }
+
+  /**
+   * Verifies that putThrough silently returns for invalid (null/blank) keys.
+   */
+  @Test
+  void putThrough_withInvalidKey_shouldSkip() {
+    hotKeyCache.putThrough(null, "value", () -> {});
+    hotKeyCache.putThrough("", "value", () -> {});
+    // No exception — silent skip
+  }
+
+  /**
+   * Verifies that putThrough caches a null value using the NullValue sentinel,
+   * which is transparently unwrapped to empty on peek.
+   */
+  @Test
+  void putThrough_withNullValue_shouldUseNullValueSentinel() {
+    hotKeyCache.putThrough("null-key", null, () -> {});
+
+    assertThat(hotKeyCache.peek("null-key")).isEmpty();
+  }
+
+  /**
+   * Verifies that putBeforeInvalidate with a failed mutation does NOT invalidate
+   * the cache entry (fault mode: writer exception).
+   */
+  @Test
+  void putBeforeInvalidate_whenMutationFails_shouldNotInvalidate() {
+    caffeineCache.put("key1", "original");
+    hotKeyCache.putBeforeInvalidate("key1", () -> { throw new RuntimeException("db-fail"); });
+
+    assertThat(hotKeyCache.peek("key1")).contains("original");
+  }
+
+  /**
+   * Verifies that putBeforeInvalidate throws HotKeyBlockedException when the key is blacklisted.
+   */
+  @Test
+  void putBeforeInvalidate_withBlacklistedKey_shouldThrow() {
+    hotKeyCache.addBlacklist("secret");
+    assertThatThrownBy(() -> hotKeyCache.putBeforeInvalidate("secret", () -> {}))
+      .isInstanceOf(HotKeyBlockedException.class)
+      .hasFieldOrPropertyWithValue("cacheKey", "secret");
+  }
+
+  /**
+   * Verifies that putBeforeInvalidate silently returns for invalid (null/blank) keys.
+   */
+  @Test
+  void putBeforeInvalidate_withInvalidKey_shouldSkip() {
+    caffeineCache.put("k", "v");
+    hotKeyCache.putBeforeInvalidate(null, () -> {});
+    hotKeyCache.putBeforeInvalidate("", () -> {});
+    // Entry untouched
+    assertThat(hotKeyCache.peek("k")).contains("v");
+  }
+
+  /**
+   * Verifies that addBlacklist with an invalid key is silently skipped.
+   */
+  @Test
+  void addBlacklist_withInvalidKey_shouldSkip() {
+    hotKeyCache.addBlacklist(null);
+    hotKeyCache.addBlacklist("");
+    assertThat(hotKeyCache.getAllRules()).isEmpty();
+  }
+
+  /**
+   * Verifies that addWhitelist with an invalid key is silently skipped.
+   */
+  @Test
+  void addWhitelist_withInvalidKey_shouldSkip() {
+    hotKeyCache.addWhitelist(null);
+    hotKeyCache.addWhitelist("");
+    assertThat(hotKeyCache.getAllRules()).isEmpty();
+  }
+
+  /**
+   * Verifies that isBlacklisted returns true for a blacklisted key.
+   */
+  @Test
+  void isBlacklisted_shouldReturnTrue() {
+    hotKeyCache.addBlacklist("secret");
+    assertThat(hotKeyCache.isBlacklisted("secret")).isTrue();
+    assertThat(hotKeyCache.isBlacklisted("other")).isFalse();
+  }
+
+  /**
+   * Verifies that isWhitelisted returns true for a whitelisted key.
+   */
+  @Test
+  void isWhitelisted_shouldReturnTrue() {
+    hotKeyCache.addWhitelist("allowed");
+    assertThat(hotKeyCache.isWhitelisted("allowed")).isTrue();
+    assertThat(hotKeyCache.isWhitelisted("other")).isFalse();
+  }
+
+  /**
+   * Verifies that unBlacklist removes a blacklist rule.
+   */
+  @Test
+  void unBlacklist_shouldRemoveRule() {
+    hotKeyCache.addBlacklist("secret");
+    assertThat(hotKeyCache.isBlacklisted("secret")).isTrue();
+    hotKeyCache.unBlacklist("secret");
+    assertThat(hotKeyCache.isBlacklisted("secret")).isFalse();
+  }
+
+  /**
+   * Verifies that unBlacklist with an invalid key is silently skipped.
+   */
+  @Test
+  void unBlacklist_withInvalidKey_shouldSkip() {
+    hotKeyCache.addBlacklist("secret");
+    hotKeyCache.unBlacklist(null);
+    hotKeyCache.unBlacklist("");
+    assertThat(hotKeyCache.isBlacklisted("secret")).isTrue();
+  }
+
+  /**
+   * Verifies that unWhitelist removes a whitelist rule.
+   */
+  @Test
+  void unWhitelist_shouldRemoveRule() {
+    hotKeyCache.addWhitelist("allowed");
+    assertThat(hotKeyCache.isWhitelisted("allowed")).isTrue();
+    hotKeyCache.unWhitelist("allowed");
+    assertThat(hotKeyCache.isWhitelisted("allowed")).isFalse();
+  }
+
+  /**
+   * Verifies that evaluateRule returns the expected action for blacklisted keys.
+   */
+  @Test
+  void evaluateRule_shouldReturnBlockForBlacklistedKey() {
+    hotKeyCache.addBlacklist("secret");
+    assertThat(hotKeyCache.evaluateRule("secret")).isEqualTo(RuleAction.BLOCK);
+    assertThat(hotKeyCache.evaluateRule("other")).isEqualTo(RuleAction.ALLOW);
+  }
+
+  /**
+   * Verifies that getAllRules returns the current set of rules.
+   */
+  @Test
+  void getAllRules_shouldReturnCurrentRules() {
+    hotKeyCache.addBlacklist("key1");
+    hotKeyCache.addBlacklist("key2");
+    assertThat(hotKeyCache.getAllRules()).hasSize(2);
+  }
+
+  /**
+   * Verifies that clearAllRules removes all rules.
+   */
+  @Test
+  void clearAllRules_shouldRemoveAllRules() {
+    hotKeyCache.addBlacklist("key1");
+    hotKeyCache.addBlacklist("key2");
+    assertThat(hotKeyCache.getAllRules()).hasSize(2);
+    hotKeyCache.clearAllRules();
+    assertThat(hotKeyCache.getAllRules()).isEmpty();
+  }
+
+  /**
+   * Verifies that estimatedSize returns a positive count for cached entries.
+   */
+  @Test
+  void estimatedSize_shouldReturnEstimate() {
+    caffeineCache.put("k1", "v1");
+    assertThat(hotKeyCache.estimatedSize()).isPositive();
+  }
+
+  /**
+   * Verifies that invalidateAll (no-arg) clears all cache entries (emergency flush).
+   */
+  @Test
+  void invalidateAll_noArg_shouldClearAll() {
+    caffeineCache.put("k1", "v1");
+    caffeineCache.put("k2", "v2");
+    assertThat(caffeineCache.estimatedSize()).isPositive();
+    hotKeyCache.invalidateAll();
+    assertThat(caffeineCache.estimatedSize()).isZero();
+  }
+
+  /**
+   * Verifies that getWithSoftExpire with an ALLOW_NO_REPORT rule does not report
+   * and returns the cached value normally.
+   */
+  @Test
+  void getWithSoftExpire_withNoReportRule_shouldReturnCached() {
+    hotKeyCache.addWhitelist("no-report");
+    caffeineCache.put("no-report", CacheEntry.builder()
+      .value("v").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 60_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    assertThat(hotKeyCache.getWithSoftExpire("no-report", () -> "fresh")).contains("v");
   }
 }

@@ -102,4 +102,42 @@ class WorkerBroadcasterTest {
     long v3 = (Long) messageCaptor.getAllValues().get(3).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
     assertThat(v3).isGreaterThan(v0);
   }
+
+  /**
+   * Verifies that broadcasting with an empty key string does not fail.
+   */
+  @Test
+  void shouldHandleEmptyKey() {
+    broadcaster.broadcastHot("", "source");
+    verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
+    assertThat(new String(messageCaptor.getValue().getBody())).isEmpty();
+  }
+
+  /**
+   * Verifies that {@code getCurrentDecisionVersion} returns the current value
+   * without incrementing it.
+   */
+  @Test
+  void getCurrentDecisionVersionShouldNotIncrement() {
+    long v1 = broadcaster.getCurrentDecisionVersion();
+    long v2 = broadcaster.getCurrentDecisionVersion();
+    assertThat(v2).isEqualTo(v1);
+  }
+
+  /**
+   * Verifies that broadcastHot and broadcastCool both increment the decision version.
+   */
+  @Test
+  void bothHotAndCoolShouldIncrementDecisionVersion() {
+    broadcaster.broadcastHot("k1", "s1");
+    broadcaster.broadcastCool("k2");
+    broadcaster.broadcastHot("k3", "s1");
+
+    verify(rabbitTemplate, times(3)).send(any(), any(), messageCaptor.capture());
+    long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
+    long v1 = (Long) messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
+    long v2 = (Long) messageCaptor.getAllValues().get(2).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
+    assertThat(v1).isGreaterThan(v0);
+    assertThat(v2).isGreaterThan(v1);
+  }
 }

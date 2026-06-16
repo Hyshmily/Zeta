@@ -93,6 +93,25 @@ class RingEndpointTest {
   }
 
   @Test
+  void keyMapping_shouldThrowWhenKeyIsBlank() {
+    assertThatThrownBy(() -> endpoint.keyMapping("   "))
+      .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void keyMapping_shouldHandleSingleCharacterKey() {
+    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    when(healthViewProvider.getIfAvailable()).thenReturn(healthView);
+    when(ringManager.routeNode(eq("x"), any(ClusterHealthView.class))).thenReturn("worker-1");
+
+    Map<String, Object> result = endpoint.keyMapping("x");
+
+    assertThat(result)
+      .containsEntry("key", "x")
+      .containsEntry("nodeId", "worker-1");
+  }
+
+  @Test
   void addNode_shouldDelegateToRingManager() {
     Map<String, Object> result = endpoint.addNode(Map.of("nodeId", "new-node"));
 

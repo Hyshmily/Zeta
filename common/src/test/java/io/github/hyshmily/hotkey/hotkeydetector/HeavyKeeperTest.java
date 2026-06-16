@@ -21,7 +21,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -222,5 +224,147 @@ class HeavyKeeperTest {
     executor.shutdown();
     assertThat(errors.get()).isZero();
     assertThat(keeper.total()).isEqualTo((long) threadCount * iterations);
+  }
+
+  @Test
+  void addDirect_shouldThrowOnNullKey() {
+    assertThatThrownBy(() -> keeper.addDirect(null, 1))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void addDirect_shouldHandleEmptyStringKey() {
+    AddResult result = keeper.addDirect("", 10);
+    assertThat(result.isHotKey()).isTrue();
+    assertThat(result.currentKey()).isEmpty();
+  }
+
+  @Test
+  void addDirect_shouldHandleVeryLongKey() {
+    String longKey = "a".repeat(10000);
+    AddResult result = keeper.addDirect(longKey, 50);
+    assertThat(result.isHotKey()).isTrue();
+    assertThat(keeper.contains(longKey)).isTrue();
+  }
+
+  @Test
+  void addDirect_shouldHandleIncrementZero() {
+    AddResult result = keeper.addDirect("key1", 0);
+    assertThat(result.isHotKey()).isFalse();
+    assertThat(keeper.total()).isZero();
+  }
+
+  @Test
+  void addDirect_shouldAccumulateSameKey() {
+    for (int i = 0; i < 10; i++) {
+      keeper.addDirect("key1", 5);
+    }
+    assertThat(keeper.contains("key1")).isTrue();
+    assertThat(keeper.total()).isEqualTo(50);
+  }
+
+  @Test
+  void addDirectMap_shouldHandleEmptyMap() {
+    List<AddResult> results = keeper.addDirect(Map.of());
+    assertThat(results).isEmpty();
+  }
+
+  @Test
+  void addDirectMap_shouldThrowOnNullMap() {
+    assertThatThrownBy(() -> keeper.addDirect((Map<String, Long>) null))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void addDirectMap_shouldThrowOnNullKeyInMap() {
+    Map<String, Long> map = new HashMap<>();
+    map.put(null, 10L);
+    assertThatThrownBy(() -> keeper.addDirect(map))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void addDirectMap_shouldThrowOnNullValueInMap() {
+    Map<String, Long> map = new HashMap<>();
+    map.put("key1", null);
+    assertThatThrownBy(() -> keeper.addDirect(map))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void listTopN_shouldReturnEmptyWhenNoHotKeys() {
+    assertThat(keeper.listTopN(5)).isEmpty();
+  }
+
+  @Test
+  void listTopN_shouldReturnEmptyWhenNIsZero() {
+    keeper.addDirect("key1", 50);
+    assertThat(keeper.listTopN(0)).isEmpty();
+  }
+
+  @Test
+  void listTopN_shouldThrowWhenNIsNegative() {
+    keeper.addDirect("key1", 50);
+    assertThatThrownBy(() -> keeper.listTopN(-1))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void fading_shouldHandleEmptyStructure() {
+    keeper.fading();
+    assertThat(keeper.list()).isEmpty();
+    assertThat(keeper.total()).isZero();
+  }
+
+  @Test
+  void fading_shouldHandleMultipleFadingCalls() {
+    keeper.addDirect("key1", 100);
+    for (int i = 0; i < 5; i++) {
+      keeper.fading();
+    }
+    long totalAfter = keeper.total();
+    assertThat(totalAfter).isPositive();
+    assertThat(totalAfter).isLessThan(100);
+  }
+
+  @Test
+  void fading_shouldRemoveKeysWithCountOne() {
+    HeavyKeeper lowMinKeeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1);
+    lowMinKeeper.addDirect("key1", 1);
+    assertThat(lowMinKeeper.contains("key1")).isTrue();
+    lowMinKeeper.fading();
+    assertThat(lowMinKeeper.contains("key1")).isFalse();
+  }
+
+  @Test
+  void contains_shouldReturnFalseForExpelledKey() {
+    for (int i = 0; i < TOP_K; i++) {
+      keeper.addDirect("key" + i, 50);
+    }
+    keeper.addDirect("newKey", 100);
+    assertThat(keeper.contains("key0")).isFalse();
+  }
+
+  @Test
+  void concurrentAddSameKey_shouldBeThreadSafe() throws InterruptedException {
+    int threadCount = 10;
+    int iterations = 100;
+    ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+    CountDownLatch latch = new CountDownLatch(threadCount);
+    for (int t = 0; t < threadCount; t++) {
+      executor.submit(() -> {
+        try {
+          for (int i = 0; i < iterations; i++) {
+            keeper.addDirect("sameKey", 1);
+          }
+        } finally {
+          latch.countDown();
+        }
+      });
+    }
+    assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+    executor.shutdown();
+    assertThat(keeper.total()).isEqualTo((long) threadCount * iterations);
+    assertThat(keeper.contains("sameKey")).isTrue();
   }
 }

@@ -28,7 +28,11 @@ import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -290,5 +294,211 @@ class CacheExpireManagerTest {
   void hotSoftExpireAt_producesPositiveTimestamp() {
     long hot = expireManager.computeHotSoftExpireAt();
     assertThat(hot).isGreaterThan(System.currentTimeMillis());
+  }
+
+  /**
+   * Verifies that isSoftExpired with softExpireAtMs=Long.MAX_VALUE returns false
+   * (MAX_VALUE means never soft-expire).
+   */
+  @Test
+  void isSoftExpired_withMaxValue_shouldReturnFalse() {
+    caffeineCache.put("perm", CacheEntry.builder()
+      .value("v").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(Long.MAX_VALUE).softExpireAtMs(Long.MAX_VALUE)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+    assertThat(expireManager.isSoftExpired("perm")).isFalse();
+  }
+
+  /**
+   * Verifies that isSoftExpired with softExpireAtMs=0 returns true
+   * (zero means immediately expired).
+   */
+  @Test
+  void isSoftExpired_withZeroExpireAt_shouldReturnTrue() {
+    caffeineCache.put("zero", CacheEntry.builder()
+      .value("v").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(0).softExpireAtMs(0)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+    assertThat(expireManager.isSoftExpired("zero")).isTrue();
+  }
+
+  /**
+   * Verifies that computeSoftExpireAt passes Long.MAX_VALUE through unchanged.
+   */
+  @Test
+  void computeSoftExpireAt_withMaxValue_shouldPassthrough() {
+    assertThat(expireManager.computeSoftExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that triggerBackgroundRefresh skips the cache update when the supplier
+   * returns null (fault mode: null supplier result).
+   */
+  @Test
+  void triggerBackgroundRefresh_withNullResult_shouldNotUpdateCache() throws InterruptedException {
+    Executor asyncExec = Executors.newCachedThreadPool();
+    CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("original").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    asyncExpire.triggerBackgroundRefresh("key", () -> null, 30_000);
+    Thread.sleep(200);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat((Object) entry.getValue()).isEqualTo("original");
+  }
+
+  /**
+   * Verifies that triggerBackgroundRefresh skips when the refresh limiter semaphore
+   * is exhausted (fault mode: limiter backpressure).
+   */
+  @Test
+  void triggerBackgroundRefresh_withExhaustedLimiter_shouldSkip() throws InterruptedException {
+    Executor asyncExec = Executors.newCachedThreadPool();
+    CacheExpireManager limited = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 1);
+
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("original").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    CountDownLatch blockLatch = new CountDownLatch(1);
+
+    // First call blocks the supplier, holding the only permit
+    limited.triggerBackgroundRefresh("key", () -> {
+      try {
+        blockLatch.await(5, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return "first-value";
+    }, 30_000);
+
+    // Give first call time to acquire the permit
+    Thread.sleep(50);
+
+    // Second refresh should fail tryAcquire and return immediately
+    limited.triggerBackgroundRefresh("key", () -> "second-value", 30_000);
+
+    // Entry should still be "original" (first hasn't completed yet)
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat((Object) entry.getValue()).isEqualTo("original");
+
+    blockLatch.countDown();
+  }
+
+  /**
+   * Verifies that triggerBackgroundRefresh deduplicates concurrent calls for the
+   * same key — only the first caller executes the supplier (per-key dedup).
+   */
+  @Test
+  void triggerBackgroundRefresh_withSameKey_shouldDeduplicate() throws InterruptedException {
+    Executor asyncExec = Executors.newCachedThreadPool();
+    CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("original").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    AtomicInteger counter = new AtomicInteger(0);
+    CountDownLatch blockLatch = new CountDownLatch(1);
+
+    // First call blocks the supplier
+    asyncExpire.triggerBackgroundRefresh("key", () -> {
+      counter.incrementAndGet();
+      try {
+        blockLatch.await(5, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return "first";
+    }, 30_000);
+
+    // Give first call time to register in pendingRefreshes
+    Thread.sleep(50);
+
+    // Second call for same key should be deduped (supplier not invoked)
+    asyncExpire.triggerBackgroundRefresh("key", () -> {
+      counter.incrementAndGet();
+      return "second";
+    }, 30_000);
+
+    blockLatch.countDown();
+    Thread.sleep(300);
+
+    assertThat(counter.get()).isEqualTo(1);
+  }
+
+  /**
+   * Verifies that triggerBackgroundRefresh with a supplier error logs the failure
+   * and leaves the existing entry intact (fault mode: supplier exception).
+   */
+  @Test
+  void triggerBackgroundRefresh_withSupplierError_shouldPreserveExistingEntry() throws InterruptedException {
+    Executor asyncExec = Executors.newCachedThreadPool();
+    CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("original").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    asyncExpire.triggerBackgroundRefresh("key", () -> {
+      throw new RuntimeException("refresh-failed");
+    }, 30_000);
+
+    Thread.sleep(200);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat((Object) entry.getValue()).isEqualTo("original");
+  }
+
+  /**
+   * Verifies that a key that is removed from the cache during an in-flight background
+   * refresh does not cause errors (fault mode: key evicted mid-refresh).
+   */
+  @Test
+  void triggerBackgroundRefresh_withEvictedKeyDuringRefresh_shouldNotError() throws InterruptedException {
+    Executor asyncExec = Executors.newCachedThreadPool();
+    CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("original").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    asyncExpire.triggerBackgroundRefresh("key", () -> {
+      caffeineCache.invalidate("key");
+      return "fresh-value";
+    }, 30_000);
+
+    Thread.sleep(200);
+
+    // Key was evicted in the supplier; the refresh compute should create a new entry
+    // because Optional.ofNullable(existing) will be empty, triggering orElseGet branch
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat((Object) entry.getValue()).isEqualTo("fresh-value");
   }
 }

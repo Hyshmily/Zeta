@@ -110,6 +110,167 @@ class WorkerListenerTest {
     return new Message(key.getBytes(StandardCharsets.UTF_8), props);
   }
 
+  /**
+   * Verifies that a HOT decision with SRE rate limiter rejecting is skipped.
+   */
+  @Test
+  void handleWorkerMessage_hot_withSreThrottling_shouldSkip() throws IOException {
+    SreRateLimiter limiter = mock(SreRateLimiter.class);
+    when(limiter.tryAcquire()).thenReturn(false);
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setWarmupJitterMs(0);
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    HotKeyProperties ttlConfig = new HotKeyProperties();
+    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    WorkerListener throttled = new WorkerListener(cache, k -> "v", props, sched, expireManager, limiter);
+
+    cache.put("key1", hotEntry());
+    throttled.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    verify(limiter).onFailed();
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(1);
+  }
+
+  /**
+   * Verifies that a HOT decision with null Redis value and no degraded entry returns without promoting.
+   */
+  @Test
+  void handleWorkerMessage_hot_withNullRedisValueNoDegradedEntry_shouldReturn() throws IOException {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setWarmupJitterMs(0);
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    HotKeyProperties ttlConfig = new HotKeyProperties();
+    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    WorkerListener nullLoader = new WorkerListener(cache, k -> null, props, sched, expireManager, null);
+
+    nullLoader.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    assertThat(cache.getIfPresent("missing")).isNull();
+  }
+
+  /**
+   * Verifies that a HOT decision with Redis exception and an existing degraded entry falls back to the degraded value.
+   */
+  @Test
+  void handleWorkerMessage_hot_withRedisExceptionAndDegradedEntry_shouldUseDegraded() throws IOException {
+    cache.put("key1", CacheEntry.builder()
+      .value("degraded-val")
+      .dataVersion(-10)
+      .isVersionDegraded(true)
+      .decisionVersion(1)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000)
+      .softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.NORMAL)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
+      .build());
+
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setWarmupJitterMs(0);
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    HotKeyProperties ttlConfig = new HotKeyProperties();
+    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    WorkerListener failingLoader = new WorkerListener(cache, k -> { throw new RuntimeException("Redis down"); }, props, sched, expireManager, null);
+
+    failingLoader.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    assertThat(cache.getIfPresent("key1")).satisfies(o -> {
+      CacheEntry ce = (CacheEntry) o;
+      assertThat(ce.getValue()).isEqualTo("degraded-val");
+      assertThat(ce.getKeyState()).isEqualTo(KeyState.HOT);
+    });
+  }
+
+  /**
+   * Verifies that a HOT decision with stale decision version is skipped via version guard.
+   */
+  @Test
+  void handleWorkerMessage_hot_withStaleDecisionVersion_shouldSkip() throws IOException {
+    cache.put("key1", hotEntry());
+    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 1L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(1);
+  }
+
+  /**
+   * Verifies that a COOL decision with no existing entry is a no-op.
+   */
+  @Test
+  void handleWorkerMessage_cool_withNoExistingEntry_shouldBeNoOp() throws IOException {
+    listener.handleWorkerMessage(channel, workerMessage("nonexistent", WorkerMessage.TYPE_COOL, 2L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    assertThat(cache.getIfPresent("nonexistent")).isNull();
+  }
+
+  /**
+   * Verifies that a COOL decision with stale decision version is skipped.
+   */
+  @Test
+  void handleWorkerMessage_cool_withStaleDecisionVersion_shouldSkip() throws IOException {
+    cache.put("key1", hotEntry());
+    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 0L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * Verifies that an empty body worker message is acknowledged without cache interaction.
+   */
+  @Test
+  void handleWorkerMessage_emptyBody_shouldAck() throws IOException {
+    Message msg = new Message(new byte[0], new MessageProperties());
+    listener.handleWorkerMessage(channel, msg);
+    verify(channel).basicAck(anyLong(), anyBoolean());
+  }
+
+  /**
+   * Verifies that a null type header is handled gracefully.
+   */
+  @Test
+  void handleWorkerMessage_nullType_shouldAck() throws IOException {
+    MessageProperties props = new MessageProperties();
+    Message msg = new Message("key1".getBytes(StandardCharsets.UTF_8), props);
+    listener.handleWorkerMessage(channel, msg);
+    verify(channel).basicAck(anyLong(), anyBoolean());
+  }
+
+  /**
+   * Verifies that an unknown worker message type is acknowledged and ignored.
+   */
+  @Test
+  void handleWorkerMessage_unknownType_shouldAck() throws IOException {
+    Message msg = workerMessage("key1", "UNKNOWN", 1L);
+    listener.handleWorkerMessage(channel, msg);
+    verify(channel).basicAck(anyLong(), anyBoolean());
+  }
+
+  /**
+   * Verifies that a HOT decision on a normal entry promotes to HOT and calls SRE onSuccess.
+   */
+  @Test
+  void handleWorkerMessage_hot_withSreSuccess_shouldCallOnSuccess() throws IOException {
+    SreRateLimiter limiter = mock(SreRateLimiter.class);
+    when(limiter.tryAcquire()).thenReturn(true);
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setWarmupJitterMs(0);
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    HotKeyProperties ttlConfig = new HotKeyProperties();
+    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    WorkerListener throttled = new WorkerListener(cache, k -> "fresh", props, sched, expireManager, limiter);
+
+    cache.put("key1", entry(1, false, 0));
+    throttled.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    verify(limiter).onSuccess();
+    assertThat(cache.getIfPresent("key1")).satisfies(o -> {
+      CacheEntry ce = (CacheEntry) o;
+      assertThat(ce.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(ce.getDecisionVersion()).isEqualTo(2L);
+    });
+  }
+
   private static CacheEntry hotEntry() {
     return CacheEntry.builder()
       .value("v")
@@ -121,6 +282,22 @@ class WorkerListenerTest {
       .softTtlMs(300_000)
       .softExpireAtMs(System.currentTimeMillis() + 300_000)
       .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
+      .build();
+  }
+
+  private static CacheEntry entry(long dataVersion, boolean degraded, long decisionVersion) {
+    return CacheEntry.builder()
+      .value("v")
+      .dataVersion(dataVersion)
+      .isVersionDegraded(degraded)
+      .decisionVersion(decisionVersion)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000)
+      .softExpireAtMs(30_000)
+      .keyState(KeyState.NORMAL)
       .normalHardTtlMs(300_000)
       .normalSoftTtlMs(30_000)
       .build();

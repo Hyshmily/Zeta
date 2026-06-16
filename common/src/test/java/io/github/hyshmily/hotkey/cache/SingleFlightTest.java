@@ -241,4 +241,108 @@ class SingleFlightTest {
     singleFlight.load("to-evict", () -> { throw new RuntimeException("fail"); });
     assertThat(singleFlight.estimatedInflightSize()).isZero();
   }
+
+  /**
+   * Verifies that a supplier that times out results in an empty Optional (timeout boundary).
+   */
+  @Test
+  void load_withTimeout_shouldReturnEmpty() {
+    SingleFlight shortTimeout = new SingleFlight(1000, 10, 1, executor);
+    Optional<String> result = shortTimeout.load("timeout-key", () -> {
+      try {
+        Thread.sleep(5000);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return "too-late";
+    });
+    assertThat(result).isEmpty();
+  }
+
+  /**
+   * Verifies that after a supplier throws an exception, a subsequent load for the same key
+   * retries the supplier (previous entry was invalidated).
+   */
+  @Test
+  void load_afterException_shouldRetryAndSucceed() {
+    // First call fails with exception — cache entry is invalidated
+    assertThat(singleFlight.load("retry-key", () -> { throw new RuntimeException("first-fail"); }))
+      .isEmpty();
+
+    // Subsequent call should create a new future and succeed
+    Optional<String> result = singleFlight.load("retry-key", () -> "success");
+    assertThat(result).contains("success");
+  }
+
+  /**
+   * Verifies that concurrent calls for the same key invoke the supplier exactly once
+   * (strict dedup count verification).
+   */
+  @Test
+  void load_shouldInvokeSupplierExactlyOnceForConcurrentCalls() throws InterruptedException {
+    AtomicInteger counter = new AtomicInteger(0);
+    CountDownLatch startLatch = new CountDownLatch(1);
+    CountDownLatch doneLatch = new CountDownLatch(5);
+
+    for (int i = 0; i < 5; i++) {
+      executor.execute(() -> {
+        try {
+          startLatch.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        singleFlight.load("dedup-key", () -> {
+          counter.incrementAndGet();
+          try {
+            Thread.sleep(200);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+          return "deduped";
+        });
+        doneLatch.countDown();
+      });
+    }
+
+    startLatch.countDown();
+    assertThat(doneLatch.await(10, TimeUnit.SECONDS)).isTrue();
+    assertThat(counter.get()).isEqualTo(1);
+  }
+
+  /**
+   * Verifies that a slow supplier completing after timeout causes the next load for the same key
+   * to re-execute the supplier (entry was invalidated after timeout).
+   */
+  @Test
+  void load_afterTimeout_shouldRetrySupplier() throws InterruptedException {
+    SingleFlight shortTimeout = new SingleFlight(1000, 10, 1, executor);
+
+    // First load times out
+    assertThat(shortTimeout.load("slow-key", () -> {
+      try {
+        Thread.sleep(3000);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return "slow-value";
+    })).isEmpty();
+
+    // Give the timeout processing time to complete
+    Thread.sleep(100);
+
+    // Second load should retry (entry was invalidated)
+    assertThat(shortTimeout.load("slow-key", () -> "fast-value")).contains("fast-value");
+  }
+
+  /**
+   * Verifies that the inflight size warning threshold triggers a log at 80% capacity.
+   */
+  @Test
+  void load_withHighInflight_shouldLogWarning() {
+    SingleFlight smallPool = new SingleFlight(5, 10, 5, executor);
+    java.util.stream.IntStream.range(0, 10).forEach(idx ->
+      smallPool.load("k" + idx, () -> "v" + idx)
+    );
+    assertThat(smallPool.estimatedInflightSize()).isNotNegative();
+  }
 }

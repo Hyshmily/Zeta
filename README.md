@@ -260,8 +260,6 @@ hotkey:
   # Feature toggles
   report:
     enabled: true                           # App→Worker reporting
-  sync:
-    enabled: false                          # cross-instance sync (requires Redis + RabbitMQ)
   scheduling:
     enabled: true                           # periodic decay & expelled cleanup
   decay-period: 20                          # HeavyKeeper fading interval (s), effective when scheduling enabled
@@ -437,7 +435,7 @@ public String getUserName(String userId) {
 > | Approach                       | HotKey's stance                                                              |
 > | ------------------------------ | ---------------------------------------------------------------------------- |
 > | `NULL_SENTINEL` sentinel value | Caller implements in the `reader` (demonstrated above)                       |
-> | `@Blacklist` rule engine       | Built-in — blocks known attack patterns like `user:-\d+`                     |
+> | Blacklist rule engine       | Built-in — blocks known attack patterns like `user:-\d+`                     |
 > | Bloom filter (Guava)           | Caller adds in the `reader` — false positive cost is caller's responsibility |
 > | Gateway-layer (Nginx/WAF)      | Most effective — intercepted before reaching the application                 |
 >
@@ -503,8 +501,7 @@ public class CollectionHotKeyCache {
     return hotKey.get(key + "::member::" + member, () -> redisTemplate.opsForSet().isMember(key, member));
   }
 
-  @SuppressWarnings("unchecked")
-  public Set<Object> sMembers(String key) {
+  public Optional<Set<Object>> sMembers(String key) {
     return hotKey.get(key, () -> redisTemplate.opsForSet().members(key));
   }
 
@@ -512,12 +509,12 @@ public class CollectionHotKeyCache {
     hotKey.putBeforeInvalidate(key, () -> redisTemplate.opsForSet().add(key, members));
   }
 
-  public List<Object> lRange(String key, long start, long end) {
+  public Optional<List<Object>> lRange(String key, long start, long end) {
     String cacheKey = key + "::range::" + start + "::" + end;
     return hotKey.get(cacheKey, () -> redisTemplate.opsForList().range(key, start, end));
   }
 
-  public Double zScore(String key, Object member) {
+  public Optional<Double> zScore(String key, Object member) {
     return hotKey.get(key + "::score::" + member, () -> redisTemplate.opsForZSet().score(key, member));
   }
 }
@@ -587,7 +584,7 @@ By default, hot keys and normal keys use different TTLs. Per-entry TTLs can be s
 
 ```java
 // 5min hard TTL + 30s soft TTL
-Optional<Shop> shop = hotKey.get("shop:" + shopId,
+Optional<String> shopJson = hotKey.get("shop:" + shopId,
     () -> redisTemplate.opsForValue().get("shop:" + shopId),
     TimeUnit.MINUTES.toMillis(5),   // hardTtlMs
     TimeUnit.SECONDS.toMillis(30)); // softTtlMs

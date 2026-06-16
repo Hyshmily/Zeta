@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.hotkeydetector.doublebuffer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -194,5 +195,48 @@ class BufferedCounterTest {
     assertThat(merged)
         .containsEntry("before_switch", 1L)
         .containsEntry("after_switch", 1L);
+  }
+
+  @Test
+  void count_shouldThrowOnNullKey() {
+    assertThatThrownBy(() -> counter.count(null, 1))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void count_shouldHandleZeroDelta() {
+    counter.count("key1", 0);
+    counter.destroy();
+    assertThat(batches).isEmpty();
+  }
+
+  @Test
+  void count_shouldHandleNegativeDelta() {
+    counter.count("key1", 5);
+    counter.count("key1", -3);
+    counter.destroy();
+    assertThat(batches).hasSize(1);
+    assertThat(batches.get(0)).containsEntry("key1", 2L);
+  }
+
+  @Test
+  void destroy_shouldBeIdempotent() {
+    counter.destroy();
+    counter.destroy();
+  }
+
+  @Test
+  void consumerException_shouldNotPropagate() throws Exception {
+    List<Map<String, Long>> failingBatches = new ArrayList<>();
+    Consumer<Map<String, Long>> throwingConsumer = batch -> {
+      failingBatches.add(batch);
+      throw new RuntimeException("simulated consumer failure");
+    };
+    BufferedCounter throwingCounter = new BufferedCounter(throwingConsumer);
+    throwingCounter.afterPropertiesSet();
+    throwingCounter.count("key1", 10);
+    Thread.sleep(600);
+    throwingCounter.destroy();
+    assertThat(failingBatches).isNotEmpty();
   }
 }

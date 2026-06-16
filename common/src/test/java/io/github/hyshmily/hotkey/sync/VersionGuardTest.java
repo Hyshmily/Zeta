@@ -127,6 +127,57 @@ class VersionGuardTest {
     assertThat(VersionGuard.shouldSkipForWorker(cache, "missing", 1)).isFalse();
   }
 
+  /**
+   * Verifies that for two normal entries with equal version, the sync is skipped.
+   */
+  @Test
+  void shouldSkipForSync_bothNormalEqualVersion_shouldSkip() {
+    cache.put("key", entry(5, false, 0));
+    assertThat(VersionGuard.shouldSkipForSync(cache, "key", 5, false)).isTrue();
+  }
+
+  /**
+   * Verifies that a degraded incoming message to a non-existent entry should not skip.
+   */
+  @Test
+  void shouldSkipForSync_noExistingEntryDegradedIncoming_shouldNotSkip() {
+    assertThat(VersionGuard.shouldSkipForSync(cache, "missing", 1, true)).isFalse();
+  }
+
+  /**
+   * Verifies the CacheEntry-overload shouldSkipForSync with null existing entry returns false.
+   */
+  @Test
+  void shouldSkipForSync_cacheEntryOverload_withNull_shouldNotSkip() {
+    assertThat(VersionGuard.shouldSkipForSync((CacheEntry) null, 1, false)).isFalse();
+  }
+
+  /**
+   * Verifies the CacheEntry-overload shouldSkipForWorker with null existing entry returns false.
+   */
+  @Test
+  void shouldSkipForWorker_cacheEntryOverload_withNull_shouldNotSkip() {
+    assertThat(VersionGuard.shouldSkipForWorker(null, 1)).isFalse();
+  }
+
+  /**
+   * Verifies that a worker decision with equal decision version to existing normal entry is skipped.
+   */
+  @Test
+  void shouldSkipForWorker_existingNormalEqualVersion_shouldSkip() {
+    cache.put("key", entry(5, false, 10));
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 10)).isTrue();
+  }
+
+  /**
+   * Verifies that both-degraded scenario is skipped when existing degraded version equals incoming.
+   */
+  @Test
+  void shouldSkipForSync_bothDegradedEqualVersion_shouldSkip() {
+    cache.put("key", entry(10, true, 0));
+    assertThat(VersionGuard.shouldSkipForSync(cache, "key", 10, true)).isTrue();
+  }
+
   private static CacheEntry entry(long dataVersion, boolean degraded, long decisionVersion) {
     return CacheEntry.builder()
       .value("v")

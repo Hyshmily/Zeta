@@ -89,4 +89,74 @@ class SyncMessageTest {
     assertThat(SyncMessage.TYPE_REFRESH).isEqualTo("REFRESH");
     assertThat(SyncMessage.TYPE_INVALIDATE).isEqualTo("INVALIDATE");
   }
+
+  /**
+   * Verifies that INVALIDATE_ALL type bypasses the key validity check and accepts a body that would be invalid for non-batch types.
+   */
+  @Test
+  void from_withInvalidateAllType_shouldSkipKeyValidityCheck() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+    Message msg = new Message("   ".getBytes(StandardCharsets.UTF_8), props);
+    assertThat(SyncMessage.from(msg)).isNotNull();
+  }
+
+  /**
+   * Verifies that RULES_SYNC type bypasses the key validity check and accepts a payload body.
+   */
+  @Test
+  void from_withRulesSyncType_shouldSkipKeyValidityCheck() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
+    Message msg = new Message("payload".getBytes(StandardCharsets.UTF_8), props);
+    assertThat(SyncMessage.from(msg)).isNotNull();
+  }
+
+  /**
+   * Verifies that a version header stored as Integer (not Long) is parsed correctly.
+   */
+  @Test
+  void from_withVersionHeaderAsInteger_shouldHandleCorrectly() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_REFRESH);
+    props.setHeader(AMQP_HEADER_VERSION, 42);
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    SyncMessage sm = SyncMessage.from(msg);
+    assertThat(sm.version()).isEqualTo(42L);
+  }
+
+  /**
+   * Verifies that an isVersionDegraded header with a non-Boolean type defaults to false.
+   */
+  @Test
+  void from_withVersionDegradedHeaderAsString_shouldDefaultToFalse() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_REFRESH);
+    props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, "true");
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    SyncMessage sm = SyncMessage.from(msg);
+    assertThat(sm.isVersionDegraded()).isFalse();
+  }
+
+  /**
+   * Verifies that a null type header with a valid key body is parsed but type is null.
+   */
+  @Test
+  void from_withNullTypeHeader_shouldReturnMessageWithNullType() {
+    MessageProperties props = new MessageProperties();
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    SyncMessage sm = SyncMessage.from(msg);
+    assertThat(sm).isNotNull();
+    assertThat(sm.type()).isNull();
+    assertThat(sm.cacheKey()).isEqualTo("key");
+  }
+
+  /**
+   * Verifies the INVALIDATE_ALL and RULES_SYNC type constants exist.
+   */
+  @Test
+  void shouldHaveBatchTypeConstants() {
+    assertThat(SyncMessage.TYPE_INVALIDATE_ALL).isEqualTo("INVALIDATE_ALL");
+    assertThat(SyncMessage.TYPE_RULES_SYNC).isEqualTo("RULES_SYNC");
+  }
 }

@@ -16,6 +16,8 @@
 package io.github.hyshmily.hotkey.worker.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -120,5 +122,76 @@ class ThresholdLearnerTest {
     learner.run();
     // should not propagate exception
     verifyNoInteractions(detector);
+  }
+
+  /**
+   * Verifies that when tolerance is set to zero (or negative), all changes are applied
+   * unconditionally without the tolerance check.
+   */
+  @Test
+  void shouldApplyChangesUnconditionallyWhenToleranceIsZero() {
+    properties.getGlobalQpsDynamicThreshold().setQpsChangeTolerance(0);
+    when(qpsEstimator.getQps()).thenReturn(100.0);
+    when(detector.getThreshold()).thenReturn(500L);
+    ThresholdLearner learner = new ThresholdLearner(qpsEstimator, detector, properties);
+    learner.run();
+    // newThreshold = max(10, floor(100 * 0.01)) = 10 — tolerance check skipped
+    verify(detector).setThreshold(10L);
+  }
+
+  /**
+   * Verifies that negative QPS is treated the same as zero — the update
+   * is skipped.
+   */
+  @Test
+  void shouldSkipWhenQpsIsNegative() {
+    when(qpsEstimator.getQps()).thenReturn(-50.0);
+    ThresholdLearner learner = new ThresholdLearner(qpsEstimator, detector, properties);
+    learner.run();
+    verifyNoInteractions(detector);
+  }
+
+  /**
+   * Verifies that when the old threshold is zero, the change rate is computed as
+   * {@code Double.MAX_VALUE}, which always exceeds any tolerance, triggering an update.
+   */
+  @Test
+  void shouldUpdateWhenOldThresholdIsZero() {
+    when(qpsEstimator.getQps()).thenReturn(2000.0);
+    when(detector.getThreshold()).thenReturn(0L);
+    ThresholdLearner learner = new ThresholdLearner(qpsEstimator, detector, properties);
+    learner.run();
+    // newThreshold = max(10, floor(2000 * 0.01)) = 20
+    verify(detector).setThreshold(20L);
+  }
+
+  /**
+   * Verifies that an extremely high QPS value produces Long.MAX_VALUE after casting,
+   * and does not cause negative or erroneous values.
+   */
+  @Test
+  void shouldNotOverflowWithExtremeQpsValues() {
+    when(qpsEstimator.getQps()).thenReturn(Double.MAX_VALUE);
+    when(detector.getThreshold()).thenReturn(500L);
+    ThresholdLearner learner = new ThresholdLearner(qpsEstimator, detector, properties);
+    learner.run();
+    // (long)(Double.MAX_VALUE * 0.01) overflows to Long.MAX_VALUE
+    verify(detector).setThreshold(Long.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that when the tolerance exactly equals the change rate, the change is
+   * skipped because {@code changeRate <= tolerance} means "within tolerance".
+   */
+  @Test
+  void shouldSkipChangeWhenChangeRateEqualsTolerance() {
+    properties.getGlobalQpsDynamicThreshold().setQpsChangeTolerance(0.9);
+    when(qpsEstimator.getQps()).thenReturn(105.0);
+    when(detector.getThreshold()).thenReturn(100L);
+    ThresholdLearner learner = new ThresholdLearner(qpsEstimator, detector, properties);
+    learner.run();
+    // newThreshold = max(10, floor(105 * 0.01)) = 10
+    // changeRate = |10 - 100| / 100 = 0.9, tolerance = 0.9 → 0.9 <= 0.9 → skip
+    verify(detector, never()).setThreshold(anyLong());
   }
 }

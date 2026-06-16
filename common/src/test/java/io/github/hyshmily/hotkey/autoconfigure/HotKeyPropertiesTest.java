@@ -135,4 +135,95 @@ class HotKeyPropertiesTest {
     HotKeyProperties p = props();
     assertThat(p.effectiveConsumerCount()).isEqualTo(1);
   }
+
+  /**
+   * Verifies that effectiveConsumerCount returns max(1, 3/2)=1 when shardCount=3 and consumerCount=0.
+   */
+  @Test
+  void effectiveConsumerCount_shouldReturnMaxOfOneWhenShardCountThree() {
+    HotKeyProperties p = props();
+    p.setShardCount(3);
+    assertThat(p.effectiveConsumerCount()).isEqualTo(1);
+  }
+
+  /**
+   * Verifies that effectiveConsumerCount returns max(1, 5/2)=2 when shardCount=5 and consumerCount=0.
+   */
+  @Test
+  void effectiveConsumerCount_shouldReturnTwoWhenShardCountFive() {
+    HotKeyProperties p = props();
+    p.setShardCount(5);
+    assertThat(p.effectiveConsumerCount()).isEqualTo(2);
+  }
+
+  /**
+   * Verifies that effectiveHardTtlMs falls back to default when override is negative (negative > 0 is false).
+   */
+  @Test
+  void effectiveHardTtlMs_shouldUseDefaultWhenOverrideIsNegative() {
+    HotKeyProperties p = props();
+    p.setHardTtlMs(-100);
+    assertThat(p.effectiveHardTtlMs()).isEqualTo(300_000L);
+  }
+
+  /**
+   * Verifies that isSoftExpireEnabled returns true when only normal soft TTL is configured.
+   */
+  @Test
+  void isSoftExpireEnabled_shouldReturnTrueWhenOnlyNormalSoftTtlConfigured() {
+    HotKeyProperties p = props();
+    p.setDefaultHardTtlMs(0);
+    p.setHardTtlMs(0);
+    p.setDefaultHotSoftTtlMs(0);
+    p.setHotSoftTtlMs(0);
+    p.setDefaultSoftTtlMs(30_000);
+    assertThat(p.isSoftExpireEnabled()).isTrue();
+  }
+
+  /**
+   * Verifies the default values for the ConsistentHashing nested config.
+   */
+  @Test
+  void consistentHashing_shouldHaveDefaultValues() {
+    HotKeyProperties p = props();
+    assertThat(p.getConsistentHashing().isEnabled()).isTrue();
+    assertThat(p.getConsistentHashing().getVirtualNodes()).isEqualTo(500);
+  }
+
+  /**
+   * Verifies the default values for the Heartbeat nested config.
+   */
+  @Test
+  void heartbeat_shouldHaveDefaultValues() {
+    HotKeyProperties p = props();
+    assertThat(p.getHeartbeat().getExchangeName()).isEqualTo("hotkey.heartbeat.exchange");
+    assertThat(p.getHeartbeat().getTimeoutMs()).isEqualTo(3000);
+    assertThat(p.getHeartbeat().getVerifyIntervalMs()).isEqualTo(1500);
+    assertThat(p.getHeartbeat().getPingTimeoutMs()).isEqualTo(2000);
+    assertThat(p.getHeartbeat().getDegradeAfterFailures()).isEqualTo(2);
+  }
+
+  /**
+   * Verifies the default values for the ReporterLimiter nested config.
+   */
+  @Test
+  void reporterLimiter_shouldHaveDefaultValues() {
+    HotKeyProperties p = props();
+    assertThat(p.getReporter().getCpuThreshold()).isEqualTo(800);
+    assertThat(p.getReporter().getCpuPollIntervalMs()).isEqualTo(500);
+    assertThat(p.getReporter().getCpuDecay()).isEqualTo(0.95);
+    assertThat(p.getReporter().getBbrWindowMs()).isEqualTo(10_000);
+    assertThat(p.getReporter().getBbrWindowBuckets()).isEqualTo(100);
+    assertThat(p.getReporter().getBbrCooldownMs()).isEqualTo(1_000);
+  }
+
+  /**
+   * Verifies the default values for the SpringCache nested config.
+   */
+  @Test
+  void springCache_shouldHaveDefaultValues() {
+    HotKeyProperties p = props();
+    assertThat(p.getSpringCache().isEnabled()).isFalse();
+    assertThat(p.getSpringCache().getKeySeparator()).isEqualTo("::");
+  }
 }

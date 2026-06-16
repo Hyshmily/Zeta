@@ -33,9 +33,10 @@ import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.Ordered;
 import org.springframework.core.ParameterNameDiscoverer;
 import org.springframework.core.annotation.Order;
+import org.springframework.context.expression.MethodBasedEvaluationContext;
+import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
-import org.springframework.expression.spel.support.StandardEvaluationContext;
 
 /**
  * Companion AOP aspect for Spring {@link Cacheable @Cacheable} methods.
@@ -76,9 +77,6 @@ public class HotKeyCacheExtensionAspect {
 
   /** Cache of parsed SpEL expressions keyed by expression string. */
   private final Map<String, Expression> expressionCache = new ConcurrentHashMap<>();
-
-  /** Cache of method parameter name arrays, keyed by Method. */
-  private final Map<Method, String[]> paramNamesCache = new ConcurrentHashMap<>();
 
   /** Cache of resolved naming-convention fallback methods, keyed by original Method. */
   private final Map<Method, Method> fallbackMethodCache = new ConcurrentHashMap<>();
@@ -206,31 +204,19 @@ public class HotKeyCacheExtensionAspect {
   }
 
   /**
-   * Builds a {@link StandardEvaluationContext} with method parameters registered
-   * as context variables. Parameter names are resolved once and cached per method.
+   * Builds an {@link EvaluationContext} with method parameters registered
+   * as context variables via {@link MethodBasedEvaluationContext}.
    *
-   * @param pjp the join point providing method arguments
+   * @param pjp the join point providing method arguments and target
    * @return a configured evaluation context with method parameters as variables
    */
-  private StandardEvaluationContext buildEvaluationContext(ProceedingJoinPoint pjp) {
-    MethodSignature sig = (MethodSignature) pjp.getSignature();
-    Method method = sig.getMethod();
-    String[] names = paramNamesCache.computeIfAbsent(method, m -> {
-      String[] n = parameterNameDiscoverer.getParameterNames(m);
-      if (n == null) {
-        n = new String[m.getParameterCount()];
-        for (int i = 0; i < n.length; i++) {
-          n[i] = "arg" + i;
-        }
-      }
-      return n;
-    });
-    Object[] args = pjp.getArgs();
-    StandardEvaluationContext ctx = new StandardEvaluationContext();
-    for (int i = 0; i < args.length; i++) {
-      ctx.setVariable(names[i], args[i]);
-    }
-    return ctx;
+  private EvaluationContext buildEvaluationContext(ProceedingJoinPoint pjp) {
+    return new MethodBasedEvaluationContext(
+      pjp.getTarget(),
+      resolveMethod(pjp),
+      pjp.getArgs(),
+      parameterNameDiscoverer
+    );
   }
 
   /**

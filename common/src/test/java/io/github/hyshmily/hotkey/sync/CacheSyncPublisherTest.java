@@ -15,15 +15,18 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import io.github.hyshmily.hotkey.sync.CacheSyncProperties;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -82,5 +85,96 @@ class CacheSyncPublisherTest {
     publisher.broadcastLocalInvalidate("key1", 3L, false);
     publisher.broadcastLocalInvalidate("key1", 5L, false);
     verify(rabbitTemplate).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that broadcastLocalInvalidateAll with null keys is a no-op.
+   */
+  @Test
+  void broadcastLocalInvalidateAll_withNullKeys_shouldBeNoOp() {
+    publisher.broadcastLocalInvalidateAll(null);
+    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that broadcastLocalInvalidateAll with empty keys is a no-op.
+   */
+  @Test
+  void broadcastLocalInvalidateAll_withEmptyKeys_shouldBeNoOp() {
+    publisher.broadcastLocalInvalidateAll(List.of());
+    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that broadcastLocalInvalidateAll sends a message for non-empty keys.
+   */
+  @Test
+  void broadcastLocalInvalidateAll_withKeys_shouldSendMessage() {
+    publisher.broadcastLocalInvalidateAll(List.of("k1", "k2"));
+    verify(rabbitTemplate).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that broadcastAllLocalRules with null JSON is a no-op.
+   */
+  @Test
+  void broadcastAllLocalRules_withNullJson_shouldBeNoOp() {
+    publisher.broadcastAllLocalRules(null, 1L);
+    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that broadcastAllLocalRules with blank JSON is a no-op.
+   */
+  @Test
+  void broadcastAllLocalRules_withBlankJson_shouldBeNoOp() {
+    publisher.broadcastAllLocalRules("   ", 1L);
+    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that broadcastAllLocalRules sends a message for valid JSON.
+   */
+  @Test
+  void broadcastAllLocalRules_withValidJson_shouldSendMessage() {
+    publisher.broadcastAllLocalRules("{\"rules\":[]}", 1L);
+    verify(rabbitTemplate).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that broadcastRefresh with null key is skipped.
+   */
+  @Test
+  void broadcastRefresh_withNullKey_shouldSkip() {
+    publisher.broadcastRefresh(null, 1L, false);
+    verify(rabbitTemplate, never()).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that a newer version is not deduplicated by an older one.
+   */
+  @Test
+  void broadcastLocalInvalidate_newerVersion_shouldOverrideOld() {
+    publisher.broadcastLocalInvalidate("key1", 3L, false);
+    publisher.broadcastLocalInvalidate("key1", 5L, false);
+    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that getDedupCacheSize returns 0 before init.
+   */
+  @Test
+  void getDedupCacheSize_beforeInit_shouldReturnZero() {
+    CacheSyncPublisher p = new CacheSyncPublisher(rabbitTemplate, properties);
+    assertThat(p.getDedupCacheSize()).isZero();
+  }
+
+  /**
+   * Verifies that getDedupCacheSize returns a positive value after broadcasts.
+   */
+  @Test
+  void getDedupCacheSize_afterBroadcast_shouldReturnPositive() {
+    publisher.broadcastRefresh("key1", 1L, false);
+    assertThat(publisher.getDedupCacheSize()).isPositive();
   }
 }

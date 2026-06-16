@@ -57,4 +57,54 @@ class InstanceIdGeneratorTest {
     InstanceIdGenerator.setOverride("custom-instance");
     assertThat(InstanceIdGenerator.get()).isEqualTo("custom-instance");
   }
+
+  /**
+   * Verifies that a blank string override does not take precedence.
+   */
+  @Test
+  void setOverride_blankString_shouldNotOverride() {
+    InstanceIdGenerator.setOverride("  ");
+    var result = InstanceIdGenerator.get();
+    assertThat(result).isNotNull();
+    assertThat(result).isNotEqualTo("  ");
+  }
+
+  /**
+   * Verifies that setting override to null clears it and falls back to auto-detection.
+   */
+  @Test
+  void setOverride_null_shouldClearAndFallback() {
+    InstanceIdGenerator.setOverride("temp-override");
+    assertThat(InstanceIdGenerator.get()).isEqualTo("temp-override");
+    InstanceIdGenerator.setOverride(null);
+    var result = InstanceIdGenerator.get();
+    assertThat(result).isNotNull();
+    assertThat(result).isNotEqualTo("temp-override");
+  }
+
+  /**
+   * Verifies that getNodeId returns a stable value across multiple calls.
+   */
+  @Test
+  void getNodeId_shouldBeStable() {
+    assertThat(InstanceIdGenerator.getNodeId()).isEqualTo(InstanceIdGenerator.getNodeId());
+  }
+
+  /**
+   * Verifies that get() is thread-safe under concurrent access.
+   */
+  @Test
+  void get_shouldBeThreadSafe() throws Exception {
+    InstanceIdGenerator.setOverride(null);
+    var first = InstanceIdGenerator.get();
+    java.util.concurrent.ExecutorService exec = java.util.concurrent.Executors.newFixedThreadPool(4);
+    var futures = new java.util.ArrayList<java.util.concurrent.Future<String>>();
+    for (int i = 0; i < 10; i++) {
+      futures.add(exec.submit(InstanceIdGenerator::get));
+    }
+    for (var f : futures) {
+      assertThat(f.get()).isEqualTo(first);
+    }
+    exec.shutdown();
+  }
 }

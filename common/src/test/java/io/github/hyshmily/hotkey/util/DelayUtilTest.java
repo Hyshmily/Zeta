@@ -69,4 +69,53 @@ class DelayUtilTest {
     assertThat(executed).isTrue();
     scheduler.shutdown();
   }
+
+  /**
+   * Verifies that a very large jitter value still schedules the task.
+   */
+  @Test
+  void floatTimeDelay_largeJitter_shouldExecuteEventually() throws InterruptedException {
+    AtomicBoolean executed = new AtomicBoolean(false);
+    CountDownLatch latch = new CountDownLatch(1);
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
+    DelayUtil.floatTimeDelay(() -> {
+      executed.set(true);
+      latch.countDown();
+    }, 3_000, scheduler);
+
+    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(executed).isTrue();
+    scheduler.shutdown();
+  }
+
+  /**
+   * Verifies that a maximum jitter value of 1 schedules immediately (delay = nextLong(1) = 0).
+   */
+  @Test
+  void floatTimeDelay_jitterOfOne_shouldRunImmediately() {
+    AtomicBoolean executed = new AtomicBoolean(false);
+    DelayUtil.floatTimeDelay(() -> executed.set(true), 1, Executors.newSingleThreadScheduledExecutor());
+    assertThat(executed).isTrue();
+  }
+
+  /**
+   * Verifies that a null scheduler does not cause a NullPointerException when delay is zero.
+   */
+  @Test
+  void floatTimeDelay_zeroJitter_nullScheduler_shouldRunImmediately() {
+    AtomicBoolean executed = new AtomicBoolean(false);
+    DelayUtil.floatTimeDelay(() -> executed.set(true), 0, null);
+    assertThat(executed).isTrue();
+  }
+
+  /**
+   * Verifies that a null scheduler does not cause a NullPointerException when jitter is negative.
+   */
+  @Test
+  void floatTimeDelay_negativeJitter_nullScheduler_shouldRunImmediately() {
+    AtomicBoolean executed = new AtomicBoolean(false);
+    DelayUtil.floatTimeDelay(() -> executed.set(true), -5, null);
+    assertThat(executed).isTrue();
+  }
 }

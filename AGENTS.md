@@ -41,7 +41,7 @@ mvn source:jar                       # Generate source JAR (common only)
 | `model/` | Data types | `CacheEntry` (with `dataVersion` + `isVersionDegraded` + `decisionVersion`), `KeyState`, `HotKeyDecision` |
 | `detection/` | Worker state machine | `HotKeyStateMachine` |
 | `sharding/` | Consistent hash ring | `ConsistentHashRing`, `RingManager` |
-| `annotation/` | `@HotKey` + companions | `HotKeyAspect`, `@HotKeyCacheTTL`, `@Intercept`, `@Fallback` |
+| `annotation/` | `@Cacheable` companions | `HotKeyCacheExtensionAspect`, `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, `@NullCaching` |
 | `autoconfigure/` | Spring Boot auto-config | 8 auto-config classes |
 | `endpoint/` | Actuator endpoints | `HotKeyEndpoint`, `RingEndpoint`, `StateMachineEndpoint` |
 | `constants/` | Shared constants | `HotKeyConstants` (AMQP headers, thread prefixes, routing keys) |
@@ -62,7 +62,7 @@ Worker-only components (`worker/` module): `SlidingWindowDetector`, `TopKValidat
 - **Introspection:** `isLocalHotKey()`, `isWorkerHotKey()`, `returnLocalHotKeys()`, `returnWorkerHotKeys()`, `returnLocalExpelledHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnLocalTotalDataStreams()`, `returnWorkerTotalDataStreams()`, `estimatedSize()`, `stats()`, `getLocalCache()` (raw Caffeine — introspection only, never write through)
 - **Rule management:** `addBlacklist()`, `removeBlacklist()`, `addWhitelist()`, `removeWhitelist()`, `getAllRules()`, `evaluateRule()`, `isBlacklisted()`, `isWhitelisted()`, `clearAllRules()`, `broadcastAllLocalRulesManually()`
 
-`@HotKey` + `@HotKeyCacheTTL` + `@Intercept` + `@Fallback` — annotation-based entry point via `HotKeyAspect`.
+`@Cacheable` + `@HotKeyCacheTTL` + `@Intercept` + `@Fallback` — annotation-based entry point via `HotKeyCacheExtensionAspect`.
 
 ### Auto-Configuration
 
@@ -77,7 +77,7 @@ Registered in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfig
 | `HotKeyMicrometerAutoConfiguration` | `MeterBinder.class` on classpath | Caffeine metrics + custom business gauges |
 | `HotKeyAmqpAutoConfiguration` | `RabbitTemplate` present | Report, sync, worker-listener AMQP infrastructure |
 | `HotKeySchedulingConfiguration` | HotKeyDetector bean present | Periodic decay + expelled drain |
-| `HotKeyAnnotationAutoConfiguration` | `Aspect` + `HotKey` bean + `hotkey.annotation.enabled=true` | `HotKeyAspect` |
+| `HotKeySpringCacheAutoConfiguration` | `AbstractValueAdaptingCache` + `HotKey` bean + `hotkey.spring-cache.enabled=true` | `HotKeyCacheManager`, `HotKeyCacheExtensionAspect` |
 
 Worker module has its own `WorkerAutoConfiguration` (activated by `@SpringBootApplication` scan when `hotkey.worker.enabled=true`).
 
@@ -161,9 +161,9 @@ See `CONTEXT.md` for canonical definitions of **Local-Hot**, **Worker-Hot**, **W
 - **Decentralized Config Gossip:** State machine parameters propagate via heartbeat broadcasts (not config store). New Worker waits ≤3s for peer heartbeat.
 - **Logging:** ERROR for genuine failures, WARN for operational risks, DEBUG for expected edge cases. Never WARN/INFO on hot path. Never log inside `forEach`. Truncate unbounded `Collectors.joining()` with `.limit(N)`.
 
-## @HotKey Integration Tests
+## Annotation Integration (Spring Cache)
 
-See `HotKeyAnnotationIntegrationIT` (Testcontainers, tagged `docker`) in the `integration-tests` module. Covers: READ/WRITE/INVALIDATE operations, SpEL key resolution, `softExpire` toggle, TTL fallback, zero-TTL defaults. Full test matrix documented in `docs/ANNOTATION.md`.
+The annotation-based entry point works through Spring's standard `@Cacheable`/`@CachePut`/`@CacheEvict` with HotKey companion annotations (`@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, `@NullCaching`). Managed by `HotKeyCacheExtensionAspect` at `@Order(HIGHEST_PRECEDENCE)`. Gated by `hotkey.spring-cache.enabled=true`. Full test matrix documented in `docs/ANNOTATION.md`.
 
 ## Reference Implementation
 

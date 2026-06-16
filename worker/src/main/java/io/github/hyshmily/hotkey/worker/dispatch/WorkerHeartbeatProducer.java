@@ -16,6 +16,8 @@
 package io.github.hyshmily.hotkey.worker.dispatch;
 import lombok.extern.slf4j.Slf4j;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT;
+
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
 import jakarta.annotation.PostConstruct;
@@ -283,7 +285,7 @@ public class WorkerHeartbeatProducer {
         stateMachine.getPreCoolGraceCount(),
         configTimestampCounter.get()
       );
-      rabbitTemplate.send(heartbeatExchange, "heartbeat." + workerId, hb.toMessage());
+      rabbitTemplate.send(heartbeatExchange, ROUTING_KEY_HEARTBEAT + workerId, hb.toMessage());
     } catch (Exception e) {
       log.error("Scheduled sendHeartbeat failed", e);
     }

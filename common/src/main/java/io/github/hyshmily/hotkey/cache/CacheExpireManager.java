@@ -250,19 +250,20 @@ public class CacheExpireManager {
       return;
     }
 
-    // refreshLimiter is null when soft expire is disabled; isSoftExpireEnabled() above
-    // guarantees it is non-null here.
-    if (!refreshLimiter.tryAcquire()) {
-      log.debug("Refresh limiter blocked, skip background refresh: {}", cacheKey);
-      return;
-    }
-
-    // Atomically register this key as in-progress
+    // Pre-check pendingRefreshes again under the imminent putIfAbsent race window
+    // to avoid wasting a semaphore permit on a loser of per-key dedup.
     CompletableFuture<Void> marker = new CompletableFuture<>();
     CompletableFuture<Void> race = pendingRefreshes.putIfAbsent(cacheKey, marker);
     if (race != null) {
-      // Lost the race — another thread already registered
-      refreshLimiter.release();
+      return;
+    }
+
+    // refreshLimiter is null when soft expire is disabled; isSoftExpireEnabled() above
+    // guarantees it is non-null here.
+    if (!refreshLimiter.tryAcquire()) {
+      pendingRefreshes.remove(cacheKey);
+      marker.complete(null);
+      log.debug("Refresh limiter blocked, skip background refresh: {}", cacheKey);
       return;
     }
 

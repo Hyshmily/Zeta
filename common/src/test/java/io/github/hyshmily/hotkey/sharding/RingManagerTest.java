@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.sharding;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
@@ -177,5 +178,74 @@ class RingManagerTest {
     manager.addNode("manual");
     manager.reconcileFromHealthView(new ClusterHealthView(0, 30000, 3));
     assertThat(manager.getCurrentNodes()).containsExactly("manual");
+  }
+
+  @Test
+  void addNode_withNull_shouldThrow() {
+    RingManager manager = new RingManager(10);
+    assertThatNullPointerException().isThrownBy(() -> manager.addNode(null));
+  }
+
+  @Test
+  void removeNode_withNull_shouldNotThrow() {
+    RingManager manager = new RingManager(10);
+    manager.removeNode(null);
+    assertThat(manager.getCurrentNodes()).isEmpty();
+  }
+
+  @Test
+  void removeNode_nonExistent_shouldBeIgnored() {
+    RingManager manager = new RingManager(10);
+    manager.addNode("a");
+    manager.addNode("b");
+    manager.removeNode("non-existent");
+    assertThat(manager.getCurrentNodes()).containsExactlyInAnyOrder("a", "b");
+  }
+
+  @Test
+  void removeNode_onEmptyRing_shouldNotThrow() {
+    RingManager manager = new RingManager(10);
+    manager.removeNode("ghost");
+    assertThat(manager.getCurrentNodes()).isEmpty();
+  }
+
+  @Test
+  void routeNode_withNullKey_shouldThrow() {
+    RingManager manager = new RingManager(10);
+    manager.addNode("worker-1");
+    ClusterHealthView hv = new ClusterHealthView(1, 30000, 3);
+    registerAlive(hv, "worker-1");
+    assertThatNullPointerException().isThrownBy(() -> manager.routeNode(null, hv));
+  }
+
+  @Test
+  void routeNode_withNullHealthView_shouldThrow() {
+    RingManager manager = new RingManager(10);
+    assertThatNullPointerException().isThrownBy(() -> manager.routeNode("key", null));
+  }
+
+  @Test
+  void resetToAuto_whenAlreadyAuto_shouldBeNoOp() {
+    RingManager manager = new RingManager(10);
+    manager.resetToAuto();
+    assertThat(manager.isManualMode()).isFalse();
+  }
+
+  @Test
+  void addRemoveCycle_shouldWorkRepeatedly() {
+    RingManager manager = new RingManager(10);
+    manager.addNode("x");
+    manager.removeNode("x");
+    assertThat(manager.getCurrentNodes()).isEmpty();
+    manager.addNode("y");
+    assertThat(manager.getCurrentNodes()).containsExactly("y");
+    manager.removeNode("y");
+    assertThat(manager.getCurrentNodes()).isEmpty();
+  }
+
+  @Test
+  void reconcileFromHealthView_withNull_shouldThrow() {
+    RingManager manager = new RingManager(10);
+    assertThatNullPointerException().isThrownBy(() -> manager.reconcileFromHealthView(null));
   }
 }

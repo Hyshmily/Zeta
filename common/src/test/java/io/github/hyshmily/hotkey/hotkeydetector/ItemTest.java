@@ -34,4 +34,41 @@ class ItemTest {
     assertThat(item.key()).isEqualTo("key1");
     assertThat(item.count()).isEqualTo(42);
   }
+
+  @Test
+  void shouldHandleNullKey() {
+    Item item = new Item(null, 5);
+    assertThat(item.key()).isNull();
+    assertThat(item.count()).isEqualTo(5);
+  }
+
+  @Test
+  void shouldHandleZeroCount() {
+    Item item = new Item("key1", 0);
+    assertThat(item.key()).isEqualTo("key1");
+    assertThat(item.count()).isEqualTo(0);
+  }
+
+  @Test
+  void shouldHandleNegativeCount() {
+    Item item = new Item("key1", -1);
+    assertThat(item.key()).isEqualTo("key1");
+    assertThat(item.count()).isEqualTo(-1);
+  }
+
+  @Test
+  void shouldVerifyEqualsAndHashCode() {
+    Item i1 = new Item("key1", 42);
+    Item i2 = new Item("key1", 42);
+    Item i3 = new Item("key1", 99);
+    assertThat(i1).isEqualTo(i2);
+    assertThat(i1).hasSameHashCodeAs(i2);
+    assertThat(i1).isNotEqualTo(i3);
+  }
+
+  @Test
+  void shouldVerifyToString() {
+    Item item = new Item("key1", 42);
+    assertThat(item.toString()).contains("key1", "42");
+  }
 }

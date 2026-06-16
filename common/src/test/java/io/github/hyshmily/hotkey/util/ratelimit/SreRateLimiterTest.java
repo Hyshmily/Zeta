@@ -172,4 +172,64 @@ class SreRateLimiterTest {
     }
     assertThat((double) allowed / N).isGreaterThan(0.95);
   }
+
+  @Test
+  void zeroK_shouldAllowOnlyBeforeMinSamples() {
+    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 0, 5);
+    // With k=0, maxRequests=0; only requests below minSamples(5) pass
+    for (int i = 0; i < 5; i++) {
+      assertThat(limiter.tryAcquire()).isTrue();
+      limiter.onFailed();
+    }
+    // After minSamples reached, probabilistic drop kicks in
+    int allowed = 0;
+    for (int i = 0; i < 100; i++) {
+      if (limiter.tryAcquire()) {
+        allowed++;
+      }
+      limiter.onFailed();
+    }
+    assertThat(allowed).isLessThan(30);
+  }
+
+  @Test
+  void negativeK_shouldTriggerDegenerateGuard() {
+    SreRateLimiter limiter = new SreRateLimiter(1000, 10, -1, 5);
+    for (int i = 0; i < 10; i++) {
+      assertThat(limiter.tryAcquire()).isTrue();
+      limiter.onSuccess();
+    }
+    // Negative k → maxRequests negative → guard returns true
+    for (int i = 0; i < 50; i++) {
+      assertThat(limiter.tryAcquire()).isTrue();
+      limiter.onSuccess();
+    }
+  }
+
+  @Test
+  void zeroMinSamples_shouldActivateImmediately() {
+    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 1, 0);
+    // First call should still be allowed (total < minSamples → true, minSamples=0)
+    assertThat(limiter.tryAcquire()).isTrue();
+  }
+
+  @Test
+  void onSuccessAndOnFailed_withoutTryAcquire_shouldNotThrow() {
+    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 1.67, 5);
+    limiter.onSuccess();
+    limiter.onFailed();
+  }
+
+  @Test
+  void windowRollover_shouldNotBreakLimiter() throws InterruptedException {
+    SreRateLimiter limiter = new SreRateLimiter(100, 5, 1.67, 5);
+    for (int i = 0; i < 20; i++) {
+      limiter.tryAcquire();
+      limiter.onSuccess();
+    }
+    // Wait for window to fully roll over (2x window duration)
+    Thread.sleep(250);
+    // After rollover, windows should be empty → below minSamples → allow
+    assertThat(limiter.tryAcquire()).isTrue();
+  }
 }

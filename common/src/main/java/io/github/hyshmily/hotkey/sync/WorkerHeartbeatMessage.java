@@ -70,10 +70,10 @@ public record WorkerHeartbeatMessage(
     props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP, configFingerprint);
     props.setHeader(AMQP_HEADER_NODE_ID, workerId);
     props.setHeader(AMQP_HEADER_TIMESTAMP, timestamp);
-    props.setHeader("hbConfigConfirm", configConfirmCount);
-    props.setHeader("hbConfigCool", configCoolCount);
-    props.setHeader("hbConfigGrace", configGraceCount);
-    props.setHeader("hbConfigTs", configTimestamp);
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, configConfirmCount);
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, configCoolCount);
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, configGraceCount);
+    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTimestamp);
 
     return new Message(workerId.getBytes(StandardCharsets.UTF_8), props);
   }
@@ -109,10 +109,10 @@ public record WorkerHeartbeatMessage(
         h.getHeader(AMQP_HEADER_HEARTBEAT_LOAD) instanceof Number n ? n.doubleValue() : 0.0,
         Boolean.TRUE.equals(h.getHeader(AMQP_HEADER_HEARTBEAT_READY)),
         h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP) instanceof Integer i ? i : 0,
-        h.getHeader("hbConfigConfirm") instanceof Number n ? n.intValue() : 0,
-        h.getHeader("hbConfigCool") instanceof Number n ? n.intValue() : 0,
-        h.getHeader("hbConfigGrace") instanceof Number n ? n.intValue() : 0,
-        h.getHeader("hbConfigTs") instanceof Number n ? n.longValue() : 0
+        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM) instanceof Number n ? n.intValue() : 0,
+        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL) instanceof Number n ? n.intValue() : 0,
+        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE) instanceof Number n ? n.intValue() : 0,
+        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP) instanceof Number n ? n.longValue() : 0
     );
   }
 }

@@ -16,9 +16,11 @@
 package io.github.hyshmily.hotkey.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.model.HotKeyDecision.DecisionType;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -60,5 +62,103 @@ class HotKeyStateMachineEdgeTest {
   private static HotKeyDecision machine(String key, boolean hot) {
     HotKeyStateMachine m = new HotKeyStateMachine(2, 5, 2);
     return m.evaluate(key, hot);
+  }
+
+  @Test
+  void nullKey_shouldThrowNullPointer() {
+    HotKeyStateMachine m = new HotKeyStateMachine(2, 5, 2);
+    assertThatNullPointerException().isThrownBy(() -> m.evaluate(null, true));
+  }
+
+  @Test
+  void emptyKey_shouldBeTracked() {
+    HotKeyStateMachine m = new HotKeyStateMachine(2, 5, 2);
+    assertThat(m.evaluate("", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("", true).type()).isEqualTo(DecisionType.HOT);
+  }
+
+  @Test
+  void reset_nonExistentKey_shouldNotThrow() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    m.reset("never-added");
+    assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void evictStale_withEmptyState_shouldNotThrow() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    m.evictStale(1000);
+    assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void reset_shouldClearTrackedCount() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    m.evaluate("key", true);
+    assertThat(m.getTrackedKeys()).isEqualTo(1);
+    m.reset("key");
+    assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void repeatedReset_shouldBeSafe() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    m.evaluate("key", true);
+    m.reset("key");
+    m.reset("key");
+    assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void getTrackedKeys_shouldReflectActiveKeys() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    assertThat(m.getTrackedKeys()).isZero();
+    m.evaluate("k1", true);
+    assertThat(m.getTrackedKeys()).isEqualTo(1);
+    m.evaluate("k2", true);
+    assertThat(m.getTrackedKeys()).isEqualTo(2);
+    m.reset("k1");
+    assertThat(m.getTrackedKeys()).isEqualTo(1);
+  }
+
+  @Test
+  void hotStreak_resetsOnColdWindow() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
+  }
+
+  @Test
+  void confirmCountOfOne_shouldPromoteImmediately() {
+    HotKeyStateMachine m = new HotKeyStateMachine(1, 5, 2);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
+  }
+
+  @Test
+  void coolCount_one_shouldCoolImmediately() {
+    HotKeyStateMachine m = new HotKeyStateMachine(1, 1, 0);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.COOL);
+  }
+
+  @Test
+  void evictStale_shouldOnlyRemoveStaleKeys() throws InterruptedException {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    m.evaluate("stale", true);
+    Thread.sleep(1);
+    m.evictStale(0);
+    assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void settingThresholds_shouldAffectTransitions() {
+    HotKeyStateMachine m = new HotKeyStateMachine(5, 10, 4);
+    m.setConfirmCount(1);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
   }
 }

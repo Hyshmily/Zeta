@@ -52,7 +52,6 @@ import org.springframework.amqp.core.Message;
 @Slf4j
 public class CacheSyncListener {
 
-  /** Logger for this class. */
 
   /** Shared Jackson mapper for deserializing batch-invalidation key lists. */
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -243,22 +242,36 @@ public class CacheSyncListener {
       .asMap()
       .compute(sm.cacheKey(), (key, existing) -> {
         // DCL second check – atomic with to write
-        if (
-          (existing instanceof CacheEntry ce &&
-            VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())) ||
-          !(existing instanceof CacheEntry cacheEntry)
-        ) {
-          return existing; // keep existing if guard rejects
+        if (existing instanceof CacheEntry ce &&
+            VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())) {
+          return existing;
         }
 
-        return cacheEntry
-          .toBuilder()
-          .value(value)
-          .dataVersion(sm.version())
-          .isVersionDegraded(sm.isVersionDegraded())
-          .hardExpireAtMs(expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs()))
-          .softExpireAtMs(expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs()))
-          .build();
+        if (existing instanceof CacheEntry cacheEntry) {
+          return cacheEntry
+              .toBuilder()
+              .value(value)
+              .dataVersion(sm.version())
+              .isVersionDegraded(sm.isVersionDegraded())
+              .hardExpireAtMs(expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs()))
+              .softExpireAtMs(expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs()))
+              .build();
+        }
+
+        // Entry was evicted from L1 — create fresh CacheEntry with default metadata
+        return CacheEntry.builder()
+            .value(value)
+            .dataVersion(sm.version())
+            .isVersionDegraded(sm.isVersionDegraded())
+            .decisionVersion(0L)
+            .hardTtlMs(expireManager.getEffectiveHardTtlMs())
+            .hardExpireAtMs(expireManager.computeHardExpireAt(expireManager.getEffectiveHardTtlMs()))
+            .softTtlMs(expireManager.getEffectiveSoftTtlMs())
+            .softExpireAtMs(expireManager.computeSoftExpireAt(expireManager.getEffectiveSoftTtlMs()))
+            .keyState(io.github.hyshmily.hotkey.model.KeyState.NORMAL)
+            .normalHardTtlMs(expireManager.getEffectiveHardTtlMs())
+            .normalSoftTtlMs(expireManager.getEffectiveSoftTtlMs())
+            .build();
       });
     log.debug("Refreshed by sync: {}", sm.cacheKey());
   }

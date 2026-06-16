@@ -19,9 +19,6 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -33,6 +30,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 
 /**
@@ -86,9 +85,11 @@ public class HotKeyReporter {
   private final RingManager ringManager;
   /** Cluster health view for filtering dead Workers. */
   private final ClusterHealthView healthView;
+
   /** Optional BBR adaptive rate limiter; null disables BBR gating. */
   @Setter
   private volatile BbrRateLimiter bbrRateLimiter;
+
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
   /** The report dispatcher instance; created on start(). */
@@ -129,7 +130,7 @@ public class HotKeyReporter {
     this.healthView = healthView;
   }
 
-    /**
+  /**
    * A batch of key-count mappings destined for a single Worker target.
    *
    * @param target    the Worker nodeId for this batch
@@ -209,7 +210,7 @@ public class HotKeyReporter {
       }
 
       if (bbrRateLimiter != null && !bbrRateLimiter.tryAcquire()) {
-        bbrRateLimiter.onDrop();
+        bbrRateLimiter.onGateDrop();
         return;
       }
 
@@ -430,15 +431,14 @@ public class HotKeyReporter {
      * <p>When BBR rate limiting is active:
      * <ul>
      *   <li>Successful publish records round-trip time via {@link BbrRateLimiter#onSuccess(long)}</li>
-     *   <li>Stale batches (5s+ wait) or publish failures trigger {@link BbrRateLimiter#onDrop()},
+     *   <li>Stale batches (5s+ wait) or publish failures trigger ,
      *       allowing BBR to back off the send rate and prevent cascading overload</li>
      *   <li>InterruptedException is handled separately (break, not logged as error)
      *       to avoid noise during orderly shutdown</li>
      * </ul>
      */
-    private void consumeLoop()  {
+    private void consumeLoop() {
       while (running) {
-
         ShardBatch batch;
         try {
           batch = queue.poll(1, TimeUnit.SECONDS);
@@ -456,23 +456,22 @@ public class HotKeyReporter {
         if (System.currentTimeMillis() - batch.timestamp() > 5_000) {
           expiredCount.incrementAndGet();
           if (bbrRateLimiter != null) {
-              bbrRateLimiter.onDrop();
+            bbrRateLimiter.onConsumerDrop();
           }
           continue;
         }
 
         try {
-            reportPublisher.publish(batch.target(), new ReportMessage(appName, batch.timestamp(), batch.counts()));
-            if (bbrRateLimiter != null) {
-              bbrRateLimiter.onSuccess(System.currentTimeMillis() - batch.timestamp());
-            }
+          reportPublisher.publish(batch.target(), new ReportMessage(appName, batch.timestamp(), batch.counts()));
+          if (bbrRateLimiter != null) {
+            bbrRateLimiter.onSuccess(System.currentTimeMillis() - batch.timestamp());
+          }
         } catch (Exception e) {
-            log.error("Failed to publish report batch for target={}, keys={}", batch.target(), batch.counts().size(), e);
-            if (bbrRateLimiter != null) {
-              bbrRateLimiter.onDrop();
-            }
+          log.error("Failed to publish report batch for target={}, keys={}", batch.target(), batch.counts().size(), e);
+          if (bbrRateLimiter != null) {
+            bbrRateLimiter.onConsumerDrop();
+          }
         }
-
       }
     }
   }

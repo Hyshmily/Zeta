@@ -54,6 +54,24 @@ class SystemLoadMonitorTest {
   }
 
   @Test
+  void constructor_shouldClampNaNDecayToDefault() throws Exception {
+    Field decayField = SystemLoadMonitor.class.getDeclaredField("decay");
+    decayField.setAccessible(true);
+    assertThat(decayField.getDouble(new SystemLoadMonitor(100, Double.NaN))).isEqualTo(DEFAULT_DECAY);
+  }
+
+  @Test
+  void sharedSchedulerConstructor_shouldUseProvidedScheduler() {
+    var scheduler = Executors.newSingleThreadScheduledExecutor();
+    SystemLoadMonitor monitor = new SystemLoadMonitor(scheduler, 100, 0.5);
+    monitor.start();
+    monitor.stop();
+    // shared scheduler should NOT be shut down by stop()
+    assertThat(scheduler.isShutdown()).isFalse();
+    scheduler.shutdown();
+  }
+
+  @Test
   void start_shouldBeIdempotent() {
     SystemLoadMonitor monitor = new SystemLoadMonitor(50, 0.5);
     monitor.start();

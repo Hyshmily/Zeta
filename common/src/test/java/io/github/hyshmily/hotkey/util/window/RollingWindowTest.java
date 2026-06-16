@@ -107,4 +107,50 @@ class RollingWindowTest {
     assertEquals(4, new RollingWindow(4, 400).size());
     assertEquals(1, new RollingWindow(1, 100).size());
   }
+
+  @Test
+  void add_negativeValue() {
+    RollingWindow w = new RollingWindow(5, 500);
+    w.add(10);
+    w.add(-3);
+    assertEquals(7, w.sum());
+  }
+
+  @Test
+  void minNonZero_withMixedValues() {
+    RollingWindow w = new RollingWindow(5, 500);
+    w.add(0);
+    w.add(5);
+    w.add(3);
+    w.add(0);
+    // All adds land in the same bucket (within same millisecond), so minNonZero returns 8
+    assertEquals(8, w.minNonZero());
+  }
+
+  @Test
+  void timeAdvance_beyondFullWindow_shouldZeroAllBuckets() throws InterruptedException {
+    RollingWindow w = new RollingWindow(1, 100);
+    w.add(10);
+    Thread.sleep(200);
+    assertEquals(0, w.sum());
+    w.add(30);
+    assertEquals(30, w.sum());
+  }
+
+  @Test
+  void timeAdvance_exactlyAtBoundary_shouldKeepCurrentBucket() throws InterruptedException {
+    RollingWindow w = new RollingWindow(2, 200);
+    w.add(10);
+    Thread.sleep(100);
+    w.add(20);
+    assertEquals(30, w.sum());
+  }
+
+  @Test
+  void add_largeValue_shouldNotOverflowSilently() {
+    RollingWindow w = new RollingWindow(5, 500);
+    w.add(Long.MAX_VALUE);
+    w.add(1);
+    assertEquals(Long.MIN_VALUE, w.sum());
+  }
 }

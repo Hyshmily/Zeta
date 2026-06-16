@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.cache;
 
+import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
@@ -32,16 +34,13 @@ import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
 import jakarta.annotation.Nullable;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
-
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -254,8 +253,9 @@ public class HotKeyCache {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
         }
 
-        // TOCTOU: re-check after side effects (promote/record may have taken time)
-        if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
+        // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
+        Object currentRaw = caffeineCache.getIfPresent(cacheKey);
+        if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
           return Optional.empty();
         }
 
@@ -353,8 +353,9 @@ public class HotKeyCache {
           hotKeyReporter.ifPresent(r -> r.record(cacheKey));
         }
 
-        // TOCTOU: re-check after side effects (promote/record may have taken time)
-        if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
+        // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
+        Object currentRaw = caffeineCache.getIfPresent(cacheKey);
+        if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
           return Optional.empty();
         }
 
@@ -590,7 +591,7 @@ public class HotKeyCache {
     }
     if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
       log.debug("putThrough: blocked by rule: {}", cacheKey);
-      return;
+      throw new HotKeyBlockedException("HotKeyCache", cacheKey);
     }
     TransactionSupport.runAsyncAfterCommit(
       () -> {
@@ -686,7 +687,7 @@ public class HotKeyCache {
     }
     if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
       log.debug("putBeforeInvalidate: blocked by rule: {}", cacheKey);
-      return;
+      throw new HotKeyBlockedException("HotKeyCache", cacheKey);
     }
     TransactionSupport.runNowOrAfterCommit(() -> {
       try {

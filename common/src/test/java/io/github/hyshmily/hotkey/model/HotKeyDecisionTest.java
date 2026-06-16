@@ -131,4 +131,50 @@ class HotKeyDecisionTest {
     HotKeyDecision decision = HotKeyDecision.hot("testKey");
     assertThat(decision.toString()).isNotNull();
   }
+
+  @Test
+  void veryLongKey_shouldBeAccepted() {
+    String longKey = "k".repeat(10_000);
+    HotKeyDecision decision = HotKeyDecision.hot(longKey);
+    assertThat(decision.cacheKey()).isEqualTo(longKey);
+  }
+
+  @Test
+  void specialCharactersInKey_shouldBeAccepted() {
+    String specials = "key:\n\t\r\u0000\u00E9\u4E2D\u6587";
+    HotKeyDecision decision = HotKeyDecision.hot(specials);
+    assertThat(decision.cacheKey()).isEqualTo(specials);
+  }
+
+  @Test
+  void equalsAndHashCode_shouldWorkForRecords() {
+    HotKeyDecision a = HotKeyDecision.hot("k");
+    HotKeyDecision b = HotKeyDecision.hot("k");
+    HotKeyDecision c = HotKeyDecision.cool("k");
+    assertThat(a).isEqualTo(b);
+    assertThat(a).hasSameHashCodeAs(b);
+    assertThat(a).isNotEqualTo(c);
+  }
+
+  @Test
+  void record_shouldBeSerializableViaToString() {
+    HotKeyDecision hot = HotKeyDecision.hot("test");
+    HotKeyDecision cool = HotKeyDecision.cool("test");
+    HotKeyDecision none = HotKeyDecision.none("test");
+    assertThat(hot.toString()).contains("HOT").contains("test");
+    assertThat(cool.toString()).contains("COOL").contains("test");
+    assertThat(none.toString()).contains("NONE").contains("test");
+  }
+
+  @Test
+  void decisionType_switch_shouldCoverAllCases() {
+    for (DecisionType t : DecisionType.values()) {
+      boolean covered = switch (t) {
+        case HOT -> true;
+        case COOL -> true;
+        case NONE -> true;
+      };
+      assertThat(covered).isTrue();
+    }
+  }
 }

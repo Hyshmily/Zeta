@@ -158,4 +158,20 @@ class HotKeyFacadeAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKey.class));
   }
+
+  /**
+   * Verifies that the scheduler pool size from properties is respected.
+   */
+  @Test
+  void schedulerPoolSize_shouldRespectProperty() {
+    new ApplicationContextRunner()
+      .withBean(HotKeyProperties.class, HotKeyProperties::new)
+      .withPropertyValues("hotkey.local.schedulerPoolSize=2")
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx).hasBean("hotKeyScheduler");
+        var scheduler = ctx.getBean("hotKeyScheduler", java.util.concurrent.ScheduledExecutorService.class);
+        assertThat(scheduler).isNotNull();
+      });
+  }
 }

@@ -47,4 +47,32 @@ class CacheSyncPropertiesTest {
     CacheSyncProperties props = new CacheSyncProperties();
     assertThat(props.getQueueName()).startsWith("hotkey.sync:");
   }
+
+  /**
+   * Verifies all default values are properly initialized.
+   */
+  @Test
+  void shouldHaveAllDefaultValues() {
+    CacheSyncProperties props = new CacheSyncProperties();
+    assertThat(props.getConcurrentConsumers()).isEqualTo(3);
+    assertThat(props.getSchedulerPoolSize()).isEqualTo(4);
+    assertThat(props.getPrefetchCount()).isEqualTo(5);
+    assertThat(props.isAutoStartup()).isTrue();
+  }
+
+  /**
+   * Verifies that setters are functional.
+   */
+  @Test
+  void shouldAllowSettingValues() {
+    CacheSyncProperties props = new CacheSyncProperties();
+    props.setEnabled(true);
+    props.setDedupWindowSeconds(30);
+    props.setDedupMaxSize(50_000);
+    props.setWarmupJitterMs(200);
+    assertThat(props.isEnabled()).isTrue();
+    assertThat(props.getDedupWindowSeconds()).isEqualTo(30);
+    assertThat(props.getDedupMaxSize()).isEqualTo(50_000);
+    assertThat(props.getWarmupJitterMs()).isEqualTo(200);
+  }
 }

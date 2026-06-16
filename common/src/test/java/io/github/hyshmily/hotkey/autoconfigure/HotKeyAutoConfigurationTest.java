@@ -28,6 +28,7 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -188,5 +189,27 @@ class HotKeyAutoConfigurationTest {
         HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
       ))
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKey.class));
+  }
+
+  /**
+   * Verifies that the hotLocalCache respects the localCacheMaxSize property.
+   */
+  @Test
+  void hotLocalCache_shouldRespectMaxSizeProperty() {
+    new ApplicationContextRunner()
+      .withPropertyValues("hotkey.local.topK=200", "hotkey.local.local-cache-max-size=500")
+      .withConfiguration(AutoConfigurations.of(
+        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
+      ))
+      .run(ctx -> {
+        assertThat(ctx).hasSingleBean(Cache.class);
+        Cache<String, Object> cache = ctx.getBean(Cache.class);
+        // Put more than 500 entries, then cleanUp to force eviction
+        for (int i = 0; i < 600; i++) {
+          cache.put("k" + i, "v" + i);
+        }
+        cache.cleanUp();
+        assertThat(cache.estimatedSize()).isLessThanOrEqualTo(500);
+      });
   }
 }

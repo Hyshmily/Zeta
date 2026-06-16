@@ -36,6 +36,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 /**
  * Tests for {@link WorkerAutoConfiguration}.
@@ -93,6 +94,57 @@ class WorkerAutoConfigurationTest {
       SlidingWindowDetector detector = ctx.getBean(SlidingWindowDetector.class);
       assertThat(detector.getWindowSize()).isEqualTo(10);
       assertThat(detector.getThreshold()).isEqualTo(1000);
+    });
+  }
+
+  /**
+   * Verifies that when the hot-threshold is set to zero, the detector uses
+   * {@code Long.MAX_VALUE} as the threshold (dynamic threshold mode).
+   */
+  @Test
+  void slidingWindowDetectorUsesMaxValueWhenThresholdIsZero() {
+    new ApplicationContextRunner()
+      .withPropertyValues(
+        "hotkey.worker.enabled=true",
+        "hotkey.worker.threshold.hot-threshold=0"
+      )
+      .withUserConfiguration(MinimalMockConfiguration.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        SlidingWindowDetector detector = ctx.getBean(SlidingWindowDetector.class);
+        assertThat(detector.getThreshold()).isEqualTo(Long.MAX_VALUE);
+      });
+  }
+
+  /**
+   * Verifies that when the hot-threshold is set to a negative value, the detector
+   * uses {@code Long.MAX_VALUE} (same as zero — dynamic threshold mode).
+   */
+  @Test
+  void slidingWindowDetectorUsesMaxValueWhenThresholdIsNegative() {
+    new ApplicationContextRunner()
+      .withPropertyValues(
+        "hotkey.worker.enabled=true",
+        "hotkey.worker.threshold.hot-threshold=-100"
+      )
+      .withUserConfiguration(MinimalMockConfiguration.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        SlidingWindowDetector detector = ctx.getBean(SlidingWindowDetector.class);
+        assertThat(detector.getThreshold()).isEqualTo(Long.MAX_VALUE);
+      });
+  }
+
+  /**
+   * Verifies that {@code EvictStaleTask.evictStale} does not throw when called.
+   * Fault: scheduled task must never propagate exceptions.
+   */
+  @Test
+  void evictStaleTaskShouldCatchExceptions() {
+    runner.run(ctx -> {
+      WorkerAutoConfiguration.EvictStaleTask task = ctx.getBean(WorkerAutoConfiguration.EvictStaleTask.class);
+      // should not throw — exceptions are caught internally
+      assertThatCode(task::evictStale).doesNotThrowAnyException();
     });
   }
 

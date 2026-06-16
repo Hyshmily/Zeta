@@ -20,6 +20,8 @@ import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
+import io.github.hyshmily.hotkey.endpoint.RingEndpoint;
+import io.github.hyshmily.hotkey.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -166,6 +168,28 @@ class HotKeyActuatorAutoConfigurationTest {
     );
 
     assertThat(endpoint).isNotNull();
+  }
+
+  /**
+   * Verifies that ringEndpoint is NOT created when consistent-hashing property is disabled.
+   */
+  @Test
+  void ringEndpoint_shouldNotBeCreatedWhenConsistentHashingDisabled() {
+    new ApplicationContextRunner()
+      .withBean(RingManager.class, () -> mock(RingManager.class))
+      .withConfiguration(AutoConfigurations.of(HotKeyActuatorAutoConfiguration.class))
+      .withPropertyValues("hotkey.local.consistent-hashing.enabled=false")
+      .run(ctx -> assertThat(ctx).doesNotHaveBean(RingEndpoint.class));
+  }
+
+  /**
+   * Verifies that stateMachineEndpoint is NOT created when HotKeyStateMachine bean is absent.
+   */
+  @Test
+  void stateMachineEndpoint_shouldNotBeCreatedWhenStateMachineBeanAbsent() {
+    new ApplicationContextRunner()
+      .withConfiguration(AutoConfigurations.of(HotKeyActuatorAutoConfiguration.class))
+      .run(ctx -> assertThat(ctx).doesNotHaveBean(StateMachineEndpoint.class));
   }
 
   /**
