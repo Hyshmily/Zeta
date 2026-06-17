@@ -29,6 +29,7 @@
     </annotationProcessing>
     <bytecodeTargetLevel>
       <module name="hotkey-integration-tests" target="17" />
+      <module name="hotkey-parent" target="17" />
       <module name="hotkey-spring-boot-starter" target="17" />
     </bytecodeTargetLevel>
   </component>

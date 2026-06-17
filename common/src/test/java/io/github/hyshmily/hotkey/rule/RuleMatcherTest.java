@@ -358,6 +358,6 @@ class RuleMatcherTest {
 
   @Test
   void replaceRules_withNullElement_shouldThrow() {
-    assertThatNullPointerException().isThrownBy(() -> ruleMatcher.replaceRules(List.of(null)));
+    assertThatNullPointerException().isThrownBy(() -> ruleMatcher.replaceRules(List.of((Rule) null)));
   }
 }

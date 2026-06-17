@@ -39,6 +39,7 @@ import java.util.concurrent.Executor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link HotKeyRedisAutoConfiguration}.
@@ -74,6 +75,7 @@ class HotKeyRedisAutoConfigurationTest {
     Executor executor = mock(Executor.class);
 
     ObjectProvider<StringRedisTemplate> redisTemplateProvider = mock(ObjectProvider.class);
+    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
     RuleMatcher ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
@@ -88,7 +90,7 @@ class HotKeyRedisAutoConfigurationTest {
       properties,
       ruleMatcher,
       mock(RingManager.class),
-      mock(ClusterHealthView.class)
+      healthViewProvider
     );
 
     assertThat(cache).isNotNull();
@@ -108,6 +110,7 @@ class HotKeyRedisAutoConfigurationTest {
     CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
     HotKeyReporter reporter = mock(HotKeyReporter.class);
     ObjectProvider<StringRedisTemplate> redisTemplateProvider = mock(ObjectProvider.class);
+    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
     RuleMatcher ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
 
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
@@ -123,7 +126,7 @@ class HotKeyRedisAutoConfigurationTest {
       properties,
       ruleMatcher,
       mock(RingManager.class),
-      mock(ClusterHealthView.class)
+      healthViewProvider
     );
 
     assertThat(cache).isNotNull();
