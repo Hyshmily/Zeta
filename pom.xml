@@ -22,6 +22,14 @@
     </license>
   </licenses>
 
+  <distributionManagement>
+    <repository>
+      <id>github</id>
+      <name>GitHub Packages</name>
+      <url>https://maven.pkg.github.com/hyshmily/hotkey</url>
+    </repository>
+  </distributionManagement>
+
   <developers>
     <developer>
       <id>hyshmily</id>
@@ -47,6 +55,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <spring-boot.version>3.5.3</spring-boot.version>
     <testcontainers.version>1.21.4</testcontainers.version>
+    <jacoco.version>0.8.13</jacoco.version>
     <skipITs>true</skipITs>
 
   </properties>
@@ -119,6 +128,27 @@
           <doclint>none</doclint>
         </configuration>
       </plugin>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>${jacoco.version}</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals>
+              <goal>prepare-agent</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
     </plugins>
   </build>
 

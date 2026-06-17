@@ -2,6 +2,7 @@
 
 <p align="center">
   <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
+  <a href="https://coveralls.io/github/hyshmily/hotkey"><img src="https://coveralls.io/repos/github/hyshmily/hotkey/badge.svg" alt="Coveralls"></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
   <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
@@ -112,7 +113,19 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 
 ## 快速开始
 
-### 1. 添加依赖（JitPack）
+### 1. 添加依赖
+
+**Maven Central**（无需额外仓库）：
+
+```xml
+<dependency>
+    <groupId>io.github.hyshmily</groupId>
+    <artifactId>hotkey</artifactId>
+    <version>1.1.4</version>
+</dependency>
+```
+
+**JitPack**（始终最新快照）：
 
 ```xml
 <repositories>

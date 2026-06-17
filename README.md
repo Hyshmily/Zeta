@@ -2,6 +2,7 @@
 
 <p align="center">
   <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
+  <a href="https://coveralls.io/github/hyshmily/hotkey"><img src="https://coveralls.io/repos/github/hyshmily/hotkey/badge.svg" alt="Coveralls"></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
   <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
@@ -112,7 +113,19 @@ See the [Benchmark Report](docs/HotKey_Benchmark_Report.en.md).
 
 ## Quick Start
 
-### 1. Add Dependency (JitPack)
+### 1. Add Dependency
+
+**Maven Central** (no extra repository needed):
+
+```xml
+<dependency>
+    <groupId>io.github.hyshmily</groupId>
+    <artifactId>hotkey</artifactId>
+    <version>1.1.4</version>
+</dependency>
+```
+
+**JitPack** (always latest snapshot):
 
 ```xml
 <repositories>
