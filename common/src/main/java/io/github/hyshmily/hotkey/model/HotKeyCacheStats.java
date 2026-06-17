@@ -16,8 +16,7 @@
 package io.github.hyshmily.hotkey.model;
 
 /**
- * Immutable snapshot of L1 (Caffeine) cache performance counters and
- * current capacity.
+ * Immutable snapshot of L1 (Caffeine) cache performance counters and current capacity.
  *
  * <p>This record is returned by {@link io.github.hyshmily.hotkey.HotKey#stats()}
  * for monitoring and observability purposes.
@@ -51,10 +50,4 @@ package io.github.hyshmily.hotkey.model;
  * @param estimatedSize  best-effort estimate of current number of entries
  *                       in the cache; always available
  */
-public record HotKeyCacheStats(
-  long hitCount,
-  long missCount,
-  double hitRate,
-  long evictionCount,
-  long estimatedSize
-) {}
+public record HotKeyCacheStats(long hitCount, long missCount, double hitRate, long evictionCount, long estimatedSize) {}
