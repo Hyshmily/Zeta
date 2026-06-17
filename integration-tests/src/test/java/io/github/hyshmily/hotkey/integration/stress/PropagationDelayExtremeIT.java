@@ -122,9 +122,9 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
 
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
-    r.add("spring.data.redis.host", redis::getHost);
+    r.add("spring.data.redis.host", () -> System.getenv().getOrDefault("TESTCONTAINERS_HOST_OVERRIDE", redis.getHost()));
     r.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
-    r.add("spring.rabbitmq.host", rabbitmq::getHost);
+    r.add("spring.rabbitmq.host", () -> System.getenv().getOrDefault("TESTCONTAINERS_HOST_OVERRIDE", rabbitmq.getHost()));
     r.add("spring.rabbitmq.port", () -> rabbitmq.getMappedPort(5672));
     r.add("spring.rabbitmq.username", () -> "guest");
     r.add("spring.rabbitmq.password", () -> "guest");
@@ -137,6 +137,7 @@ class PropagationDelayExtremeIT extends AbstractIntegrationIT {
     r.add("hotkey.sync.warmup-jitter-ms", () -> "0");             // default 100 → 0
     r.add("hotkey.worker.sliding-window.duration-ms", () -> "100"); // default 1000 → 100
     r.add("hotkey.worker.sliding-window.slices", () -> "100");      // default 10 → 100 (1ms per slice)
+    r.add("hotkey.worker-listener.auto-startup", () -> "true");
   }
 
   // -- Injection --

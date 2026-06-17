@@ -125,9 +125,9 @@ class PropagationDelayIT extends AbstractIntegrationIT {
    */
   @DynamicPropertySource
   static void overrideProps(DynamicPropertyRegistry r) {
-    r.add("spring.data.redis.host", redis::getHost);
+    r.add("spring.data.redis.host", () -> System.getenv().getOrDefault("TESTCONTAINERS_HOST_OVERRIDE", redis.getHost()));
     r.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
-    r.add("spring.rabbitmq.host", rabbitmq::getHost);
+    r.add("spring.rabbitmq.host", () -> System.getenv().getOrDefault("TESTCONTAINERS_HOST_OVERRIDE", rabbitmq.getHost()));
     r.add("spring.rabbitmq.port", () -> rabbitmq.getMappedPort(5672));
     r.add("spring.rabbitmq.username", () -> "guest");
     r.add("spring.rabbitmq.password", () -> "guest");
@@ -135,6 +135,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     r.add("spring.rabbitmq.listener.simple.concurrency", () -> "4");
     r.add("spring.rabbitmq.listener.simple.max-concurrency", () -> "8");
     r.add("hotkey.local.report-interval-ms", () -> "100");
+    r.add("hotkey.worker-listener.auto-startup", () -> "true");
   }
 
   // -- Injection -------------------------------------------------------------------
