@@ -539,11 +539,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
         for (Map.Entry<String, Long> entry : report.counts().entrySet()) {
           String key = entry.getKey();
           long count = entry.getValue();
-          workerTopK.add(key, (int) Math.min(count, Integer.MAX_VALUE));
+          workerTopK.addDirect(key, (int) Math.min(count, Integer.MAX_VALUE));
           long hotCount = workerTopK.contains(key)
               ? workerTopK.list().stream()
                   .filter(item -> item.key().equals(key))
-                  .mapToLong(io.github.hyshmily.hotkey.algorithm.Item::count)
+                  .mapToLong(io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item::count)
                   .findFirst().orElse(0)
               : 0;
           if (hotCount >= WORKER_HOT_THRESHOLD) {

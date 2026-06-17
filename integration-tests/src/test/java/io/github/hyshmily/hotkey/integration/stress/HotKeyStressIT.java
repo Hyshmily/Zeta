@@ -30,7 +30,9 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.CacheSyncProperties;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.model.CacheEntry;
@@ -254,7 +256,7 @@ class HotKeyStressIT {
    * Creates a {@link HotKeyCache} wired with a {@link SingleFlight}, {@link CacheExpireManager},
    * empty {@link RuleMatcher}, and a {@link VersionController} for stress testing.
    */
-  static HotKeyCache createCache(TopK detector, Cache<String, Object> caffeine, Executor executor) {
+  static HotKeyCache createCache(HotKeyDetector detector, Cache<String, Object> caffeine, Executor executor) {
     HotKeyProperties props = new HotKeyProperties();
     CacheExpireManager expireMgr = new CacheExpireManager(caffeine, executor, props, 10);
     SingleFlight sf = new SingleFlight(50000, 10, 5, executor);
@@ -263,7 +265,8 @@ class HotKeyStressIT {
       Optional.empty(), Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
       new VersionController(Optional.empty(), 60),
-      new RingManager(150));
+      new RingManager(150),
+      new ClusterHealthView(0, 5000, 3));
   }
 
   /**
@@ -341,7 +344,7 @@ class HotKeyStressIT {
         cum += weights[j];
         if (dice <= cum) {
           accesses[j]++;
-          keeper.add("zipf-" + j, 1);
+          keeper.addDirect("zipf-" + j, 1);
           break;
         }
       }
@@ -380,7 +383,7 @@ class HotKeyStressIT {
       int k = idx % keysPerThread;
       String key = "ndup-" + t + "-" + k;
       for (int i = 0; i < iterationsPerKey; i++) {
-        keeper.add(key, 1);
+        keeper.addDirect(key, 1);
       }
     }, m);
     assertThat(keeper.total()).isEqualTo((long) threadCount * keysPerThread * iterationsPerKey);
@@ -410,7 +413,7 @@ class HotKeyStressIT {
     int iterations = 500;
     concurrentRun("bounded", threadCount, 1, (idx) -> {
       for (int i = 0; i < iterations; i++) {
-        keeper.add("bk-" + (i % 5), 10);
+        keeper.addDirect("bk-" + (i % 5), 10);
       }
     }, m);
     int size = keeper.list().size();
@@ -533,7 +536,7 @@ class HotKeyStressIT {
         String fk = hk;
         asyncExec.submit(() -> {
           try {
-            sf.load(fk, () -> { totalExecutions.incrementAndGet(); execPerKey.compute(fk, (k, v) -> v == null ? 1 : v + 1); try { Thread.sleep(1); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } return "hot"; });
+            sf.load(fk, () -> { totalExecutions.incrementAndGet(); execPerKey.compute(fk, (kk, v) -> v == null ? 1 : v + 1); try { Thread.sleep(1); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } return "hot"; });
           } finally { latch.countDown(); }
         });
       }
@@ -568,7 +571,7 @@ class HotKeyStressIT {
   void hotKeyCache_consistency() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_consistency");
     ALL_METRICS.add(m);
-    TopK detector = new HeavyKeeper(100, 50000, 5, 0.92, 10);
+    HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(100, 50000, 5, 0.92, 10));
     Cache<String, Object> caffeine = Caffeine.newBuilder().maximumSize(1000).build();
     Executor executor = Runnable::run;
     HotKeyCache cache = createCache(detector, caffeine, executor);
@@ -594,7 +597,7 @@ class HotKeyStressIT {
   void hotKeyCache_productionMix() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_productionMix");
     ALL_METRICS.add(m);
-    TopK detector = new HeavyKeeper(100, 50000, 5, 0.92, 10);
+    HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(100, 50000, 5, 0.92, 10));
     Cache<String, Object> caffeine = Caffeine.newBuilder().maximumSize(1000).build();
     Executor executor = Runnable::run;
     HotKeyCache cache = createCache(detector, caffeine, executor);
@@ -632,7 +635,7 @@ class HotKeyStressIT {
   void hotKeyCache_ttlExpiryStorm() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_ttlExpiryStorm");
     ALL_METRICS.add(m);
-    TopK detector = new HeavyKeeper(200, 50000, 5, 0.92, 10);
+    HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(200, 50000, 5, 0.92, 10));
     Cache<String, Object> caffeine = Caffeine.newBuilder().maximumSize(2000).build();
     Executor executor = Runnable::run;
     HotKeyCache cache = createCache(detector, caffeine, executor);
@@ -659,7 +662,7 @@ class HotKeyStressIT {
     StressMetrics m = new StressMetrics("hotKeyCache_memoryPressure");
     ALL_METRICS.add(m);
     int maxSize = 200;
-    TopK detector = new HeavyKeeper(500, 50000, 5, 0.92, 10);
+    HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(500, 50000, 5, 0.92, 10));
     Cache<String, Object> caffeine = Caffeine.newBuilder().maximumSize(maxSize).build();
     Executor executor = Runnable::run;
     createCache(detector, caffeine, executor);
@@ -684,7 +687,7 @@ class HotKeyStressIT {
   void hotKeyCache_lifecycle() throws InterruptedException {
     StressMetrics m = new StressMetrics("hotKeyCache_lifecycle");
     ALL_METRICS.add(m);
-    TopK detector = new HeavyKeeper(50, 50000, 5, 0.92, 10);
+    HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(50, 50000, 5, 0.92, 10));
     Cache<String, Object> caffeine = Caffeine.newBuilder().maximumSize(100).build();
     Executor executor = Runnable::run;
     HotKeyCache cache = createCache(detector, caffeine, executor);
@@ -929,7 +932,8 @@ class HotKeyStressIT {
     ReportPublisher publisher = mock(ReportPublisher.class);
     doAnswer(inv -> null).when(publisher).publish(any(), any());
     HotKeyReporter reporter = new HotKeyReporter(
-      publisher, scheduler, 100, "stress-test", 10000, 100, 2, new RingManager(150));
+      publisher, scheduler, 100L, "stress-test", 10000, 100, 2, new RingManager(150),
+      new ClusterHealthView(0, 5000, 3));
     reporter.start();
     concurrentRun("highFreq-reporter", 20, 100_000, (idx) -> {
       reporter.record("freq-key-" + (idx & 0xFF));
@@ -958,8 +962,9 @@ class HotKeyStressIT {
     doAnswer(inv -> null).when(publisher).publish(any(), any());
     int queueCapacity = 1000;
     HotKeyReporter reporter = new HotKeyReporter(
-      publisher, scheduler, 100, "backpressure-test",
-      queueCapacity, 1, 1, new RingManager(150));
+      publisher, scheduler, 100L, "backpressure-test",
+      queueCapacity, 1, 1, new RingManager(150),
+      new ClusterHealthView(0, 5000, 3));
     reporter.start();
     int threadCount = 10;
     int opsPerThread = 20_000;
@@ -996,8 +1001,9 @@ class HotKeyStressIT {
     ReportPublisher publisher = mock(ReportPublisher.class);
     doAnswer(inv -> null).when(publisher).publish(any(), any());
     HotKeyReporter reporter = new HotKeyReporter(
-      publisher, scheduler, 100, "shard-test",
-      10000, 50, 4, new RingManager(150));
+      publisher, scheduler, 100L, "shard-test",
+      10000, 50, 4, new RingManager(150),
+      new ClusterHealthView(0, 5000, 3));
     reporter.start();
     int threadCount = 8;
     int opsPerThread = 20_000;
@@ -1127,7 +1133,7 @@ class HotKeyStressIT {
       int nodeId = n;
       nodePool.submit(() -> {
         try {
-          TopK detector = new HeavyKeeper(100, 50000, 5, 0.92, 10);
+          HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(100, 50000, 5, 0.92, 10));
           Cache<String, Object> l1 = Caffeine.newBuilder().maximumSize(1000).build();
           Executor syncExec = Runnable::run;
           HotKeyCache cache = createCache(detector, l1, syncExec);
@@ -1198,7 +1204,7 @@ class HotKeyStressIT {
       int nodeId = n;
       nodePool.submit(() -> {
         try {
-          TopK detector = new HeavyKeeper(100, 50000, 5, 0.92, 10);
+          HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(100, 50000, 5, 0.92, 10));
           Cache<String, Object> l1 = Caffeine.newBuilder().maximumSize(1000).build();
           Executor syncExec = Runnable::run;
           HotKeyCache cache = createCache(detector, l1, syncExec);
@@ -1276,7 +1282,7 @@ class HotKeyStressIT {
     for (int n = 0; n < nodeCount; n++) {
       nodePool.submit(() -> {
         try {
-          TopK detector = new HeavyKeeper(100, 50000, 5, 0.92, 10);
+          HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(100, 50000, 5, 0.92, 10));
           Cache<String, Object> l1 = Caffeine.newBuilder().maximumSize(1000).build();
           Executor syncExec = Runnable::run;
           final HotKeyCache cache = createCache(detector, l1, syncExec);
@@ -1338,7 +1344,7 @@ class HotKeyStressIT {
     int threadCount = 20;
     int opsPerThread = (uniqueKeys * opsPerKey) / threadCount;
     concurrentRun("keyChurn", threadCount, opsPerThread, (idx) -> {
-      keeper.add("churn-" + (idx % uniqueKeys), 1);
+      keeper.addDirect("churn-" + (idx % uniqueKeys), 1);
     }, m);
     int topSize = keeper.list().size();
     m.custom.put("uniqueKeys", uniqueKeys);
@@ -1356,7 +1362,7 @@ class HotKeyStressIT {
   void gradualHotKeyEmergence() throws InterruptedException {
     StressMetrics m = new StressMetrics("gradualHotKeyEmergence");
     ALL_METRICS.add(m);
-    TopK detector = new HeavyKeeper(20, 50000, 5, 0.92, 10);
+    HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(20, 50000, 5, 0.92, 10));
     Cache<String, Object> caffeine = Caffeine.newBuilder().maximumSize(100).build();
     Executor executor = Runnable::run;
     HotKeyCache cache = createCache(detector, caffeine, executor);
@@ -1405,7 +1411,7 @@ class HotKeyStressIT {
     for (int i = 0; i < keysTotal; i++) {
       simulatedDB.put("boot-key-" + i, "db-value-" + i);
     }
-    TopK detector = new HeavyKeeper(200, 50000, 5, 0.92, 10);
+    HotKeyDetector detector = new HotKeyDetector(new HeavyKeeper(200, 50000, 5, 0.92, 10));
     Cache<String, Object> caffeine = Caffeine.newBuilder().maximumSize(2000).build();
     Executor executor = Runnable::run;
     HotKeyCache cache = createCache(detector, caffeine, executor);
@@ -1440,10 +1446,10 @@ class HotKeyStressIT {
     concurrentRun("mixedKeySize", 10, (shortKeys + longKeys) * iterations / 10, (idx) -> {
       int baseIdx = idx % (shortKeys + longKeys);
       if (baseIdx < shortKeys) {
-        keeper.add("sk" + baseIdx, 1);
+        keeper.addDirect("sk" + baseIdx, 1);
       } else {
         String longK = "very-long-key-prefix-" + (baseIdx - shortKeys) + "-with-suffix";
-        keeper.add(longK, 1);
+        keeper.addDirect(longK, 1);
       }
     }, m);
     assertThat(m.errorCount.get()).isZero();

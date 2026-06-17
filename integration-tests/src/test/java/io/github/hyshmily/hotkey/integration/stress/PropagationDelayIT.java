@@ -26,8 +26,9 @@ import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.integration.AbstractIntegrationIT;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
@@ -151,7 +152,7 @@ class PropagationDelayIT extends AbstractIntegrationIT {
   ConnectionFactory connectionFactory;
 
   @Autowired
-  RingManager workerHealthMonitor;
+  ClusterHealthView workerHealthMonitor;
 
   // -- Config ----------------------------------------------------------------------
 
@@ -918,10 +919,12 @@ class PropagationDelayIT extends AbstractIntegrationIT {
     });
 
     // -- Seed worker heartbeat so reports are not silently dropped --
-    workerHealthMonitor.onHeartbeat("sim-node", System.currentTimeMillis());
+    workerHealthMonitor.onHeartbeat(
+      new WorkerHeartbeatMessage("sim-node", 1L, System.currentTimeMillis(), 0L, 0.0, true, 0, 0, 0, 0, 0L));
     ScheduledExecutorService heartbeatRefresher = Executors.newSingleThreadScheduledExecutor();
     heartbeatRefresher.scheduleAtFixedRate(
-      () -> workerHealthMonitor.onHeartbeat("sim-node", System.currentTimeMillis()),
+      () -> workerHealthMonitor.onHeartbeat(
+        new WorkerHeartbeatMessage("sim-node", 1L, System.currentTimeMillis(), 0L, 0.0, true, 0, 0, 0, 0, 0L)),
       3, 3, TimeUnit.SECONDS);
 
     // -- Setup report queue + Worker-simulator listener --

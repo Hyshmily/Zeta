@@ -25,7 +25,7 @@ import io.github.hyshmily.hotkey.integration.AbstractIntegrationIT;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
+
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -286,7 +286,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
 
     log.info("Sent {} HOT decisions, waiting {}s for WorkerListener processing ...",
         DECISION_COUNT, COLLECTIVE_WAIT_SECONDS);
-    Thread.sleep(Duration.ofSeconds(COLLECTIVE_WAIT_SECONDS));
+    Thread.sleep(COLLECTIVE_WAIT_SECONDS * 1000L);
 
     // ── Count promotions ──
 
@@ -404,7 +404,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
       sendLatencies.add(ns);
     }
 
-    Thread.sleep(Duration.ofSeconds(COLLECTIVE_WAIT_SECONDS));
+    Thread.sleep(COLLECTIVE_WAIT_SECONDS * 1000L);
 
     for (String key : toDowngrade) {
       if (!hotKey.isLocalHotKey(key)) {
