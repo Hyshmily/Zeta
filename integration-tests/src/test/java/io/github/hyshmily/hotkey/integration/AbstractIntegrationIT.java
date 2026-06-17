@@ -30,6 +30,12 @@ import org.springframework.boot.test.context.SpringBootTest;
  *
  * <p>Manages RabbitMQ listener container lifecycle (stop before each test, start after)
  * and connection factory resets to ensure a clean state between test cases.
+ *
+ * <p>Includes the heartbeat container ({@code hotkeyHeartbeatContainer})
+ * in lifecycle management to prevent stale listener threads from surviving
+ * across {@code @DirtiesContext} boundaries. Combined with a 1-second
+ * {@code spring.rabbitmq.connection-timeout}, old reconnect attempts fail
+ * quickly instead of leaking into the next test class.
  */
 @SpringBootTest(classes = IntegrationTestApplication.class)
 public abstract class AbstractIntegrationIT {
@@ -45,28 +51,40 @@ public abstract class AbstractIntegrationIT {
   @Qualifier("workerListenerContainer")
   private SimpleMessageListenerContainer workerContainer;
 
+  @Autowired(required = false)
+  @Qualifier("hotkeyHeartbeatContainer")
+  private SimpleMessageListenerContainer heartbeatContainer;
+
   @Autowired
   private CachingConnectionFactory connectionFactory;
 
-  /** Starts Redis and RabbitMQ containers before each test. */
+  /** Resets the connection factory and restarts all listener containers before each test. */
   @BeforeEach
-  void resetAndStartContainers() {
+  void resetAndStartContainers() throws Exception {
     stopContainer(syncContainer);
     stopContainer(workerContainer);
+    stopContainer(heartbeatContainer);
     connectionFactory.resetConnection();
+    Thread.sleep(200); // wait for reset to propagate
     startContainer(syncContainer);
     startContainer(workerContainer);
+    startContainer(heartbeatContainer);
+    Thread.sleep(500); // wait for containers to connect
   }
 
-  /** Stops all containers after each test. */
+  /** Stops all listener containers after each test to prevent thread leakage. */
   @AfterEach
   void stopContainers() {
     stopContainer(syncContainer);
     stopContainer(workerContainer);
+    stopContainer(heartbeatContainer);
   }
 
   /**
    * Stops a listener container if it is non-null and currently running.
+   * Waits up to 5 seconds for the container to fully shut down, preventing
+   * stale listener threads from surviving across {@code @DirtiesContext}
+   * boundaries.
    *
    * @param container the container to stop, may be {@code null}
    */

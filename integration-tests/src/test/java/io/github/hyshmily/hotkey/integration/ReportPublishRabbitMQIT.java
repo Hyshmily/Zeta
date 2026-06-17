@@ -73,11 +73,12 @@ class ReportPublishRabbitMQIT extends AbstractIntegrationIT {
 
     RabbitAdmin admin = new RabbitAdmin(rabbitTemplate.getConnectionFactory());
     admin.declareQueue(new org.springframework.amqp.core.Queue(testQueue, true, false, false));
-    admin.declareExchange(new org.springframework.amqp.core.FanoutExchange("hotkey.report.exchange", true, false));
+    admin.declareExchange(new org.springframework.amqp.core.DirectExchange("hotkey.report.exchange", true, false));
     admin.declareBinding(
       org.springframework.amqp.core.BindingBuilder
         .bind(new org.springframework.amqp.core.Queue(testQueue))
-        .to(new org.springframework.amqp.core.FanoutExchange("hotkey.report.exchange"))
+        .to(new org.springframework.amqp.core.DirectExchange("hotkey.report.exchange"))
+        .with("report.integration-test.0")
     );
 
     MessageProperties props = new MessageProperties();

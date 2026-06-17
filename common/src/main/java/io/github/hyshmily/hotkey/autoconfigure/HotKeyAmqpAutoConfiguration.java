@@ -543,6 +543,37 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
+     * Create the AMQP message listener container that processes Worker HOT/COOL decisions
+     * via the {@link WorkerListener}.
+     *
+     * <p>The container uses {@link AcknowledgeMode#MANUAL} because the
+     * {@link WorkerListener#handleWorkerMessage} performs its own ack/nack
+     * (ack-before-update pattern, see ADR-0004).
+     *
+     * @param connectionFactory the RabbitMQ connection factory
+     * @param hotkeyWorkerQueue the per-instance Worker listener queue
+     * @param workerListener    the Worker decision listener
+     * @param properties        the Worker listener configuration properties
+     * @return a configured {@link SimpleMessageListenerContainer}
+     */
+    @Bean
+    @ConditionalOnMissingBean(name = "workerListenerContainer")
+    public SimpleMessageListenerContainer workerListenerContainer(
+      ConnectionFactory connectionFactory,
+      Queue hotkeyWorkerQueue,
+      WorkerListener workerListener,
+      WorkerListenerProperties properties
+    ) {
+      SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
+      container.setQueueNames(hotkeyWorkerQueue.getName());
+      container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+      container.setMessageListener(
+        (ChannelAwareMessageListener) (msg, channel) -> workerListener.handleWorkerMessage(channel, msg));
+      container.setAutoStartup(properties.isAutoStartup());
+      return container;
+    }
+
+    /**
      * Create the {@link WorkerHeartbeatVerifier} that periodically PINGs Workers
      * to verify they are alive.
      *

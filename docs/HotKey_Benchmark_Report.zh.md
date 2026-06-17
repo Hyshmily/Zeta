@@ -168,9 +168,14 @@ HeavyKeeper 使用**固定内存**（默认 `width=50000, depth=5` 约 4MB，详
 
 ## 4. 集成测试
 
-**压力测试数据源**：[`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
+**压力测试数据源**：[`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json) / [`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-17T15-28-16.879889400Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-17T15-28-16.879889400Z.json)
 **容器压力测试数据源**：[`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json)
 **传播延迟数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json)
+**极限延迟数据源**：[`integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-08T13-40-30.557328200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-08T13-40-30.557328200Z.json)
+**分布式基准数据源**：[`integration-tests/src/test/resources/testresult/benchmark-distributed-2026-06-17T15-19-25.980186800Z.json`](../integration-tests/src/test/resources/testresult/benchmark-distributed-2026-06-17T15-19-25.980186800Z.json)
+**多实例基准数据源**：[`integration-tests/src/test/resources/testresult/benchmark-multi-instance-2026-06-17T15-37-17.272550200Z.json`](../integration-tests/src/test/resources/testresult/benchmark-multi-instance-2026-06-17T15-37-17.272550200Z.json)
+**Worker 决策基准数据源**：[`integration-tests/src/test/resources/testresult/benchmark-worker-decision-2026-06-17T15-26-48.242109900Z.json`](../integration-tests/src/test/resources/testresult/benchmark-worker-decision-2026-06-17T15-26-48.242109900Z.json)
+**Soak 基准数据源**：[`integration-tests/src/test/resources/testresult/benchmark-soak-2026-06-17T15-25-36.417145700Z.json`](../integration-tests/src/test/resources/testresult/benchmark-soak-2026-06-17T15-25-36.417145700Z.json)
 
 ### 4.1 功能性集成
 

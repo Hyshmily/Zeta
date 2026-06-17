@@ -122,7 +122,7 @@ class WorkerDecisionDeliveryBenchmarkIT extends AbstractIntegrationIT {
   static final int OPS_PER_CONCURRENT = 500;
   static final int VERSION_ORDER_BATCH = 1_000;
   static final int COLLECTIVE_WAIT_SECONDS = 15;
-  static final String WORKER_EXCHANGE = "hotkey.worker.exchange";
+  static final String WORKER_EXCHANGE = "hotkey.broadcast.exchange";
 
   /** Runnable that may throw any checked exception. */
   @FunctionalInterface

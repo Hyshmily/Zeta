@@ -280,7 +280,7 @@ class RabbitMQToxiproxyIT extends AbstractIntegrationIT {
       props.setHeader(HotKeyConstants.AMQP_HEADER_VERSION, 1L);
       props.setHeader(HotKeyConstants.AMQP_HEADER_IS_VERSION_DEGRADED, false);
       Message msg = new Message(key.getBytes(StandardCharsets.UTF_8), props);
-      rabbitTemplate.send("hotkey.worker.exchange", "", msg);
+      rabbitTemplate.send("hotkey.broadcast.exchange", "", msg);
 
       await()
         .atMost(Duration.ofSeconds(20))

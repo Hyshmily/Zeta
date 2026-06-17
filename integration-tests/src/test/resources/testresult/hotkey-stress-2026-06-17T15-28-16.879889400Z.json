@@ -1,0 +1,447 @@
+{
+  "timestamp" : "2026-06-17T15:28:16.876886Z",
+  "totalTests" : 31,
+  "totalDurationMs" : 3646,
+  "totalOps" : 2695450,
+  "totalErrors" : 0,
+  "tests" : [ {
+    "testName" : "emptyCache_bootStorm",
+    "durationMs" : 53,
+    "totalOps" : 20000,
+    "errors" : 0,
+    "p50Ms" : 0.0072,
+    "p95Ms" : 0.047399,
+    "p99Ms" : 0.522301,
+    "opsPerSecond" : 377358,
+    "custom" : {
+      "threadCount" : 40.0,
+      "totalOps" : 20000.0,
+      "cachedAfterStorm" : 500.0
+    }
+  }, {
+    "testName" : "versionGuard_concurrent",
+    "durationMs" : 6,
+    "totalOps" : 5000,
+    "errors" : 0,
+    "p50Ms" : 0.0045,
+    "p95Ms" : 0.010101,
+    "p99Ms" : 0.0248,
+    "opsPerSecond" : 833333,
+    "custom" : { }
+  }, {
+    "testName" : "heavyKeeper_boundedSize",
+    "durationMs" : 51,
+    "totalOps" : 50,
+    "errors" : 0,
+    "p50Ms" : 37.179,
+    "p95Ms" : 41.1025,
+    "p99Ms" : 42.4253,
+    "opsPerSecond" : 980,
+    "custom" : {
+      "actualSize" : 5.0,
+      "maxK" : 10.0
+    }
+  }, {
+    "testName" : "singleFlight_extremeDedup",
+    "durationMs" : 12,
+    "totalOps" : 100,
+    "errors" : 0,
+    "p50Ms" : 0.9723,
+    "p95Ms" : 7.5174,
+    "p99Ms" : 8.006801,
+    "opsPerSecond" : 8333,
+    "custom" : {
+      "executions" : 1.0,
+      "dedupRatio" : 99.0
+    }
+  }, {
+    "testName" : "hotKeyCache_lifecycle",
+    "durationMs" : 2,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "warmupOps" : 10.0,
+      "hotOps" : 500.0,
+      "coolOps" : 200.0,
+      "becameHot" : 0.0
+    }
+  }, {
+    "testName" : "keyChurn_highRate",
+    "durationMs" : 151,
+    "totalOps" : 200000,
+    "errors" : 0,
+    "p50Ms" : 0.001701,
+    "p95Ms" : 0.0186,
+    "p99Ms" : 0.0559,
+    "opsPerSecond" : 1324503,
+    "custom" : {
+      "uniqueKeys" : 100000.0,
+      "maxTopK" : 100.0,
+      "actualTopK" : 0.0
+    }
+  }, {
+    "testName" : "distributed_burstTraffic",
+    "durationMs" : 15,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "nodeCount" : 3.0,
+      "burstThreadsPerNode" : 30.0,
+      "burstOpsPerThread" : 200.0,
+      "totalBurstOps" : 18000.0
+    }
+  }, {
+    "testName" : "distributed_networkJitter",
+    "durationMs" : 23,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "nodeCount" : 3.0,
+      "jitterSimulated" : 1.0,
+      "totalOps" : 7200.0
+    }
+  }, {
+    "testName" : "reporter_multiShard",
+    "durationMs" : 742,
+    "totalOps" : 160000,
+    "errors" : 0,
+    "p50Ms" : 0.0023,
+    "p95Ms" : 0.0102,
+    "p99Ms" : 0.0482,
+    "opsPerSecond" : 215633,
+    "custom" : {
+      "depth" : 0.0,
+      "expired" : 0.0,
+      "dropped" : 0.0
+    }
+  }, {
+    "testName" : "cacheSyncPublisher_dedup",
+    "durationMs" : 16,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.023699,
+    "p95Ms" : 1.001,
+    "p99Ms" : 1.309,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "deduped_0" : 1.0,
+      "deduped_4" : 1.0,
+      "deduped_2" : 1.0,
+      "sender_1" : 1.0,
+      "deduped_5" : 1.0,
+      "deduped_3" : 1.0,
+      "deduped_6" : 1.0,
+      "deduped_7" : 1.0,
+      "deduped_8" : 1.0,
+      "deduped_9" : 1.0,
+      "deduped_10" : 1.0,
+      "deduped_11" : 1.0,
+      "deduped_12" : 1.0,
+      "deduped_13" : 1.0,
+      "deduped_14" : 1.0,
+      "deduped_15" : 1.0,
+      "deduped_16" : 1.0,
+      "deduped_17" : 1.0,
+      "deduped_18" : 1.0,
+      "deduped_19" : 1.0,
+      "deduped_20" : 1.0,
+      "deduped_21" : 1.0,
+      "deduped_22" : 1.0,
+      "deduped_23" : 1.0,
+      "deduped_24" : 1.0,
+      "deduped_25" : 1.0,
+      "deduped_26" : 1.0,
+      "deduped_27" : 1.0,
+      "deduped_28" : 1.0,
+      "deduped_29" : 1.0,
+      "threadCount" : 30.0,
+      "actualSends" : 1.0,
+      "dedupPct" : 96.67
+    }
+  }, {
+    "testName" : "heavyKeeper_noDuplicateKeys",
+    "durationMs" : 829,
+    "totalOps" : 3000,
+    "errors" : 0,
+    "p50Ms" : 5.1421,
+    "p95Ms" : 27.607601,
+    "p99Ms" : 34.0275,
+    "opsPerSecond" : 3619,
+    "custom" : {
+      "topKSize" : 200.0,
+      "totalDistinctKeys" : 3000.0
+    }
+  }, {
+    "testName" : "stateMachine_sameKey",
+    "durationMs" : 12,
+    "totalOps" : 200,
+    "errors" : 0,
+    "p50Ms" : 0.0012,
+    "p95Ms" : 7.4269,
+    "p99Ms" : 9.3536,
+    "opsPerSecond" : 16667,
+    "custom" : { }
+  }, {
+    "testName" : "singleFlight_timeoutContention",
+    "durationMs" : 58,
+    "totalOps" : 50,
+    "errors" : 0,
+    "p50Ms" : 46.2451,
+    "p95Ms" : 51.7015,
+    "p99Ms" : 52.358299,
+    "opsPerSecond" : 862,
+    "custom" : {
+      "successes" : 50.0,
+      "timeouts" : 0.0
+    }
+  }, {
+    "testName" : "heavyKeeper_zipfDistribution",
+    "durationMs" : 60,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "topKSize" : 50.0,
+      "totalAccesses" : 200000.0,
+      "k" : 50.0
+    }
+  }, {
+    "testName" : "hotKeyCache_ttlExpiryStorm",
+    "durationMs" : 27,
+    "totalOps" : 6000,
+    "errors" : 0,
+    "p50Ms" : 0.009201,
+    "p95Ms" : 0.0805,
+    "p99Ms" : 0.357099,
+    "opsPerSecond" : 222222,
+    "custom" : {
+      "keyCount" : 200.0
+    }
+  }, {
+    "testName" : "stateMachine_gradualDrift",
+    "durationMs" : 15,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "phases" : 5.0,
+      "opsPerPhase" : 50.0,
+      "totalDecisions" : 1.0
+    }
+  }, {
+    "testName" : "reporter_highFrequency",
+    "durationMs" : 1052,
+    "totalOps" : 2000000,
+    "errors" : 0,
+    "p50Ms" : 0.001499,
+    "p95Ms" : 0.003199,
+    "p99Ms" : 0.005899,
+    "opsPerSecond" : 1901141,
+    "custom" : {
+      "depth" : 0.0,
+      "expired" : 0.0,
+      "dropped" : 0.0
+    }
+  }, {
+    "testName" : "gradualHotKeyEmergence",
+    "durationMs" : 24,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "phases" : 10.0,
+      "hotFinalState" : "NORMAL",
+      "coldFinalState" : "NORMAL"
+    }
+  }, {
+    "testName" : "singleFlight_cacheStampede",
+    "durationMs" : 24,
+    "totalOps" : 1000,
+    "errors" : 0,
+    "p50Ms" : 2.0155,
+    "p95Ms" : 3.403799,
+    "p99Ms" : 4.273299,
+    "opsPerSecond" : 41667,
+    "custom" : {
+      "keyCount" : 50.0,
+      "threadsPerKey" : 20.0,
+      "totalExecutions" : 50.0,
+      "dedupRatio" : 95.0
+    }
+  }, {
+    "testName" : "cacheSyncPublisher_versionOrdering",
+    "durationMs" : 2,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "testCases" : 5.0
+    }
+  }, {
+    "testName" : "broadcastStorm",
+    "durationMs" : 6,
+    "totalOps" : 2000,
+    "errors" : 0,
+    "p50Ms" : 0.001999,
+    "p95Ms" : 0.0063,
+    "p99Ms" : 0.0286,
+    "opsPerSecond" : 333333,
+    "custom" : {
+      "stormSize" : 2000.0,
+      "uniqueKeys" : 500.0
+    }
+  }, {
+    "testName" : "workerListener_concurrent",
+    "durationMs" : 16,
+    "totalOps" : 1000,
+    "errors" : 0,
+    "p50Ms" : 0.0026,
+    "p95Ms" : 0.0837,
+    "p99Ms" : 2.235899,
+    "opsPerSecond" : 62500,
+    "custom" : {
+      "finalState" : "COOL",
+      "finalDecisionVersion" : 1000.0
+    }
+  }, {
+    "testName" : "hotKeyCache_productionMix",
+    "durationMs" : 13,
+    "totalOps" : 10000,
+    "errors" : 0,
+    "p50Ms" : 0.0024,
+    "p95Ms" : 0.0163,
+    "p99Ms" : 0.143499,
+    "opsPerSecond" : 769231,
+    "custom" : {
+      "readPct" : 90.0,
+      "writePct" : 10.0
+    }
+  }, {
+    "testName" : "stateMachine_independentKeys",
+    "durationMs" : 3,
+    "totalOps" : 50,
+    "errors" : 0,
+    "p50Ms" : 0.0796,
+    "p95Ms" : 0.2015,
+    "p99Ms" : 0.3163,
+    "opsPerSecond" : 16667,
+    "custom" : { }
+  }, {
+    "testName" : "cacheSyncListener_concurrent",
+    "durationMs" : 5,
+    "totalOps" : 2000,
+    "errors" : 0,
+    "p50Ms" : 0.0019,
+    "p95Ms" : 0.009199,
+    "p99Ms" : 0.0655,
+    "opsPerSecond" : 400000,
+    "custom" : { }
+  }, {
+    "testName" : "hotKeyCache_memoryPressure",
+    "durationMs" : 4,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "maxSize" : 200.0,
+      "insertedCount" : 1000.0,
+      "actualSize" : 200.0
+    }
+  }, {
+    "testName" : "reporter_backpressure",
+    "durationMs" : 300,
+    "totalOps" : 200000,
+    "errors" : 0,
+    "p50Ms" : 0.0017,
+    "p95Ms" : 0.0043,
+    "p99Ms" : 0.0117,
+    "opsPerSecond" : 666667,
+    "custom" : {
+      "queueCapacity" : 1000.0,
+      "depth" : 0.0,
+      "expired" : 0.0,
+      "dropped" : 0.0,
+      "queueLoss" : 0.0,
+      "lossRatePct" : 0.0
+    }
+  }, {
+    "testName" : "singleFlight_mixedHotCold",
+    "durationMs" : 41,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "hotKeys" : 5.0,
+      "coldKeys" : 95.0,
+      "totalExecutions" : 100.0
+    }
+  }, {
+    "testName" : "mixedKeySizes_heavyKeeper",
+    "durationMs" : 48,
+    "totalOps" : 75000,
+    "errors" : 0,
+    "p50Ms" : 0.0013,
+    "p95Ms" : 0.0066,
+    "p99Ms" : 0.0935,
+    "opsPerSecond" : 1562500,
+    "custom" : {
+      "shortKeys" : 1000.0,
+      "longKeys" : 500.0
+    }
+  }, {
+    "testName" : "distributedScenario",
+    "durationMs" : 25,
+    "totalOps" : 0,
+    "errors" : 0,
+    "p50Ms" : 0.0,
+    "p95Ms" : 0.0,
+    "p99Ms" : 0.0,
+    "opsPerSecond" : 0,
+    "custom" : {
+      "nodeCount" : 5.0,
+      "workersPerNode" : 8.0,
+      "opsPerWorker" : 500.0,
+      "totalDistOps" : 20000.0
+    }
+  }, {
+    "testName" : "hotKeyCache_consistency",
+    "durationMs" : 11,
+    "totalOps" : 10000,
+    "errors" : 0,
+    "p50Ms" : 0.0015,
+    "p95Ms" : 0.0077,
+    "p99Ms" : 0.027899,
+    "opsPerSecond" : 909091,
+    "custom" : { }
+  } ]
+}

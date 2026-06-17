@@ -115,14 +115,15 @@ class EmbeddedWorkerIT extends AbstractIntegrationIT {
     // Declare report exchange idempotently (matches existing type or creates if missing)
     RabbitAdmin admin = new RabbitAdmin(rabbitTemplate.getConnectionFactory());
     rabbitTemplate.execute(channel -> {
-      channel.exchangeDeclare("hotkey.report.exchange", "fanout", true);
+      channel.exchangeDeclare("hotkey.report.exchange", "direct", true);
       return null;
     });
     Queue queue = new Queue(mockWorkerQueue, true, false, false);
     admin.declareQueue(queue);
     admin.declareBinding(
       BindingBuilder.bind(queue)
-        .to(new org.springframework.amqp.core.FanoutExchange("hotkey.report.exchange"))
+        .to(new org.springframework.amqp.core.DirectExchange("hotkey.report.exchange"))
+        .with("report.integration-test.0")
     );
 
     // Mock Worker: listens on the report queue, sends HOT decisions back
@@ -140,9 +141,9 @@ class EmbeddedWorkerIT extends AbstractIntegrationIT {
           for (String cacheKey : report.counts().keySet()) {
             MessageProperties hotProps = new MessageProperties();
             hotProps.setHeader(HotKeyConstants.AMQP_HEADER_TYPE, "HOT");
-            hotProps.setHeader(HotKeyConstants.AMQP_HEADER_VERSION, 1L);
+            hotProps.setHeader(HotKeyConstants.AMQP_HEADER_VERSION, Long.MAX_VALUE);
             Message hotMsg = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), hotProps);
-            rabbitTemplate.send("hotkey.worker.exchange", "", hotMsg);
+            rabbitTemplate.send("hotkey.broadcast.exchange", "", hotMsg);
           }
 
           channel.basicAck(msg.getMessageProperties().getDeliveryTag(), false);

@@ -113,7 +113,6 @@ public class SingleFlight {
     } catch (Exception e) {
       log.warn("singleflight join failed: key={}", cacheKey, e);
       inflightLoads.invalidate(cacheKey);
-
       return Optional.empty();
     }
   }

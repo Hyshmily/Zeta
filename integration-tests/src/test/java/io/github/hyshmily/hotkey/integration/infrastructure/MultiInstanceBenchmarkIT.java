@@ -577,11 +577,11 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
   }
 
   /**
-   * Declares the report fanout exchange idempotently.
+   * Declares the report direct exchange idempotently.
    */
   private void declareReportExchange() {
     rabbitTemplate.execute(channel -> {
-      channel.exchangeDeclare(REPORT_EXCHANGE, "fanout", true);
+      channel.exchangeDeclare(REPORT_EXCHANGE, "direct", true);
       return null;
     });
   }

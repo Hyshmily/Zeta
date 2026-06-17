@@ -170,9 +170,14 @@ The enhanced report captures per-node latency for each phase, breaking down the 
 
 ## 4. Integration Tests
 
-**Stress test data source**: [`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json)
+**Stress test data source**: [`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-06T06-35-38.782405300Z.json) / [`integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-17T15-28-16.879889400Z.json`](../integration-tests/src/test/resources/testresult/hotkey-stress-2026-06-17T15-28-16.879889400Z.json)
 **Container stress data source**: [`integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json`](../integration-tests/src/test/resources/testresult/container-full-link-stress-2026-06-08T13-29-56.840876100Z.json)
 **Propagation delay data source**: [`integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-2026-06-08T13-33-43.956696900Z.json)
+**Extreme delay data source**: [`integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-08T13-40-30.557328200Z.json`](../integration-tests/src/test/resources/testresult/propagation-delay-extreme-2026-06-08T13-40-30.557328200Z.json)
+**Distributed benchmark data source**: [`integration-tests/src/test/resources/testresult/benchmark-distributed-2026-06-17T15-19-25.980186800Z.json`](../integration-tests/src/test/resources/testresult/benchmark-distributed-2026-06-17T15-19-25.980186800Z.json)
+**Multi-instance benchmark data source**: [`integration-tests/src/test/resources/testresult/benchmark-multi-instance-2026-06-17T15-37-17.272550200Z.json`](../integration-tests/src/test/resources/testresult/benchmark-multi-instance-2026-06-17T15-37-17.272550200Z.json)
+**Worker decision benchmark data source**: [`integration-tests/src/test/resources/testresult/benchmark-worker-decision-2026-06-17T15-26-48.242109900Z.json`](../integration-tests/src/test/resources/testresult/benchmark-worker-decision-2026-06-17T15-26-48.242109900Z.json)
+**Soak benchmark data source**: [`integration-tests/src/test/resources/testresult/benchmark-soak-2026-06-17T15-25-36.417145700Z.json`](../integration-tests/src/test/resources/testresult/benchmark-soak-2026-06-17T15-25-36.417145700Z.json)
 
 ```
 Tests run: 97, Failures: 0, Errors: 0, Skipped: 9

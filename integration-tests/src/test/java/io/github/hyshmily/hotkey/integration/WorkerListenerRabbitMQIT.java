@@ -95,7 +95,7 @@ class WorkerListenerRabbitMQIT extends AbstractIntegrationIT {
     props.setHeader(HotKeyConstants.AMQP_HEADER_TYPE, "HOT");
     props.setHeader(HotKeyConstants.AMQP_HEADER_VERSION, 1L);
     Message msg = new Message(key.getBytes(StandardCharsets.UTF_8), props);
-    rabbitTemplate.send("hotkey.worker.exchange", "", msg);
+    rabbitTemplate.send("hotkey.broadcast.exchange", "", msg);
 
     await()
       .atMost(Duration.ofSeconds(10))
@@ -113,7 +113,7 @@ class WorkerListenerRabbitMQIT extends AbstractIntegrationIT {
     hotProps.setHeader(HotKeyConstants.AMQP_HEADER_TYPE, "HOT");
     hotProps.setHeader(HotKeyConstants.AMQP_HEADER_VERSION, 1L);
     Message hotMsg = new Message(key.getBytes(StandardCharsets.UTF_8), hotProps);
-    rabbitTemplate.send("hotkey.worker.exchange", "", hotMsg);
+    rabbitTemplate.send("hotkey.broadcast.exchange", "", hotMsg);
 
     await()
       .atMost(Duration.ofSeconds(10))
@@ -123,7 +123,7 @@ class WorkerListenerRabbitMQIT extends AbstractIntegrationIT {
     coolProps.setHeader(HotKeyConstants.AMQP_HEADER_TYPE, "COOL");
     coolProps.setHeader(HotKeyConstants.AMQP_HEADER_VERSION, 2L);
     Message coolMsg = new Message(key.getBytes(StandardCharsets.UTF_8), coolProps);
-    rabbitTemplate.send("hotkey.worker.exchange", "", coolMsg);
+    rabbitTemplate.send("hotkey.broadcast.exchange", "", coolMsg);
 
     await()
       .atMost(Duration.ofSeconds(10))

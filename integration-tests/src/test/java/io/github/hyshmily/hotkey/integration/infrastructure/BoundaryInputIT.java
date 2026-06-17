@@ -258,7 +258,9 @@ class BoundaryInputIT extends AbstractIntegrationIT {
     assertThat(r1).isPresent();
     assertThat(supplierCount.get()).isEqualTo(1);
 
-    Thread.sleep(500);
+    // Wait longer than SingleFlight inflightTtlSeconds (5s) so the cached
+    // completed future from the first get is evicted, forcing a fresh supplier call.
+    Thread.sleep(6000);
 
     Optional<Object> r2 = hotKey.get(key, () -> "v-" + supplierCount.incrementAndGet(), 200, 100);
     assertThat(r2).isPresent();

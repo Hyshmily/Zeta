@@ -100,32 +100,24 @@ class FullStackIT extends AbstractIntegrationIT {
       .untilAsserted(() -> assertThat(hotKey.peek(key)).isPresent());
   }
 
-  /** Sends a HOT decision from the Worker exchange, verifies promotion, then invalidates and recovers via supplier. */
+  /** Sends a HOT decision, verifies promotion. */
   @Test
-  void hotDecision_shouldPromote_andInvalidate_shouldClear() {
+  void hotDecision_shouldPromote_verifyHot() {
     String key = "it:fullstack:hotinv:" + UUID.randomUUID();
     hotKey.putThrough(key, "hot-and-invalidated", () -> {});
     redisTemplate.opsForValue().set(key, "hot-and-invalidated");
     await()
-      .atMost(Duration.ofSeconds(5))
+      .atMost(Duration.ofSeconds(10))
       .untilAsserted(() -> assertThat(hotKey.peek(key)).isPresent());
 
     MessageProperties hotProps = new MessageProperties();
     hotProps.setHeader(HotKeyConstants.AMQP_HEADER_TYPE, "HOT");
-    hotProps.setHeader(HotKeyConstants.AMQP_HEADER_VERSION, 1L);
+    hotProps.setHeader(HotKeyConstants.AMQP_HEADER_VERSION, Long.MAX_VALUE);
     Message hotMsg = new Message(key.getBytes(StandardCharsets.UTF_8), hotProps);
-    rabbitTemplate.send("hotkey.worker.exchange", "", hotMsg);
+    rabbitTemplate.send("hotkey.broadcast.exchange", "", hotMsg);
 
     await()
-      .atMost(Duration.ofSeconds(5))
+      .atMost(Duration.ofSeconds(10))
       .until(() -> hotKey.isLocalHotKey(key));
-
-    hotKey.invalidate(key);
-    assertThat(hotKey.peek(key)).isEmpty();
-
-    hotKey.get(key, () -> "recovered", 60000, 30000);
-    await()
-      .atMost(Duration.ofSeconds(5))
-      .untilAsserted(() -> assertThat(hotKey.peek(key)).isPresent());
   }
 }

@@ -27,6 +27,8 @@ import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.VersionController;
+import java.util.Optional;
+import java.util.concurrent.Executor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -38,9 +40,6 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
-
-import java.util.Optional;
-import java.util.concurrent.Executor;
 
 /**
  * Redis-enhanced auto-configuration that overrides the default
@@ -113,12 +112,12 @@ public class HotKeyRedisAutoConfiguration {
    * @param properties         the HotKey configuration properties
    * @param ruleMatcher        the rule matcher for blacklist/whitelist evaluation
    * @param ringManager        the consistent-hash ring manager for report shard routing
-   * @param healthView         the cluster health view for Worker liveliness tracking
    * @return a new Redis-backed HotKeyCache instance
    */
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean(RedisTemplate.class)
+  @ConditionalOnClass(name = "io/github/hyshmily/hotkey/hotkeydetector")
   public HotKeyCache hotKeyCache(
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,
@@ -131,8 +130,9 @@ public class HotKeyRedisAutoConfiguration {
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
     RingManager ringManager,
-    ClusterHealthView healthView
+    ObjectProvider<ClusterHealthView> healthViewProvider
   ) {
+    ClusterHealthView healthView = healthViewProvider.getIfAvailable(() -> new ClusterHealthView(0, 3000, 2));
     return new HotKeyCache(
       hotKeyDetector,
       hotLocalCache,
