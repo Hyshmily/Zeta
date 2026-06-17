@@ -13,17 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache;
+package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import org.jspecify.annotations.NonNull;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
+
 import java.util.Collection;
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import org.jspecify.annotations.NonNull;
-import org.springframework.cache.Cache;
-import org.springframework.cache.CacheManager;
 
 /**
  * Spring {@link CacheManager} implementation that lazily creates
@@ -38,6 +39,9 @@ import org.springframework.cache.CacheManager;
  * <p>The {@link #getMissingCache(String)} method is {@code protected} so that
  * subclasses may override it to customise cache creation, following the
  * standard Spring extensibility pattern.
+ *
+ * @see HotKeySpringCache
+ * @see org.springframework.cache.CacheManager
  */
 public class HotKeyCacheManager implements CacheManager {
 

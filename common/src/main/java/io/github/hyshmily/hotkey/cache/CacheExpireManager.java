@@ -54,8 +54,10 @@ public class CacheExpireManager {
   private final Semaphore refreshLimiter;
   /** Per-key dedup for background refreshes — prevents concurrent refresh for the same key. */
   private final ConcurrentHashMap<String, CompletableFuture<Void>> pendingRefreshes = new ConcurrentHashMap<>();
-  /** Jitter ratio applied to TTLs (±10%) to prevent cache stampedes. */
-  private static final double ttlJitterRatio = 0.1;
+  /** Whether TTL jitter is enabled (from config). */
+  private final boolean ttlJitterEnabled;
+  /** Jitter ratio applied to TTLs to prevent cache stampedes (from config, e.g. 0.1 = ±10%). */
+  private final double ttlJitterRatio;
 
   /**
    * Creates a CacheExpireManager with the given Caffeine cache, executor, and TTL config.
@@ -77,6 +79,29 @@ public class CacheExpireManager {
     this.refreshLimiter = ttlConfig.isSoftExpireEnabled()
       ? new Semaphore(refreshMaxPools > 0 ? refreshMaxPools : 100)
       : null;
+    this.ttlJitterEnabled = ttlConfig.isTtlJitterEnabled();
+    this.ttlJitterRatio = ttlConfig.getTtlJitterRatio();
+  }
+
+  /**
+   * Create a CacheExpireManager with explicit jitter control (for testing).
+   */
+  CacheExpireManager(
+    Cache<String, Object> caffeineCache,
+    Executor executor,
+    HotKeyProperties ttlConfig,
+    int refreshMaxPools,
+    boolean ttlJitterEnabled,
+    double ttlJitterRatio
+  ) {
+    this.caffeineCache = caffeineCache;
+    this.executor = executor;
+    this.ttlConfig = ttlConfig;
+    this.refreshLimiter = ttlConfig.isSoftExpireEnabled()
+      ? new Semaphore(refreshMaxPools > 0 ? refreshMaxPools : 100)
+      : null;
+    this.ttlJitterEnabled = ttlJitterEnabled;
+    this.ttlJitterRatio = ttlJitterRatio;
   }
 
   /**
@@ -92,7 +117,7 @@ public class CacheExpireManager {
    * Hard expire timestamp from an explicit TTL duration.
    * Falls back to the normal-key default if {@code hardTtlMs <= 0}.
    *
-   * @param hardTtlMs the hard TTL duration in milliseconds (<= 0 uses configured default)
+   * @param hardTtlMs the hard TTL duration in milliseconds (&lt;= 0 uses configured default)
    * @return absolute epoch-ms timestamp for hard expiry
    */
   public long computeHardExpireAt(long hardTtlMs) {
@@ -123,7 +148,7 @@ public class CacheExpireManager {
    * Soft expire timestamp from an explicit TTL duration.
    * Falls back to the normal-key default if {@code softTtlMs <= 0}. Returns 0 if soft expire is disabled.
    *
-   * @param softTtlMs the soft TTL duration in milliseconds (<= 0 uses configured default)
+   * @param softTtlMs the soft TTL duration in milliseconds (&lt;= 0 uses configured default)
    * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
    */
   public long computeSoftExpireAt(long softTtlMs) {
@@ -179,15 +204,17 @@ public class CacheExpireManager {
     if (hardTtlMs == Long.MAX_VALUE) {
       return Long.MAX_VALUE;
     }
-    long jitter = (long) (hardTtlMs * ttlJitterRatio * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+    long jitter = ttlJitterEnabled
+      ? (long) (hardTtlMs * ttlJitterRatio * ThreadLocalRandom.current().nextDouble(-1.0, 1.0))
+      : 0L;
 
     return hardTtlMs > 0 ? System.currentTimeMillis() + Math.max(1, hardTtlMs + jitter) : Long.MAX_VALUE;
   }
 
   /**
    * Convert a soft TTL duration (ms) to an absolute epoch-ms expiration timestamp.
-   * Applies ±10% jitter to prevent cache stampedes. Returns 0 if soft expire is disabled
-   * or the TTL is non-positive.
+   * Applies configurable jitter (default ±10%) to prevent cache stampedes.
+   * Returns 0 if soft expire is disabled or the TTL is non-positive.
    *
    * @param softTtlMs the soft TTL duration in milliseconds
    * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
@@ -199,7 +226,9 @@ public class CacheExpireManager {
     if (softTtlMs == Long.MAX_VALUE) {
       return Long.MAX_VALUE;
     }
-    long jitter = (long) (softTtlMs * ttlJitterRatio * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+    long jitter = ttlJitterEnabled
+      ? (long) (softTtlMs * ttlJitterRatio * ThreadLocalRandom.current().nextDouble(-1.0, 1.0))
+      : 0L;
 
     return System.currentTimeMillis() + Math.max(1, softTtlMs + jitter);
   }

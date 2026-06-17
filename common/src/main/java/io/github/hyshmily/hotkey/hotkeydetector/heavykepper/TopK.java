@@ -24,7 +24,15 @@ import java.util.concurrent.BlockingQueue;
  *
  * <p>Implementations track the most frequently accessed keys using a
  * sketch-based algorithm (e.g. HeavyKeeper) and provide access to the
- * current ranking, expelled items, and total request count.
+ * current ranking (sorted by estimated frequency descending), expelled
+ * items (keys evicted when the TopK set is full), and the total tracked
+ * request count.
+ *
+ * <p>The interface supports both single-key and batch access recording,
+ * periodic frequency decay ({@link #fading}), and read-only introspection
+ * ({@link #list}, {@link #contains}, {@link #total}).
+ *
+ * <p>Implementations are expected to be thread-safe.
  */
 public interface TopK {
   /**
@@ -37,13 +45,19 @@ public interface TopK {
   AddResult addDirect(String key, int increment);
 
   /**
-   * Record accesses for multiple keys.
-   * <p>Always updates both the sketch counters and the TopK heap.
+   * Record accesses for multiple keys in batch.
+   *
+   * <p>Always updates both the sketch counters and the TopK heap. More
+   * efficient than repeated {@link #addDirect(String, int)} calls because
+   * the heap is updated once for the entire batch rather than per-key,
+   * reducing locking overhead. Returns results only for keys that actually
+   * entered the TopK set (possibly displacing existing members).
    *
    * @param keyCounts map of keys to their access counts
    * @return list of {@link AddResult} for keys that entered the TopK set
    */
   List<AddResult> addDirect(Map<String, Long> keyCounts);
+
   /**
    * Return the current TopK list sorted by frequency (descending).
    *
@@ -68,8 +82,14 @@ public interface TopK {
   BlockingQueue<Item> expelled();
 
   /**
-   * Decay all frequency counts to age out historical data.
-   * Typically called periodically by a scheduler.
+   * Decay all frequency counts to age out historical data and prevent
+   * stale frequency accumulation.
+   *
+   * <p>Typically invoked periodically by a scheduler (e.g. every 30
+   * seconds). The implementation halves all sketch counters and heap
+   * entry counts, discarding entries whose count drops to zero. This
+   * ensures that the TopK set reflects recent access patterns rather
+   * than cumulative historical popularity.
    */
   void fading();
 

@@ -18,8 +18,29 @@ package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 /**
  * Result of a single {@link TopK#addDirect} operation.
  *
- * @param expelledKey the key evicted from the TopK set by this operation, or {@code null} if none
- * @param isHotKey    whether the current key entered the TopK hot set
- * @param currentKey  the key that was added
+ * <p>Encapsulates three pieces of information:
+ * <ol>
+ *   <li>Whether the key being added entered the TopK hot set ({@code isHotKey});</li>
+ *   <li>If it did and the set was full, which key was evicted to make room
+ *       ({@code expelledKey});</li>
+ *   <li>The identity of the key that triggered this operation ({@code currentKey}).</li>
+ * </ol>
+ *
+ * <p>When {@code isHotKey} is {@code false}, the key either did not meet
+ * the minimum count threshold or could not displace any current member.
+ * In that case {@code expelledKey} is always {@code null}.
+ *
+ * @param expelledKey the key evicted from the TopK set by this operation,
+ *                    or {@code null} if no eviction occurred
+ * @param isHotKey    whether the input key entered the TopK hot set during
+ *                    this operation
+ * @param currentKey  the key that was added (never {@code null})
  */
-public record AddResult(String expelledKey, boolean isHotKey, String currentKey) {}
+public record AddResult(String expelledKey, boolean isHotKey, String currentKey) {
+
+  private static final AddResult COLD = new AddResult(null, false, "");
+
+  public static AddResult cold() {
+    return COLD;
+  }
+}

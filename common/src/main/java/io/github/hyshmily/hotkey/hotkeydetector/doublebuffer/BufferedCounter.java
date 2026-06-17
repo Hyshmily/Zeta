@@ -32,10 +32,25 @@ import org.springframework.beans.factory.InitializingBean;
  * Double-buffered counter that aggregates high-frequency single-key increments
  * and flushes them in batch to a downstream consumer.
  *
- * <p>An active buffer accepts incoming {@link #count(String, long)} calls while
- * a standby buffer is drained by a scheduled flusher.  When the active buffer
- * exceeds 80 % capacity the buffers are swapped eagerly, keeping the hot path
- * lock-free.
+ * <p><b>Design:</b> Two {@link CounterBuffer} instances (active and standby)
+ * are maintained as {@code AtomicReference<CounterBuffer>}. The active buffer
+ * accepts incoming {@link #count(String, long)} calls via a lock-free
+ * {@code ConcurrentHashMap}. A scheduled flusher periodically swaps and drains
+ * both buffers into the downstream consumer (see {@link #flushStandby()}).
+ *
+ * <p><b>Eager swap:</b> When the active buffer exceeds 80 % of
+ * {@link #MAX_BUFFER_SIZE}, the buffers are swapped eagerly to prevent any
+ * single buffer from growing unbounded under a traffic spike. The hot path
+ * (the {@code count} call) remains lock-free — it only does an atomic
+ * {@code getAndSet} on the active reference.
+ *
+ * <p><b>Lifecycle:</b> Implements {@link InitializingBean} to start the
+ * periodic flush scheduler, and {@link Destroyable} to perform a final drain
+ * on shutdown. The scheduler is either self-created (and owned) or externally
+ * provided (shared), controlling whether {@link #destroy()} shuts it down.
+ *
+ * <p>Thread-safe. All public methods can be called concurrently from
+ * multiple threads.
  */
 @Slf4j
 public class BufferedCounter implements InitializingBean, Destroyable {
@@ -93,10 +108,15 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * Record one or more accesses for the given key.
+   * Record one or more accesses for the given key into the active buffer.
    *
-   * @param key   the accessed key
-   * @param delta the number of accesses to record
+   * <p>This is the hot path — it performs a lock-free update on the active
+   * {@link CounterBuffer}. If the active buffer exceeds 80 % capacity
+   * after this increment, an eager swap is triggered to keep the buffer
+   * from overflowing before the next scheduled flush.
+   *
+   * @param key   the accessed key (must not be {@code null})
+   * @param delta the number of accesses to record (must be positive)
    */
   public void count(String key, long delta) {
     CounterBuffer buffer = active.get();

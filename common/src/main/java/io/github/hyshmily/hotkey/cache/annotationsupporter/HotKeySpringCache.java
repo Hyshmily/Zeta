@@ -13,27 +13,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache;
+package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import jakarta.annotation.Nullable;
+import org.jspecify.annotations.NonNull;
+import org.springframework.cache.Cache;
+import org.springframework.cache.support.AbstractValueAdaptingCache;
+
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
-import org.jspecify.annotations.NonNull;
-import org.springframework.cache.Cache;
-import org.springframework.cache.support.AbstractValueAdaptingCache;
 
 /**
  * Spring {@link Cache} adapter that wraps the HotKey {@link HotKey} facade behind the
  * standard Spring caching abstraction.
  *
  * <p>All cache keys are prefixed with the cache name and the configured key separator
- * ({@link HotKeyProperties.SpringCache#getKeySeparator()}, default {@code "::"}) to
+ * ({@link HotKeyProperties.SpringCache#keySeparator}, default {@code "::"}) to
  * avoid collisions in the shared Caffeine instance.
  *
  * <p>Delegation:

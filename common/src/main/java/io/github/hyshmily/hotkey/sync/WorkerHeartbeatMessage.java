@@ -23,14 +23,48 @@ import java.nio.charset.StandardCharsets;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
- * Enhanced heartbeat message broadcast by the Worker to all App instances.
+ * Structured heartbeat message broadcast periodically by the Worker to all
+ * application instances for cluster health monitoring and gossip-based config
+ * synchronization.
  *
- * <p>Replaces the old PING-only heartbeat with structured fields including
- * epoch (Worker restart detection), decisionVersionHwm (version watermark),
- * loadFactor (scheduling hint), readyToServe (cold-start guard), and
- * state machine configuration fields for gossip-based config sync.
+ * <p>Broadcast on the dedicated {@code hotkey.heartbeat.exchange} (Topic exchange).
+ * Each App instance consumes all heartbeats from all Workers and updates its local
+ * {@link ClusterHealthView} accordingly.
  *
- * <p>Broadcast on the dedicated {@code hotkey.heartbeat.exchange} (Topic).
+ * <p><b>Fields:</b>
+ * <ul>
+ *   <li>{@code epoch} — Monotonically increasing Worker restart counter. Handles
+ *       the case where a Worker dies and its {@code AtomicLong} decision version
+ *       resets, allowing App instances to detect restarts.</li>
+ *   <li>{@code decisionVersionHwm} — Watermark (high-water mark) of the Worker's
+ *       current decision version, used for idempotent decision ordering on the receiver.</li>
+ *   <li>{@code loadFactor} — Normalized scheduling hint (0.0–1.0) reflecting the
+ *       Worker's current processing load.</li>
+ *   <li>{@code readyToServe} — Cold-start guard; {@code false} during Worker
+ *       initialization before the first full detection cycle completes.</li>
+ *   <li>{@code configFingerprint}, {@code configConfirmCount}, etc. — Gossip-based
+ *       state machine configuration fields for decentralized config sync (see ADR-0003).</li>
+ * </ul>
+ *
+ * <p>Serialization is header-based: the body carries only the {@code workerId} as
+ * UTF-8 bytes; all structured fields are stored as AMQP message headers for efficient
+ * routing and filtering.
+ *
+ * @param workerId           unique identifier for the originating Worker node
+ * @param epoch              Worker restart counter; increases monotonically on each Worker start
+ * @param timestamp          wall-clock time when this heartbeat was generated (millis since epoch)
+ * @param decisionVersionHwm high-water mark of the Worker's current decision version
+ * @param loadFactor         normalized load factor (0.0–1.0) for scheduling hints
+ * @param readyToServe       {@code false} during Worker cold-start initialization;
+ *                           App instances should not rely on this Worker's decisions yet
+ * @param configFingerprint  hash/fingerprint of the Worker's current state machine configuration
+ * @param configConfirmCount gossip: number of peers that have confirmed the current config
+ * @param configCoolCount    gossip: cool-down period count in the state machine
+ * @param configGraceCount   gossip: grace-period count in the state machine
+ * @param configTimestamp    gossip: timestamp of the last config change
+ *
+ * @see ClusterHealthView
+ * @see WorkerHeartbeatVerifier
  */
 public record WorkerHeartbeatMessage(
     String workerId,

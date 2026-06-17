@@ -161,6 +161,39 @@ class CacheSyncPublisherTest {
   }
 
   /**
+   * Verifies that a normal broadcast does not dedup-block a subsequent degraded
+   * broadcast for the same key+type (different compositeKey due to "D:" prefix).
+   */
+  @Test
+  void degradedAfterNormal_shouldNotBeDeduplicated() {
+    publisher.broadcastRefresh("deg-key", 5L, false);
+    publisher.broadcastRefresh("deg-key", Long.MIN_VALUE + 1, true);
+    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that a degraded broadcast does not dedup-block a subsequent normal
+   * broadcast for the same key+type (different compositeKey without "D:" prefix).
+   */
+  @Test
+  void normalAfterDegraded_shouldNotBeDeduplicated() {
+    publisher.broadcastRefresh("deg-key", Long.MIN_VALUE + 1, true);
+    publisher.broadcastRefresh("deg-key", 5L, false);
+    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that two degraded broadcasts for the same key+type are correctly
+   * deduplicated when the second has a lower version (same "D:" compositeKey).
+   */
+  @Test
+  void degradedDuplicate_shouldBeDeduplicated() {
+    publisher.broadcastRefresh("deg-key", 3L, true);
+    publisher.broadcastRefresh("deg-key", 1L, true);
+    verify(rabbitTemplate, times(1)).send(anyString(), anyString(), any());
+  }
+
+  /**
    * Verifies that getDedupCacheSize returns 0 before init.
    */
   @Test

@@ -21,44 +21,63 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * Configuration for instance-to-instance cache synchronization (INVALIDATE / REFRESH).
- * <p>
- * Exchange: {@code hotkey.sync.exchange} (FanoutExchange)
- * Queue: {@code hotkey.sync:{instanceId}}
+ * Configuration properties for the instance-to-instance cache synchronization
+ * mechanism (INVALIDATE / REFRESH / RULES_SYNC).
+ *
+ * <p>Binds to the {@code hotkey.sync} prefix in Spring configuration sources.
+ * Each application instance creates an anonymous queue named
+ * {@code hotkey.sync:{instanceId}} bound to the configured FanoutExchange.
+ *
+ * <p>Controls the deduplication window for redundant broadcasts, the jitter
+ * window to spread Redis load, consumer concurrency, and prefetch settings.
+ *
+ * @see CacheSyncPublisher
+ * @see CacheSyncListener
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "hotkey.sync")
 public class CacheSyncProperties {
 
-  /** Whether instance-to-instance cache sync is enabled. */
+  /** Whether instance-to-instance cache synchronization is enabled.
+   * Set to {@code true} when multiple application instances share the same Redis
+   * backend and should be notified of each other's data mutations. */
   private boolean enabled = false;
 
-  /** FanoutExchange name for broadcasting INVALIDATE / REFRESH. */
+  /** FanoutExchange name for broadcasting INVALIDATE, REFRESH, and RULES_SYNC messages. */
   private String exchangeName = "hotkey.sync.exchange";
 
-  /** Prefix for the per-instance queue name (suffixed with instance ID). */
+  /** Prefix for the per-instance queue name, suffixed with the instance ID
+   * from {@link InstanceIdGenerator}. Final queue: {@code {queuePrefix}:{instanceId}}. */
   private String queuePrefix = "hotkey.sync";
 
-  /** Whether the RabbitMQ listener container starts automatically. */
+  /** Whether the RabbitMQ listener container starts automatically with the application context. */
   private boolean autoStartup = true;
 
-  /** Time window (seconds) for deduplicating repeated broadcasts of the same type+key. */
+  /** Time window (seconds) for deduplicating repeated broadcasts of the same
+   * type+key combination. Within this window, a broadcast with a stale version
+   * is silently dropped. */
   private int dedupWindowSeconds = 10;
 
-  /** Maximum capacity of the in-memory deduplication cache. */
+  /** Maximum number of entries in the in-memory deduplication cache.
+   * When full, older entries are evicted first (Caffeine LRU-like policy). */
   private int dedupMaxSize = 10_000;
 
-  /** Maximum random jitter (ms) added before each sync operation to spread Redis load. */
+  /** Maximum random jitter (milliseconds) added before each sync cache update.
+   * Spreads Redis reads across instances to avoid thundering herds when a
+   * single write triggers broadcasts to many peers. */
   private int warmupJitterMs = 100;
 
-  /** Number of concurrent RabbitMQ consumers for the sync queue. */
+  /** Number of concurrent RabbitMQ consumers for the sync queue.
+   * Higher values increase throughput under load at the cost of more Redis connections. */
   private int concurrentConsumers = 3;
 
-  /** Pool size for the scheduled executor that runs jittered sync tasks. */
+  /** Pool size for the scheduled executor that runs jittered sync tasks.
+   * Should be at least as large as the number of concurrent consumers. */
   private int schedulerPoolSize = 4;
 
-  /** AMQP prefetch count per consumer. */
+  /** AMQP prefetch count per consumer. Controls how many unacknowledged messages
+   * each consumer can hold at once. */
   private int prefetchCount = 5;
 
   /**

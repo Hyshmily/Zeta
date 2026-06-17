@@ -17,7 +17,7 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.annotation.HotKeyCacheExtensionAspect;
-import io.github.hyshmily.hotkey.cache.HotKeyCacheManager;
+import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheManager;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;

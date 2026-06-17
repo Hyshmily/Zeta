@@ -16,18 +16,57 @@
 package io.github.hyshmily.hotkey.model;
 
 /**
- * Lifecycle state of a key within the hot-key cache.
+ * Lifecycle state of a key within the L1 cache, governing which TTL
+ * policy is applied.
  *
- * <p>Transitions: {@code NORMAL -> HOT} (when frequency exceeds threshold),
- * {@code HOT -> PRE_COOL -> COOL -> NORMAL} (cooldown sequence).
+ * <p>A key starts in {@link #NORMAL} with the configured default TTLs.
+ * When the Worker broadcasts a HOT decision, the key transitions to
+ * {@link #HOT} and its TTLs are extended. When the Worker broadcasts a
+ * COOL decision, the key transitions through {@link #PRE_COOL} then
+ * {@link #COOL} before returning to {@link #NORMAL} with the original
+ * TTLs restored.
+ *
+ * <p>Transition sequence:
+ * <pre>
+ *              HOT broadcast
+ *   NORMAL ──────────────────► HOT
+ *     ◄─────────────────────────┘
+ *      COOL (via PRE_COOL → COOL)
+ *
+ *   Internal detail:
+ *   HOT → PRE_COOL → COOL → NORMAL
+ * </pre>
+ *
+ * <p>The {@link #PRE_COOL} intermediate state prevents TTL flapping:
+ * if a new HOT decision arrives during the cool-down grace period,
+ * the key reverts to {@link #HOT} without a full transition cycle.
  */
 public enum KeyState {
-  /** Key frequency exceeds the hot threshold; kept in L1 with extended TTL. */
+  /**
+   * Key has been identified as hot by the Worker. The L1 cache entry is
+   * kept with extended TTL to serve the high-frequency reads without
+   * hitting the backend.
+   */
   HOT,
-  /** Key frequency dropped below cooldown threshold; L1 TTL reverts to normal. */
+  /**
+   * Key frequency has dropped below the cooldown threshold. The L1 TTL
+   * reverts from the extended hot TTL back to the normal configured TTL.
+   * This is a terminal state in the cool-down sequence before returning
+   * to {@link #NORMAL}.
+   */
   COOL,
-  /** Transient state between HOT and COOL during cooldown sequence. */
+  /**
+   * Transient state between {@link #HOT} and {@link #COOL} during the
+   * cool-down sequence. The entry is still cached with extended TTL but
+   * is awaiting the next evaluation cycle. If a new HOT decision arrives
+   * during this state, the key returns to {@link #HOT} without completing
+   * the cool-down, preventing TTL oscillation.
+   */
   PRE_COOL,
-  /** Default state; key is cached with standard TTL. */
+  /**
+   * Default state: the key is cached with the standard configured TTL.
+   * All keys start in this state and return to it after the cool-down
+   * sequence completes.
+   */
   NORMAL
 }

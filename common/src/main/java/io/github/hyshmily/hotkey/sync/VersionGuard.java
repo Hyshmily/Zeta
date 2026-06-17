@@ -19,16 +19,37 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 
 /**
- * Shared version comparison logic for broadcast message guards.
- * <p>
+ * Shared version comparison logic for broadcast message guards used by both
+ * the Worker decision listener and the instance-to-instance cache sync listener.
+ *
+ * <p>This class provides two families of guard methods, each with a fast-path
+ * variant (accepting a {@link Cache} reference) and an entry-level variant
+ * (accepting an existing {@link CacheEntry}) for use inside atomic
+ * {@code compute} blocks:
+ *
  * <ul>
- *   <li>{@link #shouldSkipForWorker} compares {@code getDecisionVersion()}
- *       — Worker HOT/COOL decisions use {@code isVersionDegraded()} as
- *       a safety net: degraded entries (created during Redis outage) unconditionally
- *       accept decisions to survive Worker restart.</li>
- *   <li>{@link #shouldSkipForSync} compares {@code getDataVersion()}
- *       — data‑mutation broadcasts use the 4‑case degraded comparison.</li>
+ *   <li><b>{@link #shouldSkipForWorker}</b> — Compares {@code decisionVersion}
+ *       from Worker HOT/COOL broadcasts. Degraded entries (created during a
+ *       Redis outage) unconditionally accept incoming decisions, providing a
+ *       safety net against Worker restarts that reset the {@code AtomicLong}
+ *       counter (see ADR-0008, ADR-0009).</li>
+ *   <li><b>{@link #shouldSkipForSync}</b> — Compares {@code dataVersion}
+ *       from application-level data-mutation broadcasts. Uses a 4-case degraded
+ *       comparison matrix:
+ *       <ol>
+ *         <li>Both normal: skip if existing {@code >=} incoming</li>
+ *         <li>Existing normal, incoming degraded: always skip (normal wins)</li>
+ *         <li>Both degraded: skip if existing {@code >=} incoming</li>
+ *         <li>Existing degraded, incoming normal: never skip (normal overwrites degraded)</li>
+ *       </ol>
+ *   </li>
  * </ul>
+ *
+ * <p>All methods are stateless and thread-safe. Instances of this utility class
+ * must never be created.
+ *
+ * @see WorkerListener
+ * @see CacheSyncListener
  */
 public final class VersionGuard {
 
@@ -38,12 +59,26 @@ public final class VersionGuard {
   private VersionGuard() {}
 
   /**
-   * WorkerListener guard: the caller already holds the existing entry (inside a
-   * {@code compute} block), so no redundant {@code getIfPresent} is needed.
+   * WorkerListener guard for use inside an atomic {@code compute} block: the caller
+   * already holds the existing entry reference, so no redundant {@code getIfPresent}
+   * is needed.
    *
-   * @param existing                 the existing cache entry (maybe {@code null})
-   * @param incomingDecisionVersion  the decision version from the incoming Worker message
-   * @return {@code true} if the incoming message should be skipped
+   * <p>Returns {@code false} (accept) for any of the following:
+   * <ul>
+   *   <li>No existing entry ({@code null})</li>
+   *   <li>Existing entry is degraded ({@code isVersionDegraded == true}) —
+   *       yields to any incoming decision, even one with a lower version,
+   *       because the degraded entry was written during a Redis outage</li>
+   * </ul>
+   *
+   * Otherwise, skips when the existing entry's {@code decisionVersion} is
+   * {@code >=} the incoming version.
+   *
+   * @param existing                 the existing cache entry; may be {@code null}
+   * @param incomingDecisionVersion  the decision version from the incoming Worker message;
+   *                                 must be non-negative in normal operation
+   * @return {@code true} if the incoming message should be skipped, {@code false}
+   *         if the decision should be applied
    */
   public static boolean shouldSkipForWorker(CacheEntry existing, long incomingDecisionVersion) {
     if (existing == null) {
@@ -56,17 +91,19 @@ public final class VersionGuard {
   }
 
   /**
-   * WorkerListener guard: compares {@code getDecisionVersion()}.
-   * When the existing entry has {@code isVersionDegraded()}{@code = true}
-   * (i.e. it was created during a Redis outage), the guard unconditionally accepts the
-   * incoming decision — the entry was written in an unstable period and should yield to
-   * any newer Worker decision, even if the Worker restarted and its {@code AtomicLong}
-   * reset.
+   * WorkerListener guard with a cache-level fast path: fetches the existing entry
+   * from the L1 cache and delegates to the entry-level overload.
    *
-   * @param cache                    the local Caffeine cache
-   * @param cacheKey                 the cache key to check
+   * <p>This variant is used <em>outside</em> atomic {@code compute} blocks as a
+   * cheap first-pass check. If it returns {@code true} (skip), the caller can avoid
+   * the more expensive Redis fetch entirely. A second guard inside the {@code compute}
+   * block is still needed for correctness (DCL pattern).
+   *
+   * @param cache                    the local Caffeine L1 cache; must not be null
+   * @param cacheKey                 the cache key to look up; must not be null
    * @param incomingDecisionVersion  the decision version from the incoming Worker message
-   * @return {@code true} if the incoming message should be skipped
+   * @return {@code true} if the incoming message should be skipped (existing entry
+   *         is already up-to-date); {@code false} if the decision may need to be applied
    */
   public static boolean shouldSkipForWorker(
     Cache<String, Object> cache,
@@ -81,20 +118,26 @@ public final class VersionGuard {
   }
 
   /**
-   * CacheSyncListener guard: the caller already holds the existing entry (inside a
-   * {@code compute} block), so no redundant {@code getIfPresent} is needed.
-   * <p>
+   * CacheSyncListener guard for use inside an atomic {@code compute} block: the caller
+   * already holds the existing entry reference.
+   *
+   * <p>Applies the 4-case degraded comparison matrix:
    * <ol>
-   *   <li>Both normal: skip if existing >= incoming</li>
+   *   <li>Both normal: skip if existing {@code >=} incoming</li>
    *   <li>Existing normal, incoming degraded: always skip (normal wins)</li>
-   *   <li>Both degraded: skip if existing >= incoming</li>
+   *   <li>Both degraded: skip if existing {@code >=} incoming</li>
    *   <li>Existing degraded, incoming normal: never skip (normal overwrites degraded)</li>
    * </ol>
    *
-   * @param existing             the existing cache entry (maybe {@code null})
+   * <p>This design ensures that a single healthy Redis-backed instance can
+   * always overwrite degraded entries from other instances, while preventing
+   * degraded broadcasts from reverting healthy entries.
+   *
+   * @param existing             the existing cache entry; may be {@code null} (returns {@code false})
    * @param incomingDataVersion  the data version from the incoming sync message
-   * @param incomingDegraded     whether the incoming sync message is operating in degraded mode
-   * @return {@code true} if the incoming refresh should be skipped
+   * @param incomingDegraded     {@code true} if the incoming sync message was sent in degraded mode
+   * @return {@code true} if the incoming refresh should be skipped;
+   *         {@code false} if it should be applied
    */
   public static boolean shouldSkipForSync(CacheEntry existing, long incomingDataVersion, boolean incomingDegraded) {
     if (existing == null) {
@@ -120,20 +163,19 @@ public final class VersionGuard {
   }
 
   /**
-   * CacheSyncListener guard: compares {@code getDataVersion()}.
-   * <p>
-   * <ol>
-   *   <li>Both normal: skip if existing >= incoming</li>
-   *   <li>Existing normal, incoming degraded: always skip (normal wins)</li>
-   *   <li>Both degraded: skip if existing >= incoming</li>
-   *   <li>Existing degraded, incoming normal: never skip (normal overwrites degraded)</li>
-   * </ol>
+   * CacheSyncListener guard with a cache-level fast path: fetches the existing entry
+   * from the L1 cache and delegates to the entry-level overload.
    *
-   * @param cache               the local Caffeine cache
-   * @param cacheKey            the cache key to check
+   * <p>Used <em>outside</em> atomic {@code compute} blocks as a cheap first-pass
+   * check (DCL pattern). A second guard inside the {@code compute} block is still
+   * needed for correctness.
+   *
+   * @param cache               the local Caffeine L1 cache; must not be null
+   * @param cacheKey            the cache key to look up; must not be null
    * @param incomingDataVersion the data version from the incoming sync message
-   * @param incomingDegraded    whether the incoming sync message is operating in degraded mode
-   * @return {@code true} if the incoming refresh should be skipped
+   * @param incomingDegraded    {@code true} if the incoming sync message was sent in degraded mode
+   * @return {@code true} if the incoming refresh should be skipped;
+   *         {@code false} if the update may be needed
    */
   public static boolean shouldSkipForSync(
     Cache<String, Object> cache,

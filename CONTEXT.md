@@ -32,6 +32,7 @@
 
 - **Graceful Degradation** — When all Workers are detected as dead (`RingManager.isAnyWorkerAlive()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
 - **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `promoteLocalHotkeyIfNeeded`) or by Worker broadcast (in `handleHot`).
+- **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `CacheExpireManager` to prevent cache stampedes. Controlled by `hotkey.local.ttl-jitter-enabled` and `hotkey.local.ttl-jitter-ratio` (default 0.1 = ±10%).
 - **Expire** — Two-tier: **soft expire** (stale-while-revalidate, returns stale data + async refresh) and **hard expire** (absolute TTL, entry invalidated). Soft expire only applies to HOT and COOL entries.
 - **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `HotKeyCacheManager` (implements `CacheManager`) and `HotKeySpringCache` (implements `Cache`). Enabled via `hotkey.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
 - **HotKeyCacheContext** — ThreadLocal singleton holding TTL (`hardTtlMs`, `softTtlMs`) and `allowNull` context for the current cache operation. `HotKeyCacheExtensionAspect` snapshots/restores these values around each `@Cacheable` invocation. `HotKeySpringCache.get(Object, Callable)` reads them from context.
@@ -44,6 +45,10 @@
 - **L2** — Optional Redis cache (or any backend via the `Supplier<T>` reader). Async fallback on L1 miss.
 - **Report** — Per-key frequency count sent from App to Worker via AMQP. Aggregated locally (Caffeine, 30s, 100k max) before batching.
 - **Broadcast** — AMQP exchange `hotkey.broadcast.exchange` for cross-instance sync (cache values, HOT/COOL decisions) and Worker-to-App decision delivery.
+- **putLocal** — Local-only L1 write without version bump, broadcast, hot-key detection, or reporting. Preserves existing entry metadata. Useful for fallback caching and cache pre-warming.
+- **Fluent Read API** — `HotKeyReadQuery` returned by `hotKey.read(key)`. Builder pattern: `.withPrimary(reader)`, `.thenExecute(fallback)`, `.withTtl(hard, soft)`, `.allowBroadcast()`, `.allowNull()`, `.execute()`. Eliminates manual fallback chain orchestration.
+- **Fluent Write API** — `HotKeyWriteCommand` returned by `hotKey.write(key)`. Builder pattern: `.withHardTtl()`, `.withSoftTtl()`, `.putThrough(value, writer)`, `.putBeforeInvalidate(mutation)`, `.invalidate()`.
+- **CacheMode** — Enum: `GET` (standard cache-aside) or `GET_WITH_SOFT_EXPIRE` (stale-while-revalidate). Used by `HotKeyReadQuery.withPrimary(reader, mode)`.
 - **@Intercept** — AOP annotation for read-side interception. Calls `hotKeyDetector.add()` (keeps TopK accurate) but skips `reporter.record()` (avoids flooding Worker). Does NOT trigger Worker report flow. Applied via `HotKeyCacheExtensionAspect` on `@Cacheable` methods.
 - **@HotKeyCacheTTL** — Per-key TTL override annotation for read operations. Applied via `HotKeyCacheExtensionAspect` on `@Cacheable` methods.
 

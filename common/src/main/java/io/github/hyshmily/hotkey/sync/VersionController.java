@@ -25,11 +25,27 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 /**
- * Manages per-key version numbers using either Redis INCR (primary) or a
- * local {@link AtomicLong} fallback. When Redis is unavailable, versions
- * are assigned in the negative {@code long} space so they always sort below
- * normal (positive) Redis versions — this guarantees correct broadcast
- * ordering without flag-aware comparison logic.
+ * Manages per-key monotonically increasing version numbers for the application-level
+ * {@code dataVersion} space. Provides dual-mode version allocation: Redis-based
+ * (primary) and local fallback (degraded).
+ *
+ * <p><b>Version space design (see ADR-0008):</b>
+ * <ul>
+ *   <li><b>Normal (Redis):</b> Uses {@code Redis INCR} inside an atomic Lua script
+ *       ({@code INCR + EXPIRE}) to produce positive {@code long} values. Guarantees
+ *       global monotonic ordering across all application instances.</li>
+ *   <li><b>Degraded (local fallback):</b> When Redis is unavailable, versions are
+ *       assigned in the <em>negative</em> long space ({@code Long.MIN_VALUE + localCounter}).
+ *       This ensures all degraded versions sort below any positive Redis version in
+ *       numeric comparison, enabling the 4-case guard in {@link VersionGuard#shouldSkipForSync}
+ *       to work correctly without flag-aware comparison logic.</li>
+ * </ul>
+ *
+ * <p><b>Thread safety:</b> Redis INCR is atomic by nature. The local fallback uses
+ * {@link AtomicLong} and is safe for concurrent access from multiple threads.
+ *
+ * @see VersionGuard
+ * @see HotKeyConstants#REDIS_VERSION_KEY_PREFIX
  */
 @RequiredArgsConstructor
 @Slf4j
@@ -53,23 +69,31 @@ public class VersionController {
   private final int versionKeyTtlMinutes;
 
   /**
-   * Local counter used when Redis is unavailable. Starts at 0 and is subtracted
-   * from {@link Long#MIN_VALUE} so degraded versions always sort below normal.
+   * Local counter used when Redis is unavailable. Each call to {@link #fallbackVersion()}
+   * increments this counter. The resulting version is computed as
+   * {@code Long.MIN_VALUE + increment}, ensuring all degraded versions sort below
+   * any positive Redis INCR version in numeric comparison.
    */
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
 
   /**
-   * Atomically increment the version counter for the given cache key.
-   * Uses a Lua script for atomic INCR + EXPIRE in Redis.
-   * Falls back to {@link #fallbackVersion()} on any Redis failure.
-   * <p>
-   * The Redis key is prefixed with {@link HotKeyConstants#REDIS_VERSION_KEY_PREFIX}.
-   * If Redis is not configured, the local fallback is used directly.
+   * Atomically increments the version counter for the given cache key and returns
+   * the new version with its degradation status.
+   *
+   * <p><b>Redis path:</b> Executes a Lua script that performs an atomic
+   * {@code INCR} on the key {@code hotkey:version:{cacheKey}} followed by
+   * {@code EXPIRE} with the configured TTL ({@code versionKeyTtlMinutes}).
+   * The Lua atomicity guarantees that the INCR and EXPIRE happen together.
+   *
+   * <p><b>Fallback path:</b> If {@link StringRedisTemplate} is not configured
+   * (Redis dependency absent), or if any Redis operation throws an exception
+   * (connection failure, timeout), the method falls back to the local degraded
+   * counter via {@link #fallbackVersion()}.
    *
    * @param cacheKey the key to version; must not be null or empty
-   * @return a {@link VersionResult} containing the new version and degraded flag;
-   *         {@code degraded} is {@code true} when the version came from the
-   *         local fallback (Redis unavailable or not configured)
+   * @return a {@link VersionResult} containing the new version number and a
+   *         {@code degraded} flag indicating whether the version came from the
+   *         local fallback ({@code true}) or from Redis ({@code false})
    */
   public VersionResult nextVersion(String cacheKey) {
     return redisTemplate
@@ -97,13 +121,17 @@ public class VersionController {
   }
 
   /**
-   * Build a degraded version in negative {@code long} space so that all
-   * degraded versions sort below any normal (positive) Redis INCR version.
-   * This guarantees the {@code sendDeduped} numeric comparison in
-   * {@link io.github.hyshmily.hotkey.sync.CacheSyncPublisher} correctly
-   * prefers normal broadcasts over degraded ones without flag-aware logic.
+   * Allocates a version in the negative {@code long} space for degraded operation.
    *
-   * @return a {@link VersionResult} with a negative version and {@code degraded=true}
+   * <p>The version is computed as {@code Long.MIN_VALUE + incrementing counter},
+   * ensuring that every degraded version is numerically less than any positive
+   * Redis INCR version. This guarantees that the numeric comparison in
+   * {@link CacheSyncPublisher#sendDeduped} and {@link VersionGuard#shouldSkipForSync}
+   * correctly prefers normal (Redis-backed) broadcasts over degraded ones without
+   * requiring flag-aware logic.
+   *
+   * @return a {@link VersionResult} with a negative version and {@code degraded=true},
+   *         never null
    */
   public VersionResult fallbackVersion() {
     long version = Long.MIN_VALUE + fallbackVersionCounter.incrementAndGet();

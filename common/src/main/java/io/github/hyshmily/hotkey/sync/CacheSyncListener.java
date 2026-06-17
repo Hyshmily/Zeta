@@ -34,57 +34,83 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.amqp.core.Message;
 
 /**
- * Listens for cache synchronization messages (INVALIDATE / REFRESH) from peer instances
- * via {@code hotkey.sync.exchange} (FanoutExchange).
- * <p>
- * Unlike {@link WorkerListener} which handles hot/cool lifecycle decisions, this listener
- * handles direct cache invalidation or refresh triggered by application-level data changes.
- * <p>
- * On INVALIDATE: atomically removes the entry from the local cache.
- * On REFRESH: reloads the value from Redis and updates the local cache, preserving existing
- * metadata (hard/soft TTLs, key state, versioning, decision version) except for value and
- * data version.
- * <p>
- * Ack is decoupled from the cache mutation (the mutation is jittered) to prevent message
- * redelivery and to avoid thundering herds on Redis.
+ * Listens for cache synchronization messages (INVALIDATE / REFRESH / RULES_SYNC) from
+ * peer application instances via the {@code hotkey.sync.exchange} FanoutExchange.
+ *
+ * <p>This is the inbound half of the instance-to-instance cache coherence protocol.
+ * The outbound half is {@link CacheSyncPublisher}. Together they ensure that a data
+ * mutation on one instance is propagated to all peers.
+ *
+ * <p><b>Message routing:</b>
+ * <ul>
+ *   <li><b>INVALIDATE</b> ({@link SyncMessage#TYPE_INVALIDATE}): Atomically removes
+ *       the specified key from the local Caffeine cache. Uses the 4-case
+ *       {@link VersionGuard#shouldSkipForSync} guard to prevent stale degraded
+ *       invalidations from wiping out a healthy entry.</li>
+ *   <li><b>INVALIDATE_ALL</b> ({@link SyncMessage#TYPE_INVALIDATE_ALL}): Batch-removes
+ *       all keys in the JSON-array payload via {@code caffeineCache.invalidateAll()}.
+ *       Bypasses version guards — these are unconditional operations.</li>
+ *   <li><b>REFRESH</b> ({@link SyncMessage#TYPE_REFRESH}): Loads the latest value from
+ *       Redis and updates the local cache entry. Preserves existing metadata (TTLs,
+ *       key state, decision version, degradation flag) except for the value and
+ *       data version. Uses double-checked locking (DCL) with {@link VersionGuard}
+ *       to prevent stale overwrites.</li>
+ *   <li><b>RULES_SYNC</b> ({@link SyncMessage#TYPE_RULES_SYNC}): Merges the incoming
+ *       rule set into the local {@link RuleMatcher}, guarded by {@code rulesVersion}.</li>
+ * </ul>
+ *
+ * <p><b>Thread safety:</b> All cache mutations use
+ * {@link com.github.benmanes.caffeine.cache.Cache#asMap()}{@code .compute()} for
+ * atomic per-key updates. The AMQP ack is sent before the cache mutation
+ * (ack-before-update pattern, see ADR-0004); the mutation is scheduled with random
+ * jitter to spread Redis load across instances.
+ *
+ * @see CacheSyncPublisher
+ * @see SyncMessage
+ * @see WorkerListener
  */
 @RequiredArgsConstructor
 @Slf4j
 public class CacheSyncListener {
 
-
-  /** Shared Jackson mapper for deserializing batch-invalidation key lists. */
+  /** Shared Jackson {@link ObjectMapper} for deserializing batch-invalidation key lists from JSON. */
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-  /** Local Caffeine L1 cache — the target of invalidation and refresh operations. */
+  /** Local Caffeine L1 cache — target of invalidation and refresh operations.
+   * Accessed atomically via {@code asMap().compute()} for thread-safe updates. */
   private final Cache<String, Object> caffeineCache;
 
-  /** Function that loads the current value from Redis given a cache key. */
+  /** Function that loads the current value from Redis given a cache key.
+   * Used during REFRESH to fetch the authoritative value before writing to L1. */
   private final Function<String, Object> redisLoader;
 
-  /** Configuration for sync exchange, queue, jitter, and dedup window. */
+  /** Configuration for sync exchange name, jitter settings, and consumer concurrency. */
   private final CacheSyncProperties properties;
 
-  /** Scheduler for running jitter-delayed cache update tasks. */
+  /** Scheduler for running jitter-delayed cache update tasks, spreading Redis load.
+   * Supplied externally to allow shared-pool reuse across listeners. */
   private final ScheduledExecutorService scheduler;
 
-  /** Computes hard/soft expiry timestamps for refreshed entries. */
+  /** Computes hard and soft expiry timestamps for refreshed entries. */
   private final CacheExpireManager expireManager;
 
-  /** Hot-key rule matcher — updated when a RULES_SYNC message arrives. */
+  /** Hot-key rule matcher whose rule set is updated when a RULES_SYNC message arrives. */
   private final RuleMatcher ruleMatcher;
 
   /**
-   * RabbitMQ message callback for sync messages. Acknowledges immediately after parsing;
-   * the actual cache update is executed asynchronously with random jitter.
-   * <p>
-   * On success, the message is acked via {@link Channel#basicAck}. On any processing
-   * failure, the message is nacked and not requeued ({@code requeue=false}) to avoid
-   * poison-message loops.
+   * RabbitMQ message callback for incoming sync messages. Acknowledges the message
+   * immediately after parsing (ack-before-update), then schedules the actual cache
+   * mutation asynchronously with a random jitter to spread Redis load across peers.
    *
-   * @param channel the AMQP channel used for ack/nack
-   * @param msg     the raw AMQP message, whose body and headers carry the sync payload
-   * @throws IOException if the ack or nack operation on the channel fails
+   * <p>On success, the message is acknowledged via {@link Channel#basicAck}. On any
+   * processing exception (parse failure, routing failure), the message is negatively
+   * acknowledged with {@code requeue=false} to prevent poison-message loops. The next
+   * application-level write will re-broadcast the operation.
+   *
+   * @param channel the AMQP channel used for ack/nack operations
+   * @param msg     the raw AMQP message whose body and headers carry the sync payload;
+   *                must not be null
+   * @throws IOException if the channel's basicAck or basicNack call fails
    */
   public void handleSyncMessage(Channel channel, Message msg) throws IOException {
     long tag = msg.getMessageProperties().getDeliveryTag();
@@ -98,13 +124,14 @@ public class CacheSyncListener {
   }
 
   /**
-   * Decodes the message and schedules the appropriate handler with a random delay
-   * to distribute Redis reads evenly.
-   * <p>
-   * If the message body is empty or cannot be parsed into a {@link SyncMessage},
-   * the message is silently dropped without scheduling any task.
+   * Decodes the raw AMQP message into a {@link SyncMessage} and schedules the
+   * appropriate handler to run after a random delay within
+   * {@link CacheSyncProperties#getWarmupJitterMs()}. The jitter spreads Redis
+   * reads when multiple peers process the same sync broadcast simultaneously.
    *
-   * @param msg the raw AMQP message (may have null or empty body)
+   * @param msg the raw AMQP message; if the body is null, empty, or cannot be
+   *            parsed into a valid {@link SyncMessage}, the message is silently
+   *            dropped without scheduling any task
    */
   private void processSync(Message msg) {
     SyncMessage sm = SyncMessage.from(msg);
@@ -120,9 +147,12 @@ public class CacheSyncListener {
   }
 
   /**
-   * Routes the message to the correct handler based on its type.
+   * Routes the deserialized {@link SyncMessage} to the appropriate handler based
+   * on its type field. Delegates to {@link #handleLocalInvalidate},
+   * {@link #handleLocalInvalidateAll}, {@link #handleRefresh}, or
+   * {@link #handleRulesSync} accordingly.
    *
-   * @param msg the sync message to route
+   * @param msg the deserialized sync message to route; must not be null
    */
   private void syncMessageRouter(SyncMessage msg) {
     if (msg.type() == null) {
@@ -139,18 +169,23 @@ public class CacheSyncListener {
   }
 
   /**
-   * Atomically removes the specified key from the local cache.
-   * <p>
-   * Uses the same version guard as {@link #handleRefresh}: when the existing
-   * entry is normal and the incoming INVALIDATE is degraded, the invalidation
-   * is skipped (case 2).  An unconditional path
-   * ({@code version == 0L && !isVersionDegraded}) bypasses the guard for
-   * bulk invalidations from {@code invalidateAll}.
-   * <p>
-   * A second DCL check inside the atomic {@code compute} body prevents a
-   * concurrent refresh from being wiped by a stale degraded INVALIDATE.
-   * Thread-safe via {@link com.github.benmanes.caffeine.cache.Cache#asMap()}
-   * atomic {@code compute}.
+   * Atomically removes the specified key from the local cache in response to
+   * an INVALIDATE sync message from a peer instance.
+   *
+   * <p><b>Version guard logic:</b>
+   * <ul>
+   *   <li><b>Unconditional path:</b> When {@code version == 0L && !isVersionDegraded}
+   *       (clean invalidation from {@code invalidateAll}), the guard is bypassed
+   *       entirely — the entry is always removed.</li>
+   *   <li><b>Guarded path:</b> Uses {@link VersionGuard#shouldSkipForSync} with the
+   *       4-case degraded comparison. Case 2 (existing normal, incoming degraded)
+   *       prevents a stale degraded INVALIDATE from wiping a healthy entry.</li>
+   * </ul>
+   *
+   * <p>Double-checked locking (DCL): a fast version guard before the atomic
+   * {@code compute} (first pass), and a second guard inside the {@code compute}
+   * body (second pass) to prevent a concurrent REFRESH from being wiped by a
+   * stale invalidate that arrived after the refresh.
    *
    * @param sm the sync message containing the key to invalidate; if the key
    *           is null or invalid, the invalidation is silently skipped
@@ -182,12 +217,18 @@ public class CacheSyncListener {
   }
 
   /**
-   * Batch-invalidate all keys contained in the JSON-array body.
-   * This method bypasses version guards intentionally — the publisher
-   * from {@code invalidateAll} sends clean (version=0L, not degraded)
-   * and all keys in the batch are invalidated unconditionally.
+   * Batch-invalidates all keys contained in the JSON-array body of the sync message.
    *
-   * @param sm the sync message containing the batch-invalidation keys as a JSON array
+   * <p>This method intentionally bypasses version guards. The publisher
+   * ({@link CacheSyncPublisher#broadcastLocalInvalidateAll}) always sends clean
+   * messages (version=0L, not degraded) and all keys are removed unconditionally.
+   * This is more efficient than sending individual INVALIDATE messages for each key.
+   *
+   * <p>Deserialization failures (malformed JSON) are logged at ERROR level and
+   * do not propagate.
+   *
+   * @param sm the sync message whose {@code cacheKey} field contains the JSON-array
+   *           of keys to invalidate; must not be null
    */
   private void handleLocalInvalidateAll(SyncMessage sm) {
     try {
@@ -200,27 +241,40 @@ public class CacheSyncListener {
   }
 
   /**
-   * Merge the incoming rule set with the local rules, guarded by rulesVersion.
+   * Merges the incoming rule set from a RULES_SYNC message into the local
+   * {@link RuleMatcher}, guarded by the message's {@code rulesVersion}.
+   * <p>
+   * Delegates to {@link RuleMatcher#syncRules}, which handles the actual
+   * merge logic and version conflict resolution.
    *
-   * @param sm the sync message containing the ruleset JSON and rulesVersion
+   * @param sm the sync message whose {@code cacheKey} field contains the
+   *           serialized rule-set JSON and whose {@code rulesVersion} field
+   *           carries the version for conflict resolution; must not be null
    */
   private void handleRulesSync(SyncMessage sm) {
     ruleMatcher.syncRules(sm.cacheKey(), sm.rulesVersion());
   }
 
   /**
-   * Refreshes a cache entry with the latest value from Redis.
-   * <p>
-   * Uses double-checked locking (DCL): a fast version guard before the Redis fetch,
-   * and a second guard inside the atomic {@code compute} to prevent overwriting a
-   * newer dataVersion that arrived concurrently.
-   * <p>
-   * The refreshed entry retains the original metadata (hard/soft TTLs, normal TTLs,
-   * key state, decision version, degradation flag) except for the value and data
-   * version which are taken from the incoming message and Redis.
-   * <p>
-   * If the key is absent from the local cache before refresh, or if the Redis load
-   * returns null, the refresh is aborted and the existing entry (if any) is preserved.
+   * Refreshes a cache entry with the latest value from Redis in response to a
+   * REFRESH sync message from a peer instance.
+   *
+   * <p><b>Refresh flow:</b>
+   * <ol>
+   *   <li><b>DCL check 1:</b> Fast-path version guard ({@link VersionGuard#shouldSkipForSync})
+   *       against the existing L1 entry. If a newer dataVersion is already present,
+   *       the refresh is skipped.</li>
+   *   <li><b>Redis fetch:</b> Loads the authoritative value from Redis.</li>
+   *   <li><b>DCL check 2:</b> Second version guard inside the atomic {@code compute}
+   *       to prevent overwriting a newer version that arrived during the Redis fetch.</li>
+   *   <li><b>Write:</b> Replaces the value and dataVersion while preserving the existing
+   *       entry's metadata (hard/soft TTLs, normal TTLs, key state, decision version,
+   *       degradation flag). If no entry existed in L1 before the refresh, a fresh
+   *       {@link CacheEntry} is created with default metadata and {@code KeyState.NORMAL}.</li>
+   * </ol>
+   *
+   * <p>If the key is absent from L1 and Redis returns null (key does not exist),
+   * the refresh is aborted — there is nothing to cache.
    *
    * @param sm the sync message containing the key and version to refresh;
    *           must not be null
@@ -279,10 +333,11 @@ public class CacheSyncListener {
   /**
    * Loads the current value from Redis for the key carried in the sync message.
    * <p>
-   * Any exception thrown by the {@code redisLoader} (e.g. connection timeout,
-   * key not found) is caught and logged at WARN level.
+   * Any exception thrown by the {@code redisLoader} (connection timeout, Redis
+   * outage, serialization error) is caught and logged at WARN level. The caller
+   * should handle a {@code null} return by aborting the refresh.
    *
-   * @param sm the sync message containing the cache key to load
+   * @param sm the sync message containing the cache key to load; must not be null
    * @return the value from Redis, or {@code null} if the key is absent in Redis
    *         or the load failed with an exception
    */

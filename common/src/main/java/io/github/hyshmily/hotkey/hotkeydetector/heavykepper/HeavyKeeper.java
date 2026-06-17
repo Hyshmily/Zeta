@@ -16,6 +16,10 @@
 package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 
 import com.google.common.hash.Hashing;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -23,25 +27,37 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 
 /**
- * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking.
+ * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
+ * of frequently accessed keys.
  *
- * <p>Uses a 2D count array with fingerprint verification and probabilistic
- * decay to estimate the most frequent keys with bounded memory.  The
- * algorithm excels at filtering out low-frequency items while preserving
- * high-frequency key rankings with low error rates.
+ * <p><b>Algorithm overview:</b> Uses a 2D count array ({@code depth × width})
+ * with per-slot fingerprint verification and probabilistic decay to estimate
+ * the most frequent keys using bounded memory. Each key is hashed into one
+ * bucket per row; if the stored fingerprint matches, the counter is
+ * incremented; otherwise a probabilistic decay (sampled from a Binomial
+ * distribution) determines whether the existing counter survives or is
+ * replaced. This design excels at filtering out low-frequency items while
+ * preserving high-frequency key rankings with low error rates.
  *
- * <p>This implementation is thread-safe: per-bucket {@code synchronized}
- * blocks for sketch updates and a shared lock for the sorted TopK heap.
+ * <p><b>Concurrency model:</b> Thread-safe with two lock tiers:
+ * <ol>
+ *   <li>Fine-grained striped synchronization ({@link #LOCK_STRIPES} stripes)
+ *       on individual sketch buckets for low-contention sketch updates.</li>
+ *   <li>A single coarse-grained lock on the sorted TopK heap
+ *       ({@code sortedTopK}) for heap mutations and reads.</li>
+ * </ol>
+ * The separation ensures that sketch writes (the hot path) rarely contend
+ * with heap operations (which happen only when a key crosses a threshold).
+ *
+ * <p><b>Decay:</b> {@link #fading()} halves all counters periodically to
+ * age out historical data, keeping the TopK set reflective of recent access
+ * patterns.
  */
 @Slf4j
 public class HeavyKeeper implements TopK {
 
-  /** Class logger. */
 
   /** Pre-computed decay probability lookup table size ({@value}). */
   private static final int LOOKUP_TABLE_SIZE = 256;
@@ -210,7 +226,7 @@ public class HeavyKeeper implements TopK {
     total.add(increment);
 
     if (maxCount < minCount) {
-      return new AddResult(null, false, key);
+      return AddResult.cold();
     }
 
     synchronized (sortedTopK) {
@@ -336,9 +352,14 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Return all keys currently in the TopK set, sorted by estimated count descending.
+   * Return all keys currently in the TopK set, sorted by estimated count
+   * descending (highest frequency first).
    *
-   * @return an unmodifiable-style list of {@link Item} entries, from highest to lowest count
+   * <p>The returned list is a point-in-time snapshot: it is safe to iterate
+   * after the lock is released but may be stale immediately.
+   *
+   * @return a point-in-time list of {@link Item} entries, ordered from highest
+   *         to lowest estimated count; never {@code null}
    */
   @Override
   public List<Item> list() {
@@ -376,9 +397,19 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Halve all frequency counters in the sketch and the sorted heap,
-   * removing entries whose count drops to zero.  Also halves the
-   * running total.
+   * Halve all frequency counters in the sketch and the sorted TopK heap.
+   *
+   * <p>Entries whose count drops to zero after halving are removed from
+   * the heap entirely. The running total is also halved. This periodic
+   * decay prevents the sketch from saturating with stale historical data
+   * and ensures that the TopK ranking reflects recent access patterns
+   * rather than cumulative lifetime counts.
+   *
+   * <p>This operation is invoked automatically by a scheduler at a
+   * configured interval (typically 30 seconds). Calling it concurrently
+   * with {@link #addDirect} is safe — sketch counters are halved under
+   * per-stripe locks and the heap is rebuilt atomically under the shared
+   * heap lock.
    */
   @Override
   public void fading() {
@@ -424,10 +455,14 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Return the top {@code n} hot keys.
+   * Return the top {@code n} hot keys, ordered by estimated count descending.
    *
-   * @param n maximum number of keys to return
-   * @return list of at most {@code n} {@link Item} entries
+   * <p>If fewer than {@code n} keys are currently tracked, the returned list
+   * contains all available keys. The result is a point-in-time snapshot.
+   *
+   * @param n maximum number of keys to return (must be non-negative)
+   * @return list of at most {@code n} {@link Item} entries, never {@code null};
+   *         empty if no keys are tracked or {@code n == 0}
    */
   @Override
   public List<Item> listTopN(int n) {

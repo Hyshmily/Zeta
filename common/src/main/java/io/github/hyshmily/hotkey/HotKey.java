@@ -17,6 +17,8 @@ package io.github.hyshmily.hotkey;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyReadQuery;
+import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyWriteCommand;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
@@ -33,11 +35,18 @@ import java.util.function.Supplier;
 import lombok.RequiredArgsConstructor;
 
 /**
- * Public facade for the HotKey library.
+ * Public facade for the HotKey library — the sole public API entry point.
  *
- * <p>All cache operations go through this class. Delegates to {@link HotKeyCache}
- * for L1 / version / broadcast orchestration and {@link TopK} for hot-key
- * detection queries.
+ * <p>All cache read/write/invalidation operations are dispatched through this
+ * class, which delegates to {@link HotKeyCache} for L1 orchestration, version
+ * tracking, and cross-instance broadcast, and to {@link TopK} (HeavyKeeper)
+ * for local and cluster-wide hot-key detection queries.
+ *
+ * <p>Rule management (blacklist/whitelist) is also exposed here, with pattern
+ * matching for exact, prefix, wildcard, and regex rules.
+ *
+ * <p><b>Thread safety:</b> All public methods are thread-safe. The underlying
+ * Caffeine cache and HeavyKeeper sketch are designed for concurrent access.
  *
  * <p>Depending on the runtime mode, some dependencies may be absent:
  * <ul>
@@ -52,11 +61,22 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class HotKey {
 
-  /** Cache orchestrator; {@code null} in Worker-only mode. */
+  /**
+   * Cache orchestrator that manages L1 (Caffeine), version tracking, TTL
+   * enforcement, cross-instance broadcast, and rule evaluation.
+   * {@code null} in Worker-only mode.
+   */
   private final HotKeyCache hotKeyCache;
-  /** App-side local hot-key detector. */
+  /**
+   * App-side local hot-key detector (HeavyKeeper). Records every cache
+   * access to maintain local frequency sketches. Never {@code null} in
+   * app mode.
+   */
   private final TopK topKAlgorithm;
-  /** Worker-side global hot-key detector (may be {@code null} without Worker). */
+  /**
+   * Worker-side global hot-key detector receiving aggregated reports from
+   * all application instances. {@code null} when no Worker is connected.
+   */
   private final TopK workerTopKAlgorithm;
 
   /**
@@ -64,14 +84,63 @@ public class HotKey {
    * This constructor is used by programmatic configuration or by
    * auto‑configuration when the Worker is not active.
    *
-   * @param hotKeyCache   the cache orchestrator (may be {@code null} in Worker-only mode)
+   * @param hotKeyCache   the cache orchestrator (maybe {@code null} in Worker-only mode)
    * @param topKAlgorithm the app-side local TopK detector
    */
   public HotKey(HotKeyCache hotKeyCache, TopK topKAlgorithm) {
     this(hotKeyCache, topKAlgorithm, null);
   }
 
-  //-----------------------------------------------------------------------------
+  /**
+   * Create a fluent read query for the given key.
+   *
+   * <p>Returns a {@link HotKeyReadQuery} builder that lets you configure
+   * the primary reader, fallback chain, cache mode, TTL overrides, null
+   * caching policy, and broadcast behaviour before executing.
+   *
+   * <p>Useful for read-heavy call-sites that prefer a declarative style
+   * over manual {@code get()}/{@code getWithSoftExpire()} orchestration.
+   *
+   * <p>Example:
+   * <pre>
+   *   Optional&lt;User&gt; user = hotKey.read("user:42")
+   *       .withPrimary(userRepo::findById)
+   *       .thenExecute(backupRepo::findById)
+   *       .withHardTtl(30_000)
+   *       .withSoftTtl(10_000)
+   *       .allowBroadcast()
+   *       .execute();
+   * </pre>
+   *
+   * @param cacheKey the cache key to read
+   * @param <T>      the value type
+   * @return a new {@link HotKeyReadQuery} instance (single-use)
+   */
+  public <T> HotKeyReadQuery<T> read(String cacheKey) {
+    return new HotKeyReadQuery<>(this, cacheKey);
+  }
+
+  /**
+   * Create a fluent write command for the given key.
+   *
+   * <p>Returns a {@link HotKeyWriteCommand} builder that lets you configure
+   * TTL overrides before executing a write-through, invalidate-before-write,
+   * or plain invalidation.
+   *
+   * <p>Example:
+   * <pre>
+   *   hotKey.write("user:42")
+   *       .withHardTtl(30_000)
+   *       .putThrough(newValue, dbWriter);
+   * </pre>
+   *
+   * @param cacheKey the cache key to operate on
+   * @param <T>      the value type
+   * @return a new {@link HotKeyWriteCommand} instance (single-use)
+   */
+  public <T> HotKeyWriteCommand<T> write(String cacheKey) {
+    return new HotKeyWriteCommand<>(this, cacheKey);
+  }
 
   /**
    * Look up a cached value without loading or triggering hot-key detection.
@@ -233,6 +302,43 @@ public class HotKey {
   public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs, long softTtlMs) {
     requireCache();
     hotKeyCache.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs);
+  }
+
+  /**
+   * Write a value directly into the local L1 cache without version bump,
+   * without broadcast, without hot-key detection, and without reporting.
+   * <p>
+   * Existing entry metadata is preserved.  If no entry exists, a fresh
+   * {@link io.github.hyshmily.hotkey.model.CacheEntry} is created with {@link io.github.hyshmily.hotkey.model.KeyState#NORMAL}.
+   * <p>
+   * Never throws {@code UnsupportedOperationException} in Worker-only mode;
+   * silently no-ops instead.
+   *
+   * @param cacheKey the key to store
+   * @param value    the value to cache
+   */
+  public void putLocal(String cacheKey, Object value) {
+    if (hotKeyCache != null) {
+      hotKeyCache.putLocal(cacheKey, value);
+    }
+  }
+
+  /**
+   * Write a value directly into the local L1 cache with explicit TTL overrides.
+   * Delegates to {@link #putLocal(String, Object)} semantics — no version bump,
+   * no broadcast, no hot-key detection, and no reporting.
+   * <p>
+   * Pass {@code 0} for either TTL to use the configured default.
+   *
+   * @param cacheKey  the key to store
+   * @param value     the value to cache
+   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   */
+  public void putLocal(String cacheKey, Object value, long hardTtlMs, long softTtlMs) {
+    if (hotKeyCache != null) {
+      hotKeyCache.putLocal(cacheKey, value, hardTtlMs, softTtlMs);
+    }
   }
 
   /**

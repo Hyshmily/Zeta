@@ -84,7 +84,14 @@ public class SreRateLimiter {
     totalWindow.add(1);
   }
 
-  /** Record a failed request. */
+  /**
+   * Record a failed request outcome.
+   *
+   * <p>Increments only the total window, not the success window. Must be called
+   * after a request that passed {@link #tryAcquire()} completed with a failure
+   * (e.g. timeout, error response). This reduces the effective success rate and
+   * tightens the adaptive budget for subsequent requests.
+    */
   public void onFailed() {
     totalWindow.add(1);
   }

@@ -57,6 +57,15 @@ import lombok.Setter;
  * The {@link #evictStale(long)} method must be called periodically (e.g. every
  * few seconds) by a scheduler.  It removes any key that has not been accessed
  * within the given timeout, freeing the associated array and map entries.
+ *
+ * <h3>Dynamic threshold</h3>
+ * The hot threshold is declared {@code volatile} and can be changed at runtime
+ * via {@link #setThreshold(long)}.  The {@link ThresholdLearner} periodically
+ * updates this value based on estimated global QPS.
+ *
+ * @see GlobalQpsEstimator
+ * @see ThresholdLearner
+ * @see WorkerAutoConfiguration.EvictStaleTask
  */
 @Getter
 @Setter
@@ -71,8 +80,8 @@ public class SlidingWindowDetector {
   /**
    * The access count a key must reach within the sliding window to be
    * considered "hot" for the current evaluation cycle.  Can be changed at
-   * runtime (e.g. through JMX or a configuration refresh) because it is
-   * declared {@code volatile}.
+   * runtime (e.g. through JMX, a configuration refresh, or the
+   * {@link ThresholdLearner}) because it is declared {@code volatile}.
    */
   private volatile long threshold;
 
@@ -107,11 +116,17 @@ public class SlidingWindowDetector {
    * Records an access count for the given key and immediately evaluates
    * whether the key is "hot" in the current window.
    *
-   * @param key   the cache key
-   * @param count the number of accesses to addDirect (typically the batched count
-   *              reported by an application instance)
+   * <p>If this is the first access for the key, a new circular buffer is
+   * created atomically.  The current time slice is updated with the given
+   * count, stale slices (older than one full window) are zeroed, and the
+   * window sum is compared against the current threshold.
+   *
+   * @param key   the cache key; must not be {@code null}
+   * @param count the number of accesses to record (typically the batched
+   *              count reported by an application instance)
    * @return {@code true} if the sum of the last {@link #windowSize} slices
-   *         meets or exceeds {@link #threshold}
+   *         meets or exceeds {@link #threshold}; {@code false} otherwise
+   * @throws NullPointerException if {@code key} is {@code null}
    */
   public boolean addCount(String key, long count) {
     // Capture current time once to avoid redundant system calls.
@@ -151,7 +166,12 @@ public class SlidingWindowDetector {
    * an {@code addCount} that updates the timestamp after the first pass will be
    * correctly detected and the key will be kept.
    *
-   * @param staleAfterMs maximum idle time in milliseconds before a key is evicted
+   * <p>Must be called periodically (e.g. via
+   * {@link WorkerAutoConfiguration.EvictStaleTask}) to prevent unbounded memory
+   * growth from keys that are no longer accessed.
+   *
+   * @param staleAfterMs maximum idle time in milliseconds before a key is
+   *                     considered stale and evicted; must be non-negative
    */
   public void evictStale(long staleAfterMs) {
     long now = System.currentTimeMillis();
@@ -197,16 +217,20 @@ public class SlidingWindowDetector {
 
   /**
    * Clears the slices that are logically "behind" the current window.
-   * <p>
-   * In the doubled circular buffer, indices {@code [currentIndex + windowSize,
-   * currentIndex + 2*windowSize)} (modulo array length) correspond to time
-   * slices that are older than one full window.  They must be zeroed so that
-   * the next {@link #getWindowSum} call does not include stale data.
+   *
+   * <p>In the doubled circular buffer, indices {@code currentIndex + windowSize}
+   * backward to {@code currentIndex + 1} (modulo array length) are older than
+   * one full window.  They must be zeroed so that the next
+   * {@link #getWindowSum} call does not include stale data.
+   *
+   * @param slices       the circular buffer for a specific key
+   * @param currentIndex the index of the current time slice
    */
   private void clearStaleSlices(AtomicLong[] slices, int currentIndex) {
     int clearStart = (currentIndex + windowSize) % slices.length;
     for (int i = 0; i < windowSize; i++) {
-      int idx = (clearStart + i) % slices.length;
+      // Walk backwards to avoid clearing slices still within the current window.
+      int idx = (clearStart - i + slices.length) % slices.length;
       if (slices[idx] != null) {
         slices[idx].set(0);
       }
@@ -216,6 +240,14 @@ public class SlidingWindowDetector {
   /**
    * Sums the last {@link #windowSize} slices in the circular buffer,
    * including the slice at {@code currentIndex}.
+   *
+   * <p>Walks backwards from {@code currentIndex} to include the most recent
+   * {@code windowSize} time slices.  Null entries (uninitialised slices) are
+   * treated as zero.
+   *
+   * @param slices       the circular buffer for a specific key
+   * @param currentIndex the index of the current time slice
+   * @return the sum of all slice values within the current sliding window
    */
   private long getWindowSum(AtomicLong[] slices, int currentIndex) {
     long sum = 0;

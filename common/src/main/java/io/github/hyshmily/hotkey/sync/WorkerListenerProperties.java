@@ -21,42 +21,60 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * Configuration for listening to Worker hot/cool decisions.
- * <p>
- * Exchange: {@code hotkey.broadcast.exchange} (FanoutExchange) — must match
- * {@code hotkey.worker.messaging.broadcast-exchange} on the Worker side.
- * Queue: {@code hotkey.worker:{instanceId}}
+ * Configuration properties for the {@link WorkerListener} that receives hot/cool
+ * decisions from the Worker cluster.
+ *
+ * <p>Binds to the {@code hotkey.worker-listener} prefix in Spring configuration sources.
+ * Each application instance creates an anonymous queue named
+ * {@code hotkey.worker:{instanceId}} bound to the configured FanoutExchange. The
+ * exchange name must match the Worker-side {@code hotkey.worker.messaging.broadcast-exchange}
+ * property.
+ *
+ * <p>Includes an inner {@link Sre} configuration for adaptive rate limiting of HOT
+ * promotions, providing backpressure when downstream resources (Redis, CPU) are saturated.
+ *
+ * @see WorkerListener
+ * @see io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "hotkey.worker-listener")
 public class WorkerListenerProperties {
 
-  /** Whether the Worker decision listener is enabled. */
+  /** Whether the Worker decision listener is enabled. Set to {@code true} when
+   * a Worker cluster is deployed and the application should consume Worker decisions. */
   private boolean enabled = false;
 
-  /** FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats. */
+  /** FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats.
+   * Must match the {@code hotkey.worker.messaging.broadcast-exchange} on the Worker side. */
   private String exchangeName = "hotkey.broadcast.exchange";
 
-  /** Prefix for the per-instance queue name (suffixed with instance ID). */
+  /** Prefix for the per-instance queue name, suffixed with the instance ID
+   * from {@link InstanceIdGenerator}. Final queue: {@code {queuePrefix}:{instanceId}}. */
   private String queuePrefix = "hotkey.worker";
 
-  /** Whether the RabbitMQ listener container starts automatically. */
+  /** Whether the RabbitMQ listener container starts automatically with the application context. */
   private boolean autoStartup = true;
 
-  /** Maximum random jitter (ms) added before each Worker decision update to spread Redis load. */
+  /** Maximum random jitter (milliseconds) added before each Worker decision cache update.
+   * Spreads Redis reads across a small time window to avoid thundering herds
+   * when the Worker broadcasts a decision to many app instances simultaneously. */
   private int warmupJitterMs = 100;
 
-  /** Number of concurrent RabbitMQ consumers for the Worker decision queue. */
+  /** Number of concurrent RabbitMQ consumers for the Worker decision queue.
+   * Higher values increase throughput under load at the cost of more Redis connections. */
   private int concurrentConsumers = 2;
 
-  /** Pool size for the scheduled executor that runs jittered Worker tasks. */
+   /** Pool size for the scheduled executor that runs jittered Worker cache-update tasks.
+   * Should be at least as large as the number of concurrent consumers. */
   private int schedulerPoolSize = 2;
 
-  /** AMQP prefetch count per consumer. */
+  /** AMQP prefetch count per consumer. Controls how many unacknowledged messages
+   * each consumer can hold at once. */
   private int prefetchCount = 5;
 
-  /** Configuration for the SRE adaptive rate limiter on HOT decision processing. */
+  /** Configuration for the SRE adaptive rate limiter on HOT decision processing.
+   * Provides backpressure when downstream resources are saturated. */
   private Sre sre = new Sre();
 
   /**
@@ -70,19 +88,24 @@ public class WorkerListenerProperties {
   @Data
   public static class Sre {
 
-    /** Whether the SRE rate limiter is enabled. */
+    /** Whether the SRE rate limiter is enabled for HOT decision processing.
+     * When enabled, HOT promotions are probabilistically dropped when the
+     * success rate falls below {@link #successThreshold}. */
     private boolean enabled = true;
 
-    /** Sliding window duration in milliseconds. */
+    /** Sliding window duration in milliseconds over which request outcomes are tracked. */
     private long windowMs = 3000;
 
-    /** Number of buckets in the window. */
+    /** Number of time buckets within the sliding window for granular tracking. */
     private int buckets = 10;
 
-    /** Minimum total samples before throttling starts. */
+    /** Minimum total samples (accepts + rejects) required before the rate limiter
+     * begins actively throttling. Prevents premature throttling during warm-up. */
     private int minSamples = 20;
 
-    /** Success ratio threshold (0.0–1.0). K = 1 / successThreshold. */
+    /** Success ratio threshold (0.0–1.0). The multiplier K is computed as
+     * {@code K = 1 / successThreshold}. When the observed success rate drops below
+     * this value, the limiter probabilistically drops requests. */
     private double successThreshold = 0.6;
   }
 

@@ -18,9 +18,22 @@ package io.github.hyshmily.hotkey.util.window;
 /**
  * A fixed-size time-based sliding window backed by a circular {@code long[]}.
  *
- * <p>Buckets rotate automatically on every write — expired buckets are zeroed
- * before reuse.  All operations are synchronized so the window is safe for
- * concurrent producers and readers at moderate contention.
+ * <p>The window is divided into {@code windowSize} equally-sized buckets spanning
+ * {@code windowDurationMs} milliseconds. Each bucket represents a time slice and
+ * holds a cumulative value. On every access ({@link #add(long)}, {@link #sum()},
+ * etc.), expired buckets are detected and zeroed before the operation proceeds
+ * via the internal {@link #tick()} method.
+ *
+ * <p>This design provides O(1) amortized writes and O(windowSize) reads, with
+ * automatic time-based bucket rotation. No background threads are needed.
+ *
+ * <p>All public methods are {@code synchronized}, making the window safe for
+ * concurrent producers and readers at moderate contention. For very high
+ * contention scenarios, consider striped or lock-free alternatives (the current
+ * design targets the HotKey reporter and SRE limiter use cases where call rates
+ * are in the hundreds to low thousands per second).
+ *
+ * @see io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter
  */
 public final class RollingWindow {
 
@@ -34,8 +47,13 @@ public final class RollingWindow {
   /**
    * Creates a sliding window with the given number of buckets spanning the given duration.
    *
-   * @param windowSize       number of buckets that form one full window
-   * @param windowDurationMs total duration of the sliding window in milliseconds
+   * <p>Each bucket covers {@code windowDurationMs / windowSize} milliseconds.
+   * The window clock starts at construction time. All buckets are initially zero.
+   *
+   * @param windowSize       number of buckets that form one full window; must be positive
+   * @param windowDurationMs total duration of the sliding window in milliseconds; must be
+   *                         positive and evenly divisible by {@code windowSize} for
+   *                         precise bucket boundaries
    */
   public RollingWindow(int windowSize, long windowDurationMs) {
     this.windowSize = windowSize;
@@ -45,9 +63,14 @@ public final class RollingWindow {
   }
 
   /**
-   * Add {@code value} to the current bucket.  Thread-safe.
+   * Add {@code value} to the current (most recent) bucket.
    *
-   * @param value the value to addDirect to the current bucket
+   * <p>Bucket drift is corrected via {@link #tick()} before the addition,
+   * ensuring that the value lands in the correct time-aligned bucket even
+   * if no other operation has occurred for an extended period.
+   *
+   * @param value the value to add to the current bucket (may be negative, though
+   *              typical usage patterns use non-negative counts)
    */
   public synchronized void add(long value) {
     tick();
@@ -55,9 +78,13 @@ public final class RollingWindow {
   }
 
   /**
-   * Sum of all buckets.  Thread-safe.
+   * Sum of all buckets in the window.
    *
-   * @return the sum across all buckets
+   * <p>Expired buckets are zeroed via {@link #tick()} before summing, so the
+   * returned value reflects only the data from the current window. This is an
+   * O(windowSize) operation.
+   *
+   * @return the sum across all buckets (may be 0 if all buckets are zero)
    */
   public synchronized long sum() {
     tick();
@@ -69,7 +96,10 @@ public final class RollingWindow {
   }
 
   /**
-   * Maximum value across all buckets.
+   * Maximum value across all buckets in the window.
+   *
+   * <p>Expired buckets are zeroed via {@link #tick()} before computing.
+   * O(windowSize) operation.
    *
    * @return the maximum value across all buckets, or 0 if all buckets are zero
    */
@@ -85,8 +115,14 @@ public final class RollingWindow {
   }
 
   /**
-   * Minimum non-zero value across all buckets.
-   * Returns {@link Long#MAX_VALUE} if every bucket is zero.
+   * Minimum non-zero value across all buckets in the window.
+   *
+   * <p>Expired buckets are zeroed via {@link #tick()} before computing.
+   * Useful for detecting the minimum "background" rate when most buckets
+   * have positive values. O(windowSize) operation.
+   *
+   * @return the minimum positive value across all buckets, or {@link Long#MAX_VALUE}
+   *         if every bucket is zero
    */
   public synchronized long minNonZero() {
     tick();
@@ -99,7 +135,16 @@ public final class RollingWindow {
     return m;
   }
 
-  /** Zero every bucket and reset the window clock. */
+  /**
+   * Zero every bucket and reset the window clock to the current time.
+   *
+   * <p>After calling this method, the window behaves as if newly constructed:
+   * all buckets are zero and the time origin is reset. This is useful when
+   * the monitored metric resets (e.g. after a configuration change, a new
+   * sampling period, or a rate-limit cooldown).
+   *
+   * <p>O(windowSize) operation.
+   */
   public synchronized void reset() {
     java.util.Arrays.fill(buckets, 0);
     windowStart = System.currentTimeMillis();

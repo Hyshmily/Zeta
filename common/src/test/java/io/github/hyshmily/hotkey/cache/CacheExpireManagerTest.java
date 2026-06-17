@@ -30,6 +30,7 @@ import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.stream.Stream;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -470,6 +471,47 @@ class CacheExpireManagerTest {
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
     assertThat((Object) entry.getValue()).isEqualTo("original");
+  }
+
+  /**
+   * Verifies that jitter disabled produces exact TTL (within ±1ms tolerance).
+   */
+  @Test
+  void toHardExpireTimestamp_withJitterDisabled_shouldProduceExactTtl() {
+    CacheExpireManager noJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10, false, 0.0);
+    long start = System.currentTimeMillis();
+    long expireAt = noJitter.computeHardExpireAt(10_000);
+    long elapsed = expireAt - start;
+    assertThat(elapsed).isBetween(9_999L, 10_001L);
+  }
+
+  /**
+   * Verifies that custom ratio (0.5 = ±50%) produces jitter within the configured range.
+   */
+  @Test
+  void toHardExpireTimestamp_withCustomRatio_shouldJitterWithinRange() {
+    CacheExpireManager highJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10, true, 0.5);
+    long ttl = 10_000;
+    Stream.generate(() -> highJitter.computeHardExpireAt(ttl))
+      .limit(100)
+      .forEach(expireAt -> {
+        long diff = expireAt - System.currentTimeMillis();
+        assertThat(diff).isBetween(5_000L, 15_000L);
+      });
+  }
+
+  /**
+   * Verifies that the default (0.1 = ±10%) jitter is applied and within range.
+   */
+  @Test
+  void toHardExpireTimestamp_withDefaultJitter_shouldJitterWithinRange() {
+    long ttl = 10_000;
+    Stream.generate(() -> expireManager.computeHardExpireAt(ttl))
+      .limit(100)
+      .forEach(expireAt -> {
+        long diff = expireAt - System.currentTimeMillis();
+        assertThat(diff).isBetween(9_000L, 11_000L);
+      });
   }
 
   /**

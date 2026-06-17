@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync;
-import lombok.extern.slf4j.Slf4j;
 
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,17 +26,36 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
 /**
- * Cluster-wide Worker health view, updated by incoming heartbeats.
+ * Cluster-wide view of Worker health, maintained by consuming periodic
+ * {@link WorkerHeartbeatMessage} broadcasts from all Worker nodes.
  *
- * <p>Tracks every known Worker's epoch, heartbeat timestamps, readyToServe
- * flag, and decisionVersionHwm. Provides majority-based health judgment
- * and detects Worker restarts via epoch changes.
+ * <p>This is the central health authority for the local app instance. It tracks
+ * every known Worker by ID with its epoch (restart counter), heartbeat timestamps,
+ * readiness flag, decision version high-water mark, and verification failure count.
+ *
+ * <p><b>Health judgment:</b> The cluster is considered healthy when a strict majority
+ * ({@code > knownWorkerCount / 2}) of Workers are alive (ready, not stale, and within
+ * the heartbeat timeout window). When the cluster becomes unhealthy, the system may
+ * enter graceful degradation mode (see ADR-0009).
+ *
+ * <p><b>Restart detection:</b> When a Worker's epoch in a new heartbeat exceeds the
+ * stored epoch, a new {@link WorkerHealthRecord} is created — all state from the
+ * previous incarnation is discarded. This prevents stale health state from surviving
+ * a Worker restart.
+ *
+ * <p><b>Thread safety:</b> All record mutations use {@link ConcurrentHashMap#compute}
+ * and {@code computeIfPresent} for atomic per-Worker updates. The {@code degraded}
+ * flag and {@code lastAnyHeartbeatTime} are {@code volatile} fields safe for
+ * concurrent read/write.
+ *
+ * @see WorkerHeartbeatMessage
+ * @see WorkerHeartbeatVerifier
  */
 @RequiredArgsConstructor
 @Slf4j
 public class ClusterHealthView {
 
-
+  /** Per-Worker health records keyed by Worker ID. Thread-safe via {@link ConcurrentHashMap}. */
   private final ConcurrentMap<String, WorkerHealthRecord> records = new ConcurrentHashMap<>();
   private final int knownWorkerCount;
   private final long heartbeatTimeoutMs;
@@ -50,12 +69,20 @@ public class ClusterHealthView {
   private volatile long lastAnyHeartbeatTime;
 
   /**
-   * Processes an incoming heartbeat from a Worker.
+   * Processes an incoming {@link WorkerHeartbeatMessage} from a Worker node and
+   * updates the cluster health state accordingly.
    *
-   * <p>Creates a new record on first sighting or after an epoch change (Worker restart).
-   * Updates the existing record with the latest heartbeat timestamp, decision version
-   * watermark, load factor, and readiness flag for known Workers.
-   * The {@code lastAnyHeartbeatTime} is updated unconditionally after every heartbeat.
+   * <p><b>New or restarted Worker:</b> If this is the first heartbeat from a Worker,
+   * or if the heartbeat epoch exceeds the stored epoch (indicating a Worker restart),
+   * a new {@link WorkerHealthRecord} is created with fresh timestamps and the old
+   * decision watermark is discarded.
+   *
+   * <p><b>Known Worker:</b> Updates the last heartbeat timestamp, decision version
+   * watermark (taking the max), load factor, and readiness flag. Clears any stale
+   * or restarted flags.
+   *
+   * <p><b>Cluster recovery:</b> If the cluster was in degraded state and this heartbeat
+   * brings the majority back to health, the degraded flag is automatically cleared.
    *
    * @param hb the incoming heartbeat message; must not be null
    */
@@ -99,12 +126,15 @@ public class ClusterHealthView {
   }
 
   /**
-   * Records a successful verification response (pong) from a Worker, resetting its
-   * verification failure count and updating its heartbeat timestamp.
-   * <p>
-   * If the Worker ID is not present in the health view, this call is a no-op.
+   * Records a successful PONG response from a Worker during active verification
+   * ({@link WorkerHeartbeatVerifier#verifySuspectedWorkers}).
    *
-   * @param workerId the Worker that responded; must not be null
+   * <p>Resets the Worker's verification failure count to zero and updates its
+   * heartbeat timestamp to now, effectively restoring it to the alive set.
+   * If the cluster is currently degraded and this PONG brings it back to health,
+   * the degraded flag is cleared.
+   *
+   * @param workerId the Worker that responded with a PONG; must not be null
    */
   public void recordPong(String workerId) {
     records.computeIfPresent(workerId, (id, r) -> {
@@ -124,15 +154,18 @@ public class ClusterHealthView {
   }
 
   /**
-   * Increments the verification failure count for a Worker.
+   * Increments the verification failure count for a Worker and marks it stale
+   * if the threshold is reached.
    *
-   * <p>When the failure count reaches {@code degradeAfterFailures}, the Worker is
-   * marked as stale ({@code stale = true}) and excluded from health checks
-   * (i.e. {@link #isClusterHealthy()} and {@link #getAliveWorkerIds()} will ignore it).
-   * <p>
-   * If the Worker ID is not present in the health view, this call is a no-op.
+   * <p>When the cumulative failure count reaches {@code degradeAfterFailures},
+   * the Worker is marked as stale ({@code stale = true}). Stale Workers are
+   * excluded from {@link #isClusterHealthy()} and {@link #getAliveWorkerIds()}
+   * — they are effectively considered dead even if they were previously alive.
    *
-   * @param workerId the Worker that failed verification; must not be null
+   * <p>If the Worker ID is not present in the health view (never seen, or already
+   * removed), this call is a no-op.
+   *
+   * @param workerId the Worker that failed active verification; must not be null
    */
   public void markVerificationFailed(String workerId) {
     records.computeIfPresent(workerId, (id, r) -> {
@@ -145,16 +178,24 @@ public class ClusterHealthView {
   }
 
   /**
-   * Returns whether the cluster is considered healthy.
+   * Returns whether the cluster is currently considered healthy based on majority
+   * of known Workers being alive.
    *
-   * <p>The cluster is healthy when a majority (&#x3e; {@code knownWorkerCount / 2})
-   * of known Workers are marked as ready and have sent a heartbeat within
-   * {@code heartbeatTimeoutMs}.
-   * <p>
-   * When {@code knownWorkerCount == 0} (no Workers configured), the cluster is
-   * always considered unhealthy.
+   * <p>A Worker is considered alive when all three conditions hold:
+   * <ul>
+   *   <li>{@code readyToServe == true} (Worker completed initialization)</li>
+   *   <li>{@code stale == false} (Worker has not exceeded verification failure threshold)</li>
+   *   <li>Time since last heartbeat {@code < heartbeatTimeoutMs}</li>
+   * </ul>
    *
-   * @return {@code true} if the majority of Workers are alive and ready;
+   * <p>The cluster is healthy when the count of alive Workers is strictly greater
+   * than {@code knownWorkerCount / 2} (simple majority).
+   *
+   * <p>When {@code knownWorkerCount == 0} (no Workers configured), the cluster is
+   * always considered unhealthy. This prevents undefined behaviour in deployments
+   * without a Worker cluster.
+   *
+   * @return {@code true} if a strict majority of known Workers are alive and ready;
    *         {@code false} if no Workers are configured or too few are alive
    */
   public boolean isClusterHealthy() {
@@ -192,32 +233,54 @@ public class ClusterHealthView {
     return records.values().stream().map(WorkerHealthRecord::getWorkerId).collect(Collectors.toSet());
   }
 
+  /**
+   * Per-Worker health state tracked within the cluster health view.
+   *
+   * <p>Each record captures the Worker's current epoch, heartbeat timing,
+   * readiness, load, and verification failure state. Records are created
+   * on first heartbeat and updated (or replaced on epoch change) via
+   * atomic {@code ConcurrentHashMap.compute} operations.
+   *
+   * <p>A Worker transitions through these states:
+   * <ul>
+   *   <li><b>Startup:</b> {@code readyToServe = false} until first detection cycle completes</li>
+   *   <li><b>Healthy:</b> {@code readyToServe = true, stale = false}, heartbeats arriving within timeout</li>
+   *   <li><b>Suspected:</b> Heartbeats timeout; {@link WorkerHeartbeatVerifier} probes actively</li>
+   *   <li><b>Stale:</b> Verification failures reach threshold; excluded from health majority</li>
+   *   <li><b>Restarted:</b> New epoch detected; old record replaced entirely</li>
+   * </ul>
+   */
   @Getter
   public static class WorkerHealthRecord {
 
-    String workerId;
-    long epoch;
-    long lastHeartbeatTime;
-    long firstHeartbeatTime;
-    long decisionVersionHwm;
-    double loadFactor;
-    boolean readyToServe;
-    boolean stale;
-    boolean restarted;
-    int verifyFailures;
+    volatile String workerId;
+    volatile long epoch;
+    volatile long lastHeartbeatTime;
+    volatile long firstHeartbeatTime;
+    volatile long decisionVersionHwm;
+    volatile double loadFactor;
+    volatile boolean readyToServe;
+    volatile boolean stale;
+    volatile boolean restarted;
+    volatile int verifyFailures;
 
     /**
-     * Returns whether this Worker is currently considered alive.
-     * <p>
-     * A Worker is alive when all of the following hold:
+     * Returns whether this Worker is currently considered alive for health-majority
+     * calculations.
+     *
+     * <p>All three conditions must hold:
      * <ul>
-     *   <li>{@code readyToServe} is {@code true} (Worker has completed startup)</li>
-     *   <li>{@code stale} is {@code false} (Worker has not exceeded failure threshold)</li>
-     *   <li>The elapsed time since {@code lastHeartbeatTime} is less than {@code timeoutMs}</li>
+     *   <li>{@link #readyToServe} is {@code true} — the Worker has completed its
+     *       initial detection cycle and is accepting requests</li>
+     *   <li>{@link #stale} is {@code false} — the Worker has not exceeded the
+     *       configured verification failure threshold</li>
+     *   <li>The elapsed wall-clock time since {@link #lastHeartbeatTime} is less
+     *       than {@code timeoutMs} — heartbeats are arriving within the expected
+     *       interval</li>
      * </ul>
      *
-     * @param timeoutMs the heartbeat timeout in milliseconds
-     * @return {@code true} if the Worker is ready, not stale, and has sent a heartbeat
+     * @param timeoutMs the heartbeat timeout window in milliseconds; must be positive
+     * @return {@code true} if this Worker is ready, not stale, and has sent a heartbeat
      *         within the timeout window
      */
     public boolean isAlive(long timeoutMs) {

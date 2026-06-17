@@ -73,7 +73,13 @@ public class HotKeyAutoConfiguration {
   /**
    * Create the app-side TopK instance (HeavyKeeper) as a standalone bean.
    *
-   * @param properties the HotKey configuration properties
+   * <p>The HeavyKeeper uses a Count-Min Sketch augmented with a minimum-count
+   * threshold and exponential decay to track the top-K hottest keys with high
+   * accuracy and low memory footprint. Configuration parameters (width, depth,
+   * decay, minCount, topK capacity, expelled queue capacity) are read from
+   * {@link HotKeyProperties}.
+   *
+   * @param properties the HotKey configuration properties (never {@code null})
    * @return a new HeavyKeeper TopK instance
    */
   @Bean
@@ -93,8 +99,13 @@ public class HotKeyAutoConfiguration {
    * Create the app-side {@link HotKeyDetector} facade that wraps the HeavyKeeper TopK
    * and schedules periodic decay.
    *
-   * @param heavyKeeper      the HeavyKeeper TopK instance
-   * @param hotKeyScheduler  the shared scheduler for periodic tasks
+   * <p>The detector provides the primary hot-key detection API ({@code add()}, {@code list()},
+   * {@code total()}) and schedules the periodic HeavyKeeper decay using the shared scheduler.
+   * This bean is the {@code @Qualifier("hotKeyDetector")} target for injection into
+   * {@link HotKeyCache} and other components.
+   *
+   * @param heavyKeeper      the HeavyKeeper TopK instance (never {@code null})
+   * @param hotKeyScheduler  the shared scheduler for periodic tasks (never {@code null})
    * @return a new HotKeyDetector instance
    */
   @Bean
@@ -109,8 +120,13 @@ public class HotKeyAutoConfiguration {
   /**
    * Create the SingleFlight deduplication layer for concurrent cache-load requests.
    *
-   * @param properties     the HotKey configuration properties
-   * @param hotKeyExecutor the dedicated HotKey executor
+   * <p>When multiple threads request the same key simultaneously (a cache miss), the
+   * first caller triggers the load and subsequent callers wait for the same result
+   * rather than duplicating the load. Configuration parameters (max in-flight entries,
+   * TTL, timeout) are read from {@link HotKeyProperties}.
+   *
+   * @param properties     the HotKey configuration properties (never {@code null})
+   * @param hotKeyExecutor the dedicated HotKey executor for async load execution (never {@code null})
    * @return a new SingleFlight instance
    */
   @Bean
@@ -125,11 +141,17 @@ public class HotKeyAutoConfiguration {
   }
 
   /**
-   * Create the soft/hard expiration manager that uses a configurable pool of scheduled threads.
+   * Create the soft/hard expiration manager that manages time-based eviction.
    *
-   * @param hotLocalCache  the L1 Caffeine cache
-   * @param hotKeyExecutor the dedicated HotKey executor
-   * @param properties     the HotKey configuration properties
+   * <p>The soft-expire mechanism triggers an asynchronous refresh when a configurable
+   * portion of the TTL has elapsed, serving stale data while fetching a fresh value
+   * in the background. The hard-expire is the absolute maximum TTL enforced at the
+   * Caffeine level. The refresh pool size limits concurrent background refresh tasks
+   * to prevent resource exhaustion under high cache-miss rates.
+   *
+   * @param hotLocalCache  the L1 Caffeine cache (never {@code null})
+   * @param hotKeyExecutor the dedicated HotKey executor for async refresh tasks (never {@code null})
+   * @param properties     the HotKey configuration properties (never {@code null})
    * @return a new CacheExpireManager instance
    */
   @Bean
@@ -145,8 +167,15 @@ public class HotKeyAutoConfiguration {
   /**
    * Create the dedicated thread-pool executor for asynchronous cache operations.
    *
-   * @param properties the HotKey configuration properties
-   * @return a configured ThreadPoolTaskExecutor
+   * <p>This executor handles all async operations in the HotKey data path: cache loading
+   * via SingleFlight, soft-expiry refresh tasks, and cross-instance broadcast callbacks.
+   * The pool is configured with core/max pool size, bounded queue capacity, and a
+   * rejection policy that throws {@link java.util.concurrent.RejectedExecutionException}
+   * when the queue is full. On shutdown, in-progress tasks are allowed to complete with
+   * a 60-second grace period.
+   *
+   * @param properties the HotKey configuration properties (never {@code null})
+   * @return a configured {@link ThreadPoolTaskExecutor}
    */
   @Bean("hotKeyExecutor")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
@@ -173,10 +202,15 @@ public class HotKeyAutoConfiguration {
 
   /**
    * Create the {@link RuleMatcher} for key matching against user-defined rules.
-   * Wired with an empty Redis and sync publisher since no Redis is available in this variant.
    *
-   * @param publisherProvider optional provider for the cache sync publisher
-   * @return a new RuleMatcher instance
+   * <p>This variant is wired with an empty Redis provider and an optional sync
+   * publisher, since no {@link org.springframework.data.redis.core.StringRedisTemplate} is available in the non-Redis
+   * deployment mode. Rules are kept in-memory only and do not survive restarts.
+   * When Redis is available, {@link HotKeyRedisAutoConfiguration#ruleMatcher}
+   * takes over with Redis persistence.
+   *
+   * @param publisherProvider optional provider for the cache sync publisher (may be absent)
+   * @return a new RuleMatcher instance (in-memory only)
    */
   @Bean
   @ConditionalOnMissingBean({ RuleMatcher.class, org.springframework.data.redis.core.StringRedisTemplate.class })
@@ -185,19 +219,26 @@ public class HotKeyAutoConfiguration {
   }
 
   /**
-   * Create the {@link HotKeyCache} (non-Redis variant).  Only active when {@code RedisTemplate}
-   * is absent; otherwise {@link HotKeyRedisAutoConfiguration#hotKeyCache} takes over.
+   * Create the {@link HotKeyCache} (non-Redis variant).
    *
-   * @param hotKeyDetector            the app-side TopK detector
-   * @param hotLocalCache             the L1 Caffeine cache
-   * @param singleFlight              the deduplication layer
-   * @param expireManager             the soft/hard expiration manager
-   * @param syncPublisher             optional cache sync publisher
-   * @param hotKeyReporter            optional hot key reporter
-   * @param hotKeyExecutor            the dedicated HotKey executor
-   * @param properties                the HotKey configuration properties
-   * @param ruleMatcher               the rule matcher instance
-   * @return a new HotKeyCache instance
+   * <p>Only active when {@code RedisTemplate} is absent; otherwise
+   * {@link HotKeyRedisAutoConfiguration#hotKeyCache} takes over. Creates a
+   * {@link VersionController} with an empty Redis provider (falling back to
+   * node-local counters) and default ring manager / health view when none are
+   * available from the application context.
+   *
+   * @param hotKeyDetector            the app-side TopK detector (never {@code null})
+   * @param hotLocalCache             the L1 Caffeine cache (never {@code null})
+   * @param singleFlight              the deduplication layer (never {@code null})
+   * @param expireManager             the soft/hard expiration manager (never {@code null})
+   * @param syncPublisher             optional cache sync publisher (may be absent)
+   * @param hotKeyReporter            optional hot key reporter (may be absent; e.g. in Worker-only mode)
+   * @param hotKeyExecutor            the dedicated HotKey executor (never {@code null})
+   * @param properties                the HotKey configuration properties (never {@code null})
+   * @param ruleMatcher               the rule matcher instance (never {@code null})
+   * @param ringManagerProvider       provider for the consistent-hash ring manager (creates default if absent)
+   * @param healthViewProvider        provider for the cluster health view (creates default if absent)
+   * @return a new HotKeyCache instance with node-local version tracking
    */
   @Bean
   @ConditionalOnMissingBean(type = "org.springframework.data.redis.core.RedisTemplate")
@@ -230,15 +271,15 @@ public class HotKeyAutoConfiguration {
   }
 
   /**
-   * Fallback {@link HotKey} bean.
+   * Fallback {@link HotKey} facade bean.
    *
    * <p>Only active when a {@link HotKeyCache} bean exists but no {@link HotKey}
-   * has been defined yet.  The primary {@link HotKey} creator is
+   * has been defined yet. The primary {@link HotKey} creator is
    * {@link HotKeyFacadeAutoConfiguration} — this fallback covers the case where
    * that auto-configuration is excluded or its bean is overridden.
    *
-   * @param hotKeyCache    the HotKeyCache instance
-   * @param hotKeyDetector the app-side TopK detector
+   * @param hotKeyCache    the HotKeyCache instance (never {@code null})
+   * @param hotKeyDetector the app-side TopK detector (never {@code null})
    * @return a new HotKey facade instance
    */
   @Bean
@@ -251,14 +292,19 @@ public class HotKeyAutoConfiguration {
   /**
    * Create the L1 Caffeine cache instance.
    *
-   * <p>
-   * Time-based expiry operates at the <em>Caffeine</em> level, computing
-   * remaining nanoseconds from {@code CacheEntry.hardExpireAtMs}. Entries
-   * with {@code hardExpireAtMs == Long.MAX_VALUE} are purely logical-expiry
+   * <p>Time-based expiry operates at the <em>Caffeine</em> level via a custom
+   * {@link Expiry} implementation, computing remaining nanoseconds from
+   * {@link CacheEntry#hardExpireAtMs}. Entries with
+   * {@code hardExpireAtMs == Long.MAX_VALUE} are purely logical-expiry
    * — Caffeine never evicts them by time; they live until size eviction or
-   * manual invalidation.
+   * manual invalidation. Reads never extend the expiry duration (no read-based
+   * refresh), ensuring predictable TTL behavior.
    *
-   * @param properties the HotKey configuration properties
+   * <p>The maximum cache size is configured via {@code hotkey.local.local-cache-max-size}
+   * (default 1000 entries). Time-based TTL for entries without an explicit hard-expire
+   * timestamp defaults to {@code hotkey.local.local-cache-ttl-minutes} (default 5 minutes).
+   *
+   * @param properties the HotKey configuration properties (never {@code null})
    * @return a configured Caffeine {@link Cache} instance
    */
   @Bean

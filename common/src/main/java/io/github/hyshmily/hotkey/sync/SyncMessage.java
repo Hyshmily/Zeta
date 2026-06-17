@@ -15,23 +15,46 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import org.springframework.amqp.core.Message;
-
-import java.nio.charset.StandardCharsets;
-import java.util.List;
-
 import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import org.springframework.amqp.core.Message;
+
 /**
- * Message between app instances for cache synchronization (INVALIDATE / REFRESH).
- * Travels via {@code hotkey.sync.exchange} (FanoutExchange).
+ * Message between application instances for cache synchronization, carrying
+ * invalidation or refresh operations for a single cache key (or a batch of keys).
+ * Travels via the {@code hotkey.sync.exchange} FanoutExchange.
  *
- * @param cacheKey         the affected cache key
- * @param type             the operation type ({@link #TYPE_INVALIDATE} or {@link #TYPE_REFRESH})
- * @param version          the {@code dataVersion} at which the operation occurred
- * @param isVersionDegraded whether the dataVersion was obtained in degraded mode (node-local counter fallback)
- * @param rulesVersion     the rulesVersion for RULES_SYNC messages; {@link HotKeyConstants#VERSION_DEFAULT} for other types
+ * <p>This is the data-plane counterpart to {@link WorkerMessage}: while
+ * {@code WorkerMessage} carries hot/cool lifecycle decisions from the Worker cluster,
+ * {@code SyncMessage} carries application-level data mutation events (writes, evictions)
+ * between peer instances to keep L1 caches coherent.
+ *
+ * <p><b>Message types:</b>
+ * <ul>
+ *   <li>{@link #TYPE_INVALIDATE} — Remove a single key from the local cache</li>
+ *   <li>{@link #TYPE_REFRESH} — Reload a single key from Redis into the local cache</li>
+ *   <li>{@link #TYPE_INVALIDATE_ALL} — Batch-remove multiple keys (body is JSON array)</li>
+ *   <li>{@link #TYPE_RULES_SYNC} — Synchronize the full rule set (body is rules JSON)</li>
+ * </ul>
+ *
+ * <p>Each message carries a {@code dataVersion} and {@code isVersionDegraded} flag
+ * to enable the 4-case degraded comparison in {@link VersionGuard#shouldSkipForSync}.
+ *
+ * @param cacheKey          the affected cache key (for single-key operations) or
+ *                          the serialized payload (for batch / rules-sync types)
+ * @param type              the operation type: {@link #TYPE_INVALIDATE},
+ *                          {@link #TYPE_REFRESH}, {@link #TYPE_INVALIDATE_ALL},
+ *                          or {@link #TYPE_RULES_SYNC}
+ * @param version           the {@code dataVersion} at which the operation occurred;
+ *                          see {@link VersionController#nextVersion}
+ * @param isVersionDegraded whether the {@code dataVersion} was obtained in degraded mode
+ *                          (node-local counter fallback, indicating Redis was unavailable)
+ * @param rulesVersion      the rules version for {@code TYPE_RULES_SYNC} messages;
+ *                          {@link HotKeyConstants#VERSION_DEFAULT} (0) for other types
  */
 public record SyncMessage(String cacheKey, String type, long version, boolean isVersionDegraded, long rulesVersion) {
   /** Invalidates a single cache key across all peer instances. */
@@ -54,19 +77,24 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
   private static final List<String> BATCH_TYPES = List.of(TYPE_INVALIDATE_ALL, TYPE_RULES_SYNC);
 
   /**
-   * Deserialize a {@code SyncMessage} from an AMQP message body and headers.
-   * <p>
-   * The cache key is read from the message body (UTF-8 decoded). The type,
-   * version, and degraded flag are read from message headers. For batch types
-   * ({@link #TYPE_INVALIDATE_ALL}, {@link #TYPE_RULES_SYNC}), the key validity
-   * check is skipped — those types carry a payload rather than a single key.
-   * <p>
-   * Returns {@code null} when the body is empty or the cache key is invalid
-   * (for non-batch types).
+   * Deserializes a {@code SyncMessage} from an AMQP message body and headers.
+   *
+   * <p>Deserialization rules:
+   * <ul>
+   *   <li>The cache key / payload is read from the message body (UTF-8 decoded).</li>
+   *   <li>The type is read from the {@link HotKeyConstants#AMQP_HEADER_TYPE} header.</li>
+   *   <li>The {@code dataVersion} is read from the {@code AMQP_HEADER_VERSION} header;
+   *       defaults to {@link HotKeyConstants#VERSION_DEFAULT} (0) if missing or non-numeric.</li>
+   *   <li>The degraded flag is read from the {@code AMQP_HEADER_IS_VERSION_DEGRADED} header;
+   *       defaults to {@code false} if missing.</li>
+   *   <li>For batch types ({@link #TYPE_INVALIDATE_ALL}, {@link #TYPE_RULES_SYNC}),
+   *       the key validity check is skipped — the body carries a JSON payload rather
+   *       than a single cache key.</li>
+   * </ul>
    *
    * @param msg the incoming AMQP message; must not be null
    * @return a parsed {@link SyncMessage}, or {@code null} if the body is empty
-   *         or the key is invalid
+   *         or the cache key is invalid for non-batch types
    */
 
   public static SyncMessage from(Message msg) {
@@ -86,7 +114,9 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
     boolean isVersionDegraded =
       msg.getMessageProperties().getHeader(AMQP_HEADER_IS_VERSION_DEGRADED) instanceof Boolean b ? b : false;
     long rulesVersion =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_RULES_VERSION) instanceof Number n2 ? n2.longValue() : VERSION_DEFAULT;
+      msg.getMessageProperties().getHeader(AMQP_HEADER_RULES_VERSION) instanceof Number n2
+        ? n2.longValue()
+        : VERSION_DEFAULT;
 
     return new SyncMessage(cacheKey, type, version, isVersionDegraded, rulesVersion);
   }

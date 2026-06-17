@@ -199,7 +199,7 @@
     {
       "name": "hotkey.local.shard-count",
       "type": "java.lang.Integer",
-      "description": "Thread count divisor for auto consumer calculation (max(1, shardCount/2)).",
+      "description": "Thread count divisor for auto consumer calculation (max(4, availableProcessors/2) when 0).",
       "defaultValue": 1
     },
     {
@@ -217,7 +217,7 @@
     {
       "name": "hotkey.local.consumer-count",
       "type": "java.lang.Integer",
-      "description": "Number of report queue consumer threads (0 = auto: max(1, shardCount/2)).",
+      "description": "Number of report queue consumer threads (0 = auto: max(4, availableProcessors/2)).",
       "defaultValue": 0
     },
     {

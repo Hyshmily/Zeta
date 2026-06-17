@@ -115,4 +115,36 @@ class GlobalQpsEstimatorTest {
     long total = estimator.getWindowTotal();
     assertThat(total).isEqualTo(Long.MAX_VALUE);
   }
+
+  /**
+   * Verifies that totals survive when time advances past one or more slice
+   * boundaries (non‑contiguous access pattern). The old slice must remain
+   * within the window and must not be cleared.
+   */
+  @Test
+  void addTotal_shouldPreserveCountsAfterSliceAdvance() throws InterruptedException {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(5000, 5);
+    estimator.addTotal(100);
+    Thread.sleep(1500);
+    estimator.addTotal(50);
+    long total = estimator.getWindowTotal();
+    assertThat(total).isEqualTo(150);
+  }
+
+  /**
+   * Verifies that after multiple non‑contiguous accesses spanning several
+   * slices, the window total includes exactly the still‑active slices and
+   * nothing more.
+   */
+  @Test
+  void addTotal_shouldMaintainCorrectTotalAfterMultipleSliceAdvances() throws InterruptedException {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(5000, 5);
+    estimator.addTotal(100);
+    Thread.sleep(800);
+    estimator.addTotal(20);
+    Thread.sleep(900);
+    estimator.addTotal(5);
+    long total = estimator.getWindowTotal();
+    assertThat(total).isEqualTo(125);
+  }
 }

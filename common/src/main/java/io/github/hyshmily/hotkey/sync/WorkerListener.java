@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync;
-import lombok.extern.slf4j.Slf4j;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
@@ -24,6 +23,7 @@ import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 
 import java.io.IOException;
@@ -35,53 +35,79 @@ import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_COOL;
 import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_HOT;
 
 /**
- * Listens for Worker hot/cool decisions via {@code hotkey.worker.exchange} (FanoutExchange).
- * <p>
- * On HOT: loads the current value from Redis, promotes the L1 cache entry to
- * {@link KeyState#HOT} with extended hard TTL and active soft expiration.
- * On COOL: downgrades an existing entry to {@link KeyState#COOL}, disabling soft
- * expiration, resetting the hard TTL to the normal value, and retaining the
- * cached data to avoid thundering herds.
- * <p>
- * Acknowledge is sent before the cache update (the update is jittered to spread
- * Redis load), so ack and data mutation are decoupled.
- * <p>
- * HOT promotion can be throttled by an optional {@link SreRateLimiter} to provide
- * backpressure when downstream resources are saturated.  When the limiter drops a
- * request the decision is ignored — the entry keeps its current state and the
- * next Worker heartbeat may re-drive the promotion.
+ * Listens for Worker hot/cool decisions via the {@code hotkey.worker.exchange}
+ * FanoutExchange and applies them to the local Caffeine L1 cache.
+ *
+ * <p>This is the consumer-side counterpart of the Worker's {@code WorkerBroadcaster}.
+ * Incoming AMQP messages are deserialized into {@link WorkerMessage} records and
+ * routed by decision type:
+ * <ul>
+ *   <li><b>HOT</b> ({@link WorkerMessage#TYPE_HOT}): Loads the current value from Redis,
+ *       then promotes the L1 cache entry to {@link KeyState#HOT} with an extended hard TTL
+ *       and active soft expiration (proactive refresh). Uses double-checked locking (DCL)
+ *       with {@link VersionGuard#shouldSkipForWorker} to prevent overwriting a concurrently
+ *       received newer decision.</li>
+ *   <li><b>COOL</b> ({@link WorkerMessage#TYPE_COOL}): Downgrades an existing entry to
+ *       {@link KeyState#COOL}, disabling soft expiration and resetting the hard TTL to
+ *       the normal value. The cached data is retained to avoid thundering herds on the
+ *       next read.</li>
+ * </ul>
+ *
+ * <p><b>Ack-before-update pattern:</b> The AMQP message is acknowledged immediately after
+ * parsing (see {@link #handleWorkerMessage}). The actual cache mutation is scheduled
+ * asynchronously with a random jitter (see {@link WorkerListenerProperties#warmupJitterMs}).
+ * This decoupling provides at-most-once delivery semantics — if the application crashes
+ * after ack but before the cache write, the decision is lost and will be re-driven by the
+ * next Worker heartbeat cycle (see ADR-0004).
+ *
+ * <p><b>Backpressure:</b> HOT promotions can be throttled by an optional
+ * {@link SreRateLimiter}. When the limiter drops a request, the entry retains its current
+ * state; the next Worker heartbeat or a subsequent HOT broadcast will re-attempt the
+ * promotion.
+ *
+ * @see WorkerMessage
+ * @see WorkerHeartbeatVerifier
+ * @see CacheSyncListener
  */
 @RequiredArgsConstructor
 @Slf4j
 public class WorkerListener {
 
-  /** Logger for this class. */
-
-  /** Local Caffeine L1 cache — target for HOT promotion and COOL downgrade. */
+  /** Local Caffeine L1 cache — target for HOT promotion and COOL downgrade operations.
+   * Accessed atomically via {@code asMap().compute()} for thread-safe updates. */
   private final Cache<String, Object> caffeineCache;
 
-  /** Function that loads the current value from Redis given a cache key. */
+  /** Function that loads the current value from Redis given a cache key.
+   * Used during HOT promotion to fetch the authoritative value before writing to L1. */
   private final Function<String, Object> redisLoader;
 
-  /** Configuration for Worker exchange, queue, and jitter settings. */
+  /** Configuration for Worker exchange name, queue prefix, jitter settings, and rate limiter. */
   private final WorkerListenerProperties properties;
 
-  /** Scheduler for running jitter-delayed cache update tasks. */
+  /** Scheduler for running jitter-delayed cache update tasks, spreading Redis load.
+   * Supplied externally to allow shared-pool reuse across listeners. */
   private final ScheduledExecutorService scheduler;
 
-  /** Computes expiry timestamps for HOT-promoted and default-TTL entries. */
+  /** Computes hard and soft expiry timestamps for HOT-promoted and default-TTL entries. */
   private final CacheExpireManager expireManager;
 
-  /** Optional SRE adaptive rate limiter for HOT processing; null = disabled. */
+  /** Optional SRE adaptive rate limiter for HOT decision processing.
+   * When non-null, HOT promotions are probabilistically dropped during overload.
+   * {@code null} disables rate limiting. */
   private final SreRateLimiter sreRateLimiter;
 
   /**
-   * RabbitMQ message callback.  Acknowledges the message immediately after parsing;
-   * the actual cache update is executed asynchronously with a random jitter
-   * (see {@link #processWorker}).
+   * RabbitMQ message callback for incoming Worker decisions. Acknowledges the message
+   * immediately after parsing (ack-before-update), then schedules the actual cache
+   * mutation asynchronously with a random jitter to spread Redis load.
    *
-   * @param channel the AMQP channel
-   * @param msg     the raw message
+   * <p>If processing fails with an exception, the message is negatively acknowledged
+   * with {@code requeue=false} to prevent poison-message loops. The decision will be
+   * re-driven by the next Worker heartbeat cycle.
+   *
+   * @param channel the AMQP channel used for ack/nack operations
+   * @param msg     the raw AMQP message containing the Worker decision; must not be null
+   * @throws IOException if the channel's basicAck or basicNack call fails
    */
   public void handleWorkerMessage(Channel channel, Message msg) throws IOException {
     long tag = msg.getMessageProperties().getDeliveryTag();
@@ -95,10 +121,13 @@ public class WorkerListener {
   }
 
   /**
-   * Decodes the AMQP message into a {@link WorkerMessage} and schedules the
-   * appropriate handler with a random jitter to avoid thundering herds.
+   * Decodes the raw AMQP message into a {@link WorkerMessage} and schedules the
+   * appropriate handler to run after a random delay within
+   * {@link WorkerListenerProperties#getWarmupJitterMs()}. The jitter spreads Redis
+   * reads across a small time window when the Worker broadcasts to many instances.
    *
-   * @param msg the raw AMQP message
+   * @param msg the raw AMQP message; may have null or empty body, in which case
+   *            the message is silently dropped
    */
   private void processWorker(Message msg) {
     WorkerMessage wm = WorkerMessage.from(msg);
@@ -115,9 +144,12 @@ public class WorkerListener {
   }
 
   /**
-   * Routes the message to the correct handler based on {@link WorkerMessage#type()}.
+   * Routes the deserialized {@link WorkerMessage} to the appropriate handler based
+   * on its type field. Delegates to {@link #handleHot} for {@code TYPE_HOT} and
+   * {@link #handleCool} for {@code TYPE_COOL}. Messages with a null or unknown type
+   * are logged and dropped.
    *
-   * @param msg the worker message to route
+   * @param msg the deserialized Worker message to route; must not be null
    */
   private void workerMessageRouter(WorkerMessage msg) {
     if (msg.type() == null) {
@@ -132,18 +164,28 @@ public class WorkerListener {
   }
 
   /**
-   * Promotes a key to {@link KeyState#HOT}.
-   * <p>
-   * Preserves the existing {@code dataVersion} and {@code isVersionDegraded}
-   * from the cached entry (if any) and stores the Worker's decision version
-   * as {@code decisionVersion}.  If no entry exists, defaults are used for
-   * the data version fields.
-   * <p>
-   * Uses a double-checked locking (DCL) pattern: a fast-path version guard before
-   * the Redis fetch, and a second guard inside the atomic {@code compute} block,
-   * ensuring we never overwrite a newer decision that arrived concurrently.
+   * Promotes a cache key to {@link KeyState#HOT} with extended TTL and active soft
+   * expiration, following a Worker HOT decision.
    *
-   * @param wm the worker message containing the HOT decision
+   * <p><b>Promotion flow:</b>
+   * <ol>
+   *   <li><b>SRE gate:</b> If the rate limiter drops this request, the promotion is
+   *       skipped entirely — backpressure from downstream saturation.</li>
+   *   <li><b>DCL check 1:</b> Fast-path version guard ({@link VersionGuard#shouldSkipForWorker})
+   *       against the existing L1 entry. If a newer decision is already present, this is a no-op.</li>
+   *   <li><b>Redis fetch:</b> Loads the authoritative value from Redis. If Redis is
+   *       unavailable, falls back to the existing degraded L1 entry value (if any).</li>
+   *   <li><b>DCL check 2:</b> Second version guard inside the atomic {@code compute} to
+   *       prevent overwriting a newer decision that arrived during the Redis fetch.</li>
+   *   <li><b>Write:</b> Replaces the entry with a new {@link CacheEntry} in
+   *       {@code KeyState.HOT}, preserving data-version fields, setting HOT-specific
+   *       TTLs, and recording the Worker's {@code decisionVersion}.</li>
+   * </ol>
+   *
+   * <p>If no value is available from Redis <em>and</em> no degraded entry exists in L1,
+   * the promotion is aborted — there is nothing to cache.
+   *
+   * @param wm the Worker message containing the HOT decision; must not be null
    */
   private void handleHot(WorkerMessage wm) {
     // SRE rate limiter gate — skip HOT promotion when the system is overloaded
@@ -214,16 +256,25 @@ public class WorkerListener {
   }
 
   /**
-   * Downgrades a key from {@link KeyState#HOT} to {@link KeyState#COOL}.
-   * <p>
-   * The existing cached value, data version, degradation flag, and decision
-   * version are all preserved.  The hard TTL is reset to the normal value
-   * and soft expiration is fully disabled (both softTtlMs and softExpireAtMs
-   * set to 0) so that the entry stops being proactively refreshed.  The data
-   * remains in the cache and will be evicted naturally by Caffeine's capacity
-   * policy or a subsequent invalidation.
+   * Downgrades a cache key from {@link KeyState#HOT} to {@link KeyState#COOL},
+   * following a Worker COOL decision.
    *
-   * @param wm the worker message containing the COOL decision
+   * <p>This effectively reverts the HOT promotion:
+   * <ul>
+   *   <li>The cached value, {@code dataVersion}, degradation flag, and
+   *       {@code decisionVersion} are all preserved — the data remains available.</li>
+   *   <li>The hard TTL is reset to the normal value (from
+   *       {@link CacheEntry#getNormalHardTtlMs()}).</li>
+   *   <li>Soft expiration is fully disabled (both {@code softTtlMs} and
+   *       {@code softExpireAtMs} set to {@code 0L}), so the entry stops being
+   *       proactively refreshed.</li>
+   * </ul>
+   *
+   * <p>If no existing entry is present in L1, the COOL decision is a no-op —
+   * there is nothing to downgrade. The entry will be evicted naturally by
+   * Caffeine's capacity policy or a subsequent invalidation.
+   *
+   * @param wm the Worker message containing the COOL decision; must not be null
    */
   private void handleCool(WorkerMessage wm) {
     caffeineCache
@@ -255,10 +306,16 @@ public class WorkerListener {
   }
 
   /**
-   * Loads the current value from Redis for the key in the worker message.
+   * Loads the current value from Redis for the key carried in the Worker message.
+   * <p>
+   * Any exception thrown by the {@code redisLoader} (connection timeout, Redis
+   * outage, serialization error) is caught and logged at WARN level. The caller
+   * is responsible for falling back to the degraded entry value when this method
+   * returns {@code null}.
    *
-   * @param wm the worker message containing the cache key to load
-   * @return the value from Redis, or {@code null} if the load failed
+   * @param wm the Worker message containing the cache key to load; must not be null
+   * @return the value from Redis, or {@code null} if the key is absent or the
+   *         load failed with an exception
    */
   private Object loadFromRedis(WorkerMessage wm) {
     try {

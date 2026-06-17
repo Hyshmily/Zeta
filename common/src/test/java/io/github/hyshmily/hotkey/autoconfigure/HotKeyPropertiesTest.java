@@ -128,32 +128,33 @@ class HotKeyPropertiesTest {
   }
 
   /**
-   * Verifies that effectiveConsumerCount returns the default value of 1 when the configured value is zero.
+   * Verifies that effectiveConsumerCount returns max(4, availableProcessors/2) when the configured value is zero.
    */
   @Test
   void effectiveConsumerCount_shouldReturnDefaultWhenZero() {
     HotKeyProperties p = props();
-    assertThat(p.effectiveConsumerCount()).isEqualTo(1);
+    int expected = Math.max(4, Runtime.getRuntime().availableProcessors() / 2);
+    assertThat(p.effectiveConsumerCount()).isEqualTo(expected);
   }
 
   /**
-   * Verifies that effectiveConsumerCount returns max(1, 3/2)=1 when shardCount=3 and consumerCount=0.
+   * Verifies that effectiveConsumerCount never drops below the floor of 4.
    */
   @Test
-  void effectiveConsumerCount_shouldReturnMaxOfOneWhenShardCountThree() {
-    HotKeyProperties p = props();
-    p.setShardCount(3);
-    assertThat(p.effectiveConsumerCount()).isEqualTo(1);
+  void effectiveConsumerCount_shouldFloorAtFour() {
+    int fewCores = 2;
+    int result = Math.max(4, fewCores / 2);
+    assertThat(result).isEqualTo(4);
   }
 
   /**
-   * Verifies that effectiveConsumerCount returns max(1, 5/2)=2 when shardCount=5 and consumerCount=0.
+   * Verifies that effectiveConsumerCount scales with CPU cores above the floor.
    */
   @Test
-  void effectiveConsumerCount_shouldReturnTwoWhenShardCountFive() {
-    HotKeyProperties p = props();
-    p.setShardCount(5);
-    assertThat(p.effectiveConsumerCount()).isEqualTo(2);
+  void effectiveConsumerCount_shouldScaleWithCores() {
+    int manyCores = 24;
+    int result = Math.max(4, manyCores / 2);
+    assertThat(result).isEqualTo(12);
   }
 
   /**

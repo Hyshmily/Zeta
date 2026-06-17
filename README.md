@@ -37,7 +37,7 @@ HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 
 - **Hot key synchronization** — Optional RabbitMQ fanout (via `hotkey.sync.*`) for cross-instance cache invalidation; dedicated worker-listener (via `hotkey.worker-listener.*`) receives HOT/COOL decisions from Worker
 - **Worker mode** — Dedicated cluster-level hot key detection nodes; cross-instance consensus via sliding window + state machine pipeline; runtime state machine configuration via `/actuator/hotkey/worker/state` REST endpoint with heartbeat-based peer-to-peer config propagation; see [Worker Mode](#worker-mode)
 - **Report aggregation** — Every `get()` / `getWithSoftExpire()` call reports to the local `HotKeyReporter`, which periodically batches access counts to Worker nodes (RabbitMQ) for cluster-level hot key detection
-- **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies ±10% random jitter to each hard/soft TTL via `ThreadLocalRandom`, scattering expiration timestamps to prevent cache avalanches
+- **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies configurable random jitter to each hard/soft TTL via `ThreadLocalRandom`, scattering expiration timestamps to prevent cache avalanches (default ±10%, controlled by `hotkey.local.ttl-jitter-enabled` / `ttl-jitter-ratio`)
 - **Consistent hashing (default)** — Murmur3_32-based consistent hash ring for dynamic Worker routing via heartbeats; elastic scaling without static shard configuration
 - **BBR adaptive rate limiting** — Self-protection via BBR congestion control fused with CPU EMA monitoring; backpressure at the Reporter flush path to prevent RabbitMQ/Worker overload
 - **SRE adaptive rate limiting** — WorkerListener HOT-path backpressure using Google SRE formula (`K = 1 / successThreshold`, probabilistic drop when success rate degrades); independent of BBR, protects the HOT decision consumption path
@@ -49,7 +49,28 @@ HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 
 
 </details>
 
-## Latency & Performance
+## Use Cases & Limitations
+
+HotKey is designed as a **read-hotspot governance** framework, not a general-purpose distributed cache or distributed lock.
+
+### When to Use
+
+| Scenario | Why HotKey Fits |
+|---|---|
+| **Product detail / pricing page** | During flash sales, a few SKUs see traffic surges; HeavyKeeper auto-detects → extends local TTL → reduces Redis penetration |
+| **Viral article / video metadata** | Sudden trending content; HotKey auto-identifies + cross-instance broadcast proactively warms every pod's L1 |
+| **Config / rule / dictionary cache** | Read-frequent, write-rare; cross-instance sync via AMQP broadcast keeps all pods consistent |
+| **User session / permission snapshot** | Hot users (VIP operations) automatically get extended L1 TTL for their permission cache |
+| **Pre-sale warmup (read-side only)** | Coupon face values, product images, descriptions — any read-only field caching **alongside** a separate atomic inventory system |
+
+### When NOT to Use
+
+| Scenario | Why Not | What to Use Instead |
+|---|---|---|
+| **Atomic inventory deduction** (flash sale stock) | HotKey has no cross-JVM atomicity guarantee; `VersionGuard` is optimistic, transient inconsistencies self-heal on next heartbeat cycle (ADR-0006) | Redis Lua script or distributed lock (Redisson) |
+| **Distributed locking** | HotKey provides no distributed lock abstraction | Redisson, ZooKeeper |
+| **Strong consistency writes** | Cross-instance sync is at-most-once with self-healing broadcasts (ADR-0004, ADR-0007) | Database transaction, Paxos/Raft |
+| **Uniform traffic (no hotspots)** | No detectable hot keys → HotKey provides no benefit over bare Caffeine | Plain Caffeine cache |
 
 > [!WARNING]
 > **Extreme performance**
@@ -104,7 +125,7 @@ See the [Benchmark Report](docs/HotKey_Benchmark_Report.en.md).
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.4-SNAPSHOT</version>
+    <version>1.1.5.Beta</version>
 </dependency>
 ```
 
@@ -193,7 +214,6 @@ hotkey:
     queue-capacity: 10000                   # report queue capacity
     queue-offer-timeout-ms: 100             # queue write timeout (ms)
     consumer-count: 0                       # consumer thread count (0=auto)
-    shard-count: 1                          # report shard count
 
     # ——— HeavyKeeper algorithm ———
     topK: 100                               # number of hot keys to track
@@ -217,6 +237,10 @@ hotkey:
     executor-max-pool-size: 32              # max threads
     executor-queue-capacity: 2000           # work queue capacity
     scheduler-pool-size: 8                  # scheduled task thread pool
+
+    # ——— TTL Jitter (Cache Avalanche Protection) ———
+    ttl-jitter-enabled: true                # enable TTL random jitter
+    ttl-jitter-ratio: 0.1                   # jitter ratio (0.0~1.0), 0.1 = ±10%
 
     # ——— Refresh & version control ———
     refresh-max-pools: 100                  # refresh thread pool limit
@@ -356,146 +380,83 @@ hotkey:
 
 ### 3. Usage
 
-**A. Local-only cache (no L2)**
+**Read operations**
 
 ```java
 @Autowired
 private HotKey hotKey;
 
-Optional<String> r = hotKey.peek("user:123"); // L1 only, no hot key tracking
-```
+// A. peek — L1 only, no hot key tracking
+Optional<String> r = hotKey.peek("user:123"); // returns Optional.empty() on L1 miss
 
-L1-only lookup, no hot key tracking. Returns `Optional.empty()` on L1 miss, completely bypasses secondary storage.
-
-**B. Two-level cache (Redis or any backend)**
-
-```java
-@Autowired
-private HotKey hotKey;
-@Autowired
-private StringRedisTemplate redisTemplate;
-
+// B. get — two-level cache (Redis or any backend)
 Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-hotKey.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
+// C. getWithSoftExpire — soft expiry (stale-while-revalidate)
+Optional<String> r = hotKey.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+
+// D. Fluent read API with fallback chain
+Optional<User> user = hotKey.read("user:42")
+    .withPrimary(userRepo::findById)
+    .thenExecute(backupRepo::findById)
+    .withHardTtl(30_000)
+    .withSoftTtl(10_000)
+    .allowBroadcast()
+    .execute();
 ```
 
-**C. DB fallback**
+**Soft expiry** returns stale data immediately while refreshing asynchronously in the background. Redis stores plain values with no wrapping — HotKey manages expiration entirely at the L1 Caffeine layer.
+
+| Dimension | Traditional logical expiry | HotKey soft expiry |
+|---|---|---|
+| Expiry storage | Embedded in Redis value (`RedisData{data, expireTime}`) | L1 Caffeine metadata (`softExpireAt`) |
+| Stale return | Parse wrapper, return old data | Return L1 value directly |
+| Async refresh | Redis distributed lock + custom thread pool | SingleFlight (local) + `hotKeyExecutor` + `refreshLimiter` |
+| Redis format | Wrapped JSON | Plain value (no wrapper) |
+| DB fallback | Manual locking logic | Native `orElseGet` / `orElseThrow` |
 
 ```java
-Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
-if (r.isEmpty()) {
-    String value = userService.getById(123);                         // DB fallback
-    redisTemplate.opsForValue().set("user:123", value);
-}
-// Note: if the reader returns null, HotKey treats it as a miss (Optional.empty()).
-// The caller should handle null values themselves (e.g. sentinel object wrapper).
+// Custom per-call softTtl (overrides global default)
+Optional<String> r2 = hotKey.getWithSoftExpire("user:456", () -> redisTemplate.opsForValue().get("user:456"), 3000);
 
-@Autowired
-private HotKey hotKey;
-
-public String getUserName(String userId) {
-  String cacheKey = "user:" + userId;
-
-  // Use hotKey.get() to encapsulate the full fallback chain in the reader
-  Optional<Object> result = hotKey.get(cacheKey, () -> {
-    // 1. Query Redis first
-    String value = redisTemplate.opsForValue().get(cacheKey);
-    if (value != null) {
-      return value; // Redis hit, return directly
-    }
-
-    // 2. Redis miss, query DB
-    User user = userService.getById(userId);
-    if (user != null) {
-      // 3. DB hit, write back to Redis and return
-      String userName = user.getName();
-      redisTemplate.opsForValue().set(cacheKey, userName, Duration.ofMinutes(10));
-      return userName;
-    }
-
-    // 4. DB miss, cache a short-lived empty sentinel to prevent cache penetration
-    redisTemplate.opsForValue().set(cacheKey, "", Duration.ofMinutes(1));
-    return NULL_SENTINEL;
+// DB fallback (no distributed lock required):
+String json = hotKey
+  .getWithSoftExpire("shop:" + shopId, () -> redisTemplate.opsForValue().get("shop:" + shopId))
+  .orElseGet(() -> {
+    User u = userMapper.selectById(shopId);
+    String s = JSONUtil.toJsonStr(u);
+    if (u != null) redisTemplate.opsForValue().set("shop:" + shopId, s);
+    return s;
   });
-
-  // 5. Process the result
-  return result
-    .filter(val -> val != NULL_SENTINEL)
-    .map(Object::toString)
-    .orElse(null);
-}
 ```
 
-> [!WARNING]
-> **Cache penetration protection — why doesn't HotKey ship with a Bloom filter?**
->
-> HotKey does not include a built-in Bloom filter. Cache penetration protection is the **caller's responsibility**, not the framework's:
->
-> | Approach                       | HotKey's stance                                                              |
-> | ------------------------------ | ---------------------------------------------------------------------------- |
-> | `NULL_SENTINEL` sentinel value | Caller implements in the `reader` (demonstrated above)                       |
-> | Blacklist rule engine       | Built-in — blocks known attack patterns like `user:-\d+`                     |
-> | Bloom filter (Guava)           | Caller adds in the `reader` — false positive cost is caller's responsibility |
-> | Gateway-layer (Nginx/WAF)      | Most effective — intercepted before reaching the application                 |
->
-> If you still want a Bloom filter, add one line to the reader:
->
-> ```java
-> BloomFilter<String> bf = BloomFilter.create(Funnels.stringFunnel(UTF_8), 10_000, 0.01);
->
-> Optional<Object> r = hotKey.get("user:123", () -> {
->   if (bf.mightContain("user:123")) return null;
->   Object val = dao.findById(123);
->   if (val == null) bf.put("user:123");
->   return val;
-> });
-> ```
-
-**D. Encapsulate helper to avoid repeated lambdas**
+**Write operations**
 
 ```java
-@Component
-public class RedisHotKeyHelper {
+// E. putThrough — write-through with broadcast
+hotKey.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
-  @Autowired
-  private HotKey hotKey;
+// F. putBeforeInvalidate — mutation then invalidate (for collection types)
+hotKey.putBeforeInvalidate(key, () -> redisTemplate.opsForSet().add(key, members));
 
-  @Autowired
-  private RedisTemplate<String, Object> redisTemplate;
+// G. putLocal — local-only write, no broadcast, no version bump
+hotKey.putLocal("user:123", cachedValue);
+hotKey.putLocal("user:123", cachedValue, hardTtlMs, softTtlMs); // with TTL override
 
-  public <T> Optional<T> get(String key) {
-    return hotKey.get(key, () -> redisTemplate.opsForValue().get(key));
-  }
-
-  public void set(String key, Object value) {
-    hotKey.putThrough(key, value, () -> redisTemplate.opsForValue().set(key, value));
-  }
-}
+// H. Fluent write API
+hotKey.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
+hotKey.write("user:42").putBeforeInvalidate(dbMutation);
+hotKey.write("user:42").invalidate();
 ```
 
-**E. Custom L2 cache (non-Redis)**
-
-```java
-// Use MySQL, remote API, or any data source as L2
-Optional<User> r = hotKey.get("user:123", () -> userMapper.selectById(123));
-
-User user = r.orElseGet(() -> createDefaultUser());
-```
-
-**F. Redis collection types (List, Set, ZSet)**
-
-`putThrough` requires the full new value to update L1, but collection mutations (LPUSH, SADD, ZADD) only modify individual elements — the caller cannot obtain the full new value. Use `putBeforeInvalidate` to invalidate L1 after mutation; the next `get()` will automatically fall back to Redis, ensuring consistency.
+**putBeforeInvalidate** is designed for Redis collection types (List, Set, ZSet). `putThrough` requires the full new value to update L1, but collection mutations (LPUSH, SADD, ZADD) only modify individual elements — the caller cannot obtain the full new value. `putBeforeInvalidate` invalidates L1 after mutation; the next `get()` falls back to Redis automatically.
 
 ```java
 @Component
 public class CollectionHotKeyCache {
 
-  @Autowired
-  private HotKey hotKey;
-
-  @Autowired
-  private RedisTemplate<String, Object> redisTemplate;
+  @Autowired private HotKey hotKey;
+  @Autowired private RedisTemplate<String, Object> redisTemplate;
 
   public Boolean sIsMember(String key, Object member) {
     return hotKey.get(key + "::member::" + member, () -> redisTemplate.opsForSet().isMember(key, member));
@@ -510,8 +471,8 @@ public class CollectionHotKeyCache {
   }
 
   public Optional<List<Object>> lRange(String key, long start, long end) {
-    String cacheKey = key + "::range::" + start + "::" + end;
-    return hotKey.get(cacheKey, () -> redisTemplate.opsForList().range(key, start, end));
+    return hotKey.get(key + "::range::" + start + "::" + end,
+        () -> redisTemplate.opsForList().range(key, start, end));
   }
 
   public Optional<Double> zScore(String key, Object member) {
@@ -520,116 +481,79 @@ public class CollectionHotKeyCache {
 }
 ```
 
-**G. Soft expiry — alternative to traditional logical expiration**
-
-Soft expiry returns stale data immediately while refreshing asynchronously in the background (stale-while-revalidate). Unlike traditional logical expiry (embedding `expireTime` in the Redis value), HotKey manages expiration entirely at the L1 Caffeine layer — **Redis stores plain values with no wrapping**.
-
-| Dimension      | Traditional logical expiry                              | HotKey soft expiry                                         |
-| -------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
-| Expiry storage | Embedded in Redis value (`RedisData{data, expireTime}`) | L1 Caffeine metadata (`softExpireAt`)                      |
-| Stale return   | Parse wrapper, return old data                          | Return L1 value directly                                   |
-| Async refresh  | Redis distributed lock + custom thread pool             | SingleFlight (local) + `hotKeyExecutor` + `refreshLimiter` |
-| Redis format   | Wrapped JSON                                            | Plain value (no wrapper)                                   |
-| DB fallback    | Manual locking logic                                    | Native `orElseGet` / `orElseThrow`                         |
+**DB fallback & cache penetration protection**
 
 ```java
-// Old way (no longer needed):
-//   redisData.setExpireTime(LocalDateTime.now().plusSeconds(30L));
-//   stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
-
-// HotKey: Redis stores plain values, soft expiry managed by L1
-Optional<String> r = hotKey.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
-
-// L1 hit but soft-expired → return stale value + trigger async refresh
-// L1 miss → singleflight fallback (same as get())
-
-// Custom per-call softTtl (overrides global default)
-Optional<String> r2 = hotKey.getWithSoftExpire("user:456", () -> redisTemplate.opsForValue().get("user:456"), 3000);
+Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+if (r.isEmpty()) {
+    String value = userService.getById(123); // DB fallback
+    redisTemplate.opsForValue().set("user:123", value);
+}
 ```
-
-DB fallback (no distributed lock required):
 
 ```java
-String json = hotKey
-  .getWithSoftExpire("shop:" + shopId, () -> redisTemplate.opsForValue().get("shop:" + shopId))
-  .orElseGet(() -> {
-    User u = userMapper.selectById(shopId);
-    String s = JSONUtil.toJsonStr(u);
-    if (u != null) {
-      redisTemplate.opsForValue().set("shop:" + shopId, s);
-    }
-    return s;
-  });
+// Helper encapsulation to avoid repeated lambdas
+@Component
+public class RedisHotKeyHelper {
+  @Autowired private HotKey hotKey;
+  @Autowired private RedisTemplate<String, Object> redisTemplate;
 
-User user = JSONUtil.toBean(json, User.class);
+  public <T> Optional<T> get(String key) {
+    return hotKey.get(key, () -> redisTemplate.opsForValue().get(key));
+  }
+  public void set(String key, Object value) {
+    hotKey.putThrough(key, value, () -> redisTemplate.opsForValue().set(key, value));
+  }
+}
+
+// Custom L2 cache (non-Redis): MySQL, remote API, or any data source
+Optional<User> r = hotKey.get("user:123", () -> userMapper.selectById(123));
+User user = r.orElseGet(() -> createDefaultUser());
 ```
 
-**H. Custom per-entry hard TTL**
+**Custom per-entry TTL**
 
-HotKey uses **differentiated TTL**: hot keys and normal keys have independent default hard and soft TTLs. Per-call overrides apply on top of these defaults.
+HotKey uses **differentiated TTL**: hot keys and normal keys have independent defaults. Per-call overrides apply on top.
 
-Default TTLs by key state:
-
-| Key state | Hard TTL (Caffeine eviction)   | Soft TTL (stale-while-revalidate) |
-| --------- | ------------------------------ | --------------------------------- |
-| Normal    | `default-hard-ttl-ms` (5min)   | `default-soft-ttl-ms` (30s)       |
-| Hot       | `default-hot-hard-ttl-ms` (1h) | `default-hot-soft-ttl-ms` (5min)  |
-
-Override via `hard-ttl-ms`, `hot-hard-ttl-ms`, `soft-ttl-ms`, `hot-soft-ttl-ms` (0 = use default).
-
-> [!NOTE]
-> **Cache avalanche protection:** `CacheExpireManager` applies ±10% uniform random jitter via `ThreadLocalRandom` when computing each expiry timestamp. A 5-minute hard TTL actually expires between 4.5 ~ 5.5 minutes, preventing mass simultaneous expiry. The jitter ratio is hardcoded at 10%.
-
-By default, hot keys and normal keys use different TTLs. Per-entry TTLs can be set via `get(key, reader, hardTtlMs, softTtlMs)` or `putThrough(key, value, writer, hardTtlMs, softTtlMs)`.
+| Key state | Hard TTL (Caffeine eviction) | Soft TTL (stale-while-revalidate) |
+|---|---|---|
+| Normal | `default-hard-ttl-ms` (5min) | `default-soft-ttl-ms` (30s) |
+| Hot | `default-hot-hard-ttl-ms` (1h) | `default-hot-soft-ttl-ms` (5min) |
 
 ```java
 // 5min hard TTL + 30s soft TTL
 Optional<String> shopJson = hotKey.get("shop:" + shopId,
     () -> redisTemplate.opsForValue().get("shop:" + shopId),
-    TimeUnit.MINUTES.toMillis(5),   // hardTtlMs
-    TimeUnit.SECONDS.toMillis(30)); // softTtlMs
+    TimeUnit.MINUTES.toMillis(5), TimeUnit.SECONDS.toMillis(30));
 
-// 30s hard TTL, no soft TTL
+// 30s hard TTL, soft TTL uses default
 hotKey.putThrough("weather:" + city, weatherData,
     () -> redisTemplate.opsForValue().set("weather:" + city, weatherData),
-    TimeUnit.SECONDS.toMillis(30),  // hardTtlMs
-    0);                              // softTtlMs (use default)
+    TimeUnit.SECONDS.toMillis(30), 0);
 ```
 
+> [!NOTE]
+> **Cache avalanche protection:** `CacheExpireManager` applies configurable uniform random jitter via `ThreadLocalRandom` when computing each expiry timestamp. A 5-minute hard TTL with default ±10% jitter actually expires between 4.5 ~ 5.5 minutes. Control via `hotkey.local.ttl-jitter-enabled` (toggle) and `hotkey.local.ttl-jitter-ratio` (default `0.1` = ±10%).
+
 > [!TIP]
-> Per-call TTL semantics:
->
-> Per-call `hardTtlMs`/`softTtlMs` only apply to the current invocation. The next call without these parameters falls back to the TTL defaults for the key's current state (hot or normal).
-> Passing `0` means "use the configured default for this key state."
-> For pure soft expiry (hard TTL never evicts): pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)`. The entry stays in Caffeine forever — the hard TTL will never remove it. After `softExpireAt` expires, reads immediately return the stale value and trigger async refresh (soft expiry **does not evict** the entry). Without `Long.MAX_VALUE`, the default hard TTL may evict the entry from Caffeine first (L1 miss → higher latency) instead of taking the stale-value + async-refresh path.
-> This usage is explicitly supported by Caffeine's `Expiry` Javadoc: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
+> Per-call TTL semantics: Passing `0` means "use the configured default for this key state." For pure soft expiry (hard TTL never evicts): pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)`. The entry stays in Caffeine forever — the hard TTL will never remove it. After `softExpireAt` expires, reads immediately return the stale value and trigger async refresh. Without `Long.MAX_VALUE`, the default hard TTL may evict the entry from Caffeine first (L1 miss → higher latency). This usage is explicitly supported by Caffeine's `Expiry` Javadoc: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
 
-**I. Worker mode**
+**Worker mode**
 
-Worker mode provides cluster-level hot key detection via dedicated nodes. App instances periodically report access counts; Workers run a sliding window + state machine pipeline and broadcast HOT/COOL decisions back to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state` — changes propagate to all peer Workers via epoch-based heartbeat gossip (dedicated TopicExchange, isolated from decision traffic). Workers emit structured heartbeats every second (configurable), containing epoch, decision version watermark, load factor, and config fingerprint — enabling instant restart detection and majority-vote-based cluster health assessment.
+Worker mode provides cluster-level hot key detection via dedicated nodes. App instances periodically report access counts; Workers run a sliding window + state machine pipeline and broadcast HOT/COOL decisions back to all instances via RabbitMQ. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state`.
 
-Two deployment modes:
-
-| Mode        | `worker.enabled`  | Activated beans                                                                       |
-| ----------- | ----------------- | ------------------------------------------------------------------------------------- |
-| App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                                         |
-| Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `UnsupportedOperationException`) |
+| Mode | `worker.enabled` | Activated beans |
+|---|---|---|
+| App-only | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync |
+| Worker-only | `true` | Worker only (no cache — `get()`/`putThrough()` throw `UnsupportedOperationException`) |
 
 In **Worker-only** mode, cache operations throw `UnsupportedOperationException`.
 
-**Worker TopK persistence (hot start):**
+**Worker TopK persistence (hot start):** When `hotkey.worker.persistence.enabled=true`, the Worker periodically snapshots its TopK list to Redis. On restart, `TopKPersistService` loads the last snapshot and replays it into the HeavyKeeper sketch, reducing warm-up from hours to seconds.
 
-When `hotkey.worker.persistence.enabled=true`, the Worker periodically snapshots its current TopK list to Redis. On restart, `TopKPersistService` loads the last snapshot via `@PostConstruct` and replays it into the HeavyKeeper sketch, reducing warm-up from hours to seconds.
+**Spring Cache integration**
 
-- Redis key: `hotkey:topk:worker:<appName>:<nodeId>` — each Worker persists independently
-- Persisted data: JSON of top N key-count pairs (`List<Item>`)
-- Recovery: `TopK.add(Map)` re-hashes historical keys into the (empty) sketch — approximate but does not affect correctness
-
-**J. Spring Cache integration**
-
-Enable with `hotkey.spring-cache.enabled=true` (requires `spring-boot-starter-cache` on the classpath).
-
-Standard Spring Cache annotations (`@Cacheable` / `@CachePut` / `@CacheEvict`) are automatically routed through HotKey's hot-key detection, soft-expire, and cross-instance sync. Companion annotations remain functional on `@Cacheable` methods:
+Enable with `hotkey.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `@CacheEvict` are routed through HotKey's hot-key detection, soft-expire, and cross-instance sync.
 
 | Annotation | Role on `@Cacheable` |
 |---|---|
@@ -638,23 +562,14 @@ Standard Spring Cache annotations (`@Cacheable` / `@CachePut` / `@CacheEvict`) a
 | `@Fallback` | Supply fallback value when interceptor blocks |
 | `@NullCaching` | Opt-in to caching null return values (default `true`) |
 
-**Example:**
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
 @HotKeyCacheTTL(softTtlMs = 1000)
-@Intercept
-@Fallback
+@Intercept @Fallback
 public User getUser(Long id) { ... }
 ```
 
-**Prerequisites:**
-```yaml
-hotkey:
-  spring-cache:
-    enabled: true
-```
-
-Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classpath. A `@EnableCaching` on any `@Configuration` class activates the standard Spring Caching infrastructure.
+Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classpath.
 
 ---
 
@@ -672,7 +587,7 @@ Each instance declares its own queue (`hotkey.sync:<instanceID>`) bound to a fan
 > [!SECURITY]
 > All three RabbitMQ exchanges (`hotkey.sync.exchange`, `hotkey.report.exchange`, `hotkey.broadcast.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*` properties:
 >
-> ```yaml
+>  ```yaml
 > spring:
 >   rabbitmq:
 >     ssl:
@@ -681,7 +596,7 @@ Each instance declares its own queue (`hotkey.sync:<instanceID>`) bound to a fan
 >       key-store-password: changeit
 >       trust-store: classpath:truststore.jks
 >       trust-store-password: changeit
-> ```
+> . ```
 >
 > See [Spring Boot RabbitMQ SSL documentation](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title).
 
@@ -758,10 +673,11 @@ Write path failure behavior:
 
 | Write method                                        | Failure scenario                           | Behavior                                                                                       |
 | --------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `putThrough`                                        | Thread pool queue full (non-transactional) | `RejectedExecutionException` propagated to caller                                              |
-| `putThrough`                                        | `writer.run()` / Redis fails               | Error logged, L1 version not updated, no broadcast sent                                        |
-| `putBeforeInvalidate`                               | `mutation.run()` throws                    | Mutation exception caught and logged; local invalidation and broadcast skipped                 |
-| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails                | Falls back to node-local counter (`Long.MIN_VALUE + counter`, non-persistent, `degraded=true`) |
+| `putLocal`                                          | Any                                                   | No-op (no DB/network dependency)                                                                   |
+| `putThrough`                                        | Thread pool queue full (non-transactional)           | `RejectedExecutionException` propagated to caller                                              |
+| `putThrough`                                        | `writer.run()` / Redis fails                         | Error logged, L1 version not updated, no broadcast sent                                        |
+| `putBeforeInvalidate`                               | `mutation.run()` throws                              | Mutation exception caught and logged; local invalidation and broadcast skipped                 |
+| `invalidate` / `putBeforeInvalidate` / `putThrough` | `nextVersion()` Redis fails                          | Falls back to node-local counter (`Long.MIN_VALUE + counter`, non-persistent, `degraded=true`) |
 
 Worker mode failure behavior:
 

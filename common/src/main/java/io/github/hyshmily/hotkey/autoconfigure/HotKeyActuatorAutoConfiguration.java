@@ -41,17 +41,28 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 
 /**
- * Auto-configuration for the {@link HotKeyEndpoint} Actuator endpoint.
+ * Auto-configuration for Actuator endpoints exposing HotKey runtime diagnostics.
  *
- * <p>All dependencies are injected via {@link ObjectProvider} so that the
- * endpoint can be created in any deployment mode:
+ * <p>Creates three endpoint beans:
  * <ul>
- *   <li><b>App-only</b> — app-side TopK, cache, and SingleFlight available</li>
- *   <li><b>Worker-only</b> — only Worker-side TopK is available</li>
- *   <li><b>Coexistence</b> — both TopK instances, cache, and SingleFlight</li>
+ *   <li>{@link HotKeyEndpoint} &mdash; {@code /actuator/hotkey}: comprehensive
+ *       diagnostics including TopK rankings, cache metrics, SingleFlight, reporter
+ *       stats, rules, TTLs, version tracking, and cluster health.</li>
+ *   <li>{@link RingEndpoint} &mdash; {@code /actuator/hotkeyring}: consistent-hash
+ *       ring CRUD (requires MVC and consistent-hashing enabled).</li>
+ *   <li>{@link StateMachineEndpoint} &mdash; {@code /actuator/hotkey/worker/state}:
+ *       Worker state-machine configuration (requires Worker mode and MVC).</li>
+ * </ul>
+ *
+ * <p>All dependencies for {@link HotKeyEndpoint} are injected via
+ * {@link ObjectProvider} so that the endpoint can be created in any deployment mode:
+ * <ul>
+ *   <li><b>App-only</b> &mdash; app-side TopK, cache, and SingleFlight available</li>
+ *   <li><b>Worker-only</b> &mdash; only Worker-side TopK is available</li>
+ *   <li><b>Coexistence</b> &mdash; both TopK instances, cache, and SingleFlight</li>
  * </ul>
  * Missing dependencies are silently passed as {@code null} and guarded
- * inside {@link HotKeyEndpoint}.
+ * inside each endpoint.
  */
 @AutoConfiguration
 @ConditionalOnClass(Endpoint.class)
@@ -59,22 +70,25 @@ import org.springframework.context.annotation.Bean;
 public class HotKeyActuatorAutoConfiguration {
 
   /**
-   * Create the Actuator endpoint. All dependencies are optional via {@link ObjectProvider}
-   * so the endpoint works in any deployment mode.
+   * Create the {@link HotKeyEndpoint} Actuator endpoint for comprehensive diagnostics.
    *
-   * @param hotKeyDetectorProvider      provider for the app-side TopK detector
-   * @param workerTopKProvider          provider for the Worker-side TopK detector
-   * @param hotLocalCacheProvider       provider for the L1 Caffeine cache
-   * @param singleFlightProvider        provider for the SingleFlight dedup layer
-   * @param hotKeyReporterProvider      provider for the HotKey reporter
-   * @param ruleMatcherProvider         provider for the rule matcher
-   * @param ringManagerProvider         provider for the consistent-hash ring manager
-   * @param expireManagerProvider       provider for the cache expiry manager
-   * @param versionControllerProvider   provider for the version controller
-   * @param cacheSyncPublisherProvider  provider for the cache sync publisher
-   * @param stateMachineProvider        provider for the Worker state machine
-   * @param healthViewProvider          provider for the cluster health view
-   * @param properties                  the HotKey configuration properties
+   * <p>All dependencies are optional via {@link ObjectProvider} so the endpoint
+   * works in any deployment mode. Missing components result in empty sub-sections
+   * in the endpoint response rather than null-pointer errors.
+   *
+   * @param hotKeyDetectorProvider      provider for the app-side TopK detector (may be absent)
+   * @param workerTopKProvider          provider for the Worker-side TopK detector (may be absent)
+   * @param hotLocalCacheProvider       provider for the L1 Caffeine cache (may be absent)
+   * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
+   * @param hotKeyReporterProvider      provider for the HotKey reporter (may be absent)
+   * @param ruleMatcherProvider         provider for the rule matcher (may be absent)
+   * @param ringManagerProvider         provider for the consistent-hash ring manager (may be absent)
+   * @param expireManagerProvider       provider for the cache expiry manager (may be absent)
+   * @param versionControllerProvider   provider for the version controller (may be absent)
+   * @param cacheSyncPublisherProvider  provider for the cache sync publisher (may be absent)
+   * @param stateMachineProvider        provider for the Worker state machine (may be absent)
+   * @param healthViewProvider          provider for the cluster health view (may be absent)
+   * @param properties                  the HotKey configuration properties (never {@code null})
    * @return a new {@link HotKeyEndpoint} instance
    */
   @Bean
@@ -112,12 +126,15 @@ public class HotKeyActuatorAutoConfiguration {
   }
 
   /**
-   * Create the RingEndpoint for consistent-hash ring CRUD.
-    * Only active when {@code hotkey.local.consistent-hashing.enabled=true}
-   * and Spring MVC (RestController) is on the classpath.
+   * Create the {@link RingEndpoint} for consistent-hash ring CRUD operations.
    *
-   * @param ringManager        the ring manager for consistent-hash topology
-   * @param healthViewProvider optional provider for the cluster health view
+   * <p>Only active when {@code hotkey.local.consistent-hashing.enabled=true}
+   * and Spring MVC ({@code RestController}) is on the classpath.
+   * Provides REST endpoints at {@code /actuator/hotkeyring} for viewing and
+   * modifying the consistent-hash ring topology.
+   *
+   * @param ringManager        the ring manager for consistent-hash topology (never {@code null})
+   * @param healthViewProvider optional provider for the cluster health view (may be absent)
    * @return a new {@link RingEndpoint} instance
    */
   @Bean
@@ -132,14 +149,19 @@ public class HotKeyActuatorAutoConfiguration {
   }
 
   /**
-   * Create the StateMachineEndpoint for reading and updating the Worker's
+   * Create the {@link StateMachineEndpoint} for reading and updating the Worker's
    * state-machine configuration at runtime.
    *
    * <p>Only active when a {@link HotKeyStateMachine} bean is present
    * (i.e. in Worker mode) and Spring MVC is on the classpath.
+   * Exposes REST endpoints at {@code /actuator/hotkey/worker/state}
+   * for GET (read config) and POST (update config) operations.
+   * Configuration changes propagate to peer Workers via heartbeat broadcast.
    *
-   * @param stateMachine                    the Worker state machine
-   * @param configTimestampCounterProvider  optional provider for the config-change timestamp counter
+   * @param stateMachine                    the Worker state machine (never {@code null})
+   * @param configTimestampCounterProvider  optional provider for the config-change timestamp
+   *                                        counter; bumped on each config change to trigger
+   *                                        heartbeat broadcast (may be absent)
    * @return a new {@link StateMachineEndpoint} instance
    */
   @Bean

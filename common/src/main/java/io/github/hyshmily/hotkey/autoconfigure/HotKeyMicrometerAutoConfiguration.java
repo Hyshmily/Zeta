@@ -42,16 +42,21 @@ import org.springframework.context.annotation.Bean;
  *
  * <p>Registers two {@link MeterBinder} beans when Micrometer is on the classpath:
  * <ul>
- *   <li>{@code hotKeyCaffeineMetrics} — standard Caffeine cache metrics (hit rate, eviction, etc.)
- *       under the {@code hotkey.l1} metric prefix.</li>
- *   <li>{@code hotKeyCustomMetrics} — HotKey-specific business metrics covering TopK detection,
- *       SingleFlight, Reporter, ExpireManager, VersionController, SyncPublisher, Worker TopK,
- *       Worker health, and StateMachine.</li>
+ *   <li>{@code hotKeyCaffeineMetrics} — standard Caffeine cache metrics (hit rate, eviction,
+ *       estimated size, max size) under the {@code hotkey.l1} metric prefix via
+ *       {@link CaffeineCacheMetrics}.</li>
+ *   <li>{@code hotKeyCustomMetrics} — HotKey-specific business metrics covering TopK detection
+ *       (local and worker), SingleFlight, Reporter (queue depth, drops, BBR stats), ExpireManager
+ *       (refresh permits), VersionController (degraded count), SyncPublisher (dedup cache size),
+ *       Worker health (alive/dead), StateMachine (tracked keys), and CPU load (EMA).</li>
  * </ul>
  *
  * <p>All custom metrics use the {@code hotkey} namespace. Any missing dependency silently
- * skips the corresponding gauge registration, mirroring the same null-safe approach used
- * by {@link io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint}.
+ * skips the corresponding gauge registration via {@link ObjectProvider}, mirroring the same
+ * null-safe approach used by {@link io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint}.
+ *
+ * <p>Thread-safe: Micrometer's {@link MeterRegistry} is thread-safe; gauge supplier lambdas
+ * delegate to thread-safe component methods.
  */
 @AutoConfiguration(after = HotKeyAutoConfiguration.class)
 @ConditionalOnClass(MeterBinder.class)
@@ -59,15 +64,19 @@ import org.springframework.context.annotation.Bean;
 public class HotKeyMicrometerAutoConfiguration {
 
   /**
-   * Registers standard Caffeine cache metrics (named {@code cache.*} with a
-   * {@code cache=hotkey.l1} tag) using {@link CaffeineCacheMetrics}. This exposes
-   * hit/miss counts, eviction count/weight, estimated size, and max size.
+   * Registers standard Caffeine cache metrics using {@link CaffeineCacheMetrics}.
+   *
+   * <p>Metrics are registered under the standard {@code cache.*} namespace with a
+   * {@code cache=hotkey.l1} tag. Exposes hit/miss counts, eviction count/weight,
+   * estimated size, and max size.
    *
    * <p>Uses {@link ObjectProvider} so the bean is created safely even when the
-   * L1 cache is absent (e.g. Worker-only mode).
+   * L1 cache is absent (e.g. Worker-only mode), in which case no metrics are
+   * registered.
    *
-   * @param hotLocalCacheProvider provider for the L1 Caffeine cache
-   * @return a {@link MeterBinder} that registers Caffeine cache metrics
+   * @param hotLocalCacheProvider provider for the L1 Caffeine cache (may be absent)
+   * @return a {@link MeterBinder} that registers Caffeine cache metrics when the
+   *         cache is available; otherwise registers nothing
    */
   @Bean
   @ConditionalOnMissingBean
@@ -81,35 +90,41 @@ public class HotKeyMicrometerAutoConfiguration {
   /**
    * Registers HotKey-specific business metrics for local and worker-side components.
    *
-   * <p>Metrics registered (each gated by component availability):
+   * <p>Each gauge is gated by component availability via {@link ObjectProvider} —
+   * if a component is not present in the current deployment mode, its corresponding
+   * metric is silently skipped.
+   *
+   * <p>Metrics registered:
    * <table>
-   *   <tr><th>Metric name</th><th>Source</th></tr>
-   *   <tr><td>{@code hotkey.topk.size}</td><td>TopK current ranking count (tagged type=local/worker)</td></tr>
-   *   <tr><td>{@code hotkey.topk.total}</td><td>TopK total requests tracked (tagged type=local/worker)</td></tr>
-   *   <tr><td>{@code hotkey.expelled.queue.size}</td><td>Expelled queue backlog</td></tr>
-   *   <tr><td>{@code hotkey.expelled.queue.remaining}</td><td>Expelled queue remaining capacity</td></tr>
-   *   <tr><td>{@code hotkey.singleflight.inflight}</td><td>SingleFlight in-flight dedup count</td></tr>
-   *   <tr><td>{@code hotkey.reporter.queue.depth}</td><td>Reporter queue backlog</td></tr>
-   *   <tr><td>{@code hotkey.reporter.queue.dropped.total}</td><td>Cumulative dropped batches</td></tr>
-   *   <tr><td>{@code hotkey.reporter.queue.expired.total}</td><td>Cumulative expired batches</td></tr>
-   *   <tr><td>{@code hotkey.reporter.pending.keys}</td><td>Keys buffered in reporter counter cache</td></tr>
-   *   <tr><td>{@code hotkey.expire.refresh.available}</td><td>Available refresh limiter permits</td></tr>
-   *   <tr><td>{@code hotkey.version.degraded.total}</td><td>Cumulative version fallback count</td></tr>
-   *   <tr><td>{@code hotkey.sync.dedup.size}</td><td>Broadcast dedup cache size</td></tr>
-   *   <tr><td>{@code hotkey.worker.alive}</td><td>Whether any worker shard is alive (0/1)</td></tr>
-   *   <tr><td>{@code hotkey.worker.tracked.keys}</td><td>Keys tracked by state machine</td></tr>
+   *   <tr><th>Metric name</th><th>Source</th><th>Tags</th></tr>
+   *   <tr><td>{@code hotkey.topk.size}</td><td>TopK current ranking count</td><td>type=local|worker</td></tr>
+   *   <tr><td>{@code hotkey.topk.total}</td><td>TopK total requests tracked</td><td>type=local|worker</td></tr>
+   *   <tr><td>{@code hotkey.expelled.queue.size}</td><td>Expelled queue backlog</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.expelled.queue.remaining}</td><td>Expelled queue remaining capacity</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.singleflight.inflight}</td><td>SingleFlight in-flight dedup count</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.reporter.queue.depth}</td><td>Reporter queue backlog</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.reporter.queue.dropped.total}</td><td>Cumulative dropped batches</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.reporter.queue.expired.total}</td><td>Cumulative expired batches</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.reporter.pending.keys}</td><td>Keys buffered in reporter counter cache</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.reporter.bbr.*}</td><td>BBR rate limiter (passed/dropped/inflight/maxinflight)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.expire.refresh.available}</td><td>Available refresh limiter permits</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.version.degraded.total}</td><td>Cumulative version fallback count</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.sync.dedup.size}</td><td>Broadcast dedup cache size</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.worker.alive}</td><td>Whether any worker shard is alive</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.worker.tracked.keys}</td><td>Keys tracked by state machine</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code hotkey.cpu.load}</td><td>System CPU load EMA</td><td>&mdash;</td></tr>
    * </table>
    *
-   * @param hotKeyDetectorProvider      provider for the app-side TopK detector
-   * @param workerTopKProvider          provider for the Worker-side TopK detector
-   * @param singleFlightProvider        provider for the SingleFlight dedup layer
-   * @param reporterProvider            provider for the HotKey reporter
-   * @param expireManagerProvider       provider for the cache expiry manager
-   * @param versionControllerProvider   provider for the version controller
-   * @param cacheSyncPublisherProvider  provider for the cache sync publisher
-   * @param stateMachineProvider        provider for the Worker state machine
-   * @param healthViewProvider          provider for the cluster health view
-   * @param cpuMonitorProvider          provider for the system CPU load monitor
+   * @param hotKeyDetectorProvider      provider for the app-side TopK (may be absent)
+   * @param workerTopKProvider          provider for the Worker-side TopK (may be absent)
+   * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
+   * @param reporterProvider            provider for the HotKey reporter (may be absent)
+   * @param expireManagerProvider       provider for the cache expiry manager (may be absent)
+   * @param versionControllerProvider   provider for the version controller (may be absent)
+   * @param cacheSyncPublisherProvider  provider for the cache sync publisher (may be absent)
+   * @param stateMachineProvider        provider for the Worker state machine (may be absent)
+   * @param healthViewProvider          provider for the cluster health view (may be absent)
+   * @param cpuMonitorProvider          provider for the system CPU load monitor (may be absent)
    * @return a {@link MeterBinder} that registers HotKey-specific business metrics
    */
   @Bean

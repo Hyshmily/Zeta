@@ -16,9 +16,16 @@
 package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 
 /**
- * A hot-key item with its tracked access count.
+ * A hot-key item with its estimated access count.
  *
- * @param key   the hot key
- * @param count the estimated access count
+ * <p>Returned by {@link TopK#list()} and {@link TopK#listTopN(int)} to
+ * represent a single entry in the current TopK ranking. The {@code count}
+ * is an <b>estimate</b> produced by the Count-Min Sketch algorithm — it
+ * may over-count due to hash collisions in the sketch and is periodically
+ * halved by {@link TopK#fading()} to decay historical data.
+ *
+ * @param key   the hot key (unique identifier, e.g. a cache key)
+ * @param count the estimated access count (approximate, subject to sketch
+ *              error and periodic decay)
  */
 public record Item(String key, long count) {}

@@ -21,18 +21,30 @@ import lombok.Getter;
 import lombok.ToString;
 
 /**
- * A value stored in the L1 cache together with its versions (dataVersion,
- * decisionVersion), TTL metadata,
- * and hot-key state.
+ * A value stored in the L1 cache together with its version metadata,
+ * TTL information, and hot-key state.
  *
- * <p>{@code isVersionDegraded} indicates whether the {@code dataVersion} was obtained
- * from Redis INCR (normal) or fell back to node-local counter ({@code Long.MIN_VALUE + counter})
- * (degraded) — see {@code VersionResult} for the degraded-detection logic
- * used during broadcast reception.
- * <p>{@code decisionVersion} tracks Worker HOT/COOL decisions and is always
- * monotonically increasing (never degraded).
- * <p>The normal-state TTLs recorded at entry creation are preserved across state
- * transitions in {@code normalHardTtlMs} and {@code normalSoftTtlMs}.
+ * <p>Each {@code CacheEntry} carries two orthogonal version spaces (see ADR-0008):
+ * <ul>
+ *   <li><b>{@code dataVersion}</b> — monotonically increasing counter obtained
+ *       from Redis INCR (normal) or a node-local fallback (degraded). Used by
+ *       the cache-sync broadcast to resolve concurrent updates across instances.
+ *       When {@code isVersionDegraded} is {@code true}, the version originated
+ *       from the local fallback ({@code Long.MIN_VALUE + counter}) and carries
+ *       reduced authority.</li>
+ *   <li><b>{@code decisionVersion}</b> — tracks Worker HOT/COOL decisions and is
+ *       always monotonically increasing (never degraded). Orthogonal to
+ *       {@code dataVersion}; used solely for ordering Worker decision broadcasts.</li>
+ * </ul>
+ *
+ * <p>The normal-state TTLs ({@code normalHardTtlMs}, {@code normalSoftTtlMs}) are
+ * recorded at entry creation and preserved across hot-key state transitions (HOT
+ * extends TTL, COOL reverts to normal). This ensures the original expiry baseline
+ * is never lost when the key's state changes.
+ *
+ * <p>Uses Lombok {@code @Builder(toBuilder = true)} — create new entries with
+ * {@code CacheEntry.builder()} and produce modified copies via
+ * {@code entry.toBuilder().field(newValue).build()}.
  */
 @Getter
 @ToString
@@ -40,26 +52,70 @@ import lombok.ToString;
 @Builder(toBuilder = true)
 public class CacheEntry {
 
-  /** The cached value (may be {@code null} if the entry represents a tombstone or a miss). */
+  /**
+   * The cached value. May be {@code null} if the entry represents a tombstone
+   * (invalidated) or a placeholder for a cache miss.
+   */
   private final Object value;
-  /** Monotonically increasing version from Redis INCR (normal) or node-local counter (degraded). */
+  /**
+   * Monotonically increasing version obtained from Redis INCR (normal path)
+   * or a node-local counter (degraded path). Used by the cache-sync broadcast
+   * to resolve concurrent write conflicts across instances.
+   */
   private final long dataVersion;
-  /** {@code true} if {@link #dataVersion} was obtained from the local fallback instead of Redis. */
+  /**
+   * {@code true} if {@link #dataVersion} was obtained from the local fallback
+   * (node-local counter) instead of Redis. A degraded version carries reduced
+   * authority and triggers fallback comparison logic in
+   * {@code CacheSyncListener}.
+   */
   private final boolean isVersionDegraded;
-  /** Monotonically increasing version from Worker HOT/COOL decisions; never degraded. */
+  /**
+   * Monotonically increasing version from Worker HOT/COOL decisions.
+   * Never degraded (always originates from the Worker's {@code AtomicLong}).
+   * Orthogonal to {@link #dataVersion} — used solely for ordering Worker
+   * decision broadcasts (see ADR-0008).
+   */
   private final long decisionVersion;
-  /** Hard TTL duration in milliseconds for this specific entry. */
+  /**
+   * Hard TTL duration in milliseconds for this entry. The entry is evicted
+   * unconditionally when {@link #hardExpireAtMs} is reached, regardless of
+   * access patterns.
+   */
   private final long hardTtlMs;
-  /** Absolute epoch-millis timestamp at which the entry should be evicted (hard expiry). */
+  /**
+   * Absolute epoch-millis timestamp at which the entry should be evicted
+   * (hard expiry). Compared against {@code System.currentTimeMillis()} on
+   * each read.
+   */
   private final long hardExpireAtMs;
-  /** Soft TTL duration in milliseconds for stale-while-revalidate behaviour. */
+  /**
+   * Soft TTL duration in milliseconds for stale-while-revalidate behaviour.
+   * After {@link #softExpireAtMs} the entry is considered stale; reads may
+   * still return the stale value while a background refresh is triggered.
+   */
   private final long softTtlMs;
-  /** Absolute epoch-millis timestamp at which the entry becomes stale (soft expiry). */
+  /**
+   * Absolute epoch-millis timestamp at which the entry becomes stale
+   * (soft expiry). Before this point the entry is considered fresh.
+   */
   private final long softExpireAtMs;
-  /** Current hot-key state of this entry ({@link KeyState#NORMAL}, {@link KeyState#HOT}, or {@link KeyState#COOL}). */
+  /**
+   * Current hot-key state of this entry. Determines which TTL values
+   * are active: {@link KeyState#HOT} uses extended TTLs,
+   * {@link KeyState#COOL} reverts to normal TTLs.
+   */
   private final KeyState keyState;
-  /** Normal-state hard TTL recorded at entry creation, preserved across HOT/COOL transitions. */
+  /**
+   * Normal-state hard TTL recorded at initial entry creation. Preserved
+   * across HOT/COOL state transitions so the original hard expiry baseline
+   * is always recoverable when the key returns to NORMAL state.
+   */
   private final long normalHardTtlMs;
-  /** Normal-state soft TTL recorded at entry creation, preserved across HOT/COOL transitions. */
+  /**
+   * Normal-state soft TTL recorded at initial entry creation. Preserved
+   * across HOT/COOL state transitions so the original soft expiry baseline
+   * is always recoverable when the key returns to NORMAL state.
+   */
   private final long normalSoftTtlMs;
 }

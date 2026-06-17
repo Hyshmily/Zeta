@@ -28,11 +28,26 @@ import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
 
 /**
- * Unified facade for hot key detection.
+ * Unified facade for hot key detection that implements the {@link TopK}
+ * interface and manages the lifecycle of the underlying HeavyKeeper sketch
+ * and its double-buffered counter.
  *
- * <p>Provides both direct (synchronous, no buffering) and buffered (asynchronous,
- * batched) paths for recording key accesses, along with read-only introspection
- * of the underlying HeavyKeeper state.
+ * <p>Provides two access paths:
+ * <ul>
+ *   <li><b>Direct</b> ({@link #addDirect}) — synchronous sketch and heap update
+ *       without buffering, used by the Worker and for internal detector calls.</li>
+ *   <li><b>Buffered</b> ({@link #add}) — asynchronous, batched path via
+ *       {@link BufferedCounter} that aggregates high-frequency single-key
+ *       increments and flushes them every 500 ms to the direct path. Used
+ *       by the app-level read path.</li>
+ * </ul>
+ *
+ * <p>Implements {@link InitializingBean} and {@link DisposableBean} for
+ * Spring-managed lifecycle: the buffered counter flusher is started in
+ * {@link #afterPropertiesSet()} and shut down in {@link #destroy()}.
+ *
+ * <p>Thread-safe: all public methods delegate to the thread-safe
+ * HeavyKeeper and BufferedCounter implementations.
  */
 public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
 

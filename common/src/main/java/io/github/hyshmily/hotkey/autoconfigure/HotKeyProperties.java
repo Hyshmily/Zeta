@@ -173,6 +173,14 @@ public class HotKeyProperties {
     return effectiveSoftTtlMs() > 0 || effectiveHotSoftTtlMs() > 0;
   }
 
+  /** Whether to apply random jitter (±ttlJitterRatio) to TTL expiry timestamps to prevent cache stampedes. */
+  private boolean ttlJitterEnabled = true;
+
+  /** Jitter ratio (0.0–1.0) applied to TTLs — e.g. 0.1 means ±10% random offset. */
+  @Min(0)
+  @Max(1)
+  private double ttlJitterRatio = 0.1;
+
   /** Maximum number of concurrent refresh tasks for soft-expiry management. */
   @Min(1)
   private int refreshMaxPools = 100;
@@ -190,7 +198,7 @@ public class HotKeyProperties {
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
   private long reportIntervalMs = 100;
 
-  /** Number of shards for report partitioning. */
+  /** Number of shards for report partitioning (only used when consistent-hashing is disabled). */
   private int shardCount = 1;
 
   /** Capacity of the per-shard report queue. */
@@ -206,12 +214,17 @@ public class HotKeyProperties {
   private int consumerCount = 0;
 
   /**
-   * Effective consumer thread count: configured value, or max(1, shardCount/2).
+   * Effective consumer thread count: configured value, or max(4, availableProcessors/2).
+   * Uses available CPU cores as a baseline — scales with machine capacity without
+   * requiring static shard configuration in a dynamic topology.
+   * A floor of 4 ensures adequate parallelism for report dispatch even on small instances.
    *
    * @return the effective number of consumer threads
    */
   public int effectiveConsumerCount() {
-    return consumerCount > 0 ? consumerCount : Math.max(1, shardCount / 2);
+    return consumerCount > 0
+      ? consumerCount
+      : Math.max(4, Runtime.getRuntime().availableProcessors() / 2);
   }
 
   /**

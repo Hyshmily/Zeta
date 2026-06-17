@@ -22,7 +22,16 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * Per-key state machine that governs hot-key lifecycle transitions.
+ * Per-key state machine that governs hot-key lifecycle transitions on the
+ * Worker side.
+ *
+ * <p>Each Worker shard owns a subset of keys (determined by
+ * {@link io.github.hyshmily.hotkey.sharding.ConsistentHashRing} routing)
+ * and runs one {@code HotKeyStateMachine} instance per owned shard. The
+ * state machine converts per-key sliding-window frequency observations
+ * into lifecycle transitions — promoting COLD keys to CONFIRMED_HOT when
+ * sustained traffic is detected, and demoting them back to COLD after a
+ * prolonged cool-down.
  *
  * <h3>State diagram</h3>
  * <pre>
@@ -53,22 +62,46 @@ import lombok.Setter;
  *       stops reporting a key.</li>
  * </ul>
  *
- * <p>Instances are thread-safe and designed for single-shard workers; each key is
- * owned by exactly one worker thanks to consistent-hash routing on the client side.</p>
+ * <p>Thread-safe: per-key state mutations happen through {@link ConcurrentHashMap}
+ * with volatile fields on the mutable {@link KeyState} inner class. The state
+ * machine supports concurrent evaluation of different keys but serializes
+ * evaluations of the same key (key's state is loaded once per evaluation cycle).
+ *
+ * <p>Designed for single-shard workers; each key is owned by exactly one worker
+ * thanks to consistent-hash routing on the client side.</p>
  */
 @AllArgsConstructor
 public class HotKeyStateMachine {
 
-  /** Key-level state: current lifecycle stage plus streak counters. */
+  /**
+   * Key-level state: current lifecycle stage within the hot-key state machine.
+   *
+   * <p>Transitions are governed by consecutive window observations
+   * (see {@link HotKeyStateMachine#evaluate}).
+   */
   public enum State {
-    /** Not currently tracked as hot. */
+    /**
+     * Not currently tracked as hot. This is the initial state for all keys.
+     * The key must be observed above the hot threshold for
+     * {@code confirmCount} consecutive windows to transition to
+     * {@link #CONFIRMED_HOT}.
+     */
     COLD,
-    /** Confirmed hot — HOT broadcast has been sent. */
+    /**
+     * Confirmed hot — a HOT broadcast has been sent to the application
+     * instances. The key's L1 TTL should be extended. If traffic subsides,
+     * the key transitions to {@link #PRE_COOLING} after a grace period.
+     */
     CONFIRMED_HOT,
     /**
      * Transitional stage between HOT and COLD.
-     * No broadcast is sent yet; if the key becomes hot again it returns
-     * to {@link #CONFIRMED_HOT} silently, avoiding unnecessary COOL/HOT cycles.
+     *
+     * <p>No broadcast is sent when entering this stage. If the key becomes
+     * hot again (observed above threshold during this window) it returns
+     * to {@link #CONFIRMED_HOT} silently, avoiding unnecessary COOL→HOT
+     * oscillations. If it remains cold for {@code coolCount} consecutive
+     * windows, it transitions to {@link #COLD} and a COOL broadcast is
+     * emitted.
      */
     PRE_COOLING,
   }
@@ -106,13 +139,32 @@ public class HotKeyStateMachine {
   private final ConcurrentHashMap<String, Long> stateTimestamps = new ConcurrentHashMap<>();
 
   /**
-   * Evaluates the current window result for the given key and returns the
-   * appropriate decision (HOT, COOL, or NONE).
+   * Evaluates the current sliding-window observation for the given key and
+   * returns a decision instructing the caller whether to broadcast a HOT or
+   * COOL message.
    *
-   * @param key             the cache key
-   * @param isHotThisWindow {@code true} if the sliding-window sum exceeds the
-   *                        threshold during this evaluation cycle
-   * @return a decision that tells the caller whether to broadcast
+   * <p>This method implements the state transitions described in the class
+   * Javadoc. It updates the per-key streak counters ({@code hotStreak} /
+   * {@code coolStreak}) atomically (via {@link ConcurrentHashMap#computeIfAbsent})
+   * and returns one of:
+   * <ul>
+   *   <li>{@link HotKeyDecision.DecisionType#HOT} — key just crossed the
+   *       promotion threshold; broadcast HOT to application instances.</li>
+   *   <li>{@link HotKeyDecision.DecisionType#COOL} — key has fully cooled
+   *       down; broadcast COOL so apps revert to normal TTL.</li>
+   *   <li>{@link HotKeyDecision.DecisionType#NONE} — no state transition
+   *       occurred; no action required.</li>
+   * </ul>
+   *
+   * <p>Silent revive (PRE_COOLING → CONFIRMED_HOT) returns NONE to
+   * suppress unnecessary broadcasts and prevent HOT/COOL oscillation.
+   *
+   * @param key             the cache key (must not be {@code null})
+   * @param isHotThisWindow {@code true} if the sliding-window frequency sum
+   *                        exceeds the hot threshold during this evaluation
+   *                        cycle; {@code false} otherwise
+   * @return a non-null {@link HotKeyDecision} indicating what action the
+   *         caller should take (HOT, COOL, or NONE)
    */
   public HotKeyDecision evaluate(String key, boolean isHotThisWindow) {
     // Touch timestamp for eviction tracking
@@ -156,9 +208,17 @@ public class HotKeyStateMachine {
   }
 
   /**
-   * Immediately removes all state for the given key, effectively resetting
-   * it to {@link State#COLD}.  Called when the Worker fails to obtain a
-   * version from Redis and must abort the current HOT decision.
+   * Immediately removes all tracked state for the given key, effectively
+   * resetting it to {@link State#COLD}.
+   *
+   * <p>Called when the Worker fails to obtain a version from Redis and must
+   * abort the current HOT decision (e.g. Redis is unreachable or the key
+   * was not found in Redis). After reset, the next {@link #evaluate} call
+   * for this key will start from scratch with fresh streak counters.
+   *
+   * <p>The last-touch timestamp is intentionally not removed to prevent
+   * immediate re-creation churn in {@link #evictStale} — it will be cleaned
+   * up lazily on the next eviction cycle.
    *
    * @param key the cache key to reset
    */

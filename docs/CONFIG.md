@@ -13,6 +13,10 @@
 | `getWithSoftExpire(key, reader)`                       | Soft expiry — returns stale data + triggers async refresh; every access triggers local TopK tracking + App&#8594;Worker reporting; uses global default TTLs based on key state                                                                 |
 | `getWithSoftExpire(key, reader, softTtlMs)`            | Same as above, with per-call soft TTL override (ms)                                                                                                                                                                                            |
 | `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | Same as above, with both per-entry hard TTL and per-call soft TTL override (ms)                                                                                                                                                                |
+| `read(key)`                                            | Fluent read query builder: `hotKey.read(key).withPrimary(...).thenExecute(...).withHardTtl(...).execute()` returns `Optional<T>`; supports fallback chain, broadcast toggle, null-caching toggle                                                                       |
+| `write(key)`                                           | Fluent write command builder: `hotKey.write(key).withHardTtl(...).putThrough(value, writer)` / `.putBeforeInvalidate(mutation)` / `.invalidate()`                                                                                              |
+| `putLocal(key, value)`                                 | Local-only write: stores value in L1 without version bump, broadcast, hot-key detection, or reporting; preserves existing entry metadata                                                                                                      |
+| `putLocal(key, value, hardTtlMs, softTtlMs)`           | Same as above, with per-entry hard and soft TTL override (pass 0 to use default)                                                                                                                                                               |
 | `putThrough(key, value, writer)`                       | Write-through: writer.run(), nextVersion(), L1 update (with effective TTL based on key state), optional sync                                                                                                                                   |
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | Same as above, with per-entry hard and soft TTL override (pass 0 to use default)                                                                                                                                                               |
 | `putBeforeInvalidate(key, mutation)`                   | Write then invalidate, for incremental collection operations (LPUSH, SADD, ZADD)                                                                                                                                                               |
@@ -58,17 +62,20 @@
 | `hotkey.local.soft-ttl-ms`              | `0`                      | Per-call soft TTL override for normal keys; 0 = use `default-soft-ttl-ms`                                                     |
 | `hotkey.local.default-hot-soft-ttl-ms`  | `300000` (5min)          | Default soft TTL for hot keys                                                                                                 |
 | `hotkey.local.hot-soft-ttl-ms`          | `0`                      | Per-call soft TTL override for hot keys; 0 = use `default-hot-soft-ttl-ms`                                                    |
+| `hotkey.local.ttl-jitter-enabled`       | `true`                   | Whether to apply random jitter to TTL expiry timestamps to prevent cache stampedes                                           |
+| `hotkey.local.ttl-jitter-ratio`         | `0.1`                    | Jitter ratio (0.0–1.0); e.g. 0.1 = ±10% random offset applied to all TTL calculations                                        |
 | `hotkey.local.refresh-max-pools`        | `100`                    | Max concurrent async refreshes for soft expire (Semaphore)                                                                    |
 | `hotkey.local.version-key-ttl-minutes`  | `60`                     | Redis version key TTL (minutes); minimum 1                                                                                    |
 | `hotkey.local.report-exchange`          | `hotkey.report.exchange` | RabbitMQ exchange for app-to-Worker report messages                                                                           |
 | `hotkey.local.report-interval-ms`       | `100`                    | Interval at which app instances batch and send TopK reports to the Worker (ms)                                                |
 | `hotkey.local.app-name`                 | `"default"`              | Logical application name used as tenant discriminator for Worker routing                                                      |
-| `hotkey.local.shard-count`              | `1`                      | Divisor for auto consumer count calculation (max(1, shardCount/2)); routing uses CH by default                                |
+| `hotkey.local.shard-count`              | `1`                      | Divisor for auto consumer count calculation (max(4, availableProcessors/2) when 0); routing uses CH by default               |
 | `hotkey.local.instance-id`              | `""` (auto)              | Explicit instance ID for queue naming; auto-detected as `server.port-HOSTNAME` (or `server.port-UUID`) if empty               |
 | `hotkey.local.queue-capacity`           | `10000`                  | Report dispatcher queue capacity (internal bounded queue)                                                                     |
 | `hotkey.local.queue-offer-timeout-ms`   | `100`                    | Report queue offer timeout (ms) — blocks up to this duration before dropping                                                  |
-| `hotkey.local.consumer-count`           | `0`                      | Report consumer thread count; 0 = auto (max(1, shardCount / 2))                                                               |
-
+| `hotkey.local.consumer-count`           | `0`                      | Report consumer thread count; 0 = auto (max(4, availableProcessors / 2))                                                      |
+| `hotkey.local.scheduler-pool-size`      | `8`                      | Pool size for the shared HotKey scheduler (periodic tasks)                                                                    |
+ 
 ### Heartbeat (`hotkey.local.heartbeat.*`)
 
 | Property                                        | Default                     | Description                                                                                            |
@@ -144,7 +151,7 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `hotkey.worker-listener.queue-prefix`          | `hotkey.worker`             | Queue name prefix; full name = `{prefix}:{instanceId}`                          |
 | `hotkey.worker-listener.warmup-jitter-ms`      | `100`                       | Random jitter before processing Worker messages (prevents herd)                 |
 | `hotkey.worker-listener.concurrent-consumers`  | `2`                         | Number of concurrent RabbitMQ consumers for Worker listener queue               |
-| `hotkey.worker-listener.scheduler-pool-size`   | `2`                         | Thread pool size for deferred Redis reads in Worker listener                    |
+| `hotkey.worker-listener.scheduler-pool-size`   | `2`                         | Thread pool size for jittered Worker cache-update tasks                         |
 | `hotkey.worker-listener.prefetch-count`        | `5`                         | AMQP prefetch count per worker-listener consumer                                |
 | `hotkey.worker-listener.auto-startup`          | `true`                      | Whether the worker listener container starts automatically with the application |
 | **`hotkey.worker-listener.sre.*`**             |                             | **SRE Adaptive Rate Limiter**                                                   |
@@ -169,7 +176,7 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `hotkey.worker.sliding-window.duration-ms`                           | `1000`                      | Sliding window duration (milliseconds)                                                                                       |
 | `hotkey.worker.sliding-window.slices`                                | `10`                        | Number of time slices within one window                                                                                      |
 | **`hotkey.worker.threshold.*`**                                      |                             | **Hot Threshold**                                                                                                            |
-| `hotkey.worker.threshold.hot-threshold`                              | `1000`                      | Absolute hot-key threshold; `-1` = use ratio-based                                                                           |
+| `hotkey.worker.threshold.hot-threshold`                              | `1000`                      | Absolute hot-key threshold; `≤0` = use ratio-based                                                                           |
 | `hotkey.worker.threshold.hot-threshold-ratio`                        | `0.01`                      | Hot-key threshold as fraction of estimated global QPS (1%)                                                                   |
 | **`hotkey.worker.state-machine.*`**                                  |                             | **State Machine**                                                                                                            |
 | `hotkey.worker.state-machine.confirm-duration-ms`                    | `300`                       | Duration key must stay above threshold to be confirmed HOT                                                                   |

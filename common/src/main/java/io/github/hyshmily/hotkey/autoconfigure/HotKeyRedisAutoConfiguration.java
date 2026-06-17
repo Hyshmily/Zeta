@@ -50,11 +50,16 @@ import java.util.concurrent.Executor;
  * {@link StringRedisTemplate} is injected as optional — if absent,
  * version tracking falls back to a node-local counter ({@link
  * io.github.hyshmily.hotkey.util.InstanceIdGenerator#getNodeId()} + {@link
- * java.util.concurrent.atomic.AtomicLong}).
- * Runs <em>after</em>
- * {@link HotKeyAutoConfiguration} so its {@code @ConditionalOnMissingBean}
- * on {@code hotKeyCache} wins over the non-Redis variant, and after
- * {@link RedisAutoConfiguration} so the Redis infrastructure is ready.
+ * java.util.concurrent.atomic.AtomicLong}) with a {@code Long.MIN_VALUE}
+ * base, ensuring degraded versions from different JVMs occupy distinct ranges.
+ *
+ * <p>Runs <em>after</em> {@link HotKeyAutoConfiguration} so its
+ * {@code @ConditionalOnMissingBean} on {@code hotKeyCache} wins over the
+ * non-Redis variant, and after {@link RedisAutoConfiguration} so the Redis
+ * infrastructure is ready.
+ *
+ * <p>Also creates a {@link RuleMatcher} with optional Redis persistence,
+ * enabling rule CRUD operations to survive app restarts.
  */
 @AutoConfiguration(after = { HotKeyAutoConfiguration.class, RedisAutoConfiguration.class })
 @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
@@ -62,11 +67,18 @@ import java.util.concurrent.Executor;
 public class HotKeyRedisAutoConfiguration {
 
   /**
-   * Create the {@link RuleMatcher} with Redis persistence and broadcast support.
+   * Create the {@link RuleMatcher} with optional Redis persistence and broadcast support.
    *
-   * @param redisTemplateProvider optional provider for StringRedisTemplate
-   * @param publisherProvider     optional provider for the cache sync publisher
-   * @return a new RuleMatcher instance with Redis-backed persistence
+   * <p>When a {@link StringRedisTemplate} is available, rules (blacklist/whitelist)
+   * are persisted in Redis under the key {@code hotkey:rules}, surviving app restarts.
+   * When a {@link CacheSyncPublisher} is available, rule changes are broadcast to
+   * peer instances for cluster-wide consistency.
+   *
+   * @param redisTemplateProvider optional provider for StringRedisTemplate (Redis persistence);
+   *                              may be absent
+   * @param publisherProvider     optional provider for the cache sync publisher (cross-instance
+   *                              broadcast); may be absent
+   * @return a new RuleMatcher instance with optional Redis-backed persistence
    */
   @Bean
   @ConditionalOnMissingBean
@@ -82,19 +94,26 @@ public class HotKeyRedisAutoConfiguration {
 
   /**
    * Create the Redis-enhanced {@link HotKeyCache} with version-based stale detection.
-   * {@link StringRedisTemplate} is optional — if absent, version tracking falls back
-   * to a node-local counter ({@code Long.MIN_VALUE + counter}).
    *
-   * @param hotKeyDetector     the app-side TopK detector
-   * @param hotLocalCache      the L1 Caffeine cache
-   * @param singleFlight       the deduplication layer
-   * @param expireManager      the soft/hard expiration manager
-   * @param syncPublisher      optional cache sync publisher
-   * @param hotKeyReporter     optional hot key reporter
-   * @param hotKeyExecutor     the dedicated HotKey executor
-   * @param redisTemplateProvider optional provider for StringRedisTemplate (version tracking)
+   * <p>The {@link StringRedisTemplate} is optional — if absent, version tracking falls
+   * back to a node-local counter ({@code Long.MIN_VALUE + nodeId + counter}), ensuring
+   * graceful degradation when Redis is temporarily unavailable. The full HotKeyCache
+   * pipeline includes: TopK detection, L1 Caffeine, SingleFlight dedup, soft/hard
+   * expiry, cross-instance sync, reporting, rule matching, and consistent-hash routing.
+   *
+   * @param hotKeyDetector     the app-side TopK detector for hot-key frequency tracking
+   * @param hotLocalCache      the L1 Caffeine cache (shared across all keys)
+   * @param singleFlight       the deduplication layer for concurrent cache-load requests
+   * @param expireManager      the soft/hard expiration manager for TTL control
+   * @param syncPublisher      optional cache sync publisher for cross-instance broadcast
+   * @param hotKeyReporter     optional hot key reporter for app-to-Worker data flow
+   * @param hotKeyExecutor     the dedicated HotKey async executor
+   * @param redisTemplateProvider optional provider for StringRedisTemplate (version tracking);
+   *                              may be absent
    * @param properties         the HotKey configuration properties
-   * @param ruleMatcher        the rule matcher instance
+   * @param ruleMatcher        the rule matcher for blacklist/whitelist evaluation
+   * @param ringManager        the consistent-hash ring manager for report shard routing
+   * @param healthView         the cluster health view for Worker liveliness tracking
    * @return a new Redis-backed HotKeyCache instance
    */
   @Bean
@@ -133,15 +152,17 @@ public class HotKeyRedisAutoConfiguration {
   }
 
   /**
-   * Fallback {@link HotKey} bean for the Redis-enhanced path.
+   * Fallback {@link HotKey} facade bean for the Redis-enhanced path.
    *
    * <p>Only active when a {@link HotKeyCache} bean exists but no {@link HotKey}
-   * has been defined yet.  This covers the case where the primary
+   * has been defined yet. This covers the case where the primary
    * {@link HotKeyFacadeAutoConfiguration} is excluded and the {@link HotKeyCache}
-   * originates from this configuration.
+   * originates from this configuration. The returned facade provides the full
+   * public API including read/write/invalidate operations, TopK introspection,
+   * and rule management.
    *
-   * @param hotKeyCache    the Redis-backed HotKeyCache instance
-   * @param hotKeyDetector the app-side TopK detector
+   * @param hotKeyCache    the Redis-backed HotKeyCache instance (never {@code null})
+   * @param hotKeyDetector the app-side TopK detector (never {@code null})
    * @return a new HotKey facade instance
    */
   @Bean

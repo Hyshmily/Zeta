@@ -22,16 +22,29 @@ import java.nio.charset.StandardCharsets;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
- * Message from Worker to app instances carrying hot/cool decisions.
- * Travels via {@code hotkey.worker.exchange} (FanoutExchange).
+ * Message from Worker to app instances carrying hot/cool decisions for a single cache key.
+ * Travels via the {@code hotkey.worker.exchange} FanoutExchange, ensuring every connected
+ * app instance receives each decision exactly once (subject to at-most-once delivery).
  *
- * <p>No {@code isVersionDegraded} — Worker skips broadcast if Redis GET fails.
+ * <p>Each {@code WorkerMessage} carries the Worker's monotonically increasing
+ * {@code decisionVersion}, which enables receivers to apply idempotent ordering:
+ * stale decisions (lower version than the local entry's {@code decisionVersion}) are
+ * silently skipped. This version space is orthogonal to the application-level
+ * {@code dataVersion} — see ADR-0008 (Dual Version Space).
  *
- * @param cacheKey        the affected cache key
- * @param type            the decision ({@link #TYPE_HOT} or {@link #TYPE_COOL})
- * @param decisionVersion the Worker‑local decision version (monotonically increasing)
- * @param timestamp       reserved (0 for HOT/COOL)
- * @param nodeId          reserved (null for HOT/COOL)
+ * <p>Unlike {@link SyncMessage}, this record has no {@code isVersionDegraded} field.
+ * The Worker simply skips broadcast entirely if {@code Redis GET} fails during a HOT
+ * decision, preventing degraded decision propagation.
+ *
+ * <p>The {@code timestamp} and {@code nodeId} fields are reserved for future use and
+ * carry default values ({@code 0L} and {@code null}) for standard HOT/COOL decisions.
+ *
+ * @param cacheKey        the affected cache key; must not be null
+ * @param type            the decision type, one of {@link #TYPE_HOT} or {@link #TYPE_COOL}
+ * @param decisionVersion the Worker-local decision version (monotonically increasing
+ *                        {@code AtomicLong}); used for idempotent ordering on the receiver
+ * @param timestamp       reserved for future use; always {@code 0L} for HOT/COOL decisions
+ * @param nodeId          reserved for future use; always {@code null} for HOT/COOL decisions
  */
 public record WorkerMessage(String cacheKey, String type, long decisionVersion, long timestamp, String nodeId) {
   /** Promotes a cache key to hot state — extended TTL, soft expiration enabled. */
@@ -41,7 +54,7 @@ public record WorkerMessage(String cacheKey, String type, long decisionVersion, 
   public static final String TYPE_COOL = "COOL";
 
   /**
-   * Deserialize a {@code WorkerMessage} from an AMQP message body and headers.
+   * Deserializes a {@code WorkerMessage} from an AMQP message body and headers.
    * <p>
    * The cache key is read from the message body (UTF-8 decoded). The type,
    * decision version, timestamp, and node ID are read from message headers.

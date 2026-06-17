@@ -17,11 +17,7 @@ package io.github.hyshmily.hotkey.annotation;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.HotKeyCacheContext;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -29,14 +25,19 @@ import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cache.interceptor.SimpleKey;
+import org.springframework.context.expression.MethodBasedEvaluationContext;
 import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.Ordered;
 import org.springframework.core.ParameterNameDiscoverer;
 import org.springframework.core.annotation.Order;
-import org.springframework.context.expression.MethodBasedEvaluationContext;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Companion AOP aspect for Spring {@link Cacheable @Cacheable} methods.
@@ -247,11 +248,22 @@ public class HotKeyCacheExtensionAspect {
   }
 
   /**
-   * Invokes the naming-convention fallback method ({@code {originalName}Fallback})
-   * on the target bean with the original method arguments.
+   * Invokes the naming-convention fallback method on the target bean with
+   * the original method arguments.
    *
-   * @param pjp the join point providing method arguments and target
-   * @return the fallback method return value, or {@code null} if not found
+   * <p>The fallback method is expected to follow the naming convention
+   * {@code {originalMethodName}Fallback} with the same parameter types
+   * as the original method. The resolved method is cached in
+   * {@link #fallbackMethodCache} for subsequent invocations.
+   *
+   * <p>If no matching fallback method exists anywhere in the class
+   * hierarchy, {@code null} is returned silently (no error is logged).
+   *
+   * @param pjp the join point providing the original method's arguments,
+   *            target object, and signature metadata
+   * @return the return value of the fallback method, or {@code null} if
+   *         no fallback method was found
+   * @throws Throwable the unwrapped cause if the fallback method throws
    */
   private Object invokeFallbackMethod(ProceedingJoinPoint pjp) throws Throwable {
     MethodSignature sig = (MethodSignature) pjp.getSignature();
@@ -273,13 +285,27 @@ public class HotKeyCacheExtensionAspect {
   }
 
   /**
-   * Recursively searches the class hierarchy for a method with the given name
-   * and parameter types.
+   * Recursively searches the class hierarchy (superclasses, not interfaces)
+   * for a method matching the given name and parameter types.
    *
-   * @param clazz      the class to search from
-   * @param name       the method name to find
-   * @param paramTypes the parameter types of the method to find
-   * @return the matching method, or {@code null} if not found
+   * <p>The search starts at the provided class and walks up the inheritance
+   * chain via {@link Class#getSuperclass()}, stopping at {@link Object}.
+   * This ensures that fallback methods defined in abstract base classes
+   * or superclasses are discovered.
+   *
+   * <p>Interface default methods are <em>not</em> searched, as the
+   * annotation-based contract is that the fallback method resides in the
+   * concrete bean's class hierarchy.
+   *
+   * @param clazz      the class to start the search from (typically the
+   *                   target object's runtime class)
+   * @param name       the name of the fallback method to find (e.g.,
+   *                   {@code "findUserFallback"})
+   * @param paramTypes the parameter types of the method to find (must
+   *                   exactly match the original method's parameter types)
+   * @return the matching {@link Method}, or {@code null} if no method
+   *         with the given name and parameter types exists in the
+   *         hierarchy
    */
   private Method findFallbackMethod(Class<?> clazz, String name, Class<?>... paramTypes) {
     try {

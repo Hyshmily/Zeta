@@ -13,6 +13,10 @@
 | `getWithSoftExpire(key, reader)`                       | 软失效——返回过期旧值+触发异步刷新；每次访问触发本地 TopK 追踪 + App→Worker 上报；根据 key 状态使用全局默认 TTL                                                              |
 | `getWithSoftExpire(key, reader, softTtlMs)`            | 同上，带 per-call 软 TTL 覆盖（毫秒）                                                                                                                                       |
 | `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)` | 同上，同时带 per-entry 硬 TTL 和 per-call 软 TTL 覆盖（毫秒）                                                                                                               |
+| `read(key)`                                            | 流式读查询构造器：`hotKey.read(key).withPrimary(...).thenExecute(...).withHardTtl(...).execute()` 返回 `Optional<T>`；支持 fallback 链、广播开关、空值缓存开关              |
+| `write(key)`                                           | 流式写命令构造器：`hotKey.write(key).withHardTtl(...).putThrough(value, writer)` / `.putBeforeInvalidate(mutation)` / `.invalidate()`                                         |
+| `putLocal(key, value)`                                 | 仅本地写：将值存入 L1，不 bump 版本号、不广播、不触发热 key 检测、不上报；保留现有 entry 元数据                                                                            |
+| `putLocal(key, value, hardTtlMs, softTtlMs)`           | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                 |
 | `putThrough(key, value, writer)`                       | 写穿透：writer.run()、nextVersion()、L1 更新（根据 key 状态使用有效 TTL）、可选同步                                                                                         |
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)` | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                 |
 | `putBeforeInvalidate(key, mutation)`                   | 先写后失效，用于集合增量操作（LPUSH、SADD、ZADD）                                                                                                                           |
@@ -58,17 +62,20 @@
 | `hotkey.local.soft-ttl-ms`              | `0`                      | 普通 key 每次调用的软 TTL 覆盖；0 = 使用 `default-soft-ttl-ms`                               |
 | `hotkey.local.default-hot-soft-ttl-ms`  | `300000`（5分钟）        | 热点 key 默认软 TTL                                                                          |
 | `hotkey.local.hot-soft-ttl-ms`          | `0`                      | 热点 key 每次调用的软 TTL 覆盖；0 = 使用 `default-hot-soft-ttl-ms`                           |
+| `hotkey.local.ttl-jitter-enabled`       | `true`                   | 是否对 TTL 过期时间施加随机偏移以防止缓存雪崩                                                |
+| `hotkey.local.ttl-jitter-ratio`         | `0.1`                    | 偏移比例（0.0–1.0）；例如 0.1 表示对 TTL 计算施加 ±10% 的随机偏移                            |
 | `hotkey.local.refresh-max-pools`        | `100`                    | 软过期最大并发异步刷新数（信号量）                                                           |
 | `hotkey.local.version-key-ttl-minutes`  | `60`                     | Redis 版本 key TTL（分钟），最小值为 1                                                       |
 | `hotkey.local.report-exchange`          | `hotkey.report.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                                                 |
 | `hotkey.local.report-interval-ms`       | `100`                    | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）                                       |
 | `hotkey.local.app-name`                 | `"default"`              | 逻辑应用名，用于 Worker 路由的租户区分                                                       |
-| `hotkey.local.shard-count`              | `1`                      | 消费者线程数自动计算的除数（max(1, shardCount/2)）；路由默认使用一致性哈希                   |
+| `hotkey.local.shard-count`              | `1`                      | 消费者线程数自动计算的除数（max(4, availableProcessors/2)；路由默认使用一致性哈希             |
 | `hotkey.local.instance-id`              | `""`（自动检测）         | 用于队列命名的显式实例 ID；为空时自动检测为 `server.port-HOSTNAME`（或 `server.port-UUID`）  |
 | `hotkey.local.queue-capacity`           | `10000`                  | 报告分发器队列容量（内部有界队列）                                                           |
 | `hotkey.local.queue-offer-timeout-ms`   | `100`                    | 报告队列写入超时（毫秒）——阻塞此时长后丢弃                                                   |
-| `hotkey.local.consumer-count`           | `0`                      | 报告消费者线程数；0 = 自动（max(1, shardCount / 2)）                                         |
-
+| `hotkey.local.consumer-count`           | `0`                      | 报告消费者线程数；0 = 自动（max(4, availableProcessors / 2)）                                |
+| `hotkey.local.scheduler-pool-size`      | `8`                      | HotKey 共享调度器线程池大小（定时任务）                                                        |
+ 
 ### 心跳配置（`hotkey.local.heartbeat.*`）
 
 | 属性                                            | 默认值                      | 说明                                                                   |
@@ -144,7 +151,7 @@
 | `hotkey.worker-listener.queue-prefix`          | `hotkey.worker`             | 队列名前缀；完整名称 = `{prefix}:{instanceId}`  |
 | `hotkey.worker-listener.warmup-jitter-ms`      | `100`                       | 处理 Worker 消息前的随机 jitter（防止惊群效应） |
 | `hotkey.worker-listener.concurrent-consumers`  | `2`                         | Worker 监听队列 RabbitMQ 消费者并发数           |
-| `hotkey.worker-listener.scheduler-pool-size`   | `2`                         | Worker 监听器延迟 Redis 读取的线程池大小        |
+| `hotkey.worker-listener.scheduler-pool-size`   | `2`                         | Worker 监听器抖动缓存更新任务的线程池大小                                       |
 | `hotkey.worker-listener.prefetch-count`        | `5`                         | Worker 监听器每个消费者的 AMQP 预取数量         |
 | `hotkey.worker-listener.auto-startup`          | `true`                      | Worker 监听器容器是否随应用自动启动             |
 | **`hotkey.worker-listener.sre.*`**             |                             | **SRE 自适应速率限制器**                        |
@@ -169,7 +176,7 @@
 | `hotkey.worker.sliding-window.duration-ms`                           | `1000`                      | 滑动窗口时长（毫秒）                                                                             |
 | `hotkey.worker.sliding-window.slices`                                | `10`                        | 每个窗口的时间片数                                                                               |
 | **`hotkey.worker.threshold.*`**                                      |                             | **热点阈值**                                                                                     |
-| `hotkey.worker.threshold.hot-threshold`                              | `1000`                      | 绝对热点阈值；`-1` = 使用比例阈值                                                                |
+| `hotkey.worker.threshold.hot-threshold`                              | `1000`                      | 绝对热点阈值；`≤0` = 使用比例阈值                                                                |
 | `hotkey.worker.threshold.hot-threshold-ratio`                        | `0.01`                      | 热点阈值占估计全局 QPS 的比例（1%）                                                              |
 | **`hotkey.worker.state-machine.*`**                                  |                             | **状态机**                                                                                       |
 | `hotkey.worker.state-machine.confirm-duration-ms`                    | `300`                       | key 持续超过阈值才确认 HOT 的时长                                                                |

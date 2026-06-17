@@ -33,11 +33,29 @@ import java.util.stream.Collectors;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
- * On-demand active verifier — only triggers when heartbeats go silent.
+ * On-demand active heartbeat verifier that probes suspected-dead Workers when
+ * passive heartbeat monitoring indicates a potential failure.
  *
- * <p>Periodically checks {@link ClusterHealthView} for Workers that have
- * exceeded {@code heartbeatTimeoutMs} without a heartbeat, sends a PING
- * via Direct reply-to, and updates the health view on PONG or failure.
+ * <p>Under normal operation, the {@link ClusterHealthView} is updated passively
+ * by incoming heartbeat messages. This verifier activates only when one or more
+ * Workers have exceeded the {@code heartbeatTimeoutMs} window — it sends a
+ * point-to-point PING message to each suspected Worker's dedicated verification
+ * queue ({@code hotkey.verify.ping.{workerId}}) via Direct reply-to and awaits
+ * a PONG response.
+ *
+ * <p><b>Failure escalation:</b> If cumulative failures across all suspected Workers
+ * reach {@code degradeAfterFailures} and the cluster remains unhealthy, the health
+ * view is marked as degraded via {@link ClusterHealthView#degraded}, triggering
+ * graceful degradation behaviour (see ADR-0009). Workers that respond are restored
+ * to the alive set; Workers that fail repeatedly are marked as stale and excluded
+ * from majority-based health checks.
+ *
+ * <p><b>Thread safety:</b> The verification loop runs on a single daemon thread
+ * ({@code hb-verifier}). The {@link ClusterHealthView} uses {@code ConcurrentHashMap}
+ * internally, so concurrent heartbeat reception and verification are safe.
+ *
+ * @see ClusterHealthView
+ * @see WorkerHeartbeatMessage
  */
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 @Slf4j
@@ -57,7 +75,20 @@ public class WorkerHeartbeatVerifier {
   private static final String QUEUE_VERIFY_PING_PREFIX = "hotkey.verify.ping.";
 
   /**
-   * Creates a verifier with its own scheduler (backward-compatible for tests).
+   * Creates a verifier with an internally owned single-thread scheduler.
+   * <p>
+   * This constructor is convenience for standalone use and tests. The internal
+   * daemon thread is named {@code hb-verifier}. The caller must invoke
+   * {@link #start()} to begin periodic verification and {@link #stop()} to
+   * release the scheduler resources.
+   *
+   * @param rabbitTemplate        the RabbitMQ template for sending PING messages
+   * @param healthView            the shared cluster health view to update on PONG/failure
+   * @param appInstanceId         the local application instance ID, sent as PING metadata
+   * @param verifyIntervalMs      fixed delay between verification cycles (milliseconds)
+   * @param pingTimeoutMs         maximum time to wait for a PONG response (milliseconds)
+   * @param degradeAfterFailures  number of failed verifications before marking a Worker stale
+   *                              and potentially degrading the cluster
    */
   public WorkerHeartbeatVerifier(
     RabbitTemplate rabbitTemplate,
@@ -76,7 +107,21 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
-   * Creates a verifier with a shared external scheduler.
+   * Creates a verifier with a caller-supplied external scheduler.
+   * <p>
+   * The caller is responsible for managing the scheduler's lifecycle. When using
+   * this constructor, {@link #stop()} will cancel the verification task but will
+   * <em>not</em> shut down the scheduler. This allows sharing a single scheduler
+   * across multiple listeners and verifiers.
+   *
+   * @param rabbitTemplate        the RabbitMQ template for sending PING messages
+   * @param healthView            the shared cluster health view to update on PONG/failure
+   * @param appInstanceId         the local application instance ID, sent as PING metadata
+   * @param verifyIntervalMs      fixed delay between verification cycles (milliseconds)
+   * @param pingTimeoutMs         maximum time to wait for a PONG response (milliseconds)
+   * @param degradeAfterFailures  number of failed verifications before marking a Worker stale
+   * @param scheduler             the external scheduler for running verification tasks;
+   *                              will not be shut down by {@link #stop()}
    */
   public WorkerHeartbeatVerifier(
     RabbitTemplate rabbitTemplate,
@@ -95,11 +140,16 @@ public class WorkerHeartbeatVerifier {
    * Starts the periodic heartbeat verification at a fixed rate.
    *
    * <p>Every {@code verifyIntervalMs} milliseconds, iterates over all Workers in
-   * {@link ClusterHealthView} that have exceeded the heartbeat timeout and sends
-   * a PING via Direct reply-to. Updates the health view on PONG or failure.
+   * {@link ClusterHealthView} that have exceeded {@code heartbeatTimeoutMs} without
+   * a heartbeat and sends each a PING via Direct reply-to. On PONG, the Worker's
+   * health record is restored; on timeout, the failure counter is incremented.
    * <p>
-   * The verification runs on a daemon background thread named {@code hb-verifier}.
-   * This method is idempotent — subsequent calls are silently ignored.
+   * The verification runs on a daemon background thread. The task is idempotent:
+   * subsequent calls to this method after the verifier is already running are
+   * silently ignored.
+   *
+   * @see #verifySuspectedWorkers
+   * @see #stop()
    */
   public void start() {
     if (verifyTask != null) {
@@ -114,9 +164,15 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
-   * Gracefully stops the heartbeat verification.
+   * Gracefully stops the periodic heartbeat verification.
    *
-   * <p>Cancels the scheduled task; shuts down the scheduler only if owned.
+   * <p>Cancels the scheduled verification task and, if this verifier owns its
+   * scheduler (created via the 6-argument constructor), shuts down the scheduler.
+   * When an external scheduler is used (7-argument constructor), the scheduler is
+   * left running for the caller to manage.
+   *
+   * <p>After {@code stop()}, the verifier can be restarted by calling {@link #start()}
+   * again.
    */
   public void stop() {
     if (verifyTask != null) {
@@ -128,13 +184,17 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
-   * Iterates over all Workers that are registered but not currently alive,
-   * sends each a PING via Direct reply-to, and updates the health view
-   * based on the response.
-   * <p>
-   * If cumulative failures across all suspected Workers reach
-   * {@code degradeAfterFailures} and the cluster is still unhealthy,
-   * the cluster is marked as degraded via {@link ClusterHealthView#setDegraded}.
+   * Iterates over all Workers registered in {@link ClusterHealthView} that are
+   * <em>not</em> currently marked alive, sends each a PING via Direct reply-to,
+   * and updates the health view based on the response.
+   *
+   * <p>If the cluster is healthy (majority of Workers alive), the verification
+   * is skipped entirely — no need for active probing. When cumulative failures
+   * across all suspected Workers reach {@code degradeAfterFailures} and the cluster
+   * remains unhealthy, the cluster is marked as degraded.
+   *
+   * <p>This method is called periodically by the scheduled task and is also
+   * safe to invoke manually for testing.
    */
   void verifySuspectedWorkers() {
     try {
@@ -177,15 +237,19 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
-   * Sends a PING message to the given Worker's dedicated verification queue
-     * ({@code hotkey.verify.ping.{workerId}}) and waits for a PONG
-   * response via Direct reply-to.
-   * <p>
-   * The PING carries the app instance ID so the Worker can identify the requester.
+   * Sends a point-to-point PING message to the given Worker's dedicated verification
+   * queue ({@code hotkey.verify.ping.{workerId}}) and waits for a PONG response
+   * via AMQP Direct reply-to ({@code amq.rabbitmq.reply-to}).
    *
-   * @param workerId the Worker to ping
-   * @return {@code true} if a PONG response was received within {@code pingTimeoutMs};
-   *         {@code false} if the request timed out or the queue is unreachable
+   * <p>The PING carries the application instance ID in the
+   * {@link HotKeyConstants#AMQP_HEADER_VERIFY_APP_INSTANCE} header so the Worker
+   * can identify the requester. The reply timeout is set to {@code pingTimeoutMs}
+   * on the RabbitTemplate before each call.
+   *
+   * @param workerId the Worker to ping; must not be null
+   * @return {@code true} if a non-null PONG response was received within
+   *         {@code pingTimeoutMs}; {@code false} if the request timed out
+   *         ({@link AmqpTimeoutException}) or the queue is unreachable
    */
   boolean sendPingAndWaitPong(String workerId) {
     MessageProperties props = new MessageProperties();

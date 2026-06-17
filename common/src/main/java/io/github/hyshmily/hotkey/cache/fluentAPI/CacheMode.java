@@ -13,20 +13,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache;
+package io.github.hyshmily.hotkey.cache.fluentAPI;
 
 /**
- * Internal sentinel representing an explicitly cached {@code null} value.
+ * Cache access mode for {@link HotKeyReadQuery}.
  *
- * <p>Stored inside {@link CacheEntry} when the caller caches a null (via
- * {@code @NullCaching(true)}). The sentinel is unwrapped back to {@code null}
- * when read, allowing the cache to distinguish "entry found but value is null"
- * from "no entry found".
+ * <p>Controls whether the read query uses
+ * {@link io.github.hyshmily.hotkey.HotKey#get} or
+ * {@link io.github.hyshmily.hotkey.HotKey#getWithSoftExpire} semantics.
  */
-final class NullValue {
+public enum CacheMode {
+  /** Standard cache read — returns immediately if the key is not in L1. */
+  GET,
 
-  /** Singleton instance. */
-  static final NullValue INSTANCE = new NullValue();
-
-  private NullValue() {}
+  /**
+   * Soft-expiry read — returns a stale entry if available while a background
+   * refresh is triggered.  Useful for read-heavy workloads where latency is
+   * more critical than absolute freshness.
+   */
+  GET_WITH_SOFT_EXPIRE,
 }

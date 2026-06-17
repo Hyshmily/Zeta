@@ -17,6 +17,8 @@ package io.github.hyshmily.hotkey.worker.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.reflect.Method;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -185,5 +187,79 @@ class SlidingWindowDetectorTest {
     // adding zero should not change sum
     detector.addCount("key", 0);
     assertThat(detector.getWindowSum("key")).isEqualTo(Long.MAX_VALUE);
+  }
+
+  /**
+   * Exhaustively verifies that {@code clearStaleSlices} does not clear any slot
+   * still within the current sliding window, for every possible {@code currentIndex}
+   * in the circular buffer.
+   *
+   * <p>A previous implementation iterated <em>forward</em> from
+   * {@code currentIndex + windowSize}, which incorrectly cleared up to
+   * {@code windowSize - 1} slots still inside the window.
+   */
+  @Test
+  void clearStaleSlices_shouldNotOverlapWithWindowAtEveryIndex() throws Exception {
+    SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
+
+    Method clearMethod = SlidingWindowDetector.class.getDeclaredMethod(
+        "clearStaleSlices", AtomicLong[].class, int.class);
+    clearMethod.setAccessible(true);
+
+    Method sumMethod = SlidingWindowDetector.class.getDeclaredMethod(
+        "getWindowSum", AtomicLong[].class, int.class);
+    sumMethod.setAccessible(true);
+
+    int arrayLen = 10; // 2 * windowSize
+    AtomicLong[] slices = new AtomicLong[arrayLen];
+    for (int ci = 0; ci < arrayLen; ci++) {
+      for (int i = 0; i < arrayLen; i++) {
+        slices[i] = new AtomicLong(i * 10L);
+      }
+
+      clearMethod.invoke(detector, slices, ci);
+      long sum = (long) sumMethod.invoke(detector, slices, ci);
+
+      // Window = {ci, ci-1, ci-2, ci-3, ci-4} modulo arrayLen
+      long expectedSum = 0;
+      for (int i = 0; i < 5; i++) {
+        int idx = (ci - i + arrayLen) % arrayLen;
+        expectedSum += idx * 10L;
+      }
+
+      assertThat(sum).as("currentIndex=" + ci).isEqualTo(expectedSum);
+    }
+  }
+
+  /**
+   * Verifies that counts survive when time advances past one or more slice
+   * boundaries (non‑contiguous access pattern). The old slice must remain
+   * within the window and must not be cleared.
+   */
+  @Test
+  void addCount_shouldPreserveCountsAfterSliceAdvance() throws InterruptedException {
+    SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
+    detector.addCount("gap-key", 100);
+    Thread.sleep(1500); // advance at least 1 slice, still well within 5000ms window
+    detector.addCount("gap-key", 50);
+    long sum = detector.getWindowSum("gap-key");
+    assertThat(sum).isEqualTo(150);
+  }
+
+  /**
+   * Verifies that after multiple non‑contiguous accesses spanning several
+   * slices, the window sum includes exactly the still‑active slices and
+   * nothing more.
+   */
+  @Test
+  void addCount_shouldMaintainCorrectSumAfterMultipleSliceAdvances() throws InterruptedException {
+    SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
+    detector.addCount("rot-key", 100);
+    Thread.sleep(800);
+    detector.addCount("rot-key", 20);
+    Thread.sleep(900);
+    detector.addCount("rot-key", 5);
+    long sum = detector.getWindowSum("rot-key");
+    assertThat(sum).isEqualTo(125);
   }
 }

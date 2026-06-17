@@ -16,14 +16,26 @@
 package io.github.hyshmily.hotkey.model;
 
 /**
- * A decision emitted by the Worker's sliding-window / state-machine pipeline.
+ * A decision emitted by the Worker's sliding-window / state-machine pipeline,
+ * instructing application instances how to treat a specific cache key.
  *
- * <p>Indicates whether a key should be treated as {@link DecisionType#HOT},
- * {@link DecisionType#COOL}, or that no action is required
- * ({@link DecisionType#NONE}).
+ * <p>Each evaluation cycle of {@link io.github.hyshmily.hotkey.detection.HotKeyStateMachine}
+ * produces at most one {@code HotKeyDecision} per key. The decision is then
+ * serialized into a {@link io.github.hyshmily.hotkey.sync.WorkerMessage} and
+ * broadcast to all application instances via RabbitMQ.
  *
- * @param type     the decision type
- * @param cacheKey the affected key
+ * <p>Three outcomes are possible:
+ * <ul>
+ *   <li>{@link DecisionType#HOT} — key should be promoted in L1 with extended TTL</li>
+ *   <li>{@link DecisionType#COOL} — key should revert to normal TTL</li>
+ *   <li>{@link DecisionType#NONE} — no change needed</li>
+ * </ul>
+ *
+ * <p>Use the static factory methods ({@link #hot}, {@link #cool}, {@link #none})
+ * for concise construction.
+ *
+ * @param type     the decision type (never {@code null})
+ * @param cacheKey the affected cache key (never {@code null})
  */
 public record HotKeyDecision(DecisionType type, String cacheKey) {
   /**

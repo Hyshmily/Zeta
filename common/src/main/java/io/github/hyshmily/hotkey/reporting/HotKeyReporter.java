@@ -178,7 +178,20 @@ public class HotKeyReporter {
     );
   }
 
-  /** Stop the dispatcher. Called via destroyMethod on the bean. */
+  /**
+   * Gracefully shut down the report dispatcher.
+   *
+   * <p>Interrupts all consumer threads and waits for them to finish
+   * (with a 2-second timeout per thread). Any batches remaining in the
+   * work queue are discarded. This method is typically registered as
+   * the Spring bean {@code destroyMethod}.
+   *
+   * <p>After shutdown, the reporter no longer publishes reports.
+   * The periodic flush loop continues to run but its output is silently
+   * dropped because the dispatcher queue is no longer being consumed.
+   *
+   * <p>Idempotent — safe to call multiple times.
+   */
   public void stop() {
     if (dispatcher != null) {
       dispatcher.shutdown();
@@ -258,63 +271,103 @@ public class HotKeyReporter {
   }
 
   /**
-   * @return current backlog depth in the dispatcher queue, or {@code -1} before start
+   * Return the current number of batches waiting in the dispatcher work queue.
+   *
+   * @return queue depth (number of enqueued but not yet consumed batches),
+   *         or {@code -1} if the dispatcher has not been started
    */
   public int dispatcherDepth() {
     return dispatcher == null ? -1 : dispatcher.depth();
   }
 
   /**
-   * @return capacity of the dispatcher queue
+   * Return the maximum capacity of the dispatcher work queue.
+   *
+   * @return the queue capacity as configured via {@code queueCapacity},
+   *         or {@code -1} if the dispatcher has not been started
    */
   public int dispatcherCapacity() {
     return dispatcher == null ? -1 : dispatcher.capacity();
   }
 
   /**
-   * @return total batches discarded because they waited longer than 5 s in the queue
+   * Return the total number of batches that were discarded because they
+   * waited longer than 5 seconds in the dispatcher queue (staleness expiry).
+   *
+   * @return total expired batch count since startup, or {@code -1} if the
+   *         dispatcher has not been started
    */
   public long dispatcherExpired() {
     return dispatcher == null ? -1 : dispatcher.expired();
   }
 
   /**
-   * @return total batches rejected because the queue was full (backpressure drops)
+   * Return the total number of batches rejected because the dispatcher
+   * queue was full (back-pressure drops from the flush loop).
+   *
+   * @return total dropped batch count since startup, or {@code -1} if the
+   *         dispatcher has not been started
    */
   public long dispatcherDropped() {
     return dispatcher == null ? -1 : dispatcher.dropped();
   }
 
   /**
-   * @return number of keys currently buffered in the local counter cache
+   * Return the approximate number of unique keys currently buffered in the
+   * local Caffeine counter store.
+   *
+   * <p>This is an estimate provided by {@link Cache#estimatedSize()} and
+   * may not reflect the exact count due to the concurrent nature of the
+   * underlying data structure.
+   *
+   * @return estimated number of unique cache keys with pending access counts
    */
   public long getPendingKeyCount() {
     return counters.estimatedSize();
   }
 
   /**
-   * @return total flush cycles passed by the BBR limiter, or {@code -1} if BBR is disabled
+   * Return the total number of flush cycles that were permitted by the BBR
+   * rate limiter since startup.
+   *
+   * @return total passed count, or {@code -1} if BBR rate limiting is disabled
+   *         ({@link #bbrRateLimiter} is {@code null})
    */
   public long bbrPassed() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalPassed();
   }
 
   /**
-   * @return total flush cycles dropped by the BBR limiter, or {@code -1} if BBR is disabled
+   * Return the total number of flush cycles that were dropped by the BBR
+   * rate limiter since startup (both gate drops and consumer drops).
+   *
+   * @return total dropped count, or {@code -1} if BBR rate limiting is disabled
    */
   public long bbrDropped() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalDropped();
   }
 
   /**
-   * @return current BBR in-flight count, or {@code -1} if BBR is disabled
+   * Return the current number of in-flight batches tracked by the BBR rate
+   * limiter — those enqueued for publishing but not yet completed or dropped.
+   *
+   * @return current in-flight count (non-negative), or {@code -1} if BBR
+   *         rate limiting is disabled
    */
   public long bbrInFlight() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getInFlight();
   }
 
   /**
-   * @return current BBR max-in-flight budget, or {@code -1} if BBR is disabled
+   * Return the current BBR-computed maximum concurrency budget (max in-flight).
+   *
+   * <p>This value is derived from the sliding-window maxPASS and minRT
+   * metrics via Little's Law. It represents the limiter's estimate of the
+   * optimal number of concurrent in-flight batches before the pipeline
+   * becomes congested.
+   *
+   * @return the computed max in-flight budget, or {@code -1} if BBR rate
+   *         limiting is disabled
    */
   public long bbrMaxInFlight() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxInFlight();
@@ -342,8 +395,13 @@ public class HotKeyReporter {
     private volatile boolean running;
 
     /**
-     * Starts the consumer threads that drain batches from the work queue
-     * and publish them via {@link ReportPublisher}.
+     * Start the consumer threads that drain batches from the bounded work
+     * queue and publish them via {@link ReportPublisher}.
+     *
+     * <p>Each consumer runs in a named daemon thread
+     * ({@code "report-consumer-N"}) so they do not prevent JVM shutdown.
+     * The number of consumer threads is determined by the
+     * {@code consumerCount} configuration.
      */
     void start() {
       running = true;
@@ -356,10 +414,19 @@ public class HotKeyReporter {
     }
 
     /**
-     * Offer a batch to the queue.  Blocks for up to {@code queueOfferTimeoutMs}.
+     * Offer a batch to the bounded work queue with a timeout.
      *
-     * @param batch the sharded batch to publish
-     * @return {@code true} if accepted, {@code false} if the queue was full
+     * <p>Blocks for up to {@code queueOfferTimeoutMs} milliseconds waiting
+     * for space to become available. If the queue remains full after the
+     * timeout, the batch is rejected and the drop counter is incremented.
+     *
+     * <p>If the calling thread is interrupted while waiting, the batch is
+     * discarded and {@code false} is returned.
+     *
+     * @param batch the sharded batch to enqueue for publishing
+     * @return {@code true} if the batch was accepted into the queue;
+     *         {@code false} if the queue was full or the thread was
+     *         interrupted
      */
     boolean enqueue(ShardBatch batch) {
       try {
@@ -374,7 +441,18 @@ public class HotKeyReporter {
       }
     }
 
-    /** Interrupt all consumer threads and wait for them to finish. */
+    /**
+     * Gracefully shut down all consumer threads.
+     *
+     * <p>Signals all consumers to stop via the {@code running} flag and
+     * thread interruption, then waits up to 2 seconds for each thread to
+     * finish. After shutdown, the queue may still contain unconsumed
+     * batches — they are discarded.
+     *
+     * <p>This method is called from {@link HotKeyReporter#stop()} and is
+     * idempotent. However, after shutdown the dispatcher cannot be
+     * restarted.
+     */
     void shutdown() {
       running = false;
       for (Thread t : consumers) {
@@ -396,27 +474,49 @@ public class HotKeyReporter {
       );
     }
 
-    /** Current number of batches waiting in the queue. */
+    /**
+     * Return the current number of batches waiting in the work queue.
+     *
+     * @return current queue depth (non-negative)
+     */
     int depth() {
       return queue.size();
     }
 
-    /** Maximum number of batches the queue can hold. */
+    /**
+     * Return the maximum number of batches the work queue can hold.
+     *
+     * @return the configured queue capacity
+     */
     int capacity() {
       return queueCapacity;
     }
 
-    /** Number of active consumer threads. */
+    /**
+     * Return the number of actively running consumer threads.
+     *
+     * @return current consumer thread count
+     */
     int consumerCount() {
       return consumers.size();
     }
 
-    /** Total batches expired (removed after TTL) since startup. */
+    /**
+     * Return the total number of batches that were discarded due to
+     * staleness (waited longer than 5 seconds in the queue) since startup.
+     *
+     * @return total expired batch count
+     */
     long expired() {
       return expiredCount.get();
     }
 
-    /** Total batches dropped (queue full) since startup. */
+    /**
+     * Return the total number of batches that were rejected because the
+     * queue was full since startup.
+     *
+     * @return total dropped batch count
+     */
     long dropped() {
       return droppedCount.get();
     }
@@ -441,7 +541,7 @@ public class HotKeyReporter {
       while (running) {
         ShardBatch batch;
         try {
-          batch = queue.poll(1, TimeUnit.SECONDS);
+          batch = queue.take();
         } catch (InterruptedException e) {
           log.warn("ReportDispatcher consumer interrupted, shutting down");
           Thread.currentThread().interrupt();
