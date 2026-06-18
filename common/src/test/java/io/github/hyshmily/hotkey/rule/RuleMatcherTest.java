@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
@@ -358,6 +359,6 @@ class RuleMatcherTest {
 
   @Test
   void replaceRules_withNullElement_shouldThrow() {
-    assertThatNullPointerException().isThrownBy(() -> ruleMatcher.replaceRules(List.of((Rule) null)));
+    assertThatNullPointerException().isThrownBy(() -> ruleMatcher.replaceRules(Collections.singletonList(null)));
   }
 }

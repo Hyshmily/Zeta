@@ -111,7 +111,7 @@ public class HotKeyRedisAutoConfiguration {
    *                              may be absent
    * @param properties         the HotKey configuration properties
    * @param ruleMatcher        the rule matcher for blacklist/whitelist evaluation
-   * @param ringManager        the consistent-hash ring manager for report shard routing
+   * @param ringManagerProvider  provider for the consistent-hash ring manager (creates default if absent)
    * @return a new Redis-backed HotKeyCache instance
    */
   @Bean
@@ -129,7 +129,7 @@ public class HotKeyRedisAutoConfiguration {
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    RingManager ringManager,
+    ObjectProvider<RingManager> ringManagerProvider,
     ObjectProvider<ClusterHealthView> healthViewProvider
   ) {
     ClusterHealthView healthView = healthViewProvider.getIfAvailable(() -> new ClusterHealthView(0, 3000, 2));
@@ -146,7 +146,7 @@ public class HotKeyRedisAutoConfiguration {
         Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
         properties.getVersionKeyTtlMinutes()
       ),
-      ringManager,
+      ringManagerProvider.getIfAvailable(() -> new RingManager(properties.getConsistentHashing().getVirtualNodes())),
       healthView
     );
   }
