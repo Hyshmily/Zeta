@@ -25,11 +25,29 @@ Thumbs.db
 
 # Logs
 *.log
+*.gz
+*.zip
 
 # Node (prettier / tooling)
 node_modules/
 
 # Maven wrapper
 .mvn/
+!.mvn/wrapper/maven-wrapper.jar
+
+# Heap dumps & JVM crash logs
+*.hprof
+*.jfr
+replay_pid*
+*.pid
+
+# Backup files
+*~
+*.bak
+*.orig
+*.swp
+
+# Generated docs
+HELP.md
 
 

@@ -6,25 +6,120 @@ on:
   pull_request:
     branches: [main, master]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Compile
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: "17"
           distribution: "temurin"
           cache: maven
+      - name: Compile
+        run: mvn clean compile --no-transfer-progress
 
-      - name: Build and test with coverage
-        run: mvn clean verify jacoco:report -P integration
-
-      - name: Upload coverage to Coveralls
+  test:
+    name: Unit Tests & Coverage
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: maven
+      - name: Run tests with coverage check
+        run: mvn clean verify --no-transfer-progress
+      - name: Upload JaCoCo report
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: |
+            common/target/site/jacoco/
+            worker/target/site/jacoco/
+          retention-days: 14
+      - name: Upload common coverage to Coveralls
         uses: coverallsapp/github-action@v2
         with:
-          files: |
-            common/target/site/jacoco/jacoco.xml
+          file: common/target/site/jacoco/jacoco.xml
+          base-path: common/src/main/java
+          flag-name: common
+          parallel: true
+      - name: Upload worker coverage to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          file: worker/target/site/jacoco/jacoco.xml
+          base-path: worker/src/main/java
+          flag-name: worker
+          parallel: true
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: maven
+      - name: Run integration tests
+        run: mvn clean verify -P integration --no-transfer-progress
+      - name: Upload integration coverage to Coveralls
+        if: always()
+        uses: coverallsapp/github-action@v2
+        with:
+          file: integration-tests/target/site/jacoco-aggregate/jacoco.xml
+          base-path: common/src/main/java
+          flag-name: integration
+          parallel: true
+
+  finish:
+    name: Coveralls Parallel Finish
+    needs: [test, integration]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: coverallsapp/github-action@v2
+        with:
+          parallel-finished: true
+          carryforward: "common,worker,integration"
+
+  publish:
+    name: Publish to GitHub Packages
+    runs-on: ubuntu-latest
+    needs: [test, integration]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: maven
+      - name: Build worker JAR
+        run: mvn clean package -pl worker -am -DskipTests --no-transfer-progress
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: worker
+          push: true
+          tags: ghcr.io/hyshmily/hotkey-worker:${{ github.ref_name }}

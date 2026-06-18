@@ -94,6 +94,34 @@
 
   <build>
     <plugins>
+      <!-- JaCoCo must be declared BEFORE failsafe so its verify-phase
+           report-aggregate runs BEFORE failsafe's verify goal triggers
+           build failure on test errors. This ensures the aggregated
+           coverage XML is always produced. -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>check</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>report-aggregate</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report-aggregate</goal>
+            </goals>
+            <configuration>
+              <title>HotKey Integration Tests Coverage</title>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-failsafe-plugin</artifactId>
