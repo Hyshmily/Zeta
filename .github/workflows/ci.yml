@@ -76,14 +76,6 @@ jobs:
           cache: maven
       - name: Run integration tests
         run: mvn clean verify -P integration --no-transfer-progress
-      - name: Upload integration coverage to Coveralls
-        if: always()
-        uses: coverallsapp/github-action@v2
-        with:
-          file: integration-tests/target/site/jacoco-aggregate/jacoco.xml
-          base-path: common/src/main/java
-          flag-name: integration
-          parallel: true
 
   finish:
     name: Coveralls Parallel Finish
@@ -94,7 +86,7 @@ jobs:
       - uses: coverallsapp/github-action@v2
         with:
           parallel-finished: true
-          carryforward: "common,worker,integration"
+          carryforward: "common,worker"
 
   publish:
     name: Publish to GitHub Packages
@@ -123,3 +115,4 @@ jobs:
           context: worker
           push: true
           tags: ghcr.io/hyshmily/hotkey-worker:${{ github.ref_name }}
+
