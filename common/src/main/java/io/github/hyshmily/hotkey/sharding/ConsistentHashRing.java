@@ -16,12 +16,11 @@
 package io.github.hyshmily.hotkey.sharding;
 
 import com.google.common.hash.Hashing;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.Predicate;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Consistent hash ring backed by a {@link TreeMap}.
@@ -93,8 +92,7 @@ public class ConsistentHashRing {
 
     int startHash = entry.getKey();
     int currentHash = startHash;
-
-    int probes=0;
+    int probes = 0;
 
     do {
       String physicalNode = currentRing.get(currentHash);
@@ -110,7 +108,11 @@ public class ConsistentHashRing {
       currentHash = next.getKey();
 
       if (++probes > MAX_PROBES) {
-        log.warn("Exhausted {} probes in consistent hash ring for key '{}', all workers appear dead or ring is corrupt. Discarding this key.", MAX_PROBES, key);
+        log.warn(
+          "Exhausted {} probes in consistent hash ring for key '{}', all workers appear dead or ring is corrupt. Discarding this key.",
+          MAX_PROBES,
+          key
+        );
         break;
       }
     } while (currentHash != startHash);
