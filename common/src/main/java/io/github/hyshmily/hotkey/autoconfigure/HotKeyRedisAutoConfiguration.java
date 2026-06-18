@@ -117,7 +117,7 @@ public class HotKeyRedisAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean(RedisTemplate.class)
-  @ConditionalOnClass(name = "io/github/hyshmily/hotkey/hotkeydetector")
+  @ConditionalOnClass(HotKeyDetector.class)
   public HotKeyCache hotKeyCache(
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,
