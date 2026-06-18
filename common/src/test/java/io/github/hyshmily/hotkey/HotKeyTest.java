@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
@@ -27,8 +28,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -417,5 +420,472 @@ class HotKeyTest {
   void notifyLocalDetector_shouldIgnoreNullKey() {
     hotKey.notifyLocalDetector((String) null);
     verify(appDetector, never()).add(anyString());
+  }
+
+  // ── read / write factories ──
+
+  @Test
+  void read_shouldReturnHotKeyReadQuery() {
+    when(hotKeyCache.evaluateRule("k")).thenReturn(RuleAction.ALLOW);
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    assertThat(hotKey.read("k").withPrimary(() -> "db").execute()).contains("v");
+  }
+
+  @Test
+  void write_shouldReturnHotKeyWriteCommand() {
+    hotKey.write("k").invalidate();
+    verify(hotKeyCache).invalidate("k");
+  }
+
+  // ── computeIfAbsent single-key ──
+
+  @Test
+  void computeIfAbsent_shouldReturnValue() {
+    when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.of("v"));
+    assertThat(hotKey.computeIfAbsent("k", () -> "loaded")).isEqualTo("v");
+    verify(hotKeyCache).get(eq("k"), any());
+  }
+
+  @Test
+  void computeIfAbsent_shouldReturnNullWhenLoaderNull() {
+    when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.empty());
+    assertThat((Object) hotKey.computeIfAbsent("k", () -> null)).isNull();
+  }
+
+  @Test
+  void computeIfAbsent_withHardTtl_shouldDelegate() {
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    assertThat(hotKey.computeIfAbsent("k", () -> "db", 5000L)).isEqualTo("v");
+    verify(hotKeyCache).get(eq("k"), any(), eq(5000L), eq(0L));
+  }
+
+  @Test
+  void computeIfAbsent_withHardSoftTtl_shouldDelegate() {
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    assertThat(hotKey.computeIfAbsent("k", () -> "db", 5000L, 500L)).isEqualTo("v");
+    verify(hotKeyCache).get(eq("k"), any(), eq(5000L), eq(500L));
+  }
+
+  @Test
+  void computeIfAbsent_collection_shouldReturnMap() {
+    when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.of("v"));
+    Map<String, String> result = hotKey.computeIfAbsent(List.of("a", "b"), k -> "v");
+    assertThat(result).containsEntry("a", "v").containsEntry("b", "v");
+  }
+
+  @Test
+  void computeIfAbsent_collectionWithHardTtl_shouldReturnMap() {
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    Map<String, String> result = hotKey.computeIfAbsent(List.of("a"), k -> "v", 5000L);
+    assertThat(result).containsEntry("a", "v");
+  }
+
+  @Test
+  void computeIfAbsent_collectionWithBothTtls_shouldReturnMap() {
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    Map<String, String> result = hotKey.computeIfAbsent(List.of("a"), k -> "v", 5000L, 500L);
+    assertThat(result).containsEntry("a", "v");
+  }
+
+  // ── computeIfAbsentWithSoftExpire ──
+
+  @Test
+  void computeIfAbsentWithSoftExpire_collection_shouldReturnMap() {
+    when(hotKeyCache.getWithSoftExpire(anyString(), any())).thenReturn(Optional.of("v"));
+    Map<String, String> result = hotKey.computeIfAbsentWithSoftExpire(List.of("a"), k -> "v");
+    assertThat(result).containsEntry("a", "v");
+  }
+
+  @Test
+  void computeIfAbsentWithSoftExpire_withSoftTtl_shouldDelegate() {
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong())).thenReturn(Optional.of("v"));
+    assertThat(hotKey.computeIfAbsentWithSoftExpire("k", () -> "db", 500L)).isEqualTo("v");
+    verify(hotKeyCache).getWithSoftExpire(eq("k"), any(), eq(500L));
+  }
+
+  @Test
+  void computeIfAbsentWithSoftExpire_collectionWithSoftTtl_shouldReturnMap() {
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong())).thenReturn(Optional.of("v"));
+    Map<String, String> result = hotKey.computeIfAbsentWithSoftExpire(List.of("a"), k -> "v", 500L);
+    assertThat(result).containsEntry("a", "v");
+  }
+
+  @Test
+  void computeIfAbsentWithSoftExpire_withBothTtls_shouldDelegate() {
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    assertThat(hotKey.computeIfAbsentWithSoftExpire("k", () -> "db", 5000L, 500L)).isEqualTo("v");
+    verify(hotKeyCache).getWithSoftExpire(eq("k"), any(), eq(5000L), eq(500L));
+  }
+
+  @Test
+  void computeIfAbsentWithSoftExpire_collectionWithBothTtls_shouldReturnMap() {
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    Map<String, String> result = hotKey.computeIfAbsentWithSoftExpire(List.of("a"), k -> "v", 5000L, 500L);
+    assertThat(result).containsEntry("a", "v");
+  }
+
+  // ── invalidateAll no-arg ──
+
+  @Test
+  void invalidateAll_noArg_shouldDelegateToCache() {
+    hotKey.invalidateAll();
+    verify(hotKeyCache).invalidateAll();
+  }
+
+  @Test
+  void invalidateAll_noArg_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(workerOnly::invalidateAll)
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── invalidateAll Collection ──
+
+  @Test
+  void invalidateAll_collection_shouldDelegateToCache() {
+    hotKey.invalidateAll(List.of("k1", "k2"));
+    verify(hotKeyCache).invalidateAll(List.of("k1", "k2"));
+  }
+
+  // ── putLocal ──
+
+  @Test
+  void putLocal_shouldDelegateToCache() {
+    hotKey.putLocal("k", "v");
+    verify(hotKeyCache).putLocal("k", "v", 0L, 0L);
+  }
+
+  @Test
+  void putLocal_withTtl_shouldDelegateToCache() {
+    hotKey.putLocal("k", "v", 5000L, 500L);
+    verify(hotKeyCache).putLocal("k", "v", 5000L, 500L);
+  }
+
+  @Test
+  void putLocal_map_shouldDelegateToCache() {
+    Map<String, Object> map = Map.of("k", "v");
+    hotKey.putLocal(map);
+    verify(hotKeyCache).putLocal("k", "v", 0L, 0L);
+  }
+
+  // ── estimatedSize ──
+
+  @Test
+  void estimatedSize_shouldDelegateToCache() {
+    when(hotKeyCache.estimatedSize()).thenReturn(42L);
+    assertThat(hotKey.estimatedSize()).isEqualTo(42L);
+    verify(hotKeyCache).estimatedSize();
+  }
+
+  @Test
+  void estimatedSize_shouldReturnZeroInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThat(workerOnly.estimatedSize()).isZero();
+  }
+
+  // ── stats ──
+
+  @Test
+  void stats_shouldDelegateToCache() {
+    HotKeyCacheStats stats = mock(HotKeyCacheStats.class);
+    when(hotKeyCache.stats()).thenReturn(stats);
+    assertThat(hotKey.stats()).isSameAs(stats);
+    verify(hotKeyCache).stats();
+  }
+
+  @Test
+  void stats_shouldReturnNullInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThat(workerOnly.stats()).isNull();
+  }
+
+  // ── notifyLocalDetectorDirect ──
+
+  @Test
+  void notifyLocalDetectorDirect_shouldDelegateToAppDetector() {
+    hotKey.notifyLocalDetectorDirect("k", 5);
+    verify(appDetector).addDirect("k", 5);
+  }
+
+  @Test
+  void notifyLocalDetectorDirect_map_shouldDelegateToAppDetector() {
+    Map<String, Long> map = Map.of("k", 3L);
+    hotKey.notifyLocalDetectorDirect(map);
+    verify(appDetector).addDirect(map);
+  }
+
+  // ── notifyLocalDetector(String, long) and Map ──
+
+  @Test
+  void notifyLocalDetector_withDelta_shouldDelegateToAppDetector() {
+    hotKey.notifyLocalDetector("k", 7);
+    verify(appDetector).add("k", 7);
+  }
+
+  @Test
+  void notifyLocalDetector_map_shouldDelegateToAppDetector() {
+    Map<String, Long> map = Map.of("k", 3L);
+    hotKey.notifyLocalDetector(map);
+    verify(appDetector).add(map);
+  }
+
+  // ── returnLocalTopNHotKeys ──
+
+  @Test
+  void returnLocalTopNHotKeys_shouldDelegateToAppDetector() {
+    List<Item> items = List.of(new Item("k", 10));
+    when(appDetector.listTopN(3)).thenReturn(items);
+    assertThat(hotKey.returnLocalTopNHotKeys(3)).isSameAs(items);
+    verify(appDetector).listTopN(3);
+  }
+
+  @Test
+  void returnLocalTopNHotKeys_shouldReturnEmptyWhenDetectorNull() {
+    HotKey hk = new HotKey(hotKeyCache, null, workerTopK);
+    assertThat(hk.returnLocalTopNHotKeys(5)).isEmpty();
+  }
+
+  // ── isBlacklisted ──
+
+  @Test
+  void isBlacklisted_shouldDelegateToCache() {
+    when(hotKeyCache.isBlacklisted("secret")).thenReturn(true);
+    assertThat(hotKey.isBlacklisted("secret")).isTrue();
+    verify(hotKeyCache).isBlacklisted("secret");
+  }
+
+  @Test
+  void isBlacklisted_shouldReturnFalseWhenCacheNull() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThat(workerOnly.isBlacklisted("x")).isFalse();
+  }
+
+  // ── isWhitelisted ──
+
+  @Test
+  void isWhitelisted_shouldDelegateToCache() {
+    when(hotKeyCache.isWhitelisted("health")).thenReturn(true);
+    assertThat(hotKey.isWhitelisted("health")).isTrue();
+    verify(hotKeyCache).isWhitelisted("health");
+  }
+
+  @Test
+  void isWhitelisted_shouldReturnFalseWhenCacheNull() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThat(workerOnly.isWhitelisted("x")).isFalse();
+  }
+
+  // ── peekAll ──
+
+  @Test
+  void peekAll_shouldReturnMapOfPresentValues() {
+    when(hotKeyCache.peek("k1")).thenReturn(Optional.of("v1"));
+    when(hotKeyCache.peek("k2")).thenReturn(Optional.empty());
+    assertThat(hotKey.peekAll(List.of("k1", "k2"))).containsEntry("k1", "v1").doesNotContainKey("k2");
+  }
+
+  @Test
+  void peekAll_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.peekAll(List.of("k"))).isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── evictLocal ──
+
+  @Test
+  void evictLocal_shouldDelegateToCache() {
+    hotKey.evictLocal("key1");
+    verify(hotKeyCache).evictLocal(List.of("key1"));
+  }
+
+  @Test
+  void evictLocal_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.evictLocal("k")).isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── areLocalHotKeys ──
+
+  @Test
+  void areLocalHotKeys_shouldDelegateToCache() {
+    when(hotKeyCache.isLocalHotKey("k1")).thenReturn(true);
+    when(hotKeyCache.isLocalHotKey("k2")).thenReturn(false);
+    assertThat(hotKey.areLocalHotKeys(List.of("k1", "k2")))
+      .containsEntry("k1", true).containsEntry("k2", false);
+  }
+
+  @Test
+  void areLocalHotKeys_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.areLocalHotKeys(List.of("k"))).isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── areWorkerHotKeys ──
+
+  @Test
+  void areWorkerHotKeys_shouldReturnMap() {
+    when(workerTopK.contains("k1")).thenReturn(true);
+    when(workerTopK.contains("k2")).thenReturn(false);
+    assertThat(hotKey.areWorkerHotKeys(List.of("k1", "k2")))
+      .containsEntry("k1", true).containsEntry("k2", false);
+  }
+
+  @Test
+  void areWorkerHotKeys_whenWorkerTopKNull_shouldReturnAllFalse() {
+    HotKey hk = new HotKey(hotKeyCache, appDetector, null);
+    assertThat(hk.areWorkerHotKeys(List.of("k1"))).containsEntry("k1", false);
+  }
+
+  // ── refresh ──
+
+  @Test
+  void refresh_shouldEvictAndPutThrough() {
+    hotKey.refresh("k1", () -> "v");
+    verify(hotKeyCache).evictLocal(List.of("k1"));
+    verify(hotKeyCache).putThrough(eq("k1"), eq("v"), any());
+  }
+
+  @Test
+  void refresh_withTtl_shouldEvictAndPutThroughWithTtl() {
+    hotKey.refresh("k1", () -> "v", 5000L, 500L);
+    verify(hotKeyCache).evictLocal(List.of("k1"));
+    verify(hotKeyCache).putThrough(eq("k1"), eq("v"), any(), eq(5000L), eq(500L));
+  }
+
+  @Test
+  void refresh_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.refresh("k", () -> "v")).isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── refreshAll ──
+
+  @Test
+  void refreshAll_shouldRefreshEachKey() {
+    hotKey.refreshAll(Map.of("k1", (Supplier<?>) () -> "v1", "k2", (Supplier<?>) () -> "v2"));
+    verify(hotKeyCache, times(2)).evictLocal(any());
+    verify(hotKeyCache, times(2)).putThrough(any(), any(), any());
+  }
+
+  // ── putBeforeInvalidateAll ──
+
+  @Test
+  void putBeforeInvalidateAll_shouldDelegateToCache() {
+    hotKey.putBeforeInvalidateAll(Map.of("k1", () -> {}, "k2", () -> {}));
+    verify(hotKeyCache, times(2)).putBeforeInvalidate(anyString(), any());
+  }
+
+  @Test
+  void putBeforeInvalidateAll_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.putBeforeInvalidateAll(Map.of("k", () -> {})))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── addBlacklist(Collection) / removeBlacklist(Collection) ──
+
+  @Test
+  void addBlacklist_collection_shouldDelegateToCache() {
+    hotKey.addBlacklist(List.of("a", "b"));
+    verify(hotKeyCache).addBlacklist("a");
+    verify(hotKeyCache).addBlacklist("b");
+  }
+
+  @Test
+  void addBlacklist_collection_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.addBlacklist(List.of("x")))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  @Test
+  void removeBlacklist_collection_shouldDelegateToCache() {
+    hotKey.removeBlacklist(List.of("a", "b"));
+    verify(hotKeyCache).unBlacklist("a");
+    verify(hotKeyCache).unBlacklist("b");
+  }
+
+  @Test
+  void removeBlacklist_collection_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.removeBlacklist(List.of("x")))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── addWhitelist(Collection) / removeWhitelist(Collection) ──
+
+  @Test
+  void addWhitelist_collection_shouldDelegateToCache() {
+    hotKey.addWhitelist(List.of("a", "b"));
+    verify(hotKeyCache).addWhitelist("a");
+    verify(hotKeyCache).addWhitelist("b");
+  }
+
+  @Test
+  void addWhitelist_collection_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.addWhitelist(List.of("x")))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  @Test
+  void removeWhitelist_collection_shouldDelegateToCache() {
+    hotKey.removeWhitelist(List.of("a", "b"));
+    verify(hotKeyCache).unWhitelist("a");
+    verify(hotKeyCache).unWhitelist("b");
+  }
+
+  @Test
+  void removeWhitelist_collection_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.removeWhitelist(List.of("x")))
+      .isInstanceOf(UnsupportedOperationException.class);
+  }
+
+  // ── evaluateRules(Collection) ──
+
+  @Test
+  void evaluateRules_shouldReturnMap() {
+    when(hotKeyCache.evaluateRule("k1")).thenReturn(RuleAction.BLOCK);
+    when(hotKeyCache.evaluateRule("k2")).thenReturn(RuleAction.ALLOW);
+    assertThat(hotKey.evaluateRules(List.of("k1", "k2")))
+      .containsEntry("k1", RuleAction.BLOCK).containsEntry("k2", RuleAction.ALLOW);
+  }
+
+  @Test
+  void evaluateRules_whenCacheNull_shouldReturnAllAllow() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThat(workerOnly.evaluateRules(List.of("k1", "k2")))
+      .containsEntry("k1", RuleAction.ALLOW).containsEntry("k2", RuleAction.ALLOW);
+  }
+
+  // ── isBlacklisted(Collection) / isWhitelisted(Collection) ──
+
+  @Test
+  void isBlacklisted_collection_shouldReturnMap() {
+    when(hotKeyCache.isBlacklisted("k1")).thenReturn(true);
+    when(hotKeyCache.isBlacklisted("k2")).thenReturn(false);
+    assertThat(hotKey.isBlacklisted(List.of("k1", "k2")))
+      .containsEntry("k1", true).containsEntry("k2", false);
+  }
+
+  @Test
+  void isBlacklisted_collection_whenCacheNull_shouldReturnAllFalse() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThat(workerOnly.isBlacklisted(List.of("k1"))).containsEntry("k1", false);
+  }
+
+  @Test
+  void isWhitelisted_collection_shouldReturnMap() {
+    when(hotKeyCache.isWhitelisted("k1")).thenReturn(true);
+    when(hotKeyCache.isWhitelisted("k2")).thenReturn(false);
+    assertThat(hotKey.isWhitelisted(List.of("k1", "k2")))
+      .containsEntry("k1", true).containsEntry("k2", false);
+  }
+
+  @Test
+  void isWhitelisted_collection_whenCacheNull_shouldReturnAllFalse() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThat(workerOnly.isWhitelisted(List.of("k1"))).containsEntry("k1", false);
   }
 }

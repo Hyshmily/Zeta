@@ -21,6 +21,7 @@ import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.model.CacheEntry;
+import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
@@ -581,5 +582,167 @@ class HotKeyCacheTest {
       .build());
 
     assertThat(hotKeyCache.getWithSoftExpire("no-report", () -> "fresh")).contains("v");
+  }
+
+  // ── putLocal ──
+
+  @Test
+  void putLocal_shouldCacheValue() {
+    hotKeyCache.putLocal("k", "v", 0L, 0L);
+    assertThat(hotKeyCache.peek("k")).contains("v");
+  }
+
+  @Test
+  void putLocal_shouldCreateCacheEntry() {
+    hotKeyCache.putLocal("k", "v", 0L, 0L);
+    Object raw = caffeineCache.getIfPresent("k");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) raw).getValue()).isEqualTo("v");
+  }
+
+  @Test
+  void putLocal_withTtl_shouldUseCustomTtl() {
+    hotKeyCache.putLocal("k", "v", 10000L, 1000L);
+    Object raw = caffeineCache.getIfPresent("k");
+    assertThat(((CacheEntry) raw).getHardTtlMs()).isEqualTo(10000L);
+    assertThat(((CacheEntry) raw).getSoftTtlMs()).isEqualTo(1000L);
+  }
+
+  @Test
+  void putLocal_withBlacklistedKey_shouldThrow() {
+    hotKeyCache.addBlacklist("secret");
+    assertThatThrownBy(() -> hotKeyCache.putLocal("secret", "v", 0L, 0L))
+      .isInstanceOf(HotKeyBlockedException.class);
+  }
+
+  @Test
+  void putLocal_withInvalidKey_shouldSkip() {
+    hotKeyCache.putLocal(null, "v", 0L, 0L);
+    hotKeyCache.putLocal("", "v", 0L, 0L);
+    assertThat(hotKeyCache.estimatedSize()).isZero();
+  }
+
+  @Test
+  void putLocal_shouldPreserveExistingMetadata() {
+    caffeineCache.put("k", CacheEntry.builder()
+      .value("old").dataVersion(42).isVersionDegraded(false)
+      .decisionVersion(7).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 60_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    hotKeyCache.putLocal("k", "new", 0L, 0L);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getValue()).isEqualTo("new");
+    assertThat(entry.getDataVersion()).isEqualTo(42);
+    assertThat(entry.getDecisionVersion()).isEqualTo(7);
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  // ── evictLocal ──
+
+  @Test
+  void evictLocal_shouldRemoveEntries() {
+    caffeineCache.put("k1", "v1");
+    caffeineCache.put("k2", "v2");
+    hotKeyCache.evictLocal(List.of("k1", "k2"));
+    assertThat(caffeineCache.getIfPresent("k1")).isNull();
+    assertThat(caffeineCache.getIfPresent("k2")).isNull();
+  }
+
+  @Test
+  void evictLocal_withInvalidKeys_shouldSkipInvalid() {
+    caffeineCache.put("k1", "v1");
+    hotKeyCache.evictLocal(Arrays.asList("k1", null, ""));
+    assertThat(caffeineCache.getIfPresent("k1")).isNull();
+  }
+
+  @Test
+  void evictLocal_withEmptyCollection_shouldSkip() {
+    caffeineCache.put("k1", "v1");
+    hotKeyCache.evictLocal(List.of());
+    assertThat(caffeineCache.getIfPresent("k1")).isNotNull();
+  }
+
+  // ── stats ──
+
+  @Test
+  void stats_shouldReturnStats() {
+    caffeineCache.put("k1", "v1");
+    HotKeyCacheStats stats = hotKeyCache.stats();
+    assertThat(stats).isNotNull();
+    assertThat(stats.estimatedSize()).isPositive();
+  }
+
+  // ── getLocalCache ──
+
+  @Test
+  void getLocalCache_shouldReturnUnderlyingCache() {
+    assertThat(hotKeyCache.getLocalCache()).isSameAs(caffeineCache);
+  }
+
+  // ── putBeforeInvalidate success path ──
+
+  @Test
+  void putBeforeInvalidate_shouldInvalidateOnSuccess() {
+    caffeineCache.put("key1", "original");
+    hotKeyCache.putBeforeInvalidate("key1", () -> {});
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
+  }
+
+  // ── get with ALLOW_NO_REPORT ──
+
+  @Test
+  void get_withNoReportRule_shouldReturnCached() {
+    hotKeyCache.addWhitelist("no-report");
+    caffeineCache.put("no-report", "v");
+    assertThat(hotKeyCache.get("no-report", () -> "fresh")).contains("v");
+  }
+
+  // ── getWithSoftExpire with TTL override ──
+
+  @Test
+  void getWithSoftExpire_withSoftTtlOverride_shouldReturnCached() {
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("cached").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 60_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 500L)).contains("cached");
+  }
+
+  // ── putThrough with TTL overrides ──
+
+  @Test
+  void putThrough_withTtlOverrides_shouldCacheWithCustomTtl() {
+    hotKeyCache.putThrough("key1", "v", () -> {}, 50000L, 5000L);
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) raw).getHardTtlMs()).isEqualTo(50000L);
+    assertThat(((CacheEntry) raw).getSoftTtlMs()).isEqualTo(5000L);
+  }
+
+  // ── invalidateAll(Collection) with all-invalid keys ──
+
+  @Test
+  void invalidateAll_collection_whenAllInvalid_shouldSkip() {
+    caffeineCache.put("k1", "v1");
+    hotKeyCache.invalidateAll(Arrays.asList(null, ""));
+    assertThat(caffeineCache.getIfPresent("k1")).isNotNull();
+  }
+
+  // ── getWithSoftExpire with hard/soft TTL overrides ──
+
+  @Test
+  void getWithSoftExpire_withBothTtlOverrides_shouldReturnCached() {
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("cached").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 60_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 10000L, 500L)).contains("cached");
   }
 }

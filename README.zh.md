@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://central.sonatype.com/artifact/io.github.hyshmily/hotkey"><img src="https://img.shields.io/maven-central/v/io.github.hyshmily/hotkey?color=blue" alt="Maven Central"></a>
   <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
-  <a href="https://coveralls.io/github/hyshmily/hotkey"><img src="https://coveralls.io/repos/github/hyshmily/hotkey/badge.svg" alt="Coveralls"></a>
+  <a href="https://coveralls.io/github/Hyshmily/hotkey?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/hotkey/badge.svg?branch=master" alt="Coveralls"></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
   <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
@@ -403,13 +403,22 @@ private HotKey hotKey;
 // A. peek — 仅查 L1，不做热点追踪
 Optional<String> r = hotKey.peek("user:123"); // L1 未命中返回 Optional.empty()
 
-// B. get — 两级缓存（Redis 或任意后端）
+// A1. peekAll — 批量 L1 查找
+Map<String, Object> batch = hotKey.peekAll(List.of("user:1", "user:2", "user:3"));
+
+// B. computeIfAbsent — 简化 get（无 Optional 包装）
+String val = hotKey.computeIfAbsent("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+
+// B1. computeIfAbsent — 批量重载
+Map<String, String> users = hotKey.computeIfAbsent(keys, k -> loadUser(k));
+
+// C. get — 两级缓存（Redis 或任意后端）
 Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-// C. getWithSoftExpire — 软失效（stale-while-revalidate）
+// D. getWithSoftExpire — 软失效（stale-while-revalidate）
 Optional<String> r = hotKey.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-// D. 流式读 API + fallback 链
+// E. 流式读 API + fallback 链
 Optional<User> user = hotKey
   .read("user:42")
   .withPrimary(userRepo::findById)
@@ -448,17 +457,29 @@ String json = hotKey
 **写操作**
 
 ```java
-// E. putThrough — 写穿透 + 广播
+// F. putThrough — 写穿透 + 广播
 hotKey.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
-// F. putBeforeInvalidate — 变异后失效（集合类型）
+// G. putBeforeInvalidate — 变异后失效（集合类型）
 hotKey.putBeforeInvalidate(key, () -> redisTemplate.opsForSet().add(key, members));
 
-// G. putLocal — 仅本地写，不广播、不 bump 版本
+// H. putLocal — 仅本地写，不广播、不 bump 版本
 hotKey.putLocal("user:123", cachedValue);
 hotKey.putLocal("user:123", cachedValue, hardTtlMs, softTtlMs); // 指定 TTL
 
-// H. 流式写 API
+// H1. putLocal — 批量仅本地写
+hotKey.putLocal(Map.of("user:1", v1, "user:2", v2));
+
+// I. evictLocal — 仅从本地缓存驱逐，不广播、不 bump 版本号
+hotKey.evictLocal("user:123");                          // 单个 key
+hotKey.evictLocal(List.of("user:1", "user:2", "user:3")); // 批量
+
+// J. refresh — 本地驱逐后加载并缓存
+hotKey.refresh("user:123", () -> loadUser(123));
+hotKey.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // 带 TTL 覆盖
+hotKey.refreshAll(Map.of("user:1", () -> loadUser(1), "user:2", () -> loadUser(2))); // 批量
+
+// K. 流式写 API
 hotKey.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
 hotKey.write("user:42").putBeforeInvalidate(dbMutation);
 hotKey.write("user:42").invalidate();
@@ -677,6 +698,21 @@ HotKeyCacheStats s = hotKey.stats();   // 命中率、驱逐数等
 
 // 紧急清空（不广播）
 hotKey.invalidateAll();
+
+// 批量规则评估
+Map<String, Rule.RuleAction> actions = hotKey.evaluateRules(List.of("user:1", "user:2"));
+Map<String, Boolean> blocked = hotKey.isBlacklisted(List.of("user:1", "user:2"));
+Map<String, Boolean> skipReport = hotKey.isWhitelisted(List.of("health:ping", "metrics:qps"));
+
+// 批量热点 key 检查
+Map<String, Boolean> localHots = hotKey.areLocalHotKeys(List.of("user:1", "user:2"));
+Map<String, Boolean> workerHots = hotKey.areWorkerHotKeys(List.of("user:1", "user:2"));
+
+// 直接 TopK 操作
+hotKey.notifyLocalDetectorDirect("user:123", 100); // 批量增加本地 TopK 计数 100
+
+// Top-N 查询
+List<Item> top10 = hotKey.returnLocalTopNHotKeys(10);
 ```
 
 ### 降级

@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://central.sonatype.com/artifact/io.github.hyshmily/hotkey"><img src="https://img.shields.io/maven-central/v/io.github.hyshmily/hotkey?color=blue" alt="Maven Central"></a>
   <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
-  <a href="https://coveralls.io/github/hyshmily/hotkey"><img src="https://coveralls.io/repos/github/hyshmily/hotkey/badge.svg" alt="Coveralls"></a>
+  <a href="https://coveralls.io/github/Hyshmily/hotkey?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/hotkey/badge.svg?branch=master" alt="Coveralls"></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
   <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
@@ -403,13 +403,22 @@ private HotKey hotKey;
 // A. peek — L1 only, no hot key tracking
 Optional<String> r = hotKey.peek("user:123"); // returns Optional.empty() on L1 miss
 
-// B. get — two-level cache (Redis or any backend)
+// A1. peekAll — batch L1 lookup for multiple keys
+Map<String, Object> batch = hotKey.peekAll(List.of("user:1", "user:2", "user:3"));
+
+// B. computeIfAbsent — simplified get (no Optional wrapping)
+String val = hotKey.computeIfAbsent("user:123", () -> redisTemplate.opsForValue().get("user:123"));
+
+// B1. computeIfAbsent — batch overload
+Map<String, String> users = hotKey.computeIfAbsent(keys, k -> loadUser(k));
+
+// C. get — two-level cache (Redis or any backend)
 Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-// C. getWithSoftExpire — soft expiry (stale-while-revalidate)
+// D. getWithSoftExpire — soft expiry (stale-while-revalidate)
 Optional<String> r = hotKey.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
-// D. Fluent read API with fallback chain
+// E. Fluent read API with fallback chain
 Optional<User> user = hotKey.read("user:42")
     .withPrimary(userRepo::findById)
     .thenExecute(backupRepo::findById)
@@ -447,17 +456,29 @@ String json = hotKey
 **Write operations**
 
 ```java
-// E. putThrough — write-through with broadcast
+// F. putThrough — write-through with broadcast
 hotKey.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
-// F. putBeforeInvalidate — mutation then invalidate (for collection types)
+// G. putBeforeInvalidate — mutation then invalidate (for collection types)
 hotKey.putBeforeInvalidate(key, () -> redisTemplate.opsForSet().add(key, members));
 
-// G. putLocal — local-only write, no broadcast, no version bump
+// H. putLocal — local-only write, no broadcast, no version bump
 hotKey.putLocal("user:123", cachedValue);
 hotKey.putLocal("user:123", cachedValue, hardTtlMs, softTtlMs); // with TTL override
 
-// H. Fluent write API
+// H1. putLocal — batch local-only write
+hotKey.putLocal(Map.of("user:1", v1, "user:2", v2));
+
+// I. evictLocal — evict from local cache only, no broadcast, no version bump
+hotKey.evictLocal("user:123");                          // single key
+hotKey.evictLocal(List.of("user:1", "user:2", "user:3")); // batch
+
+// J. refresh — evict locally then load and cache
+hotKey.refresh("user:123", () -> loadUser(123));
+hotKey.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // with TTL override
+hotKey.refreshAll(Map.of("user:1", () -> loadUser(1), "user:2", () -> loadUser(2))); // batch
+
+// K. Fluent write API
 hotKey.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
 hotKey.write("user:42").putBeforeInvalidate(dbMutation);
 hotKey.write("user:42").invalidate();
@@ -667,6 +688,21 @@ HotKeyCacheStats s = hotKey.stats();   // hit rate, eviction, etc.
 
 // Emergency flush (no broadcast)
 hotKey.invalidateAll();
+
+// Batch rule evaluation
+Map<String, Rule.RuleAction> actions = hotKey.evaluateRules(List.of("user:1", "user:2"));
+Map<String, Boolean> blocked = hotKey.isBlacklisted(List.of("user:1", "user:2"));
+Map<String, Boolean> skipReport = hotKey.isWhitelisted(List.of("health:ping", "metrics:qps"));
+
+// Batch hot key checks
+Map<String, Boolean> localHots = hotKey.areLocalHotKeys(List.of("user:1", "user:2"));
+Map<String, Boolean> workerHots = hotKey.areWorkerHotKeys(List.of("user:1", "user:2"));
+
+// Direct TopK manipulation
+hotKey.notifyLocalDetectorDirect("user:123", 100); // bulk-increment local TopK by 100
+
+// Top-N query
+List<Item> top10 = hotKey.returnLocalTopNHotKeys(10);
 ```
 
 ### Degradation

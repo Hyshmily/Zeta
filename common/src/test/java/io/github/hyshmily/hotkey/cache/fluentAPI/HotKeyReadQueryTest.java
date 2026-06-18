@@ -1,0 +1,250 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.hyshmily.hotkey.cache.fluentAPI;
+
+import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
+import io.github.hyshmily.hotkey.rule.Rule;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.cache.support.NullValue;
+
+import java.util.Optional;
+import java.util.function.Supplier;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+class HotKeyReadQueryTest {
+
+  private HotKey hotKey;
+  private HotKeyReadQuery<String> query;
+
+  @BeforeEach
+  void setUp() {
+    hotKey = mock(HotKey.class);
+    query = new HotKeyReadQuery<>(hotKey, "test-key");
+  }
+
+  // ── Block rule ──
+
+  @Test
+  void execute_shouldThrowWhenKeyBlocked() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.BLOCK);
+    HotKeyReadQuery<String> q = query.withPrimary(() -> "v");
+    assertThatThrownBy(q::execute).isInstanceOf(HotKeyBlockedException.class);
+    verify(hotKey).evaluateRule("test-key");
+    verifyNoMoreInteractions(hotKey);
+  }
+
+  // ── Cache hit (GET mode) ──
+
+  @Test
+  void execute_shouldReturnCachedValueInGetMode() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("cached"));
+    Optional<String> result = query.withPrimary(() -> "db").execute();
+    assertThat(result).contains("cached");
+    verify(hotKey).get(eq("test-key"), any(), eq(0L), eq(0L));
+  }
+
+  // ── Cache hit (GET_WITH_SOFT_EXPIRE mode) ──
+
+  @Test
+  void execute_shouldReturnCachedValueInSoftExpireMode() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("cached"));
+    Optional<String> result = query.withPrimary(() -> "db", CacheMode.GET_WITH_SOFT_EXPIRE).execute();
+    assertThat(result).contains("cached");
+    verify(hotKey).getWithSoftExpire(eq("test-key"), any(), eq(0L), eq(0L));
+  }
+
+  // ── NullValue sentinel unwrapping ──
+
+  @Test
+  void execute_shouldUnwrapNullValueSentinel() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong()))
+      .thenReturn(Optional.of(NullValue.INSTANCE));
+    Optional<String> result = query.withPrimary(() -> null).execute();
+    assertThat(result).isEmpty();
+  }
+
+  // ── Primary reader null, null caching disabled ──
+
+  @Test
+  void execute_shouldNotCacheNullWhenDisabled() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Optional<String> result = query.withPrimary(() -> null).notAllowNull().execute();
+    assertThat(result).isEmpty();
+  }
+
+  // ── Primary reader null, null caching enabled (default) ──
+
+  @Test
+  void execute_shouldReturnEmptyForNullCached() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong()))
+      .thenReturn(Optional.of(NullValue.INSTANCE));
+    Optional<String> result = query.withPrimary(() -> null).execute();
+    assertThat(result).isEmpty();
+  }
+
+  // ── Cache miss, fallback returns value ──
+
+  @Test
+  void execute_shouldUseFallbackWhenCacheMiss() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Optional<String> result = query.withPrimary(() -> null).thenExecute(() -> "fallback").execute();
+    assertThat(result).contains("fallback");
+    verify(hotKey).putLocal("test-key", "fallback", 0L, 0L);
+  }
+
+  // ── Cache miss, fallback with broadcast ──
+
+  @Test
+  void execute_shouldUseFallbackWithBroadcast() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Optional<String> result = query.withPrimary(() -> null).allowBroadcast().thenExecute(() -> "fb").execute();
+    assertThat(result).contains("fb");
+    verify(hotKey).putThrough(eq("test-key"), eq("fb"), any(Runnable.class), eq(0L), eq(0L));
+  }
+
+  // ── Multiple fallbacks, first returns value ──
+
+  @Test
+  void execute_shouldUseFirstNonNullFallback() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Supplier<String> fb1 = mock(Supplier.class);
+    when(fb1.get()).thenReturn(null);
+    Supplier<String> fb2 = () -> "fb2";
+    Optional<String> result = query.withPrimary(() -> null).thenExecute(fb1).thenExecute(fb2).execute();
+    assertThat(result).contains("fb2");
+    verify(fb1).get();
+    verify(hotKey).putLocal("test-key", "fb2", 0L, 0L);
+  }
+
+  // ── Fallback null, null caching enabled → stores NullValue ──
+
+  @Test
+  void execute_shouldCacheNullValueWhenFallbackNull() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Optional<String> result = query.withPrimary(() -> null).thenExecute(() -> null).execute();
+    assertThat(result).isEmpty();
+    verify(hotKey).putLocal("test-key", NullValue.INSTANCE, 0L, 0L);
+  }
+
+  // ── Fallback null, null caching + broadcast → stores NullValue via putThrough ──
+
+  @Test
+  void execute_shouldCacheNullValueViaPutThroughWhenBroadcast() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Optional<String> result =
+      query.withPrimary(() -> null).allowBroadcast().thenExecute(() -> null).execute();
+    assertThat(result).isEmpty();
+    verify(hotKey).putThrough(eq("test-key"), eq(NullValue.INSTANCE), any(Runnable.class), eq(0L), eq(0L));
+  }
+
+  // ── Fallback null, null caching disabled → no cache call ──
+
+  @Test
+  void execute_shouldNotCacheNullFallbackWhenDisabled() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Optional<String> result =
+      query.withPrimary(() -> null).notAllowNull().thenExecute(() -> null).execute();
+    assertThat(result).isEmpty();
+    verify(hotKey, never()).putLocal(anyString(), any(), anyLong(), anyLong());
+    verify(hotKey, never()).putThrough(anyString(), any(), any(), anyLong(), anyLong());
+  }
+
+  // ── Default value ──
+
+  @Test
+  void execute_shouldReturnDefaultWhenAllNull() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Optional<String> result =
+      query.withPrimary(() -> null).thenExecute(() -> null).orElseThisTime("default").execute();
+    assertThat(result).contains("default");
+  }
+
+  // ── All null, no default → empty ──
+
+  @Test
+  void execute_shouldReturnEmptyWhenAllReadersNull() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    Optional<String> result = query.withPrimary(() -> null).execute();
+    assertThat(result).isEmpty();
+  }
+
+  // ── TTL overrides ──
+
+  @Test
+  void execute_shouldPassTtlOverrides() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    query.withPrimary(() -> "db").withHardTtl(5000L).withSoftTtl(500L).execute();
+    verify(hotKey).get(eq("test-key"), any(), eq(5000L), eq(500L));
+  }
+
+  @Test
+  void execute_shouldPassTtlOverridesViaWithTtl() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    query.withPrimary(() -> "db").withTtl(10000L, 1000L).execute();
+    verify(hotKey).get(eq("test-key"), any(), eq(10000L), eq(1000L));
+  }
+
+  // ── Builder chaining ──
+
+  @Test
+  void builder_shouldReturnSameInstance() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    Supplier<String> fallback = () -> null;
+    HotKeyReadQuery<String> q = query
+      .withPrimary(() -> "db")
+      .notAllowBroadcast()
+      .allowBroadcast()
+      .notAllowNull()
+      .allowNull()
+      .thenExecute(fallback)
+      .withHardTtl(1000L)
+      .withSoftTtl(100L)
+      .orElseThisTime("oops");
+    assertThat(q.execute()).contains("v");
+  }
+
+  // ── Explicit hard/soft TTL in withPrimary + mode ──
+
+  @Test
+  void execute_primaryWithModeShouldRespectExplicitMode() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    query.withPrimary(() -> "db", CacheMode.GET_WITH_SOFT_EXPIRE).execute();
+    verify(hotKey).getWithSoftExpire(eq("test-key"), any(), eq(0L), eq(0L));
+  }
+}

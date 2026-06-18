@@ -29,6 +29,7 @@ import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -166,6 +167,25 @@ public class HotKey {
   }
 
   /**
+   * Batch variant of {@link #computeIfAbsent(String, Supplier)}. Iterates over
+   * the given keys and loads each one via the provided function on cache miss.
+   *
+   * @param cachKeys the keys to retrieve
+   * @param loader   the per-key value supplier for cache misses
+   * @param <V>      the value type
+   * @return a map of key → loaded value (only keys whose loader returned non-null are included)
+   */
+  public <V> Map<String, V> computeIfAbsent(Collection<String> cachKeys, Function<String, V> loader) {
+    Map<String, V> result = new HashMap<>();
+    cachKeys.forEach(key -> {
+      V value = computeIfAbsent(key, () -> loader.apply(key));
+      result.put(key, value);
+    });
+
+    return result;
+  }
+
+  /**
    * Convenience shorthand with explicit hard TTL.
    *
    * @param cacheKey the key to retrieve
@@ -180,6 +200,26 @@ public class HotKey {
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs) {
     requireCache();
     return get(cacheKey, loader, hardTtlMs, 0).orElse(null);
+  }
+
+  /**
+   * Batch variant of {@link #computeIfAbsent(String, Supplier, long)}. Iterates
+   * over the given keys with an explicit hard TTL override.
+   *
+   * @param cachKeys  the keys to retrieve
+   * @param loader    the per-key value supplier for cache misses
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param <V>       the value type
+   * @return a map of key → loaded value
+   */
+  public <V> Map<String, V> computeIfAbsent(Collection<String> cachKeys, Function<String, V> loader, long hardTtlMs) {
+    Map<String, V> result = new HashMap<>();
+    cachKeys.forEach(key -> {
+      V value = computeIfAbsent(key, () -> loader.apply(key), hardTtlMs);
+      result.put(key, value);
+    });
+
+    return result;
   }
 
   /**
@@ -201,6 +241,32 @@ public class HotKey {
   }
 
   /**
+   * Batch variant of {@link #computeIfAbsent(String, Supplier, long, long)}.
+   * Iterates over the given keys with explicit hard and soft TTL overrides.
+   *
+   * @param cachKeys  the keys to retrieve
+   * @param loader    the per-key value supplier for cache misses
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <V>       the value type
+   * @return a map of key → loaded value
+   */
+  public <V> Map<String, V> computeIfAbsent(
+    Collection<String> cachKeys,
+    Function<String, V> loader,
+    long hardTtlMs,
+    long softTtlMs
+  ) {
+    Map<String, V> result = new HashMap<>();
+    cachKeys.forEach(key -> {
+      V value = computeIfAbsent(key, () -> loader.apply(key), hardTtlMs, softTtlMs);
+      result.put(key, value);
+    });
+
+    return result;
+  }
+
+  /**
    * Convenience shorthand for {@link #getWithSoftExpire getWithSoftExpire(cacheKey, loader).orElse(null)}.
    *
    * <p>Returns stale data immediately when the soft TTL has expired, triggering
@@ -219,6 +285,25 @@ public class HotKey {
   }
 
   /**
+   * Batch variant of {@link #computeIfAbsentWithSoftExpire(String, Supplier)}.
+   * Iterates over the given keys with soft-expire semantics.
+   *
+   * @param cachKeys the keys to retrieve
+   * @param loader   the per-key value supplier for cache misses / refreshes
+   * @param <V>      the value type
+   * @return a map of key → (possibly stale) loaded value
+   */
+  public <V> Map<String, V> computeIfAbsentWithSoftExpire(Collection<String> cachKeys, Function<String, V> loader) {
+    Map<String, V> result = new HashMap<>();
+    cachKeys.forEach(key -> {
+      V value = computeIfAbsentWithSoftExpire(key, () -> loader.apply(key));
+      result.put(key, value);
+    });
+
+    return result;
+  }
+
+  /**
    * Convenience shorthand with explicit soft TTL.
    *
    * @param cacheKey  the key to retrieve
@@ -232,6 +317,30 @@ public class HotKey {
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long softTtlMs) {
     requireCache();
     return getWithSoftExpire(cacheKey, loader, softTtlMs).orElse(null);
+  }
+
+  /**
+   * Batch variant of {@link #computeIfAbsentWithSoftExpire(String, Supplier, long)}.
+   * Iterates over the given keys with explicit soft TTL override.
+   *
+   * @param cachKeys  the keys to retrieve
+   * @param loader    the per-key value supplier for cache misses / refreshes
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <V>       the value type
+   * @return a map of key → (possibly stale) loaded value
+   */
+  public <V> Map<String, V> computeIfAbsentWithSoftExpire(
+    Collection<String> cachKeys,
+    Function<String, V> loader,
+    long softTtlMs
+  ) {
+    Map<String, V> result = new HashMap<>();
+    cachKeys.forEach(key -> {
+      V value = computeIfAbsentWithSoftExpire(key, () -> loader.apply(key), softTtlMs);
+      result.put(key, value);
+    });
+
+    return result;
   }
 
   /**
@@ -252,6 +361,32 @@ public class HotKey {
   }
 
   /**
+   * Batch variant of {@link #computeIfAbsentWithSoftExpire(String, Supplier, long, long)}.
+   * Iterates over the given keys with explicit hard and soft TTL overrides.
+   *
+   * @param cachKeys  the keys to retrieve
+   * @param loader    the per-key value supplier for cache misses / refreshes
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <V>       the value type
+   * @return a map of key → (possibly stale) loaded value
+   */
+  public <V> Map<String, V> computeIfAbsentWithSoftExpire(
+    Collection<String> cachKeys,
+    Function<String, V> loader,
+    long hardTtlMs,
+    long softTtlMs
+  ) {
+    Map<String, V> result = new HashMap<>();
+    cachKeys.forEach(key -> {
+      V value = computeIfAbsentWithSoftExpire(key, () -> loader.apply(key), hardTtlMs, softTtlMs);
+      result.put(key, value);
+    });
+
+    return result;
+  }
+
+  /**
    * Look up a cached value without loading or triggering hot-key detection.
    *
    * @param cacheKey the key to look up
@@ -262,6 +397,24 @@ public class HotKey {
   public <T> Optional<T> peek(String cacheKey) {
     requireCache();
     return hotKeyCache.peek(cacheKey);
+  }
+
+  /**
+   * Batch variant of {@link #peek(String)}. Returns a map of key → value for
+   * all keys that are present in L1. Missing keys are silently omitted.
+   *
+   * @param cacheKeys the keys to look up
+   * @return a map of present key-value pairs (never {@code null})
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public Map<String, Object> peekAll(Collection<String> cacheKeys) {
+    Map<String, Object> result = new HashMap<>();
+    cacheKeys.forEach(key -> {
+      Optional<Object> value = peek(key);
+      value.ifPresent(v -> result.put(key, v));
+    });
+
+    return result;
   }
 
   /**
@@ -382,6 +535,32 @@ public class HotKey {
   }
 
   /**
+   * Convenience shorthand for {@link #evictLocal(Collection)} — evicts a single
+   * key from the local cache without broadcasting.
+   *
+   * @param cacheKeys the key to evict locally
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void evictLocal(String cacheKeys) {
+    evictLocal(Collections.singletonList(cacheKeys));
+  }
+
+  /**
+   * Evict keys from the local cache only, without broadcasting to other
+   * instances and without bumping version numbers.
+   *
+   * <p>Useful for emergency local cleanup, testing, or module offline
+   * scenarios where only the current node needs to be cleared.
+   *
+   * @param cacheKeys the keys to evict locally
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void evictLocal(Collection<String> cacheKeys) {
+    requireCache();
+    hotKeyCache.evictLocal(cacheKeys);
+  }
+
+  /**
    * Write-through: execute the writer, then update L1 and broadcast.
    * Uses effective hard/soft TTL from configuration.
    *
@@ -427,9 +606,20 @@ public class HotKey {
    * @param value    the value to cache
    */
   public void putLocal(String cacheKey, Object value) {
-    if (hotKeyCache != null) {
-      hotKeyCache.putLocal(cacheKey, value);
-    }
+    requireCache();
+    putLocal(cacheKey, value, 0, 0);
+  }
+
+  /**
+   * Batch variant of {@link #putLocal(String, Object)}. Writes all entries into
+   * L1 without version bump, broadcast, hot-key detection, or reporting.
+   *
+   * @param entries a map of key → value to store locally
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void putLocal(Map<String, Object> entries) {
+    requireCache();
+    entries.forEach(this::putLocal);
   }
 
   /**
@@ -445,9 +635,8 @@ public class HotKey {
    * @param softTtlMs soft TTL override (0 = use configured default)
    */
   public void putLocal(String cacheKey, Object value, long hardTtlMs, long softTtlMs) {
-    if (hotKeyCache != null) {
-      hotKeyCache.putLocal(cacheKey, value, hardTtlMs, softTtlMs);
-    }
+    requireCache();
+    hotKeyCache.putLocal(cacheKey, value, hardTtlMs, softTtlMs);
   }
 
   /**
@@ -461,6 +650,18 @@ public class HotKey {
   public void putBeforeInvalidate(String cacheKey, Runnable mutation) {
     requireCache();
     hotKeyCache.putBeforeInvalidate(cacheKey, mutation);
+  }
+
+  /**
+   * Batch variant of {@link #putBeforeInvalidate(String, Runnable)}. Executes
+   * all mutations and invalidates the corresponding keys from L1 with broadcast.
+   *
+   * @param mutations a map of key → mutation to execute
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void putBeforeInvalidateAll(Map<String, Runnable> mutations) {
+    requireCache();
+    mutations.forEach(this::putBeforeInvalidate);
   }
 
   /**
@@ -542,6 +743,21 @@ public class HotKey {
   }
 
   /**
+   * Batch variant of {@link #isLocalHotKey(String)}. Returns a map of key →
+   * hot status for all given keys.
+   *
+   * @param cacheKeys the keys to inspect
+   * @return a map of key → whether it is a local hot key
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public Map<String, Boolean> areLocalHotKeys(Collection<String> cacheKeys) {
+    requireCache();
+    Map<String, Boolean> result = new HashMap<>();
+    cacheKeys.forEach(key -> result.put(key, isLocalHotKey(key)));
+    return result;
+  }
+
+  /**
    * Increment the local TopK detector directly, bypassing the buffer and the
    * report-to-Worker path. Useful for bulk-loading historical access patterns
    * or correcting frequency counts.
@@ -575,7 +791,7 @@ public class HotKey {
   }
 
   /**
-   * Notify the local detector of a key access with a custom delta, routing
+   * Notify the local detector of key access with a custom delta, routing
    * through the buffered counter. Null keys are silently ignored.
    *
    * @param cacheKey the accessed key (maybe {@code null}, silently ignored)
@@ -596,6 +812,49 @@ public class HotKey {
   }
 
   /**
+   * Evict the given key locally, then load and cache via the supplier.
+   * Uses default TTLs. No broadcast is sent for the eviction.
+   *
+   * @param cacheKey the key to refresh
+   * @param loader   the value supplier
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void refresh(String cacheKey, Supplier<?> loader) {
+    requireCache();
+    evictLocal(cacheKey);
+    putThrough(cacheKey, loader.get(), () -> {});
+  }
+
+  /**
+   * Batch variant of {@link #refresh(String, Supplier)}. Refreshes all entries
+   * by evicting locally then loading and caching via the provided suppliers.
+   *
+   * @param loaders a map of key → value supplier
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void refreshAll(Map<String, Supplier<?>> loaders) {
+    requireCache();
+    loaders.forEach(this::refresh);
+  }
+
+  /**
+   * Evict the given key locally, then load and cache with explicit TTL overrides.
+   * No broadcast is sent for the eviction.
+   *
+   * @param cacheKey     the key to refresh
+   * @param loader       the value supplier
+   * @param hotHardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param hotSoftTtlMs soft TTL override (0 = use configured default)
+   * @param <V>          the value type
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public <V> void refresh(String cacheKey, Supplier<V> loader, long hotHardTtlMs, long hotSoftTtlMs) {
+    requireCache();
+    evictLocal(cacheKey);
+    putThrough(cacheKey, loader.get(), () -> {}, hotHardTtlMs, hotSoftTtlMs);
+  }
+
+  /**
    * Check whether a key is currently tracked as a cluster-wide hot key by the
    * Worker-side global detector.
    *
@@ -605,6 +864,20 @@ public class HotKey {
    */
   public boolean isWorkerHotKey(String cacheKey) {
     return workerTopKAlgorithm != null && cacheKey != null && workerTopKAlgorithm.contains(cacheKey);
+  }
+
+  /**
+   * Batch variant of {@link #isWorkerHotKey(String)}. Returns a map of key →
+   * Worker hot status for all given keys.
+   *
+   * @param cacheKeys the keys to inspect
+   * @return a map of key → whether it is a cluster-wide hot key;
+   *         all entries are {@code false} when no Worker is active
+   */
+  public Map<String, Boolean> areWorkerHotKeys(Collection<String> cacheKeys) {
+    Map<String, Boolean> result = new HashMap<>();
+    cacheKeys.forEach(key -> result.put(key, isWorkerHotKey(key)));
+    return result;
   }
 
   /**
@@ -699,6 +972,18 @@ public class HotKey {
   }
 
   /**
+   * Batch variant of {@link #addBlacklist(String)}. Adds multiple key patterns
+   * to the blacklist.
+   *
+   * @param keyPatterns the key patterns to blacklist
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void addBlacklist(Collection<String> keyPatterns) {
+    requireCache();
+    keyPatterns.forEach(hotKeyCache::addBlacklist);
+  }
+
+  /**
    * Remove a key pattern from the blacklist.
    *
    * @param keyPattern the key pattern to remove from the blacklist
@@ -707,6 +992,18 @@ public class HotKey {
   public void removeBlacklist(String keyPattern) {
     requireCache();
     hotKeyCache.unBlacklist(keyPattern);
+  }
+
+  /**
+   * Batch variant of {@link #removeBlacklist(String)}. Removes multiple key
+   * patterns from the blacklist.
+   *
+   * @param keyPatterns the key patterns to remove from the blacklist
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void removeBlacklist(Collection<String> keyPatterns) {
+    requireCache();
+    keyPatterns.forEach(hotKeyCache::unBlacklist);
   }
 
   /**
@@ -724,6 +1021,18 @@ public class HotKey {
   }
 
   /**
+   * Batch variant of {@link #addWhitelist(String)}. Adds multiple key patterns
+   * to the whitelist.
+   *
+   * @param keyPatterns the key patterns to whitelist
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void addWhitelist(Collection<String> keyPatterns) {
+    requireCache();
+    keyPatterns.forEach(hotKeyCache::addWhitelist);
+  }
+
+  /**
    * Remove a key pattern from the whitelist.
    *
    * @param keyPattern the key pattern to remove from the whitelist
@@ -732,6 +1041,18 @@ public class HotKey {
   public void removeWhitelist(String keyPattern) {
     requireCache();
     hotKeyCache.unWhitelist(keyPattern);
+  }
+
+  /**
+   * Batch variant of {@link #removeWhitelist(String)}. Removes multiple key
+   * patterns from the whitelist.
+   *
+   * @param keyPatterns the key patterns to remove from the whitelist
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void removeWhitelist(Collection<String> keyPatterns) {
+    requireCache();
+    keyPatterns.forEach(hotKeyCache::unWhitelist);
   }
 
   /**
@@ -746,6 +1067,23 @@ public class HotKey {
       return Rule.RuleAction.ALLOW;
     }
     return hotKeyCache.evaluateRule(cacheKey);
+  }
+
+  /**
+   * Batch variant of {@link #evaluateRule(String)}. Evaluates all rules against
+   * the given keys and returns the first matching action for each.
+   *
+   * @param cacheKeys the keys to evaluate
+   * @return a map of key → matching {@link Rule.RuleAction} (or {@code ALLOW} if no rule matches)
+   */
+  public Map<String, Rule.RuleAction> evaluateRules(Collection<String> cacheKeys) {
+    Map<String, Rule.RuleAction> result = new HashMap<>();
+    cacheKeys.forEach(key -> {
+      Rule.RuleAction action = evaluateRule(key);
+      result.put(key, action);
+    });
+
+    return result;
   }
 
   /**
@@ -766,6 +1104,23 @@ public class HotKey {
   }
 
   /**
+   * Batch variant of {@link #isBlacklisted(String)}. Checks multiple keys
+   * against blacklist rules.
+   *
+   * @param cacheKeys the keys to check
+   * @return a map of key → whether it is blocked by a blacklist rule
+   */
+  public Map<String, Boolean> isBlacklisted(Collection<String> cacheKeys) {
+    Map<String, Boolean> result = new HashMap<>();
+    cacheKeys.forEach(key -> {
+      boolean isBlacklisted = isBlacklisted(key);
+      result.put(key, isBlacklisted);
+    });
+
+    return result;
+  }
+
+  /**
    * Quickly check whether the given key is whitelisted (skips Worker reporting).
    * <p>
    * Equivalent to {@code evaluateRule(key) == ALLOW_NO_REPORT}, provided as a
@@ -780,6 +1135,23 @@ public class HotKey {
       return false;
     }
     return hotKeyCache.isWhitelisted(cacheKey);
+  }
+
+  /**
+   * Batch variant of {@link #isWhitelisted(String)}. Checks multiple keys
+   * against whitelist rules.
+   *
+   * @param cacheKeys the keys to check
+   * @return a map of key → whether it is whitelisted (skips Worker reporting)
+   */
+  public Map<String, Boolean> isWhitelisted(Collection<String> cacheKeys) {
+    Map<String, Boolean> result = new HashMap<>();
+    cacheKeys.forEach(key -> {
+      boolean isWhitelisted = isWhitelisted(key);
+      result.put(key, isWhitelisted);
+    });
+
+    return result;
   }
 
   /**

@@ -569,6 +569,28 @@ public class HotKeyCache {
   }
 
   /**
+   * Evict keys from the local cache only, without broadcasting to other
+   * instances and without bumping version numbers.
+   *
+   * <p>Useful for emergency local cleanup, testing, or when a module is
+   * taken offline and only the current node needs to be cleared.
+   *
+   * @param cacheKeys the keys to evict locally
+   */
+  public void evictLocal(Collection<String> cacheKeys) {
+    List<String> validKeys = cacheKeys
+      .stream()
+      .filter(k -> !invalidCacheKey(k))
+      .toList();
+    if (validKeys.isEmpty()) {
+      log.debug("evictLocal: all cacheKeys are invalid");
+      return;
+    }
+    caffeineCache.invalidateAll(validKeys);
+    log.debug("evictLocal: evicted {} keys locally", validKeys.size());
+  }
+
+  /**
    * Write-through: execute the writer, then update L1 and broadcast.
    * Uses effective hard/soft TTL from configuration.
    *
@@ -680,26 +702,6 @@ public class HotKeyCache {
       .normalHardTtlMs(normalHardTtl)
       .normalSoftTtlMs(normalSoftTtl)
       .build();
-  }
-
-  /**
-   * Write a value directly into the local L1 cache without version bump,
-   * without broadcast, without hot-key detection, and without reporting.
-   * <p>
-   * Existing entry metadata ({@code dataVersion}, {@code decisionVersion},
-   * {@code keyState}, {@code isVersionDegraded}, {@code normalHardTtlMs},
-   * {@code normalSoftTtlMs}) is preserved.  If no entry exists, a fresh
-   * {@link CacheEntry} is created with {@link KeyState#NORMAL} and the
-   * configured effective TTL.
-   * <p>
-   * Useful for pre-warming the local cache or for caching fallback values
-   * that should not propagate to peers.
-   *
-   * @param cacheKey the key to store
-   * @param value    the value to cache
-   */
-  public void putLocal(String cacheKey, Object value) {
-    putLocal(cacheKey, value, 0L, 0L);
   }
 
   /**
