@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.hotkeydetector;
 
+import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+
 import io.github.hyshmily.hotkey.hotkeydetector.doublebuffer.BufferedCounter;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
@@ -103,6 +105,9 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   @Override
   public AddResult addDirect(String key, int increment) {
+    if (invalidCacheKey(key)) {
+      return null;
+    }
     return heavyKeeper.addDirect(key, increment);
   }
 
@@ -114,6 +119,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   @Override
   public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+    keyCounts.entrySet().removeIf(entry -> invalidCacheKey(entry.getKey()));
     return heavyKeeper.addDirect(keyCounts);
   }
 
@@ -123,6 +129,9 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    * @param key the accessed key
    */
   public void add(String key) {
+    if (invalidCacheKey(key)) {
+      return;
+    }
     bufferedCounter.count(key, 1);
   }
 
@@ -133,6 +142,9 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    * @param delta the number of accesses
    */
   public void add(String key, long delta) {
+    if (invalidCacheKey(key)) {
+      return;
+    }
     bufferedCounter.count(key, delta);
   }
 
@@ -143,6 +155,9 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   public void add(Map<String, Long> keyCounts) {
     for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
+      if (invalidCacheKey(entry.getKey())) {
+        continue;
+      }
       bufferedCounter.count(entry.getKey(), entry.getValue());
     }
   }
@@ -176,6 +191,9 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   @Override
   public boolean contains(String key) {
+    if (invalidCacheKey(key)) {
+      return false;
+    }
     return heavyKeeper.contains(key);
   }
 

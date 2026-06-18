@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.autoconfigure;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import jakarta.annotation.PostConstruct;
@@ -91,9 +92,10 @@ public class HotKeyFacadeAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKey hotKey(
     ObjectProvider<HotKeyCache> hotKeyCacheProvider,
-    @Qualifier("hotKeyDetector") ObjectProvider<TopK> appTopKProvider,
+    @Qualifier("hotKeyDetector") ObjectProvider<HotKeyDetector> appTopKProvider,
     @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider
   ) {
     return new HotKey(

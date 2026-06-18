@@ -20,19 +20,16 @@ import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyReadQuery;
 import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyWriteCommand;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Supplier;
-import lombok.RequiredArgsConstructor;
 
 /**
  * Public facade for the HotKey library — the sole public API entry point.
@@ -58,7 +55,6 @@ import lombok.RequiredArgsConstructor;
  * {@link UnsupportedOperationException} (cache read/write) or return
  * empty / zero (TopK queries).
  */
-@RequiredArgsConstructor
 public class HotKey {
 
   /**
@@ -72,7 +68,7 @@ public class HotKey {
    * access to maintain local frequency sketches. Never {@code null} in
    * app mode.
    */
-  private final TopK topKAlgorithm;
+  private final HotKeyDetector appHotKeyDetector;
   /**
    * Worker-side global hot-key detector receiving aggregated reports from
    * all application instances. {@code null} when no Worker is connected.
@@ -80,15 +76,24 @@ public class HotKey {
   private final TopK workerTopKAlgorithm;
 
   /**
-   * Create a HotKey with a cache and an app‑side TopK detector.
-   * This constructor is used by programmatic configuration or by
-   * auto‑configuration when the Worker is not active.
+   * Create a HotKey facade with all three optional components.
    *
-   * @param hotKeyCache   the cache orchestrator (maybe {@code null} in Worker-only mode)
-   * @param topKAlgorithm the app-side local TopK detector
+   * <p>Each parameter may be {@code null} depending on the deployment mode:
+   * <ul>
+   *   <li><b>App-only:</b> {@code hotKeyCache} and {@code appHotKeyDetector} are present,
+   *       {@code workerTopKAlgorithm} is {@code null}</li>
+   *   <li><b>Worker-only:</b> only {@code workerTopKAlgorithm} is present</li>
+   *   <li><b>Coexistence:</b> all three are present</li>
+   * </ul>
+   *
+   * @param hotKeyCache         the cache orchestrator (maybe {@code null} in Worker-only mode)
+   * @param appHotKeyDetector   the app-side local TopK detector (maybe {@code null} in Worker-only mode)
+   * @param workerTopKAlgorithm the Worker-side global TopK detector (maybe {@code null} in app-only mode)
    */
-  public HotKey(HotKeyCache hotKeyCache, TopK topKAlgorithm) {
-    this(hotKeyCache, topKAlgorithm, null);
+  public HotKey(HotKeyCache hotKeyCache, HotKeyDetector appHotKeyDetector, TopK workerTopKAlgorithm) {
+    this.hotKeyCache = hotKeyCache;
+    this.appHotKeyDetector = appHotKeyDetector;
+    this.workerTopKAlgorithm = workerTopKAlgorithm;
   }
 
   /**
@@ -140,6 +145,110 @@ public class HotKey {
    */
   public <T> HotKeyWriteCommand<T> write(String cacheKey) {
     return new HotKeyWriteCommand<>(this, cacheKey);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get get(cacheKey, loader).orElse(null)}.
+   *
+   * <p>Loads the value via the supplier on cache miss, using configured default TTLs.
+   * Returns {@code null} when the loader itself returns {@code null}.
+   *
+   * @param cacheKey the key to retrieve
+   * @param loader   the value supplier for cache misses
+   * @param <V>      the value type
+   * @return the cached or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader) {
+    requireCache();
+    return get(cacheKey, loader).orElse(null);
+  }
+
+  /**
+   * Convenience shorthand with explicit hard TTL.
+   *
+   * @param cacheKey the key to retrieve
+   * @param loader   the value supplier for cache misses
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param <V>      the value type
+   * @return the cached or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   * @see #get(String, Supplier, long, long)
+   */
+  public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs) {
+    requireCache();
+    return get(cacheKey, loader, hardTtlMs, 0).orElse(null);
+  }
+
+  /**
+   * Convenience shorthand with explicit hard and soft TTLs.
+   *
+   * @param cacheKey  the key to retrieve
+   * @param loader    the value supplier for cache misses
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <V>       the value type
+   * @return the cached or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   * @see #get(String, Supplier, long, long)
+   */
+  public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
+    requireCache();
+    return get(cacheKey, loader, hardTtlMs, softTtlMs).orElse(null);
+  }
+
+  /**
+   * Convenience shorthand for {@link #getWithSoftExpire getWithSoftExpire(cacheKey, loader).orElse(null)}.
+   *
+   * <p>Returns stale data immediately when the soft TTL has expired, triggering
+   * an async refresh in the background.
+   *
+   * @param cacheKey the key to retrieve
+   * @param loader   the value supplier for cache misses / refreshes
+   * @param <V>      the value type
+   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader) {
+    requireCache();
+    return getWithSoftExpire(cacheKey, loader).orElse(null);
+  }
+
+  /**
+   * Convenience shorthand with explicit soft TTL.
+   *
+   * @param cacheKey  the key to retrieve
+   * @param loader    the value supplier for cache misses / refreshes
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <V>       the value type
+   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long softTtlMs) {
+    requireCache();
+    return getWithSoftExpire(cacheKey, loader, softTtlMs).orElse(null);
+  }
+
+  /**
+   * Convenience shorthand with explicit hard and soft TTLs for soft-expire semantics.
+   *
+   * @param cacheKey  the key to retrieve
+   * @param loader    the value supplier for cache misses / refreshes
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <V>       the value type
+   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
+    requireCache();
+    return getWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs).orElse(null);
   }
 
   /**
@@ -433,6 +542,27 @@ public class HotKey {
   }
 
   /**
+   * Increment the local TopK detector directly, bypassing the buffer and the
+   * report-to-Worker path. Useful for bulk-loading historical access patterns
+   * or correcting frequency counts.
+   *
+   * @param cacheKey the key to record
+   * @param count    the number of accesses to add
+   */
+  public void notifyLocalDetectorDirect(String cacheKey, int count) {
+    appHotKeyDetector.addDirect(cacheKey, count);
+  }
+
+  /**
+   * Batch-increment the local TopK detector directly, bypassing buffer and reports.
+   *
+   * @param keyCounts a map of key → access count
+   */
+  public void notifyLocalDetectorDirect(Map<String, Long> keyCounts) {
+    appHotKeyDetector.addDirect(keyCounts);
+  }
+
+  /**
    * Notify the local TopK detector that a key was accessed, without triggering
    * a report to the Worker. Used by {@code @Intercept} path to keep the local
    * frequency sketch accurate without flooding the Worker with reports.
@@ -441,10 +571,28 @@ public class HotKey {
    * @param cacheKey the accessed key (maybe {@code null}, silently ignored)
    */
   public void notifyLocalDetector(String cacheKey) {
-    if (cacheKey == null) {
-      return;
-    }
-    topKAlgorithm.addDirect(cacheKey, io.github.hyshmily.hotkey.constants.HotKeyConstants.TOPK_INCR);
+    appHotKeyDetector.add(cacheKey);
+  }
+
+  /**
+   * Notify the local detector of a key access with a custom delta, routing
+   * through the buffered counter. Null keys are silently ignored.
+   *
+   * @param cacheKey the accessed key (maybe {@code null}, silently ignored)
+   * @param count    the number of accesses to record
+   */
+  public void notifyLocalDetector(String cacheKey, long count) {
+    appHotKeyDetector.add(cacheKey, count);
+  }
+
+  /**
+   * Batch-notify the local detector of multiple key accesses, routing through
+   * the buffered counter. Null keys in the map are silently ignored.
+   *
+   * @param keyCounts a map of key → access count
+   */
+  public void notifyLocalDetector(Map<String, Long> keyCounts) {
+    appHotKeyDetector.add(keyCounts);
   }
 
   /**
@@ -460,14 +608,14 @@ public class HotKey {
   }
 
   /**
-   * Return the current top-K hot keys (key + count) from the local detector,
-   * ordered by frequency.
+   * Return the top N hot keys from the local detector, ordered by frequency.
+   * Useful when callers need more or fewer items than the configured TopK capacity.
    *
-   * @return the local top-K list, or an empty list if no detector is available;
-   *         the returned list is a point-in-time snapshot
+   * @param n the number of top keys to return
+   * @return the top N items, or an empty list if no detector is available
    */
-  public List<Item> returnLocalHotKeys() {
-    return topKAlgorithm != null ? topKAlgorithm.list() : List.of();
+  public List<Item> returnLocalTopNHotKeys(int n) {
+    return appHotKeyDetector != null ? appHotKeyDetector.listTopN(n) : List.of();
   }
 
   /**
@@ -477,7 +625,7 @@ public class HotKey {
    * @return the expelled queue, or an empty queue if no detector is available
    */
   public BlockingQueue<Item> returnLocalExpelledHotKeys() {
-    return topKAlgorithm != null ? topKAlgorithm.expelled() : new LinkedBlockingQueue<>();
+    return appHotKeyDetector != null ? appHotKeyDetector.expelled() : new LinkedBlockingQueue<>();
   }
 
   /**
@@ -486,7 +634,18 @@ public class HotKey {
    * @return the total count, or {@code 0} if no detector is available
    */
   public long returnLocalTotalDataStreams() {
-    return topKAlgorithm != null ? topKAlgorithm.total() : 0L;
+    return appHotKeyDetector != null ? appHotKeyDetector.total() : 0L;
+  }
+
+  /**
+   * Return the current top-K hot keys (key + count) from the local detector,
+   * ordered by frequency.
+   *
+   * @return the local top-K list, or an empty list if no detector is available;
+   *         the returned list is a point-in-time snapshot
+   */
+  public List<Item> returnLocalHotKeys() {
+    return appHotKeyDetector != null ? appHotKeyDetector.list() : List.of();
   }
 
   /**

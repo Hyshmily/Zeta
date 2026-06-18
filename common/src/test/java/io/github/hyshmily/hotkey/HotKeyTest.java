@@ -19,6 +19,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
@@ -37,7 +38,7 @@ import static org.mockito.Mockito.*;
 class HotKeyTest {
 
   private HotKeyCache hotKeyCache;
-  private TopK topK;
+  private HotKeyDetector appDetector;
   private TopK workerTopK;
   private HotKey hotKey;
 
@@ -45,9 +46,9 @@ class HotKeyTest {
   @SuppressWarnings("unchecked")
   void setUp() {
     hotKeyCache = mock(HotKeyCache.class);
-    topK = mock(TopK.class);
+    appDetector = mock(HotKeyDetector.class);
     workerTopK = mock(TopK.class);
-    hotKey = new HotKey(hotKeyCache, topK, workerTopK);
+    hotKey = new HotKey(hotKeyCache, appDetector, workerTopK);
   }
 
   @Test
@@ -117,13 +118,13 @@ class HotKeyTest {
 
   @Test
   void returnHotKeys_shouldReturnLocalFromTopK() {
-    when(topK.list()).thenReturn(List.of(new Item("k1", 10)));
+    when(appDetector.list()).thenReturn(List.of(new Item("k1", 10)));
     assertThat(hotKey.returnLocalHotKeys()).hasSize(1);
   }
 
   @Test
   void returnHotKeys_shouldReturnLocalEmptyWhenTopKNull() {
-    HotKey hk = new HotKey(hotKeyCache, null);
+    HotKey hk = new HotKey(hotKeyCache, null, null);
     assertThat(hk.returnLocalHotKeys()).isEmpty();
   }
 
@@ -135,31 +136,31 @@ class HotKeyTest {
 
   @Test
   void returnWorkerHotKeys_shouldReturnEmptyWhenWorkerTopKNull() {
-    assertThat(new HotKey(hotKeyCache, topK, null).returnWorkerHotKeys()).isEmpty();
+    assertThat(new HotKey(hotKeyCache, appDetector, null).returnWorkerHotKeys()).isEmpty();
   }
 
   @Test
   void returnTotalDataStreams_shouldReturnLocalFromTopK() {
-    when(topK.total()).thenReturn(100L);
+    when(appDetector.total()).thenReturn(100L);
     assertThat(hotKey.returnLocalTotalDataStreams()).isEqualTo(100L);
   }
 
   @Test
   void returnTotalDataStreams_shouldReturnLocalZeroWhenTopKNull() {
-    assertThat(new HotKey(hotKeyCache, null).returnLocalTotalDataStreams()).isZero();
+    assertThat(new HotKey(hotKeyCache, null, null).returnLocalTotalDataStreams()).isZero();
   }
 
   @Test
   void returnExpelledHotKeys_shouldReturnLocalFromTopK() {
     LinkedBlockingQueue<Item> queue = new LinkedBlockingQueue<>();
     queue.add(new Item("k1", 5));
-    when(topK.expelled()).thenReturn(queue);
+    when(appDetector.expelled()).thenReturn(queue);
     assertThat(hotKey.returnLocalExpelledHotKeys()).hasSize(1);
   }
 
   @Test
   void cacheMethods_shouldThrowInWorkerMode() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(() -> workerOnly.get("k", () -> "v"))
       .isInstanceOf(UnsupportedOperationException.class);
     assertThatThrownBy(() -> workerOnly.isLocalHotKey("k"))
@@ -215,7 +216,7 @@ class HotKeyTest {
 
   @Test
   void isWorkerHotKey_shouldReturnFalseWhenWorkerTopKNull() {
-    HotKey hk = new HotKey(hotKeyCache, topK, null);
+    HotKey hk = new HotKey(hotKeyCache, appDetector, null);
     assertThat(hk.isWorkerHotKey("any")).isFalse();
   }
 
@@ -237,7 +238,7 @@ class HotKeyTest {
 
   @Test
   void returnWorkerExpelledHotKeys_shouldReturnEmptyQueueWhenWorkerTopKNull() {
-    HotKey hk = new HotKey(hotKeyCache, topK, null);
+    HotKey hk = new HotKey(hotKeyCache, appDetector, null);
     assertThat(hk.returnWorkerExpelledHotKeys()).isEmpty();
   }
 
@@ -251,7 +252,7 @@ class HotKeyTest {
 
   @Test
   void returnWorkerTotalDataStreams_shouldReturnZeroWhenWorkerTopKNull() {
-    HotKey hk = new HotKey(hotKeyCache, topK, null);
+    HotKey hk = new HotKey(hotKeyCache, appDetector, null);
     assertThat(hk.returnWorkerTotalDataStreams()).isZero();
   }
 
@@ -259,7 +260,7 @@ class HotKeyTest {
 
   @Test
   void returnExpelledHotKeys_shouldReturnEmptyQueueWhenTopKNull() {
-    HotKey hk = new HotKey(hotKeyCache, null);
+    HotKey hk = new HotKey(hotKeyCache, null, null);
     assertThat(hk.returnLocalExpelledHotKeys()).isEmpty();
   }
 
@@ -284,7 +285,7 @@ class HotKeyTest {
 
   @Test
   void getLocalCache_shouldThrowInWorkerMode() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(workerOnly::getLocalCache)
       .isInstanceOf(UnsupportedOperationException.class);
   }
@@ -299,7 +300,7 @@ class HotKeyTest {
 
   @Test
   void addBlacklist_shouldThrowInWorkerMode() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(() -> workerOnly.addBlacklist("x"))
       .isInstanceOf(UnsupportedOperationException.class);
   }
@@ -312,7 +313,7 @@ class HotKeyTest {
 
   @Test
   void removeBlacklist_shouldThrowInWorkerMode() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(() -> workerOnly.removeBlacklist("x"))
       .isInstanceOf(UnsupportedOperationException.class);
   }
@@ -325,7 +326,7 @@ class HotKeyTest {
 
   @Test
   void addWhitelist_shouldThrowInWorkerMode() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(() -> workerOnly.addWhitelist("x"))
       .isInstanceOf(UnsupportedOperationException.class);
   }
@@ -338,7 +339,7 @@ class HotKeyTest {
 
   @Test
   void removeWhitelist_shouldThrowInWorkerMode() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(() -> workerOnly.removeWhitelist("x"))
       .isInstanceOf(UnsupportedOperationException.class);
   }
@@ -355,7 +356,7 @@ class HotKeyTest {
 
   @Test
   void getAllRules_shouldReturnEmptyWhenCacheNull() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThat(workerOnly.getAllRules()).isEmpty();
   }
 
@@ -370,7 +371,7 @@ class HotKeyTest {
 
   @Test
   void evaluateRule_shouldReturnAllowWhenCacheNull() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThat(workerOnly.evaluateRule("any")).isEqualTo(RuleAction.ALLOW);
   }
 
@@ -384,7 +385,7 @@ class HotKeyTest {
 
   @Test
   void clearAllRules_shouldThrowInWorkerMode() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(workerOnly::clearAllRules)
       .isInstanceOf(UnsupportedOperationException.class);
   }
@@ -399,7 +400,7 @@ class HotKeyTest {
 
   @Test
   void broadcastAllLocalRulesManually_shouldThrowInWorkerMode() {
-    HotKey workerOnly = new HotKey(null, topK);
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(workerOnly::broadcastAllLocalRulesManually)
       .isInstanceOf(UnsupportedOperationException.class);
   }
@@ -409,12 +410,12 @@ class HotKeyTest {
   @Test
   void notifyLocalDetector_shouldDelegateToTopK() {
     hotKey.notifyLocalDetector("my-key");
-    verify(topK).addDirect("my-key", 1);
+    verify(appDetector).add("my-key");
   }
 
   @Test
   void notifyLocalDetector_shouldIgnoreNullKey() {
-    hotKey.notifyLocalDetector(null);
-    verifyNoInteractions(topK);
+    hotKey.notifyLocalDetector((String) null);
+    verify(appDetector, never()).add(anyString());
   }
 }

@@ -169,6 +169,6 @@ public class HotKeyRedisAutoConfiguration {
   @ConditionalOnBean(HotKeyCache.class)
   @ConditionalOnMissingBean
   public HotKey hotKey(HotKeyCache hotKeyCache, @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector) {
-    return new HotKey(hotKeyCache, hotKeyDetector);
+    return new HotKey(hotKeyCache, hotKeyDetector, null);
   }
 }

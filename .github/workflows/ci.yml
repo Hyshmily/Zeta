@@ -28,4 +28,3 @@ jobs:
         with:
           files: |
             common/target/site/jacoco/jacoco.xml
-            integration-tests/target/site/jacoco/jacoco.xml

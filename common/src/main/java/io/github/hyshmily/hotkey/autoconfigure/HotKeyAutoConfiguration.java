@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.autoconfigure;
-import lombok.extern.slf4j.Slf4j;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -26,6 +25,7 @@ import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -38,6 +38,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -67,8 +68,6 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 @EnableConfigurationProperties(HotKeyProperties.class)
 @Slf4j
 public class HotKeyAutoConfiguration {
-
-  /** Logger for this configuration class. */
 
   /**
    * Create the app-side TopK instance (HeavyKeeper) as a standalone bean.
@@ -279,14 +278,20 @@ public class HotKeyAutoConfiguration {
    * that auto-configuration is excluded or its bean is overridden.
    *
    * @param hotKeyCache    the HotKeyCache instance (never {@code null})
-   * @param hotKeyDetector the app-side TopK detector (never {@code null})
+   * @param appHotKeyDetector the app-side TopK detector (never {@code null})
+   * @param workerTopK     the Worker-side TopK algorithm (may be {@code null})
    * @return a new HotKey facade instance
    */
   @Bean
   @ConditionalOnBean(HotKeyCache.class)
   @ConditionalOnMissingBean
-  public HotKey hotKey(HotKeyCache hotKeyCache, @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector) {
-    return new HotKey(hotKeyCache, hotKeyDetector);
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
+  public HotKey hotKey(
+    HotKeyCache hotKeyCache,
+    @Qualifier("hotKeyDetector") HotKeyDetector appHotKeyDetector,
+    @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider
+  ) {
+    return new HotKey(hotKeyCache, appHotKeyDetector, workerTopKProvider.getIfAvailable());
   }
 
   /**
