@@ -218,6 +218,18 @@ class HotKeyReadQueryTest {
     verify(hotKey).get(eq("test-key"), any(), eq(10000L), eq(1000L));
   }
 
+  @Test
+  void execute_shouldInvokeWrappedPrimaryReader_whenMockInvokesSupplier() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+      Supplier<Object> reader = invocation.getArgument(1);
+      Object val = reader.get();
+      return val == NullValue.INSTANCE ? Optional.empty() : Optional.ofNullable(val);
+    });
+    Optional<String> result = query.withPrimary(() -> "from-reader").execute();
+    assertThat(result).contains("from-reader");
+  }
+
   // ── Builder chaining ──
 
   @Test

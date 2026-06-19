@@ -283,4 +283,33 @@ class HotKeySpringCacheTest {
     assertThatThrownBy(() -> cache.get("myKey", (Callable<String>) () -> { throw new RuntimeException("db error"); }))
       .isInstanceOf(ValueRetrievalException.class);
   }
+
+  @Test
+  @DisplayName("get invokes valueLoader successfully")
+  void get_whenLoaderSucceeds_invokesLoader() {
+    when(hotKey.computeIfAbsent(anyString(), any())).thenAnswer(invocation -> {
+      Supplier<Object> supplier = invocation.getArgument(1);
+      return supplier.get();
+    });
+    String result = cache.get("myKey", (Callable<String>) () -> "loaded");
+    assertThat(result).isEqualTo("loaded");
+  }
+
+  @Test
+  @DisplayName("put with skipBroadcast=false calls putThrough")
+  void put_withSkipBroadcastFalse_callsPutThrough() {
+    HotKeyCacheContext.get().apply(0, 0, false, false);
+    cache.put("myKey", "myValue");
+    verify(hotKey).putThrough(eq("test::myKey"), eq("myValue"), any());
+  }
+
+  @Test
+  @DisplayName("get with allowNull and skipBroadcast=false calls putThrough for null")
+  void get_whenNullAllowNullAndNoSkipBroadcast_usesPutThrough() {
+    HotKeyCacheContext.get().apply(0, 0, true, false);
+    when(hotKey.computeIfAbsent(anyString(), any())).thenReturn(null);
+    String result = cache.get("myKey", (Callable<String>) () -> null);
+    assertThat(result).isNull();
+    verify(hotKey).putThrough(eq("test::myKey"), isNull(), any());
+  }
 }

@@ -178,6 +178,26 @@ class VersionGuardTest {
     assertThat(VersionGuard.shouldSkipForSync(cache, "key", 10, true)).isTrue();
   }
 
+  /**
+   * Verifies that when the cache contains a non-{@link CacheEntry} object, the worker guard
+   * returns false (do not skip).
+   */
+  @Test
+  void shouldSkipForWorker_withNonCacheEntryInCache_shouldNotSkip() {
+    cache.put("key", "not-a-cache-entry");
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 1)).isFalse();
+  }
+
+  /**
+   * Verifies that when the cache contains a non-{@link CacheEntry} object, the sync guard
+   * returns false (do not skip).
+   */
+  @Test
+  void shouldSkipForSync_withNonCacheEntryInCache_shouldNotSkip() {
+    cache.put("key", "not-a-cache-entry");
+    assertThat(VersionGuard.shouldSkipForSync(cache, "key", 1, false)).isFalse();
+  }
+
   private static CacheEntry entry(long dataVersion, boolean degraded, long decisionVersion) {
     return CacheEntry.builder()
       .value("v")

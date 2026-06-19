@@ -139,4 +139,17 @@ class HotKeyCacheManagerTest {
     assertThat(cache).isNotNull();
     assertThat(cache.getName()).isEqualTo("custom");
   }
+
+  @Test
+  @DisplayName("getCache returns null when getMissingCache returns null")
+  void getCache_whenGetMissingCacheNull_returnsNull() {
+    HotKeyCacheManager nullManager = new HotKeyCacheManager(hotKey, properties) {
+      @Override
+      protected Cache getMissingCache(String name) {
+        return null;
+      }
+    };
+    Cache cache = nullManager.getCache("nonExistent");
+    assertThat(cache).isNull();
+  }
 }

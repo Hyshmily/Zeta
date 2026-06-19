@@ -82,6 +82,19 @@ class TopKPersistServiceTest {
   }
 
   /**
+   * Verifies that restoreFromRedis handles the JSON literal {@code "null"}
+   * gracefully.  Jackson's {@code readValue("null", List.class)} returns
+   * {@code null}, which exercises the {@code items == null} branch inside
+   * {@code restoreFromRedis}.
+   */
+  @Test
+  void restoreFromRedis_shouldHandleNullJsonLiteral() {
+    when(valueOps.get(REDIS_KEY)).thenReturn("null");
+    assertThatCode(() -> service.restoreFromRedis()).doesNotThrowAnyException();
+    verifyNoInteractions(topK);
+  }
+
+  /**
    * Verifies that restoreFromRedis handles an empty Redis value gracefully.
    */
   @Test

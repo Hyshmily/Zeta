@@ -23,14 +23,16 @@ import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.*;
+import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.amqp.core.Binding;
-import org.springframework.amqp.core.FanoutExchange;
-import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -368,4 +370,273 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(listener).isNotNull();
   }
 
+  // ── ReportConfiguration additional beans ──
+
+  @Test
+  void hotkeyReportExchangeIsCreatedWithCorrectProperties() {
+    HotKeyProperties properties = new HotKeyProperties();
+    properties.setReportExchange("test.report.exchange");
+
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
+      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    DirectExchange exchange = config.hotkeyReportExchange(properties);
+
+    assertThat(exchange).isNotNull();
+    assertThat(exchange.getName()).isEqualTo("test.report.exchange");
+    assertThat(exchange.isDurable()).isTrue();
+    assertThat(exchange.isAutoDelete()).isFalse();
+  }
+
+  @Test
+  void reportMessageConverterIsCreated() {
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
+      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    MessageConverter converter = config.reportMessageConverter();
+
+    assertThat(converter).isNotNull();
+  }
+
+  @Test
+  void ringManagerIsCreatedWithCorrectVirtualNodes() {
+    HotKeyProperties properties = new HotKeyProperties();
+    properties.getConsistentHashing().setVirtualNodes(300);
+
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
+      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    RingManager ringManager = config.ringManager(properties);
+
+    assertThat(ringManager).isNotNull();
+    assertThat(ringManager.getVirtualNodeCount()).isEqualTo(300);
+  }
+
+  @Test
+  void hotKeyCpuMonitorIsCreatedWithCorrectProperties() {
+    HotKeyProperties properties = new HotKeyProperties();
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
+      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    SystemLoadMonitor monitor = config.hotKeyCpuMonitor(properties, scheduler);
+
+    assertThat(monitor).isNotNull();
+  }
+
+  @Test
+  void hotKeyBbrRateLimiterIsCreatedWithCorrectProperties() {
+    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
+    HotKeyProperties properties = new HotKeyProperties();
+
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
+      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    BbrRateLimiter limiter = config.hotKeyBbrRateLimiter(cpuMonitor, properties);
+
+    assertThat(limiter).isNotNull();
+  }
+
+  @Test
+  void hotKeyReporterAcceptsBbrRateLimiterViaProvider() {
+    ReportPublisher reportPublisher = mock(ReportPublisher.class);
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+    HotKeyProperties properties = new HotKeyProperties();
+    RingManager ringManager = new RingManager(150);
+    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
+    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
+
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
+      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyReporter reporter = config.hotKeyReporter(
+      reportPublisher, scheduler, properties, ringManager, healthViewProvider, bbrProvider
+    );
+
+    assertThat(reporter).isNotNull();
+  }
+
+  // ── SyncConfiguration remaining beans ──
+
+  @Test
+  void cacheSyncPublisherIsCreatedWithAllDependencies() {
+    RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
+    CacheSyncProperties props = new CacheSyncProperties();
+
+    HotKeyAmqpAutoConfiguration.SyncConfiguration config =
+      new HotKeyAmqpAutoConfiguration.SyncConfiguration();
+    CacheSyncPublisher publisher = config.cacheSyncPublisher(rabbitTemplate, props);
+
+    assertThat(publisher).isNotNull();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void hotKeyRedisLoaderIsCreated() {
+    org.springframework.data.redis.core.StringRedisTemplate redisTemplate =
+      mock(org.springframework.data.redis.core.StringRedisTemplate.class);
+
+    HotKeyAmqpAutoConfiguration.SyncConfiguration config =
+      new HotKeyAmqpAutoConfiguration.SyncConfiguration();
+    Function<String, Object> loader = config.hotKeyRedisLoader(redisTemplate);
+
+    assertThat(loader).isNotNull();
+  }
+
+  @Test
+  void syncListenerContainerIsCreatedWithCorrectProperties() {
+    ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
+    CacheSyncListener cacheSyncListener = mock(CacheSyncListener.class);
+    CacheSyncProperties props = new CacheSyncProperties();
+
+    HotKeyAmqpAutoConfiguration.SyncConfiguration config =
+      new HotKeyAmqpAutoConfiguration.SyncConfiguration();
+    SimpleMessageListenerContainer container =
+      config.syncListenerContainer(connectionFactory, cacheSyncListener, props);
+
+    assertThat(container).isNotNull();
+    assertThat(container.getQueueNames()).containsExactly(props.getQueueName());
+  }
+
+  // ── WorkerListenerConfiguration remaining beans ──
+
+  @Test
+  void hotkeyHeartbeatExchangeIsCreatedWithCorrectProperties() {
+    HotKeyProperties properties = new HotKeyProperties();
+    properties.getHeartbeat().setExchangeName("test.heartbeat.exchange");
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    TopicExchange exchange = config.hotkeyHeartbeatExchange(properties);
+
+    assertThat(exchange).isNotNull();
+    assertThat(exchange.getName()).isEqualTo("test.heartbeat.exchange");
+    assertThat(exchange.isDurable()).isTrue();
+    assertThat(exchange.isAutoDelete()).isFalse();
+  }
+
+  @Test
+  void hotkeyHeartbeatQueueIsCreated() {
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    Queue queue = config.hotkeyHeartbeatQueue();
+
+    assertThat(queue).isNotNull();
+    assertThat(queue.getName()).startsWith("hotkey.heartbeat:");
+    assertThat(queue.isDurable()).isFalse();
+    assertThat(queue.isAutoDelete()).isTrue();
+  }
+
+  @Test
+  void hotkeyHeartbeatBindingBindsQueueToExchange() {
+    Queue queue = new Queue("hq");
+    TopicExchange exchange = new TopicExchange("he");
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    Binding binding = config.hotkeyHeartbeatBinding(queue, exchange);
+
+    assertThat(binding).isNotNull();
+    assertThat(binding.getDestination()).isEqualTo("hq");
+    assertThat(binding.getExchange()).isEqualTo("he");
+    assertThat(binding.getRoutingKey()).isEqualTo(io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT + "*");
+  }
+
+  @Test
+  void clusterHealthViewIsCreatedWithCorrectProperties() {
+    RingManager ringManager = mock(RingManager.class);
+    HotKeyProperties properties = new HotKeyProperties();
+    properties.getHeartbeat().setTimeoutMs(5000);
+    properties.getHeartbeat().setDegradeAfterFailures(3);
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    ClusterHealthView healthView = config.clusterHealthView(ringManager, properties);
+
+    assertThat(healthView).isNotNull();
+  }
+
+  @Test
+  void heartbeatContainerIsCreated() {
+    ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
+    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    Queue heartbeatQueue = new Queue("hotkey.heartbeat:test");
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    SimpleMessageListenerContainer container =
+      config.heartbeatContainer(connectionFactory, healthView, heartbeatQueue);
+
+    assertThat(container).isNotNull();
+    assertThat(container.getQueueNames()).containsExactly("hotkey.heartbeat:test");
+  }
+
+  @Test
+  void workerListenerContainerIsCreated() {
+    ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
+    Queue workerQueue = new Queue("hotkey.worker:test");
+    WorkerListener workerListener = mock(WorkerListener.class);
+    WorkerListenerProperties props = new WorkerListenerProperties();
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    SimpleMessageListenerContainer container =
+      config.workerListenerContainer(connectionFactory, workerQueue, workerListener, props);
+
+    assertThat(container).isNotNull();
+    assertThat(container.getQueueNames()).containsExactly("hotkey.worker:test");
+  }
+
+  @Test
+  void workerHeartbeatVerifierIsCreated() {
+    RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
+    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    HotKeyProperties properties = new HotKeyProperties();
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    WorkerHeartbeatVerifier verifier =
+      config.workerHeartbeatVerifier(rabbitTemplate, healthView, properties, scheduler);
+
+    assertThat(verifier).isNotNull();
+  }
+
+  // ── Conditional configuration skip tests ──
+
+  @Test
+  void allConfigSkippedWhenRabbitTemplateClassNotPresent() {
+    new ApplicationContextRunner()
+      .withConfiguration(AutoConfigurations.of(HotKeyAmqpAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx).doesNotHaveBean(ReportPublisher.class);
+        assertThat(ctx).doesNotHaveBean(CacheSyncPublisher.class);
+        assertThat(ctx).doesNotHaveBean(WorkerListener.class);
+      });
+  }
+
+  @Test
+  void workerListenerConfigRequiresRedisTemplateBean() {
+    new ApplicationContextRunner()
+      .withConfiguration(AutoConfigurations.of(HotKeyAmqpAutoConfiguration.class))
+      .withPropertyValues("hotkey.worker-listener.enabled=true")
+      .run(ctx -> {
+        assertThat(ctx).doesNotHaveBean(WorkerListener.class);
+      });
+  }
+
+  @Test
+  void reportBbrRateLimiterSkippedWhenLocalReporterDisabled() {
+    new ApplicationContextRunner()
+      .withConfiguration(AutoConfigurations.of(HotKeyAmqpAutoConfiguration.class))
+      .withPropertyValues("hotkey.local.reporter.enabled=false")
+      .run(ctx -> {
+        assertThat(ctx).doesNotHaveBean(BbrRateLimiter.class);
+      });
+  }
+
+  @Test
+  void workerSreRateLimiterSkippedWhenSreDisabled() {
+    new ApplicationContextRunner()
+      .withConfiguration(AutoConfigurations.of(HotKeyAmqpAutoConfiguration.class))
+      .withPropertyValues("hotkey.worker-listener.sre.enabled=false")
+      .run(ctx -> {
+        assertThat(ctx).doesNotHaveBean(SreRateLimiter.class);
+      });
+  }
 }

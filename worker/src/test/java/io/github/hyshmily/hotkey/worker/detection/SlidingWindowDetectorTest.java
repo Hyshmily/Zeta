@@ -18,7 +18,9 @@ package io.github.hyshmily.hotkey.worker.detection;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
@@ -302,6 +304,40 @@ class SlidingWindowDetectorTest {
     Thread.sleep(1);
     detector.evictStale(3600_000); // 1 hour stale timeout — key is far newer
     assertThat(detector.getActiveKeyCount()).isOne();
+  }
+
+  /**
+   * Verifies that {@code evictStale} cleans up orphaned entries in
+   * {@code lastAccessTime} whose corresponding window array has been removed
+   * (line 215 of the source).  This path is normally exercised by the
+   * race-condition guard inside {@code windows.compute()}, but we simulate it
+   * directly by injecting a dangling timestamp via reflection.
+   *
+   * <p>A normal key is also added via {@code addCount} to exercise the
+   * {@code false} branch of the {@code removeIf} predicate (keys that are
+   * in both {@code lastAccessTime} and {@code windows} must not be removed).
+   */
+  @Test
+  void evictStale_shouldCleanupOrphanedLastAccessTimeEntries() throws Exception {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
+
+    // Add a normal key that IS in windows — exercises the false branch of removeIf.
+    detector.addCount("normal", 1);
+
+    Field latField = SlidingWindowDetector.class.getDeclaredField("lastAccessTime");
+    latField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Map<String, Long> lastAccessTime = (Map<String, Long>) latField.get(detector);
+
+    // Inject a key that exists only in lastAccessTime, not in windows.
+    lastAccessTime.put("orphan", System.currentTimeMillis() - 100_000);
+
+    // Call evictStale with a stale timeout large enough that "orphan" is NOT a
+    // candidate for the normal eviction path.  Line 215 will still clean it up.
+    detector.evictStale(3600_000);
+
+    assertThat(lastAccessTime).doesNotContainKey("orphan");
+    assertThat(lastAccessTime).containsKey("normal");
   }
 
   /**

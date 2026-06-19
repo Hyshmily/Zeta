@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -256,6 +257,28 @@ class BufferedCounterTest {
     counter.destroy();
     // Long.MIN_VALUE is negative, filtered out during drain
     assertThat(batches).isEmpty();
+  }
+
+  /**
+   * Verifies that {@code destroy()} with a shared (externally-provided) scheduler does NOT
+   * shut down the scheduler ({@code ownsScheduler=false} branch).
+   */
+  @Test
+  void destroy_withSharedScheduler_shouldNotShutdownScheduler() {
+    ScheduledExecutorService shared = Executors.newSingleThreadScheduledExecutor();
+    try {
+      List<Map<String, Long>> sharedBatches = new ArrayList<>();
+      BufferedCounter sharedCounter = new BufferedCounter(sharedBatches::add, shared);
+
+      sharedCounter.count("key1", 1);
+      sharedCounter.destroy();
+
+      assertThat(shared.isShutdown()).isFalse();
+      assertThat(sharedBatches).hasSize(1);
+      assertThat(sharedBatches.get(0)).containsEntry("key1", 1L);
+    } finally {
+      shared.shutdown();
+    }
   }
 
   @Test

@@ -345,4 +345,30 @@ class SingleFlightTest {
     );
     assertThat(smallPool.estimatedInflightSize()).isNotNegative();
   }
+
+  /**
+   * Verifies that when a supplier throws with an {@link InterruptedException} cause,
+   * the {@code exceptionally} handler's cancel branch is exercised and the result is empty.
+   */
+  @Test
+  void load_withInterruptedExceptionCause_shouldReturnEmpty() {
+    Optional<String> result = singleFlight.load("interrupt-key", () -> {
+      throw new RuntimeException(new InterruptedException("simulated"));
+    });
+    assertThat(result).isEmpty();
+  }
+
+  /**
+   * Verifies that after an {@link InterruptedException} path, a subsequent load for the same key
+   * retries the supplier (entry was invalidated).
+   */
+  @Test
+  void load_afterInterruptedException_shouldRetry() {
+    assertThat(singleFlight.load("retry-key", () -> {
+      throw new RuntimeException(new InterruptedException("simulated"));
+    })).isEmpty();
+
+    Optional<String> result = singleFlight.load("retry-key", () -> "success");
+    assertThat(result).contains("success");
+  }
 }

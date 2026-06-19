@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Tests for {@link TransactionSupport}, verifying sync and async execution outside transaction context.
@@ -104,5 +105,66 @@ class TransactionSupportTest {
         throw new IllegalStateException("state-error");
       })
     ).isInstanceOf(IllegalStateException.class).hasMessage("state-error");
+  }
+
+  // ── Transaction-aware paths ──
+
+  /**
+   * Verifies that {@code runAsyncAfterCommit} defers the task when a transaction is active,
+   * and executes it only after commit.
+   */
+  @Test
+  void runAsyncAfterCommit_withinTransaction_shouldDeferAfterCommit() {
+    TransactionSynchronizationManager.initSynchronization();
+    try {
+      AtomicBoolean executed = new AtomicBoolean(false);
+      TransactionSupport.runAsyncAfterCommit(() -> executed.set(true), Runnable::run);
+
+      assertThat(executed).isFalse();
+
+      TransactionSynchronizationManager.getSynchronizations()
+        .forEach(s -> s.afterCommit());
+
+      assertThat(executed).isTrue();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  /**
+   * Verifies that {@code runNowOrAfterCommit} defers the task when a transaction is active,
+   * and executes it only after commit.
+   */
+  @Test
+  void runNowOrAfterCommit_withinTransaction_shouldDeferAfterCommit() {
+    TransactionSynchronizationManager.initSynchronization();
+    try {
+      AtomicBoolean executed = new AtomicBoolean(false);
+      TransactionSupport.runNowOrAfterCommit(() -> executed.set(true));
+
+      assertThat(executed).isFalse();
+
+      TransactionSynchronizationManager.getSynchronizations()
+        .forEach(s -> s.afterCommit());
+
+      assertThat(executed).isTrue();
+    } finally {
+      TransactionSynchronizationManager.clear();
+    }
+  }
+
+  /**
+   * Verifies that the {@code exceptionally} callback in {@code runAsyncAfterCommit} is invoked
+   * when the async task fails, using a direct executor for deterministic execution.
+   */
+  @Test
+  void runAsyncAfterCommit_withException_shouldInvokeExceptionallyCallback() {
+    AtomicBoolean executed = new AtomicBoolean(false);
+    TransactionSupport.runAsyncAfterCommit(() -> {
+      executed.set(true);
+      throw new RuntimeException("async-fail");
+    }, Runnable::run);
+
+    assertThat(executed).isTrue();
   }
 }

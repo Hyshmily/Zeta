@@ -23,6 +23,7 @@ import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
 import io.github.hyshmily.hotkey.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.hotkey.worker.ingest.ReportConsumer;
+import io.github.hyshmily.hotkey.worker.persistence.TopKPersistService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -42,6 +43,7 @@ import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -307,6 +309,165 @@ class WorkerAutoConfigurationTest {
   }
 
   /**
+   * Verifies that the {@code workerTopK} HeavyKeeper bean is created.
+   */
+  @Test
+  @DisplayName("should create workerTopK bean")
+  void shouldCreateWorkerTopKBean() {
+    runner.run(ctx -> assertThat(ctx).hasBean("workerTopK"));
+  }
+
+  /**
+   * Verifies that the shard-specific {@code reportQueue} bean is created with the
+   * correct name prefix.
+   */
+  @Test
+  @DisplayName("should create reportQueue bean with correct name prefix")
+  void shouldCreateReportQueueBean() {
+    runner.run(ctx -> {
+      Queue queue = ctx.getBean("reportQueue", Queue.class);
+      assertThat(queue.getName()).startsWith("hotkey.report.");
+    });
+  }
+
+  /**
+   * Verifies that the {@code reportBinding} bean binds the report queue to the
+   * report exchange.
+   */
+  @Test
+  @DisplayName("should create reportBinding bean")
+  void shouldCreateReportBindingBean() {
+    runner.run(ctx -> assertThat(ctx).hasBean("reportBinding"));
+  }
+
+  /**
+   * Verifies that the {@code workerConfigBinding} bean binds the worker config
+   * queue to the heartbeat exchange.
+   */
+  @Test
+  @DisplayName("should create workerConfigBinding bean")
+  void shouldCreateWorkerConfigBindingBean() {
+    runner.run(ctx -> assertThat(ctx).hasBean("workerConfigBinding"));
+  }
+
+  /**
+   * Verifies the {@link WorkerConfigNegotiator} bean is created with its
+   * required dependencies.
+   */
+  @Test
+  @DisplayName("should create WorkerConfigNegotiator bean")
+  void shouldCreateWorkerConfigNegotiatorBean() {
+    runner.run(ctx -> assertThat(ctx).hasBean("workerConfigNegotiator"));
+  }
+
+  /**
+   * Verifies the {@code verifyPingContainer} bean (a
+   * {@link org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer})
+   * is created for the verification PING/PONG protocol.
+   */
+  @Test
+  @DisplayName("should create verifyPingContainer bean")
+  void shouldCreateVerifyPingContainerBean() {
+    runner.run(ctx -> assertThat(ctx).hasBean("verifyPingContainer"));
+  }
+
+  /**
+   * Verifies that the {@code thresholdLearningTask} placeholder bean is created
+   * by the auto-configuration.
+   */
+  @Test
+  @DisplayName("should create thresholdLearningTask bean")
+  void shouldCreateThresholdLearningTaskBean() {
+    runner.run(ctx -> assertThat(ctx).hasBean("thresholdLearningTask"));
+  }
+
+  /**
+   * Verifies the {@link io.github.hyshmily.hotkey.worker.dispatch.WorkerHeartbeatProducer}
+   * bean is created with all its dependencies.
+   */
+  @Test
+  @DisplayName("should create WorkerHeartbeatProducer bean")
+  void shouldCreateWorkerHeartbeatProducerBean() {
+    runner.run(ctx -> assertThat(ctx).hasBean("workerHeartbeatProducer"));
+  }
+
+  /**
+   * Verifies that {@code TopKValidationTask.validate()} does not propagate
+   * exceptions thrown by the underlying {@link TopKValidator}.
+   */
+  @Test
+  @DisplayName("TopKValidationTask.validate should catch exceptions from TopKValidator")
+  void topKValidationTaskShouldCatchExceptionsFromValidator() {
+    TopKValidator validator = Mockito.mock(TopKValidator.class);
+    Mockito.doThrow(new RuntimeException("validation failed"))
+      .when(validator).validate();
+
+    WorkerAutoConfiguration.TopKValidationTask task =
+      new WorkerAutoConfiguration.TopKValidationTask(validator);
+    assertThatCode(task::validate).doesNotThrowAnyException();
+  }
+
+  /**
+   * Verifies that {@code EvictStaleTask.evictStale()} does not propagate
+   * exceptions thrown by the underlying {@link SlidingWindowDetector}.
+   */
+  @Test
+  @DisplayName("EvictStaleTask.evictStale should catch exceptions from detector")
+  void evictStaleTaskShouldCatchExceptionsFromDetector() {
+    SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
+    HotKeyStateMachine stateMachine = Mockito.mock(HotKeyStateMachine.class);
+    WorkerProperties properties = new WorkerProperties();
+    Mockito.doThrow(new RuntimeException("eviction failed"))
+      .when(detector).evictStale(Mockito.anyLong());
+
+    WorkerAutoConfiguration.EvictStaleTask task =
+      new WorkerAutoConfiguration.EvictStaleTask(detector, stateMachine, properties);
+    assertThatCode(task::evictStale).doesNotThrowAnyException();
+  }
+
+  /**
+   * Verifies that {@code validateWindowConfig} does not log a warning when
+   * {@code slidingWindow.durationMs} is evenly divisible by {@code windowSlices}.
+   */
+  @Test
+  @DisplayName("validateWindowConfig should not warn when duration is evenly divisible by slices")
+  void validateWindowConfigShouldNotWarnWhenEvenlyDivisible() {
+    assertThatCode(() ->
+      new ApplicationContextRunner()
+        .withPropertyValues(
+          "hotkey.worker.enabled=true",
+          "hotkey.worker.sliding-window.duration-ms=1000",
+          "hotkey.worker.sliding-window.slices=10"
+        )
+        .withUserConfiguration(MinimalMockConfiguration.class)
+        .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+        .run(ctx -> ctx.getBean(SlidingWindowDetector.class))
+    ).doesNotThrowAnyException();
+  }
+
+  /**
+   * Verifies that persistence-related beans ({@link TopKPersistService} and
+   * {@code topKPersistTask}) are created when
+   * {@code hotkey.worker.persistence.enabled=true} and
+   * {@link org.springframework.data.redis.core.StringRedisTemplate} is available.
+   */
+  @Test
+  @DisplayName("should create persistence beans when persistence enabled")
+  void shouldCreatePersistenceBeansWhenEnabled() {
+    new ApplicationContextRunner()
+      .withPropertyValues(
+        "hotkey.worker.enabled=true",
+        "hotkey.worker.persistence.enabled=true"
+      )
+      .withUserConfiguration(MinimalMockConfigurationWithPersistence.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx).hasSingleBean(TopKPersistService.class);
+        assertThat(ctx).hasBean("topKPersistTask");
+      });
+  }
+
+  /**
    * Minimal configuration providing mocked RabbitTemplate, ConnectionFactory, and
    * the shared scheduler for the context runner.
    */
@@ -331,6 +492,20 @@ class WorkerAutoConfigurationTest {
     @Bean("hotKeyScheduler")
     ScheduledExecutorService hotKeyScheduler() {
       return Executors.newSingleThreadScheduledExecutor();
+    }
+  }
+
+  /**
+   * Extends {@link MinimalMockConfiguration} with a mocked
+   * {@link org.springframework.data.redis.core.StringRedisTemplate} so that
+   * {@link TopKPersistService} can be created when persistence is enabled.
+   */
+  @Configuration
+  static class MinimalMockConfigurationWithPersistence extends MinimalMockConfiguration {
+
+    @Bean
+    StringRedisTemplate stringRedisTemplate() {
+      return org.mockito.Mockito.mock(StringRedisTemplate.class);
     }
   }
 }

@@ -27,6 +27,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -175,5 +176,19 @@ class TopKValidatorTest {
     validator.validate();
     validator.validate();
     verify(broadcaster).broadcastHot(eq("zeroKey"), any());
+  }
+
+  /**
+   * Triggers the periodic monitoring log that fires every 10 validation cycles
+   * ({@code ++validationCount % 10 == 0}).  Verifies that the validator survives
+   * repeated calls without throwing.
+   */
+  @Test
+  void validate_shouldLogStatsEvery10Cycles() {
+    when(topK.listTopN(5)).thenReturn(List.of());
+    for (int i = 0; i < 12; i++) {
+      assertThatCode(() -> validator.validate()).doesNotThrowAnyException();
+    }
+    verify(topK, times(12)).listTopN(5);
   }
 }

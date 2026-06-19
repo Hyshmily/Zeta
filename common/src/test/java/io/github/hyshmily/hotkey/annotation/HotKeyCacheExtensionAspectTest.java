@@ -99,8 +99,9 @@ class HotKeyCacheExtensionAspectTest {
       return "result-" + id;
     }
 
-    @Cacheable(cacheNames = "test", key = "#p0")
-    @HotKeyCacheTTL(hardTtlMs = 5000)
+  @Cacheable(cacheNames = "test", key = "#p0")
+  @HotKeyCacheTTL(hardTtlMs = 5000)
+
     public String findWithTtl(String id) {
       return "result-" + id;
     }
@@ -146,6 +147,66 @@ class HotKeyCacheExtensionAspectTest {
     @Cacheable(cacheNames = "test", key = "#p0")
     public String findThrowingNoFallback(String id) {
       throw new RuntimeException("from-method");
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Fallback
+    public String findThrowingNoFallbackMethod(String id) {
+      throw new RuntimeException("error");
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Fallback
+    public String findThrowingFallbackMethod(String id) {
+      throw new RuntimeException("from-method");
+    }
+
+    public String findThrowingFallbackMethodFallback(String id) {
+      throw new IllegalArgumentException("fallback-threw");
+    }
+  }
+
+  static class NoArgService {
+    @Cacheable(cacheNames = "test")
+    public String find() {
+      return "no-arg";
+    }
+  }
+
+  static class MultiArgService {
+    @Cacheable(cacheNames = "test")
+    public String find(String a, String b) {
+      return a + b;
+    }
+  }
+
+  static class ArrayArgService {
+    @Cacheable(cacheNames = "test")
+    public String find(String[] ids) {
+      return "array";
+    }
+  }
+
+  static class SpelFallbackService {
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Intercept
+    @Fallback("'spel-fallback-value'")
+    public String find(String id) {
+      return "result-" + id;
+    }
+  }
+
+  static class BaseFallbackService {
+    public String findFallback(String id) {
+      return "base-fallback-" + id;
+    }
+  }
+
+  static class DerivedFallbackService extends BaseFallbackService {
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Fallback
+    public String find(String id) {
+      throw new RuntimeException("error");
     }
   }
 
@@ -583,5 +644,215 @@ class HotKeyCacheExtensionAspectTest {
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
 
     aspect.aroundCacheable(pjp, cacheable);
+  }
+
+  // ── resolveKey: empty expression with 0 args ──
+
+  @Test
+  @DisplayName("resolveKey with empty expression and 0 args returns 'empty'")
+  void resolveKey_emptyExpressionWithNoArgs() throws Throwable {
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.value()).thenReturn(new String[0]);
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[0]);
+    when(pjp.proceed()).thenReturn("ok");
+
+    aspect.aroundCacheable(pjp, cacheable);
+    verify(pjp).proceed();
+  }
+
+  @Test
+  @DisplayName("resolveKey with empty expression and multiple args returns SimpleKey")
+  void resolveKey_emptyExpressionWithMultipleArgs() throws Throwable {
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.value()).thenReturn(new String[0]);
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"a", "b"});
+    when(pjp.proceed()).thenReturn("ok");
+
+    aspect.aroundCacheable(pjp, cacheable);
+    verify(pjp).proceed();
+  }
+
+  @Test
+  @DisplayName("resolveKey with empty expression and single null arg returns SimpleKey")
+  void resolveKey_emptyExpressionWithSingleNullArg() throws Throwable {
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.value()).thenReturn(new String[0]);
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {null});
+    when(pjp.proceed()).thenReturn("ok");
+
+    aspect.aroundCacheable(pjp, cacheable);
+    verify(pjp).proceed();
+  }
+
+  @Test
+  @DisplayName("resolveKey with empty expression and single array arg returns SimpleKey")
+  void resolveKey_emptyExpressionWithArrayArg() throws Throwable {
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.value()).thenReturn(new String[0]);
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {new String[] {"x"}});
+    when(pjp.proceed()).thenReturn("ok");
+
+    aspect.aroundCacheable(pjp, cacheable);
+    verify(pjp).proceed();
+  }
+
+  // ── resolveMethod: interface method with NoSuchMethodException ──
+
+  @Test
+  @DisplayName("resolveMethod keeps interface method when getMethod throws NoSuchMethodException")
+  void resolveMethod_keepsInterfaceMethodWhenNoSuchMethod() throws Throwable {
+    Method interfaceMethod = TestInterface.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.value()).thenReturn(new String[0]);
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    when(signature.getMethod()).thenReturn(interfaceMethod);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new Object());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    aspect.aroundCacheable(pjp, cacheable);
+    verify(pjp).proceed();
+  }
+
+  // ── resolveFallback with non-empty SpEL expression ──
+
+  @Test
+  @DisplayName("@Intercept with hot key and @Fallback with SpEL expression returns evaluated fallback")
+  void interceptWithHotKeyAndSpelFallback_returnsFallback() throws Throwable {
+    Method method = SpelFallbackService.class.getMethod("find", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new SpelFallbackService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+
+    when(hotKey.isLocalHotKey("test::myId")).thenReturn(true);
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("spel-fallback-value");
+    verify(pjp, never()).proceed();
+  }
+
+  // ── invokeFallbackMethod when null ──
+
+  @Test
+  @DisplayName("when method throws and @Fallback has no matching method, returns null")
+  void methodThrowsWithFallbackButNoMethod_returnsNull() throws Throwable {
+    Method method = TestService.class.getMethod("findThrowingNoFallbackMethod", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenThrow(new RuntimeException("error"));
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isNull();
+  }
+
+  // ── findFallbackMethod superclass search ──
+
+  @Test
+  @DisplayName("findFallbackMethod searches superclass when method not found on target class")
+  void fallbackMethod_searchesSuperclass() throws Throwable {
+    Method method = DerivedFallbackService.class.getMethod("find", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new DerivedFallbackService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenThrow(new RuntimeException("error"));
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("base-fallback-myId");
+  }
+
+  // ── InvocationTargetException from fallback method ──
+
+  @Test
+  @DisplayName("when fallback method itself throws, InvocationTargetException is unwrapped and propagated")
+  void fallbackMethodThrowing_throwsUnwrappedCause() throws Throwable {
+    Method method = TestService.class.getMethod("findThrowingFallbackMethod", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenThrow(new RuntimeException("original-error"));
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    assertThatThrownBy(() -> aspect.aroundCacheable(pjp, cacheable))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessage("fallback-threw");
   }
 }

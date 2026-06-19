@@ -453,6 +453,158 @@ class HeavyKeeperTest {
     assertThat(hk.total()).isEqualTo(1);
   }
 
+  // ── Fingerprint collision paths in addDirect(String, int) ──
+
+  @Test
+  void addDirect_withCollisionAndDecaySubtracts_shouldDecrement() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100);
+    hk.addDirect("key1", 10);
+    hk.addDirect("key2", 5);
+    assertThat(hk.contains("key2")).isTrue();
+  }
+
+  @Test
+  void addDirect_withCollisionAndDecayReplaces_shouldReplaceFingerprint() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 1.0, 1, 100);
+    hk.addDirect("key1", 5);
+    hk.addDirect("key2", 10);
+    assertThat(hk.contains("key1")).isTrue();
+    assertThat(hk.contains("key2")).isTrue();
+  }
+
+  @Test
+  void addDirect_withCollisionAndCountAboveLookup_shouldUseMaxLookupEntry() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100);
+    for (int i = 0; i < 300; i++) {
+      hk.addDirect("key1", 1);
+    }
+    hk.addDirect("key2", 10);
+    assertThat(hk.contains("key2")).isTrue();
+  }
+
+  // ── sampleBinomial edge cases through collision path ──
+
+  @Test
+  void addDirect_withCollisionAndZeroIncrement_shouldHandle() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100);
+    hk.addDirect("key1", 10);
+    AddResult result = hk.addDirect("key2", 0);
+    assertThat(result).isNotNull();
+    assertThat(hk.total()).isEqualTo(10);
+  }
+
+  @Test
+  void addDirect_withCollisionAndLargeIncrement_shouldUseNormalApproximation() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100);
+    hk.addDirect("key1", 1);
+    AddResult result = hk.addDirect("key2", 200);
+    assertThat(result.isHotKey()).isTrue();
+  }
+
+  @Test
+  void addDirect_withCollisionAndMediumIncrement_shouldUseFallbackLoop() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100);
+    hk.addDirect("key1", 1);
+    AddResult result = hk.addDirect("key2", 20);
+    assertThat(result.isHotKey()).isTrue();
+  }
+
+  // ── addDirect(Map) edge cases ──
+
+  @Test
+  void addDirectMap_whenKeyBelowMinCount_shouldSkip() {
+    HeavyKeeper hk = new HeavyKeeper(3, 100, 4, 0.9, 50, 100);
+    Map<String, Long> map = new HashMap<>();
+    map.put("high", 100L);
+    map.put("low", 10L);
+    List<AddResult> results = hk.addDirect(map);
+    boolean hasHigh = results.stream().anyMatch(r -> "high".equals(r.currentKey()));
+    boolean hasLow = results.stream().anyMatch(r -> "low".equals(r.currentKey()));
+    assertThat(hasHigh).isTrue();
+    assertThat(hasLow).isFalse();
+  }
+
+  @Test
+  void addDirectMap_whenKeyNotHotEnough_shouldNotInsert() {
+    HeavyKeeper hk = new HeavyKeeper(3, 100000, 4, 0.9, 1, 100);
+    hk.addDirect("a", 100);
+    hk.addDirect("b", 100);
+    hk.addDirect("c", 100);
+    Map<String, Long> map = new HashMap<>();
+    map.put("d", 5L);
+    List<AddResult> results = hk.addDirect(map);
+    assertThat(results).isEmpty();
+    assertThat(hk.contains("d")).isFalse();
+  }
+
+  @Test
+  void addDirectMap_withCollisionInAddToSketch_shouldHandle() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.0, 1, 100);
+    Map<String, Long> map = new HashMap<>();
+    map.put("key1", 10L);
+    map.put("key2", 5L);
+    List<AddResult> results = hk.addDirect(map);
+    assertThat(results).hasSize(2);
+  }
+
+  @Test
+  void addDirectMap_withExistingKeyInHeap_shouldRemoveOldNode() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1000, 4, 0.9, 1, 100);
+    hk.addDirect("k", 50);
+    Map<String, Long> map = new HashMap<>();
+    map.put("k", 10L);
+    map.put("other", 100L);
+    List<AddResult> results = hk.addDirect(map);
+    assertThat(results).hasSize(2);
+    assertThat(hk.contains("k")).isTrue();
+  }
+
+  @Test
+  void addDirectMap_withExpelledQueueFull_shouldLogWarning() {
+    HeavyKeeper hk = new HeavyKeeper(1, 1000, 4, 0.9, 1, 1);
+    hk.addDirect("first", 100);
+    hk.addDirect("second", 200);
+    Map<String, Long> map = new HashMap<>();
+    map.put("third", 300L);
+    List<AddResult> results = hk.addDirect(map);
+    assertThat(results).hasSize(1);
+    assertThat(results.get(0).currentKey()).isEqualTo("third");
+  }
+
+  @Test
+  void addDirectMap_withExistingKeyCollisionInAddToSketch_shouldHandle() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1000, 4, 0.9, 1, 100);
+    hk.addDirect("k", 10);
+    Map<String, Long> map = new HashMap<>();
+    map.put("k", 5L);
+    List<AddResult> results = hk.addDirect(map);
+    String ks = results.stream().filter(r -> "k".equals(r.currentKey())).findFirst().map(AddResult::currentKey).orElse("");
+    assertThat(results).isNotEmpty();
+  }
+
+  @Test
+  void addDirectMap_withCollisionCountAboveLookup_shouldUseMaxLookup() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100);
+    for (int i = 0; i < 300; i++) {
+      hk.addDirect("key1", 1);
+    }
+    Map<String, Long> map = new HashMap<>();
+    map.put("key2", 10L);
+    List<AddResult> results = hk.addDirect(map);
+    assertThat(results).isNotEmpty();
+  }
+
+  @Test
+  void addDirectMap_withCollisionAndDecayReplacesFingerprint_shouldReplace() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 1.0, 1, 100);
+    hk.addDirect("key1", 5);
+    Map<String, Long> map = new HashMap<>();
+    map.put("key2", 10L);
+    List<AddResult> results = hk.addDirect(map);
+    assertThat(results).isNotEmpty();
+    assertThat(hk.contains("key2")).isTrue();
+  }
+
   @Test
   void fading_withConcurrentAddDirect_shouldNotDeadlock() throws InterruptedException {
     HeavyKeeper preloaded = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1);

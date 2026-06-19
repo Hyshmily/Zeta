@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.worker.dispatch;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -28,6 +29,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
@@ -40,6 +42,7 @@ import org.mockito.MockedConstruction;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -264,6 +267,67 @@ class WorkerHeartbeatProducerTest {
       var scheduler = (ScheduledExecutorService) ReflectionTestUtils.getField(producer, "scheduler");
       assertThat(scheduler).isNotNull();
       assertThat(scheduler.isShutdown()).isTrue();
+    }
+  }
+
+  /**
+   * {@code stop()} cancels the scheduled task when {@code heartbeatTask} is
+   * non-null (i.e., the producer was started).  Also shuts down the scheduler.
+   */
+  @Test
+  void stop_shouldCancelHeartbeatTaskWhenRunning() {
+    var schedulerMock = mock(ScheduledExecutorService.class);
+    when(schedulerMock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any()))
+      .thenReturn(mock(ScheduledFuture.class));
+
+    try (var executorsMock = mockStatic(Executors.class);
+         var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
+      executorsMock.when(() -> Executors.newSingleThreadScheduledExecutor(any())).thenReturn(schedulerMock);
+
+      var producer = newProducer();
+      producer.start();
+      // heartbeatTask is now non-null; stop() must cancel it and shut down
+      assertThatCode(producer::stop).doesNotThrowAnyException();
+    }
+  }
+
+  /**
+   * Tests the first public constructor (9-param with {@link RedisConnectionFactory}
+   * and {@link ScheduledExecutorService}).  This constructor is called by
+   * auto-configuration and sets {@code ownsScheduler = false}.  Verifies that
+   * {@code stop()} does <em>not</em> shut down the externally-owned scheduler.
+   */
+  @Test
+  void constructorWithExternalScheduler_shouldNotShutdownSchedulerOnStop() {
+    var schedulerMock = mock(ScheduledExecutorService.class);
+    when(schedulerMock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any()))
+      .thenReturn(mock(ScheduledFuture.class));
+    var redisFactoryMock = mock(RedisConnectionFactory.class);
+    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
+      var producer = new WorkerHeartbeatProducer(
+        rabbitTemplate, HB_EXCHANGE, WORKER_ID,
+        stateMachine, broadcaster, configTimestampCounter,
+        redisFactoryMock, PING_INTERVAL_MS, schedulerMock
+      );
+      producer.start();
+      producer.stop();
+      verify(schedulerMock, never()).shutdown();
+    }
+  }
+
+  /**
+   * Using the real executor (via the 7-param constructor), {@code start()}
+   * schedules the heartbeat task.  The {@code ScheduledThreadPoolExecutor}
+   * creates a daemon thread through the thread-factory lambda, exercises the
+   * thread-factory body, and the new thread executes {@code sendHeartbeat}.
+   */
+  @Test
+  void start_shouldInvokeThreadFactoryViaRealExecutor() {
+    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
+      var producer = newProducer();
+      producer.start();
+      verify(rabbitTemplate, timeout(2000)).send(anyString(), anyString(), any());
+      producer.stop();
     }
   }
 
