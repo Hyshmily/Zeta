@@ -149,25 +149,41 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 
 #### Worker 节点（独立部署）— JAR / Docker
 
-Worker 是独立 Spring Boot 应用（不发布到 Maven Central）。单独构建部署：
+Worker 是独立 Spring Boot 应用（不发布到 Maven Central）。预构建镜像托管在 GHCR。
+
+**前置条件：** 使用具备 `read:packages` 权限的 GitHub PAT 登录：
 
 ```bash
-# 构建 Worker JAR
-mvn clean package -pl worker
+echo $PAT | docker login ghcr.io -u hyshmily --password-stdin
+```
 
-# 直接运行
-java -jar worker/target/hotkey-worker-1.1.5-SNAPSHOT.jar
+**通过 docker compose 全栈启动**（含 Redis + RabbitMQ）：
 
-# 或通过 Docker
-docker build -t hotkey-worker:1.1.5-SNAPSHOT ./worker/
+```bash
+docker compose -f worker/docker-compose.yml up -d
+```
+
+**扩缩容多个 Worker 实例：**
+
+```bash
+docker compose -f worker/docker-compose.yml up -d --scale worker=3
+```
+
+**单独运行**（外部 Redis + RabbitMQ）：
+
+```bash
 docker run -d --name hotkey-worker -p 8080:8080 \
   -e SPRING_RABBITMQ_HOST=rabbitmq \
   -e SPRING_DATA_REDIS_HOST=redis \
   -e HOTKEY_WORKER_ENABLED=true \
-  hotkey-worker:1.1.5-SNAPSHOT
+  ghcr.io/hyshmily/hotkey-worker:1.1.5-SNAPSHOT
+```
 
-# 或通过 docker compose 全栈启动
-docker compose -f worker/docker-compose.yml up -d --scale worker=3
+**直接运行 JAR**（无需 Docker）：
+
+```bash
+mvn clean package -pl worker
+java -jar worker/target/hotkey-worker-1.1.5-SNAPSHOT.jar
 ```
 
 > Worker 由 `worker/` 模块打包。必须连接 RabbitMQ + Redis。

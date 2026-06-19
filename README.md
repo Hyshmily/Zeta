@@ -151,25 +151,41 @@ Just add the starter to your `pom.xml`; Caffeine L1 + local HeavyKeeper + Report
 
 #### Worker (Standalone Node) — JAR / Docker
 
-The Worker is a standalone Spring Boot application (never published to Maven Central). Build and deploy it separately:
+The Worker is a standalone Spring Boot application (never published to Maven Central). Pre-built images are available on GHCR.
+
+**Prerequisites:** Authenticate to GitHub Container Registry with a PAT that has `read:packages` scope:
 
 ```bash
-# Build Worker JAR
-mvn clean package -pl worker
+echo $PAT | docker login ghcr.io -u hyshmily --password-stdin
+```
 
-# Run directly
-java -jar worker/target/hotkey-worker-1.1.5-SNAPSHOT.jar
+**Run via docker compose** (full stack with Redis + RabbitMQ):
 
-# Or via Docker
-docker build -t hotkey-worker:1.1.5-SNAPSHOT ./worker/
+```bash
+docker compose -f worker/docker-compose.yml up -d
+```
+
+**Scale to multiple Workers:**
+
+```bash
+docker compose -f worker/docker-compose.yml up -d --scale worker=3
+```
+
+**Run standalone** (if you have external Redis + RabbitMQ):
+
+```bash
 docker run -d --name hotkey-worker -p 8080:8080 \
   -e SPRING_RABBITMQ_HOST=rabbitmq \
   -e SPRING_DATA_REDIS_HOST=redis \
   -e HOTKEY_WORKER_ENABLED=true \
-  hotkey-worker:1.1.5-SNAPSHOT
+  ghcr.io/hyshmily/hotkey-worker:1.1.5-SNAPSHOT
+```
 
-# Or full stack via docker compose
-docker compose -f worker/docker-compose.yml up -d --scale worker=3
+**Run JAR directly** (no Docker required):
+
+```bash
+mvn clean package -pl worker
+java -jar worker/target/hotkey-worker-1.1.5-SNAPSHOT.jar
 ```
 
 > Worker packaged from the `worker/` module. Requires RabbitMQ + Redis.

@@ -31,9 +31,8 @@ services:
     restart: unless-stopped
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/hyshmily/hotkey-worker:1.1.5-SNAPSHOT
+    pull_policy: always
     environment:
       SPRING_RABBITMQ_HOST: rabbitmq
       SPRING_DATA_REDIS_HOST: redis

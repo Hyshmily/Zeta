@@ -1,0 +1,15 @@
+target/classes/
+target/generated-sources/
+target/generated-test-sources/
+target/maven-archiver/
+target/maven-status/
+target/surefire-reports/
+target/test-classes/
+target/hotkey-worker-*.jar.original
+target/jacoco.exec
+src/
+pom.xml
+Dockerfile
+docker-compose.yml
+hotkey-worker.iml
+.env
