@@ -548,10 +548,6 @@ public class HotKeyReporter {
           break;
         }
 
-        if (batch == null) {
-          continue;
-        }
-
         // 5s stale check — discard data that waited too long in the queue
         if (System.currentTimeMillis() - batch.timestamp() > 5_000) {
           expiredCount.incrementAndGet();

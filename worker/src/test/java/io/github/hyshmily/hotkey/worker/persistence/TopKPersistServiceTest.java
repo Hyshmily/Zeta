@@ -27,6 +27,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.*;
@@ -160,5 +161,17 @@ class TopKPersistServiceTest {
   void persistToRedis_shouldHandleSerializationFailure() {
     when(topK.listTopN(100)).thenReturn(List.of(new Item(null, 0)));
     assertThatCode(() -> service.persistToRedis()).doesNotThrowAnyException();
+  }
+
+  /**
+   * Verifies that restoreFromRedis parses valid JSON and feeds the extracted
+   * items into {@link TopK#addDirect(Map)} for warm-up of the HeavyKeeper sketch.
+   */
+  @Test
+  void restoreFromRedis_shouldRestoreItemsWhenValidJson() {
+    when(valueOps.get(REDIS_KEY)).thenReturn("[{\"key\":\"hotKey\",\"count\":100}]");
+    service.restoreFromRedis();
+    verify(topK).addDirect(
+        argThat((Map<String, Long> m) -> m.size() == 1 && m.get("hotKey") == 100L));
   }
 }

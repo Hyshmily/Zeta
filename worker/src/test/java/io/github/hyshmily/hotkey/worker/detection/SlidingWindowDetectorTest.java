@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.worker.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicLong;
@@ -261,5 +262,86 @@ class SlidingWindowDetectorTest {
     detector.addCount("rot-key", 5);
     long sum = detector.getWindowSum("rot-key");
     assertThat(sum).isEqualTo(125);
+  }
+
+  /**
+   * Verifies that {@code addCount} throws {@link NullPointerException} when the key is null,
+   * as specified by the method contract.
+   */
+  @Test
+  void shouldHandleNullKey() {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 100);
+    assertThatThrownBy(() -> detector.addCount(null, 1))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  /**
+   * Verifies that {@code clearStaleSlices} handles an array where all entries are null
+   * without throwing a {@link NullPointerException}.
+   */
+  @Test
+  void clearStaleSlices_shouldHandleAllNullSlices() throws Exception {
+    SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
+    Method clearMethod = SlidingWindowDetector.class.getDeclaredMethod(
+        "clearStaleSlices", AtomicLong[].class, int.class);
+    clearMethod.setAccessible(true);
+
+    AtomicLong[] slices = new AtomicLong[10]; // all entries are null
+    clearMethod.invoke(detector, slices, 3);
+    // No exception expected — the method guards against null slices
+  }
+
+  /**
+   * Verifies that a recently accessed key survives eviction by {@code evictStale}
+   * when its last access time is well within the stale timeout.
+   */
+  @Test
+  void evictStale_shouldNotRemoveRecentlyAccessedKey() throws InterruptedException {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
+    detector.addCount("keepMe", 1);
+    Thread.sleep(1);
+    detector.evictStale(3600_000); // 1 hour stale timeout — key is far newer
+    assertThat(detector.getActiveKeyCount()).isOne();
+  }
+
+  /**
+   * Verifies that the threshold can be updated at runtime and read back correctly.
+   */
+  @Test
+  void setThreshold_shouldUpdateAndGetThreshold() {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 100);
+    assertThat(detector.getThreshold()).isEqualTo(100);
+    detector.setThreshold(500);
+    assertThat(detector.getThreshold()).isEqualTo(500);
+    detector.setThreshold(0);
+    assertThat(detector.getThreshold()).isZero();
+    detector.setThreshold(Long.MAX_VALUE);
+    assertThat(detector.getThreshold()).isEqualTo(Long.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that {@code getWindowSum} treats null slice entries in the
+   * circular buffer as zero when computing the window sum.
+   */
+  @Test
+  void getWindowSum_shouldReturnZeroForNullSliceEntry() throws Exception {
+    SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
+    Method sumMethod = SlidingWindowDetector.class.getDeclaredMethod(
+        "getWindowSum", AtomicLong[].class, int.class);
+    sumMethod.setAccessible(true);
+
+    int arrayLen = 10; // 2 * windowSize
+    AtomicLong[] slices = new AtomicLong[arrayLen];
+    slices[0] = new AtomicLong(10);
+    slices[1] = new AtomicLong(20);
+    // Indices 2-9 remain null
+
+    // currentIndex = 9, window covers 9,8,7,6,5 — all null
+    long sumForNullRange = (long) sumMethod.invoke(detector, slices, 9);
+    assertThat(sumForNullRange).isZero();
+
+    // currentIndex = 1, window covers 1,0,9,8,7 — indices 1 and 0 are set, rest are null
+    long sumWithPartialNulls = (long) sumMethod.invoke(detector, slices, 1);
+    assertThat(sumWithPartialNulls).isEqualTo(30);
   }
 }

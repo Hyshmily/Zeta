@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.BeforeEach;
@@ -255,5 +256,18 @@ class HotKeyDetectorTest {
   void fading_shouldDelegate() {
     detector.fading();
     verify(heavyKeeper).fading();
+  }
+
+  @Test
+  void add_buffered_shouldEventuallyFlushToHeavyKeeper() throws Exception {
+    HeavyKeeper realKeeper = new HeavyKeeper(3, 1000, 4, 0.9, 1);
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    HotKeyDetector realDetector = new HotKeyDetector(realKeeper, scheduler);
+    realDetector.afterPropertiesSet();
+    realDetector.add("testKey");
+    Thread.sleep(600);
+    realDetector.destroy();
+    scheduler.shutdown();
+    assertThat(realKeeper.contains("testKey")).isTrue();
   }
 }

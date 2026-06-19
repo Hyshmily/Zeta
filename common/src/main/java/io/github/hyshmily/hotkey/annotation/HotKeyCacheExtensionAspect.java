@@ -18,11 +18,17 @@ package io.github.hyshmily.hotkey.annotation;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.CachePut;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cache.interceptor.SimpleKey;
 import org.springframework.context.expression.MethodBasedEvaluationContext;
@@ -34,30 +40,32 @@ import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
- * Companion AOP aspect for Spring {@link Cacheable @Cacheable} methods.
+ * Companion AOP aspect for Spring {@link Cacheable @Cacheable},
+ * {@link CachePut @CachePut}, and {@link CacheEvict @CacheEvict} methods.
  *
  * <p>Runs at {@link Ordered#HIGHEST_PRECEDENCE} — before Spring's own
  * {@code CacheInterceptor} — to set up thread-bound TTL overrides,
- * null-caching mode, and apply {@link Intercept @Intercept} /
- * {@link Fallback @Fallback} semantics.
+ * null-caching mode, broadcast suppression, and apply
+ * {@link Intercept @Intercept} / {@link Fallback @Fallback} semantics.
  *
  * <p>For each {@code @Cacheable} invocation:
  * <ol>
  *   <li>Resolves the cache key from SpEL</li>
  *   <li>If {@code @Intercept} is present and the key is a local hot key,
  *       skips the method and returns the cached value or fallback</li>
- *   <li>Applies TTL from {@code @HotKeyCacheTTL} and null-caching from
- *       {@code @NullCaching} into {@link HotKeyCacheContext}</li>
+ *   <li>Applies TTL from {@code @HotKeyCacheTTL}, null-caching from
+ *       {@code @NullCaching}, and broadcast suppression from
+ *       {@link Broadcast @Broadcast} into {@link HotKeyCacheContext}</li>
  *   <li>Proceeds to the Spring {@code CacheInterceptor}</li>
  *   <li>Restores the context snapshot in a {@code finally} block</li>
  *   <li>If the method throws and {@code @Fallback} is present, returns the fallback</li>
  * </ol>
+ *
+ * <p>For {@code @CachePut} and {@code @CacheEvict}, the aspect only reads
+ * {@link Broadcast @Broadcast} to set the broadcast suppression flag. All other
+ * companion annotations ({@code @HotKeyCacheTTL}, {@code @Intercept},
+ * {@code @Fallback}, {@code @NullCaching}) are ignored on these methods.
  */
 @Aspect
 @Order(Ordered.HIGHEST_PRECEDENCE)
@@ -116,6 +124,7 @@ public class HotKeyCacheExtensionAspect {
     Intercept intercept = method.getAnnotation(Intercept.class);
     Fallback fallback = method.getAnnotation(Fallback.class);
     NullCaching nullCaching = method.getAnnotation(NullCaching.class);
+    Broadcast broadcast = method.getAnnotation(Broadcast.class);
 
     // @Intercept: skip method when key is a local hot key
     if (intercept != null && hotKey.isLocalHotKey(prefixedKey)) {
@@ -131,8 +140,9 @@ public class HotKeyCacheExtensionAspect {
       long hardTtlMs = (ttl != null && ttl.hardTtlMs() > 0) ? ttl.hardTtlMs() : 0L;
       long softTtlMs = (ttl != null && ttl.softTtlMs() > 0) ? ttl.softTtlMs() : 0L;
       boolean allowNull = nullCaching != null && nullCaching.value();
+      boolean skipBroadcast = broadcast != null && !broadcast.value();
 
-      HotKeyCacheContext.get().apply(hardTtlMs, softTtlMs, allowNull);
+      HotKeyCacheContext.get().apply(hardTtlMs, softTtlMs, allowNull, skipBroadcast);
       return pjp.proceed();
     } catch (Throwable e) {
       if (fallback != null) {
@@ -140,6 +150,56 @@ public class HotKeyCacheExtensionAspect {
         return resolveFallback(pjp, fallback);
       }
       throw e;
+    } finally {
+      HotKeyCacheContext.get().restore(prev);
+    }
+  }
+
+  /**
+   * Intercepts {@link CachePut @CachePut} methods to set the broadcast suppression
+   * flag from {@link Broadcast @Broadcast} before the method reaches Spring's
+   * {@code CacheInterceptor}.
+   *
+   * <p>Only the {@code @Broadcast} annotation is read here. Other companion
+   * annotations ({@code @HotKeyCacheTTL}, {@code @Intercept}, {@code @Fallback},
+   * {@code @NullCaching}) are ignored on {@code @CachePut} methods.
+   *
+   * @param pjp      the join point for the intercepted method
+   * @param cachePut the {@code @CachePut} annotation on the intercepted method
+   * @return the method return value
+   */
+  @Around("@annotation(cachePut)")
+  public Object aroundCachePut(ProceedingJoinPoint pjp, CachePut cachePut) throws Throwable {
+    return setBroadcast(pjp);
+  }
+
+  /**
+   * Intercepts {@link CacheEvict @CacheEvict} methods to set the broadcast
+   * suppression flag from {@link Broadcast @Broadcast} before the method reaches
+   * Spring's {@code CacheInterceptor}.
+   *
+   * <p>Only the {@code @Broadcast} annotation is read here. Other companion
+   * annotations ({@code @HotKeyCacheTTL}, {@code @Intercept}, {@code @Fallback},
+   * {@code @NullCaching}) are ignored on {@code @CacheEvict} methods.
+   *
+   * @param pjp       the join point for the intercepted method
+   * @param cacheEvict the {@code @CacheEvict} annotation on the intercepted method
+   * @return the method return value
+   */
+  @Around("@annotation(cacheEvict)")
+  public Object aroundCacheEvict(ProceedingJoinPoint pjp, CacheEvict cacheEvict) throws Throwable {
+    return setBroadcast(pjp);
+  }
+
+  private Object setBroadcast(ProceedingJoinPoint pjp) throws Throwable {
+    Method method = resolveMethod(pjp);
+    Broadcast broadcast = method.getAnnotation(Broadcast.class);
+    boolean skipBroadcast = broadcast != null && !broadcast.value();
+
+    HotKeyCacheContext.ContextValues prev = HotKeyCacheContext.get().snapshot();
+    try {
+      HotKeyCacheContext.get().apply(0, 0, false, skipBroadcast);
+      return pjp.proceed();
     } finally {
       HotKeyCacheContext.get().restore(prev);
     }

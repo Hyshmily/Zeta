@@ -18,23 +18,23 @@ package io.github.hyshmily.hotkey.cache.annotationsupporter;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import jakarta.annotation.Nullable;
-import org.jspecify.annotations.NonNull;
-import org.springframework.cache.Cache;
-import org.springframework.cache.support.AbstractValueAdaptingCache;
-
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
+import org.jspecify.annotations.NonNull;
+import org.springframework.cache.Cache;
+import org.springframework.cache.support.AbstractValueAdaptingCache;
+
 
 /**
  * Spring {@link Cache} adapter that wraps the HotKey {@link HotKey} facade behind the
  * standard Spring caching abstraction.
  *
  * <p>All cache keys are prefixed with the cache name and the configured key separator
- * ({@link HotKeyProperties.SpringCache#keySeparator}, default {@code "::"}) to
+ * ( , default {@code "::"}) to
  * avoid collisions in the shared Caffeine instance.
  *
  * <p>Delegation:
@@ -174,17 +174,21 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
 
     boolean hasTtlOverride = hardTtlMs > 0 || softTtlMs > 0;
 
-    Optional<Object> result = hasTtlOverride
-      ? hotKey.getWithSoftExpire(prefixed, loader, hardTtlMs, softTtlMs)
-      : hotKey.get(prefixed, loader);
+    Object result = hasTtlOverride
+      ? hotKey.computeIfAbsentWithSoftExpire(prefixed, loader, hardTtlMs, softTtlMs)
+      : hotKey.computeIfAbsent(prefixed, loader);
 
-    if (result.isPresent()) {
-      return (T) fromStoreValue(result.get());
+    if (result != null) {
+      return (T) fromStoreValue(result);
     }
 
     // Cache miss: store NullValue sentinel if null-caching is enabled
     if (allowNull) {
-      hotKey.putThrough(prefixed, null, () -> {});
+      if (HotKeyCacheContext.get().isSkipBroadcast()) {
+        hotKey.putLocal(prefixed, null);
+      } else {
+        hotKey.putThrough(prefixed, null, () -> {});
+      }
       nullCachedKeys.add(prefixed);
     }
 
@@ -211,7 +215,11 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
     Object storeValue = toStoreValue(value);
     nullCachedKeys.remove(prefixed);
 
-    hotKey.putThrough(prefixed, storeValue, () -> {});
+    if (HotKeyCacheContext.get().isSkipBroadcast()) {
+      hotKey.putLocal(prefixed, storeValue);
+    } else {
+      hotKey.putThrough(prefixed, storeValue, () -> {});
+    }
   }
 
   /**
@@ -224,8 +232,13 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
    */
   @Override
   public void evict(@NonNull Object key) {
-    nullCachedKeys.remove(prefixedKey(key));
-    hotKey.invalidate(prefixedKey(key));
+    String prefixed = prefixedKey(key);
+    nullCachedKeys.remove(prefixed);
+    if (HotKeyCacheContext.get().isSkipBroadcast()) {
+      hotKey.evictLocal(prefixed);
+    } else {
+      hotKey.invalidate(prefixed);
+    }
   }
 
   /**

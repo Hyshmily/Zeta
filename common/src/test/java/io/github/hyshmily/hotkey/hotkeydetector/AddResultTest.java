@@ -77,4 +77,23 @@ class AddResultTest {
     AddResult result = new AddResult("expelled", true, "current");
     assertThat(result.toString()).contains("expelled", "true", "current");
   }
+
+  @Test
+  void cold_shouldReturnSingleton() {
+    AddResult cold1 = AddResult.cold();
+    AddResult cold2 = AddResult.cold();
+    assertThat(cold1).isSameAs(cold2);
+    assertThat(cold1.isHotKey()).isFalse();
+    assertThat(cold1.expelledKey()).isNull();
+  }
+
+  @Test
+  void hot_withExpelledKey_shouldHaveExpelledKey() {
+    AddResult result = AddResult.cold();
+    assertThat(result.expelledKey()).isNull();
+    result = new AddResult("expelledKey", true, "currentKey");
+    assertThat(result.expelledKey()).isEqualTo("expelledKey");
+    assertThat(result.isHotKey()).isTrue();
+    assertThat(result.currentKey()).isEqualTo("currentKey");
+  }
 }

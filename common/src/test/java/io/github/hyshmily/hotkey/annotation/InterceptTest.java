@@ -15,25 +15,31 @@
  */
 package io.github.hyshmily.hotkey.annotation;
 
-import java.lang.annotation.ElementType;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
-/**
- * Per-method override for hard and soft TTLs on a {@link org.springframework.cache.annotation.Cacheable @Cacheable} READ operation.
- * <p>
- * When present, the specified TTL values take precedence over the global defaults
- * from {@code hotkey.local.*} configuration. A value of {@code 0} means "use the
- * global default for this TTL type".
- */
-@Target({ElementType.METHOD, ElementType.TYPE})
-@Retention(RetentionPolicy.RUNTIME)
-public @interface HotKeyCacheTTL {
+import static org.assertj.core.api.Assertions.assertThat;
 
-  /** Hard TTL in milliseconds. 0 = use global default. */
-  long hardTtlMs() default 0;
+@DisplayName("Intercept annotation tests")
+class InterceptTest {
 
-  /** Soft TTL in milliseconds. 0 = use global default. */
-  long softTtlMs() default 0;
+  @Test
+  @DisplayName("target is METHOD")
+  void targetIsMethod() {
+    Target target = Intercept.class.getAnnotation(Target.class);
+    assertThat(target).isNotNull();
+    assertThat(target.value()).containsExactly(java.lang.annotation.ElementType.METHOD);
+  }
+
+  @Test
+  @DisplayName("retention is RUNTIME")
+  void retentionIsRuntime() {
+    Retention retention = Intercept.class.getAnnotation(Retention.class);
+    assertThat(retention).isNotNull();
+    assertThat(retention.value()).isEqualTo(RetentionPolicy.RUNTIME);
+  }
 }

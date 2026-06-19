@@ -71,4 +71,27 @@ class ItemTest {
     Item item = new Item("key1", 42);
     assertThat(item.toString()).contains("key1", "42");
   }
+
+  @Test
+  void item_withEmptyStringKey_shouldWork() {
+    Item item = new Item("", 10);
+    assertThat(item.key()).isEmpty();
+    assertThat(item.count()).isEqualTo(10);
+  }
+
+  @Test
+  void item_withLongMaxValueCount_shouldWork() {
+    Item item = new Item("key1", Long.MAX_VALUE);
+    assertThat(item.key()).isEqualTo("key1");
+    assertThat(item.count()).isEqualTo(Long.MAX_VALUE);
+  }
+
+  @Test
+  void item_equality_byKey() {
+    Item i1 = new Item("key1", 42);
+    Item i2 = new Item("key1", 42);
+    Item i3 = new Item("key1", 99);
+    assertThat(i1).isEqualTo(i2);
+    assertThat(i1).isNotEqualTo(i3);
+  }
 }

@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.rule;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import lombok.Data;
@@ -105,8 +106,9 @@ public class Rule {
   private String id;
   /** Timestamp (epoch millis) when this rule was created. */
   private long createdAt;
-  /** Pattern type used to match cache keys. */
-  private RuleType type;
+  /** Pattern type used to match cache keys. Defaults to {@link RuleType#EXACT} for Jackson deserialization. */
+  @JsonProperty(defaultValue = "EXACT")
+  private RuleType type = RuleType.EXACT;
   /** Pattern string (exact value, prefix, glob, or regex). */
   private String pattern;
   /** Action to take when a key matches this rule. */
@@ -154,6 +156,8 @@ public class Rule {
    *
    * <p>Matching behavior depends on the rule type:
    * <ul>
+   *   <li>{@code null} type — returns {@code false} (rule is effectively disabled); may
+   *       occur when {@link RuleType} is absent during deserialization</li>
    *   <li>{@link RuleType#EXACT} — exact string equality via {@link String#equals}</li>
    *   <li>{@link RuleType#PREFIX} — prefix check via {@link String#startsWith}</li>
    *   <li>{@link RuleType#WILDCARD} — converts the glob to a regex (if not already
@@ -164,13 +168,15 @@ public class Rule {
    *
    * @param key the cache key to test against this rule; must not be {@code null}
    * @return {@code true} if the key matches this rule's pattern and the
-   *         rule's action should be applied
+   *         rule's action should be applied; {@code false} if the rule's type is
+   *         {@code null} (untyped rule is treated as non-matching)
    * @throws NullPointerException if {@code key} is {@code null}
    * @throws java.util.regex.PatternSyntaxException if the underlying pattern
    *         (REGEX or WILDCARD) has not been {@link #prepare() prepared} yet
    *         and compilation fails
    */
   public boolean match(String key) {
+    if (type == null) return false;
     return switch (type) {
       case EXACT -> key.equals(pattern);
       case PREFIX -> key.startsWith(pattern);
@@ -211,6 +217,7 @@ public class Rule {
    *         pattern cannot be compiled into a valid regular expression
    */
   public void prepare() {
+    if (type == null) return;
     if (type == RuleType.REGEX) {
       compiledPattern = Pattern.compile(pattern);
     } else if (type == RuleType.WILDCARD) {

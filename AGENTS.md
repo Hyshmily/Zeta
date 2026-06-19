@@ -19,7 +19,7 @@ Two Maven modules under `hotkey-parent:1.1.4`:
 ```bash
 mvn clean package                    # Build all modules (JARs)
 mvn clean package -P release         # Build with GPG signing for Maven Central
-mvn test                             # Run all unit tests (531 total: 459 common + 72 worker)
+mvn test                             # Run all unit tests (1262 total: 1109 common + 153 worker)
 mvn javadoc:jar                      # Generate Javadoc JAR (common only)
 mvn source:jar                       # Generate source JAR (common only)
 ```

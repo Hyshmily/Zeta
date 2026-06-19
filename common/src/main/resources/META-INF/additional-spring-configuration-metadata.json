@@ -103,6 +103,12 @@
       "defaultValue": 2000
     },
     {
+      "name": "hotkey.local.scheduler-pool-size",
+      "type": "java.lang.Integer",
+      "description": "Pool size for the shared HotKey scheduler (periodic tasks).",
+      "defaultValue": 8
+    },
+    {
       "name": "hotkey.local.expelled-queue-capacity",
       "type": "java.lang.Integer",
       "description": "Capacity of the expelled-key queue (for keys evicted from the top-K ranking).",
@@ -165,6 +171,18 @@
       "type": "java.lang.Long",
       "description": "Override soft TTL in milliseconds for hot keys (0 = use default-hot-soft-ttl-ms).",
       "defaultValue": 0
+    },
+    {
+      "name": "hotkey.local.ttl-jitter-enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether to apply random jitter to TTL expiry timestamps to prevent cache stampedes.",
+      "defaultValue": true
+    },
+    {
+      "name": "hotkey.local.ttl-jitter-ratio",
+      "type": "java.lang.Double",
+      "description": "Jitter ratio (0.0-1.0) applied to TTLs e.g. 0.1 means +/- 10% random offset.",
+      "defaultValue": 0.1
     },
     {
       "name": "hotkey.local.refresh-max-pools",
@@ -237,6 +255,90 @@
       "type": "java.lang.String",
       "description": "Per-instance identifier for queue naming. Overrides auto-detected instance-id.",
       "defaultValue": ""
+    },
+    {
+      "name": "hotkey.local.reporter.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether BBR adaptive rate-limiting is enabled for the reporter.",
+      "defaultValue": true
+    },
+    {
+      "name": "hotkey.local.reporter.cpu-threshold",
+      "type": "java.lang.Integer",
+      "description": "CPU threshold (0-1000, default 800 = 80%) for reporter backpressure.",
+      "defaultValue": 800
+    },
+    {
+      "name": "hotkey.local.reporter.cpu-poll-interval-ms",
+      "type": "java.lang.Long",
+      "description": "CPU polling interval in milliseconds for reporter backpressure.",
+      "defaultValue": 500
+    },
+    {
+      "name": "hotkey.local.reporter.cpu-decay",
+      "type": "java.lang.Double",
+      "description": "EMA decay factor for CPU smoothing (0.0-1.0).",
+      "defaultValue": 0.95
+    },
+    {
+      "name": "hotkey.local.reporter.bbr-window-ms",
+      "type": "java.lang.Long",
+      "description": "BBR sliding window size in milliseconds.",
+      "defaultValue": 10000
+    },
+    {
+      "name": "hotkey.local.reporter.bbr-window-buckets",
+      "type": "java.lang.Integer",
+      "description": "Number of buckets in the BBR sliding window.",
+      "defaultValue": 100
+    },
+    {
+      "name": "hotkey.local.reporter.bbr-cooldown-ms",
+      "type": "java.lang.Long",
+      "description": "Cooldown period in ms after a reporter drop before allowing again.",
+      "defaultValue": 1000
+    },
+    {
+      "name": "hotkey.local.heartbeat.exchange-name",
+      "type": "java.lang.String",
+      "description": "Heartbeat exchange name for worker liveliness detection.",
+      "defaultValue": "hotkey.heartbeat.exchange"
+    },
+    {
+      "name": "hotkey.local.heartbeat.timeout-ms",
+      "type": "java.lang.Long",
+      "description": "Heartbeat timeout in milliseconds.",
+      "defaultValue": 3000
+    },
+    {
+      "name": "hotkey.local.heartbeat.verify-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Verify interval in milliseconds for worker liveliness checks.",
+      "defaultValue": 1500
+    },
+    {
+      "name": "hotkey.local.heartbeat.ping-timeout-ms",
+      "type": "java.lang.Long",
+      "description": "PING timeout in milliseconds for worker verification.",
+      "defaultValue": 2000
+    },
+    {
+      "name": "hotkey.local.heartbeat.degrade-after-failures",
+      "type": "java.lang.Integer",
+      "description": "Number of consecutive heartbeat failures before graceful degradation.",
+      "defaultValue": 2
+    },
+    {
+      "name": "hotkey.local.spring-cache.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable Spring @Cacheable integration with HotKey dynamic TTL.",
+      "defaultValue": false
+    },
+    {
+      "name": "hotkey.local.spring-cache.key-separator",
+      "type": "java.lang.String",
+      "description": "Separator between cache name and key in internal cache key string.",
+      "defaultValue": "::"
     },
     {
       "name": "hotkey.sync.enabled",
@@ -345,6 +447,36 @@
       "type": "java.lang.Integer",
       "description": "AMQP prefetch count for the Worker listener.",
       "defaultValue": 5
+    },
+    {
+      "name": "hotkey.worker-listener.sre.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable SRE adaptive rate limiter for HOT decision processing.",
+      "defaultValue": true
+    },
+    {
+      "name": "hotkey.worker-listener.sre.window-ms",
+      "type": "java.lang.Long",
+      "description": "Sliding window duration in milliseconds for SRE rate limiter tracking.",
+      "defaultValue": 3000
+    },
+    {
+      "name": "hotkey.worker-listener.sre.buckets",
+      "type": "java.lang.Integer",
+      "description": "Number of time buckets within the SRE rate limiter sliding window.",
+      "defaultValue": 10
+    },
+    {
+      "name": "hotkey.worker-listener.sre.min-samples",
+      "type": "java.lang.Integer",
+      "description": "Minimum total samples before SRE rate limiter begins active throttling.",
+      "defaultValue": 20
+    },
+    {
+      "name": "hotkey.worker-listener.sre.success-threshold",
+      "type": "java.lang.Double",
+      "description": "Success ratio threshold (0.0-1.0) for SRE rate limiter backpressure.",
+      "defaultValue": 0.6
     }
   ]
 }

@@ -92,6 +92,22 @@ public User getUser(Long id) { ... }
 | `hardTtlMs` | `0` | 硬 TTL（毫秒）。`0` = 使用全局默认值 |
 | `softTtlMs` | `0` | 软 TTL（毫秒）。`0` = 使用全局默认值 |
 
+### @Broadcast
+
+控制缓存写入/失效操作是否向对等实例广播同步消息。默认 (`@Broadcast(true)`) 所有缓存变更通过 RabbitMQ 广播。使用 `@Broadcast(false)` 走本地路径（`putLocal()` / `evictLocal()`）。
+
+| 属性    | 类型      | 默认值  | 说明                      |
+| ------- | --------- | ------- | ------------------------- |
+| `value` | `boolean` | `true`  | 是否广播。设为 `false` 禁止跨实例同步 |
+
+```java
+@CachePut(cacheNames = "users", key = "#user.id")
+@Broadcast(false)
+public User updateUser(User user) { ... }
+```
+
+适用于 `@Cacheable`、`@CachePut` 和 `@CacheEvict` 方法。
+
 ### @NullCaching
 
 选择缓存 `null` 返回值。默认情况下，缓存加载器返回 `null` 被视为"无值"且不存储。当 `@NullCaching(true)` 存在时，`null` 作为内部哨兵（`NullValue`）存储，并在后续查找时以 `null` 形式返回。
@@ -112,16 +128,17 @@ public User getUser(Long id) { ... }
 
 当 `hotkey.spring-cache.enabled=true` 时，`HotKeyCacheExtensionAspect` 随标准 Spring Cache 注解（`@Cacheable` / `@CachePut` / `@CacheEvict`）一起激活。它将相同的配套注解应用于 `@Cacheable` 方法：
 
-| 注解              | 在 `@Cacheable` 上的作用                          |
-| ----------------- | ------------------------------------------------- |
-| `@HotKeyCacheTTL` | 覆盖硬/软 TTL                                     |
-| `@Intercept`      | 缓存命中时触发拦截回调，通过 `@Fallback` 解析     |
-| `@Fallback`       | 拦截器阻止时提供回退值                            |
-| `@NullCaching`    | 选择缓存 `null` 返回值                            |
+| 注解              | 在 `@Cacheable` / `@CachePut` / `@CacheEvict` 上的作用          |
+| ----------------- | ---------------------------------------------------------------- |
+| `@HotKeyCacheTTL` | 覆盖硬/软 TTL（仅 `@Cacheable`）                                |
+| `@Intercept`      | 当 key 为本地热点时跳过方法体，通过 `@Fallback` 或 `peek()` 返回保底值（仅 `@Cacheable`） |
+| `@Fallback`       | 被黑名单阻止、拦截或异常时提供回退值（仅 `@Cacheable`）          |
+| `@NullCaching`    | 选择缓存 `null` 返回值（仅 `@Cacheable`）                       |
+| `@Broadcast`      | 禁止跨实例同步消息                                               |
 
 该切面以 `@Order(HIGHEST_PRECEDENCE)` 运行——早于 Spring 的 `CacheInterceptor`——使其能够在 `HotKeySpringCache` 在 `get(Callable)` 调用期间读取之前设置 TTL 和空缓存上下文参数。
 
-**局限性：** 配套切面仅拦截 `@Cacheable`（非 `@CachePut` / `@CacheEvict`），且 SpEL key 解析与 `CacheInterceptor` 重复（可接受的性能开销）。
+**注意：** `@Cacheable` 的 SpEL key 解析与 `CacheInterceptor` 重复（可接受的性能开销）。对于 `@CachePut` 和 `@CacheEvict`，仅读取 `@Broadcast` 注解。
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")

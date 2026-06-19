@@ -92,6 +92,22 @@ public User getUser(Long id) { ... }
 | `hardTtlMs` | `0`     | Hard TTL in ms. `0` = use global default. |
 | `softTtlMs` | `0`     | Soft TTL in ms. `0` = use global default. |
 
+### @Broadcast
+
+Controls whether cache write/evict operations broadcast sync messages to peer instances. By default (`@Broadcast(true)`), all cache mutations are broadcast via RabbitMQ. Place `@Broadcast(false)` to use local-only variants (`putLocal()` / `evictLocal()`).
+
+| Attribute | Type      | Default | Description                                                       |
+| --------- | --------- | ------- | ----------------------------------------------------------------- |
+| `value`   | `boolean` | `true`  | Whether to broadcast. Set `false` to suppress cross-instance sync. |
+
+```java
+@CachePut(cacheNames = "users", key = "#user.id")
+@Broadcast(false)
+public User updateUser(User user) { ... }
+```
+
+Applies to `@Cacheable`, `@CachePut`, and `@CacheEvict` methods.
+
 ### @NullCaching
 
 Opt-in to caching `null` return values. By default, `null` results from a cache loader are treated as "no value" and not stored. When `@NullCaching(true)` is present, `null` is stored as an internal sentinel (`NullValue`) and returned as `null` on subsequent lookups.
@@ -112,16 +128,17 @@ Only applies to `@Cacheable` methods (READ operations). Ignored on `@CachePut` a
 
 When `hotkey.spring-cache.enabled=true`, `HotKeyCacheExtensionAspect` activates alongside standard Spring Cache annotations (`@Cacheable` / `@CachePut` / `@CacheEvict`). It applies the same companion annotations to `@Cacheable` methods:
 
-| Annotation    | Role on `@Cacheable`                                            |
-| ------------- | --------------------------------------------------------------- |
-| `@HotKeyCacheTTL` | Override hard/soft TTL                                     |
-| `@Intercept`      | Fire intercept callback on cache hit, resolve via `@Fallback` |
-| `@Fallback`       | Supply fallback value when interceptor blocks                |
-| `@NullCaching`    | Opt-in to caching `null` return values                       |
+| Annotation    | Role on `@Cacheable` / `@CachePut` / `@CacheEvict`                 |
+| ------------- | ------------------------------------------------------------------ |
+| `@HotKeyCacheTTL` | Override hard/soft TTL (`@Cacheable` only)                    |
+| `@Intercept`      | Skip method when key is local hot key; use `@Fallback` or `peek()` for stale value (`@Cacheable` only) |
+| `@Fallback`       | Supply fallback value when blocked, intercepted, or on exception (`@Cacheable` only) |
+| `@NullCaching`    | Opt-in to caching `null` return values (`@Cacheable` only)     |
+| `@Broadcast`      | Suppress cross-instance sync messages                           |
 
 The aspect runs at `@Order(HIGHEST_PRECEDENCE)` — before Spring's `CacheInterceptor` — allowing it to set TTL and null-caching context parameters that `HotKeySpringCache` reads during the `get(Callable)` call.
 
-**Limitation:** The companion aspect intercepts only `@Cacheable` (not `@CachePut` / `@CacheEvict`), and SpEL key resolution is duplicated with `CacheInterceptor` (acceptable overhead).
+**Note:** SpEL key resolution is duplicated with `CacheInterceptor` for `@Cacheable` (acceptable overhead). For `@CachePut` and `@CacheEvict`, only the `@Broadcast` annotation is read.
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")

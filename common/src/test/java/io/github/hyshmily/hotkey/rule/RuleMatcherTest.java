@@ -17,13 +17,28 @@ package io.github.hyshmily.hotkey.rule;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 
 /**
  * Tests for {@link RuleMatcher} covering pattern detection, rule evaluation, and rule management.
@@ -360,5 +375,179 @@ class RuleMatcherTest {
   @Test
   void replaceRules_withNullElement_shouldThrow() {
     assertThatNullPointerException().isThrownBy(() -> ruleMatcher.replaceRules(Collections.singletonList(null)));
+  }
+
+  @Nested
+  @DisplayName("With Redis and CacheSyncPublisher")
+  class WithRedisAndPublisher {
+
+    private StringRedisTemplate redisTemplate;
+    private ValueOperations<String, String> valueOps;
+    private CacheSyncPublisher publisher;
+    private RuleMatcher ruleMatcher;
+
+    @BeforeEach
+    @SuppressWarnings("unchecked")
+    void setUp() {
+      redisTemplate = mock(StringRedisTemplate.class);
+      valueOps = mock(ValueOperations.class);
+      when(redisTemplate.opsForValue()).thenReturn(valueOps);
+      publisher = mock(CacheSyncPublisher.class);
+      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.of(publisher));
+    }
+
+    @Test
+    @DisplayName("syncRules should skip when incoming version <= local version")
+    void syncRules_shouldSkipStaleBroadcast() {
+      ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
+      ruleMatcher.syncRules("[]", Long.MAX_VALUE);
+      // After syncRules, local-only pattern should still exist
+      assertThat(ruleMatcher.evaluateRule("k1")).isEqualTo(RuleAction.BLOCK);
+    }
+
+    @Test
+    @DisplayName("syncRules should merge incoming rules with version > local version")
+    void syncRules_shouldMergeIncomingRules() {
+      ruleMatcher.addRule(RuleMatcher.of("local", RuleAction.BLOCK));
+      ruleMatcher.syncRules(
+        "[{\"pattern\":\"incoming\",\"action\":\"ALLOW_NO_REPORT\",\"type\":\"EXACT\"}]",
+        Long.MAX_VALUE
+      );
+      assertThat(ruleMatcher.evaluateRule("incoming")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+      assertThat(ruleMatcher.evaluateRule("local")).isEqualTo(RuleAction.BLOCK);
+    }
+
+    @Test
+    @DisplayName("syncRules should parse versioned wrapper format")
+    void syncRules_shouldParseVersionedWrapperFormat() {
+      ruleMatcher.syncRules(
+        "{\"rulesVersion\":10,\"rules\":[{\"pattern\":\"wrapper\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]}",
+        5L
+      );
+      assertThat(ruleMatcher.evaluateRule("wrapper")).isEqualTo(RuleAction.BLOCK);
+    }
+
+    @Test
+    @DisplayName("syncRules should handle legacy array format")
+    void syncRules_shouldParseLegacyArrayFormat() {
+      ruleMatcher.syncRules(
+        "[{\"pattern\":\"legacy\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]",
+        Long.MAX_VALUE
+      );
+      assertThat(ruleMatcher.evaluateRule("legacy")).isEqualTo(RuleAction.BLOCK);
+    }
+
+    @Test
+    @DisplayName("syncRules should catch JSON parse errors without propagation")
+    void syncRules_shouldHandleJsonParseException() {
+      ruleMatcher.syncRules("not valid json", Long.MAX_VALUE);
+      assertThat(ruleMatcher.getAllRules()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("syncRules should persist merged rules to Redis")
+    void syncRules_shouldPersistToRedisAfterMerge() {
+      ruleMatcher.syncRules(
+        "{\"rulesVersion\":10,\"rules\":[{\"pattern\":\"p\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]}",
+        5L
+      );
+      verify(redisTemplate, timeout(1000).atLeastOnce()).execute(any(RedisScript.class), anyList(), any(), any());
+    }
+
+    @Test
+    @DisplayName("syncRules should keep local-only patterns after merge")
+    void syncRules_shouldKeepLocalOnlyPatterns() {
+      ruleMatcher.addRule(RuleMatcher.of("local-only", RuleAction.BLOCK));
+      ruleMatcher.syncRules(
+        "[{\"pattern\":\"incoming\",\"action\":\"ALLOW_NO_REPORT\",\"type\":\"EXACT\"}]",
+        Long.MAX_VALUE
+      );
+      assertThat(ruleMatcher.evaluateRule("local-only")).isEqualTo(RuleAction.BLOCK);
+      assertThat(ruleMatcher.evaluateRule("incoming")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+    }
+
+    @Test
+    @DisplayName("syncRules should overwrite same-pattern rules with incoming value")
+    void syncRules_shouldOverwriteSamePattern() {
+      ruleMatcher.addRule(RuleMatcher.of("shared", RuleAction.BLOCK));
+      ruleMatcher.syncRules(
+        "[{\"pattern\":\"shared\",\"action\":\"ALLOW_NO_REPORT\",\"type\":\"EXACT\"}]",
+        Long.MAX_VALUE
+      );
+      assertThat(ruleMatcher.evaluateRule("shared")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+    }
+
+    @Test
+    @DisplayName("broadcastAllLocalRulesManually should broadcast when publisher is present")
+    void broadcastAllLocalRulesManually_shouldBroadcastWhenPublisherPresent() {
+      ruleMatcher.broadcastAllLocalRulesManually();
+      verify(publisher, timeout(1000).atLeastOnce()).broadcastAllLocalRules(anyString(), anyLong());
+    }
+
+    @Test
+    @DisplayName("addRule should persist to Redis when template is present")
+    void addRule_shouldPersistToRedis() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
+      verify(redisTemplate, timeout(1000).atLeastOnce()).execute(any(RedisScript.class), anyList(), any(), any());
+    }
+
+    @Test
+    @DisplayName("addRule should broadcast when publisher is present")
+    void addRule_shouldBroadcast() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
+      verify(publisher, timeout(1000).atLeastOnce()).broadcastAllLocalRules(anyString(), anyLong());
+    }
+
+    @Test
+    @DisplayName("removeRule should persist to Redis when template is present")
+    void removeRule_shouldPersistToRedis() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
+      ruleMatcher.removeRule("k", RuleAction.BLOCK);
+      verify(redisTemplate, timeout(1000).atLeast(2)).execute(any(RedisScript.class), anyList(), any(), any());
+    }
+
+    @Test
+    @DisplayName("clearRules should persist to Redis when template is present")
+    void clearRules_shouldPersistToRedis() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
+      ruleMatcher.clearRules();
+      verify(redisTemplate, timeout(1000).atLeast(2)).execute(any(RedisScript.class), anyList(), any(), any());
+    }
+
+    @Test
+    @DisplayName("initRules should load from Redis when template is present")
+    void initRules_shouldLoadFromRedis() {
+      when(valueOps.get(anyString())).thenReturn("[{\"pattern\":\"redis-loaded\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]");
+      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
+      ruleMatcher.initRules();
+      assertThat(ruleMatcher.evaluateRule("redis-loaded")).isEqualTo(RuleAction.BLOCK);
+    }
+
+    @Test
+    @DisplayName("initRules should handle null Redis value gracefully")
+    void initRules_shouldHandleNullRedisValue() {
+      when(valueOps.get(anyString())).thenReturn(null);
+      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
+      ruleMatcher.initRules();
+      assertThat(ruleMatcher.getAllRules()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("initRules should handle empty Redis value gracefully")
+    void initRules_shouldHandleEmptyRedisValue() {
+      when(valueOps.get(anyString())).thenReturn("");
+      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
+      ruleMatcher.initRules();
+      assertThat(ruleMatcher.getAllRules()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("initRules should handle malformed JSON in Redis gracefully")
+    void initRules_shouldHandleMalformedRedisJson() {
+      when(valueOps.get(anyString())).thenReturn("not valid json");
+      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
+      ruleMatcher.initRules();
+      assertThat(ruleMatcher.getAllRules()).isEmpty();
+    }
   }
 }

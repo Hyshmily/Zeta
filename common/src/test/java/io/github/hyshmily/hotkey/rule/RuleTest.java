@@ -174,10 +174,10 @@ class RuleTest {
   }
 
   @Test
-  void noArgConstructorLeavesFieldsNull() {
+  void noArgConstructorDefaults() {
     var rule = new Rule();
     assertThat(rule.getId()).isNull();
-    assertThat(rule.getType()).isNull();
+    assertThat(rule.getType()).isEqualTo(RuleType.EXACT);
     assertThat(rule.getPattern()).isNull();
     assertThat(rule.getAction()).isNull();
     assertThat(rule.getCompiledPattern()).isNull();

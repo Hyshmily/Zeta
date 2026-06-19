@@ -21,27 +21,22 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Marks a {@link org.springframework.cache.annotation.Cacheable @Cacheable} method to allow
- * caching of {@code null} return values.
- *
- * <p>By default, when a {@code @Cacheable} method returns {@code null}, the result is
- * <em>not</em> cached — a subsequent call with the same key will invoke the method again.
- * With {@code @NullCaching(true)}, the {@code null} value is stored via an internal sentinel
- * ({@link io.github.hyshmily.hotkey.cache.annotationsupporter.NullValue}), and subsequent calls skip the method
- * and return {@code null} directly.
- *
- * <p>This annotation is only effective on {@code @Cacheable} methods. It has no effect on
- * {@code @CachePut} or {@code @CacheEvict}.
- *
- * <pre>{@code
- * @Cacheable("users")
- * @NullCaching(true)
- * User findUser(String id) { ... }
- * }</pre>
+ * Controls whether cache write/evict operations on this method broadcast
+ * sync messages to peer instances via RabbitMQ.
+ * <p>
+ * When {@code @Broadcast(false)} is present, the underlying
+ * {@link io.github.hyshmily.hotkey.HotKey} methods use local-only variants
+ * ({@code putLocal()} / {@code evictLocal()}) instead of the default
+ * {@code putThrough()} / {@code invalidate()} paths.
+ * <p>
+ * Applies to {@link org.springframework.cache.annotation.Cacheable @Cacheable},
+ * {@link org.springframework.cache.annotation.CachePut @CachePut}, and
+ * {@link org.springframework.cache.annotation.CacheEvict @CacheEvict} methods.
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
-public @interface NullCaching {
-  /** Whether to cache {@code null} return values. Default is {@code true}. */
+public @interface Broadcast {
+
+  /** Whether to broadcast sync messages. Default is {@code true}. */
   boolean value() default true;
 }

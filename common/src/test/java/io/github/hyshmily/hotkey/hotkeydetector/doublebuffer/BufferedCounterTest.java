@@ -26,6 +26,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -238,5 +239,44 @@ class BufferedCounterTest {
     Thread.sleep(600);
     throwingCounter.destroy();
     assertThat(failingBatches).isNotEmpty();
+  }
+
+  @Test
+  void count_withNegativeDeltaLargerThanPositive_shouldAllowNegative() {
+    counter.count("key1", 3);
+    counter.count("key1", -5);
+    counter.destroy();
+    // Net count is -2; drain() filters out non-positive values
+    assertThat(batches).isEmpty();
+  }
+
+  @Test
+  void count_withDeltaLongMinValue_shouldNotThrow() {
+    counter.count("key1", Long.MIN_VALUE);
+    counter.destroy();
+    // Long.MIN_VALUE is negative, filtered out during drain
+    assertThat(batches).isEmpty();
+  }
+
+  @Test
+  void destroy_withConcurrentCount_shouldNotDeadlock() throws Exception {
+    ExecutorService exec = Executors.newFixedThreadPool(2);
+    AtomicBoolean stopped = new AtomicBoolean(false);
+    exec.submit(() -> {
+      while (!stopped.get()) {
+        try {
+          counter.count("key", 1);
+        } catch (Exception e) {
+          // ignore
+        }
+      }
+    });
+    Thread.sleep(50);
+    exec.submit(() -> {
+      counter.destroy();
+      stopped.set(true);
+    });
+    exec.shutdown();
+    assertThat(exec.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
   }
 }

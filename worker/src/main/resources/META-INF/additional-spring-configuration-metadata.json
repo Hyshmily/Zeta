@@ -73,6 +73,12 @@
       "defaultValue": 5000
     },
     {
+      "name": "hotkey.worker.state-machine.evict-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Interval in ms for evicting stale sliding-window and state-machine state.",
+      "defaultValue": 30000
+    },
+    {
       "name": "hotkey.worker.global-qps-dynamic-threshold.qps-change-tolerance",
       "type": "java.lang.Double",
       "description": "Tolerance factor for QPS change before recalculating dynamic thresholds.",
@@ -149,6 +155,36 @@
       "type": "java.lang.Integer",
       "description": "Interval in milliseconds between structured heartbeat sends (epoch, loadFactor, decisionVersionHwm, config gossip).",
       "defaultValue": 1000
+    },
+    {
+      "name": "hotkey.worker.persistence.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether TopK persistence to Redis is enabled for warm-start after Worker restart.",
+      "defaultValue": false
+    },
+    {
+      "name": "hotkey.worker.persistence.persist-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Interval in milliseconds between periodic TopK snapshots.",
+      "defaultValue": 30000
+    },
+    {
+      "name": "hotkey.worker.persistence.top-k-count",
+      "type": "java.lang.Integer",
+      "description": "Number of top keys to persist per snapshot.",
+      "defaultValue": 100
+    },
+    {
+      "name": "hotkey.worker.persistence.redis-key-prefix",
+      "type": "java.lang.String",
+      "description": "Redis key prefix for persisted TopK data (final key = prefix + appName + ':' + nodeId).",
+      "defaultValue": "hotkey:topk:worker:"
+    },
+    {
+      "name": "hotkey.worker.persistence.ttl-days",
+      "type": "java.lang.Integer",
+      "description": "TTL in days for persisted TopK data in Redis.",
+      "defaultValue": 3
     }
   ]
 }

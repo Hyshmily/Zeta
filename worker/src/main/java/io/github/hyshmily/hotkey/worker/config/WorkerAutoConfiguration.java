@@ -40,7 +40,7 @@ import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -74,7 +74,7 @@ import org.springframework.scheduling.annotation.Scheduled;
  *   <li>Scheduled tasks for stale‑state eviction and Top‑K validation.</li>
  * </ul>
  */
-@AutoConfiguration
+@Configuration
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @ConditionalOnProperty(prefix = "hotkey.worker", name = "enabled", havingValue = "true")
 @EnableConfigurationProperties(WorkerProperties.class)

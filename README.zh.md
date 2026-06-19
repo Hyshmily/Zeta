@@ -116,13 +116,17 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 
 ### 1. 添加依赖
 
+#### 本地模式（App 侧）— Maven 依赖
+
+只需在 `pom.xml` 中加入 starter；Caffeine L1 + 本地 HeavyKeeper + Reporter 自动激活，零额外配置。
+
 **Maven Central**（无需额外仓库）：
 
 ```xml
 <dependency>
-    <groupId>io.github.hyshmily</groupId>
-    <artifactId>hotkey</artifactId>
-    <version>1.1.5.Beta</version>
+  <groupId>io.github.hyshmily</groupId>
+  <artifactId>hotkey</artifactId>
+  <version>1.1.5-SNAPSHOT</version>
 </dependency>
 ```
 
@@ -139,9 +143,35 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.5.Beta</version>
+    <version>1.1.5-SNAPSHOT</version>
 </dependency>
 ```
+
+#### Worker 节点（独立部署）— JAR / Docker
+
+Worker 是独立 Spring Boot 应用（不发布到 Maven Central）。单独构建部署：
+
+```bash
+# 构建 Worker JAR
+mvn clean package -pl worker
+
+# 直接运行
+java -jar worker/target/hotkey-worker-1.1.5-SNAPSHOT.jar
+
+# 或通过 Docker
+docker build -t hotkey-worker:1.1.5-SNAPSHOT ./worker/
+docker run -d --name hotkey-worker -p 8080:8080 \
+  -e SPRING_RABBITMQ_HOST=rabbitmq \
+  -e SPRING_DATA_REDIS_HOST=redis \
+  -e HOTKEY_WORKER_ENABLED=true \
+  hotkey-worker:1.1.5-SNAPSHOT
+
+# 或通过 docker compose 全栈启动
+docker compose -f worker/docker-compose.yml up -d --scale worker=3
+```
+
+> Worker 由 `worker/` 模块打包。必须连接 RabbitMQ + Redis。
+> 设置 `HOTKEY_WORKER_ENABLED=true` 激活 Worker 模式（此模式下缓存方法抛出 `UnsupportedOperationException`）。
 
 ### 2. 配置
 
@@ -223,7 +253,7 @@ hotkey:
     instance-id: "" # 显式实例 ID（空=自动生成）
 
     # ——— 报告上报 ———
-    report-exchange: "hotkey.report.exchange"
+    report-exchange: "hotkey.report.exchange" # 必须与 worker.messaging.report-exchange 一致
     report-interval-ms: 100 # 批量发送间隔 (ms)
     queue-capacity: 10000 # 上报队列容量
     queue-offer-timeout-ms: 100 # 队列写入超时 (ms)
@@ -279,7 +309,7 @@ hotkey:
 
     # ——— 心跳（App 侧；Worker 健康监控） ———
     heartbeat:
-      exchange-name: "hotkey.heartbeat.exchange"
+      exchange-name: "hotkey.heartbeat.exchange" # 必须与 worker.messaging.heartbeat-exchange 一致
       timeout-ms: 3000 # 此窗口内无心跳即判定 Worker 死亡
       verify-interval-ms: 1500 # 可疑 Worker 验证间隔
       ping-timeout-ms: 2000 # Direct reply-to PING 超时
@@ -305,7 +335,7 @@ hotkey:
   # App 侧 — Worker 决策监听（接收 HOT / COOL）
   worker-listener:
     enabled: false # 需 Redis + RabbitMQ
-    exchange-name: "hotkey.broadcast.exchange"
+    exchange-name: "hotkey.broadcast.exchange" # 必须与 worker.messaging.broadcast-exchange 一致
     queue-prefix: "hotkey.worker"
     auto-startup: true # 随应用启动
     warmup-jitter-ms: 100 # 处理前随机延迟（防惊群）
@@ -343,9 +373,9 @@ hotkey:
       # 路由通过一致性哈希和心跳自动管理
 
     messaging:
-      report-exchange: "hotkey.report.exchange"
-      broadcast-exchange: "hotkey.broadcast.exchange"
-      heartbeat-exchange: "hotkey.heartbeat.exchange"
+      report-exchange: "hotkey.report.exchange" # 必须与 local.report-exchange 一致
+      broadcast-exchange: "hotkey.broadcast.exchange" # 必须与 worker-listener.exchange-name 一致
+      heartbeat-exchange: "hotkey.heartbeat.exchange" # 必须与 local.heartbeat.exchange-name 一致
 
     sliding-window:
       duration-ms: 1000 # 窗口时长 (ms)
@@ -410,7 +440,7 @@ Map<String, Object> batch = hotKey.peekAll(List.of("user:1", "user:2", "user:3")
 String val = hotKey.computeIfAbsent("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
 // B1. computeIfAbsent — 批量重载
-Map<String, String> users = hotKey.computeIfAbsent(keys, k -> loadUser(k));
+Map<String, String> users = hotKey.computeIfAbsent(keys, (k) -> loadUser(k));
 
 // C. get — 两级缓存（Redis 或任意后端）
 Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().get("user:123"));
@@ -549,6 +579,9 @@ public class RedisHotKeyHelper {
   }
 }
 
+> [!NOTE]
+> **序列化：** HotKey 内部使用 `StringRedisTemplate`，值的序列化完全由调用方决定。推荐使用 **Jackson**（Spring Boot 默认，JSON）或 **Kryo**（二进制，极致吞吐）。不建议使用 JDK 原生序列化。
+
 // 自定义二级缓存（非 Redis）：MySQL、远程 API 或任意数据源
 Optional<User> r = hotKey.get("user:123", () -> userMapper.selectById(123));
 
@@ -602,9 +635,10 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 | 注解              | 在 `@Cacheable` 上的作用                            |
 | ----------------- | --------------------------------------------------- |
 | `@HotKeyCacheTTL` | 覆盖硬/软 TTL                                       |
-| `@Intercept`      | 缓存命中时触发拦截回调，通过 `@Fallback` 解析回退值 |
-| `@Fallback`       | 拦截器阻止时提供回退值                              |
+| `@Intercept`      | 当 key 为本地热点时跳过方法体，通过 `@Fallback` 或 `peek()` 返回保底值 |
+| `@Fallback`       | 被黑名单阻止、拦截或异常时提供回退值                |
 | `@NullCaching`    | 选择缓存 null 返回值（默认 `true`）                 |
+| `@Broadcast`      | 禁止跨实例同步消息                                  |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")

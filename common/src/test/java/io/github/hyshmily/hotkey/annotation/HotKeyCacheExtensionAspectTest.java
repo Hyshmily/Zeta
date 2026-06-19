@@ -1,0 +1,587 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.hyshmily.hotkey.annotation;
+
+import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.lang.reflect.MethodSignature;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.CachePut;
+import org.springframework.cache.annotation.Cacheable;
+
+import java.lang.reflect.Method;
+import java.util.Optional;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@DisplayName("HotKeyCacheExtensionAspect tests")
+class HotKeyCacheExtensionAspectTest {
+
+  private HotKey hotKey;
+  private HotKeyProperties properties;
+  private HotKeyProperties.SpringCache springCache;
+  private HotKeyCacheExtensionAspect aspect;
+
+  @BeforeEach
+  void setUp() {
+    hotKey = mock(HotKey.class);
+    properties = mock(HotKeyProperties.class);
+    springCache = new HotKeyProperties.SpringCache();
+    springCache.setKeySeparator("::");
+    when(properties.getSpringCache()).thenReturn(springCache);
+    aspect = new HotKeyCacheExtensionAspect(hotKey, properties);
+  }
+
+  @AfterEach
+  void tearDown() {
+    HotKeyCacheContext.get().restore(null);
+  }
+
+  // ── Test service helpers ──
+
+  interface TestInterface {
+    String find(String id);
+  }
+
+  static class TestInterfaceImpl implements TestInterface {
+    @Override
+    public String find(String id) {
+      return "impl-" + id;
+    }
+  }
+
+  static class TestService {
+    @Cacheable(cacheNames = "test", key = "#p0")
+    public String find(String id) {
+      return "result-" + id;
+    }
+
+    public String findFallback(String id) {
+      return "fallback-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Intercept
+    @Fallback
+    public String findInterceptedWithFallback(String id) {
+      return "result-" + id;
+    }
+
+    public String findInterceptedWithFallbackFallback(String id) {
+      return "fallback-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Intercept
+    public String findInterceptedNoFallback(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @HotKeyCacheTTL(hardTtlMs = 5000)
+    public String findWithTtl(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @NullCaching(true)
+    public String findWithNullCaching(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Broadcast(false)
+    public String findBroadcastOff(String id) {
+      return "result-" + id;
+    }
+
+    @CachePut(cacheNames = "test", key = "#p0")
+    @Broadcast(false)
+    public String putBroadcastOff(String id) {
+      return "result-" + id;
+    }
+
+    @CacheEvict(cacheNames = "test", key = "#p0")
+    @Broadcast(false)
+    public void evictBroadcastOff(String id) {}
+
+    @CachePut(cacheNames = "test", key = "#p0")
+    @Broadcast
+    public String putBroadcastDefault(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Fallback
+    public String findThrowing(String id) {
+      throw new RuntimeException("from-method");
+    }
+
+    public String findThrowingFallback(String id) {
+      return "fallback-result";
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    public String findThrowingNoFallback(String id) {
+      throw new RuntimeException("from-method");
+    }
+  }
+
+  // ── @Intercept tests ──
+
+  @Test
+  @DisplayName("@Intercept with hot key and @Fallback returns fallback value")
+  void interceptWithHotKeyAndFallback_returnsFallback() throws Throwable {
+    Method method = TestService.class.getMethod("findInterceptedWithFallback", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+
+    when(hotKey.isLocalHotKey("test::myId")).thenReturn(true);
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("fallback-myId");
+    verify(pjp, never()).proceed();
+  }
+
+  @Test
+  @DisplayName("@Intercept with hot key and no @Fallback returns peek value")
+  void interceptWithHotKeyNoFallback_returnsPeekValue() throws Throwable {
+    Method method = TestService.class.getMethod("findInterceptedNoFallback", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+
+    when(hotKey.isLocalHotKey("test::myId")).thenReturn(true);
+    when(hotKey.peek("test::myId")).thenReturn(Optional.of("cached-value"));
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("cached-value");
+    verify(pjp, never()).proceed();
+  }
+
+  @Test
+  @DisplayName("@Intercept with non-hot key proceeds normally")
+  void interceptWithNonHotKey_proceedsNormally() throws Throwable {
+    Method method = TestService.class.getMethod("findInterceptedNoFallback", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    when(hotKey.isLocalHotKey("test::myId")).thenReturn(false);
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("result-myId");
+    verify(pjp).proceed();
+  }
+
+  @Test
+  @DisplayName("context is restored after proceed in finally block")
+  void contextRestoredAfterProceed() throws Throwable {
+    HotKeyCacheContext.get().apply(999L, 888L, true, false);
+
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(HotKeyCacheContext.get().getHardTtlMs()).isEqualTo(999L);
+    assertThat(HotKeyCacheContext.get().getSoftTtlMs()).isEqualTo(888L);
+    assertThat(HotKeyCacheContext.get().isAllowNull()).isTrue();
+  }
+
+  @Test
+  @DisplayName("context is cleared after proceed when no prior context")
+  void contextClearedAfterProceedWhenNoPriorContext() throws Throwable {
+    HotKeyCacheContext.get().restore(null);
+
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(HotKeyCacheContext.get().snapshot()).isNull();
+  }
+
+  // ── Fallback on exception tests ──
+
+  @Test
+  @DisplayName("when method throws and @Fallback present, returns fallback")
+  void methodThrowsWithFallback_returnsFallback() throws Throwable {
+    Method method = TestService.class.getMethod("findThrowing", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenThrow(new RuntimeException("from-method"));
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("fallback-result");
+  }
+
+  @Test
+  @DisplayName("when method throws and no @Fallback, rethrows")
+  void methodThrowsWithoutFallback_rethrows() throws Throwable {
+    Method method = TestService.class.getMethod("findThrowingNoFallback", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenThrow(new RuntimeException("from-method"));
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    assertThatThrownBy(() -> aspect.aroundCacheable(pjp, cacheable))
+      .isInstanceOf(RuntimeException.class)
+      .hasMessage("from-method");
+  }
+
+  // ── resolveCacheName tests ──
+
+  @Test
+  @DisplayName("resolveCacheName uses cacheNames[0] when available")
+  void resolveCacheName_usesCacheNames() throws Throwable {
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[] {"fromCacheNames"});
+    when(cacheable.value()).thenReturn(new String[] {"fromValue"});
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("ok");
+
+    aspect.aroundCacheable(pjp, cacheable);
+  }
+
+  @Test
+  @DisplayName("resolveCacheName falls back to value[0] when cacheNames empty")
+  void resolveCacheName_fallsBackToValue() throws Throwable {
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[0]);
+    when(cacheable.value()).thenReturn(new String[] {"fromValue"});
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("ok");
+
+    aspect.aroundCacheable(pjp, cacheable);
+  }
+
+  @Test
+  @DisplayName("resolveCacheName defaults to hotkey when both empty")
+  void resolveCacheName_defaultsToHotkey() throws Throwable {
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[0]);
+    when(cacheable.value()).thenReturn(new String[0]);
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("ok");
+
+    aspect.aroundCacheable(pjp, cacheable);
+  }
+
+  // ── resolveKey tests ──
+
+  @Test
+  @DisplayName("resolveKey with empty expression and single arg returns arg.toString()")
+  void resolveKey_emptyExpressionWithSingleArg() throws Throwable {
+    HotKeyCacheContext.get().restore(null);
+
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.value()).thenReturn(new String[0]);
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(TestService.class.getMethod("find", String.class));
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    aspect.aroundCacheable(pjp, cacheable);
+  }
+
+  @Test
+  @DisplayName("resolveKey with SpEL expression evaluates correctly")
+  void resolveKey_withSpelExpression() throws Throwable {
+    Method method = TestService.class.getMethod("find", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"spelKey"});
+    when(pjp.proceed()).thenReturn("result-spelKey");
+
+    aspect.aroundCacheable(pjp, cacheable);
+  }
+
+  // ── resolveMethod tests ──
+
+  @Test
+  @DisplayName("resolveMethod unwraps interface methods to impl class")
+  void resolveMethod_unwrapsInterfaceMethod() throws Throwable {
+    Method interfaceMethod = TestInterface.class.getMethod("find", String.class);
+    Cacheable cacheable = mock(Cacheable.class);
+    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.value()).thenReturn(new String[0]);
+    when(cacheable.key()).thenReturn("");
+
+    MethodSignature signature = mock(MethodSignature.class);
+    when(signature.getMethod()).thenReturn(interfaceMethod);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestInterfaceImpl());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("impl-myId");
+
+    aspect.aroundCacheable(pjp, cacheable);
+    verify(pjp).proceed();
+  }
+
+  // ── TTL override tests ──
+
+  @Test
+  @DisplayName("@HotKeyCacheTTL applies hardTtlMs override to context")
+  void ttlOverride_appliesToContext() throws Throwable {
+    HotKeyCacheContext.get().restore(null);
+
+    Method method = TestService.class.getMethod("findWithTtl", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenAnswer(invocation -> {
+      assertThat(HotKeyCacheContext.get().getHardTtlMs()).isEqualTo(5000L);
+      return "result-myId";
+    });
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    aspect.aroundCacheable(pjp, cacheable);
+  }
+
+  // ── @Broadcast tests ──
+
+  @Test
+  @DisplayName("@Broadcast(false) on @Cacheable sets skipBroadcast in context")
+  void broadcastFalse_onCacheable_setsSkipBroadcast() throws Throwable {
+    HotKeyCacheContext.get().restore(null);
+
+    Method method = TestService.class.getMethod("findBroadcastOff", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenAnswer(invocation -> {
+      assertThat(HotKeyCacheContext.get().isSkipBroadcast()).isTrue();
+      return "result-myId";
+    });
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    aspect.aroundCacheable(pjp, cacheable);
+  }
+
+  @Test
+  @DisplayName("@Broadcast(false) on @CachePut sets skipBroadcast in context")
+  void broadcastFalse_onCachePut_setsSkipBroadcast() throws Throwable {
+    HotKeyCacheContext.get().restore(null);
+
+    Method method = TestService.class.getMethod("putBroadcastOff", String.class);
+    CachePut cachePut = method.getAnnotation(CachePut.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenAnswer(invocation -> {
+      assertThat(HotKeyCacheContext.get().isSkipBroadcast()).isTrue();
+      return "result-myId";
+    });
+
+    aspect.aroundCachePut(pjp, cachePut);
+  }
+
+  @Test
+  @DisplayName("@Broadcast(false) on @CacheEvict sets skipBroadcast in context")
+  void broadcastFalse_onCacheEvict_setsSkipBroadcast() throws Throwable {
+    HotKeyCacheContext.get().restore(null);
+
+    Method method = TestService.class.getMethod("evictBroadcastOff", String.class);
+    CacheEvict cacheEvict = method.getAnnotation(CacheEvict.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenAnswer(invocation -> {
+      assertThat(HotKeyCacheContext.get().isSkipBroadcast()).isTrue();
+      return null;
+    });
+
+    aspect.aroundCacheEvict(pjp, cacheEvict);
+  }
+
+  @Test
+  @DisplayName("@Broadcast (default true) on @CachePut does not set skipBroadcast")
+  void broadcastDefault_onCachePut_doesNotSkip() throws Throwable {
+    HotKeyCacheContext.get().restore(null);
+
+    Method method = TestService.class.getMethod("putBroadcastDefault", String.class);
+    CachePut cachePut = method.getAnnotation(CachePut.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenAnswer(invocation -> {
+      assertThat(HotKeyCacheContext.get().isSkipBroadcast()).isFalse();
+      return "result-myId";
+    });
+
+    aspect.aroundCachePut(pjp, cachePut);
+  }
+
+  // ── NullCaching tests ──
+
+  @Test
+  @DisplayName("@NullCaching(true) sets allowNull in context")
+  void nullCaching_appliesAllowNull() throws Throwable {
+    HotKeyCacheContext.get().restore(null);
+
+    Method method = TestService.class.getMethod("findWithNullCaching", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenAnswer(invocation -> {
+      assertThat(HotKeyCacheContext.get().isAllowNull()).isTrue();
+      return "result-myId";
+    });
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    aspect.aroundCacheable(pjp, cacheable);
+  }
+}

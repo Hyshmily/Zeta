@@ -28,6 +28,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -366,5 +367,125 @@ class HeavyKeeperTest {
     executor.shutdown();
     assertThat(keeper.total()).isEqualTo((long) threadCount * iterations);
     assertThat(keeper.contains("sameKey")).isTrue();
+  }
+
+  @Test
+  void addDirect_withNegativeIncrement_shouldNotThrow() {
+    assertThat(keeper.addDirect("key1", -5).isHotKey()).isFalse();
+    assertThat(keeper.contains("key1")).isFalse();
+  }
+
+  @Test
+  void addDirect_mapBatch_whenAllBelowMinCount_shouldReturnEmpty() {
+    HeavyKeeper hk = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1000);
+    Map<String, Long> map = new HashMap<>();
+    map.put("low1", 1L);
+    map.put("low2", 2L);
+    assertThat(hk.addDirect(map)).isEmpty();
+  }
+
+  @Test
+  void addDirect_mapBatch_withBlankKeys_shouldNotThrow() {
+    keeper.addDirect("", 10);
+    assertThat(keeper.contains("")).isTrue();
+  }
+
+  @Test
+  void addDirect_withExpelledQueueFull_shouldNotThrow() {
+    HeavyKeeper smallQueue = new HeavyKeeper(3, 1000, 4, 0.9, 1, 1);
+    for (int i = 0; i < 5; i++) {
+      smallQueue.addDirect("key" + i, 50);
+    }
+    assertThat(smallQueue.list()).hasSize(3);
+  }
+
+  @Test
+  void listTopN_withNLessThanTopK_shouldReturnNItems() {
+    keeper.addDirect("a", 50);
+    keeper.addDirect("b", 40);
+    keeper.addDirect("c", 30);
+    assertThat(keeper.listTopN(2)).hasSize(2);
+  }
+
+  @Test
+  void listTopN_withNGreaterThanTopK_shouldReturnAllItems() {
+    keeper.addDirect("a", 50);
+    keeper.addDirect("b", 40);
+    assertThat(keeper.listTopN(100)).hasSize(2);
+  }
+
+  @Test
+  void contains_withEmptyString_shouldReturnFalse() {
+    assertThat(keeper.contains("")).isFalse();
+  }
+
+  @Test
+  void contains_withSpecialCharacters_shouldWork() {
+    keeper.addDirect("\uD83D\uDD25", 50);
+    keeper.addDirect("\u952E", 50);
+    keeper.addDirect("\u043A\u043B\u044E\u0447", 50);
+    assertThat(keeper.contains("\uD83D\uDD25")).isTrue();
+    assertThat(keeper.contains("\u952E")).isTrue();
+    assertThat(keeper.contains("\u043A\u043B\u044E\u0447")).isTrue();
+  }
+
+  @Test
+  void addDirect_withSameCountKeys_shouldHandleTieBreaking() {
+    keeper.addDirect("b-key", 50);
+    keeper.addDirect("a-key", 50);
+    keeper.addDirect("c-key", 50);
+    List<Item> items = keeper.list();
+    assertThat(items).hasSize(3);
+    assertThat(items.get(0).count()).isEqualTo(50);
+    assertThat(items.get(1).count()).isEqualTo(50);
+    assertThat(items.get(2).count()).isEqualTo(50);
+  }
+
+  @Test
+  void fading_whenMultipleEntriesHaveCountOne_shouldClearAll() {
+    HeavyKeeper hk = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1);
+    hk.addDirect("k1", 1);
+    hk.addDirect("k2", 1);
+    hk.addDirect("k3", 1);
+    assertThat(hk.list()).hasSize(3);
+    hk.fading();
+    assertThat(hk.list()).isEmpty();
+    assertThat(hk.total()).isEqualTo(1);
+  }
+
+  @Test
+  void fading_withConcurrentAddDirect_shouldNotDeadlock() throws InterruptedException {
+    HeavyKeeper preloaded = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1);
+    for (int i = 0; i < 10; i++) {
+      preloaded.addDirect("key" + i, 100);
+    }
+    CountDownLatch latch = new CountDownLatch(1);
+    ExecutorService exec = Executors.newFixedThreadPool(2);
+    AtomicBoolean stopped = new AtomicBoolean(false);
+    exec.submit(() -> {
+      try {
+        latch.await();
+      } catch (Exception e) {
+        Thread.currentThread().interrupt();
+      }
+      while (!stopped.get()) {
+        preloaded.addDirect("concurrentKey", 1);
+      }
+    });
+    exec.submit(() -> {
+      try {
+        latch.await();
+      } catch (Exception e) {
+        Thread.currentThread().interrupt();
+      }
+      for (int i = 0; i < 100; i++) {
+        preloaded.fading();
+      }
+      stopped.set(true);
+    });
+    latch.countDown();
+    exec.shutdown();
+    assertThat(exec.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(preloaded.list()).isNotNull();
   }
 }

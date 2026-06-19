@@ -34,6 +34,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,7 +45,16 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 
 /**
  * Tests for {@link HotKeyCache}, covering peek, get, invalidate, and blacklist behaviors.
@@ -744,5 +754,296 @@ class HotKeyCacheTest {
       .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
       .build());
     assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 10000L, 500L)).contains("cached");
+  }
+
+  // ── broadcastAllLocalRulesManually (no publisher) ──
+
+  @Test
+  @DisplayName("broadcastAllLocalRulesManually should not throw with no publisher")
+  void broadcastAllLocalRulesManually_shouldNotThrow() {
+    hotKeyCache.broadcastAllLocalRulesManually();
+  }
+
+  // ── putBeforeInvalidate with no existing entry ──
+
+  @Test
+  @DisplayName("putBeforeInvalidate on clean key should not throw")
+  void putBeforeInvalidate_withNoExistingEntry_shouldWork() {
+    hotKeyCache.putBeforeInvalidate("key1", () -> {});
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
+  }
+
+  // ── Hot path detection and promotion ──
+
+  @Nested
+  @DisplayName("Hot path detection and promotion")
+  class HotPathTest {
+
+    private HotKeyDetector hotKeyDetector;
+    private Cache<String, Object> caffeineCache;
+    private SingleFlight singleFlight;
+    private CacheExpireManager expireManager;
+    private Executor executor;
+    private HotKeyCache hotKeyCache;
+    private CacheSyncPublisher publisher;
+    private ClusterHealthView healthView;
+
+    @BeforeEach
+    void setUp() {
+      hotKeyDetector = mock(HotKeyDetector.class);
+      caffeineCache = Caffeine.newBuilder().maximumSize(100).build();
+      singleFlight = mock(SingleFlight.class);
+      executor = Runnable::run;
+      HotKeyProperties ttlConfig = new HotKeyProperties();
+      expireManager = new CacheExpireManager(caffeineCache, executor, ttlConfig, 10);
+      publisher = mock(CacheSyncPublisher.class);
+      healthView = mock(ClusterHealthView.class);
+      HotKeyReporter reporter = mock(HotKeyReporter.class);
+
+      hotKeyCache = new HotKeyCache(
+        hotKeyDetector,
+        caffeineCache,
+        singleFlight,
+        expireManager,
+        executor,
+        Optional.of(publisher),
+        Optional.of(reporter),
+        new RuleMatcher(Optional.empty(), Optional.empty()),
+        new VersionController(Optional.empty(), 60),
+        mock(RingManager.class),
+        healthView
+      );
+    }
+
+    @Test
+    @DisplayName("loadAndCache should promote key to HOT when detected as hot")
+    void loadAndCache_shouldPromoteHotKey() {
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+      when(singleFlight.load(eq("key1"), any())).thenReturn(Optional.of("value"));
+
+      Optional<String> result = hotKeyCache.get("key1", () -> "value");
+
+      assertThat(result).contains("value");
+      Object raw = caffeineCache.getIfPresent("key1");
+      assertThat(raw).isInstanceOf(CacheEntry.class);
+      CacheEntry entry = (CacheEntry) raw;
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(entry.getValue()).isEqualTo("value");
+    }
+
+    @Test
+    @DisplayName("loadAndCache should preserve Worker-managed HOT entry")
+    void loadAndCache_shouldPreserveWorkerManagedEntry() {
+      when(hotKeyDetector.contains("key1")).thenReturn(false);
+      when(singleFlight.load(eq("key1"), any())).thenAnswer(invocation -> {
+        Supplier<String> reader = invocation.getArgument(1);
+        caffeineCache.put("key1", CacheEntry.builder()
+          .value("workerValue")
+          .dataVersion(100)
+          .isVersionDegraded(false)
+          .decisionVersion(42)
+          .hardTtlMs(3_600_000)
+          .hardExpireAtMs(Long.MAX_VALUE)
+          .softTtlMs(300_000)
+          .softExpireAtMs(Long.MAX_VALUE)
+          .keyState(KeyState.HOT)
+          .normalHardTtlMs(300_000)
+          .normalSoftTtlMs(30_000)
+          .build());
+        return Optional.ofNullable(reader.get());
+      });
+
+      Optional<String> result = hotKeyCache.get("key1", () -> "newValue");
+
+      assertThat(result).contains("newValue");
+      Object raw = caffeineCache.getIfPresent("key1");
+      assertThat(raw).isInstanceOf(CacheEntry.class);
+      CacheEntry entry = (CacheEntry) raw;
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(entry.getValue()).isEqualTo("workerValue");
+    }
+
+    @Test
+    @DisplayName("getWithSoftExpire uses normalSoftTtlMs for COOL entry")
+    void getWithSoftExpire_shouldUseCoolNormalSoftTtl() {
+      caffeineCache.put("key", CacheEntry.builder()
+        .value("stale").dataVersion(1).isVersionDegraded(false)
+        .decisionVersion(5).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() - 1000)
+        .keyState(KeyState.COOL).normalHardTtlMs(300_000).normalSoftTtlMs(5000)
+        .build());
+
+      hotKeyCache.getWithSoftExpire("key", () -> "fresh");
+
+      CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
+      assertThat(after.getValue()).isEqualTo("fresh");
+      assertThat(after.getSoftTtlMs()).isEqualTo(5000L);
+    }
+
+    @Test
+    @DisplayName("getWithSoftExpire uses hot soft TTL override for HOT entry")
+    void getWithSoftExpire_shouldUseHotSoftTtlOverride() {
+      caffeineCache.put("key", CacheEntry.builder()
+        .value("stale").dataVersion(1).isVersionDegraded(false)
+        .decisionVersion(5).hardTtlMs(3_600_000).hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(300_000).softExpireAtMs(System.currentTimeMillis() - 1000)
+        .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+        .build());
+
+      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 9999L);
+
+      CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
+      assertThat(after.getValue()).isEqualTo("fresh");
+      assertThat(after.getSoftTtlMs()).isEqualTo(9999L);
+    }
+
+    @Test
+    @DisplayName("promoteLocalHotkeyIfNeeded should promote NORMAL to HOT")
+    void promoteLocalHotkeyIfNeeded_shouldPromoteNormalToHot() {
+      caffeineCache.put("key1", CacheEntry.builder()
+        .value("v").dataVersion(1).isVersionDegraded(false)
+        .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .keyState(KeyState.NORMAL).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+        .build());
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+
+      hotKeyCache.get("key1", () -> "loaded");
+
+      Object raw = caffeineCache.getIfPresent("key1");
+      assertThat(raw).isInstanceOf(CacheEntry.class);
+      CacheEntry entry = (CacheEntry) raw;
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+    }
+
+    @Test
+    @DisplayName("promoteLocalHotkeyIfNeeded should promote COOL to HOT when cluster unhealthy")
+    void promoteLocalHotkeyIfNeeded_shouldPromoteCoolWhenClusterUnhealthy() {
+      caffeineCache.put("key1", CacheEntry.builder()
+        .value("v").dataVersion(1).isVersionDegraded(false)
+        .decisionVersion(5).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .keyState(KeyState.COOL).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+        .build());
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+      when(healthView.isClusterHealthy()).thenReturn(false);
+
+      hotKeyCache.get("key1", () -> "loaded");
+
+      Object raw = caffeineCache.getIfPresent("key1");
+      assertThat(raw).isInstanceOf(CacheEntry.class);
+      CacheEntry entry = (CacheEntry) raw;
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+    }
+
+    @Test
+    @DisplayName("promoteLocalHotkeyIfNeeded should NOT promote COOL when cluster healthy")
+    void promoteLocalHotkeyIfNeeded_shouldNotPromoteCoolWhenClusterHealthy() {
+      caffeineCache.put("key1", CacheEntry.builder()
+        .value("v").dataVersion(1).isVersionDegraded(false)
+        .decisionVersion(5).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .keyState(KeyState.COOL).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+        .build());
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+      when(healthView.isClusterHealthy()).thenReturn(true);
+
+      hotKeyCache.get("key1", () -> "loaded");
+
+      Object raw = caffeineCache.getIfPresent("key1");
+      assertThat(raw).isInstanceOf(CacheEntry.class);
+      CacheEntry entry = (CacheEntry) raw;
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.COOL);
+    }
+
+    @Test
+    @DisplayName("putThrough preserves Worker-managed HOT state")
+    void buildPutThroughEntry_shouldPreserveWorkerManagedState() {
+      caffeineCache.put("key1", CacheEntry.builder()
+        .value("old").dataVersion(1).isVersionDegraded(false)
+        .decisionVersion(5).hardTtlMs(3_600_000).hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(300_000).softExpireAtMs(Long.MAX_VALUE)
+        .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+        .build());
+
+      hotKeyCache.putThrough("key1", "newValue", () -> {});
+
+      Object raw = caffeineCache.getIfPresent("key1");
+      assertThat(raw).isInstanceOf(CacheEntry.class);
+      CacheEntry entry = (CacheEntry) raw;
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(entry.getValue()).isEqualTo("newValue");
+    }
+
+    @Test
+    @DisplayName("invalidate should broadcast when publisher present")
+    void invalidate_shouldBroadcastWhenPublisherPresent() {
+      hotKeyCache.invalidate("key1");
+
+      verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));
+    }
+
+    @Test
+    @DisplayName("invalidateAll should broadcast when publisher present")
+    void invalidateAll_shouldBroadcastWhenPublisherPresent() {
+      hotKeyCache.invalidateAll(List.of("key1", "key2"));
+
+      verify(publisher).broadcastLocalInvalidateAll(eq(List.of("key1", "key2")));
+    }
+
+    @Test
+    @DisplayName("putThrough should broadcast refresh when publisher present")
+    void putThrough_shouldBroadcastWhenPublisherPresent() {
+      hotKeyCache.putThrough("key1", "value", () -> {});
+
+      verify(publisher).broadcastRefresh(eq("key1"), anyLong(), eq(true));
+    }
+
+    @Test
+    @DisplayName("putBeforeInvalidate should broadcast when publisher present")
+    void putBeforeInvalidate_shouldBroadcastWhenPublisherPresent() {
+      hotKeyCache.putBeforeInvalidate("key1", () -> {});
+
+      verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));
+    }
+
+    @Test
+    @DisplayName("broadcastAllLocalRulesManually should delegate without throwing")
+    void broadcastAllLocalRulesManually_shouldDelegate() {
+      hotKeyCache.broadcastAllLocalRulesManually();
+    }
+
+    @Test
+    @DisplayName("get with TTL overrides should use them in loadAndCache")
+    void get_shouldUseTtlOverrides() {
+      when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("value"));
+      when(hotKeyDetector.contains("key1")).thenReturn(false);
+
+      hotKeyCache.get("key1", () -> "value", 50000L, 5000L);
+
+      Object raw = caffeineCache.getIfPresent("key1");
+      assertThat(raw).isInstanceOf(CacheEntry.class);
+      CacheEntry entry = (CacheEntry) raw;
+      assertThat(entry.getHardTtlMs()).isEqualTo(50000L);
+      assertThat(entry.getSoftTtlMs()).isEqualTo(5000L);
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+    }
+
+    @Test
+    @DisplayName("getWithSoftExpire with COOL expired entry triggers background refresh")
+    void getWithSoftExpire_coolEntry_shouldTriggerRefresh() {
+      caffeineCache.put("key", CacheEntry.builder()
+        .value("stale").dataVersion(1).isVersionDegraded(false)
+        .decisionVersion(5).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() - 1000)
+        .keyState(KeyState.COOL).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+        .build());
+
+      hotKeyCache.getWithSoftExpire("key", () -> "fresh");
+
+      CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
+      assertThat(after.getValue()).isEqualTo("fresh");
+      assertThat(after.getSoftExpireAtMs()).isGreaterThan(System.currentTimeMillis() - 500);
+    }
   }
 }
