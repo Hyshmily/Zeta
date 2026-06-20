@@ -48,6 +48,7 @@ HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 
 - **Worker TopK persistence** — Periodic snapshots of the Worker's HeavyKeeper to Redis; restart recovery in seconds instead of hours of re-accumulation
 - **Spring Cache integration** — Standard `@Cacheable` / `@CachePut` / `@CacheEvict` with HotKey hot-key detection, soft-expire, cross-instance sync, and companion annotations (`@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, `@NullCaching`) for TTL, intercept, fallback, and null-caching; gated by `hotkey.spring-cache.enabled=true`
 - **Transaction support** — `TransactionSupport` defers cache writes until after Spring `@Transactional` commits, ensuring cache-data consistency on the write path
+- **Distributed lock** — Redis-based `tryLock` / `tryLockAndRun` with configurable retry counts, Lua-based safe release (GET+DEL), and graceful degradation (null when no Redis)
 
 </details>
 
@@ -70,7 +71,7 @@ HotKey is designed as a **read-hotspot governance** framework, not a general-pur
 | Scenario                                          | Why Not                                                                                                                                           | What to Use Instead                             |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | **Atomic inventory deduction** (flash sale stock) | HotKey has no cross-JVM atomicity guarantee; `VersionGuard` is optimistic, transient inconsistencies self-heal on next heartbeat cycle (ADR-0006) | Redis Lua script or distributed lock (Redisson) |
-| **Distributed locking**                           | HotKey provides no distributed lock abstraction                                                                                                   | Redisson, ZooKeeper                             |
+| **Distributed locking**                           | HotKey provides a built-in Redis distributed lock for simple critical sections; for auto-renewal, multi-lock, or read-write lock use dedicated tools | Redisson, ZooKeeper                             |
 | **Strong consistency writes**                     | Cross-instance sync is at-most-once with self-healing broadcasts (ADR-0004, ADR-0007)                                                             | Database transaction, Paxos/Raft                |
 | **Uniform traffic (no hotspots)**                 | No detectable hot keys → HotKey provides no benefit over bare Caffeine                                                                            | Plain Caffeine cache                            |
 
@@ -604,6 +605,23 @@ public class RedisHotKeyHelper {
 Optional<User> r = hotKey.get("user:123", () -> userMapper.selectById(123));
 
 User user = r.orElseGet(() -> createDefaultUser());
+```
+
+**Distributed lock**
+
+Distributed locks guard external resources (DB writes, RPC calls) — HotKey cache operations are a side effect after lock release.
+
+```java
+// Lock protects the external write, then refresh cache (outside lock)
+boolean ok = hotKey.tryLockAndRun("order:42", 5, TimeUnit.SECONDS, () -> {
+    orderService.deductStock(orderId, quantity); // external resource, needs mutual exclusion
+    hotKey.invalidate("order:" + orderId);        // cache post-invalidation
+});
+
+// Custom retry counts (negative = fall back to configured default)
+try (AutoReleaseLock lock = hotKey.tryLock("order:42", 5, TimeUnit.SECONDS, 3, 1, 3)) {
+    if (lock != null) { /* critical section */ }
+}
 ```
 
 **Custom per-entry TTL**

@@ -55,6 +55,10 @@
 | `refresh(key, reader)`                                 | Evict locally then load and cache via the supplier; uses default TTLs                                                                                                                                                                          |
 | `refresh(key, reader, hardTtlMs, softTtlMs)`           | Evict locally then load and cache with explicit TTL overrides                                                                                                                                                                                  |
 | `refreshAll(Map)`                                      | Batch refresh — evicts all keys locally then loads via provided suppliers                                                                                                                                                                      |
+| `tryLock(key, expire, unit)`                           | Acquire a distributed lock with default retry counts; returns `AutoReleaseLock` or `null` if failed                                                                             |
+| `tryLock(key, expire, unit, lockCount, inquiryCount, unlockCount)` | Same with explicit retry counts (negative values fall back to configured defaults)                                                                                |
+| `tryLockAndRun(key, expire, unit, action)`              | Convenience — acquire lock, run action, release; returns `true` if lock acquired and action ran                                                                                 |
+| `tryLockAndRun(key, expire, unit, action, lockCount, inquiryCount, unlockCount)` | Same with explicit retry counts                                                                                                                             |
 | `returnLocalHotKeys()`                                 | App-side Top-K snapshot (key + count)                                                                                                                                                                                                          |
 | `returnLocalTopNHotKeys(n)`                            | Return top N hot keys from the local detector, ordered by frequency                                                                                                                                                                            |
 | `returnLocalExpelledHotKeys()`                         | Get app-side expelled hot key queue; periodically drained by internal timer                                                                                                                                                                    |
@@ -107,6 +111,14 @@
 | `hotkey.local.consumer-count`           | `0`                      | Report consumer thread count; 0 = auto (max(4, availableProcessors / 2))                                                      |
 | `hotkey.local.scheduler-pool-size`      | `8`                      | Pool size for the shared HotKey scheduler (periodic tasks)                                                                    |
  
+### Distributed Lock (`hotkey.local.*`)
+
+| Property                                | Default | Description                                                                           |
+| --------------------------------------- | ------- | ------------------------------------------------------------------------------------- |
+| `hotkey.local.try-lock-lock-count`      | `2`     | Number of SET NX retries for distributed lock acquisition                             |
+| `hotkey.local.try-lock-inquiry-count`   | `1`     | Number of GET inquiries after transient SET NX failure                                |
+| `hotkey.local.try-lock-unlock-count`    | `2`     | Number of DEL retries for distributed lock release                                    |
+
 ### Heartbeat (`hotkey.local.heartbeat.*`)
 
 | Property                                        | Default                     | Description                                                                                            |

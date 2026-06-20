@@ -6,4 +6,5 @@ io.github.hyshmily.hotkey.autoconfigure.HotKeyAmqpAutoConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeySchedulingConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeyMicrometerAutoConfiguration
 io.github.hyshmily.hotkey.autoconfigure.HotKeySpringCacheAutoConfiguration
+io.github.hyshmily.hotkey.autoconfigure.HotKeyLockAutoConfiguration
 

@@ -342,4 +342,13 @@ public class HotKeyProperties {
   /** Spring Cache integration configuration. */
   @Valid
   private SpringCache springCache = new SpringCache();
+
+  /** Number of {@code SET NX} retries for distributed lock acquisition. */
+  private int tryLockLockCount = 2;
+
+  /** Number of {@code GET} inquiries after a transient {@code SET NX} failure. */
+  private int tryLockInquiryCount = 1;
+
+  /** Number of {@code DEL} retries for distributed lock release. */
+  private int tryLockUnlockCount = 2;
 }

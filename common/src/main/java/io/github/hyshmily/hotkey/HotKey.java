@@ -17,6 +17,8 @@ package io.github.hyshmily.hotkey;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.distributedlock.AutoReleaseLock;
+import io.github.hyshmily.hotkey.cache.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyReadQuery;
 import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyWriteCommand;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
@@ -29,8 +31,10 @@ import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Public facade for the HotKey library — the sole public API entry point.
@@ -75,6 +79,11 @@ public class HotKey {
    * all application instances. {@code null} when no Worker is connected.
    */
   private final TopK workerTopKAlgorithm;
+  /**
+   * Distributed lock provider.  {@code null} when no Redis is available
+   * (graceful degradation — {@link #tryLock} returns {@code null}).
+   */
+  private final LockProvider lockProvider;
 
   /**
    * Create a HotKey facade with all three optional components.
@@ -92,9 +101,35 @@ public class HotKey {
    * @param workerTopKAlgorithm the Worker-side global TopK detector (maybe {@code null} in app-only mode)
    */
   public HotKey(HotKeyCache hotKeyCache, HotKeyDetector appHotKeyDetector, TopK workerTopKAlgorithm) {
+    this(hotKeyCache, appHotKeyDetector, workerTopKAlgorithm, null);
+  }
+
+  /**
+   * Create a HotKey facade with an optional distributed lock provider.
+   *
+   * <p>Each parameter may be {@code null} depending on the deployment mode:
+   * <ul>
+   *   <li><b>App-only:</b> {@code hotKeyCache} and {@code appHotKeyDetector} are present,
+   *       {@code workerTopKAlgorithm} and {@code lockProvider} may be absent</li>
+   *   <li><b>Worker-only:</b> only {@code workerTopKAlgorithm} is present</li>
+   *   <li><b>Coexistence:</b> all four may be present</li>
+   * </ul>
+   *
+   * @param hotKeyCache         the cache orchestrator (maybe {@code null} in Worker-only mode)
+   * @param appHotKeyDetector   the app-side local TopK detector (maybe {@code null} in Worker-only mode)
+   * @param workerTopKAlgorithm the Worker-side global TopK detector (maybe {@code null} in app-only mode)
+   * @param lockProvider        the distributed lock provider (maybe {@code null} when no Redis)
+   */
+  public HotKey(
+    HotKeyCache hotKeyCache,
+    HotKeyDetector appHotKeyDetector,
+    TopK workerTopKAlgorithm,
+    LockProvider lockProvider
+  ) {
     this.hotKeyCache = hotKeyCache;
     this.appHotKeyDetector = appHotKeyDetector;
     this.workerTopKAlgorithm = workerTopKAlgorithm;
+    this.lockProvider = lockProvider;
   }
 
   /**
@@ -726,6 +761,130 @@ public class HotKey {
   public void invalidateAll() {
     requireCache();
     hotKeyCache.invalidateAll();
+  }
+
+  /**
+   * Attempt to acquire a distributed lock with the provider's default
+   * retry counts.
+   *
+   * <p>Equivalent to {@code tryLock(key, expire, unit, -1, -1, -1)}.
+   *
+   * <p>Usage:
+   * <pre>{@code
+   * try (AutoReleaseLock lock = hotKey.tryLock("order:42", 5, TimeUnit.SECONDS)) {
+   *     if (lock != null) {
+   *         // critical section
+   *     }
+   * }
+   * }</pre>
+   *
+   * @param key    the lock key
+   * @param expire the time-to-live for the lock
+   * @param unit   the time unit for {@code expire}
+   * @return a lock handle if acquired, or {@code null} if the lock is held
+   *         by another caller or the provider is unavailable
+   */
+  @Nullable
+  public AutoReleaseLock tryLock(String key, long expire, TimeUnit unit) {
+    return lockProvider != null ? lockProvider.tryLock(key, expire, unit) : null;
+  }
+
+  /**
+   * Acquire a distributed lock, execute the action, and release
+   * with the provider's default retry counts.
+   *
+   * <p>Equivalent to {@code tryLockAndRun(key, expire, unit, action, -1, -1, -1)}.
+   *
+   * @param key    the lock key
+   * @param expire the time-to-live for the lock
+   * @param unit   the time unit for {@code expire}
+   * @param action the action to execute while holding the lock
+   * @return {@code true} if the lock was acquired and the action ran,
+   *         {@code false} otherwise
+   */
+  public boolean tryLockAndRun(String key, long expire, TimeUnit unit, Runnable action) {
+    Objects.requireNonNull(action, "action must not be null");
+    if (lockProvider == null) {
+      return false;
+    }
+    try (AutoReleaseLock lock = tryLock(key, expire, unit)) {
+      if (lock != null) {
+        action.run();
+        return true;
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Attempt to acquire a distributed lock with explicit retry counts.
+   *
+   * <p>Any negative count falls back to the provider's configured default.
+   * Returns {@code null} when the lock is held by another caller or when
+   * no Redis is available (graceful degradation).
+   *
+   * @param key                  the lock key
+   * @param expire               the time-to-live for the lock
+   * @param unit                 the time unit for {@code expire}
+   * @param tryLockLockCount     the number of {@code SET NX} retries;
+   *                             negative → default
+   * @param tryLockInquiryCount  the number of {@code GET} inquiries;
+   *                             negative → default
+   * @param tryLockUnlockCount   the number of {@code DEL} retries;
+   *                             negative → default
+   * @return a lock handle if acquired, or {@code null} if the lock is held
+   *         by another caller or the provider is unavailable
+   */
+  @Nullable
+  public AutoReleaseLock tryLock(
+    String key,
+    long expire,
+    TimeUnit unit,
+    int tryLockLockCount,
+    int tryLockInquiryCount,
+    int tryLockUnlockCount
+  ) {
+    return lockProvider != null
+      ? lockProvider.tryLock(key, expire, unit, tryLockLockCount, tryLockInquiryCount, tryLockUnlockCount)
+      : null;
+  }
+
+  /**
+   * Acquire a distributed lock with explicit retry counts, execute the
+   * action, and release.
+   *
+   * <p>Any negative count falls back to the provider's configured default.
+   *
+   * @param key                  the lock key
+   * @param expire               the time-to-live for the lock
+   * @param unit                 the time unit for {@code expire}
+   * @param action               the action to execute while holding the lock
+   * @param tryLockLockCount     the number of {@code SET NX} retries;
+   *                             negative → default
+   * @param tryLockInquiryCount  the number of {@code GET} inquiries;
+   *                             negative → default
+   * @param tryLockUnlockCount   the number of {@code DEL} retries;
+   *                             negative → default
+   * @return {@code true} if the lock was acquired and the action ran,
+   *         {@code false} otherwise
+   */
+  public boolean tryLockAndRun(
+    String key,
+    long expire,
+    TimeUnit unit,
+    Runnable action,
+    int tryLockLockCount,
+    int tryLockInquiryCount,
+    int tryLockUnlockCount
+  ) {
+    Objects.requireNonNull(action, "action must not be null");
+    try (AutoReleaseLock lock = tryLock(key, expire, unit, tryLockLockCount, tryLockInquiryCount, tryLockUnlockCount)) {
+      if (lock != null) {
+        action.run();
+        return true;
+      }
+      return false;
+    }
   }
 
   //------------------------------------------------------------------------

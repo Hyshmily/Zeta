@@ -110,4 +110,7 @@ public final class HotKeyConstants {
 
   /** Redis key for the dynamic rules hash (blacklist / whitelist entries). */
   public static final String REDIS_KEY_RULES = "hotkey:rules";
+
+  /** Redis key prefix for distributed lock entries. */
+  public static final String REDIS_LOCK_KEY_PREFIX = "hotkey:lock:";
 }

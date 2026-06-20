@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
@@ -88,20 +89,22 @@ public class HotKeyFacadeAutoConfiguration {
    * @param hotKeyCacheProvider provider for the HotKeyCache (app-only or coexistence mode)
    * @param appTopKProvider     provider for the app-side TopK detector
    * @param workerTopKProvider  provider for the Worker-side TopK detector
+   * @param lockProvider        provider for distributed locks (absent when no Redis)
    * @return a new {@link HotKey} facade instance
    */
   @Bean
   @ConditionalOnMissingBean
-  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKey hotKey(
     ObjectProvider<HotKeyCache> hotKeyCacheProvider,
     @Qualifier("hotKeyDetector") ObjectProvider<HotKeyDetector> appTopKProvider,
-    @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider
+    @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
+    ObjectProvider<LockProvider> lockProvider
   ) {
     return new HotKey(
       hotKeyCacheProvider.getIfAvailable(),
       appTopKProvider.getIfAvailable(),
-      workerTopKProvider.getIfAvailable()
+      workerTopKProvider.getIfAvailable(),
+      lockProvider.getIfAvailable()
     );
   }
 }
