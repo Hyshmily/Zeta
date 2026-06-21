@@ -171,4 +171,12 @@ class HotKeyConstantsTest {
     var instance = ctor.newInstance();
     assertThat(instance).isNotNull();
   }
+
+  /**
+   * Verifies the epoch AMQP header constant value.
+   */
+  @Test
+  void shouldHaveExpectedEpochHeader() {
+    assertThat(HotKeyConstants.AMQP_HEADER_EPOCH).isEqualTo("epoch");
+  }
 }

@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.ingest;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING_WINDOW;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
@@ -24,12 +25,10 @@ import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
-import lombok.RequiredArgsConstructor;
-import org.springframework.amqp.rabbit.annotation.RabbitListener;
-
 import java.util.Map;
-
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING_WINDOW;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
 
 /**
  * Worker‑side message consumer that receives batched per‑key access counts
@@ -61,7 +60,6 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING
 @RequiredArgsConstructor
 @Slf4j
 public class ReportConsumer {
-
 
   /** Sliding-window detector that tracks per-key access counts and returns hot/cold verdicts. */
   private final SlidingWindowDetector detector;
@@ -110,6 +108,8 @@ public class ReportConsumer {
         // true if the sum of the last windowSize slices exceeds the threshold.
         boolean isHot = detector.addCount(key, count);
 
+        Map<String, Object> stateSnapshot = stateMachine.getStateSnapshot(key);
+
         // The state machine tracks consecutive hot/cold windows and applies
         // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
         // and PRE_COOLING.
@@ -117,20 +117,30 @@ public class ReportConsumer {
 
         switch (decision.type()) {
           case HOT -> {
-            // A new hot key has been confirmed.
-            // Broadcast HOT to all app instances so they can pre‑warm
-            // their local caches and enable soft expiration.
-            broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW);
-            // Record the confirmation in TopK for historical ranking.
-            topKValidator.markConfirmed(key);
+            try {
+              // A new hot key has been confirmed.
+              // Broadcast HOT to all app instances so they can pre‑warm
+              // their local caches and enable soft expiration.
+              broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW);
+              // Record the confirmation in TopK for historical ranking.
+              topKValidator.markConfirmed(key);
+            } catch (WorkerBroadcaster.BroadcastFailedException e) {
+              log.warn("Broadcast HOT failed, rolling back state machine for key={}", key, e);
+              stateMachine.rollbackToPreviousState(key, stateSnapshot);
+            }
           }
           case COOL -> {
-            // The key has fully cooled down.
-            // Broadcast COOL so instances can disable soft expiration
-            // and let the entry be evicted naturally.
-            broadcaster.broadcastCool(key);
-            // Update the TopK tracking accordingly.
-            topKValidator.markCooled(key);
+            try {
+              // The key has fully cooled down.
+              // Broadcast COOL so instances can disable soft expiration
+              // and let the entry be evicted naturally.
+              broadcaster.broadcastCool(key);
+              // Update the TopK tracking accordingly.
+              topKValidator.markCooled(key);
+            } catch (WorkerBroadcaster.BroadcastFailedException e) {
+              log.warn("Broadcast COOL failed, rolling back state machine for key={}", key, e);
+              stateMachine.rollbackToPreviousState(key, stateSnapshot);
+            }
           }
           case NONE -> {
             // No state transition occurred – the key remains in its

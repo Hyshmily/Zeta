@@ -37,6 +37,8 @@ public final class HotKeyConstants {
   /** AMQP message header key for the message creation timestamp. */
   public static final String AMQP_HEADER_TIMESTAMP = "timestamp";
 
+  /** AMQP message header key for the Worker epoch (restart generation counter). */
+  public static final String AMQP_HEADER_EPOCH = "epoch";
   /** AMQP message header key for the heartbeat epoch (state machine generation). */
   public static final String AMQP_HEADER_HEARTBEAT_EPOCH = "hbEpoch";
   /** AMQP message header key for the sender's current load metric. */
@@ -67,7 +69,6 @@ public final class HotKeyConstants {
   public static final String AMQP_HEADER_VERIFY_PING = "PING";
   /** Verification response type constant. */
   public static final String AMQP_HEADER_VERIFY_PONG = "PONG";
-
 
   /** Thread name prefix for general hotkey operations. */
   public static final String THREAD_PREFIX_HOTKEY = "hotkey-";

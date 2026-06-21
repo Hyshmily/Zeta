@@ -110,7 +110,8 @@
 | `hotkey.local.queue-offer-timeout-ms`   | `100`                    | Report queue offer timeout (ms) — blocks up to this duration before dropping                                                  |
 | `hotkey.local.consumer-count`           | `0`                      | Report consumer thread count; 0 = auto (max(4, availableProcessors / 2))                                                      |
 | `hotkey.local.scheduler-pool-size`      | `8`                      | Pool size for the shared HotKey scheduler (periodic tasks)                                                                    |
- 
+| `hotkey.local.expected-worker-count`    | `0`                      | Expected number of Worker nodes for quorum-based health checks; 0 = dynamic discovery (always unhealthy until first heartbeat) |
+
 ### Distributed Lock (`hotkey.local.*`)
 
 | Property                                | Default | Description                                                                           |

@@ -43,7 +43,7 @@ public final class DelayUtil {
         return;
       }
     }
-    task.run();
+    scheduler.schedule(task, 0, TimeUnit.MILLISECONDS);
   }
 
   /** Private constructor to prevent instantiation of this utility class. */

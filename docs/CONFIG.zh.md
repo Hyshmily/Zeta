@@ -106,7 +106,8 @@
 | `hotkey.local.queue-offer-timeout-ms`   | `100`                    | 报告队列写入超时（毫秒）——阻塞此时长后丢弃                                                   |
 | `hotkey.local.consumer-count`           | `0`                      | 报告消费者线程数；0 = 自动（max(4, availableProcessors / 2)）                                |
 | `hotkey.local.scheduler-pool-size`      | `8`                      | HotKey 共享调度器线程池大小（定时任务）                                                        |
- 
+| `hotkey.local.expected-worker-count`    | `0`                      | 期望的 Worker 节点数，用于基于仲裁的健康检查；0 = 动态发现（收到首个心跳前始终不健康）          |
+
 ### 心跳配置（`hotkey.local.heartbeat.*`）
 
 | 属性                                            | 默认值                      | 说明                                                                   |

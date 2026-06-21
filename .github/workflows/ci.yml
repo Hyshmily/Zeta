@@ -114,4 +114,9 @@ jobs:
           context: worker
           push: true
           tags: ghcr.io/hyshmily/hotkey-worker:${{ github.ref_name }}
-
+      - name: Upload worker jar to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: worker/target/hotkey-worker-*.jar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

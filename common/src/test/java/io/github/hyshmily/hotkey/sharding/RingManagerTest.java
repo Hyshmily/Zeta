@@ -248,4 +248,78 @@ class RingManagerTest {
     RingManager manager = new RingManager(10);
     assertThatNullPointerException().isThrownBy(() -> manager.reconcileFromHealthView(null));
   }
+
+  // ── onRingReconciled callback (P0-1) ──
+
+  /**
+   * Verifies that onRingReconciled is invoked with the correct alive count
+   * when the ring is rebuilt during auto-mode reconciliation.
+   */
+  @Test
+  void reconcileFromHealthView_shouldInvokeOnRingReconciled() {
+    RingManager manager = new RingManager(10);
+    ClusterHealthView healthView = new ClusterHealthView(3, 30000, 3);
+
+    final int[] capturedCount = {-1};
+    manager.setOnRingReconciled(count -> capturedCount[0] = count);
+
+    registerAlive(healthView, "a");
+    registerAlive(healthView, "b");
+    registerAlive(healthView, "c");
+    manager.reconcileFromHealthView(healthView);
+
+    assertThat(capturedCount[0]).isEqualTo(3);
+  }
+
+  /**
+   * Verifies that onRingReconciled is NOT invoked in manual mode
+   * (when overrideNodes is set via addNode).
+   */
+  @Test
+  void reconcileFromHealthView_withManualMode_shouldNotInvokeOnRingReconciled() {
+    RingManager manager = new RingManager(10);
+    manager.addNode("manual-a");
+
+    final boolean[] invoked = {false};
+    manager.setOnRingReconciled(count -> invoked[0] = true);
+
+    ClusterHealthView healthView = new ClusterHealthView(1, 30000, 3);
+    registerAlive(healthView, "auto-b");
+    manager.reconcileFromHealthView(healthView);
+
+    assertThat(invoked[0]).isFalse();
+  }
+
+  /**
+   * Verifies that onRingReconciled is NOT invoked when the alive set hasn't changed.
+   */
+  @Test
+  void reconcileFromHealthView_withSameNodes_shouldNotInvokeOnRingReconciled() {
+    RingManager manager = new RingManager(10);
+    ClusterHealthView healthView = new ClusterHealthView(1, 30000, 3);
+    registerAlive(healthView, "a");
+
+    final int[] invocationCount = {0};
+    manager.setOnRingReconciled(count -> invocationCount[0]++);
+
+    manager.reconcileFromHealthView(healthView);
+    manager.reconcileFromHealthView(healthView); // second call, same nodes
+
+    assertThat(invocationCount[0]).isEqualTo(1); // only called once on first rebuild
+  }
+
+  /**
+   * Verifies that setting onRingReconciled to null does not cause NPE on reconcile.
+   */
+  @Test
+  void reconcileFromHealthView_withNullOnRingReconciled_shouldNotThrow() {
+    RingManager manager = new RingManager(10);
+    manager.setOnRingReconciled(null);
+
+    ClusterHealthView healthView = new ClusterHealthView(1, 30000, 3);
+    registerAlive(healthView, "a");
+
+    manager.reconcileFromHealthView(healthView);
+    assertThat(manager.getCurrentNodes()).containsExactly("a");
+  }
 }

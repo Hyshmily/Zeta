@@ -43,8 +43,10 @@ import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -76,6 +78,12 @@ class CacheSyncListenerTest {
 
     listener = new CacheSyncListener(cache, redisLoader, properties, scheduler, expireManager, ruleMatcher);
     channel = mock(Channel.class);
+  }
+
+  private void awaitWorkerTasks() throws InterruptedException {
+    CountDownLatch latch = new CountDownLatch(1);
+    scheduler.schedule(latch::countDown, 0, TimeUnit.MILLISECONDS);
+    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
   }
 
   /**
@@ -126,9 +134,10 @@ class CacheSyncListenerTest {
    * Verifies that a RULES_SYNC message delegates to ruleMatcher.syncRules and acknowledges.
    */
   @Test
-  void handleSyncMessage_withRulesSync_shouldCallRuleMatcher() throws IOException {
+  void handleSyncMessage_withRulesSync_shouldCallRuleMatcher() throws IOException, InterruptedException {
     Message msg = syncMessage("rule-payload", SyncMessage.TYPE_RULES_SYNC, 0L, false);
     listener.handleSyncMessage(channel, msg);
+    awaitWorkerTasks();
     verify(ruleMatcher).syncRules("rule-payload", 0L);
     verify(channel).basicAck(anyLong(), eq(false));
   }
@@ -174,10 +183,11 @@ class CacheSyncListenerTest {
    * Verifies that an INVALIDATE with version 0 (unconditional) removes the entry regardless of existing version.
    */
   @Test
-  void invalidate_withVersion0AndNotDegraded_shouldBeUnconditional() throws IOException {
+  void invalidate_withVersion0AndNotDegraded_shouldBeUnconditional() throws IOException, InterruptedException {
     cache.put("key1", entry(5, false, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).isNull();
   }
 
@@ -185,10 +195,11 @@ class CacheSyncListenerTest {
    * Verifies that invalidating a key with a plain string value (not CacheEntry) does not throw.
    */
   @Test
-  void invalidate_whenExistingNotCacheEntry_shouldNotThrow() throws IOException {
+  void invalidate_whenExistingNotCacheEntry_shouldNotThrow() throws IOException, InterruptedException {
     cache.put("key1", "plain-string");
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 1L, false));
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).isNull();
   }
 
@@ -215,7 +226,7 @@ class CacheSyncListenerTest {
    * Verifies that an INVALIDATE_ALL message with valid JSON batch invalidates all keys.
    */
   @Test
-  void handleSyncMessage_withInvalidateAll_shouldBatchInvalidate() throws IOException {
+  void handleSyncMessage_withInvalidateAll_shouldBatchInvalidate() throws IOException, InterruptedException {
     cache.put("k1", "v1");
     cache.put("k2", "v2");
     cache.put("k3", "v3");
@@ -224,6 +235,7 @@ class CacheSyncListenerTest {
     Message msg = new Message("[\"k1\",\"k2\"]".getBytes(StandardCharsets.UTF_8), props);
     listener.handleSyncMessage(channel, msg);
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(cache.getIfPresent("k1")).isNull();
     assertThat(cache.getIfPresent("k2")).isNull();
     assertThat(cache.getIfPresent("k3")).isNotNull();
@@ -273,10 +285,11 @@ class CacheSyncListenerTest {
    * Verifies that a normal incoming refresh overwrites an existing degraded entry.
    */
   @Test
-  void handleSyncMessage_withRefreshExistingDegradedIncomingNormal_shouldAccept() throws IOException {
+  void handleSyncMessage_withRefreshExistingDegradedIncomingNormal_shouldAccept() throws IOException, InterruptedException {
     cache.put("key1", entry(1, true, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
       CacheEntry ce = (CacheEntry) o;
       assertThat(ce.getDataVersion()).isEqualTo(2L);
@@ -288,9 +301,10 @@ class CacheSyncListenerTest {
    * Verifies that a refresh on a missing cache key creates a new CacheEntry from the Redis loader.
    */
   @Test
-  void handleSyncMessage_withRefreshOnMissingKey_shouldCreateEntry() throws IOException {
+  void handleSyncMessage_withRefreshOnMissingKey_shouldCreateEntry() throws IOException, InterruptedException {
     listener.handleSyncMessage(channel, syncMessage("nonexistent", SyncMessage.TYPE_REFRESH, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(cache.getIfPresent("nonexistent")).isNotNull().isInstanceOf(CacheEntry.class);
     assertThat(((CacheEntry) cache.getIfPresent("nonexistent")).getValue()).isEqualTo("refreshed");
   }

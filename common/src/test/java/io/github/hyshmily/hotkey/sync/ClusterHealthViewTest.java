@@ -165,6 +165,78 @@ class ClusterHealthViewTest {
     assertThat(view.isClusterHealthy()).isFalse();
   }
 
+  /**
+   * Verifies that setKnownWorkerCount transitions from 0 to a positive value,
+   * enabling majority-quorum health checks.
+   */
+  @Test
+  void setKnownWorkerCount_fromZeroToPositive_switchesToMajorityQuorum() {
+    ClusterHealthView view = new ClusterHealthView(0, 5000, 2);
+    view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w2", 1, true));
+    view.onHeartbeat(hb("w3", 1, true));
+
+    // Before set: fallback mode (at least 1 alive)
+    assertThat(view.isClusterHealthy()).isTrue();
+
+    // After set to 3: majority quorum of 3 requires 2 alive
+    view.setKnownWorkerCount(3);
+    assertThat(view.isClusterHealthy()).isTrue();
+
+    // One worker dies: 2 alive >= 2 (3/2+1 = 2) → still healthy
+    view.markVerificationFailed("w1");
+    view.markVerificationFailed("w1");
+    assertThat(view.isClusterHealthy()).isTrue();
+
+    // Two workers die: 1 alive < 2 → unhealthy
+    view.markVerificationFailed("w2");
+    view.markVerificationFailed("w2");
+    assertThat(view.isClusterHealthy()).isFalse();
+  }
+
+  /**
+   * Verifies that setKnownWorkerCount with a negative value is silently ignored.
+   */
+  @Test
+  void setKnownWorkerCount_withNegativeValue_shouldIgnore() {
+    ClusterHealthView view = new ClusterHealthView(3, 5000, 2);
+    view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w2", 1, true));
+    view.onHeartbeat(hb("w3", 1, true));
+
+    view.setKnownWorkerCount(-1);
+    // knownWorkerCount should still be 3
+    assertThat(view.getKnownWorkerCount()).isEqualTo(3);
+    assertThat(view.isClusterHealthy()).isTrue();
+  }
+
+  /**
+   * Verifies that setKnownWorkerCount with 0 re-enables fallback mode.
+   */
+  @Test
+  void setKnownWorkerCount_toZero_shouldRevertToFallbackMode() {
+    view.onHeartbeat(hb("w1", 1, true));
+
+    // With knownWorkerCount=3 and only 1 alive, cluster is unhealthy
+    assertThat(view.isClusterHealthy()).isFalse();
+
+    // Reset to 0: fallback mode, 1 alive → healthy
+    view.setKnownWorkerCount(0);
+    assertThat(view.isClusterHealthy()).isTrue();
+  }
+
+  /**
+   * Verifies that getKnownWorkerCount returns the last value set.
+   */
+  @Test
+  void getKnownWorkerCount_shouldReturnCurrentValue() {
+    assertThat(view.getKnownWorkerCount()).isEqualTo(3);
+    view.setKnownWorkerCount(5);
+    assertThat(view.getKnownWorkerCount()).isEqualTo(5);
+    view.setKnownWorkerCount(0);
+    assertThat(view.getKnownWorkerCount()).isZero();
+  }
+
   // ── getAliveWorkerIds ──
 
   @Test
@@ -321,13 +393,24 @@ class ClusterHealthViewTest {
   }
 
   /**
-   * Verifies that knownWorkerCount of 0 excludes all workers from healthy check.
+   * Verifies that when knownWorkerCount is 0 and at least one worker is alive,
+   * the cluster is considered healthy (fallback detection).
    */
   @Test
-  void isClusterHealthy_withZeroKnownWorkers_shouldReturnFalseEvenWithRecords() {
+  void isClusterHealthy_withZeroKnownWorkersAndAliveWorkers_shouldReturnTrue() {
     ClusterHealthView empty = new ClusterHealthView(0, 5000, 2);
     empty.onHeartbeat(hb("w1", 1, true));
     empty.onHeartbeat(hb("w2", 1, true));
+    assertThat(empty.isClusterHealthy()).isTrue();
+  }
+
+  /**
+   * Verifies that when knownWorkerCount is 0 and NO workers are alive,
+   * the cluster is considered unhealthy.
+   */
+  @Test
+  void isClusterHealthy_withZeroKnownWorkersAndNoAliveWorkers_shouldReturnFalse() {
+    ClusterHealthView empty = new ClusterHealthView(0, 5000, 2);
     assertThat(empty.isClusterHealthy()).isFalse();
   }
 

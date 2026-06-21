@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.config;
-import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
@@ -35,17 +34,18 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -82,7 +82,6 @@ import org.springframework.scheduling.annotation.Scheduled;
 @RequiredArgsConstructor
 @Slf4j
 public class WorkerAutoConfiguration {
-
 
   private final WorkerProperties properties;
 
@@ -266,7 +265,8 @@ public class WorkerAutoConfiguration {
    *
    * @param rabbitTemplate         the RabbitMQ template used to publish messages
    * @param properties             worker configuration providing exchange and routing settings
-   * @param stateMachine           the state machine providing config gossip fields for heartbeats
+   * @param nodeId                 the Worker's node identity, injected via {@code @Qualifier("workerNodeId")}
+   * @param epochCounter           the Worker's epoch counter, injected via {@code @Qualifier("workerEpochCounter")}
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @return a new {@link WorkerBroadcaster} instance
    */
@@ -274,15 +274,16 @@ public class WorkerAutoConfiguration {
   public WorkerBroadcaster workerBroadcaster(
     RabbitTemplate rabbitTemplate,
     WorkerProperties properties,
-    HotKeyStateMachine stateMachine,
+    @Qualifier("workerNodeId") String nodeId,
+    @Qualifier("workerEpochCounter") AtomicLong epochCounter,
     @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter
   ) {
     return new WorkerBroadcaster(
       rabbitTemplate,
       properties.getMessaging().getBroadcastExchange(),
       properties.getRouting().getAppName(),
-      stateMachine,
-      configTimestampCounter
+      nodeId,
+      epochCounter
     );
   }
 
@@ -312,9 +313,7 @@ public class WorkerAutoConfiguration {
   @Bean
   public Queue reportQueue(WorkerProperties properties) {
     String queueName = HotKeyConstants.QUEUE_PREFIX_REPORT + properties.getRouting().getAppName() + "." + nodeId;
-    return QueueBuilder.durable(queueName)
-        .withArgument("x-expires", 604_800_000)
-        .build();
+    return QueueBuilder.durable(queueName).withArgument("x-expires", 604_800_000).build();
   }
 
   /**
@@ -358,7 +357,9 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public Binding workerConfigBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
-    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with(HotKeyConstants.ROUTING_KEY_HEARTBEAT + "*");
+    return BindingBuilder.bind(workerConfigQueue)
+      .to(heartbeatExchange)
+      .with(HotKeyConstants.ROUTING_KEY_HEARTBEAT + "*");
   }
 
   /**
@@ -370,6 +371,33 @@ public class WorkerAutoConfiguration {
   @Bean
   public TopicExchange heartbeatExchange(WorkerProperties properties) {
     return new TopicExchange(properties.getMessaging().getHeartbeatExchange(), true, false);
+  }
+
+  /**
+   * Exposes the Worker's node ID as a Spring bean for injection.
+   *
+   * @return the unique node identifier for this Worker instance
+   */
+  @Bean
+  @Qualifier("workerNodeId")
+  public String workerNodeId() {
+    return nodeId;
+  }
+
+  /**
+   * Monotonically increasing epoch counter for this Worker instance.
+   *
+   * <p>The epoch is incremented on every Worker restart and transmitted in
+   * broadcast messages (see {@link WorkerBroadcaster#sendBroadcast}). Receiving
+   * apps use the epoch to detect Worker restarts and unconditionally accept
+   * decisions from a higher epoch (ADR-0010).
+   *
+   * @return a new {@link AtomicLong} initialised to {@code 0}
+   */
+  @Bean
+  @Qualifier("workerEpochCounter")
+  public AtomicLong workerEpochCounter() {
+    return new AtomicLong(0);
   }
 
   /**

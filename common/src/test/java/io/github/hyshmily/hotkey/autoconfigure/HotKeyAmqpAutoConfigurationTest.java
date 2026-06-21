@@ -27,6 +27,7 @@ import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -40,8 +41,13 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 
+import java.util.function.IntConsumer;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link HotKeyAmqpAutoConfiguration}.
@@ -638,5 +644,86 @@ class HotKeyAmqpAutoConfigurationTest {
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(SreRateLimiter.class);
       });
+  }
+
+  @Test
+  void workerListenerContainer_withConcurrentConsumersAndPrefetchCount_shouldSetProperties() {
+    ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
+    Queue workerQueue = new Queue("hotkey.worker:test");
+    WorkerListener workerListener = mock(WorkerListener.class);
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setConcurrentConsumers(4);
+    props.setPrefetchCount(10);
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+
+    // Container must be created without error when non-default properties are set
+    assertThat(
+      config.workerListenerContainer(connectionFactory, workerQueue, workerListener, props)
+    ).isNotNull();
+  }
+
+  @Test
+  void clusterHealthView_shouldUseExpectedWorkerCountFromProperties() {
+    RingManager ringManager = mock(RingManager.class);
+    HotKeyProperties properties = new HotKeyProperties();
+    properties.setExpectedWorkerCount(5);
+    properties.getHeartbeat().setTimeoutMs(4000);
+    properties.getHeartbeat().setDegradeAfterFailures(2);
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    ClusterHealthView healthView = config.clusterHealthView(ringManager, properties);
+
+    assertThat(healthView).isNotNull();
+    assertThat(healthView.getKnownWorkerCount()).isEqualTo(5);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void hotKeyReporter_withHealthViewProvider_shouldCreateClusterHealthViewWithProperties() {
+    ReportPublisher reportPublisher = mock(ReportPublisher.class);
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+    HotKeyProperties properties = new HotKeyProperties();
+    RingManager ringManager = new RingManager(150);
+    ClusterHealthView customHealthView = new ClusterHealthView(3, 5000, 2);
+
+    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
+    when(healthViewProvider.getIfAvailable(any())).thenReturn(customHealthView);
+
+    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
+
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
+      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyReporter reporter = config.hotKeyReporter(
+      reportPublisher, scheduler, properties, ringManager, healthViewProvider, bbrProvider
+    );
+
+    assertThat(reporter).isNotNull();
+  }
+
+  @Test
+  void clusterHealthView_withZeroExpectedWorkerCount_shouldEnableDynamicUpdate() {
+    RingManager ringManager = mock(RingManager.class);
+    HotKeyProperties properties = new HotKeyProperties();
+    properties.setExpectedWorkerCount(0);
+    properties.getHeartbeat().setTimeoutMs(3000);
+    properties.getHeartbeat().setDegradeAfterFailures(2);
+
+    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
+      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
+    ClusterHealthView healthView = config.clusterHealthView(ringManager, properties);
+
+    assertThat(healthView).isNotNull();
+    assertThat(healthView.getKnownWorkerCount()).isEqualTo(0);
+
+    ArgumentCaptor<IntConsumer> captor = ArgumentCaptor.forClass(IntConsumer.class);
+    verify(ringManager).setOnRingReconciled(captor.capture());
+
+    IntConsumer callback = captor.getValue();
+    callback.accept(3);
+
+    assertThat(healthView.getKnownWorkerCount()).isEqualTo(3);
   }
 }

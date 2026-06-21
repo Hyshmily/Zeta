@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.cache;
-import lombok.extern.slf4j.Slf4j;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.VERSION_DEFAULT;
 
@@ -23,13 +22,10 @@ import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.*;
 import java.util.function.Supplier;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Manages hard and soft TTL computation for {@link CacheEntry} instances.
@@ -40,8 +36,6 @@ import lombok.Getter;
 @Getter
 @Slf4j
 public class CacheExpireManager {
-
-  /** Logger for this class. */
 
   /** The underlying L1 Caffeine cache instance. */
   private final Cache<String, Object> caffeineCache;
@@ -58,6 +52,8 @@ public class CacheExpireManager {
   private final boolean ttlJitterEnabled;
   /** Jitter ratio applied to TTLs to prevent cache stampedes (from config, e.g. 0.1 = ±10%). */
   private final double ttlJitterRatio;
+
+  private static final long refreshTimeoutSeconds = 30;
 
   /**
    * Creates a CacheExpireManager with the given Caffeine cache, executor, and TTL config.
@@ -302,10 +298,34 @@ public class CacheExpireManager {
       .map(CacheEntry::getDataVersion)
       .orElse(VERSION_DEFAULT);
 
-    CompletableFuture.supplyAsync(reader, executor).whenComplete((value, error) -> {
+    // Wrap the async refresh with a timeout guard so a stuck supplier never leaks
+    // a pending refresh marker. The orTimeout future is always wrapped because the
+    // orTimeout call itself may throw RejectedExecutionException when the executor
+    // is saturated — we catch that separately below.
+    CompletableFuture<?> completableFuture = new CompletableFuture<>();
+
+    try {
+      completableFuture = CompletableFuture.supplyAsync(reader, executor).orTimeout(
+        refreshTimeoutSeconds,
+        TimeUnit.SECONDS
+      );
+    } catch (RejectedExecutionException e) {
+      // Executor saturated — release the limiter permit and the pending-refresh
+      // slot so the next read can retry immediately instead of being blocked forever.
+      refreshLimiter.release();
+      pendingRefreshes.remove(cacheKey);
+      marker.complete(null);
+      log.warn("Background refresh rejected by executor (saturated), key={}", cacheKey);
+    }
+
+    completableFuture.whenComplete((value, error) -> {
       try {
         if (error != null) {
-          log.warn("Background soft refresh failed: {}", cacheKey, error);
+          if (error instanceof TimeoutException) {
+            log.warn("Background soft refresh timed out after {}s: {}", refreshTimeoutSeconds, cacheKey);
+          } else {
+            log.warn("Background soft refresh failed: {}", cacheKey, error);
+          }
           return;
         }
         if (value != null) {
@@ -320,8 +340,8 @@ public class CacheExpireManager {
                     log.debug("Async refresh discarded: newer version exists: {}", cacheKey);
                     return cacheEntry;
                   }
-
-                  return cacheEntry.toBuilder()
+                  return cacheEntry
+                    .toBuilder()
                     .value(value)
                     .softTtlMs(softTtlMs)
                     .softExpireAtMs(computeSoftExpireAt(softTtlMs))

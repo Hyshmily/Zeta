@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.util;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import java.util.concurrent.CountDownLatch;
@@ -32,23 +33,27 @@ import org.junit.jupiter.api.Test;
 class DelayUtilTest {
 
   /**
-   * Verifies that a zero jitter value causes the task to execute immediately without scheduling.
+   * Verifies that a zero jitter value causes the task to execute via the scheduler.
    */
   @Test
-  void floatTimeDelay_zeroJitter_shouldRunImmediately() {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    DelayUtil.floatTimeDelay(() -> executed.set(true), 0, Executors.newSingleThreadScheduledExecutor());
-    assertThat(executed).isTrue();
+  void floatTimeDelay_zeroJitter_shouldRunImmediately() throws InterruptedException {
+    CountDownLatch latch = new CountDownLatch(1);
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    DelayUtil.floatTimeDelay(latch::countDown, 0, scheduler);
+    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    scheduler.shutdown();
   }
 
   /**
-   * Verifies that a negative jitter value causes the task to execute immediately without scheduling.
+   * Verifies that a negative jitter value causes the task to execute via the scheduler.
    */
   @Test
-  void floatTimeDelay_negativeJitter_shouldRunImmediately() {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    DelayUtil.floatTimeDelay(() -> executed.set(true), -1, Executors.newSingleThreadScheduledExecutor());
-    assertThat(executed).isTrue();
+  void floatTimeDelay_negativeJitter_shouldRunImmediately() throws InterruptedException {
+    CountDownLatch latch = new CountDownLatch(1);
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    DelayUtil.floatTimeDelay(latch::countDown, -1, scheduler);
+    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    scheduler.shutdown();
   }
 
   /**
@@ -90,32 +95,58 @@ class DelayUtilTest {
   }
 
   /**
-   * Verifies that a maximum jitter value of 1 schedules immediately (delay = nextLong(1) = 0).
+   * Verifies that a jitter value of 1 causes the task to execute via the scheduler (delay =
+   * nextLong(1) = 0).
    */
   @Test
-  void floatTimeDelay_jitterOfOne_shouldRunImmediately() {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    DelayUtil.floatTimeDelay(() -> executed.set(true), 1, Executors.newSingleThreadScheduledExecutor());
-    assertThat(executed).isTrue();
+  void floatTimeDelay_jitterOfOne_shouldRunImmediately() throws InterruptedException {
+    CountDownLatch latch = new CountDownLatch(1);
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    DelayUtil.floatTimeDelay(latch::countDown, 1, scheduler);
+    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    scheduler.shutdown();
   }
 
   /**
-   * Verifies that a null scheduler does not cause a NullPointerException when delay is zero.
+   * Verifies that a null scheduler with zero jitter throws NullPointerException (the method always
+   * delegates to the scheduler).
    */
   @Test
-  void floatTimeDelay_zeroJitter_nullScheduler_shouldRunImmediately() {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    DelayUtil.floatTimeDelay(() -> executed.set(true), 0, null);
-    assertThat(executed).isTrue();
+  void floatTimeDelay_zeroJitter_nullScheduler_shouldThrow() {
+    assertThatCode(() -> DelayUtil.floatTimeDelay(() -> {}, 0, null))
+        .isInstanceOf(NullPointerException.class);
   }
 
   /**
-   * Verifies that a null scheduler does not cause a NullPointerException when jitter is negative.
+   * Verifies that a null scheduler with negative jitter throws NullPointerException (the method
+   * always delegates to the scheduler).
    */
   @Test
-  void floatTimeDelay_negativeJitter_nullScheduler_shouldRunImmediately() {
-    AtomicBoolean executed = new AtomicBoolean(false);
-    DelayUtil.floatTimeDelay(() -> executed.set(true), -5, null);
-    assertThat(executed).isTrue();
+  void floatTimeDelay_negativeJitter_nullScheduler_shouldThrow() {
+    assertThatCode(() -> DelayUtil.floatTimeDelay(() -> {}, -5, null))
+        .isInstanceOf(NullPointerException.class);
+  }
+
+  /**
+   * Verifies that a zero jitter value with a real scheduler executes the task eventually via the
+   * scheduler.
+   */
+  @Test
+  void floatTimeDelay_zeroJitter_scheduler_shouldExecuteEventually() throws InterruptedException {
+    CountDownLatch latch = new CountDownLatch(1);
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    DelayUtil.floatTimeDelay(latch::countDown, 0, scheduler);
+    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    scheduler.shutdown();
+  }
+
+  /**
+   * Verifies that a null scheduler with positive jitter throws NullPointerException (the method
+   * always delegates to the scheduler regardless of jitter value).
+   */
+  @Test
+  void floatTimeDelay_nullScheduler_withPositiveJitter_shouldThrow() {
+    assertThatCode(() -> DelayUtil.floatTimeDelay(() -> {}, 100, null))
+        .isInstanceOf(NullPointerException.class);
   }
 }

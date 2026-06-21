@@ -30,10 +30,11 @@ import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
-import java.util.stream.Stream;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -542,5 +543,57 @@ class CacheExpireManagerTest {
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
     assertThat((Object) entry.getValue()).isEqualTo("fresh-value");
+  }
+
+  /**
+   * Verifies that triggerBackgroundRefresh catches RejectedExecutionException from
+   * CompletableFuture.supplyAsync, releases the limiter permit and pending-refresh
+   * marker, and preserves the existing cache entry.
+   */
+  @Test
+  void triggerBackgroundRefresh_withRejectedExecution_shouldReleaseResources() {
+    Executor rejectingExecutor = task -> { throw new RejectedExecutionException("rejected"); };
+    CacheExpireManager rejectingMgr = new CacheExpireManager(caffeineCache, rejectingExecutor, ttlConfig, 10);
+
+    caffeineCache.put("key", CacheEntry.builder()
+      .value("original").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+
+    rejectingMgr.triggerBackgroundRefresh("key", () -> "newValue", 30_000);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat((Object) entry.getValue()).isEqualTo("original");
+  }
+
+  /**
+   * Verifies that triggerBackgroundRefresh with a real async executor and the
+   * new refresh-timeout wrapper works normally — the value is updated on success.
+   */
+  @Test
+  void triggerBackgroundRefresh_async_withRefreshTimeoutEnabled_shouldWorkNormally() throws InterruptedException {
+    Executor asyncExec = Executors.newCachedThreadPool();
+    try {
+      CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+
+      caffeineCache.put("key", CacheEntry.builder()
+        .value("original").dataVersion(1).isVersionDegraded(false)
+        .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+        .build());
+
+      asyncExpire.triggerBackgroundRefresh("key", () -> "updated", 30_000);
+      Thread.sleep(200);
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+      assertThat(entry).isNotNull();
+      assertThat((Object) entry.getValue()).isEqualTo("updated");
+    } finally {
+      ((java.util.concurrent.ExecutorService) asyncExec).shutdownNow();
+    }
   }
 }

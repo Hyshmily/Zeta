@@ -47,6 +47,12 @@ replay_pid*
 *.orig
 *.swp
 
+# GPG signing backup (maven-gpg-plugin)
+*.releaseBackup
+
+# Version plugin backup (maven-versions-plugin)
+*.versionsBackup
+
 # Generated docs
 HELP.md
 

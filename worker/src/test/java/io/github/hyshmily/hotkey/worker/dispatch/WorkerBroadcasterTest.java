@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.hotkey.worker.dispatch;
 
-import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.sync.WorkerMessage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,8 +30,11 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -45,18 +47,15 @@ class WorkerBroadcasterTest {
   @Mock
   private RabbitTemplate rabbitTemplate;
 
-  @Mock
-  private HotKeyStateMachine stateMachine;
-
   @Captor
   private ArgumentCaptor<Message> messageCaptor;
 
   private WorkerBroadcaster broadcaster;
-  private final AtomicLong configTimestampCounter = new AtomicLong(0);
+  private final AtomicLong epochCounter = new AtomicLong(0);
 
   @BeforeEach
   void setUp() {
-    broadcaster = new WorkerBroadcaster(rabbitTemplate, "hotkey.broadcast.exchange", "testApp", stateMachine, configTimestampCounter);
+    broadcaster = new WorkerBroadcaster(rabbitTemplate, "hotkey.broadcast.exchange", "testApp", "test-node", epochCounter);
   }
 
   /**
@@ -139,5 +138,67 @@ class WorkerBroadcasterTest {
     long v2 = (Long) messageCaptor.getAllValues().get(2).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
     assertThat(v1).isGreaterThan(v0);
     assertThat(v2).isGreaterThan(v1);
+  }
+
+  /**
+   * Verifies that {@code broadcastHot} sets the {@link HotKeyConstants#AMQP_HEADER_NODE_ID}
+   * header on the sent message.
+   */
+  @Test
+  void sendBroadcast_shouldIncludeNodeIdHeader() {
+    broadcaster.broadcastHot("key", "source");
+    verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
+        .containsEntry(AMQP_HEADER_NODE_ID, "test-node");
+  }
+
+  /**
+   * Verifies that the epoch header reflects the current epoch counter and increments
+   * across successive broadcasts.
+   */
+  @Test
+  void sendBroadcast_shouldIncludeEpochHeader() {
+    broadcaster.broadcastHot("key", "source");
+    epochCounter.incrementAndGet();
+    broadcaster.broadcastHot("key2", "source");
+
+    verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
+    assertThat(messageCaptor.getAllValues()).hasSize(2);
+    assertThat((Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_EPOCH))
+        .isEqualTo(0L);
+    assertThat((Long) messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(AMQP_HEADER_EPOCH))
+        .isEqualTo(1L);
+  }
+
+  /**
+   * Verifies that when {@link RabbitTemplate#send} throws, {@code broadcastHot} propagates a
+   * {@link WorkerBroadcaster.BroadcastFailedException} with the correct metadata.
+   */
+  @Test
+  void sendBroadcast_whenRabbitTemplateThrows_shouldThrowBroadcastFailedException() {
+    doThrow(new RuntimeException("connection lost")).when(rabbitTemplate).send(any(String.class), any(String.class), any(Message.class));
+    assertThatThrownBy(() -> broadcaster.broadcastHot("key", "source"))
+        .isInstanceOf(WorkerBroadcaster.BroadcastFailedException.class)
+        .satisfies(
+            e -> {
+              assertThat(((WorkerBroadcaster.BroadcastFailedException) e).cacheKey).isEqualTo("key");
+              assertThat(((WorkerBroadcaster.BroadcastFailedException) e).type).isEqualTo(WorkerMessage.TYPE_HOT);
+            });
+  }
+
+  /**
+   * Verifies that when {@link RabbitTemplate#send} throws, {@code broadcastCool} propagates a
+   * {@link WorkerBroadcaster.BroadcastFailedException} with the correct metadata.
+   */
+  @Test
+  void broadcastCool_whenRabbitTemplateThrows_shouldThrowBroadcastFailedException() {
+    doThrow(new RuntimeException("connection lost")).when(rabbitTemplate).send(any(String.class), any(String.class), any(Message.class));
+    assertThatThrownBy(() -> broadcaster.broadcastCool("key"))
+        .isInstanceOf(WorkerBroadcaster.BroadcastFailedException.class)
+        .satisfies(
+            e -> {
+              assertThat(((WorkerBroadcaster.BroadcastFailedException) e).cacheKey).isEqualTo("key");
+              assertThat(((WorkerBroadcaster.BroadcastFailedException) e).type).isEqualTo(WorkerMessage.TYPE_COOL);
+            });
   }
 }

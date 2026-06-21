@@ -19,10 +19,7 @@ import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import jakarta.annotation.Nullable;
 import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import org.jspecify.annotations.NonNull;
 import org.springframework.cache.Cache;
@@ -56,13 +53,6 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   private final String name;
   private final HotKey hotKey;
   private final HotKeyProperties properties;
-
-  /**
-   * Tracks keys whose value is explicitly {@code null} (via {@code @NullCaching(true)}).
-   * Enables a side-effect-free {@link #lookup} to distinguish "found null in cache"
-   * from "not in cache" — information that a single {@link Optional} return cannot convey.
-   */
-  private final Set<String> nullCachedKeys = ConcurrentHashMap.newKeySet();
 
   /**
    * Create a new {@code HotKeySpringCache}.
@@ -126,9 +116,6 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   @Nullable
   protected Object lookup(@NonNull Object key) {
     String prefixed = prefixedKey(key);
-    if (nullCachedKeys.contains(prefixed)) {
-      return null; // null value was intentionally cached
-    }
     return hotKey.peek(prefixed).orElse(null);
   }
 
@@ -189,7 +176,6 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
       } else {
         hotKey.putThrough(prefixed, null, () -> {});
       }
-      nullCachedKeys.add(prefixed);
     }
 
     return null;
@@ -201,11 +187,6 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
    * <p>Stores the value via {@link HotKey#putThrough} with a no-op writer,
    * since the mutating method was already executed by the {@code CacheInterceptor}.
    *
-   * <p>If the value is {@code null} (allowed only when {@code allowNullValues}
-   * is {@code true}), the key is tracked in {@link #nullCachedKeys} so that
-   * subsequent side-effect-free {@link #lookup} calls distinguish "cached null"
-   * from "not in cache".
-   *
    * @param key   the cache key
    * @param value the value to cache (maybe {@code null} if null values are allowed)
    */
@@ -213,7 +194,6 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   public void put(@NonNull Object key, @Nullable Object value) {
     String prefixed = prefixedKey(key);
     Object storeValue = toStoreValue(value);
-    nullCachedKeys.remove(prefixed);
 
     if (HotKeyCacheContext.get().isSkipBroadcast()) {
       hotKey.putLocal(prefixed, storeValue);
@@ -233,7 +213,6 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   @Override
   public void evict(@NonNull Object key) {
     String prefixed = prefixedKey(key);
-    nullCachedKeys.remove(prefixed);
     if (HotKeyCacheContext.get().isSkipBroadcast()) {
       hotKey.evictLocal(prefixed);
     } else {
@@ -248,7 +227,6 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
    */
   @Override
   public void clear() {
-    nullCachedKeys.clear();
     /*
      * This is a defensive measure, we agreed that such out-of-bounds behavior shouldn't happen in a distributed cluster
      * Banned broadcast is essential.

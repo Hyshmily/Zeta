@@ -182,6 +182,25 @@ class HotKeyPropertiesTest {
   }
 
   /**
+   * Verifies that expectedWorkerCount defaults to 0 (dynamic discovery mode).
+   */
+  @Test
+  void expectedWorkerCount_shouldDefaultToZero() {
+    HotKeyProperties p = props();
+    assertThat(p.getExpectedWorkerCount()).isZero();
+  }
+
+  /**
+   * Verifies that expectedWorkerCount returns the configured value when set.
+   */
+  @Test
+  void expectedWorkerCount_shouldReturnConfiguredValue() {
+    HotKeyProperties p = props();
+    p.setExpectedWorkerCount(5);
+    assertThat(p.getExpectedWorkerCount()).isEqualTo(5);
+  }
+
+  /**
    * Verifies the default values for the ConsistentHashing nested config.
    */
   @Test

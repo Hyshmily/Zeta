@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.sync;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.model.CacheEntry;
+import java.util.Objects;
 
 /**
  * Shared version comparison logic for broadcast message guards used by both
@@ -59,6 +60,53 @@ public final class VersionGuard {
   private VersionGuard() {}
 
   /**
+   * WorkerListener guard with epoch and node-id awareness.
+   * <p>Decision logic:
+   * <ol>
+   *   <li>No existing entry → accept (return false)</li>
+   *   <li>Existing entry is degraded → accept unconditionally (safety net)</li>
+ *   <li>Incoming epoch &gt; existing epoch → accept unconditionally
+ *       (Worker restart detected — ADR-0010)</li>
+ *   <li>Incoming epoch &lt; existing epoch → skip (stale incarnation message)</li>
+ *   <li>Same epoch, same nodeId → normal ordering (skip if existing dv &gt;= incoming dv)</li>
+   *   <li>Different nodeId, same epoch → cross-Worker ownership transfer;
+   *       accept (return false) to allow new owner to assert authority</li>
+   * </ol>
+   *
+   * @param existing              the existing cache entry; may be null
+   * @param incomingDecisionVersion the decision version from the incoming Worker message
+   * @param incomingNodeId        the originating Worker's node ID
+   * @param incomingEpoch         the originating Worker's epoch
+   * @return true if the incoming message should be skipped, false if it should be applied
+   */
+  public static boolean shouldSkipForWorker(
+    CacheEntry existing,
+    long incomingDecisionVersion,
+    String incomingNodeId,
+    long incomingEpoch
+  ) {
+    if (existing == null) {
+      return false;
+    }
+    if (existing.isVersionDegraded()) {
+      return false;
+    }
+
+    if (incomingEpoch > existing.getDecisionEpoch()) {
+      return false;
+    }
+    if (incomingEpoch < existing.getDecisionEpoch()) {
+      return true;
+    }
+
+    if (Objects.equals(incomingNodeId, existing.getDecisionNodeId())) {
+      return existing.getDecisionVersion() >= incomingDecisionVersion;
+    }
+
+    return false;
+  }
+
+  /**
    * WorkerListener guard for use inside an atomic {@code compute} block: the caller
    * already holds the existing entry reference, so no redundant {@code getIfPresent}
    * is needed.
@@ -91,13 +139,8 @@ public final class VersionGuard {
   }
 
   /**
-   * WorkerListener guard with a cache-level fast path: fetches the existing entry
-   * from the L1 cache and delegates to the entry-level overload.
-   *
-   * <p>This variant is used <em>outside</em> atomic {@code compute} blocks as a
-   * cheap first-pass check. If it returns {@code true} (skip), the caller can avoid
-   * the more expensive Redis fetch entirely. A second guard inside the {@code compute}
-   * block is still needed for correctness (DCL pattern).
+   * WorkerListener guard with a cache-level fast path using legacy 3-argument signature.
+   * Delegates to the 5-argument overload with {@code null} node ID and {@code 0} epoch.
    *
    * @param cache                    the local Caffeine L1 cache; must not be null
    * @param cacheKey                 the cache key to look up; must not be null
@@ -110,9 +153,36 @@ public final class VersionGuard {
     String cacheKey,
     long incomingDecisionVersion
   ) {
+    return shouldSkipForWorker(cache, cacheKey, incomingDecisionVersion, null, 0);
+  }
+
+  /**
+   * WorkerListener guard with a cache-level fast path: fetches the existing entry
+   * from the L1 cache and delegates to the entry-level overload.
+   *
+   * <p>This variant is used <em>outside</em> atomic {@code compute} blocks as a
+   * cheap first-pass check. If it returns {@code true} (skip), the caller can avoid
+   * the more expensive Redis fetch entirely. A second guard inside the {@code compute}
+   * block is still needed for correctness (DCL pattern).
+   *
+   * @param cache                    the local Caffeine L1 cache; must not be null
+   * @param cacheKey                 the cache key to look up; must not be null
+   * @param incomingDecisionVersion  the decision version from the incoming Worker message
+   * @param incomingNodeId           the originating Worker's node ID, may be null
+   * @param incomingEpoch            the originating Worker's epoch
+   * @return {@code true} if the incoming message should be skipped (existing entry
+   *         is already up-to-date); {@code false} if the decision may need to be applied
+   */
+  public static boolean shouldSkipForWorker(
+    Cache<String, Object> cache,
+    String cacheKey,
+    long incomingDecisionVersion,
+    String incomingNodeId,
+    long incomingEpoch
+  ) {
     Object existing = cache.getIfPresent(cacheKey);
     if (existing instanceof CacheEntry existingCacheEntry) {
-      return shouldSkipForWorker(existingCacheEntry, incomingDecisionVersion);
+      return shouldSkipForWorker(existingCacheEntry, incomingDecisionVersion, incomingNodeId, incomingEpoch);
     }
     return false;
   }

@@ -49,12 +49,13 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 /**
  * App-side autoconfiguration for the HotKey library.
  *
- * <p>Creates the app-side {@link io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK} detector (HeavyKeeper), L1 Caffeine
+ * <p>Creates the app-side {@link TopK} detector (HeavyKeeper), L1 Caffeine
  * cache, {@link SingleFlight} deduplication layer, executor, and the
  * primary {@link HotKeyCache} (without Redis version tracking when Redis
  * is absent).
@@ -109,6 +110,7 @@ public class HotKeyAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyDetector hotKeyDetector(
     HeavyKeeper heavyKeeper,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
@@ -169,7 +171,7 @@ public class HotKeyAutoConfiguration {
    * <p>This executor handles all async operations in the HotKey data path: cache loading
    * via SingleFlight, soft-expiry refresh tasks, and cross-instance broadcast callbacks.
    * The pool is configured with core/max pool size, bounded queue capacity, and a
-   * rejection policy that throws {@link java.util.concurrent.RejectedExecutionException}
+   * rejection policy that throws {@link RejectedExecutionException}
    * when the queue is full. On shutdown, in-progress tasks are allowed to complete with
    * a 60-second grace period.
    *
@@ -203,7 +205,7 @@ public class HotKeyAutoConfiguration {
    * Create the {@link RuleMatcher} for key matching against user-defined rules.
    *
    * <p>This variant is wired with an empty Redis provider and an optional sync
-   * publisher, since no {@link org.springframework.data.redis.core.StringRedisTemplate} is available in the non-Redis
+   * publisher, since no {@link StringRedisTemplate} is available in the non-Redis
    * deployment mode. Rules are kept in-memory only and do not survive restarts.
    * When Redis is available, {@link HotKeyRedisAutoConfiguration#ruleMatcher}
    * takes over with Redis persistence.
@@ -212,7 +214,7 @@ public class HotKeyAutoConfiguration {
    * @return a new RuleMatcher instance (in-memory only)
    */
   @Bean
-  @ConditionalOnMissingBean({ RuleMatcher.class, org.springframework.data.redis.core.StringRedisTemplate.class })
+  @ConditionalOnMissingBean({ RuleMatcher.class, StringRedisTemplate.class })
   public RuleMatcher ruleMatcher(ObjectProvider<CacheSyncPublisher> publisherProvider) {
     return new RuleMatcher(Optional.empty(), Optional.ofNullable(publisherProvider.getIfAvailable()));
   }
@@ -265,7 +267,11 @@ public class HotKeyAutoConfiguration {
       ruleMatcher,
       new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes()),
       ringManagerProvider.getIfAvailable(() -> new RingManager(properties.getConsistentHashing().getVirtualNodes())),
-      healthViewProvider.getIfAvailable(() -> new ClusterHealthView(0, 3000, 2))
+      new ClusterHealthView(
+        properties.getExpectedWorkerCount(),
+        properties.getHeartbeat().getTimeoutMs(),
+        properties.getHeartbeat().getDegradeAfterFailures()
+      )
     );
   }
 
@@ -279,7 +285,7 @@ public class HotKeyAutoConfiguration {
    *
    * @param hotKeyCache    the HotKeyCache instance (never {@code null})
    * @param appHotKeyDetector the app-side TopK detector (never {@code null})
-   * @param workerTopK     the Worker-side TopK algorithm (may be {@code null})
+   * @param workerTopKProvider     the Worker-side TopK algorithm (may be {@code null})
    * @return a new HotKey facade instance
    */
   @Bean
@@ -299,7 +305,7 @@ public class HotKeyAutoConfiguration {
    *
    * <p>Time-based expiry operates at the <em>Caffeine</em> level via a custom
    * {@link Expiry} implementation, computing remaining nanoseconds from
-   * {@link CacheEntry#hardExpireAtMs}. Entries with
+   * . Entries with
    * {@code hardExpireAtMs == Long.MAX_VALUE} are purely logical-expiry
    * — Caffeine never evicts them by time; they live until size eviction or
    * manual invalidation. Reads never extend the expiry duration (no read-based
@@ -335,7 +341,7 @@ public class HotKeyAutoConfiguration {
             if (value instanceof CacheEntry entry) {
               if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
                 // Pure logical expiry: Caffeine never time-evicts this entry.
-                // See Expiry JavaDoc: Long.MAX_VALUE signals "no expiration".
+                // See Expiry Javadoc: Long.MAX_VALUE signals "no expiration".
                 return Long.MAX_VALUE;
               }
               long remainingMs = entry.getHardExpireAtMs() - System.currentTimeMillis();

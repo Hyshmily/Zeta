@@ -16,10 +16,12 @@
 package io.github.hyshmily.hotkey.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.model.HotKeyDecision.DecisionType;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -160,5 +162,90 @@ class HotKeyStateMachineEdgeTest {
     HotKeyStateMachine m = new HotKeyStateMachine(5, 10, 4);
     m.setConfirmCount(1);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
+  }
+
+  /**
+   * Verifies that {@link HotKeyStateMachine#getStateSnapshot(String)} returns a map containing
+   * {@code "currentState"}, {@code "hotStreak"}, and {@code "coolStreak"} with expected values
+   * after a key reaches CONFIRMED_HOT.
+   */
+  @Test
+  void getStateSnapshot_shouldReturnCorrectSnapshot() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
+
+    Map<String, Object> snapshot = m.getStateSnapshot("key");
+    assertThat(snapshot)
+      .containsEntry("currentState", "CONFIRMED_HOT")
+      .containsEntry("hotStreak", 3)
+      .containsEntry("coolStreak", 0);
+  }
+
+  /**
+   * Verifies that {@link HotKeyStateMachine#getStateSnapshot(String)} returns an empty map for
+   * a key that was never added.
+   */
+  @Test
+  void getStateSnapshot_nonExistentKey_shouldReturnEmptyMap() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    assertThat(m.getStateSnapshot("never-added")).isEmpty();
+  }
+
+  /**
+   * Verifies that {@link HotKeyStateMachine#rollbackToPreviousState(String, Map)} restores
+   * the per-key state (currentState, hotStreak, coolStreak) from a previously captured snapshot.
+   */
+  @Test
+  void rollbackToPreviousState_shouldRestoreState() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
+
+    Map<String, Object> snapshot = m.getStateSnapshot("key");
+
+    m.reset("key");
+    assertThat(m.getStateSnapshot("key")).isEmpty();
+
+    m.rollbackToPreviousState("key", snapshot);
+    assertThat(m.getStateSnapshot("key"))
+      .containsEntry("currentState", "CONFIRMED_HOT")
+      .containsEntry("hotStreak", 3);
+
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+  }
+
+  /**
+   * Verifies that {@link HotKeyStateMachine#rollbackToPreviousState(String, null)}
+   * resets the key's state so the next evaluation starts fresh from COLD.
+   */
+  @Test
+  void rollbackToPreviousState_withNull_shouldReset() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
+
+    m.rollbackToPreviousState("key", null);
+
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+  }
+
+  /**
+   * Verifies that {@link HotKeyStateMachine#rollbackToPreviousState(String, Map)} does not
+   * throw when called with a non-null snapshot for a key that was never tracked.
+   */
+  @Test
+  void rollbackToPreviousState_nonExistentKey_shouldNotThrow() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    Map<String, Object> snapshot = Map.of(
+      "currentState", "CONFIRMED_HOT",
+      "hotStreak", 3,
+      "coolStreak", 0
+    );
+    assertThatCode(() -> m.rollbackToPreviousState("never-added", snapshot))
+      .doesNotThrowAnyException();
   }
 }

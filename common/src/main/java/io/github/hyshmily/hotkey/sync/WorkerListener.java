@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
+import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_COOL;
+import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_HOT;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
@@ -22,17 +25,13 @@ import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.core.Message;
-
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
-
-import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_COOL;
-import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_HOT;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.core.Message;
 
 /**
  * Listens for Worker hot/cool decisions via the {@code hotkey.worker.exchange}
@@ -196,7 +195,7 @@ public class WorkerListener {
     }
 
     // DCL first check – cheap, outside the compute lock
-    if (VersionGuard.shouldSkipForWorker(caffeineCache, wm.cacheKey(), wm.decisionVersion())) {
+    if (VersionGuard.shouldSkipForWorker(caffeineCache, wm.cacheKey(), wm.decisionVersion(), wm.nodeId(), wm.epoch())) {
       log.debug("handleHot: HotKey already up-to-date in L1: {}", wm.cacheKey());
       return;
     }
@@ -219,7 +218,7 @@ public class WorkerListener {
       .compute(wm.cacheKey(), (key, existing) -> {
         // DCL second check – atomic with to write
         if (existing instanceof CacheEntry ce) {
-          if (VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion())) {
+          if (VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion(), wm.nodeId(), wm.epoch())) {
             return existing;
           }
 
@@ -227,6 +226,8 @@ public class WorkerListener {
             .toBuilder()
             .value(value)
             .decisionVersion(wm.decisionVersion())
+            .decisionNodeId(wm.nodeId())
+            .decisionEpoch(wm.epoch())
             .hardTtlMs(expireManager.getEffectiveHotHardTtlMs())
             .hardExpireAtMs(expireManager.computeHotHardExpireAt())
             .softTtlMs(expireManager.getEffectiveHotSoftTtlMs())
@@ -280,7 +281,10 @@ public class WorkerListener {
     caffeineCache
       .asMap()
       .compute(wm.cacheKey(), (key, existing) -> {
-        if (existing instanceof CacheEntry ce && VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion())) {
+        if (
+          existing instanceof CacheEntry ce &&
+          VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion(), wm.nodeId(), wm.epoch())
+        ) {
           return existing;
         }
 
@@ -289,8 +293,9 @@ public class WorkerListener {
             .toBuilder()
             .value(cacheEntry.getValue())
             .dataVersion(cacheEntry.getDataVersion())
-            .isVersionDegraded(cacheEntry.isVersionDegraded())
-            .decisionVersion(cacheEntry.getDecisionVersion())
+            .decisionVersion(wm.decisionVersion())
+            .decisionNodeId(wm.nodeId())
+            .decisionEpoch(wm.epoch())
             .hardTtlMs(cacheEntry.getNormalHardTtlMs())
             .hardExpireAtMs(expireManager.computeHardExpireAt(cacheEntry.getNormalHardTtlMs()))
             .softTtlMs(0L)

@@ -15,11 +15,10 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import org.springframework.amqp.core.Message;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 import java.nio.charset.StandardCharsets;
-
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+import org.springframework.amqp.core.Message;
 
 /**
  * Message from Worker to app instances carrying hot/cool decisions for a single cache key.
@@ -36,17 +35,24 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
  * The Worker simply skips broadcast entirely if {@code Redis GET} fails during a HOT
  * decision, preventing degraded decision propagation.
  *
- * <p>The {@code timestamp} and {@code nodeId} fields are reserved for future use and
- * carry default values ({@code 0L} and {@code null}) for standard HOT/COOL decisions.
- *
  * @param cacheKey        the affected cache key; must not be null
  * @param type            the decision type, one of {@link #TYPE_HOT} or {@link #TYPE_COOL}
  * @param decisionVersion the Worker-local decision version (monotonically increasing
  *                        {@code AtomicLong}); used for idempotent ordering on the receiver
  * @param timestamp       reserved for future use; always {@code 0L} for HOT/COOL decisions
- * @param nodeId          reserved for future use; always {@code null} for HOT/COOL decisions
+ * @param nodeId          the originating Worker's node identity; used by receivers for
+ *                        per-Worker version partitioning (see {@link VersionGuard}) — ADR-0010
+ * @param epoch           the originating Worker's restart generation counter; receivers
+ *                        unconditionally accept decisions from a higher epoch (see ADR-0010)
  */
-public record WorkerMessage(String cacheKey, String type, long decisionVersion, long timestamp, String nodeId) {
+public record WorkerMessage(
+  String cacheKey,
+  String type,
+  long decisionVersion,
+  long timestamp,
+  String nodeId,
+  long epoch
+) {
   /** Promotes a cache key to hot state — extended TTL, soft expiration enabled. */
   public static final String TYPE_HOT = "HOT";
 
@@ -77,8 +83,8 @@ public record WorkerMessage(String cacheKey, String type, long decisionVersion, 
       msg.getMessageProperties().getHeader(AMQP_HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
     long timestamp =
       msg.getMessageProperties().getHeader(AMQP_HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
-    String nodeId =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_NODE_ID) instanceof String s ? s : null;
-    return new WorkerMessage(cacheKey, type, decisionVersion, timestamp, nodeId);
+    String nodeId = msg.getMessageProperties().getHeader(AMQP_HEADER_NODE_ID) instanceof String s ? s : null;
+    long epoch = msg.getMessageProperties().getHeader(AMQP_HEADER_EPOCH) instanceof Number n ? n.longValue() : 0L;
+    return new WorkerMessage(cacheKey, type, decisionVersion, timestamp, nodeId, epoch);
   }
 }

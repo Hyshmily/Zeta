@@ -15,15 +15,13 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Cluster-wide view of Worker health, maintained by consuming periodic
@@ -51,13 +49,20 @@ import java.util.stream.Collectors;
  * @see WorkerHeartbeatMessage
  * @see WorkerHeartbeatVerifier
  */
-@RequiredArgsConstructor
 @Slf4j
 public class ClusterHealthView {
 
   /** Per-Worker health records keyed by Worker ID. Thread-safe via {@link ConcurrentHashMap}. */
   private final ConcurrentMap<String, WorkerHealthRecord> records = new ConcurrentHashMap<>();
-  private final int knownWorkerCount;
+
+  /**
+   * -- GETTER --
+   *  Returns the current expected Worker count.
+   *
+   */
+  @Getter
+  private volatile int knownWorkerCount;
+
   private final long heartbeatTimeoutMs;
   private final int degradeAfterFailures;
 
@@ -67,6 +72,34 @@ public class ClusterHealthView {
 
   @Getter
   private volatile long lastAnyHeartbeatTime;
+
+  public ClusterHealthView(int knownWorkerCount, long heartbeatTimeoutMs, int degradeAfterFailures) {
+    this.knownWorkerCount = knownWorkerCount;
+    this.heartbeatTimeoutMs = heartbeatTimeoutMs;
+    this.degradeAfterFailures = degradeAfterFailures;
+  }
+
+  /**
+   * Updates the expected Worker count for majority-quorum health calculations.
+   * <p>Called during initialization (from configuration) and dynamically
+   * when the ring is reconciled from observed heartbeats.
+   * <p>If the new count is 0, the cluster is always considered unhealthy.
+   * If the new count is greater than the previous, the quorum threshold
+   * adjusts accordingly.
+   *
+   * @param count the new expected Worker count; must be {@code >= 0}
+   */
+  public void setKnownWorkerCount(int count) {
+    if (count < 0) {
+      log.warn("Invalid knownWorkerCount {}, ignoring update", count);
+      return;
+    }
+    int old = this.knownWorkerCount;
+    this.knownWorkerCount = count;
+    if (old == 0 && count > 0) {
+      log.info("knownWorkerCount updated from 0 to {}; cluster health check now active", count);
+    }
+  }
 
   /**
    * Processes an incoming {@link WorkerHeartbeatMessage} from a Worker node and
@@ -191,23 +224,33 @@ public class ClusterHealthView {
    * <p>The cluster is healthy when the count of alive Workers is strictly greater
    * than {@code knownWorkerCount / 2} (simple majority).
    *
-   * <p>When {@code knownWorkerCount == 0} (no Workers configured), the cluster is
-   * always considered unhealthy. This prevents undefined behaviour in deployments
-   * without a Worker cluster.
+   * <p>When {@code knownWorkerCount == 0} (no expected count configured), the
+   * cluster is considered healthy if at least one alive Worker is observed via
+   * heartbeats. This provides backward compatibility for deployments that rely
+   * on dynamic Worker discovery rather than a fixed expected count.
    *
    * @return {@code true} if a strict majority of known Workers are alive and ready;
    *         {@code false} if no Workers are configured or too few are alive
    */
   public boolean isClusterHealthy() {
-    if (knownWorkerCount == 0) {
-        return false;
+    int currentKnown = knownWorkerCount;
+    if (currentKnown <= 0) {
+      // Fallback: if no expected count configured, use observed alive workers
+      // A cluster with at least 1 alive worker is considered healthy when
+      // expectedWorkerCount was never set (backward compatibility)
+      long aliveCount = records
+        .values()
+        .stream()
+        .filter(r -> r.isAlive(heartbeatTimeoutMs))
+        .count();
+      return aliveCount > 0;
     }
     long aliveCount = records
       .values()
       .stream()
       .filter(r -> r.isAlive(heartbeatTimeoutMs))
       .count();
-    return aliveCount >= knownWorkerCount / 2 + 1;
+    return aliveCount >= currentKnown / 2 + 1;
   }
 
   /**

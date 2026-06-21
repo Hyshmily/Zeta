@@ -18,7 +18,9 @@ package io.github.hyshmily.hotkey.sharding;
 import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.IntConsumer;
 import lombok.Getter;
+import lombok.Setter;
 
 /**
  * Manages the consistent-hash ring for Worker shard routing.
@@ -40,6 +42,9 @@ public class RingManager {
   private final int virtualNodeCount;
 
   private volatile Set<String> overrideNodes; // null=auto mode
+
+  @Setter
+  private IntConsumer onRingReconciled;
 
   /**
    * Creates a ring manager with the given virtual-node count.
@@ -64,9 +69,14 @@ public class RingManager {
       }
       return;
     }
+
     Set<String> alive = healthView.getAliveWorkerIds();
     if (!alive.equals(ring.getNodes())) {
       ring.rebuild(alive);
+
+      if (onRingReconciled != null) {
+        onRingReconciled.accept(alive.size());
+      }
     }
   }
 

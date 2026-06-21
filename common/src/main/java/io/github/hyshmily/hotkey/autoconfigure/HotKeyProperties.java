@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import io.github.hyshmily.hotkey.sync.ClusterHealthView;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -95,6 +96,17 @@ public class HotKeyProperties {
   /** Pool size for the shared HotKey scheduler (periodic tasks). */
   @Min(1)
   private int schedulerPoolSize = 8;
+
+  /**
+   * Expected number of Worker nodes in the cluster.
+   * <p>Used by {@link ClusterHealthView} for majority-quorum health checks.
+   * If set to 0 (default), the cluster is always considered unhealthy until
+   * Worker heartbeats dynamically update the count.
+   * <p>For production deployments with a fixed Worker count, set this to
+   * the expected number of Worker instances for accurate health detection.
+   */
+  @Min(0)
+  private int expectedWorkerCount = 0;
 
   /** Capacity of the expelled-key queue in HeavyKeeper. */
   @Min(1)
@@ -222,9 +234,7 @@ public class HotKeyProperties {
    * @return the effective number of consumer threads
    */
   public int effectiveConsumerCount() {
-    return consumerCount > 0
-      ? consumerCount
-      : Math.max(4, Runtime.getRuntime().availableProcessors() / 2);
+    return consumerCount > 0 ? consumerCount : Math.max(4, Runtime.getRuntime().availableProcessors() / 2);
   }
 
   /**
@@ -310,7 +320,7 @@ public class HotKeyProperties {
     /** Heartbeat exchange name. */
     private String exchangeName = "hotkey.heartbeat.exchange";
     /** Heartbeat timeout (ms). */
-    private long timeoutMs = 3000;
+    private int timeoutMs = 3000;
     /** Verify interval (ms). */
     private long verifyIntervalMs = 1500;
     /** PING timeout (ms). */

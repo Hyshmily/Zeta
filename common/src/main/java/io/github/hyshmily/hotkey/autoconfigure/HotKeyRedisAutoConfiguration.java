@@ -118,6 +118,7 @@ public class HotKeyRedisAutoConfiguration {
   @ConditionalOnMissingBean
   @ConditionalOnBean(RedisTemplate.class)
   @ConditionalOnClass(HotKeyDetector.class)
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyCache hotKeyCache(
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,
@@ -132,7 +133,6 @@ public class HotKeyRedisAutoConfiguration {
     ObjectProvider<RingManager> ringManagerProvider,
     ObjectProvider<ClusterHealthView> healthViewProvider
   ) {
-    ClusterHealthView healthView = healthViewProvider.getIfAvailable(() -> new ClusterHealthView(0, 3000, 2));
     return new HotKeyCache(
       hotKeyDetector,
       hotLocalCache,
@@ -147,7 +147,13 @@ public class HotKeyRedisAutoConfiguration {
         properties.getVersionKeyTtlMinutes()
       ),
       ringManagerProvider.getIfAvailable(() -> new RingManager(properties.getConsistentHashing().getVirtualNodes())),
-      healthView
+      healthViewProvider.getIfAvailable(() ->
+        new ClusterHealthView(
+          properties.getExpectedWorkerCount(),
+          properties.getHeartbeat().getTimeoutMs(),
+          properties.getHeartbeat().getDegradeAfterFailures()
+        )
+      )
     );
   }
 

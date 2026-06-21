@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_EPOCH;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_NODE_ID;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TIMESTAMP;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TYPE;
@@ -120,5 +121,50 @@ class WorkerMessageTest {
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm.decisionVersion()).isEqualTo(42L);
+  }
+
+  // ── P0-2: Epoch ──
+
+  /**
+   * Verifies that the epoch header is parsed correctly.
+   */
+  @Test
+  void from_withEpoch_shouldParse() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(AMQP_HEADER_VERSION, 10L);
+    props.setHeader(AMQP_HEADER_EPOCH, 3L);
+    props.setHeader(AMQP_HEADER_NODE_ID, "worker-1");
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    WorkerMessage wm = WorkerMessage.from(msg);
+    assertThat(wm.epoch()).isEqualTo(3L);
+    assertThat(wm.nodeId()).isEqualTo("worker-1");
+  }
+
+  /**
+   * Verifies that missing epoch header defaults to 0L.
+   */
+  @Test
+  void from_withMissingEpoch_shouldDefaultToZero() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(AMQP_HEADER_VERSION, 10L);
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    WorkerMessage wm = WorkerMessage.from(msg);
+    assertThat(wm.epoch()).isZero();
+  }
+
+  /**
+   * Verifies that epoch header stored as Integer is parsed correctly.
+   */
+  @Test
+  void from_withEpochAsInteger_shouldHandle() {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(AMQP_HEADER_VERSION, 10L);
+    props.setHeader(AMQP_HEADER_EPOCH, 2);
+    Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
+    WorkerMessage wm = WorkerMessage.from(msg);
+    assertThat(wm.epoch()).isEqualTo(2L);
   }
 }

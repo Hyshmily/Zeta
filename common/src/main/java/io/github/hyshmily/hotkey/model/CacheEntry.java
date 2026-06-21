@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.model;
 
+import io.github.hyshmily.hotkey.sync.VersionGuard;
 import lombok.Builder;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
@@ -77,6 +78,20 @@ public class CacheEntry {
    * decision broadcasts (see ADR-0008).
    */
   private final long decisionVersion;
+  /**
+   * The Worker node ID that produced the {@link #decisionVersion}.
+   * Used for per-Worker version partitioning in {@link VersionGuard#shouldSkipForWorker}.
+   * May be {@code null} for entries created by local promotion (no Worker origin).
+   */
+  private final String decisionNodeId;
+
+  /**
+   * The epoch (restart counter) of the Worker that produced the {@link #decisionVersion}.
+   * A higher epoch indicates a Worker restart; {@link VersionGuard} unconditionally
+   * accepts decisions from a higher epoch (see ADR-0010).
+   * May be {@code 0} for entries created by local promotion.
+   */
+  private final long decisionEpoch;
   /**
    * Hard TTL duration in milliseconds for this entry. The entry is evicted
    * unconditionally when {@link #hardExpireAtMs} is reached, regardless of

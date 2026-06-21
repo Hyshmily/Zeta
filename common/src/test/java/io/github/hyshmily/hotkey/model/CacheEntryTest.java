@@ -275,4 +275,74 @@ class CacheEntryTest {
     assertThat(a).isEqualTo(b);
     assertThat(a).hasSameHashCodeAs(b);
   }
+
+  /**
+   * Verifies decisionNodeId set via builder is stored and retrieved correctly.
+   */
+  @Test
+  void decisionNodeId_shouldBeStoredAndRetrieved() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("v")
+      .decisionNodeId("worker-1")
+      .build();
+    assertThat(entry.getDecisionNodeId()).isEqualTo("worker-1");
+  }
+
+  /**
+   * Verifies decisionEpoch set via builder is stored and retrieved correctly.
+   */
+  @Test
+  void decisionEpoch_shouldBeStoredAndRetrieved() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("v")
+      .decisionEpoch(5L)
+      .build();
+    assertThat(entry.getDecisionEpoch()).isEqualTo(5L);
+  }
+
+  /**
+   * Verifies decisionNodeId defaults to null when not explicitly set.
+   */
+  @Test
+  void decisionNodeId_defaultNull_whenNotSet() {
+    CacheEntry entry = CacheEntry.builder().value("v").build();
+    assertThat(entry.getDecisionNodeId()).isNull();
+  }
+
+  /**
+   * Verifies decisionEpoch defaults to zero when not explicitly set.
+   */
+  @Test
+  void decisionEpoch_defaultZero_whenNotSet() {
+    CacheEntry entry = CacheEntry.builder().value("v").build();
+    assertThat(entry.getDecisionEpoch()).isZero();
+  }
+
+  /**
+   * Verifies toBuilder copies decisionNodeId and decisionEpoch to the new entry.
+   */
+  @Test
+  void toBuilder_shouldCopyDecisionFields() {
+    CacheEntry original = CacheEntry.builder()
+      .value("orig")
+      .decisionNodeId("worker-1")
+      .decisionEpoch(5L)
+      .build();
+    CacheEntry copy = original.toBuilder().value("new").build();
+    assertThat(copy.getValue()).isEqualTo("new");
+    assertThat(copy.getDecisionNodeId()).isEqualTo("worker-1");
+    assertThat(copy.getDecisionEpoch()).isEqualTo(5L);
+  }
+
+  /**
+   * Verifies equals and hashCode consider decisionNodeId and decisionEpoch.
+   */
+  @Test
+  void equalsAndHashCode_shouldConsiderDecisionFields() {
+    CacheEntry a = CacheEntry.builder()
+      .value("x").dataVersion(1L).decisionNodeId("worker-1").decisionEpoch(5L).build();
+    CacheEntry b = CacheEntry.builder()
+      .value("x").dataVersion(1L).decisionNodeId("worker-2").decisionEpoch(5L).build();
+    assertThat(a).isNotEqualTo(b);
+  }
 }

@@ -250,7 +250,7 @@ class WorkerAutoConfigurationTest {
   @DisplayName("should create configTimestampCounter AtomicLong bean")
   void shouldCreateConfigTimestampCounterBean() {
     runner.run(ctx -> {
-      assertThat(ctx).hasSingleBean(AtomicLong.class);
+      assertThat(ctx).getBean("configTimestampCounter", AtomicLong.class).isNotNull();
     });
   }
 

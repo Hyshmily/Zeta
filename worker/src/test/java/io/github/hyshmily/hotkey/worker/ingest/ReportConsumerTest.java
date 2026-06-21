@@ -247,4 +247,72 @@ class ReportConsumerTest {
     verify(stateMachine).evaluate("goodKey", false);
     verify(globalQpsEstimator).addTotal(3L);
   }
+
+  /**
+   * Verifies that a failed HOT broadcast triggers a state machine rollback and no confirmation.
+   */
+  @Test
+  void broadcastHotFailure_shouldRollbackStateMachine() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
+    when(detector.addCount("hotKey", 100L)).thenReturn(true);
+    when(stateMachine.evaluate("hotKey", true)).thenReturn(HotKeyDecision.hot("hotKey"));
+    when(stateMachine.getStateSnapshot(anyString())).thenReturn(Map.of("currentState", "COLD", "hotStreak", 0, "coolStreak", 0));
+    doThrow(new WorkerBroadcaster.BroadcastFailedException("hotKey", "HOT", 1, new RuntimeException("test")))
+        .when(broadcaster).broadcastHot(anyString(), anyString());
+
+    consumer.onReport(message);
+
+    verify(stateMachine).rollbackToPreviousState(eq("hotKey"), anyMap());
+    verify(topKValidator, never()).markConfirmed(anyString());
+  }
+
+  /**
+   * Verifies that a failed COOL broadcast triggers a state machine rollback and no cooling confirmation.
+   */
+  @Test
+  void broadcastCoolFailure_shouldRollbackStateMachine() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
+    when(detector.addCount("coolKey", 1L)).thenReturn(false);
+    when(stateMachine.evaluate("coolKey", false)).thenReturn(HotKeyDecision.cool("coolKey"));
+    when(stateMachine.getStateSnapshot(anyString())).thenReturn(Map.of("currentState", "HOT", "hotStreak", 0, "coolStreak", 0));
+    doThrow(new WorkerBroadcaster.BroadcastFailedException("coolKey", "COOL", 1, new RuntimeException("test")))
+        .when(broadcaster).broadcastCool(anyString());
+
+    consumer.onReport(message);
+
+    verify(stateMachine).rollbackToPreviousState(eq("coolKey"), anyMap());
+    verify(topKValidator, never()).markCooled(anyString());
+  }
+
+  /**
+   * Verifies that a successful HOT broadcast does not trigger a state machine rollback.
+   */
+  @Test
+  void broadcastHotSuccess_shouldNotRollback() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
+    when(detector.addCount("hotKey", 100L)).thenReturn(true);
+    when(stateMachine.evaluate("hotKey", true)).thenReturn(HotKeyDecision.hot("hotKey"));
+
+    consumer.onReport(message);
+
+    verify(broadcaster).broadcastHot("hotKey", "sliding_window");
+    verify(topKValidator).markConfirmed("hotKey");
+    verify(stateMachine, never()).rollbackToPreviousState(anyString(), anyMap());
+  }
+
+  /**
+   * Verifies that a successful COOL broadcast does not trigger a state machine rollback.
+   */
+  @Test
+  void broadcastCoolSuccess_shouldNotRollback() {
+    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
+    when(detector.addCount("coolKey", 1L)).thenReturn(false);
+    when(stateMachine.evaluate("coolKey", false)).thenReturn(HotKeyDecision.cool("coolKey"));
+
+    consumer.onReport(message);
+
+    verify(broadcaster).broadcastCool("coolKey");
+    verify(topKValidator).markCooled("coolKey");
+    verify(stateMachine, never()).rollbackToPreviousState(anyString(), anyMap());
+  }
 }

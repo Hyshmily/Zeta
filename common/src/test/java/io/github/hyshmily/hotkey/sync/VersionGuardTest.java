@@ -198,6 +198,148 @@ class VersionGuardTest {
     assertThat(VersionGuard.shouldSkipForSync(cache, "key", 1, false)).isFalse();
   }
 
+  // ── shouldSkipForWorker with nodeId/epoch (P0-2) ──
+
+  /**
+   * Verifies that null existing entry is accepted (not skipped).
+   */
+  @Test
+  void shouldSkipForWorker_withNodeIdEpoch_nullExisting_shouldNotSkip() {
+    assertThat(VersionGuard.shouldSkipForWorker(null, 100, "W1", 1)).isFalse();
+  }
+
+  /**
+   * Verifies that a degraded existing entry unconditionally accepts the incoming decision.
+   */
+  @Test
+  void shouldSkipForWorker_withNodeIdEpoch_existingDegraded_shouldNotSkip() {
+    CacheEntry degraded = entry(5, true, 50).toBuilder()
+      .decisionNodeId("W1")
+      .decisionEpoch(1)
+      .build();
+    assertThat(VersionGuard.shouldSkipForWorker(degraded, 1, "W1", 1)).isFalse();
+  }
+
+  /**
+   * Verifies that incoming epoch higher than existing epoch unconditionally accepts
+   * (Worker restart detected — ADR-0010).
+   */
+  @Test
+  void shouldSkipForWorker_withNodeIdEpoch_higherEpoch_shouldNotSkip() {
+    CacheEntry existing = entry(5, false, 100).toBuilder()
+      .decisionNodeId("W1")
+      .decisionEpoch(1)
+      .build();
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 10, "W1", 2)).isFalse();
+  }
+
+  /**
+   * Verifies that same nodeId and existing dv >= incoming dv skips the decision.
+   */
+  @Test
+  void shouldSkipForWorker_withNodeIdEpoch_sameNodeId_existingDvHigher_shouldSkip() {
+    CacheEntry existing = entry(5, false, 100).toBuilder()
+      .decisionNodeId("W1")
+      .decisionEpoch(1)
+      .build();
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 99, "W1", 1)).isTrue();
+  }
+
+  /**
+   * Verifies that same nodeId and existing dv == incoming dv skips the decision.
+   */
+  @Test
+  void shouldSkipForWorker_withNodeIdEpoch_sameNodeId_existingDvEqual_shouldSkip() {
+    CacheEntry existing = entry(5, false, 100).toBuilder()
+      .decisionNodeId("W1")
+      .decisionEpoch(1)
+      .build();
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 100, "W1", 1)).isTrue();
+  }
+
+  /**
+   * Verifies that same nodeId and incoming dv > existing dv does NOT skip.
+   */
+  @Test
+  void shouldSkipForWorker_withNodeIdEpoch_sameNodeId_incomingDvHigher_shouldNotSkip() {
+    CacheEntry existing = entry(5, false, 100).toBuilder()
+      .decisionNodeId("W1")
+      .decisionEpoch(1)
+      .build();
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 101, "W1", 1)).isFalse();
+  }
+
+  /**
+   * Verifies that same epoch but different nodeId is accepted (cross-Worker ownership transfer).
+   */
+  @Test
+  void shouldSkipForWorker_withNodeIdEpoch_differentNodeId_sameEpoch_shouldNotSkip() {
+    CacheEntry existing = entry(5, false, 100).toBuilder()
+      .decisionNodeId("W1")
+      .decisionEpoch(1)
+      .build();
+    // Worker B takes over from Worker A, same epoch
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 50, "W2", 1)).isFalse();
+  }
+
+  /**
+   * Verifies that same epoch, different nodeId is accepted even when incoming dv is much lower
+   * (new owner establishes authority from its own counter).
+   */
+  @Test
+  void shouldSkipForWorker_withNodeIdEpoch_differentNodeId_lowDv_shouldNotSkip() {
+    CacheEntry existing = entry(5, false, 1000).toBuilder()
+      .decisionNodeId("W1")
+      .decisionEpoch(1)
+      .build();
+    // Worker B just started, dv=1, but should be accepted as new owner
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W2", 1)).isFalse();
+  }
+
+  /**
+   * Verifies that the old overload (without nodeId/epoch) delegates correctly with null/0 defaults.
+   */
+  @Test
+  void shouldSkipForWorker_oldOverload_shouldDelegate() {
+    CacheEntry existing = entry(5, false, 100).toBuilder()
+      .decisionNodeId(null)
+      .decisionEpoch(0)
+      .build();
+    // Without nodeId/epoch: cross-Worker comparison gives false positive (skip)
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 50)).isTrue();
+  }
+
+  // ── Cache-level shouldSkipForWorker with nodeId/epoch (P0-2) ──
+
+  /**
+   * Verifies that the cache-level overload with nodeId/epoch works correctly.
+   */
+  @Test
+  void shouldSkipForWorker_cacheLevel_withNodeIdEpoch_shouldDelegate() {
+    CacheEntry existing = entry(5, false, 100).toBuilder()
+      .decisionNodeId("W1")
+      .decisionEpoch(1)
+      .build();
+    cache.put("key", existing);
+
+    // Same nodeId, existing dv >= incoming → skip
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 99, "W1", 1)).isTrue();
+
+    // Different nodeId → accept
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 50, "W2", 1)).isFalse();
+
+    // Higher epoch → accept
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 10, "W1", 2)).isFalse();
+  }
+
+  /**
+   * Verifies that the cache-level overload with nodeId/epoch returns false for missing keys.
+   */
+  @Test
+  void shouldSkipForWorker_cacheLevel_withNodeIdEpoch_missingKey_shouldNotSkip() {
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "missing", 1, "W1", 1)).isFalse();
+  }
+
   private static CacheEntry entry(long dataVersion, boolean degraded, long decisionVersion) {
     return CacheEntry.builder()
       .value("v")

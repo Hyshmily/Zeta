@@ -37,8 +37,8 @@ HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 
 - **Soft expiry (logical expiration)** — Returns stale data immediately while refreshing asynchronously in the background; reduces p99 latency at the cost of brief stale reads. **Fully replaces traditional Redis-side logical expiry** (`RedisData{data, expireTime}` wrapper pattern) — Redis stores plain values, HotKey manages expiration at the L1 Caffeine layer
 - **Redis collection types** — Supports incremental writes to List/Set/ZSet via `putBeforeInvalidate`, no `putThrough` required
 - **Hot key synchronization** — Optional RabbitMQ fanout (via `hotkey.sync.*`) for cross-instance cache invalidation; dedicated worker-listener (via `hotkey.worker-listener.*`) receives HOT/COOL decisions from Worker
-- **Worker mode** — Dedicated cluster-level hot key detection nodes; cross-instance consensus via sliding window + state machine pipeline; runtime state machine configuration via `/actuator/hotkey/worker/state` REST endpoint with heartbeat-based peer-to-peer config propagation; see [Worker Mode](#worker-mode)
-- **Report aggregation** — Every `get()` / `getWithSoftExpire()` call reports to the local `HotKeyReporter`, which periodically batches access counts to Worker nodes (RabbitMQ) for cluster-level hot key detection
+- **Worker mode** — Dedicated cluster-level hot key detection nodes; cross-instance consensus via sliding window + state machine pipeline; runtime state machine configuration via `/actuator/hotkey/worker/state` REST endpoint with heartbeat-based peer-to-peer config propagation; cross-Worker `decisionVersion` partitioning via `nodeId`/`epoch` for safe version ordering across Worker restarts; see [Worker Mode](#worker-mode)
+- **Report aggregation** — Every `get()` / `getWithSoftExpire()` call reports to the local `HotKeyReporter`, which periodically batches access counts to Worker nodes (RabbitMQ) for cluster-level hot key detection; per-Worker epoch counter enables deterministic decision ordering after restarts
 - **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies configurable random jitter to each hard/soft TTL via `ThreadLocalRandom`, scattering expiration timestamps to prevent cache avalanches (default ±10%, controlled by `hotkey.local.ttl-jitter-enabled` / `ttl-jitter-ratio`)
 - **Consistent hashing (default)** — Murmur3_32-based consistent hash ring for dynamic Worker routing via heartbeats; elastic scaling without static shard configuration
 - **BBR adaptive rate limiting** — Self-protection via BBR congestion control fused with CPU EMA monitoring; backpressure at the Reporter flush path to prevent RabbitMQ/Worker overload
@@ -662,6 +662,10 @@ Worker mode provides cluster-level hot key detection via dedicated nodes. App in
 
 In **Worker-only** mode, cache operations throw `UnsupportedOperationException`.
 
+**Cross-Worker decisionVersion partitioning:** Every Worker has a unique `nodeId` and an `epoch` counter. When broadcasting HOT/COOL decisions, the Worker attaches both as AMQP headers. The app-side `WorkerListener` propagates `nodeId`/`epoch` through the double-checked-lock path into `CacheEntry.decisionNodeId`/`decisionEpoch`. The `VersionGuard` compares decisions per-Worker: an incoming decision wins only if its `epoch` >= the cached entry's `decisionEpoch`, using `nodeId` to partition the version space. This prevents stale decisions from a restarted Worker from overriding fresher ones — each new boot increments the `epoch` counter, resetting the authority.
+
+**Worker cluster health:** Set `hotkey.local.expected-worker-count` to the expected number of Workers in production. When set (>0), `ClusterHealthView` uses majority-quorum (`> expectedWorkerCount / 2`) as the threshold for healthy Worker count; when 0 (default), the cluster is always considered unhealthy until at least one heartbeat arrives. This enables accurate detection of partial Worker failures and graceful degradation decisions.
+
 **Worker TopK persistence (hot start):** When `hotkey.worker.persistence.enabled=true`, the Worker periodically snapshots its TopK list to Redis. On restart, `TopKPersistService` loads the last snapshot and replays it into the HeavyKeeper sketch, reducing warm-up from hours to seconds.
 
 **Spring Cache integration**
@@ -817,6 +821,7 @@ Worker mode failure behavior:
 | Partial Workers down      | Unaffected shards continue working normally                                                           | Restart failed Workers; auto-reconnect                             |
 | Report channel failure    | Reports queued/buffered (RabbitMQ)                                                                    | Auto-recover when RabbitMQ recovers                                |
 | Worker broadcast failure  | No cross-instance HOT/COOL sync; local TopK continues normally                                        | Restart Worker broadcaster                                         |
+| `expected-worker-count=0` | Cluster health always unhealthy until first heartbeat; no quorum-based degradation                    | Set `hotkey.local.expected-worker-count` to fixed Worker count     |
 | Reporter BBR backpressure | BBR drops batches when concurrency exceeds budget (CPU ≥ threshold); lenient below threshold          | Auto-recover when load decreases                                   |
 | Worker TopK persistence   | Redis unavailable → silently skip persistence, `error` log recorded; Worker cold start (no hot start) | Next scheduled persistence succeeds when Redis recovers            |
 

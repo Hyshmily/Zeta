@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
@@ -26,7 +28,8 @@ import io.github.hyshmily.hotkey.sync.*;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.function.Function;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -48,9 +51,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
-
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Function;
 
 /**
  * Unified AMQP auto-configuration for HotKey messaging: app-to-Worker reporting,
@@ -171,11 +171,13 @@ public class HotKeyAmqpAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "hotkey.local.reporter", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public BbrRateLimiter hotKeyBbrRateLimiter(
-      SystemLoadMonitor cpuMonitor,
-      HotKeyProperties properties
-    ) {
+    @ConditionalOnProperty(
+      prefix = "hotkey.local.reporter",
+      name = "enabled",
+      havingValue = "true",
+      matchIfMissing = true
+    )
+    public BbrRateLimiter hotKeyBbrRateLimiter(SystemLoadMonitor cpuMonitor, HotKeyProperties properties) {
       HotKeyProperties.ReporterLimiter cfg = properties.getReporter();
       return new BbrRateLimiter(
         cpuMonitor,
@@ -216,7 +218,13 @@ public class HotKeyAmqpAutoConfiguration {
         properties.getQueueOfferTimeoutMs(),
         properties.effectiveConsumerCount(),
         ringManager,
-        healthViewProvider.getIfAvailable(() -> new ClusterHealthView(0, 3000, 2))
+        healthViewProvider.getIfAvailable(() ->
+          new ClusterHealthView(
+            properties.getExpectedWorkerCount(),
+            properties.getHeartbeat().getTimeoutMs(),
+            properties.getHeartbeat().getDegradeAfterFailures()
+          )
+        )
       );
       bbrRateLimiterProvider.ifAvailable(reporter::setBbrRateLimiter);
       return reporter;
@@ -227,7 +235,7 @@ public class HotKeyAmqpAutoConfiguration {
    * Inner configuration for instance-to-instance cache synchronization.
    * Creates a FanoutExchange, per-instance queue with TTL, binding, publisher,
    * Redis loader, sync listener, and a dedicated scheduled executor.
-    * Requires Redis and {@code hotkey.sync.enabled=true}.
+   * Requires Redis and {@code hotkey.sync.enabled=true}.
    */
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
@@ -258,9 +266,9 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnClass(name = "org.springframework.amqp.core.Queue")
     public Queue hotkeySyncQueue(CacheSyncProperties properties) {
       return QueueBuilder.durable(properties.getQueueName())
-          .withArgument("x-message-ttl", 60_000)
-          .withArgument("x-expires", 86_400_000)
-          .build();
+        .withArgument("x-message-ttl", 60_000)
+        .withArgument("x-expires", 86_400_000)
+        .build();
     }
 
     /**
@@ -362,7 +370,7 @@ public class HotKeyAmqpAutoConfiguration {
    * Inner configuration for receiving Worker HOT/COOL decisions.
    * Creates a FanoutExchange, per-instance queue with TTL, binding, worker listener,
    * listener container, and a dedicated scheduled executor.
-    * Requires Redis and {@code hotkey.worker-listener.enabled=true}.
+   * Requires Redis and {@code hotkey.worker-listener.enabled=true}.
    */
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
@@ -394,9 +402,9 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotkeyWorkerQueue")
     public Queue hotkeyWorkerQueue(WorkerListenerProperties properties) {
       return QueueBuilder.durable(properties.getQueueName())
-          .withArgument("x-message-ttl", 60_000)
-          .withArgument("x-expires", 86_400_000)
-          .build();
+        .withArgument("x-message-ttl", 60_000)
+        .withArgument("x-expires", 86_400_000)
+        .build();
     }
 
     /**
@@ -455,11 +463,17 @@ public class HotKeyAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public ClusterHealthView clusterHealthView(RingManager ringManager, HotKeyProperties properties) {
-      return new ClusterHealthView(
-        ringManager.nodeCount(),
+      ClusterHealthView view = new ClusterHealthView(
+        properties.getExpectedWorkerCount(),
         properties.getHeartbeat().getTimeoutMs(),
         properties.getHeartbeat().getDegradeAfterFailures()
       );
+      ringManager.setOnRingReconciled(aliveCount -> {
+        if (properties.getExpectedWorkerCount() <= 0) {
+          view.setKnownWorkerCount(Math.max(view.getKnownWorkerCount(), aliveCount));
+        }
+      });
+      return view;
     }
 
     /**
@@ -472,7 +486,12 @@ public class HotKeyAmqpAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "hotkey.worker-listener.sre", name = "enabled", havingValue = "true", matchIfMissing = true)
+    @ConditionalOnProperty(
+      prefix = "hotkey.worker-listener.sre",
+      name = "enabled",
+      havingValue = "true",
+      matchIfMissing = true
+    )
     public SreRateLimiter hotKeySreRateLimiter(WorkerListenerProperties properties) {
       WorkerListenerProperties.Sre sreConfig = properties.getSre();
       return new SreRateLimiter(
@@ -568,7 +587,10 @@ public class HotKeyAmqpAutoConfiguration {
       container.setQueueNames(hotkeyWorkerQueue.getName());
       container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
       container.setMessageListener(
-        (ChannelAwareMessageListener) (msg, channel) -> workerListener.handleWorkerMessage(channel, msg));
+        (ChannelAwareMessageListener) (msg, channel) -> workerListener.handleWorkerMessage(channel, msg)
+      );
+      container.setConcurrentConsumers(properties.getConcurrentConsumers());
+      container.setPrefetchCount(properties.getPrefetchCount());
       container.setAutoStartup(properties.isAutoStartup());
       return container;
     }

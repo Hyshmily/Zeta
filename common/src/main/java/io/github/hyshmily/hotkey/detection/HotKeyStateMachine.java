@@ -15,7 +15,11 @@
  */
 package io.github.hyshmily.hotkey.detection;
 
+import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
+
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
+import java.util.Collections;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -177,14 +181,14 @@ public class HotKeyStateMachine {
       state.coolStreak = 0; // reset cold streak
 
       // COLD → CONFIRMED_HOT transition
-      if (state.currentState == State.COLD && state.hotStreak >= confirmCount) {
-        state.currentState = State.CONFIRMED_HOT;
+      if (state.currentState == COLD && state.hotStreak >= confirmCount) {
+        state.currentState = CONFIRMED_HOT;
         return HotKeyDecision.hot(key); // broadcast HOT
       }
 
       // PRE_COOLING → CONFIRMED_HOT (silent revive)
-      if (state.currentState == State.PRE_COOLING) {
-        state.currentState = State.CONFIRMED_HOT;
+      if (state.currentState == PRE_COOLING) {
+        state.currentState = CONFIRMED_HOT;
         return HotKeyDecision.none(key); // no broadcast — avoid oscillation
       }
     } else {
@@ -192,14 +196,14 @@ public class HotKeyStateMachine {
       state.hotStreak = 0; // reset hot streak
 
       // CONFIRMED_HOT → PRE_COOLING transition (first cool phase)
-      if (state.currentState == State.CONFIRMED_HOT && state.coolStreak >= coolCount - preCoolGraceCount) {
-        state.currentState = State.PRE_COOLING;
+      if (state.currentState == CONFIRMED_HOT && state.coolStreak >= coolCount - preCoolGraceCount) {
+        state.currentState = PRE_COOLING;
         // no broadcast yet — wait for full cool-down
       }
 
       // PRE_COOLING → COLD transition (fully cooled)
-      if (state.currentState == State.PRE_COOLING && state.coolStreak >= coolCount) {
-        state.currentState = State.COLD;
+      if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
+        state.currentState = COLD;
         return HotKeyDecision.cool(key); // broadcast COOL
       }
     }
@@ -261,20 +265,44 @@ public class HotKeyStateMachine {
     stateTimestamps.keySet().removeIf(k -> !states.containsKey(k));
   }
 
+  public Map<String, Object> getStateSnapshot(String key) {
+    KeyState keyState = states.get(key);
+    if (keyState == null) {
+      return Collections.emptyMap();
+    }
+    return Map.of(
+      "currentState",
+      keyState.currentState.name(),
+      "hotStreak",
+      keyState.hotStreak,
+      "coolStreak",
+      keyState.coolStreak
+    );
+  }
+
   /**
-   * Mutable per-key state.  Instances are confined to the {@code states}
-   * map and updated under the key-level concurrency guarantees of
-   * {@link ConcurrentHashMap}.
+   * Rolls back the per-key state to its previous value after a broadcast failure.
+   * This allows the next evaluation window to re-emit the decision.
+   *
+   * @param key the key whose state machine should be rolled back
    */
-  /**
-   * Mutable per-key state, updated under {@link ConcurrentHashMap#computeIfAbsent} insert
-   * but with unsynchronised field mutations from the {@link ReportConsumer} thread pool.
-   * {@code volatile} guarantees cross-thread visibility of the three mutable fields.
-   */
+  public void rollbackToPreviousState(String key, Map<String, Object> previousState) {
+    if (previousState == null) {
+      // No previous state; treat as reset
+      reset(key);
+      return;
+    }
+
+    KeyState keyState = states.computeIfAbsent(key, k -> new KeyState());
+    keyState.currentState = State.valueOf((String) previousState.get("currentState"));
+    keyState.hotStreak = (int) previousState.get("hotStreak");
+    keyState.coolStreak = (int) previousState.get("coolStreak");
+  }
+
   private static class KeyState {
 
     /** Current lifecycle stage. */
-    volatile State currentState = State.COLD;
+    volatile State currentState = COLD;
 
     /** Number of consecutive windows above the hot threshold. */
     volatile int hotStreak = 0;
