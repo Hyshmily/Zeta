@@ -389,4 +389,11 @@ class SingleFlightTest {
     Optional<String> result = singleFlight.load("retry-key", () -> "success");
     assertThat(result).contains("success");
   }
+
+  @Test
+  void load_withErrorCause_shouldPropagate() {
+    assertThatThrownBy(() ->
+      singleFlight.load("error-key", () -> { throw new Error("simulated-error"); })
+    ).isInstanceOf(Error.class);
+  }
 }

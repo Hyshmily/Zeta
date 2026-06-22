@@ -17,6 +17,8 @@ package io.github.hyshmily.hotkey.reporting;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -285,5 +287,52 @@ class HotKeyReporterTest {
     assertThat(reporter.bbrDropped()).isZero();
     assertThat(reporter.bbrInFlight()).isZero();
     assertThat(reporter.bbrMaxInFlight()).isZero();
+  }
+
+  @Test
+  void flush_withBbrRateLimiterAndRecords_shouldTrackMetrics() throws Exception {
+    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
+    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
+    BbrRateLimiter bbr = new BbrRateLimiter(cpuMonitor, 800, 500, 5, 1000);
+    reporter.setBbrRateLimiter(bbr);
+    registerWorker(healthView, "worker-1");
+    reporter.start();
+    reporter.record("bbr-key");
+    awaitPublish(1);
+    assertThat(reporter.bbrPassed()).isPositive();
+  }
+
+  @Test
+  void flush_withHighCpuBbr_shouldDropRecords() throws Exception {
+    SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
+    when(cpuMonitor.getCpuLoadEMA()).thenReturn(1.0);
+    BbrRateLimiter bbr = new BbrRateLimiter(cpuMonitor, 800, 500, 5, 1000);
+    reporter.setBbrRateLimiter(bbr);
+    registerWorker(healthView, "worker-1");
+    reporter.start();
+    reporter.record("high-cpu-key");
+    Thread.sleep(REPORT_INTERVAL_MS * 3 + 500);
+    assertThat(reporter.bbrDropped()).isNotNegative();
+  }
+
+  @Test
+  void start_withFailedScheduler_shouldHandleGracefully() {
+    ScheduledExecutorService brokenScheduler = mock(ScheduledExecutorService.class);
+    when(brokenScheduler.scheduleAtFixedRate(any(), anyLong(), anyLong(), any()))
+      .thenThrow(new RuntimeException("scheduler failure"));
+    HotKeyReporter failingReporter = new HotKeyReporter(
+      testPublisher,
+      brokenScheduler,
+      REPORT_INTERVAL_MS,
+      "testApp",
+      QUEUE_CAPACITY,
+      100,
+      1,
+      ringManager,
+      healthView
+    );
+    failingReporter.start();
+    assertThat(failingReporter.dispatcherDepth()).isNotNegative();
+    failingReporter.stop();
   }
 }

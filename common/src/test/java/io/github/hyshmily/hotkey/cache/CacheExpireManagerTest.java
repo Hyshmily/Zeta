@@ -155,7 +155,7 @@ class CacheExpireManagerTest {
   @Test
   void isSoftExpired_shouldReturnTrueForNonCacheEntry() {
     caffeineCache.put("plain", "not-a-cache-entry");
-    assertThat(expireManager.isSoftExpired("plain")).isTrue();
+    assertThat(expireManager.isSoftExpired("not-a-cache-entry")).isTrue();
   }
 
   /**
@@ -163,7 +163,7 @@ class CacheExpireManagerTest {
    */
   @Test
   void isSoftExpired_shouldReturnTrueForMissingEntry() {
-    assertThat(expireManager.isSoftExpired("not-present")).isTrue();
+    assertThat(expireManager.isSoftExpired(null)).isTrue();
   }
 
   /**
@@ -290,12 +290,59 @@ class CacheExpireManagerTest {
   }
 
   /**
+   * Verifies that computeHotHardExpireAt returns Long.MAX_VALUE when hot hard TTL is disabled (0).
+   * This covers toHardExpireTimestamp when hardTtlMs <= 0.
+   */
+  @Test
+  void computeHotHardExpireAt_withDisabledHotHardTtl_shouldReturnMaxValue() {
+    ttlConfig.setDefaultHotHardTtlMs(0);
+    assertThat(expireManager.computeHotHardExpireAt()).isEqualTo(Long.MAX_VALUE);
+  }
+
+  /**
    * Verifies that computeHotSoftExpireAt produces a positive future timestamp.
    */
   @Test
   void hotSoftExpireAt_producesPositiveTimestamp() {
     long hot = expireManager.computeHotSoftExpireAt();
     assertThat(hot).isGreaterThan(System.currentTimeMillis());
+  }
+
+  /**
+   * Verifies that computeHotSoftExpireAt returns 0 when hot soft TTL is disabled (0).
+   * This covers the toSoftExpireTimestamp branch when softTtlMs <= 0.
+   */
+  @Test
+  void computeHotSoftExpireAt_withZeroHotSoftTtl_shouldReturnZero() {
+    ttlConfig.setDefaultHotSoftTtlMs(0);
+    assertThat(expireManager.computeHotSoftExpireAt()).isZero();
+  }
+
+  /**
+   * Verifies that jitter disabled produces exact TTL (within ±1ms tolerance) on soft TTL path.
+   */
+  @Test
+  void toSoftExpireTimestamp_withJitterDisabled_shouldProduceExactTtl() {
+    CacheExpireManager noJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10, false, 0.0);
+    long start = System.currentTimeMillis();
+    long expireAt = noJitter.computeSoftExpireAt(10_000);
+    long elapsed = expireAt - start;
+    assertThat(elapsed).isBetween(9_999L, 10_001L);
+  }
+
+  /**
+   * Verifies that isSoftExpired returns true when softExpireAtMs is a past timestamp
+   * (positive but earlier than the current time).
+   */
+  @Test
+  void isSoftExpired_withExpiredEntry_shouldReturnTrue() {
+    CacheEntry entry = CacheEntry.builder()
+      .value("v").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(1L)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build();
+    assertThat(expireManager.isSoftExpired(entry)).isTrue();
   }
 
   /**
@@ -371,8 +418,14 @@ class CacheExpireManagerTest {
     Executor asyncExec = Executors.newCachedThreadPool();
     CacheExpireManager limited = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 1);
 
-    caffeineCache.put("key", CacheEntry.builder()
-      .value("original").dataVersion(1).isVersionDegraded(false)
+    caffeineCache.put("key1", CacheEntry.builder()
+      .value("original1").dataVersion(1).isVersionDegraded(false)
+      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .build());
+    caffeineCache.put("key2", CacheEntry.builder()
+      .value("original2").dataVersion(1).isVersionDegraded(false)
       .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
       .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
       .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
@@ -381,7 +434,7 @@ class CacheExpireManagerTest {
     CountDownLatch blockLatch = new CountDownLatch(1);
 
     // First call blocks the supplier, holding the only permit
-    limited.triggerBackgroundRefresh("key", () -> {
+    limited.triggerBackgroundRefresh("key1", () -> {
       try {
         blockLatch.await(5, TimeUnit.SECONDS);
       } catch (InterruptedException e) {
@@ -393,13 +446,18 @@ class CacheExpireManagerTest {
     // Give first call time to acquire the permit
     Thread.sleep(50);
 
-    // Second refresh should fail tryAcquire and return immediately
-    limited.triggerBackgroundRefresh("key", () -> "second-value", 30_000);
+    // Second refresh for DIFFERENT key should fail tryAcquire and return immediately
+    limited.triggerBackgroundRefresh("key2", () -> "second-value", 30_000);
 
-    // Entry should still be "original" (first hasn't completed yet)
-    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
-    assertThat(entry).isNotNull();
-    assertThat((Object) entry.getValue()).isEqualTo("original");
+    // key1 should still be "original1" (first hasn't completed yet)
+    CacheEntry entry1 = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(entry1).isNotNull();
+    assertThat((Object) entry1.getValue()).isEqualTo("original1");
+
+    // key2 should still be "original2" (limiter exhausted, refresh skipped)
+    CacheEntry entry2 = (CacheEntry) caffeineCache.getIfPresent("key2");
+    assertThat(entry2).isNotNull();
+    assertThat((Object) entry2.getValue()).isEqualTo("original2");
 
     blockLatch.countDown();
   }

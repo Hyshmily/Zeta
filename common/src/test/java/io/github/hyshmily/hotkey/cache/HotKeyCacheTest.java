@@ -1401,4 +1401,93 @@ class HotKeyCacheTest {
       assertThat(entry.getValue()).isEqualTo("workerValue");
     }
   }
+
+  // ── putThrough with existing CacheEntry: buildPutThroughEntry deeper branches ──
+
+  @Test
+  void putThrough_withExistingEntry_shouldPreserveDecisionMetadata() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("oldValue")
+        .dataVersion(Long.MIN_VALUE)
+        .isVersionDegraded(true)
+        .decisionVersion(42)
+        .decisionNodeId("worker-1")
+        .decisionEpoch(7)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    hotKeyCache.putThrough("key1", "newValue", () -> {});
+
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    CacheEntry entry = (CacheEntry) raw;
+    assertThat(entry.getValue()).isEqualTo("newValue");
+    assertThat(entry.getDecisionVersion()).isEqualTo(42);
+    assertThat(entry.getDecisionNodeId()).isEqualTo("worker-1");
+    assertThat(entry.getDecisionEpoch()).isEqualTo(7);
+  }
+
+  @Test
+  void putThrough_withWorkerManagedEntry_shouldPreserveNormalTtls() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("old")
+        .dataVersion(Long.MIN_VALUE)
+        .isVersionDegraded(true)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(777_777)
+        .normalSoftTtlMs(77_777)
+        .build()
+    );
+
+    hotKeyCache.putThrough("key1", "newValue", () -> {}, 50000L, 5000L);
+
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    CacheEntry entry = (CacheEntry) raw;
+    assertThat(entry.getNormalHardTtlMs()).isEqualTo(777_777);
+    assertThat(entry.getNormalSoftTtlMs()).isEqualTo(77_777);
+  }
+
+  @Test
+  void putThrough_withExistingEntryAndHigherDataVersion_shouldSkip() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(Long.MAX_VALUE)
+        .isVersionDegraded(true)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    hotKeyCache.putThrough("key1", "newValue", () -> {});
+
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    CacheEntry entry = (CacheEntry) raw;
+    assertThat(entry.getValue()).isEqualTo("original");
+  }
 }
