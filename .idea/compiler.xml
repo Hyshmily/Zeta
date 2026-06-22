@@ -31,8 +31,8 @@
       </profile>
     </annotationProcessing>
     <bytecodeTargetLevel>
-      <module name="hotkey-integration-tests" target="21" />
-      <module name="hotkey-spring-boot-starter" target="21" />
+      <module name="hotkey-integration-tests" target="17" />
+      <module name="hotkey-spring-boot-starter" target="17" />
     </bytecodeTargetLevel>
   </component>
   <component name="JavacSettings">

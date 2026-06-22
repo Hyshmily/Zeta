@@ -44,7 +44,7 @@
   </modules>
 
   <properties>
-    <java.version>21</java.version>
+    <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <spring-boot.version>3.5.3</spring-boot.version>
     <testcontainers.version>1.21.4</testcontainers.version>
@@ -78,7 +78,7 @@
         <version>3.15.0</version>
         <configuration>
           <parameters>true</parameters>
-          <release>21</release>
+          <release>17</release>
           <annotationProcessorPaths>
             <path>
               <groupId>org.springframework.boot</groupId>

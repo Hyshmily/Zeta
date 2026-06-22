@@ -24,7 +24,7 @@ mvn javadoc:jar                      # Generate Javadoc JAR (common only)
 mvn source:jar                       # Generate source JAR (common only)
 ```
 
-**Java version:** 21 | **Code formatting:** Prettier with `prettier-plugin-java` and `@prettier/plugin-xml` (printWidth: 120)
+**Java version:** 17 | **Code formatting:** Prettier with `prettier-plugin-java` and `@prettier/plugin-xml` (printWidth: 120)
 
 ## Architecture
 

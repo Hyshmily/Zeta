@@ -55,9 +55,8 @@ public class WorkerConfigNegotiator {
    */
   @PostConstruct
   void syncOnStartup() {
-    Thread waitThread = Thread.ofVirtual()
-      .name("config-sync-startup")
-      .unstarted(() -> {
+    Thread waitThread = new Thread(
+      () -> {
         try {
           boolean received = startupLatch.await(3000, TimeUnit.MILLISECONDS);
           if (!received) {
@@ -66,7 +65,10 @@ public class WorkerConfigNegotiator {
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
         }
-      });
+      },
+      "config-sync-startup"
+    );
+    waitThread.setDaemon(true);
     waitThread.start();
   }
 

@@ -1,4 +1,4 @@
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY target/hotkey-worker-*.jar app.jar
 EXPOSE 8080
