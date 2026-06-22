@@ -18,7 +18,7 @@ package io.github.hyshmily.hotkey.worker.ingest;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING_WINDOW;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;

@@ -17,7 +17,7 @@ package io.github.hyshmily.hotkey.hotkeydetector;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.AddResult;
 import org.junit.jupiter.api.Test;
 
 /**

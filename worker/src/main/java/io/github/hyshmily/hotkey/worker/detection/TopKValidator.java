@@ -18,8 +18,8 @@ import lombok.extern.slf4j.Slf4j;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
 import lombok.RequiredArgsConstructor;
 

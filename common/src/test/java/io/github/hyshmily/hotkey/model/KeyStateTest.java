@@ -25,11 +25,11 @@ import org.junit.jupiter.api.Test;
 class KeyStateTest {
 
   /**
-   * Verifies the KeyState enum contains exactly HOT, COOL, PRE_COOL, and NORMAL in that order.
+   * Verifies the KeyState enum contains exactly HOT, COOL, and NORMAL in that order.
    */
   @Test
   void shouldHaveExpectedEnumValues() {
-    assertThat(KeyState.values()).containsExactly(KeyState.HOT, KeyState.COOL, KeyState.PRE_COOL, KeyState.NORMAL);
+    assertThat(KeyState.values()).containsExactly(KeyState.HOT, KeyState.COOL, KeyState.NORMAL);
   }
 
   @Test
@@ -40,11 +40,6 @@ class KeyStateTest {
   @Test
   void cool_shouldHaveCorrectName() {
     assertThat(KeyState.COOL.name()).isEqualTo("COOL");
-  }
-
-  @Test
-  void preCool_shouldHaveCorrectName() {
-    assertThat(KeyState.PRE_COOL.name()).isEqualTo("PRE_COOL");
   }
 
   @Test
@@ -63,13 +58,8 @@ class KeyStateTest {
   }
 
   @Test
-  void preCool_shouldHaveOrdinalTwo() {
-    assertThat(KeyState.PRE_COOL.ordinal()).isEqualTo(2);
-  }
-
-  @Test
-  void normal_shouldHaveOrdinalThree() {
-    assertThat(KeyState.NORMAL.ordinal()).isEqualTo(3);
+  void normal_shouldHaveOrdinalTwo() {
+    assertThat(KeyState.NORMAL.ordinal()).isEqualTo(2);
   }
 
   @Test
@@ -83,11 +73,6 @@ class KeyStateTest {
   }
 
   @Test
-  void valueOf_shouldResolvePRE_COOL() {
-    assertThat(KeyState.valueOf("PRE_COOL")).isEqualTo(KeyState.PRE_COOL);
-  }
-
-  @Test
   void valueOf_shouldResolveNORMAL() {
     assertThat(KeyState.valueOf("NORMAL")).isEqualTo(KeyState.NORMAL);
   }
@@ -98,7 +83,6 @@ class KeyStateTest {
       boolean covered = switch (state) {
         case HOT    -> true;
         case COOL   -> true;
-        case PRE_COOL -> true;
         case NORMAL -> true;
       };
       assertThat(covered).isTrue();

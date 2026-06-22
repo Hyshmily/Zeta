@@ -24,8 +24,8 @@ import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -35,7 +35,7 @@ import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import java.util.Optional;
 import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
@@ -50,7 +50,6 @@ import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 /**
  * App-side autoconfiguration for the HotKey library.
@@ -166,39 +165,22 @@ public class HotKeyAutoConfiguration {
   }
 
   /**
-   * Create the dedicated thread-pool executor for asynchronous cache operations.
+   * Create the virtual-thread executor for asynchronous cache operations.
    *
    * <p>This executor handles all async operations in the HotKey data path: cache loading
    * via SingleFlight, soft-expiry refresh tasks, and cross-instance broadcast callbacks.
-   * The pool is configured with core/max pool size, bounded queue capacity, and a
-   * rejection policy that throws {@link RejectedExecutionException}
-   * when the queue is full. On shutdown, in-progress tasks are allowed to complete with
-   * a 60-second grace period.
+   * Uses JDK 21 virtual threads ({@link Executors#newVirtualThreadPerTaskExecutor}) which
+   * are lightweight enough that no thread-pool tuning is needed — every task runs on its
+   * own virtual thread, yielding during I/O waits. The executor is closed gracefully on
+   * context shutdown via {@link ExecutorService#close}.
    *
    * @param properties the HotKey configuration properties (never {@code null})
-   * @return a configured {@link ThreadPoolTaskExecutor}
+   * @return a virtual-thread-based {@link Executor}
    */
   @Bean("hotKeyExecutor")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
   public Executor hotKeyExecutor(HotKeyProperties properties) {
-    ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-    executor.setCorePoolSize(properties.getExecutorCorePoolSize());
-    executor.setMaxPoolSize(properties.getExecutorMaxPoolSize());
-    executor.setQueueCapacity(properties.getExecutorQueueCapacity());
-    executor.setThreadNamePrefix(HotKeyConstants.THREAD_PREFIX_HOTKEY);
-    executor.setWaitForTasksToCompleteOnShutdown(true);
-    executor.setAwaitTerminationSeconds(60);
-    executor.setRejectedExecutionHandler((r, exe) -> {
-      log.warn(
-        "HotKey executor task rejected: corePool={}, maxPool={}, queueCapacity={}",
-        properties.getExecutorCorePoolSize(),
-        properties.getExecutorMaxPoolSize(),
-        properties.getExecutorQueueCapacity()
-      );
-      throw new RejectedExecutionException("HotKey executor queue full");
-    });
-    executor.initialize();
-    return executor;
+    return Executors.newVirtualThreadPerTaskExecutor();
   }
 
   /**

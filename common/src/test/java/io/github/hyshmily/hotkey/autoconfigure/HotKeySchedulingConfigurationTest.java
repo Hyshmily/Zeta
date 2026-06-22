@@ -15,8 +15,8 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;

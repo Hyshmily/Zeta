@@ -22,24 +22,19 @@ package io.github.hyshmily.hotkey.model;
  * <p>A key starts in {@link #NORMAL} with the configured default TTLs.
  * When the Worker broadcasts a HOT decision, the key transitions to
  * {@link #HOT} and its TTLs are extended. When the Worker broadcasts a
- * COOL decision, the key transitions through {@link #PRE_COOL} then
- * {@link #COOL} before returning to {@link #NORMAL} with the original
- * TTLs restored.
+ * COOL decision, the key transitions to {@link #COOL} with the original
+ * TTLs restored, then returns to {@link #NORMAL} when the entry expires
+ * or is evicted and subsequently reloaded.
  *
  * <p>Transition sequence:
  * <pre>
  *              HOT broadcast
  *   NORMAL ──────────────────► HOT
  *     ◄─────────────────────────┘
- *      COOL (via PRE_COOL → COOL)
+ *              COOL broadcast
  *
- *   Internal detail:
- *   HOT → PRE_COOL → COOL → NORMAL
+ *   NORMAL ◄─── entry expires / evicted, reload as NORMAL ──── COOL
  * </pre>
- *
- * <p>The {@link #PRE_COOL} intermediate state prevents TTL flapping:
- * if a new HOT decision arrives during the cool-down grace period,
- * the key reverts to {@link #HOT} without a full transition cycle.
  */
 public enum KeyState {
   /**
@@ -55,14 +50,6 @@ public enum KeyState {
    * to {@link #NORMAL}.
    */
   COOL,
-  /**
-   * Transient state between {@link #HOT} and {@link #COOL} during the
-   * cool-down sequence. The entry is still cached with extended TTL but
-   * is awaiting the next evaluation cycle. If a new HOT decision arrives
-   * during this state, the key returns to {@link #HOT} without completing
-   * the cool-down, preventing TTL oscillation.
-   */
-  PRE_COOL,
   /**
    * Default state: the key is cached with the standard configured TTL.
    * All keys start in this state and return to it after the cool-down

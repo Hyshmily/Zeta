@@ -122,17 +122,17 @@ Worker module has its own `WorkerAutoConfiguration` (activated by `@SpringBootAp
 
 3. **No git without asking.** Never use destructive git commands (`checkout`, `restore`, `reset`). Ask first.
 
-4. **Grill-with-docs before execution.** Cross-reference changes against `CONTEXT.md`, `docs/adr/`, `docs/ARCH.md`, `docs/CONFIG.md`, `README.md`, `README.zh.md`. Resolve contradictions before proceeding.
+4. **Grill-with-docs before execution.** Cross-reference changes against `CONTEXT.md`, `docs/adr/`, `docs/CONFIG.md`, `README.md`, `README.zh.md`. Resolve contradictions before proceeding.
 
 5. **ADR on architectural decisions.** Create ADR in `docs/adr/` when decision is (a) hard to reverse, (b) surprising, (c) a real trade-off. Use format from `$HOME/.agents/skills/grill-with-docs/ADR-FORMAT.md`. Number sequentially.
 
 6. **CONTEXT.md on term clarification.** Update immediately when `grill-with-docs` resolves a fuzzy domain term. Add new domain concepts on the spot.
 
-7. **Bilingual doc sync.** Every EN doc (`ARCH.md`, `CONFIG.md`, `ANNOTATION.md`, `MONITOR.md`) has a `*.zh.md` counterpart. Both updated in same change. Semantics must match.
+7. **Bilingual doc sync.** Every EN doc (`CONFIG.md`, `ANNOTATION.md`, `MONITOR.md`) has a `*.zh.md` counterpart. Both updated in same change. Semantics must match.
 
 8. **Stress test every core change.** Changes affecting `TopK`, `SingleFlight`, `HotKeyCache`, `VersionGuard`, `CacheSyncPublisher/Listener`, `WorkerListener`, `HotKeyStateMachine`, `CacheExpireManager`, or `HotKeyReporter` must pass `HotKeyStressTest` (31 scenarios covering concurrency dedup, version races, distributed 3-node simulation). Skip only for non-functional changes (config metadata, Javadoc, formatting, build config).
 
-9. **Doc sync on every code change.** After any code modification, skim `README.md`, `CONTEXT.md`, `docs/CONFIG.md`, `docs/ARCH.md`, `docs/ANNOTATION.md`, `docs/MONITOR.md`, and `docs/adr/` for affected references. Update if found. Complements rule 7.
+9. **Doc sync on every code change.** After any code modification, skim `README.md`, `CONTEXT.md`, `docs/CONFIG.md`, `docs/ANNOTATION.md`, `docs/MONITOR.md`, and `docs/adr/` for affected references. Update if found. Complements rule 7.
 
 ## Domain Glossary & Architecture Decisions
 
@@ -145,7 +145,8 @@ See `CONTEXT.md` for canonical definitions of **Local-Hot**, **Worker-Hot**, **W
 | `0003` | **State Machine Config via Heartbeat Gossip** — AMQP heartbeat broadcasts, no config store. |
 | `0004` | **Ack-Before-Update** — at-most-once delivery, self-healing via periodic broadcast. |
 | `0005` | **32-bit Murmur3 for Consistent Hash Ring** — `murmur3_32_fixed()`, <3% collision at 500 vnodes × 100 Workers. |
-| `0006` | **Acceptable Race Fading** — transient inconsistencies self-resolve on next heartbeat cycle. |
+| `0006` | **Per-Stripe Lock in HeavyKeeper Fading** — per-stripe `synchronized` guards against torn `long` reads during counter decay, avoiding `AtomicLongArray` overhead. |
+| `0013` | **Acceptable Race Fading** — transient inconsistencies from async broadcast are bounded by the next periodic cycle; no distributed consensus needed for state convergence. |
 | `0007` | **No Publisher Confirms** — fire-and-forget broadcast; lost messages tolerated by next cycle. |
 | `0008` | **Dual Version Space** — `dataVersion` (may degrade) for sync, `decisionVersion` (never degrades) for HOT/COOL. Orthogonal. |
 | `0009` | **Graceful Degradation** — when all Workers dead, local TopK assumes authority; self-heals on Worker recovery. |

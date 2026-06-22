@@ -16,8 +16,8 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 import lombok.extern.slf4j.Slf4j;
 
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;

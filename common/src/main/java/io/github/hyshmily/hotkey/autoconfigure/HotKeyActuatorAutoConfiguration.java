@@ -22,7 +22,7 @@ import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.endpoint.RingEndpoint;
 import io.github.hyshmily.hotkey.endpoint.StateMachineEndpoint;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;

@@ -15,8 +15,8 @@
  */
 package io.github.hyshmily.hotkey.worker.detection;
 
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

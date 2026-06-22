@@ -124,15 +124,6 @@ class CacheEntryTest {
   }
 
   @Test
-  void keyStatePRE_COOL_shouldBuildCorrectly() {
-    CacheEntry entry = CacheEntry.builder()
-      .value("precooling")
-      .keyState(KeyState.PRE_COOL)
-      .build();
-    assertThat(entry.getKeyState()).isEqualTo(KeyState.PRE_COOL);
-  }
-
-  @Test
   void valueAsString_shouldBeStored() {
     CacheEntry entry = CacheEntry.builder().value("hello").build();
     assertThat(entry.getValue()).isEqualTo("hello");

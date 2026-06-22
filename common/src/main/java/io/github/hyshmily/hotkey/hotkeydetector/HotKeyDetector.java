@@ -18,10 +18,10 @@ package io.github.hyshmily.hotkey.hotkeydetector;
 import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
 
 import io.github.hyshmily.hotkey.hotkeydetector.doublebuffer.BufferedCounter;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.AddResult;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;

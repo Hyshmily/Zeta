@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.HeavyKeeper;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.integration.AbstractIntegrationIT;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
@@ -543,7 +543,7 @@ class MultiInstanceBenchmarkIT extends AbstractIntegrationIT {
           long hotCount = workerTopK.contains(key)
               ? workerTopK.list().stream()
                   .filter(item -> item.key().equals(key))
-                  .mapToLong(io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item::count)
+                  .mapToLong(io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item::count)
                   .findFirst().orElse(0)
               : 0;
           if (hotCount >= WORKER_HOT_THRESHOLD) {

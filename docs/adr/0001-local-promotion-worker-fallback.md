@@ -1,3 +1,26 @@
 # Local Promotion with Worker-Aware Fallback
 
-`promoteLocalHotkeyIfNeeded` upgrades NORMAL entries to HOT on every L1 hit (both `get` and `getWithSoftExpire`), and also upgrades COOL entries when `ClusterHealthView.isClusterHealthy()` returns `false`. This guarantees two things: (1) the local App always promotes hot keys faster than the Worker can broadcast, giving the local view priority; (2) when the Worker cluster fails majority quorum (`alive < total/2 + 1`), COOL entries don't stagnate with short TTLs — the local TopK takes over as the authority. Worker broadcasts on recovery override local promotions via `decisionVersion` comparison, so the system self-heals without coordination.
+`promoteLocalHotkeyIfNeeded` upgrades NORMAL entries to HOT on every L1 hit (both `get` and `getWithSoftExpire`), and also upgrades COOL entries only when `ClusterHealthView.isClusterHealthy()` returns `false`.
+
+## Decision
+
+Two asymmetric promotion rules:
+
+- **NORMAL → HOT unconditionally.** The local App always promotes hot keys faster than the Worker can broadcast. This does not race with Worker decisions because Workers never issue NORMAL — they emit only HOT or COOL. A local NORMAL→HOT promotion is a provisional speed-up; the Worker can still override it later via a higher `decisionVersion` broadcast.
+
+- **COOL → HOT only when all Workers are dead** (majority quorum fails: `alive < known / 2 + 1`). COOL means a Worker deliberately decided to cool this key down. While at least one Worker is alive and responsive, the local App defers to Worker authority. Only when the entire Worker cluster is unreachable (graceful degradation) does the local TopK assume authority and promote COOL entries. Worker recovery overrides all local promotions via `decisionVersion` comparison within one broadcast cycle.
+
+Implementation in `HotKeyCache.java:177`:
+
+```java
+private boolean isPromotableState(KeyState state) {
+    return state == KeyState.NORMAL || (state == KeyState.COOL && !healthView.isClusterHealthy());
+}
+```
+
+## Consequences
+
+- Local promotion never races with Worker decisions because the two version spaces are orthogonal (`dataVersion` for cache sync, `decisionVersion` for decision ordering).
+- A COOL entry stays COOL for as long as the Worker cluster is healthy. This is intentional: the Worker's decision is authoritative.
+- On cluster-wide Worker failure, the system degrades gracefully: local TopK drives L1 TTL, Reporter drops silently, and recovery is automatic once Workers come back.
+- Latency overhead of the promotion path is one local TopK `contains()` check plus one atomic `compute()` on the Caffeine map — both sub-microsecond.

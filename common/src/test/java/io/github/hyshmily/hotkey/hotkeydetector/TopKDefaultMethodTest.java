@@ -17,9 +17,9 @@ package io.github.hyshmily.hotkey.hotkeydetector;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.AddResult;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.AddResult;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;

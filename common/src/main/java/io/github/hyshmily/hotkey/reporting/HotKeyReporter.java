@@ -412,8 +412,9 @@ public class HotKeyReporter {
     void start() {
       running = true;
       for (int i = 0; i < consumerCount; i++) {
-        Thread t = new Thread(this::consumeLoop, "report-consumer-" + i);
-        t.setDaemon(true);
+        Thread t = Thread.ofVirtual()
+          .name("report-consumer-" + i)
+          .unstarted(this::consumeLoop);
         t.start();
         consumers.add(t);
       }
