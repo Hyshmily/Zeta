@@ -18,7 +18,7 @@ package io.github.hyshmily.hotkey.reporting;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -166,16 +166,21 @@ public class HotKeyReporter {
       log.debug("HotKeyReporter already started, skip");
       return;
     }
-    dispatcher = new ReportDispatcher();
-    dispatcher.start();
-    scheduler.scheduleAtFixedRate(this::flush, reportIntervalMs, reportIntervalMs, TimeUnit.MILLISECONDS);
-    log.info(
-      "HotKeyReporter started: appName={}, intervalMs={}, queueCapacity={}, consumers={}",
-      appName,
-      reportIntervalMs,
-      queueCapacity,
-      dispatcher.consumerCount()
-    );
+    try {
+      dispatcher = new ReportDispatcher();
+      dispatcher.start();
+      scheduler.scheduleAtFixedRate(this::flush, reportIntervalMs, reportIntervalMs, TimeUnit.MILLISECONDS);
+      log.info(
+        "HotKeyReporter started: appName={}, intervalMs={}, queueCapacity={}, consumers={}",
+        appName,
+        reportIntervalMs,
+        queueCapacity,
+        dispatcher.consumerCount()
+      );
+    } catch (Exception e) {
+      log.error("Failed to start HotKeyReporter; per-key counts will not be flushed to Worker. " +
+          "Application continues but Worker hot-key detection will be blind to this instance.", e);
+    }
   }
 
   /**
@@ -219,6 +224,7 @@ public class HotKeyReporter {
   private void flush() {
     try {
       if (counters.estimatedSize() == 0) {
+        log.trace("Reporter flush tick: counters empty, no-op");
         return;
       }
 

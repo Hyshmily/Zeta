@@ -232,17 +232,15 @@ public class CacheExpireManager {
   /**
    * Check whether the given key's soft TTL has expired.
    *
-   * @param cacheKey the key to check for soft expiry
    * @return {@code true} if the entry's soft TTL has expired or the entry is absent
    * @throws IllegalStateException if soft expire is disabled
    */
-  public boolean isSoftExpired(String cacheKey) {
+  public boolean isSoftExpired(Object cacheEntry) {
     if (!isSoftExpireEnabled()) {
       throw new IllegalStateException(
         "CacheExpireManager soft expire is disabled, isSoftExpired() should not be called"
       );
     }
-    Object cacheEntry = caffeineCache.getIfPresent(cacheKey);
     if (cacheEntry instanceof CacheEntry ce) {
       long expireAt = ce.getSoftExpireAtMs();
       return expireAt <= 0 || expireAt < System.currentTimeMillis();

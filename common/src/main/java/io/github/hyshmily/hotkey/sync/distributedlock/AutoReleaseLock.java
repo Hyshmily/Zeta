@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache.distributedlock;
+package io.github.hyshmily.hotkey.sync.distributedlock;
 
 /**
  * A distributed lock handle that is automatically released when the

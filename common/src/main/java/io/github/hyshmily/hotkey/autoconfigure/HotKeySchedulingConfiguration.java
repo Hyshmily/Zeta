@@ -59,7 +59,7 @@ public class HotKeySchedulingConfiguration {
   public void cleanHotKeys() {
     try {
       topKInstances.forEach(TopK::fading);
-      log.debug("HeavyKeeper count has decayed for {} TopK instance(s)", topKInstances.size());
+      log.debug("HeavyKeeper tick: decayed for {} TopK instance(s)", topKInstances.size());
     } catch (Exception e) {
       log.error("Scheduled cleanHotKeys failed", e);
     }

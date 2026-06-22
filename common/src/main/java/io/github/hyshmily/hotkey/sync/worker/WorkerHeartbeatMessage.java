@@ -13,14 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
-
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.core.MessageProperties;
-
-import java.nio.charset.StandardCharsets;
+package io.github.hyshmily.hotkey.sync.worker;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import java.nio.charset.StandardCharsets;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 
 /**
  * Structured heartbeat message broadcast periodically by the Worker to all
@@ -67,18 +67,18 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
  * @see WorkerHeartbeatVerifier
  */
 public record WorkerHeartbeatMessage(
-    String workerId,
-    long epoch,
-    long timestamp,
-    long decisionVersionHwm,
-    double loadFactor,
-    boolean readyToServe,
-    int configFingerprint,
-    int configConfirmCount,
-    int configCoolCount,
-    int configGraceCount,
-    long configTimestamp) {
-
+  String workerId,
+  long epoch,
+  long timestamp,
+  long decisionVersionHwm,
+  double loadFactor,
+  boolean readyToServe,
+  int configFingerprint,
+  int configConfirmCount,
+  int configCoolCount,
+  int configGraceCount,
+  long configTimestamp
+) {
   /** Message type discriminator for heartbeat messages ({@value}). */
   public static final String TYPE = "WORKER_HB";
 
@@ -136,17 +136,17 @@ public record WorkerHeartbeatMessage(
     }
 
     return new WorkerHeartbeatMessage(
-        h.getHeader(AMQP_HEADER_NODE_ID) instanceof String s ? s : "",
-        h.getHeader(AMQP_HEADER_HEARTBEAT_EPOCH) instanceof Number n ? n.longValue() : 0,
-        h.getHeader(AMQP_HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0,
-        h.getHeader(AMQP_HEADER_HEARTBEAT_DV_HWM) instanceof Number n ? n.longValue() : 0,
-        h.getHeader(AMQP_HEADER_HEARTBEAT_LOAD) instanceof Number n ? n.doubleValue() : 0.0,
-        Boolean.TRUE.equals(h.getHeader(AMQP_HEADER_HEARTBEAT_READY)),
-        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP) instanceof Integer i ? i : 0,
-        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM) instanceof Number n ? n.intValue() : 0,
-        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL) instanceof Number n ? n.intValue() : 0,
-        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE) instanceof Number n ? n.intValue() : 0,
-        h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP) instanceof Number n ? n.longValue() : 0
+      h.getHeader(AMQP_HEADER_NODE_ID) instanceof String s ? s : "",
+      h.getHeader(AMQP_HEADER_HEARTBEAT_EPOCH) instanceof Number n ? n.longValue() : 0,
+      h.getHeader(AMQP_HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0,
+      h.getHeader(AMQP_HEADER_HEARTBEAT_DV_HWM) instanceof Number n ? n.longValue() : 0,
+      h.getHeader(AMQP_HEADER_HEARTBEAT_LOAD) instanceof Number n ? n.doubleValue() : 0.0,
+      Boolean.TRUE.equals(h.getHeader(AMQP_HEADER_HEARTBEAT_READY)),
+      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP) instanceof Integer i ? i : 0,
+      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM) instanceof Number n ? n.intValue() : 0,
+      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL) instanceof Number n ? n.intValue() : 0,
+      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE) instanceof Number n ? n.intValue() : 0,
+      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP) instanceof Number n ? n.longValue() : 0
     );
   }
 }

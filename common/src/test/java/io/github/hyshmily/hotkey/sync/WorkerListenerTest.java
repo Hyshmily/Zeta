@@ -15,10 +15,7 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_EPOCH;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_NODE_ID;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TYPE;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_VERSION;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -27,15 +24,14 @@ import static org.mockito.Mockito.*;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
-import io.github.hyshmily.hotkey.sync.WorkerListener;
-import io.github.hyshmily.hotkey.sync.WorkerListenerProperties;
-import io.github.hyshmily.hotkey.sync.WorkerMessage;
+import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
+import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
-import io.github.hyshmily.hotkey.util.window.RollingWindow;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
@@ -99,6 +95,8 @@ class WorkerListenerTest {
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
       CacheEntry ce = (CacheEntry) o;
       assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
+      assertThat(ce.getDecisionVersion()).isEqualTo(2L);
+      assertThat(ce.getSoftExpireAtMs()).isZero();
     });
   }
 
@@ -170,27 +168,40 @@ class WorkerListenerTest {
    * Verifies that a HOT decision with Redis exception and an existing degraded entry falls back to the degraded value.
    */
   @Test
-  void handleWorkerMessage_hot_withRedisExceptionAndDegradedEntry_shouldUseDegraded() throws IOException, InterruptedException {
-    cache.put("key1", CacheEntry.builder()
-      .value("degraded-val")
-      .dataVersion(-10)
-      .isVersionDegraded(true)
-      .decisionVersion(1)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.NORMAL)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build());
+  void handleWorkerMessage_hot_withRedisExceptionAndDegradedEntry_shouldUseDegraded()
+    throws IOException, InterruptedException {
+    cache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("degraded-val")
+        .dataVersion(-10)
+        .isVersionDegraded(true)
+        .decisionVersion(1)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
     CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
-    WorkerListener failingLoader = new WorkerListener(cache, k -> { throw new RuntimeException("Redis down"); }, props, sched, expireManager, null);
+    WorkerListener failingLoader = new WorkerListener(
+      cache,
+      k -> {
+        throw new RuntimeException("Redis down");
+      },
+      props,
+      sched,
+      expireManager,
+      null
+    );
 
     failingLoader.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
@@ -237,6 +248,29 @@ class WorkerListenerTest {
     listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 0L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * Verifies that a COOL decision on a degraded entry is accepted and downgrades.
+   */
+  @Test
+  void handleWorkerMessage_cool_onDegradedEntry_shouldDowngrade() throws IOException, InterruptedException {
+    cache.put("key1", entry(0, true, 0).toBuilder()
+      .keyState(KeyState.NORMAL)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000)
+      .softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .build());
+    listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 1L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    awaitWorkerTasks();
+    assertThat(cache.getIfPresent("key1")).satisfies(o -> {
+      CacheEntry ce = (CacheEntry) o;
+      assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
+      assertThat(ce.getDecisionVersion()).isEqualTo(1L);
+      assertThat(ce.getSoftExpireAtMs()).isZero();
+    });
   }
 
   /**
@@ -309,8 +343,10 @@ class WorkerListenerTest {
   @Test
   void handleWorkerMessage_hot_shouldSetDecisionNodeIdAndEpoch() throws IOException, InterruptedException {
     cache.put("key1", normalEntry());
-    listener.handleWorkerMessage(channel, workerMessageWithNodeIdEpoch(
-      "key1", WorkerMessage.TYPE_HOT, 2L, "worker-A", 3L));
+    listener.handleWorkerMessage(
+      channel,
+      workerMessageWithNodeIdEpoch("key1", WorkerMessage.TYPE_HOT, 2L, "worker-A", 3L)
+    );
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -326,8 +362,10 @@ class WorkerListenerTest {
   @Test
   void handleWorkerMessage_cool_shouldSetDecisionNodeIdAndEpoch() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
-    listener.handleWorkerMessage(channel, workerMessageWithNodeIdEpoch(
-      "key1", WorkerMessage.TYPE_COOL, 2L, "worker-B", 5L));
+    listener.handleWorkerMessage(
+      channel,
+      workerMessageWithNodeIdEpoch("key1", WorkerMessage.TYPE_COOL, 2L, "worker-B", 5L)
+    );
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -338,7 +376,11 @@ class WorkerListenerTest {
   }
 
   private static Message workerMessageWithNodeIdEpoch(
-    String key, String type, long version, String nodeId, long epoch
+    String key,
+    String type,
+    long version,
+    String nodeId,
+    long epoch
   ) {
     MessageProperties props = new MessageProperties();
     props.setHeader(AMQP_HEADER_TYPE, type);

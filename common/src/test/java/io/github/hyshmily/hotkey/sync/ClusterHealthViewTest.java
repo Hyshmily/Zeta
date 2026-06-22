@@ -17,7 +17,8 @@ package io.github.hyshmily.hotkey.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.util.Set;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;

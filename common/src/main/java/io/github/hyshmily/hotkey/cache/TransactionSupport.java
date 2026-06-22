@@ -14,11 +14,10 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.cache;
-import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -31,6 +30,17 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  *   <li>{@link #runAsyncAfterCommit} submits to an async executor</li>
  *   <li>{@link #runNowOrAfterCommit} executes synchronously on the caller's thread</li>
  * </ul>
+ *
+ *
+ * <p><b>Rollback behavior:</b> Deferred actions registered via
+ * {@code runNowOrAfterCommit} are NOT executed if the surrounding
+ * transaction rolls back. This is standard Spring
+ * {@code TransactionSynchronization.afterCommit()} behavior.
+ * Callers using {@code invalidate()} inside a transaction that may
+ * roll back should be aware that the invalidation will be silently
+ * dropped on rollback. For critical invalidations, use
+ * {@code evictLocal()} (immediate, no tx deferral) or register
+ * an {@code afterCompletion} callback manually.
  */
 @Slf4j
 public final class TransactionSupport {

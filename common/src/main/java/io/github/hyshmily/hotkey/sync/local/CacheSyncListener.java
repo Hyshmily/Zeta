@@ -13,10 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
-import lombok.extern.slf4j.Slf4j;
+package io.github.hyshmily.hotkey.sync.local;
 
-import static io.github.hyshmily.hotkey.sync.SyncMessage.*;
+import static io.github.hyshmily.hotkey.sync.local.SyncMessage.*;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,12 +24,15 @@ import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import io.github.hyshmily.hotkey.util.DelayUtil;
+import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 
 /**
@@ -140,7 +142,13 @@ public class CacheSyncListener {
       return;
     }
 
-    Runnable task = () -> syncMessageRouter(sm);
+    Runnable task = () -> {
+      try {
+        syncMessageRouter(sm);
+      } catch (Exception e) {
+        log.error("Async sync task failed: type={}, key={}, version={}", sm.type(), sm.cacheKey(), sm.version(), e);
+      }
+    };
 
     // Random jitter spreads out Redis fetches, reducing hotspot load during batch sync.
     DelayUtil.floatTimeDelay(task, properties.getWarmupJitterMs(), scheduler);
@@ -296,36 +304,37 @@ public class CacheSyncListener {
       .asMap()
       .compute(sm.cacheKey(), (key, existing) -> {
         // DCL second check – atomic with to write
-        if (existing instanceof CacheEntry ce &&
-            VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())) {
+        if (
+          existing instanceof CacheEntry ce && VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())
+        ) {
           return existing;
         }
 
         if (existing instanceof CacheEntry cacheEntry) {
           return cacheEntry
-              .toBuilder()
-              .value(value)
-              .dataVersion(sm.version())
-              .isVersionDegraded(sm.isVersionDegraded())
-              .hardExpireAtMs(expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs()))
-              .softExpireAtMs(expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs()))
-              .build();
+            .toBuilder()
+            .value(value)
+            .dataVersion(sm.version())
+            .isVersionDegraded(sm.isVersionDegraded())
+            .hardExpireAtMs(expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs()))
+            .softExpireAtMs(expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs()))
+            .build();
         }
 
         // Entry was evicted from L1 — create fresh CacheEntry with default metadata
         return CacheEntry.builder()
-            .value(value)
-            .dataVersion(sm.version())
-            .isVersionDegraded(sm.isVersionDegraded())
-            .decisionVersion(0L)
-            .hardTtlMs(expireManager.getEffectiveHardTtlMs())
-            .hardExpireAtMs(expireManager.computeHardExpireAt(expireManager.getEffectiveHardTtlMs()))
-            .softTtlMs(expireManager.getEffectiveSoftTtlMs())
-            .softExpireAtMs(expireManager.computeSoftExpireAt(expireManager.getEffectiveSoftTtlMs()))
-            .keyState(io.github.hyshmily.hotkey.model.KeyState.NORMAL)
-            .normalHardTtlMs(expireManager.getEffectiveHardTtlMs())
-            .normalSoftTtlMs(expireManager.getEffectiveSoftTtlMs())
-            .build();
+          .value(value)
+          .dataVersion(sm.version())
+          .isVersionDegraded(sm.isVersionDegraded())
+          .decisionVersion(0L)
+          .hardTtlMs(expireManager.getEffectiveHardTtlMs())
+          .hardExpireAtMs(expireManager.computeHardExpireAt(expireManager.getEffectiveHardTtlMs()))
+          .softTtlMs(expireManager.getEffectiveSoftTtlMs())
+          .softExpireAtMs(expireManager.computeSoftExpireAt(expireManager.getEffectiveSoftTtlMs()))
+          .keyState(io.github.hyshmily.hotkey.model.KeyState.NORMAL)
+          .normalHardTtlMs(expireManager.getEffectiveHardTtlMs())
+          .normalSoftTtlMs(expireManager.getEffectiveSoftTtlMs())
+          .build();
       });
     log.debug("Refreshed by sync: {}", sm.cacheKey());
   }

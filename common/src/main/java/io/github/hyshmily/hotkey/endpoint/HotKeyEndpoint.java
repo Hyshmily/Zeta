@@ -26,19 +26,18 @@ import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
-import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
-
+import io.github.hyshmily.hotkey.util.version.VersionController;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
+import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 
 /**
  * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics
@@ -263,10 +262,14 @@ public class HotKeyEndpoint {
   private static Map<String, Object> heavyKeeperConfig(TopK topK) {
     if (topK instanceof HeavyKeeper hk) {
       return Map.of(
-        "topKCapacity", hk.getK(),
-        "sketchWidth", hk.getWidth(),
-        "sketchDepth", hk.getDepth(),
-        "minCountThreshold", hk.getMinCount()
+        "topKCapacity",
+        hk.getK(),
+        "sketchWidth",
+        hk.getWidth(),
+        "sketchDepth",
+        hk.getDepth(),
+        "minCountThreshold",
+        hk.getMinCount()
       );
     }
     return Map.of();

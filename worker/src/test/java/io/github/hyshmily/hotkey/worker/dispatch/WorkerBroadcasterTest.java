@@ -15,7 +15,15 @@
  */
 package io.github.hyshmily.hotkey.worker.dispatch;
 
-import io.github.hyshmily.hotkey.sync.WorkerMessage;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
+
+import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -25,18 +33,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-
-import java.util.concurrent.atomic.AtomicLong;
-
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 
 /**
  * Tests for {@link WorkerBroadcaster}.
@@ -55,7 +51,13 @@ class WorkerBroadcasterTest {
 
   @BeforeEach
   void setUp() {
-    broadcaster = new WorkerBroadcaster(rabbitTemplate, "hotkey.broadcast.exchange", "testApp", "test-node", epochCounter);
+    broadcaster = new WorkerBroadcaster(
+      rabbitTemplate,
+      "hotkey.broadcast.exchange",
+      "testApp",
+      "test-node",
+      epochCounter
+    );
   }
 
   /**
@@ -64,7 +66,11 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendHotWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastHot("myKey", "test_source");
-    verify(rabbitTemplate).send(eq("hotkey.broadcast.exchange"), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate).send(
+      eq("hotkey.broadcast.exchange"),
+      eq(ROUTING_KEY_BROADCAST + "testApp"),
+      messageCaptor.capture()
+    );
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_HOT);
@@ -78,7 +84,11 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendCoolWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastCool("myKey");
-    verify(rabbitTemplate).send(eq("hotkey.broadcast.exchange"), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate).send(
+      eq("hotkey.broadcast.exchange"),
+      eq(ROUTING_KEY_BROADCAST + "testApp"),
+      messageCaptor.capture()
+    );
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_COOL);
@@ -148,8 +158,10 @@ class WorkerBroadcasterTest {
   void sendBroadcast_shouldIncludeNodeIdHeader() {
     broadcaster.broadcastHot("key", "source");
     verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-        .containsEntry(AMQP_HEADER_NODE_ID, "test-node");
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+      AMQP_HEADER_NODE_ID,
+      "test-node"
+    );
   }
 
   /**
@@ -164,10 +176,12 @@ class WorkerBroadcasterTest {
 
     verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getAllValues()).hasSize(2);
-    assertThat((Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_EPOCH))
-        .isEqualTo(0L);
-    assertThat((Long) messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(AMQP_HEADER_EPOCH))
-        .isEqualTo(1L);
+    assertThat(
+      (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_EPOCH)
+    ).isEqualTo(0L);
+    assertThat(
+      (Long) messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(AMQP_HEADER_EPOCH)
+    ).isEqualTo(1L);
   }
 
   /**
@@ -176,14 +190,15 @@ class WorkerBroadcasterTest {
    */
   @Test
   void sendBroadcast_whenRabbitTemplateThrows_shouldThrowBroadcastFailedException() {
-    doThrow(new RuntimeException("connection lost")).when(rabbitTemplate).send(any(String.class), any(String.class), any(Message.class));
+    doThrow(new RuntimeException("connection lost"))
+      .when(rabbitTemplate)
+      .send(any(String.class), any(String.class), any(Message.class));
     assertThatThrownBy(() -> broadcaster.broadcastHot("key", "source"))
-        .isInstanceOf(WorkerBroadcaster.BroadcastFailedException.class)
-        .satisfies(
-            e -> {
-              assertThat(((WorkerBroadcaster.BroadcastFailedException) e).cacheKey).isEqualTo("key");
-              assertThat(((WorkerBroadcaster.BroadcastFailedException) e).type).isEqualTo(WorkerMessage.TYPE_HOT);
-            });
+      .isInstanceOf(WorkerBroadcaster.BroadcastFailedException.class)
+      .satisfies(e -> {
+        assertThat(((WorkerBroadcaster.BroadcastFailedException) e).cacheKey).isEqualTo("key");
+        assertThat(((WorkerBroadcaster.BroadcastFailedException) e).type).isEqualTo(WorkerMessage.TYPE_HOT);
+      });
   }
 
   /**
@@ -192,13 +207,14 @@ class WorkerBroadcasterTest {
    */
   @Test
   void broadcastCool_whenRabbitTemplateThrows_shouldThrowBroadcastFailedException() {
-    doThrow(new RuntimeException("connection lost")).when(rabbitTemplate).send(any(String.class), any(String.class), any(Message.class));
+    doThrow(new RuntimeException("connection lost"))
+      .when(rabbitTemplate)
+      .send(any(String.class), any(String.class), any(Message.class));
     assertThatThrownBy(() -> broadcaster.broadcastCool("key"))
-        .isInstanceOf(WorkerBroadcaster.BroadcastFailedException.class)
-        .satisfies(
-            e -> {
-              assertThat(((WorkerBroadcaster.BroadcastFailedException) e).cacheKey).isEqualTo("key");
-              assertThat(((WorkerBroadcaster.BroadcastFailedException) e).type).isEqualTo(WorkerMessage.TYPE_COOL);
-            });
+      .isInstanceOf(WorkerBroadcaster.BroadcastFailedException.class)
+      .satisfies(e -> {
+        assertThat(((WorkerBroadcaster.BroadcastFailedException) e).cacheKey).isEqualTo("key");
+        assertThat(((WorkerBroadcaster.BroadcastFailedException) e).type).isEqualTo(WorkerMessage.TYPE_COOL);
+      });
   }
 }

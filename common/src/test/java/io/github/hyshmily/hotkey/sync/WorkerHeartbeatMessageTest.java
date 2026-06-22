@@ -15,33 +15,34 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_COOL;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_FP;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_GRACE;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_DV_HWM;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_EPOCH;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_LOAD;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_HEARTBEAT_READY;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_NODE_ID;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TIMESTAMP;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TYPE;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class WorkerHeartbeatMessageTest {
 
   @Test
   void toMessage_shouldSetAllHeaders() {
     WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
-        "worker-1", 5L, 1000L, 42L, 0.75, true, 12345, 3, 10, 2, 9999L);
+      "worker-1",
+      5L,
+      1000L,
+      42L,
+      0.75,
+      true,
+      12345,
+      3,
+      10,
+      2,
+      9999L
+    );
     Message msg = hb.toMessage();
     var h = msg.getMessageProperties();
     assertThat((String) h.getHeader(AMQP_HEADER_TYPE)).isEqualTo(WorkerHeartbeatMessage.TYPE);
@@ -60,8 +61,7 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void toMessage_bodyShouldBeWorkerIdBytes() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
-        "worker-x", 1L, 0L, 0L, 0.0, false, 0, 0, 0, 0, 0L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("worker-x", 1L, 0L, 0L, 0.0, false, 0, 0, 0, 0, 0L);
     Message msg = hb.toMessage();
     assertThat(new String(msg.getBody(), StandardCharsets.UTF_8)).isEqualTo("worker-x");
   }
@@ -69,7 +69,18 @@ class WorkerHeartbeatMessageTest {
   @Test
   void from_shouldRoundTrip() {
     WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(
-        "w-42", 7L, 2000L, 99L, 0.5, true, 54321, 5, 8, 1, 7777L);
+      "w-42",
+      7L,
+      2000L,
+      99L,
+      0.5,
+      true,
+      54321,
+      5,
+      8,
+      1,
+      7777L
+    );
     Message msg = original.toMessage();
     WorkerHeartbeatMessage restored = WorkerHeartbeatMessage.from(msg);
     assertThat(restored).isEqualTo(original);
@@ -77,8 +88,7 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void from_nullMessage_shouldThrow() {
-    org.junit.jupiter.api.Assertions.assertThrows(NullPointerException.class,
-        () -> WorkerHeartbeatMessage.from(null));
+    org.junit.jupiter.api.Assertions.assertThrows(NullPointerException.class, () -> WorkerHeartbeatMessage.from(null));
   }
 
   @Test
@@ -152,8 +162,7 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void constructor_shouldSetAllFields() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
-        "w-1", 2L, 3L, 4L, 0.5, true, 100, 6, 7, 8, 9L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("w-1", 2L, 3L, 4L, 0.5, true, 100, 6, 7, 8, 9L);
     assertThat(hb.workerId()).isEqualTo("w-1");
     assertThat(hb.epoch()).isEqualTo(2L);
     assertThat(hb.timestamp()).isEqualTo(3L);

@@ -96,12 +96,13 @@ public class TopKPersistService {
     try {
       List<Item> topKeys = topK.listTopN(config.getTopKCount());
       if (topKeys.isEmpty()) {
+        log.debug("TopK persist tick: no hot keys to persist");
         return;
       }
 
       String json = OBJECT_MAPPER.writeValueAsString(topKeys);
       redisTemplate.opsForValue().set(redisKey, json, config.getTtlDays(), TimeUnit.DAYS);
-      log.debug("Persisted {} hot keys to Redis at key: {}", topKeys.size(), redisKey);
+      log.debug("TopK persist tick: persisted {} hot keys to Redis at key: {}", topKeys.size(), redisKey);
     } catch (Exception e) {
       log.error("Failed to persist TopK to Redis at key: {}", redisKey, e);
     }

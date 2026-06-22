@@ -15,8 +15,8 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
-import io.github.hyshmily.hotkey.cache.distributedlock.LockProvider;
-import io.github.hyshmily.hotkey.sync.RedisLockProvider;
+import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
+import io.github.hyshmily.hotkey.sync.distributedlock.impl.RedisLockProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;

@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.hotkey.model;
 
-import io.github.hyshmily.hotkey.sync.VersionGuard;
+import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import lombok.Builder;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;

@@ -13,10 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.util.version;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.model.CacheEntry;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import java.util.Objects;
 
 /**
@@ -65,10 +67,10 @@ public final class VersionGuard {
    * <ol>
    *   <li>No existing entry → accept (return false)</li>
    *   <li>Existing entry is degraded → accept unconditionally (safety net)</li>
- *   <li>Incoming epoch &gt; existing epoch → accept unconditionally
- *       (Worker restart detected — ADR-0010)</li>
- *   <li>Incoming epoch &lt; existing epoch → skip (stale incarnation message)</li>
- *   <li>Same epoch, same nodeId → normal ordering (skip if existing dv &gt;= incoming dv)</li>
+   *   <li>Incoming epoch &gt; existing epoch → accept unconditionally
+   *       (Worker restart detected — ADR-0010)</li>
+   *   <li>Incoming epoch &lt; existing epoch → skip (stale incarnation message)</li>
+   *   <li>Same epoch, same nodeId → normal ordering (skip if existing dv &gt;= incoming dv)</li>
    *   <li>Different nodeId, same epoch → cross-Worker ownership transfer;
    *       accept (return false) to allow new owner to assert authority</li>
    * </ol>

@@ -26,9 +26,9 @@ import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.util.version.VersionController;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
@@ -141,10 +141,7 @@ public class HotKeyActuatorAutoConfiguration {
   @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
   @ConditionalOnProperty(prefix = "hotkey.local.consistent-hashing", name = "enabled", havingValue = "true")
   @ConditionalOnMissingBean
-  public RingEndpoint ringEndpoint(
-    RingManager ringManager,
-    ObjectProvider<ClusterHealthView> healthViewProvider
-  ) {
+  public RingEndpoint ringEndpoint(RingManager ringManager, ObjectProvider<ClusterHealthView> healthViewProvider) {
     return new RingEndpoint(ringManager, healthViewProvider);
   }
 

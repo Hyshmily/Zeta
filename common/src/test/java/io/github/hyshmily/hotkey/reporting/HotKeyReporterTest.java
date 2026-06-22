@@ -21,8 +21,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import java.util.List;
 import java.util.Map;
@@ -70,8 +70,15 @@ class HotKeyReporterTest {
     ringManager = new RingManager(150);
     healthView = new ClusterHealthView(3, 30000, 3);
     reporter = new HotKeyReporter(
-      testPublisher, scheduler, REPORT_INTERVAL_MS, "testApp",
-      QUEUE_CAPACITY, 100, 1, ringManager, healthView
+      testPublisher,
+      scheduler,
+      REPORT_INTERVAL_MS,
+      "testApp",
+      QUEUE_CAPACITY,
+      100,
+      1,
+      ringManager,
+      healthView
     );
   }
 
@@ -82,9 +89,7 @@ class HotKeyReporterTest {
   }
 
   private static void registerWorker(ClusterHealthView hv, String workerId) {
-    hv.onHeartbeat(new WorkerHeartbeatMessage(
-      workerId, 1, System.currentTimeMillis(), 0, 0.0, true, 0, 0, 0, 0, 0
-    ));
+    hv.onHeartbeat(new WorkerHeartbeatMessage(workerId, 1, System.currentTimeMillis(), 0, 0.0, true, 0, 0, 0, 0, 0));
   }
 
   private void awaitPublish(int minCount) throws InterruptedException {
@@ -165,7 +170,8 @@ class HotKeyReporterTest {
     reporter.record("agg-key");
     reporter.record("agg-key");
     awaitPublish(1);
-    long total = testPublisher.messages.stream()
+    long total = testPublisher.messages
+      .stream()
       .flatMap(m -> m.counts().entrySet().stream())
       .filter(e -> e.getKey().equals("agg-key"))
       .mapToLong(Map.Entry::getValue)
@@ -261,7 +267,8 @@ class HotKeyReporterTest {
     }
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
-    long total = testPublisher.messages.stream()
+    long total = testPublisher.messages
+      .stream()
       .flatMap(m -> m.counts().values().stream())
       .mapToLong(Long::longValue)
       .sum();

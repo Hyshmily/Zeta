@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import java.util.Optional;
@@ -80,12 +81,13 @@ class SingleFlightTest {
   }
 
   /**
-   * Verifies that a supplier exception results in an empty Optional.
+   * Verifies that a supplier exception propagates through SingleFlight.
    */
   @Test
-  void load_shouldReturnEmptyOnSupplierException() {
-    Optional<String> result = singleFlight.load("key", () -> { throw new RuntimeException("fail"); });
-    assertThat(result).isEmpty();
+  void load_shouldPropagateSupplierException() {
+    assertThatThrownBy(() ->
+      singleFlight.load("key", () -> { throw new RuntimeException("fail"); })
+    ).isInstanceOf(RuntimeException.class).hasMessage("fail");
   }
 
   /**
@@ -237,26 +239,30 @@ class SingleFlightTest {
    */
   @Test
   void estimatedInflightSize_shouldReturnZeroAfterAllComplete() throws InterruptedException {
-    // Load with exception — the catch block invalidates the entry synchronously
-    singleFlight.load("to-evict", () -> { throw new RuntimeException("fail"); });
+    try {
+      singleFlight.load("to-evict", () -> { throw new RuntimeException("fail"); });
+    } catch (RuntimeException e) {
+      // expected — exception invalidates the entry
+    }
     assertThat(singleFlight.estimatedInflightSize()).isZero();
   }
 
   /**
-   * Verifies that a supplier that times out results in an empty Optional (timeout boundary).
+   * Verifies that a supplier that times out throws a RuntimeException (timeout boundary).
    */
   @Test
-  void load_withTimeout_shouldReturnEmpty() {
+  void load_withTimeout_shouldThrow() {
     SingleFlight shortTimeout = new SingleFlight(1000, 10, 1, executor);
-    Optional<String> result = shortTimeout.load("timeout-key", () -> {
-      try {
-        Thread.sleep(5000);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-      return "too-late";
-    });
-    assertThat(result).isEmpty();
+    assertThatThrownBy(() ->
+      shortTimeout.load("timeout-key", () -> {
+        try {
+          Thread.sleep(5000);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        return "too-late";
+      })
+    ).isInstanceOf(RuntimeException.class).hasMessageContaining("timeout-key");
   }
 
   /**
@@ -266,8 +272,11 @@ class SingleFlightTest {
   @Test
   void load_afterException_shouldRetryAndSucceed() {
     // First call fails with exception — cache entry is invalidated
-    assertThat(singleFlight.load("retry-key", () -> { throw new RuntimeException("first-fail"); }))
-      .isEmpty();
+    try {
+      singleFlight.load("retry-key", () -> { throw new RuntimeException("first-fail"); });
+    } catch (RuntimeException e) {
+      // expected
+    }
 
     // Subsequent call should create a new future and succeed
     Optional<String> result = singleFlight.load("retry-key", () -> "success");
@@ -318,14 +327,18 @@ class SingleFlightTest {
     SingleFlight shortTimeout = new SingleFlight(1000, 10, 1, executor);
 
     // First load times out
-    assertThat(shortTimeout.load("slow-key", () -> {
-      try {
-        Thread.sleep(3000);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-      return "slow-value";
-    })).isEmpty();
+    try {
+      shortTimeout.load("slow-key", () -> {
+        try {
+          Thread.sleep(3000);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        return "slow-value";
+      });
+    } catch (RuntimeException e) {
+      // expected
+    }
 
     // Give the timeout processing time to complete
     Thread.sleep(100);
@@ -348,25 +361,30 @@ class SingleFlightTest {
 
   /**
    * Verifies that when a supplier throws with an {@link InterruptedException} cause,
-   * the {@code exceptionally} handler's cancel branch is exercised and the result is empty.
+   * the exception propagates through SingleFlight.
    */
   @Test
-  void load_withInterruptedExceptionCause_shouldReturnEmpty() {
-    Optional<String> result = singleFlight.load("interrupt-key", () -> {
-      throw new RuntimeException(new InterruptedException("simulated"));
-    });
-    assertThat(result).isEmpty();
+  void load_withInterruptedExceptionCause_shouldPropagate() {
+    assertThatThrownBy(() ->
+      singleFlight.load("interrupt-key", () -> {
+        throw new RuntimeException(new InterruptedException("simulated"));
+      })
+    ).isInstanceOf(RuntimeException.class);
   }
 
   /**
-   * Verifies that after an {@link InterruptedException} path, a subsequent load for the same key
+   * Verifies that after an exception path, a subsequent load for the same key
    * retries the supplier (entry was invalidated).
    */
   @Test
   void load_afterInterruptedException_shouldRetry() {
-    assertThat(singleFlight.load("retry-key", () -> {
-      throw new RuntimeException(new InterruptedException("simulated"));
-    })).isEmpty();
+    try {
+      singleFlight.load("retry-key", () -> {
+        throw new RuntimeException(new InterruptedException("simulated"));
+      });
+    } catch (RuntimeException e) {
+      // expected
+    }
 
     Optional<String> result = singleFlight.load("retry-key", () -> "success");
     assertThat(result).contains("success");

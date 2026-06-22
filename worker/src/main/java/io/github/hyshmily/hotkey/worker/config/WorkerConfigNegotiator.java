@@ -16,17 +16,15 @@
 package io.github.hyshmily.hotkey.worker.config;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import jakarta.annotation.PostConstruct;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
-
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-
 
 /**
  * Listens for heartbeat-based config updates from peer Workers and applies them
@@ -82,6 +80,14 @@ public class WorkerConfigNegotiator {
    */
   @RabbitListener(queues = "#{@workerConfigQueue.name}")
   public void onHeartbeat(Message msg) {
+    try {
+      doOnHeartbeat(msg);
+    } catch (Exception e) {
+      log.warn("Uncaught exception in onHeartbeat config negotiation, discarding message to prevent requeue loop", e);
+    }
+  }
+
+  private void doOnHeartbeat(Message msg) {
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
     if (hb == null) {
       return;

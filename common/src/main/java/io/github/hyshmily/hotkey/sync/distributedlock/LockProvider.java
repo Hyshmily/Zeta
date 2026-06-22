@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache.distributedlock;
+package io.github.hyshmily.hotkey.sync.distributedlock;
 
 import java.util.concurrent.TimeUnit;
 
@@ -55,7 +55,14 @@ public interface LockProvider {
    * @return a {@link AutoReleaseLock} if acquired, or {@code null} if the
    *         lock is held by another caller or the provider is unavailable
    */
-  default AutoReleaseLock tryLock(String key, long expire, TimeUnit unit, int lockCount, int inquiryCount, int unlockCount) {
+  default AutoReleaseLock tryLock(
+    String key,
+    long expire,
+    TimeUnit unit,
+    int lockCount,
+    int inquiryCount,
+    int unlockCount
+  ) {
     return tryLock(key, expire, unit);
   }
 }

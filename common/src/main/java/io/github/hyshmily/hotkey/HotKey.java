@@ -17,8 +17,6 @@ package io.github.hyshmily.hotkey;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.distributedlock.AutoReleaseLock;
-import io.github.hyshmily.hotkey.cache.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyReadQuery;
 import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyWriteCommand;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
@@ -28,6 +26,8 @@ import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sync.distributedlock.AutoReleaseLock;
+import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;

@@ -24,7 +24,14 @@ import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.*;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
@@ -240,6 +247,7 @@ public class HotKeyAmqpAutoConfiguration {
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
   @ConditionalOnProperty(prefix = "hotkey.sync", name = "enabled", havingValue = "true")
+  @lombok.extern.slf4j.Slf4j
   static class SyncConfiguration {
 
     /**
@@ -359,6 +367,7 @@ public class HotKeyAmqpAutoConfiguration {
       container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
       container.setConcurrentConsumers(properties.getConcurrentConsumers());
       container.setPrefetchCount(properties.getPrefetchCount());
+      container.setErrorHandler(t -> log.warn("Sync listener uncaught exception (message will be requeued by container)", t));
       container.setMessageListener(
         (ChannelAwareMessageListener) (msg, channel) -> cacheSyncListener.handleSyncMessage(channel, msg)
       );
@@ -376,6 +385,7 @@ public class HotKeyAmqpAutoConfiguration {
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
   @ConditionalOnBean(RedisTemplate.class)
   @ConditionalOnProperty(prefix = "hotkey.worker-listener", name = "enabled", havingValue = "true")
+  @lombok.extern.slf4j.Slf4j
   static class WorkerListenerConfiguration {
 
     /**
@@ -552,6 +562,7 @@ public class HotKeyAmqpAutoConfiguration {
       container.setAcknowledgeMode(AcknowledgeMode.NONE);
       container.setConcurrentConsumers(1);
       container.setPrefetchCount(100);
+      container.setErrorHandler(t -> log.warn("Heartbeat listener uncaught exception (message discarded)", t));
       container.setMessageListener(msg -> {
         WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
         if (hb != null) {
@@ -591,6 +602,7 @@ public class HotKeyAmqpAutoConfiguration {
       );
       container.setConcurrentConsumers(properties.getConcurrentConsumers());
       container.setPrefetchCount(properties.getPrefetchCount());
+      container.setErrorHandler(t -> log.warn("Worker listener uncaught exception (message will be requeued by container)", t));
       container.setAutoStartup(properties.isAutoStartup());
       return container;
     }

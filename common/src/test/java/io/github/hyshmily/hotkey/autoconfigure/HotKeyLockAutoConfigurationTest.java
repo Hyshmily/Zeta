@@ -18,8 +18,8 @@ package io.github.hyshmily.hotkey.autoconfigure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
-import io.github.hyshmily.hotkey.cache.distributedlock.LockProvider;
-import io.github.hyshmily.hotkey.sync.RedisLockProvider;
+import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
+import io.github.hyshmily.hotkey.sync.distributedlock.impl.RedisLockProvider;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;

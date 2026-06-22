@@ -17,18 +17,11 @@ package io.github.hyshmily.hotkey.rule;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -430,10 +423,7 @@ class RuleMatcherTest {
     @Test
     @DisplayName("syncRules should handle legacy array format")
     void syncRules_shouldParseLegacyArrayFormat() {
-      ruleMatcher.syncRules(
-        "[{\"pattern\":\"legacy\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]",
-        Long.MAX_VALUE
-      );
+      ruleMatcher.syncRules("[{\"pattern\":\"legacy\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]", Long.MAX_VALUE);
       assertThat(ruleMatcher.evaluateRule("legacy")).isEqualTo(RuleAction.BLOCK);
     }
 
@@ -517,7 +507,9 @@ class RuleMatcherTest {
     @Test
     @DisplayName("initRules should load from Redis when template is present")
     void initRules_shouldLoadFromRedis() {
-      when(valueOps.get(anyString())).thenReturn("[{\"pattern\":\"redis-loaded\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]");
+      when(valueOps.get(anyString())).thenReturn(
+        "[{\"pattern\":\"redis-loaded\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]"
+      );
       ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
       ruleMatcher.initRules();
       assertThat(ruleMatcher.evaluateRule("redis-loaded")).isEqualTo(RuleAction.BLOCK);

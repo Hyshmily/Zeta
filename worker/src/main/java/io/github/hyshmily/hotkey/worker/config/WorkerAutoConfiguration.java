@@ -127,7 +127,11 @@ public class WorkerAutoConfiguration {
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
     long interval = properties.getPersistence().getPersistIntervalMs();
-    scheduler.scheduleAtFixedRate(service::persistToRedis, interval, interval, TimeUnit.MILLISECONDS);
+    try {
+      scheduler.scheduleAtFixedRate(service::persistToRedis, interval, interval, TimeUnit.MILLISECONDS);
+    } catch (Exception e) {
+      log.error("Failed to schedule TopK persistence task; Worker TopK snapshots will not be persisted.", e);
+    }
     return new Object();
   }
 
@@ -457,7 +461,7 @@ public class WorkerAutoConfiguration {
         long staleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
         detector.evictStale(staleAfterMs);
         stateMachine.evictStale(staleAfterMs);
-        log.debug("Evicted stale Worker state: staleAfterMs={}", staleAfterMs);
+        log.debug("EvictStale tick: staleAfterMs={}", staleAfterMs);
       } catch (Exception e) {
         log.error("Scheduled evictStale failed", e);
       }
@@ -494,6 +498,7 @@ public class WorkerAutoConfiguration {
     public void validate() {
       try {
         topKValidator.validate();
+        log.debug("TopK validation tick completed");
       } catch (Exception e) {
         log.error("Scheduled TopK validation failed", e);
       }
@@ -574,12 +579,17 @@ public class WorkerAutoConfiguration {
     WorkerProperties properties,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
-    scheduler.scheduleAtFixedRate(
-      learner,
-      properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
-      properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
-      TimeUnit.MILLISECONDS
-    );
+    try {
+      scheduler.scheduleAtFixedRate(
+        learner,
+        properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
+        properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
+        TimeUnit.MILLISECONDS
+      );
+    } catch (Exception e) {
+      log.error("Failed to schedule threshold learning task; dynamic threshold " +
+          "adjustment will not run.", e);
+    }
     return new Object(); // placeholder bean
   }
 
@@ -623,6 +633,7 @@ public class WorkerAutoConfiguration {
     c.setQueues(verifyPingQueue);
     c.setMessageListener(verifyConsumer::handlePing);
     c.setAcknowledgeMode(AcknowledgeMode.NONE);
+    c.setErrorHandler(t -> log.warn("Verify ping listener uncaught exception (PONG will not be sent)", t));
     return c;
   }
 

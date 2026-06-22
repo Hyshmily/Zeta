@@ -13,18 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.sync.worker;
 
-import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_COOL;
-import static io.github.hyshmily.hotkey.sync.WorkerMessage.TYPE_HOT;
+import static io.github.hyshmily.hotkey.sync.worker.WorkerMessage.TYPE_COOL;
+import static io.github.hyshmily.hotkey.sync.worker.WorkerMessage.TYPE_HOT;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
@@ -135,7 +137,21 @@ public class WorkerListener {
       return;
     }
 
-    Runnable task = () -> workerMessageRouter(wm);
+    Runnable task = () -> {
+      try {
+        workerMessageRouter(wm);
+      } catch (Exception e) {
+        log.error(
+          "Error processing WorkerMessage: cacheKey={}, type={}, decisionVersion={}, nodeId={}, epoch={}",
+          wm.cacheKey(),
+          wm.type(),
+          wm.decisionVersion(),
+          wm.nodeId(),
+          wm.epoch(),
+          e
+        );
+      }
+    };
 
     // Random jitter spreads Redis reads across a small time window,
     // preventing all nodes from fetching the same key simultaneously.

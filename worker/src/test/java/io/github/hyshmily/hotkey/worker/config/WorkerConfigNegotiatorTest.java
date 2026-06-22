@@ -1,7 +1,14 @@
 package io.github.hyshmily.hotkey.worker.config;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -9,14 +16,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
-
-import java.util.concurrent.atomic.AtomicLong;
-
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
 class WorkerConfigNegotiatorTest {
@@ -162,8 +161,7 @@ class WorkerConfigNegotiatorTest {
   }
 
   @Test
-  void integrationSyncOnStartupAndOnHeartbeatShouldApplyConfigAndReleaseLatch()
-      throws InterruptedException {
+  void integrationSyncOnStartupAndOnHeartbeatShouldApplyConfigAndReleaseLatch() throws InterruptedException {
     negotiator.syncOnStartup();
 
     Thread daemon = findDaemonThread();

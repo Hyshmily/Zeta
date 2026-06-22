@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.util;
 
+import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.util.UUID;
 
 /**
@@ -36,7 +37,7 @@ public final class InstanceIdGenerator {
    * JVM-local node identifier derived from the upper 31 bits of a random UUID.
    * Initialized once at class load, stable for the JVM lifetime.
    *
-   * <p>Used by {@link io.github.hyshmily.hotkey.sync.VersionGuard} as the upper 32 bits of the
+   * <p>Used by {@link VersionGuard} as the upper 32 bits of the
    * fallback version when Redis INCR is unavailable, ensuring that degraded
    * versions from different JVMs occupy non-overlapping ranges.
    */

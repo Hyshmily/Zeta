@@ -199,12 +199,14 @@ class ReportConsumerTest {
   }
 
   /**
-   * Verifies that a report message just under the staleness boundary (4999ms old)
-   * is still processed (boundary: > 5000 means stale).
+   * Verifies that a report message just under the staleness boundary
+   * is still processed (boundary: > threshold means stale).
    */
   @Test
   void shouldProcessMessageJustUnderStalenessBoundary() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis() - 4999, Map.of("key", 1L));
+    consumer.stalenessThresholdMs = 100_000L;
+    long now = System.currentTimeMillis();
+    ReportMessage message = new ReportMessage("testApp", now - (consumer.stalenessThresholdMs - 1), Map.of("key", 1L));
     when(detector.addCount("key", 1L)).thenReturn(false);
     when(stateMachine.evaluate("key", false)).thenReturn(HotKeyDecision.none("key"));
 

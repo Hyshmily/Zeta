@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.detection;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.model.HotKeyDecision.DecisionType;
@@ -247,5 +248,65 @@ class HotKeyStateMachineEdgeTest {
     );
     assertThatCode(() -> m.rollbackToPreviousState("never-added", snapshot))
       .doesNotThrowAnyException();
+  }
+
+  /**
+   * Verifies that rollbackToPreviousState from COLD state restores streaks.
+   */
+  @Test
+  void rollbackToPreviousState_fromCold_shouldRestore() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
+    Map<String, Object> snap = m.getStateSnapshot("key");
+    assertThat(snap).containsEntry("currentState", "COLD");
+    m.reset("key");
+    m.rollbackToPreviousState("key", snap);
+    assertThat(m.getStateSnapshot("key")).containsEntry("currentState", "COLD");
+  }
+
+  /**
+   * Verifies that rollbackToPreviousState from PRE_COOLING state restores correctly.
+   */
+  @Test
+  void rollbackToPreviousState_fromPreCooling_shouldRestore() {
+    HotKeyStateMachine m = new HotKeyStateMachine(1, 5, 2);
+    assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
+    Map<String, Object> snap = m.getStateSnapshot("key");
+    assertThat(snap).containsEntry("currentState", "PRE_COOLING");
+    m.reset("key");
+    m.rollbackToPreviousState("key", snap);
+    assertThat(m.getStateSnapshot("key")).containsEntry("currentState", "PRE_COOLING");
+  }
+
+  /**
+   * Verifies that rollbackToPreviousState with an invalid state name in the snapshot
+   * throws IllegalArgumentException from State.valueOf.
+   */
+  @Test
+  void rollbackToPreviousState_withInvalidStateName_shouldThrow() {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    Map<String, Object> bad = Map.of(
+      "currentState", "NON_EXISTENT_STATE",
+      "hotStreak", 0,
+      "coolStreak", 0
+    );
+    assertThatThrownBy(() -> m.rollbackToPreviousState("key", bad))
+      .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  /**
+   * Verifies that evictStale cleans up orphaned stateTimestamps entries.
+   */
+  @Test
+  void evictStale_shouldCleanOrphanedTimestamps() throws InterruptedException {
+    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    m.evaluate("key", true);
+    m.reset("key");
+    Thread.sleep(1);
+    m.evictStale(0);
+    assertThat(m.getTrackedKeys()).isZero();
   }
 }

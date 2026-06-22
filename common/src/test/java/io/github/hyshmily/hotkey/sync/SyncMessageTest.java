@@ -15,12 +15,10 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_IS_VERSION_DEGRADED;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TYPE;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_VERSION;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.sync.SyncMessage;
+import io.github.hyshmily.hotkey.sync.local.SyncMessage;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;

@@ -144,6 +144,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
       drainBuffer(flushedActive);
       drainBuffer(flushedStandby);
+      log.trace("BufferedCounter flush tick: active={}, standby={}", flushedActive.size(), flushedStandby.size());
     } catch (Exception e) {
       log.error("Scheduled flushStandby failed", e);
     }
@@ -164,7 +165,15 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    */
   @Override
   public void afterPropertiesSet() {
-    scheduler.scheduleAtFixedRate(this::flushStandby, FLUSH_INTERVAL_MS, FLUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    try {
+      scheduler.scheduleAtFixedRate(this::flushStandby, FLUSH_INTERVAL_MS, FLUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    } catch (Exception e) {
+      log.error(
+        "Failed to start BufferedCounter flush scheduler; buffered counts will not " +
+          "be flushed to HeavyKeeper. Hot-key detection may be impaired.",
+        e
+      );
+    }
   }
 
   /**
@@ -215,7 +224,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
      * @return {@code true} if the buffer is empty
      */
     boolean isEmpty() {
-      return counters.isEmpty();
+      return size() == 0;
     }
 
     /**

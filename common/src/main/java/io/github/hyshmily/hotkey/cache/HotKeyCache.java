@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.cache;
 
+import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.NullValue;
@@ -28,21 +30,19 @@ import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.util.version.VersionController;
+import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import jakarta.annotation.Nullable;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
-
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -196,9 +196,16 @@ public class HotKeyCache {
       throw new HotKeyBlockedException("HotKeyCache", cacheKey);
     }
 
-    return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).map(raw ->
-      raw instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) raw
-    );
+    try {
+      return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).map(raw ->
+        raw instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) raw
+      );
+    } catch (HotKeyBlockedException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      log.error("HotKeyCache.peek internal error for key={}, returning empty", cacheKey, e);
+      return Optional.empty();
+    }
   }
 
   /**
@@ -242,28 +249,37 @@ public class HotKeyCache {
     }
     boolean skipReport = action == RuleAction.ALLOW_NO_REPORT;
 
-    return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
-      .flatMap(raw -> {
-        if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
-          return Optional.empty();
-        }
+    try {
+      return Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
+        .flatMap(raw -> {
+          if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
+            return Optional.empty();
+          }
 
-        T val = raw instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) raw;
+          T val = raw instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) raw;
 
-        promoteLocalHotkeyIfNeeded(cacheKey, raw, val, hardTtlMs, softTtlMs);
-        if (!skipReport) {
-          hotKeyReporter.ifPresent(r -> r.record(cacheKey));
-        }
+          boolean wasPromoted = promoteLocalHotkeyIfNeeded(cacheKey, raw, val, hardTtlMs, softTtlMs);
+          if (!skipReport) {
+            hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+          }
 
-        // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
-        Object currentRaw = caffeineCache.getIfPresent(cacheKey);
-        if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
-          return Optional.empty();
-        }
+          // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
+          if (wasPromoted || !skipReport) {
+            Object currentRaw = caffeineCache.getIfPresent(cacheKey);
+            if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
+              return Optional.empty();
+            }
+          }
 
-        return Optional.ofNullable(val);
-      })
-      .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
+          return Optional.ofNullable(val);
+        })
+        .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
+    } catch (HotKeyBlockedException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      log.error("HotKeyCache.get internal error for key={}, returning empty to keep caller operational", cacheKey, e);
+      return Optional.empty();
+    }
   }
 
   /**
@@ -324,46 +340,59 @@ public class HotKeyCache {
       return get(cacheKey, reader, hardTtlMs, softTtlMs);
     }
     Object raw = caffeineCache.getIfPresent(cacheKey);
-    return Optional.ofNullable(raw)
-      .flatMap(v -> {
-        if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
-          return Optional.empty();
-        }
-
-        T cached = v instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) v;
-
-        if (
-          v instanceof CacheEntry cacheEntry &&
-          (KeyState.HOT == cacheEntry.getKeyState() || KeyState.COOL == cacheEntry.getKeyState())
-        ) {
-          if (expireManager.isSoftExpired(cacheKey)) {
-            long effectiveSoft =
-              softTtlMs > 0
-                ? softTtlMs
-                : (KeyState.HOT == cacheEntry.getKeyState()
-                    ? expireManager.getEffectiveHotSoftTtlMs()
-                    : cacheEntry.getNormalSoftTtlMs() > 0
-                      ? cacheEntry.getNormalSoftTtlMs()
-                      : expireManager.getEffectiveSoftTtlMs());
-
-            expireManager.triggerBackgroundRefresh(cacheKey, reader, effectiveSoft);
+    try {
+      return Optional.ofNullable(raw)
+        .flatMap(v -> {
+          if (invalidateIfIsLogicallyExpired(cacheKey, raw)) {
+            return Optional.empty();
           }
-        }
 
-        promoteLocalHotkeyIfNeeded(cacheKey, raw, cached, hardTtlMs, softTtlMs);
-        if (!skipReport) {
-          hotKeyReporter.ifPresent(r -> r.record(cacheKey));
-        }
+          T cached = v instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) v;
 
-        // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
-        Object currentRaw = caffeineCache.getIfPresent(cacheKey);
-        if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
-          return Optional.empty();
-        }
+          if (
+            v instanceof CacheEntry cacheEntry &&
+            (KeyState.HOT == cacheEntry.getKeyState() || KeyState.COOL == cacheEntry.getKeyState())
+          ) {
+            if (expireManager.isSoftExpired(cacheEntry)) {
+              long effectiveSoft =
+                softTtlMs > 0
+                  ? softTtlMs
+                  : (KeyState.HOT == cacheEntry.getKeyState()
+                      ? expireManager.getEffectiveHotSoftTtlMs()
+                      : cacheEntry.getNormalSoftTtlMs() > 0
+                        ? cacheEntry.getNormalSoftTtlMs()
+                        : expireManager.getEffectiveSoftTtlMs());
 
-        return Optional.ofNullable(cached);
-      })
-      .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
+              expireManager.triggerBackgroundRefresh(cacheKey, reader, effectiveSoft);
+            }
+          }
+
+          boolean wasPromoted = promoteLocalHotkeyIfNeeded(cacheKey, raw, cached, hardTtlMs, softTtlMs);
+          if (!skipReport) {
+            hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+          }
+
+          // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
+          if (wasPromoted || !skipReport) {
+            Object currentRaw = caffeineCache.getIfPresent(cacheKey);
+            if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
+              return Optional.empty();
+            }
+          }
+
+          return Optional.ofNullable(cached);
+        })
+        .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
+    } catch (HotKeyBlockedException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      log.error(
+        "HotKeyCache.getWithSoftExpire internal error for key={}, returning empty to keep caller operational",
+        cacheKey,
+        e
+      );
+      return Optional.empty();
+    }
   }
 
   /**
@@ -474,11 +503,11 @@ public class HotKeyCache {
    * @param hardTtlMs hard TTL override (0 = use configured hot hard TTL)
    * @param softTtlMs soft TTL override (0 = use configured hot soft TTL)
    */
-  private void promoteLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
+  private boolean promoteLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
     if (raw instanceof CacheEntry ce && isPromotableState(ce.getKeyState())) {
       hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
       if (!hotKeyDetector.contains(cacheKey)) {
-        return;
+        return false;
       }
       long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
       long hotSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveHotSoftTtlMs();
@@ -517,7 +546,9 @@ public class HotKeyCache {
             .normalSoftTtlMs(ce.getNormalSoftTtlMs())
             .build();
         });
+      return true;
     }
+    return false;
   }
 
   /**
@@ -626,7 +657,12 @@ public class HotKeyCache {
     }
     TransactionSupport.runAsyncAfterCommit(
       () -> {
-        writer.run();
+        try {
+          writer.run();
+        } catch (Exception e) {
+          log.error("putThrough writer failed for key={}, cache update skipped: {}", cacheKey, e.getMessage(), e);
+          return;
+        }
         var vr = versionController.nextVersion(cacheKey);
 
         long effectiveHardTtl = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHardTtlMs();
@@ -667,12 +703,18 @@ public class HotKeyCache {
     long effectiveSoftTtl
   ) {
     KeyState state = (existing instanceof CacheEntry entry) ? entry.getKeyState() : KeyState.NORMAL;
+    if (existing instanceof CacheEntry ce && VersionGuard.shouldSkipForSync(ce, vr.dataVersion(), vr.degraded())) {
+      return ce;
+    }
 
     boolean isWorkerManaged = isWorkerManagedEntry(existing);
 
     long normalHardTtl = 0;
     long normalSoftTtl = 0;
+
     long decisionVersion = (existing instanceof CacheEntry entry) ? entry.getDecisionVersion() : 0L;
+    String decisionNodeId = (existing instanceof CacheEntry entry) ? entry.getDecisionNodeId() : null;
+    long decisionEpoch = (existing instanceof CacheEntry entry) ? entry.getDecisionEpoch() : 0L;
 
     if (existing instanceof CacheEntry) {
       normalHardTtl = isWorkerManaged ? ((CacheEntry) existing).getNormalHardTtlMs() : effectiveHardTtl;
@@ -686,6 +728,8 @@ public class HotKeyCache {
       .dataVersion(vr.dataVersion())
       .isVersionDegraded(vr.degraded())
       .decisionVersion(decisionVersion)
+      .decisionNodeId(decisionNodeId)
+      .decisionEpoch(decisionEpoch)
       .hardTtlMs(state == KeyState.HOT ? expireManager.getEffectiveHotHardTtlMs() : effectiveHardTtl)
       .hardExpireAtMs(
         state == KeyState.HOT
@@ -731,30 +775,33 @@ public class HotKeyCache {
     long hardTtl = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHardTtlMs();
     long softTtl = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveSoftTtlMs();
 
-    caffeineCache.asMap().compute(cacheKey, (k, existing) -> {
-      if (existing instanceof CacheEntry ce) {
-        return ce.toBuilder()
+    caffeineCache
+      .asMap()
+      .compute(cacheKey, (k, existing) -> {
+        if (existing instanceof CacheEntry ce) {
+          return ce
+            .toBuilder()
+            .value(value)
+            .hardTtlMs(hardTtl)
+            .softTtlMs(softTtl)
+            .hardExpireAtMs(expireManager.computeHardExpireAt(hardTtl))
+            .softExpireAtMs(expireManager.computeSoftExpireAt(softTtl))
+            .build();
+        }
+        return CacheEntry.builder()
           .value(value)
+          .dataVersion(HotKeyConstants.VERSION_DEFAULT)
+          .isVersionDegraded(false)
+          .decisionVersion(0L)
           .hardTtlMs(hardTtl)
-          .softTtlMs(softTtl)
           .hardExpireAtMs(expireManager.computeHardExpireAt(hardTtl))
+          .softTtlMs(softTtl)
           .softExpireAtMs(expireManager.computeSoftExpireAt(softTtl))
+          .keyState(KeyState.NORMAL)
+          .normalHardTtlMs(hardTtl)
+          .normalSoftTtlMs(softTtl)
           .build();
-      }
-      return CacheEntry.builder()
-        .value(value)
-        .dataVersion(HotKeyConstants.VERSION_DEFAULT)
-        .isVersionDegraded(false)
-        .decisionVersion(0L)
-        .hardTtlMs(hardTtl)
-        .hardExpireAtMs(expireManager.computeHardExpireAt(hardTtl))
-        .softTtlMs(softTtl)
-        .softExpireAtMs(expireManager.computeSoftExpireAt(softTtl))
-        .keyState(KeyState.NORMAL)
-        .normalHardTtlMs(hardTtl)
-        .normalSoftTtlMs(softTtl)
-        .build();
-    });
+      });
   }
 
   /**

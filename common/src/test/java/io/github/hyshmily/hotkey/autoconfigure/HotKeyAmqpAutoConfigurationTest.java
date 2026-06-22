@@ -15,6 +15,10 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
@@ -22,9 +26,18 @@ import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.*;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.function.Function;
+import java.util.function.IntConsumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -37,17 +50,6 @@ import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Function;
-
-import java.util.function.IntConsumer;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link HotKeyAmqpAutoConfiguration}.
@@ -130,7 +132,12 @@ class HotKeyAmqpAutoConfigurationTest {
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
     ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
     HotKeyReporter reporter = config.hotKeyReporter(
-      reportPublisher, scheduler, properties, new RingManager(150), healthViewProvider, bbrProvider
+      reportPublisher,
+      scheduler,
+      properties,
+      new RingManager(150),
+      healthViewProvider,
+      bbrProvider
     );
 
     assertThat(reporter).isNotNull();
@@ -196,9 +203,7 @@ class HotKeyAmqpAutoConfigurationTest {
     Queue queue = config.hotkeySyncQueue(props);
 
     assertThat(queue).isNotNull();
-    assertThat(queue.getName()).isEqualTo(
-      "test.sync:" + io.github.hyshmily.hotkey.util.InstanceIdGenerator.get()
-    );
+    assertThat(queue.getName()).isEqualTo("test.sync:" + io.github.hyshmily.hotkey.util.InstanceIdGenerator.get());
     assertThat(queue.isDurable()).isTrue();
   }
 
@@ -383,8 +388,7 @@ class HotKeyAmqpAutoConfigurationTest {
     HotKeyProperties properties = new HotKeyProperties();
     properties.setReportExchange("test.report.exchange");
 
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
-      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
     DirectExchange exchange = config.hotkeyReportExchange(properties);
 
     assertThat(exchange).isNotNull();
@@ -395,8 +399,7 @@ class HotKeyAmqpAutoConfigurationTest {
 
   @Test
   void reportMessageConverterIsCreated() {
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
-      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
     MessageConverter converter = config.reportMessageConverter();
 
     assertThat(converter).isNotNull();
@@ -407,8 +410,7 @@ class HotKeyAmqpAutoConfigurationTest {
     HotKeyProperties properties = new HotKeyProperties();
     properties.getConsistentHashing().setVirtualNodes(300);
 
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
-      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
     RingManager ringManager = config.ringManager(properties);
 
     assertThat(ringManager).isNotNull();
@@ -420,8 +422,7 @@ class HotKeyAmqpAutoConfigurationTest {
     HotKeyProperties properties = new HotKeyProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
 
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
-      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
     SystemLoadMonitor monitor = config.hotKeyCpuMonitor(properties, scheduler);
 
     assertThat(monitor).isNotNull();
@@ -432,8 +433,7 @@ class HotKeyAmqpAutoConfigurationTest {
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
     HotKeyProperties properties = new HotKeyProperties();
 
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
-      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
     BbrRateLimiter limiter = config.hotKeyBbrRateLimiter(cpuMonitor, properties);
 
     assertThat(limiter).isNotNull();
@@ -448,10 +448,14 @@ class HotKeyAmqpAutoConfigurationTest {
     ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
     ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
 
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
-      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
     HotKeyReporter reporter = config.hotKeyReporter(
-      reportPublisher, scheduler, properties, ringManager, healthViewProvider, bbrProvider
+      reportPublisher,
+      scheduler,
+      properties,
+      ringManager,
+      healthViewProvider,
+      bbrProvider
     );
 
     assertThat(reporter).isNotNull();
@@ -464,8 +468,7 @@ class HotKeyAmqpAutoConfigurationTest {
     RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
     CacheSyncProperties props = new CacheSyncProperties();
 
-    HotKeyAmqpAutoConfiguration.SyncConfiguration config =
-      new HotKeyAmqpAutoConfiguration.SyncConfiguration();
+    HotKeyAmqpAutoConfiguration.SyncConfiguration config = new HotKeyAmqpAutoConfiguration.SyncConfiguration();
     CacheSyncPublisher publisher = config.cacheSyncPublisher(rabbitTemplate, props);
 
     assertThat(publisher).isNotNull();
@@ -474,11 +477,11 @@ class HotKeyAmqpAutoConfigurationTest {
   @Test
   @SuppressWarnings("unchecked")
   void hotKeyRedisLoaderIsCreated() {
-    org.springframework.data.redis.core.StringRedisTemplate redisTemplate =
-      mock(org.springframework.data.redis.core.StringRedisTemplate.class);
+    org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
+      org.springframework.data.redis.core.StringRedisTemplate.class
+    );
 
-    HotKeyAmqpAutoConfiguration.SyncConfiguration config =
-      new HotKeyAmqpAutoConfiguration.SyncConfiguration();
+    HotKeyAmqpAutoConfiguration.SyncConfiguration config = new HotKeyAmqpAutoConfiguration.SyncConfiguration();
     Function<String, Object> loader = config.hotKeyRedisLoader(redisTemplate);
 
     assertThat(loader).isNotNull();
@@ -490,10 +493,12 @@ class HotKeyAmqpAutoConfigurationTest {
     CacheSyncListener cacheSyncListener = mock(CacheSyncListener.class);
     CacheSyncProperties props = new CacheSyncProperties();
 
-    HotKeyAmqpAutoConfiguration.SyncConfiguration config =
-      new HotKeyAmqpAutoConfiguration.SyncConfiguration();
-    SimpleMessageListenerContainer container =
-      config.syncListenerContainer(connectionFactory, cacheSyncListener, props);
+    HotKeyAmqpAutoConfiguration.SyncConfiguration config = new HotKeyAmqpAutoConfiguration.SyncConfiguration();
+    SimpleMessageListenerContainer container = config.syncListenerContainer(
+      connectionFactory,
+      cacheSyncListener,
+      props
+    );
 
     assertThat(container).isNotNull();
     assertThat(container.getQueueNames()).containsExactly(props.getQueueName());
@@ -540,7 +545,9 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(binding).isNotNull();
     assertThat(binding.getDestination()).isEqualTo("hq");
     assertThat(binding.getExchange()).isEqualTo("he");
-    assertThat(binding.getRoutingKey()).isEqualTo(io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT + "*");
+    assertThat(binding.getRoutingKey()).isEqualTo(
+      io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT + "*"
+    );
   }
 
   @Test
@@ -565,8 +572,7 @@ class HotKeyAmqpAutoConfigurationTest {
 
     HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    SimpleMessageListenerContainer container =
-      config.heartbeatContainer(connectionFactory, healthView, heartbeatQueue);
+    SimpleMessageListenerContainer container = config.heartbeatContainer(connectionFactory, healthView, heartbeatQueue);
 
     assertThat(container).isNotNull();
     assertThat(container.getQueueNames()).containsExactly("hotkey.heartbeat:test");
@@ -581,8 +587,12 @@ class HotKeyAmqpAutoConfigurationTest {
 
     HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    SimpleMessageListenerContainer container =
-      config.workerListenerContainer(connectionFactory, workerQueue, workerListener, props);
+    SimpleMessageListenerContainer container = config.workerListenerContainer(
+      connectionFactory,
+      workerQueue,
+      workerListener,
+      props
+    );
 
     assertThat(container).isNotNull();
     assertThat(container.getQueueNames()).containsExactly("hotkey.worker:test");
@@ -597,8 +607,12 @@ class HotKeyAmqpAutoConfigurationTest {
 
     HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    WorkerHeartbeatVerifier verifier =
-      config.workerHeartbeatVerifier(rabbitTemplate, healthView, properties, scheduler);
+    WorkerHeartbeatVerifier verifier = config.workerHeartbeatVerifier(
+      rabbitTemplate,
+      healthView,
+      properties,
+      scheduler
+    );
 
     assertThat(verifier).isNotNull();
   }
@@ -659,9 +673,7 @@ class HotKeyAmqpAutoConfigurationTest {
       new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
 
     // Container must be created without error when non-default properties are set
-    assertThat(
-      config.workerListenerContainer(connectionFactory, workerQueue, workerListener, props)
-    ).isNotNull();
+    assertThat(config.workerListenerContainer(connectionFactory, workerQueue, workerListener, props)).isNotNull();
   }
 
   @Test
@@ -694,10 +706,14 @@ class HotKeyAmqpAutoConfigurationTest {
 
     ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
 
-    HotKeyAmqpAutoConfiguration.ReportConfiguration config =
-      new HotKeyAmqpAutoConfiguration.ReportConfiguration();
+    HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
     HotKeyReporter reporter = config.hotKeyReporter(
-      reportPublisher, scheduler, properties, ringManager, healthViewProvider, bbrProvider
+      reportPublisher,
+      scheduler,
+      properties,
+      ringManager,
+      healthViewProvider,
+      bbrProvider
     );
 
     assertThat(reporter).isNotNull();

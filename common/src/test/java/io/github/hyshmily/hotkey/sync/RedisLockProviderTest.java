@@ -17,22 +17,17 @@ package io.github.hyshmily.hotkey.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
-import io.github.hyshmily.hotkey.cache.distributedlock.AutoReleaseLock;
+import io.github.hyshmily.hotkey.sync.distributedlock.AutoReleaseLock;
+import io.github.hyshmily.hotkey.sync.distributedlock.impl.RedisLockProvider;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -72,8 +67,7 @@ class RedisLockProviderTest {
 
   @Test
   void tryLock_afterRetries_shouldReturnLock() {
-    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
-      .thenReturn(false, false, true);
+    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(false, false, true);
     AutoReleaseLock lock = provider.tryLock(KEY, 10, TimeUnit.SECONDS);
     assertThat(lock).isNotNull();
   }
@@ -139,18 +133,17 @@ class RedisLockProviderTest {
 
   @Test
   void tryLock_whenSetIfAbsentThrows_shouldPropagate() {
-    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
-      .thenThrow(new RuntimeException("Redis connection refused"));
-    assertThatThrownBy(() -> provider.tryLock(KEY, 10, TimeUnit.SECONDS))
-      .isInstanceOf(RuntimeException.class);
+    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenThrow(
+      new RuntimeException("Redis connection refused")
+    );
+    assertThatThrownBy(() -> provider.tryLock(KEY, 10, TimeUnit.SECONDS)).isInstanceOf(RuntimeException.class);
   }
 
   // ── 6-arg Overload ────────────────────────────────────────────
 
   @Test
   void tryLock_withExplicitCounts_shouldUseThem() {
-    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
-      .thenReturn(false, true); // lockCount=2 → 2 attempts
+    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(false, true); // lockCount=2 → 2 attempts
     AutoReleaseLock lock = provider.tryLock(KEY, 10, TimeUnit.SECONDS, 2, 1, 1);
     assertThat(lock).isNotNull();
   }
@@ -177,8 +170,7 @@ class RedisLockProviderTest {
   @Test
   void close_whenScriptReturnsNull_shouldRetryThenSucceed() {
     when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(null).thenReturn(1L);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(null).thenReturn(1L);
     AutoReleaseLock lock = provider.tryLock(KEY, 10, TimeUnit.SECONDS);
     assertThat(lock).isNotNull();
     lock.close();
@@ -189,7 +181,8 @@ class RedisLockProviderTest {
   void close_whenScriptThrows_shouldRetryThenSucceed() {
     when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenThrow(new RuntimeException("Redis down")).thenReturn(1L);
+      .thenThrow(new RedisSystemException("Redis down", new RuntimeException()))
+      .thenReturn(1L);
     AutoReleaseLock lock = provider.tryLock(KEY, 10, TimeUnit.SECONDS);
     assertThat(lock).isNotNull();
     lock.close();
@@ -208,9 +201,7 @@ class RedisLockProviderTest {
   @Test
   void close_whenExpired_shouldSkipUnlock() {
     long past = System.currentTimeMillis() - 5000;
-    var expired = new RedisLockProvider.RedisLockHandle(
-      redisTemplate, "hotkey:lock:expired", "uuid", past, 3
-    );
+    var expired = new RedisLockProvider.RedisLockHandle(redisTemplate, "hotkey:lock:expired", "uuid", past, 3);
     expired.close();
     verify(redisTemplate, never()).execute(any(), anyList(), anyString());
   }
@@ -218,8 +209,7 @@ class RedisLockProviderTest {
   @Test
   void close_whenNotOwner_shouldTryAllUnlockRetries() {
     when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(0L); // wrong UUID or already released
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(0L); // wrong UUID or already released
     AutoReleaseLock lock = provider.tryLock(KEY, 10, TimeUnit.SECONDS);
     assertThat(lock).isNotNull();
     long start = System.currentTimeMillis();
@@ -231,8 +221,7 @@ class RedisLockProviderTest {
 
   @Test
   void tryLock_withDefaults_shouldUseConstructorDefaults() {
-    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
-      .thenReturn(false, false, true); // 3rd attempt succeeds (default lockCount=3)
+    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(false, false, true); // 3rd attempt succeeds (default lockCount=3)
     AutoReleaseLock lock = provider.tryLock(KEY, 10, TimeUnit.SECONDS);
     assertThat(lock).isNotNull();
   }

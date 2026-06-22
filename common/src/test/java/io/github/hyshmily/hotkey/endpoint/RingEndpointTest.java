@@ -1,7 +1,7 @@
 package io.github.hyshmily.hotkey.endpoint;
 
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;

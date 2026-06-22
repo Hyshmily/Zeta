@@ -15,13 +15,15 @@
  */
 package io.github.hyshmily.hotkey.model;
 
+import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
+
 /**
  * A decision emitted by the Worker's sliding-window / state-machine pipeline,
  * instructing application instances how to treat a specific cache key.
  *
  * <p>Each evaluation cycle of {@link io.github.hyshmily.hotkey.detection.HotKeyStateMachine}
  * produces at most one {@code HotKeyDecision} per key. The decision is then
- * serialized into a {@link io.github.hyshmily.hotkey.sync.WorkerMessage} and
+ * serialized into a {@link WorkerMessage} and
  * broadcast to all application instances via RabbitMQ.
  *
  * <p>Three outcomes are possible:

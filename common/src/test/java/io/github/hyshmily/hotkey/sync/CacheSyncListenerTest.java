@@ -15,34 +15,25 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_IS_VERSION_DEGRADED;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_TYPE;
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.AMQP_HEADER_VERSION;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
-import io.github.hyshmily.hotkey.sync.CacheSyncListener;
-import io.github.hyshmily.hotkey.sync.CacheSyncProperties;
-import io.github.hyshmily.hotkey.sync.SyncMessage;
+import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
+import io.github.hyshmily.hotkey.sync.local.SyncMessage;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -163,7 +154,14 @@ class CacheSyncListenerTest {
     properties.setWarmupJitterMs(0);
     HotKeyProperties ttlConfig = new HotKeyProperties();
     CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
-    CacheSyncListener nullListener = new CacheSyncListener(cache, nullLoader, properties, scheduler, expireManager, ruleMatcher);
+    CacheSyncListener nullListener = new CacheSyncListener(
+      cache,
+      nullLoader,
+      properties,
+      scheduler,
+      expireManager,
+      ruleMatcher
+    );
 
     nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
@@ -258,12 +256,21 @@ class CacheSyncListenerTest {
    */
   @Test
   void handleSyncMessage_withRefreshAndRedisException_shouldAck() throws IOException {
-    Function<String, Object> failingLoader = k -> { throw new RuntimeException("Redis down"); };
+    Function<String, Object> failingLoader = k -> {
+      throw new RuntimeException("Redis down");
+    };
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
     HotKeyProperties ttlConfig = new HotKeyProperties();
     CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
-    CacheSyncListener failingListener = new CacheSyncListener(cache, failingLoader, props, scheduler, expireManager, ruleMatcher);
+    CacheSyncListener failingListener = new CacheSyncListener(
+      cache,
+      failingLoader,
+      props,
+      scheduler,
+      expireManager,
+      ruleMatcher
+    );
 
     cache.put("key1", entry(1, false, 0));
     failingListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
@@ -285,7 +292,8 @@ class CacheSyncListenerTest {
    * Verifies that a normal incoming refresh overwrites an existing degraded entry.
    */
   @Test
-  void handleSyncMessage_withRefreshExistingDegradedIncomingNormal_shouldAccept() throws IOException, InterruptedException {
+  void handleSyncMessage_withRefreshExistingDegradedIncomingNormal_shouldAccept()
+    throws IOException, InterruptedException {
     cache.put("key1", entry(1, true, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
@@ -319,7 +327,14 @@ class CacheSyncListenerTest {
     props.setWarmupJitterMs(0);
     HotKeyProperties ttlConfig = new HotKeyProperties();
     CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
-    CacheSyncListener nullListener = new CacheSyncListener(cache, nullLoader, props, scheduler, expireManager, ruleMatcher);
+    CacheSyncListener nullListener = new CacheSyncListener(
+      cache,
+      nullLoader,
+      props,
+      scheduler,
+      expireManager,
+      ruleMatcher
+    );
 
     cache.put("key1", entry(5, false, 0));
     nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 6L, false));

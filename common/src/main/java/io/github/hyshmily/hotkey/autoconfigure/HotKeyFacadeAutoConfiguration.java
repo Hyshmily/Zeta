@@ -17,10 +17,10 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
+import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.Executors;

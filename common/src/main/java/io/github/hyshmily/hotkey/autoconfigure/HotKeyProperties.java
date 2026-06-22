@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;

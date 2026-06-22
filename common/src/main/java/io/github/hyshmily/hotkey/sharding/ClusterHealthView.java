@@ -13,8 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.sharding;
 
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -296,16 +298,16 @@ public class ClusterHealthView {
   @Getter
   public static class WorkerHealthRecord {
 
-    volatile String workerId;
-    volatile long epoch;
-    volatile long lastHeartbeatTime;
-    volatile long firstHeartbeatTime;
-    volatile long decisionVersionHwm;
-    volatile double loadFactor;
-    volatile boolean readyToServe;
-    volatile boolean stale;
-    volatile boolean restarted;
-    volatile int verifyFailures;
+    public volatile String workerId;
+    public volatile long epoch;
+    public volatile long lastHeartbeatTime;
+    public volatile long firstHeartbeatTime;
+    public volatile long decisionVersionHwm;
+    public volatile double loadFactor;
+    public volatile boolean readyToServe;
+    public volatile boolean stale;
+    public volatile boolean restarted;
+    public volatile int verifyFailures;
 
     /**
      * Returns whether this Worker is currently considered alive for health-majority

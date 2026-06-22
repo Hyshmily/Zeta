@@ -16,7 +16,7 @@
 package io.github.hyshmily.hotkey.endpoint;
 
 import io.github.hyshmily.hotkey.sharding.RingManager;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;

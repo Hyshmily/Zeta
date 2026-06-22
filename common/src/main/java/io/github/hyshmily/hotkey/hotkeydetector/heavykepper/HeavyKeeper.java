@@ -16,17 +16,17 @@
 package io.github.hyshmily.hotkey.hotkeydetector.heavykepper;
 
 import com.google.common.hash.Hashing;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
@@ -57,7 +57,6 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 public class HeavyKeeper implements TopK {
-
 
   /** Pre-computed decay probability lookup table size ({@value}). */
   private static final int LOOKUP_TABLE_SIZE = 256;
@@ -162,7 +161,7 @@ public class HeavyKeeper implements TopK {
     this.lockMask = LOCK_STRIPES - 1;
 
     this.sortedTopK = new TreeMap<>(Comparator.comparingLong((Node a) -> a.count).thenComparing(a -> a.key));
-    this.heapIndex = new HashMap<>();
+    this.heapIndex = new ConcurrentHashMap<>();
     this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
     this.total = new LongAdder();
   }
@@ -380,9 +379,7 @@ public class HeavyKeeper implements TopK {
    */
   @Override
   public boolean contains(String key) {
-    synchronized (sortedTopK) {
-      return heapIndex.containsKey(key);
-    }
+    return heapIndex.containsKey(key);
   }
 
   /**

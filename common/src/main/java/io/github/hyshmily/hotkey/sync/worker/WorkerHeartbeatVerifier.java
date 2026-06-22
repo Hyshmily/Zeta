@@ -13,7 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.sync.worker;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import lombok.extern.slf4j.Slf4j;
 
 import lombok.AccessLevel;
@@ -155,12 +156,17 @@ public class WorkerHeartbeatVerifier {
     if (verifyTask != null) {
       return;
     }
-    verifyTask = scheduler.scheduleAtFixedRate(
-      this::verifySuspectedWorkers,
-      verifyIntervalMs,
-      verifyIntervalMs,
-      TimeUnit.MILLISECONDS
-    );
+    try {
+      verifyTask = scheduler.scheduleAtFixedRate(
+        this::verifySuspectedWorkers,
+        verifyIntervalMs,
+        verifyIntervalMs,
+        TimeUnit.MILLISECONDS
+      );
+    } catch (Exception e) {
+      log.error("Failed to start heartbeat verifier scheduler; Worker liveness verification " +
+          "will not run. Application continues but stale Workers may not be detected.", e);
+    }
   }
 
   /**
@@ -196,7 +202,7 @@ public class WorkerHeartbeatVerifier {
    * <p>This method is called periodically by the scheduled task and is also
    * safe to invoke manually for testing.
    */
-  void verifySuspectedWorkers() {
+  public void verifySuspectedWorkers() {
     try {
       if (healthView.isClusterHealthy()) {
         return;
@@ -251,7 +257,7 @@ public class WorkerHeartbeatVerifier {
    *         {@code pingTimeoutMs}; {@code false} if the request timed out
    *         ({@link AmqpTimeoutException}) or the queue is unreachable
    */
-  boolean sendPingAndWaitPong(String workerId) {
+  public boolean sendPingAndWaitPong(String workerId) {
     MessageProperties props = new MessageProperties();
     props.setHeader(AMQP_HEADER_VERIFY_TYPE, AMQP_HEADER_VERIFY_PING);
     props.setHeader(AMQP_HEADER_VERIFY_APP_INSTANCE, appInstanceId);

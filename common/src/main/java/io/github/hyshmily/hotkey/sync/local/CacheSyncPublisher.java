@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.sync.local;
 
 import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
@@ -22,6 +22,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
+import io.github.hyshmily.hotkey.util.version.VersionController;
 import jakarta.annotation.PostConstruct;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -244,9 +246,9 @@ public class CacheSyncPublisher {
    * @param type     the sync message type (e.g. {@link SyncMessage#TYPE_INVALIDATE},
    *                 {@link SyncMessage#TYPE_REFRESH})
    * @param version  the {@code dataVersion} of the operation
- * @param degraded whether the version was obtained in degraded mode; passed through
- *                 to the message headers; also prefixes the dedup compositeKey with "D:"
- *                 to prevent degraded broadcasts from being blocked by normal ones
+   * @param degraded whether the version was obtained in degraded mode; passed through
+   *                 to the message headers; also prefixes the dedup compositeKey with "D:"
+   *                 to prevent degraded broadcasts from being blocked by normal ones
    */
   private void sendDeduped(String cacheKey, String type, long version, boolean degraded) {
     if (invalidCacheKey(cacheKey) || invalidCacheKey(type)) {

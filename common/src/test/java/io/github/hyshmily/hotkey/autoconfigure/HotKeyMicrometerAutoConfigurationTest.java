@@ -15,6 +15,10 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
@@ -23,35 +27,31 @@ import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykepper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
-import io.github.hyshmily.hotkey.sync.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.github.hyshmily.hotkey.sync.VersionController;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
+import io.github.hyshmily.hotkey.util.version.VersionController;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
-import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.Semaphore;
-import java.util.function.Consumer;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
-
 /**
  * Tests for {@link HotKeyMicrometerAutoConfiguration}.
  */
 class HotKeyMicrometerAutoConfigurationTest {
 
-  private final ApplicationContextRunner runner = new ApplicationContextRunner()
-    .withConfiguration(AutoConfigurations.of(HotKeyMicrometerAutoConfiguration.class));
+  private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
+    AutoConfigurations.of(HotKeyMicrometerAutoConfiguration.class)
+  );
 
   private HotKeyMicrometerAutoConfiguration config;
   private SimpleMeterRegistry registry;
@@ -85,7 +85,9 @@ class HotKeyMicrometerAutoConfigurationTest {
     doAnswer(inv -> {
       ((Consumer<Cache<String, Object>>) inv.getArgument(0)).accept(cache);
       return null;
-    }).when(provider).ifAvailable(any());
+    })
+      .when(provider)
+      .ifAvailable(any());
 
     MeterBinder binder = config.hotKeyCaffeineMetrics(provider);
     binder.bindTo(registry);
@@ -249,7 +251,9 @@ class HotKeyMicrometerAutoConfigurationTest {
         ((Consumer<T>) invocation.getArgument(0)).accept(value);
       }
       return null;
-    }).when(provider).ifAvailable(any());
+    })
+      .when(provider)
+      .ifAvailable(any());
     return provider;
   }
 

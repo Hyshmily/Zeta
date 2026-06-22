@@ -18,13 +18,12 @@ package io.github.hyshmily.hotkey.worker.dispatch;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.anyLong;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Executors;
@@ -91,8 +90,10 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-        .containsEntry(AMQP_HEADER_HEARTBEAT_EPOCH, 1L);
+      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+        AMQP_HEADER_HEARTBEAT_EPOCH,
+        1L
+      );
     }
   }
 
@@ -104,8 +105,10 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-        .containsEntry(AMQP_HEADER_HEARTBEAT_EPOCH, 6L);
+      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+        AMQP_HEADER_HEARTBEAT_EPOCH,
+        6L
+      );
     }
   }
 
@@ -121,8 +124,10 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-        .containsEntry(AMQP_HEADER_HEARTBEAT_EPOCH, 1L);
+      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+        AMQP_HEADER_HEARTBEAT_EPOCH,
+        1L
+      );
 
       var path = epochFilePath();
       assertThat(path).exists();
@@ -145,8 +150,10 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-        .containsEntry(AMQP_HEADER_HEARTBEAT_EPOCH, 4L);
+      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+        AMQP_HEADER_HEARTBEAT_EPOCH,
+        4L
+      );
 
       assertThat(Files.readString(epochFilePath())).isEqualTo("4");
     } finally {
@@ -166,9 +173,7 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      var epoch =
-        (Long)
-          messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_HEARTBEAT_EPOCH);
+      var epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_HEARTBEAT_EPOCH);
       assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000L);
     } finally {
       System.setProperty("java.io.tmpdir", origTmpdir);
@@ -220,8 +225,10 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-        .containsEntry(AMQP_HEADER_HEARTBEAT_READY, false);
+      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+        AMQP_HEADER_HEARTBEAT_READY,
+        false
+      );
     }
   }
 
@@ -234,8 +241,10 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
-        .containsEntry(AMQP_HEADER_HEARTBEAT_READY, true);
+      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+        AMQP_HEADER_HEARTBEAT_READY,
+        true
+      );
     }
   }
 
@@ -245,15 +254,21 @@ class WorkerHeartbeatProducerTest {
   @Test
   void start_shouldScheduleHeartbeatAtFixedRate() {
     var schedulerMock = mock(ScheduledExecutorService.class);
-    try (var executorsMock = mockStatic(Executors.class);
-         var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
+    try (
+      var executorsMock = mockStatic(Executors.class);
+      var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))
+    ) {
       executorsMock.when(() -> Executors.newSingleThreadScheduledExecutor(any())).thenReturn(schedulerMock);
 
       var producer = newProducer();
       producer.start();
 
-      verify(schedulerMock)
-        .scheduleAtFixedRate(any(Runnable.class), eq(0L), eq(PING_INTERVAL_MS), eq(TimeUnit.MILLISECONDS));
+      verify(schedulerMock).scheduleAtFixedRate(
+        any(Runnable.class),
+        eq(0L),
+        eq(PING_INTERVAL_MS),
+        eq(TimeUnit.MILLISECONDS)
+      );
     }
   }
 
@@ -277,11 +292,14 @@ class WorkerHeartbeatProducerTest {
   @Test
   void stop_shouldCancelHeartbeatTaskWhenRunning() {
     var schedulerMock = mock(ScheduledExecutorService.class);
-    when(schedulerMock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any()))
-      .thenReturn(mock(ScheduledFuture.class));
+    when(schedulerMock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any())).thenReturn(
+      mock(ScheduledFuture.class)
+    );
 
-    try (var executorsMock = mockStatic(Executors.class);
-         var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
+    try (
+      var executorsMock = mockStatic(Executors.class);
+      var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))
+    ) {
       executorsMock.when(() -> Executors.newSingleThreadScheduledExecutor(any())).thenReturn(schedulerMock);
 
       var producer = newProducer();
@@ -300,14 +318,21 @@ class WorkerHeartbeatProducerTest {
   @Test
   void constructorWithExternalScheduler_shouldNotShutdownSchedulerOnStop() {
     var schedulerMock = mock(ScheduledExecutorService.class);
-    when(schedulerMock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any()))
-      .thenReturn(mock(ScheduledFuture.class));
+    when(schedulerMock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any())).thenReturn(
+      mock(ScheduledFuture.class)
+    );
     var redisFactoryMock = mock(RedisConnectionFactory.class);
     try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
       var producer = new WorkerHeartbeatProducer(
-        rabbitTemplate, HB_EXCHANGE, WORKER_ID,
-        stateMachine, broadcaster, configTimestampCounter,
-        redisFactoryMock, PING_INTERVAL_MS, schedulerMock
+        rabbitTemplate,
+        HB_EXCHANGE,
+        WORKER_ID,
+        stateMachine,
+        broadcaster,
+        configTimestampCounter,
+        redisFactoryMock,
+        PING_INTERVAL_MS,
+        schedulerMock
       );
       producer.start();
       producer.stop();
@@ -342,8 +367,7 @@ class WorkerHeartbeatProducerTest {
     try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
       when(broadcaster.getCurrentDecisionVersion()).thenReturn(0L);
       when(configTimestampCounter.get()).thenReturn(0L);
-      doThrow(new RuntimeException("RabbitMQ unavailable"))
-        .when(rabbitTemplate).send(anyString(), anyString(), any());
+      doThrow(new RuntimeException("RabbitMQ unavailable")).when(rabbitTemplate).send(anyString(), anyString(), any());
 
       var producer = newProducer();
       producer.sendHeartbeat();
@@ -363,9 +387,7 @@ class WorkerHeartbeatProducerTest {
       var producer = newProducer();
       producer.sendHeartbeat();
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      var epoch =
-        (Long)
-          messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_HEARTBEAT_EPOCH);
+      var epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_HEARTBEAT_EPOCH);
       assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000L);
     } finally {
       System.setProperty("java.io.tmpdir", origTmpdir);
@@ -376,8 +398,14 @@ class WorkerHeartbeatProducerTest {
 
   private WorkerHeartbeatProducer newProducer() {
     return new WorkerHeartbeatProducer(
-      rabbitTemplate, HB_EXCHANGE, WORKER_ID,
-      stateMachine, broadcaster, configTimestampCounter, PING_INTERVAL_MS);
+      rabbitTemplate,
+      HB_EXCHANGE,
+      WORKER_ID,
+      stateMachine,
+      broadcaster,
+      configTimestampCounter,
+      PING_INTERVAL_MS
+    );
   }
 
   @SuppressWarnings("unchecked")

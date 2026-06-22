@@ -17,7 +17,8 @@ package io.github.hyshmily.hotkey.worker.dispatch;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
-import io.github.hyshmily.hotkey.sync.WorkerMessage;
+import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
+import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
@@ -50,7 +51,7 @@ public class WorkerBroadcaster {
   private final String appName;
 
   /** Originating Worker's node identity, set on every broadcast header for cross-Worker
-   * version tracking in {@link io.github.hyshmily.hotkey.sync.VersionGuard}. */
+   * version tracking in {@link VersionGuard}. */
   private final String nodeId;
 
   /** Monotonically increasing epoch counter for this Worker instance, incremented on every

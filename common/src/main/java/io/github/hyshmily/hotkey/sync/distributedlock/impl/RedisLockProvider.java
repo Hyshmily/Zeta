@@ -13,13 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.sync.distributedlock.impl;
 
 import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
 
-import io.github.hyshmily.hotkey.cache.distributedlock.AutoReleaseLock;
-import io.github.hyshmily.hotkey.cache.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import io.github.hyshmily.hotkey.sync.distributedlock.AutoReleaseLock;
+import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -27,6 +27,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
@@ -154,29 +155,33 @@ public class RedisLockProvider implements LockProvider {
         }
       }
 
-      Boolean acquired = redisTemplate.opsForValue().setIfAbsent(lockKey, uuid, Duration.ofMillis(expireMs));
+      try {
+        Boolean acquired = redisTemplate.opsForValue().setIfAbsent(lockKey, uuid, Duration.ofMillis(expireMs));
 
-      if (Boolean.TRUE.equals(acquired)) {
-        if (i > 0) {
-          log.debug("Lock '{}' acquired after {} retries", key, i);
+        if (Boolean.TRUE.equals(acquired)) {
+          if (i > 0) {
+            log.debug("Lock '{}' acquired after {} retries", key, i);
+          }
+          return new RedisLockHandle(redisTemplate, lockKey, uuid, expireTimestamp, unlockCount);
         }
-        return new RedisLockHandle(redisTemplate, lockKey, uuid, expireTimestamp, unlockCount);
-      }
 
-      if (acquired == null) {
-        for (int j = 0; j < inquiryCount; j++) {
-          String value = redisTemplate.opsForValue().get(lockKey);
+        if (acquired == null) {
+          for (int j = 0; j < inquiryCount; j++) {
+            String value = redisTemplate.opsForValue().get(lockKey);
 
-          if (uuid.equals(value)) {
-            if (i > 0) {
-              log.debug("Lock '{}' acquired after {} retries (inquiry path)", key, i);
+            if (uuid.equals(value)) {
+              if (i > 0) {
+                log.debug("Lock '{}' acquired after {} retries (inquiry path)", key, i);
+              }
+              return new RedisLockHandle(redisTemplate, lockKey, uuid, expireTimestamp, unlockCount);
             }
-            return new RedisLockHandle(redisTemplate, lockKey, uuid, expireTimestamp, unlockCount);
-          }
-          if (value != null) {
-            break;
+            if (value != null) {
+              break;
+            }
           }
         }
+      } catch (RedisSystemException e) {
+        log.error("Redis system error occurred while acquiring lock '{}'", key, e);
       }
     }
     log.warn("Failed to acquire lock '{}' after {} attempts", key, lockCount);
@@ -185,7 +190,7 @@ public class RedisLockProvider implements LockProvider {
 
   @RequiredArgsConstructor
   @Slf4j
-  static class RedisLockHandle implements AutoReleaseLock {
+  public static class RedisLockHandle implements AutoReleaseLock {
 
     private final StringRedisTemplate redisTemplate;
     private final String lockKey;
@@ -218,7 +223,7 @@ public class RedisLockProvider implements LockProvider {
             if (Objects.equals(result, 1L)) {
               return;
             }
-          } catch (Exception e) {
+          } catch (RedisSystemException e) {
             log.warn("Redis unlock attempt {}/{} failed for key {}", i + 1, unlockCount, lockKey, e);
           }
         } else {

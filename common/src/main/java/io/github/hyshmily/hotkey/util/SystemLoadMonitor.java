@@ -97,8 +97,13 @@ public class SystemLoadMonitor {
     if (!running.compareAndSet(false, true)) {
       return;
     }
-    flushTask = scheduler.scheduleAtFixedRate(this::sample, 0, pollIntervalMs, TimeUnit.MILLISECONDS);
-    log.debug("SystemLoadMonitor started: pollIntervalMs={}, decay={}", pollIntervalMs, decay);
+    try {
+      flushTask = scheduler.scheduleAtFixedRate(this::sample, 0, pollIntervalMs, TimeUnit.MILLISECONDS);
+      log.debug("SystemLoadMonitor started: pollIntervalMs={}, decay={}", pollIntervalMs, decay);
+    } catch (Exception e) {
+      log.error("Failed to start SystemLoadMonitor sampler; CPU-based BBR backpressure " +
+          "will fall back to 0 CPU load (permissive).", e);
+    }
   }
 
   /** Stop the background sampler. */
@@ -153,6 +158,7 @@ public class SystemLoadMonitor {
         double next = current * decay + raw * (1.0 - decay);
         emaCpuLoadBits.set(Double.doubleToLongBits(next));
       }
+      log.trace("SystemLoadMonitor tick: raw={}, ema={}", raw, getCpuLoadEMA());
     } catch (Exception e) {
       log.warn("Failed to sample CPU load", e);
     }

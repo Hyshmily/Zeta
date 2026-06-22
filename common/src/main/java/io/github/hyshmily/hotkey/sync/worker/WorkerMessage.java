@@ -13,10 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.sync.worker;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
+import io.github.hyshmily.hotkey.sync.local.SyncMessage;
+import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.nio.charset.StandardCharsets;
 import org.springframework.amqp.core.Message;
 

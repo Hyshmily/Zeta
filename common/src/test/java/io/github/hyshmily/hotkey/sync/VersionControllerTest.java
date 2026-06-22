@@ -16,14 +16,12 @@
 package io.github.hyshmily.hotkey.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import io.github.hyshmily.hotkey.sync.VersionController;
-import io.github.hyshmily.hotkey.sync.VersionController.VersionResult;
+import io.github.hyshmily.hotkey.util.version.VersionController;
+import io.github.hyshmily.hotkey.util.version.VersionController.VersionResult;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,8 +49,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_withRedis_shouldReturnPositiveVersionNotDegraded() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(42L);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(42L);
     VersionResult result = controller.nextVersion("key1");
     assertThat(result.dataVersion()).isEqualTo(42L);
     assertThat(result.degraded()).isFalse();
@@ -63,8 +60,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_withRedis_shouldHandleZeroVersion() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(0L);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(0L);
     VersionResult result = controller.nextVersion("key1");
     assertThat(result.dataVersion()).isZero();
     assertThat(result.degraded()).isFalse();
@@ -75,8 +71,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_withRedis_shouldHandleLargeVersion() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(Long.MAX_VALUE);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(Long.MAX_VALUE);
     VersionResult result = controller.nextVersion("key1");
     assertThat(result.dataVersion()).isEqualTo(Long.MAX_VALUE);
     assertThat(result.degraded()).isFalse();
@@ -87,8 +82,9 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_whenRedisFails_shouldFallbackToDegraded() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenThrow(new RuntimeException("Redis connection refused"));
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenThrow(
+      new RuntimeException("Redis connection refused")
+    );
     VersionResult result = controller.nextVersion("key1");
     assertThat(result.dataVersion()).isNegative();
     assertThat(result.degraded()).isTrue();
@@ -99,8 +95,9 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_whenRedisThrows_shouldFallbackToDegraded() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenThrow(new IllegalStateException("Lua script error"));
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenThrow(
+      new IllegalStateException("Lua script error")
+    );
     VersionResult result = controller.nextVersion("key1");
     assertThat(result.dataVersion()).isNegative();
     assertThat(result.degraded()).isTrue();
@@ -111,8 +108,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_whenRedisReturnsNull_shouldFallbackToDegraded() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(null);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(null);
     VersionResult result = controller.nextVersion("key1");
     assertThat(result.dataVersion()).isNegative();
     assertThat(result.degraded()).isTrue();
@@ -166,8 +162,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_consecutiveCalls_shouldReturnIncreasingVersions() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(1L, 2L, 3L);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(1L, 2L, 3L);
     assertThat(controller.nextVersion("key1").dataVersion()).isEqualTo(1L);
     assertThat(controller.nextVersion("key1").dataVersion()).isEqualTo(2L);
     assertThat(controller.nextVersion("key1").dataVersion()).isEqualTo(3L);
@@ -178,8 +173,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_differentKeys_shouldBeIndependent() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(100L, 200L);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(100L, 200L);
     assertThat(controller.nextVersion("key-a").dataVersion()).isEqualTo(100L);
     assertThat(controller.nextVersion("key-b").dataVersion()).isEqualTo(200L);
   }
@@ -231,8 +225,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_withBlankKey_shouldStillWork() {
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(99L);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(99L);
     VersionResult result = controller.nextVersion("  ");
     assertThat(result.dataVersion()).isEqualTo(99L);
     assertThat(result.degraded()).isFalse();
@@ -244,8 +237,7 @@ class VersionControllerTest {
   @Test
   void nextVersion_withZeroTtl_shouldStillIncrement() {
     VersionController zeroTtl = new VersionController(Optional.of(redisTemplate), 0);
-    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
-      .thenReturn(7L);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(7L);
     VersionResult result = zeroTtl.nextVersion("key1");
     assertThat(result.dataVersion()).isEqualTo(7L);
     assertThat(result.degraded()).isFalse();

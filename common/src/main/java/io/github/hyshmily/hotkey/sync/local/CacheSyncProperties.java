@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.sync.local;
 
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import lombok.Data;

@@ -74,6 +74,9 @@ public class ReportConsumer {
   /** Global QPS estimator tracking overall throughput for dynamic threshold learning. */
   private final GlobalQpsEstimator globalQpsEstimator;
 
+  /** Staleness threshold in milliseconds. Package-visible for testing. */
+  long stalenessThresholdMs = 5000L;
+
   /**
    * Main entry point for batched report messages.
    *
@@ -81,13 +84,22 @@ public class ReportConsumer {
    */
   @RabbitListener(queues = "#{@reportQueue.name}")
   public void onReport(ReportMessage message) {
+    try {
+      doOnReport(message);
+    } catch (Exception e) {
+      log.error("Uncaught exception in onReport, discarding message to prevent poison-message requeue loop: appName={}",
+          message != null ? message.appName() : "null", e);
+    }
+  }
+
+  private void doOnReport(ReportMessage message) {
     long now = System.currentTimeMillis();
     long totalQps = 0;
 
     // Discard reports that are more than 5 seconds old.
     // This guards against delayed or re‑delivered messages that would
     // feed outdated counts into the sliding window.
-    if (now - message.timestamp() > 5000) {
+    if (now - message.timestamp() > stalenessThresholdMs) {
       log.debug("Stale report message, skip: appName={}, age={}ms", message.appName(), now - message.timestamp());
       return;
     }

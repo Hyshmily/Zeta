@@ -15,9 +15,10 @@
  */
 package io.github.hyshmily.hotkey.sync;
 
-import org.junit.jupiter.api.Test;
-
 import static org.assertj.core.api.Assertions.assertThat;
+
+import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
+import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link CacheSyncProperties} verifying default configuration values and queue name

@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.dispatch;
-import lombok.extern.slf4j.Slf4j;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.lang.management.ManagementFactory;
@@ -33,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -50,7 +50,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 @Slf4j
 public class WorkerHeartbeatProducer {
-
 
   /** RabbitMQ template for publishing heartbeat messages. */
   private final RabbitTemplate rabbitTemplate;
@@ -243,7 +242,12 @@ public class WorkerHeartbeatProducer {
    */
   @PostConstruct
   public void start() {
-    heartbeatTask = scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, pingIntervalMs, TimeUnit.MILLISECONDS);
+    try {
+      heartbeatTask = scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, pingIntervalMs, TimeUnit.MILLISECONDS);
+    } catch (Exception e) {
+      log.error("Failed to start heartbeat scheduler; Worker heartbeat will not be sent. " +
+          "Application continues but App instances may mark this Worker as dead.", e);
+    }
   }
 
   /**

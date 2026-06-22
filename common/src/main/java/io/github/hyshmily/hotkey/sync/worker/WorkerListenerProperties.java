@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sync;
+package io.github.hyshmily.hotkey.sync.worker;
 
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import lombok.Data;
@@ -65,7 +65,7 @@ public class WorkerListenerProperties {
    * Higher values increase throughput under load at the cost of more Redis connections. */
   private int concurrentConsumers = 2;
 
-   /** Pool size for the scheduled executor that runs jittered Worker cache-update tasks.
+  /** Pool size for the scheduled executor that runs jittered Worker cache-update tasks.
    * Should be at least as large as the number of concurrent consumers. */
   private int schedulerPoolSize = 2;
 

@@ -18,8 +18,7 @@ package io.github.hyshmily.hotkey.sharding;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
-import io.github.hyshmily.hotkey.sync.ClusterHealthView;
-import io.github.hyshmily.hotkey.sync.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -27,7 +26,8 @@ class RingManagerTest {
 
   private static void registerAlive(ClusterHealthView healthView, String nodeId) {
     healthView.onHeartbeat(
-        new WorkerHeartbeatMessage(nodeId, 1, System.currentTimeMillis(), 0, 0, true, 0, 0, 0, 0, 0));
+      new WorkerHeartbeatMessage(nodeId, 1, System.currentTimeMillis(), 0, 0, true, 0, 0, 0, 0, 0)
+    );
   }
 
   @Test
@@ -260,7 +260,7 @@ class RingManagerTest {
     RingManager manager = new RingManager(10);
     ClusterHealthView healthView = new ClusterHealthView(3, 30000, 3);
 
-    final int[] capturedCount = {-1};
+    final int[] capturedCount = { -1 };
     manager.setOnRingReconciled(count -> capturedCount[0] = count);
 
     registerAlive(healthView, "a");
@@ -280,7 +280,7 @@ class RingManagerTest {
     RingManager manager = new RingManager(10);
     manager.addNode("manual-a");
 
-    final boolean[] invoked = {false};
+    final boolean[] invoked = { false };
     manager.setOnRingReconciled(count -> invoked[0] = true);
 
     ClusterHealthView healthView = new ClusterHealthView(1, 30000, 3);
@@ -299,7 +299,7 @@ class RingManagerTest {
     ClusterHealthView healthView = new ClusterHealthView(1, 30000, 3);
     registerAlive(healthView, "a");
 
-    final int[] invocationCount = {0};
+    final int[] invocationCount = { 0 };
     manager.setOnRingReconciled(count -> invocationCount[0]++);
 
     manager.reconcileFromHealthView(healthView);

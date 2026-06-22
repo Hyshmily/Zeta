@@ -304,13 +304,14 @@ class CacheExpireManagerTest {
    */
   @Test
   void isSoftExpired_withMaxValue_shouldReturnFalse() {
-    caffeineCache.put("perm", CacheEntry.builder()
+    CacheEntry entry = CacheEntry.builder()
       .value("v").dataVersion(1).isVersionDegraded(false)
       .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
       .softTtlMs(Long.MAX_VALUE).softExpireAtMs(Long.MAX_VALUE)
       .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
-    assertThat(expireManager.isSoftExpired("perm")).isFalse();
+      .build();
+    caffeineCache.put("perm", entry);
+    assertThat(expireManager.isSoftExpired(entry)).isFalse();
   }
 
   /**
@@ -319,13 +320,14 @@ class CacheExpireManagerTest {
    */
   @Test
   void isSoftExpired_withZeroExpireAt_shouldReturnTrue() {
-    caffeineCache.put("zero", CacheEntry.builder()
+    CacheEntry entry = CacheEntry.builder()
       .value("v").dataVersion(1).isVersionDegraded(false)
       .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
       .softTtlMs(0).softExpireAtMs(0)
       .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
-    assertThat(expireManager.isSoftExpired("zero")).isTrue();
+      .build();
+    caffeineCache.put("zero", entry);
+    assertThat(expireManager.isSoftExpired(entry)).isTrue();
   }
 
   /**
