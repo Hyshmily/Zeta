@@ -60,4 +60,8 @@ CLAUDE.md
 # Generated docs
 HELP.md
 
+# Environment / transient files
+worker/.env
+common/cp.txt
+
 
