@@ -31,8 +31,8 @@ import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import java.util.Arrays;
@@ -232,7 +232,7 @@ class HotKeyCacheTest {
   }
 
   /**
-   * Verifies that invalidateAll removes multiple cached entries.
+   * Verifies that invalidateAllLocal removes multiple cached entries.
    */
   @Test
   void invalidateAll_shouldRemoveEntries() {
@@ -244,7 +244,7 @@ class HotKeyCacheTest {
   }
 
   /**
-   * Verifies that invalidateAll skips null and blank keys in the input list.
+   * Verifies that invalidateAllLocal skips null and blank keys in the input list.
    */
   @Test
   void invalidateAll_shouldSkipInvalidKeys() {
@@ -592,14 +592,14 @@ class HotKeyCacheTest {
   }
 
   /**
-   * Verifies that invalidateAll (no-arg) clears all cache entries (emergency flush).
+   * Verifies that invalidateAllLocal (no-arg) clears all cache entries (emergency flush).
    */
   @Test
   void invalidateAll_noArg_shouldClearAll() {
     caffeineCache.put("k1", "v1");
     caffeineCache.put("k2", "v2");
     assertThat(caffeineCache.estimatedSize()).isPositive();
-    hotKeyCache.invalidateAll();
+    hotKeyCache.invalidateAllLocal();
     assertThat(caffeineCache.estimatedSize()).isZero();
   }
 
@@ -900,7 +900,7 @@ class HotKeyCacheTest {
     assertThat(((CacheEntry) raw).getSoftTtlMs()).isEqualTo(5000L);
   }
 
-  // ── invalidateAll(Collection) with all-invalid keys ──
+  // ── invalidateAllLocal(Collection) with all-invalid keys ──
 
   @Test
   void invalidateAll_collection_whenAllInvalid_shouldSkip() {
@@ -1224,7 +1224,7 @@ class HotKeyCacheTest {
     }
 
     @Test
-    @DisplayName("invalidateAll should broadcast when publisher present")
+    @DisplayName("invalidateAllLocal should broadcast when publisher present")
     void invalidateAll_shouldBroadcastWhenPublisherPresent() {
       hotKeyCache.invalidateAll(List.of("key1", "key2"));
 

@@ -127,7 +127,7 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>hotkey</artifactId>
-  <version>1.1.5-SNAPSHOT</version>
+  <version>1.1.51</version>
 </dependency>
 ```
 
@@ -144,7 +144,7 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.5-SNAPSHOT</version>
+    <version>1.1.51</version>
 </dependency>
 ```
 
@@ -177,18 +177,18 @@ docker run -d --name hotkey-worker -p 8080:8080 \
   -e SPRING_RABBITMQ_HOST=rabbitmq \
   -e SPRING_DATA_REDIS_HOST=redis \
   -e HOTKEY_WORKER_ENABLED=true \
-  ghcr.io/hyshmily/hotkey-worker:1.1.5-SNAPSHOT
+  ghcr.io/hyshmily/hotkey-worker:1.1.51
 ```
 
 **直接运行 JAR**（无需 Docker）：
 
 ```bash
 mvn clean package -pl worker
-java -jar worker/target/hotkey-worker-1.1.5-SNAPSHOT.jar
+java -jar worker/target/hotkey-worker-1.1.51.jar
 ```
 
 > Worker 由 `worker/` 模块打包。必须连接 RabbitMQ + Redis。
-> 设置 `HOTKEY_WORKER_ENABLED=true` 激活 Worker 模式（此模式下缓存方法抛出 `UnsupportedOperationException`）。
+> 设置 `HOTKEY_WORKER_ENABLED=true` 激活 Worker 模式（此模式下缓存方法抛出 `HotKeyModeException`）。
 
 ### 2. 配置
 
@@ -656,9 +656,9 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 | 模式        | `worker.enabled` | 激活的 Bean                                                                      |
 | ----------- | ---------------- | -------------------------------------------------------------------------------- |
 | App-only    | `false`（默认）  | `HotKeyCache`、TopK、reporter、actuator、sync                                    |
-| Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `UnsupportedOperationException`） |
+| Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `HotKeyModeException`） |
 
-**Worker-only** 模式下缓存操作抛出 `UnsupportedOperationException`。
+**Worker-only** 模式下缓存操作抛出 `HotKeyModeException`。
 
 **跨 Worker decisionVersion 分区：** 每个 Worker 拥有唯一的 `nodeId` 和 `epoch` 计数器。广播 HOT/COOL 决策时，Worker 将两者作为 AMQP 头部附加。应用侧 `WorkerListener` 将 `nodeId`/`epoch` 通过双重检查锁定路径传播到 `CacheEntry.decisionNodeId`/`decisionEpoch`。`VersionGuard` 按 Worker 分区比较决策：只有传入决策的 `epoch` >= 缓存的 `decisionEpoch` 时才获胜，使用 `nodeId` 区分版本空间。这防止重启后的 Worker 产生的过时决策覆盖较新的决策——每次新启动递增 `epoch` 计数器，重置权威性。
 
@@ -697,7 +697,7 @@ public User getUser(Long id) { ... }
 
 - **`TYPE_REFRESH`** — 带版本号的刷新。对端通过 `CacheSyncListener.handleRefresh()` 从 Redis 重新加载，根据 `dataVersion` 跳过旧更新。4 种情况的比较（正常-正常、正常-降级、降级-正常、降级-降级）保证正常的（Redis INCR）dataVersion 始终优先于降级的（节点本地）版本。由 `invalidate()` 和 `putThrough()` 发送。
 - **`TYPE_INVALIDATE`** — 单 key 失效（带版本守卫）。对端仅在传入 `dataVersion` 不陈旧时移除 L1 条目。由 `putBeforeInvalidate()` 发送。
-- **`TYPE_INVALIDATE_ALL`** — 批量失效（无版本守卫）。对端立即从 L1 移除所有列出的 key，不重新加载。由 `invalidateAll()` 发送。
+- **`TYPE_INVALIDATE_ALL`** — 批量失效（无版本守卫）。对端立即从 L1 移除所有列出的 key，不重新加载。由 `invalidateAllLocal()` 发送。
 - **`TYPE_RULES_SYNC`** — 规则集替换。body 为 JSON 序列化的 `List<Rule>`，接收端调用 `RuleMatcher.syncRules()` 原子替换本地规则列表。不触发二次广播。
 
 > [!SECURITY]
@@ -769,7 +769,7 @@ long size = hotKey.estimatedSize();    // L1 条目数量
 HotKeyCacheStats s = hotKey.stats();   // 命中率、驱逐数等
 
 // 紧急清空（不广播）
-hotKey.invalidateAll();
+hotKey.invalidateAllLocal();
 
 // 批量规则评估
 Map<String, Rule.RuleAction> actions = hotKey.evaluateRules(List.of("user:1", "user:2"));

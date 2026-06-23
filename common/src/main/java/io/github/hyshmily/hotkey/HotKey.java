@@ -20,6 +20,7 @@ import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyReadQuery;
 import io.github.hyshmily.hotkey.cache.fluentAPI.HotKeyWriteCommand;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
+import io.github.hyshmily.hotkey.exception.HotKeyModeException;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
@@ -197,7 +198,6 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader) {
-    requireCache();
     return get(cacheKey, loader).orElse(null);
   }
 
@@ -233,7 +233,6 @@ public class HotKey {
    * @see #get(String, Supplier, long, long)
    */
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs) {
-    requireCache();
     return get(cacheKey, loader, hardTtlMs, 0).orElse(null);
   }
 
@@ -271,7 +270,6 @@ public class HotKey {
    * @see #get(String, Supplier, long, long)
    */
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
-    requireCache();
     return get(cacheKey, loader, hardTtlMs, softTtlMs).orElse(null);
   }
 
@@ -315,7 +313,6 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader) {
-    requireCache();
     return getWithSoftExpire(cacheKey, loader).orElse(null);
   }
 
@@ -350,7 +347,6 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long softTtlMs) {
-    requireCache();
     return getWithSoftExpire(cacheKey, loader, softTtlMs).orElse(null);
   }
 
@@ -391,7 +387,6 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
-    requireCache();
     return getWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs).orElse(null);
   }
 
@@ -430,7 +425,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <T> Optional<T> peek(String cacheKey) {
-    requireCache();
+    requireAppCache("peek");
     return hotKeyCache.peek(cacheKey);
   }
 
@@ -464,7 +459,8 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader) {
-    requireCache();
+    requireAppCache("get");
+    requireAppDetector("get");
     return hotKeyCache.get(cacheKey, reader);
   }
 
@@ -482,7 +478,8 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
-    requireCache();
+    requireAppCache("get");
+    requireAppDetector("get");
     return hotKeyCache.get(cacheKey, reader, hardTtlMs, softTtlMs);
   }
 
@@ -498,7 +495,8 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader) {
-    requireCache();
+    requireAppCache("get");
+    requireAppDetector("get");
     return hotKeyCache.getWithSoftExpire(cacheKey, reader);
   }
 
@@ -514,7 +512,8 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long softTtlMs) {
-    requireCache();
+    requireAppCache("get");
+    requireAppDetector("get");
     return hotKeyCache.getWithSoftExpire(cacheKey, reader, softTtlMs);
   }
 
@@ -531,7 +530,8 @@ public class HotKey {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
-    requireCache();
+    requireAppCache("get");
+    requireAppDetector("get");
     return hotKeyCache.getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs);
   }
 
@@ -543,7 +543,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void invalidate(String cacheKey) {
-    requireCache();
+    requireAppCache("invalidate");
     hotKeyCache.invalidate(cacheKey);
   }
 
@@ -565,7 +565,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void invalidateAll(Collection<String> cacheKeys) {
-    requireCache();
+    requireAppCache("invalidateAll");
     hotKeyCache.invalidateAll(cacheKeys);
   }
 
@@ -591,7 +591,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void evictLocal(Collection<String> cacheKeys) {
-    requireCache();
+    requireAppCache("evictLocal");
     hotKeyCache.evictLocal(cacheKeys);
   }
 
@@ -606,7 +606,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer) {
-    requireCache();
+    requireAppCache("putThrough");
     hotKeyCache.putThrough(cacheKey, value, writer);
   }
 
@@ -623,7 +623,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs, long softTtlMs) {
-    requireCache();
+    requireAppCache("putThrough");
     hotKeyCache.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs);
   }
 
@@ -641,7 +641,9 @@ public class HotKey {
    * @param value    the value to cache
    */
   public void putLocal(String cacheKey, Object value) {
-    requireCache();
+    if (hotKeyCache == null) {
+      return; // Worker-only mode: silently no-op (per Javadoc)
+    }
     putLocal(cacheKey, value, 0, 0);
   }
 
@@ -649,11 +651,14 @@ public class HotKey {
    * Batch variant of {@link #putLocal(String, Object)}. Writes all entries into
    * L1 without version bump, broadcast, hot-key detection, or reporting.
    *
+   * <p>In Worker-only mode this method silently no-ops.
+   *
    * @param entries a map of key → value to store locally
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void putLocal(Map<String, Object> entries) {
-    requireCache();
+    if (hotKeyCache == null) {
+      return; // Worker-only mode: silently no-op
+    }
     entries.forEach(this::putLocal);
   }
 
@@ -664,13 +669,17 @@ public class HotKey {
    * <p>
    * Pass {@code 0} for either TTL to use the configured default.
    *
+   * <p>In Worker-only mode this method silently no-ops.
+   *
    * @param cacheKey  the key to store
    * @param value     the value to cache
    * @param hardTtlMs hard TTL override (0 = use configured default)
    * @param softTtlMs soft TTL override (0 = use configured default)
    */
   public void putLocal(String cacheKey, Object value, long hardTtlMs, long softTtlMs) {
-    requireCache();
+    if (hotKeyCache == null) {
+      return; // Worker-only mode: silently no-op
+    }
     hotKeyCache.putLocal(cacheKey, value, hardTtlMs, softTtlMs);
   }
 
@@ -683,7 +692,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void putBeforeInvalidate(String cacheKey, Runnable mutation) {
-    requireCache();
+    requireAppCache("putBeforeInvalidate");
     hotKeyCache.putBeforeInvalidate(cacheKey, mutation);
   }
 
@@ -691,11 +700,14 @@ public class HotKey {
    * Batch variant of {@link #putBeforeInvalidate(String, Runnable)}. Executes
    * all mutations and invalidates the corresponding keys from L1 with broadcast.
    *
+   * <p><b>Batch execution:</b> Iterates sequentially; for large batches
+   * consider parallelizing in caller code.
+   *
    * @param mutations a map of key → mutation to execute
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void putBeforeInvalidateAll(Map<String, Runnable> mutations) {
-    requireCache();
+    requireAppCache("putBeforeInvalidateAll");
     mutations.forEach(this::putBeforeInvalidate);
   }
 
@@ -742,7 +754,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public Cache<String, Object> getLocalCache() {
-    requireCache();
+    requireAppCache("getLocalCache");
     return hotKeyCache.getLocalCache();
   }
 
@@ -758,9 +770,9 @@ public class HotKey {
    *
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
-  public void invalidateAll() {
-    requireCache();
-    hotKeyCache.invalidateAll();
+  public void invalidateAllLocal() {
+    requireAppCache("invalidateAllLocal");
+    hotKeyCache.invalidateAllLocal();
   }
 
   /**
@@ -897,7 +909,8 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public boolean isLocalHotKey(String cacheKey) {
-    requireCache();
+    requireAppCache("isLocalHotKey");
+    requireAppDetector("isLocalHotKey");
     return hotKeyCache.isLocalHotKey(cacheKey);
   }
 
@@ -905,12 +918,14 @@ public class HotKey {
    * Batch variant of {@link #isLocalHotKey(String)}. Returns a map of key →
    * hot status for all given keys.
    *
+   * <p><b>Batch execution:</b> Iterates sequentially; for large batches
+   * consider parallelizing in caller code.
+   *
    * @param cacheKeys the keys to inspect
    * @return a map of key → whether it is a local hot key
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public Map<String, Boolean> areLocalHotKeys(Collection<String> cacheKeys) {
-    requireCache();
     Map<String, Boolean> result = new HashMap<>();
     cacheKeys.forEach(key -> result.put(key, isLocalHotKey(key)));
     return result;
@@ -925,6 +940,7 @@ public class HotKey {
    * @param count    the number of accesses to add
    */
   public void notifyLocalDetectorDirect(String cacheKey, int count) {
+    requireAppDetector("notifyLocalDetectorDirect");
     appHotKeyDetector.addDirect(cacheKey, count);
   }
 
@@ -934,6 +950,7 @@ public class HotKey {
    * @param keyCounts a map of key → access count
    */
   public void notifyLocalDetectorDirect(Map<String, Long> keyCounts) {
+    requireAppDetector("notifyLocalDetectorDirect");
     appHotKeyDetector.addDirect(keyCounts);
   }
 
@@ -946,6 +963,7 @@ public class HotKey {
    * @param cacheKey the accessed key (maybe {@code null}, silently ignored)
    */
   public void notifyLocalDetector(String cacheKey) {
+    requireAppDetector("notifyLocalDetector");
     appHotKeyDetector.add(cacheKey);
   }
 
@@ -957,6 +975,7 @@ public class HotKey {
    * @param count    the number of accesses to record
    */
   public void notifyLocalDetector(String cacheKey, long count) {
+    requireAppDetector("notifyLocalDetector");
     appHotKeyDetector.add(cacheKey, count);
   }
 
@@ -967,6 +986,7 @@ public class HotKey {
    * @param keyCounts a map of key → access count
    */
   public void notifyLocalDetector(Map<String, Long> keyCounts) {
+    requireAppDetector("notifyLocalDetector");
     appHotKeyDetector.add(keyCounts);
   }
 
@@ -979,7 +999,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void refresh(String cacheKey, Supplier<?> loader) {
-    requireCache();
+    requireAppCache("refresh");
     evictLocal(cacheKey);
     putThrough(cacheKey, loader.get(), () -> {});
   }
@@ -992,7 +1012,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void refreshAll(Map<String, Supplier<?>> loaders) {
-    requireCache();
+    requireAppCache("refreshAll");
     loaders.forEach(this::refresh);
   }
 
@@ -1008,7 +1028,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <V> void refresh(String cacheKey, Supplier<V> loader, long hotHardTtlMs, long hotSoftTtlMs) {
-    requireCache();
+    requireAppCache("refresh");
     evictLocal(cacheKey);
     putThrough(cacheKey, loader.get(), () -> {}, hotHardTtlMs, hotSoftTtlMs);
   }
@@ -1028,6 +1048,9 @@ public class HotKey {
   /**
    * Batch variant of {@link #isWorkerHotKey(String)}. Returns a map of key →
    * Worker hot status for all given keys.
+   *
+   * <p><b>Batch execution:</b> Iterates sequentially; for large batches
+   * consider parallelizing in caller code.
    *
    * @param cacheKeys the keys to inspect
    * @return a map of key → whether it is a cluster-wide hot key;
@@ -1126,7 +1149,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addBlacklist(String keyPattern) {
-    requireCache();
+    requireAppCache("addBlacklist");
     hotKeyCache.addBlacklist(keyPattern);
   }
 
@@ -1138,7 +1161,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addBlacklist(Collection<String> keyPatterns) {
-    requireCache();
+    requireAppCache("addBlacklist");
     keyPatterns.forEach(hotKeyCache::addBlacklist);
   }
 
@@ -1149,7 +1172,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeBlacklist(String keyPattern) {
-    requireCache();
+    requireAppCache("removeBlacklist");
     hotKeyCache.unBlacklist(keyPattern);
   }
 
@@ -1161,7 +1184,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeBlacklist(Collection<String> keyPatterns) {
-    requireCache();
+    requireAppCache("removeBlacklist");
     keyPatterns.forEach(hotKeyCache::unBlacklist);
   }
 
@@ -1175,7 +1198,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addWhitelist(String keyPattern) {
-    requireCache();
+    requireAppCache("addWhitelist");
     hotKeyCache.addWhitelist(keyPattern);
   }
 
@@ -1187,7 +1210,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addWhitelist(Collection<String> keyPatterns) {
-    requireCache();
+    requireAppCache("addWhitelist");
     keyPatterns.forEach(hotKeyCache::addWhitelist);
   }
 
@@ -1198,7 +1221,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeWhitelist(String keyPattern) {
-    requireCache();
+    requireAppCache("removeWhitelist");
     hotKeyCache.unWhitelist(keyPattern);
   }
 
@@ -1210,7 +1233,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeWhitelist(Collection<String> keyPatterns) {
-    requireCache();
+    requireAppCache("removeWhitelist");
     keyPatterns.forEach(hotKeyCache::unWhitelist);
   }
 
@@ -1332,7 +1355,7 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void clearAllRules() {
-    requireCache();
+    requireAppCache("clearAllRules");
     hotKeyCache.clearAllRules();
   }
 
@@ -1343,19 +1366,94 @@ public class HotKey {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void broadcastAllLocalRulesManually() {
-    requireCache();
+    requireAppCache("broadcastAllLocalRulesManually");
     hotKeyCache.broadcastAllLocalRulesManually();
   }
 
   /**
-   * Verify that the cache is available; throws {@link UnsupportedOperationException}
-   * when running in Worker-only mode where no app-side cache exists.
+   * Whether this instance has app-side cache available.
+   *
+   * <p>Returns {@code true} in App-only and Coexistence modes,
+   * {@code false} in Worker-only mode. Callers can use this to guard
+   * cache-dependent operations without catching {@link HotKeyModeException}.
+   *
+   * @return {@code true} if cache-dependent APIs (get, put, invalidate, etc.) are usable
    */
-  private void requireCache() {
+  public boolean isApp() {
+    return hotKeyCache != null;
+  }
+
+  /**
+   * Whether this instance has Worker-side TopK available.
+   *
+   * <p>Returns {@code true} in Worker-only and Coexistence modes,
+   * {@code false} in App-only mode.
+   *
+   * @return {@code true} if Worker TopK queries (returnWorkerHotKeys, etc.) are usable
+   */
+  public boolean isWorker() {
+    return workerTopKAlgorithm != null;
+  }
+
+  /**
+   * Whether this instance is in pure App-only mode (cache present, Worker TopK absent).
+   *
+   * @return {@code true} if App-only mode
+   */
+  public boolean isAppOnly() {
+    return hotKeyCache != null && workerTopKAlgorithm == null;
+  }
+
+  /**
+   * Whether this instance is in pure Worker-only mode (cache absent, Worker TopK present).
+   *
+   * @return {@code true} if Worker-only mode
+   */
+  public boolean isWorkerOnly() {
+    return hotKeyCache == null && workerTopKAlgorithm != null;
+  }
+
+  /**
+   * Returns a human-readable label of the current deployment mode based on the
+   * presence/absence of the cache and Worker TopK fields.
+   */
+  private String currentModeLabel() {
+    if (hotKeyCache != null && workerTopKAlgorithm != null) {
+      return "Coexistence mode";
+    }
+    if (hotKeyCache != null) {
+      return "App-only mode";
+    }
+    if (workerTopKAlgorithm != null) {
+      return "Worker-only mode";
+    }
+    return "Uninitialized mode (no cache, no TopK)";
+  }
+
+  /**
+   * Requires app-side cache; throws {@link HotKeyModeException} with an
+   * operation-tagged message when running in Worker-only mode.
+   *
+   * @param operation the API operation name (e.g. {@code "get"}, {@code "putThrough"})
+   */
+  private void requireAppCache(String operation) {
     if (hotKeyCache == null) {
-      throw new UnsupportedOperationException(
-        "HotKey cache is not available in Worker-only mode. " + "Run the Worker as a separate Spring Boot process."
-      );
+      throw new HotKeyModeException(operation, currentModeLabel(), "App-mode cache");
     }
   }
+
+  /**
+   * Requires app-side TopK detector; throws {@link HotKeyModeException} when
+   * the app-side detector is unavailable (Worker-only mode).
+   *
+   * @param operation the API operation name
+   */
+  private void requireAppDetector(String operation) {
+    if (appHotKeyDetector == null) {
+      throw new HotKeyModeException(operation, currentModeLabel(), "App-mode TopK detector");
+    }
+  }
+
+
 }
+

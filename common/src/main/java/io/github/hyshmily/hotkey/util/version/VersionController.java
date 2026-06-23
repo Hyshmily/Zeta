@@ -17,13 +17,14 @@ package io.github.hyshmily.hotkey.util.version;
 
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
-import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages per-key monotonically increasing version numbers for the application-level
@@ -77,6 +78,11 @@ public class VersionController {
    */
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
 
+  private static final DefaultRedisScript<Long> INCR_SCRIPT = new DefaultRedisScript<>(
+    "local v = redis.call('INCR', KEYS[1]); redis.call('EXPIRE', KEYS[1], ARGV[1]); return v",
+    Long.class
+  );
+
   /**
    * Atomically increments the version counter for the given cache key and returns
    * the new version with its degradation status.
@@ -100,15 +106,8 @@ public class VersionController {
     return redisTemplate
       .map(t -> {
         try {
-          String script =
-            "local v = redis.call('INCR', KEYS[1]) " +
-            "if tonumber(ARGV[1]) > 0 then " +
-            "    redis.call('EXPIRE', KEYS[1], ARGV[1]) " +
-            "end " +
-            "return v";
-
           Long v = t.execute(
-            new DefaultRedisScript<>(script, Long.class),
+            INCR_SCRIPT,
             List.of(HotKeyConstants.REDIS_VERSION_KEY_PREFIX + cacheKey),
             String.valueOf(versionKeyTtlMinutes * 60L)
           );
@@ -127,7 +126,7 @@ public class VersionController {
    * <p>The version is computed as {@code Long.MIN_VALUE + incrementing counter},
    * ensuring that every degraded version is numerically less than any positive
    * Redis INCR version. This guarantees that the numeric comparison in
-   * {@link CacheSyncPublisher#sendDeduped} and {@link VersionGuard#shouldSkipForSync}
+   * {@link CacheSyncPublisher #sendDeduped} and {@link VersionGuard#shouldSkipForSync}
    * correctly prefers normal (Redis-backed) broadcasts over degraded ones without
    * requiring flag-aware logic.
    *

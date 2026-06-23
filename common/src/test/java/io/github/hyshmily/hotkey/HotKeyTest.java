@@ -15,28 +15,28 @@
  */
 package io.github.hyshmily.hotkey;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.hotkey.exception.HotKeyModeException;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Supplier;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 class HotKeyTest {
 
@@ -164,26 +164,22 @@ class HotKeyTest {
   @Test
   void cacheMethods_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.get("k", () -> "v"))
-      .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> workerOnly.isLocalHotKey("k"))
-      .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> workerOnly.peek("k"))
-      .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> workerOnly.invalidate("k"))
-      .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> workerOnly.putThrough("k", "v", () -> {}))
-      .isInstanceOf(UnsupportedOperationException.class);
-    assertThatThrownBy(() -> workerOnly.putBeforeInvalidate("k", () -> {}))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.get("k", () -> "v")).isInstanceOf(HotKeyModeException.class);
+    assertThatThrownBy(() -> workerOnly.isLocalHotKey("k")).isInstanceOf(HotKeyModeException.class);
+    assertThatThrownBy(() -> workerOnly.peek("k")).isInstanceOf(HotKeyModeException.class);
+    assertThatThrownBy(() -> workerOnly.invalidate("k")).isInstanceOf(HotKeyModeException.class);
+    assertThatThrownBy(() -> workerOnly.putThrough("k", "v", () -> {})).isInstanceOf(
+      HotKeyModeException.class
+    );
+    assertThatThrownBy(() -> workerOnly.putBeforeInvalidate("k", () -> {})).isInstanceOf(
+      HotKeyModeException.class
+    );
   }
 
   @Test
   void get_shouldPropagateHotKeyBlockedException() {
-    when(hotKeyCache.get(anyString(), any()))
-      .thenThrow(new HotKeyBlockedException("HotKeyCache", "secret"));
-    assertThatThrownBy(() -> hotKey.get("secret", () -> "v"))
-      .isInstanceOf(HotKeyBlockedException.class);
+    when(hotKeyCache.get(anyString(), any())).thenThrow(new HotKeyBlockedException("HotKeyCache", "secret"));
+    assertThatThrownBy(() -> hotKey.get("secret", () -> "v")).isInstanceOf(HotKeyBlockedException.class);
   }
 
   // ── Additional getWithSoftExpire overloads ──
@@ -289,8 +285,7 @@ class HotKeyTest {
   @Test
   void getLocalCache_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(workerOnly::getLocalCache)
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(workerOnly::getLocalCache).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── addBlacklist / removeBlacklist / addWhitelist / removeWhitelist ──
@@ -304,8 +299,7 @@ class HotKeyTest {
   @Test
   void addBlacklist_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.addBlacklist("x"))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.addBlacklist("x")).isInstanceOf(HotKeyModeException.class);
   }
 
   @Test
@@ -317,8 +311,7 @@ class HotKeyTest {
   @Test
   void removeBlacklist_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.removeBlacklist("x"))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.removeBlacklist("x")).isInstanceOf(HotKeyModeException.class);
   }
 
   @Test
@@ -330,8 +323,7 @@ class HotKeyTest {
   @Test
   void addWhitelist_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.addWhitelist("x"))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.addWhitelist("x")).isInstanceOf(HotKeyModeException.class);
   }
 
   @Test
@@ -343,8 +335,7 @@ class HotKeyTest {
   @Test
   void removeWhitelist_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.removeWhitelist("x"))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.removeWhitelist("x")).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── getAllRules ──
@@ -389,8 +380,7 @@ class HotKeyTest {
   @Test
   void clearAllRules_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(workerOnly::clearAllRules)
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(workerOnly::clearAllRules).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── broadcastAllLocalRulesManually ──
@@ -404,8 +394,7 @@ class HotKeyTest {
   @Test
   void broadcastAllLocalRulesManually_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(workerOnly::broadcastAllLocalRulesManually)
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(workerOnly::broadcastAllLocalRulesManually).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── notifyLocalDetector ──
@@ -428,7 +417,12 @@ class HotKeyTest {
   void read_shouldReturnHotKeyReadQuery() {
     when(hotKeyCache.evaluateRule("k")).thenReturn(RuleAction.ALLOW);
     when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
-    assertThat(hotKey.read("k").withPrimary(() -> "db").execute()).contains("v");
+    assertThat(
+      hotKey
+        .read("k")
+        .withPrimary(() -> "db")
+        .execute()
+    ).contains("v");
   }
 
   @Test
@@ -524,22 +518,21 @@ class HotKeyTest {
     assertThat(result).containsEntry("a", "v");
   }
 
-  // ── invalidateAll no-arg ──
+  // ── invalidateAllLocal no-arg ──
 
   @Test
-  void invalidateAll_noArg_shouldDelegateToCache() {
-    hotKey.invalidateAll();
-    verify(hotKeyCache).invalidateAll();
+  void invalidateAllLocal_shouldDelegateToCache() {
+    hotKey.invalidateAllLocal();
+    verify(hotKeyCache).invalidateAllLocal();
   }
 
   @Test
-  void invalidateAll_noArg_shouldThrowInWorkerMode() {
+  void invalidateAllLocal_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(workerOnly::invalidateAll)
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(workerOnly::invalidateAllLocal).isInstanceOf(HotKeyModeException.class);
   }
 
-  // ── invalidateAll Collection ──
+  // ── invalidateAllLocal Collection ──
 
   @Test
   void invalidateAll_collection_shouldDelegateToCache() {
@@ -687,7 +680,7 @@ class HotKeyTest {
   @Test
   void peekAll_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.peekAll(List.of("k"))).isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.peekAll(List.of("k"))).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── evictLocal ──
@@ -701,7 +694,7 @@ class HotKeyTest {
   @Test
   void evictLocal_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.evictLocal("k")).isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.evictLocal("k")).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── areLocalHotKeys ──
@@ -710,14 +703,15 @@ class HotKeyTest {
   void areLocalHotKeys_shouldDelegateToCache() {
     when(hotKeyCache.isLocalHotKey("k1")).thenReturn(true);
     when(hotKeyCache.isLocalHotKey("k2")).thenReturn(false);
-    assertThat(hotKey.areLocalHotKeys(List.of("k1", "k2")))
-      .containsEntry("k1", true).containsEntry("k2", false);
+    assertThat(hotKey.areLocalHotKeys(List.of("k1", "k2"))).containsEntry("k1", true).containsEntry("k2", false);
   }
 
   @Test
   void areLocalHotKeys_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.areLocalHotKeys(List.of("k"))).isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.areLocalHotKeys(List.of("k"))).isInstanceOf(
+      HotKeyModeException.class
+    );
   }
 
   // ── areWorkerHotKeys ──
@@ -726,8 +720,7 @@ class HotKeyTest {
   void areWorkerHotKeys_shouldReturnMap() {
     when(workerTopK.contains("k1")).thenReturn(true);
     when(workerTopK.contains("k2")).thenReturn(false);
-    assertThat(hotKey.areWorkerHotKeys(List.of("k1", "k2")))
-      .containsEntry("k1", true).containsEntry("k2", false);
+    assertThat(hotKey.areWorkerHotKeys(List.of("k1", "k2"))).containsEntry("k1", true).containsEntry("k2", false);
   }
 
   @Test
@@ -755,7 +748,7 @@ class HotKeyTest {
   @Test
   void refresh_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.refresh("k", () -> "v")).isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.refresh("k", () -> "v")).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── refreshAll ──
@@ -778,8 +771,9 @@ class HotKeyTest {
   @Test
   void putBeforeInvalidateAll_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.putBeforeInvalidateAll(Map.of("k", () -> {})))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.putBeforeInvalidateAll(Map.of("k", () -> {}))).isInstanceOf(
+      HotKeyModeException.class
+    );
   }
 
   // ── addBlacklist(Collection) / removeBlacklist(Collection) ──
@@ -794,8 +788,7 @@ class HotKeyTest {
   @Test
   void addBlacklist_collection_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.addBlacklist(List.of("x")))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.addBlacklist(List.of("x"))).isInstanceOf(HotKeyModeException.class);
   }
 
   @Test
@@ -808,8 +801,9 @@ class HotKeyTest {
   @Test
   void removeBlacklist_collection_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.removeBlacklist(List.of("x")))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.removeBlacklist(List.of("x"))).isInstanceOf(
+      HotKeyModeException.class
+    );
   }
 
   // ── addWhitelist(Collection) / removeWhitelist(Collection) ──
@@ -824,8 +818,7 @@ class HotKeyTest {
   @Test
   void addWhitelist_collection_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.addWhitelist(List.of("x")))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.addWhitelist(List.of("x"))).isInstanceOf(HotKeyModeException.class);
   }
 
   @Test
@@ -838,8 +831,9 @@ class HotKeyTest {
   @Test
   void removeWhitelist_collection_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.removeWhitelist(List.of("x")))
-      .isInstanceOf(UnsupportedOperationException.class);
+    assertThatThrownBy(() -> workerOnly.removeWhitelist(List.of("x"))).isInstanceOf(
+      HotKeyModeException.class
+    );
   }
 
   // ── evaluateRules(Collection) ──
@@ -849,14 +843,16 @@ class HotKeyTest {
     when(hotKeyCache.evaluateRule("k1")).thenReturn(RuleAction.BLOCK);
     when(hotKeyCache.evaluateRule("k2")).thenReturn(RuleAction.ALLOW);
     assertThat(hotKey.evaluateRules(List.of("k1", "k2")))
-      .containsEntry("k1", RuleAction.BLOCK).containsEntry("k2", RuleAction.ALLOW);
+      .containsEntry("k1", RuleAction.BLOCK)
+      .containsEntry("k2", RuleAction.ALLOW);
   }
 
   @Test
   void evaluateRules_whenCacheNull_shouldReturnAllAllow() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThat(workerOnly.evaluateRules(List.of("k1", "k2")))
-      .containsEntry("k1", RuleAction.ALLOW).containsEntry("k2", RuleAction.ALLOW);
+      .containsEntry("k1", RuleAction.ALLOW)
+      .containsEntry("k2", RuleAction.ALLOW);
   }
 
   // ── isBlacklisted(Collection) / isWhitelisted(Collection) ──
@@ -865,8 +861,7 @@ class HotKeyTest {
   void isBlacklisted_collection_shouldReturnMap() {
     when(hotKeyCache.isBlacklisted("k1")).thenReturn(true);
     when(hotKeyCache.isBlacklisted("k2")).thenReturn(false);
-    assertThat(hotKey.isBlacklisted(List.of("k1", "k2")))
-      .containsEntry("k1", true).containsEntry("k2", false);
+    assertThat(hotKey.isBlacklisted(List.of("k1", "k2"))).containsEntry("k1", true).containsEntry("k2", false);
   }
 
   @Test
@@ -879,8 +874,7 @@ class HotKeyTest {
   void isWhitelisted_collection_shouldReturnMap() {
     when(hotKeyCache.isWhitelisted("k1")).thenReturn(true);
     when(hotKeyCache.isWhitelisted("k2")).thenReturn(false);
-    assertThat(hotKey.isWhitelisted(List.of("k1", "k2")))
-      .containsEntry("k1", true).containsEntry("k2", false);
+    assertThat(hotKey.isWhitelisted(List.of("k1", "k2"))).containsEntry("k1", true).containsEntry("k2", false);
   }
 
   @Test

@@ -586,7 +586,7 @@ public class HotKeyCache {
       .filter(k -> !invalidCacheKey(k))
       .toList();
     if (validKeys.isEmpty()) {
-      log.debug("invalidateAll: all cacheKeys are invalid");
+      log.debug("invalidateAllLocal: all cacheKeys are invalid");
       return;
     }
 
@@ -984,7 +984,7 @@ public class HotKeyCache {
    * This is an emergency flush — all cached values are removed immediately.
    * No cross-instance sync messages are sent.
    */
-  public void invalidateAll() {
+  public void invalidateAllLocal() {
     caffeineCache.invalidateAll();
   }
 

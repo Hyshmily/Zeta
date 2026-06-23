@@ -48,7 +48,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * instances within the same deployment.
  *
  * <p><b>Responsibility boundary:</b> This publisher handles <em>application-level</em>
- * data changes only (e.g. {@code @CachePut}, {@code @CacheEvict}, {@code invalidateAll}).
+ * data changes only (e.g. {@code @CachePut}, {@code @CacheEvict}, {@code invalidateAllLocal}).
  * HOT/COOL lifecycle decisions from the Worker cluster are handled separately by the
  * Worker's {@code WorkerBroadcaster} and received by {@link WorkerListener}.
  *
@@ -156,7 +156,7 @@ public class CacheSyncPublisher {
    * for very large batches).
    *
    * <p>The body of each message is a JSON array of key strings. The receiver
-   * ({@link CacheSyncListener}) calls {@code caffeineCache.invalidateAll()}
+   * ({@link CacheSyncListener}) calls {@code caffeineCache.invalidateAllLocal()}
    * once per batch, which is more efficient
    * than sending individual INVALIDATE messages for each key.
    *

@@ -50,7 +50,7 @@ import org.springframework.amqp.core.Message;
  *       {@link VersionGuard#shouldSkipForSync} guard to prevent stale degraded
  *       invalidations from wiping out a healthy entry.</li>
  *   <li><b>INVALIDATE_ALL</b> ({@link SyncMessage#TYPE_INVALIDATE_ALL}): Batch-removes
- *       all keys in the JSON-array payload via {@code caffeineCache.invalidateAll()}.
+ *       all keys in the JSON-array payload via {@code caffeineCache.invalidateAllLocal()}.
  *       Bypasses version guards — these are unconditional operations.</li>
  *   <li><b>REFRESH</b> ({@link SyncMessage#TYPE_REFRESH}): Loads the latest value from
  *       Redis and updates the local cache entry. Preserves existing metadata (TTLs,
@@ -183,7 +183,7 @@ public class CacheSyncListener {
    * <p><b>Version guard logic:</b>
    * <ul>
    *   <li><b>Unconditional path:</b> When {@code version == 0L && !isVersionDegraded}
-   *       (clean invalidation from {@code invalidateAll}), the guard is bypassed
+   *       (clean invalidation from {@code invalidateAllLocal}), the guard is bypassed
    *       entirely — the entry is always removed.</li>
    *   <li><b>Guarded path:</b> Uses {@link VersionGuard#shouldSkipForSync} with the
    *       4-case degraded comparison. Case 2 (existing normal, incoming degraded)

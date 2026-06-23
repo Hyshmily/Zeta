@@ -129,7 +129,7 @@ Just add the starter to your `pom.xml`; Caffeine L1 + local HeavyKeeper + Report
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>hotkey</artifactId>
-  <version>1.1.5-SNAPSHOT</version>
+  <version>1.1.51</version>
 </dependency>
 ```
 
@@ -146,7 +146,7 @@ Just add the starter to your `pom.xml`; Caffeine L1 + local HeavyKeeper + Report
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.5-SNAPSHOT</version>
+    <version>1.1.51</version>
 </dependency>
 ```
 
@@ -179,18 +179,18 @@ docker run -d --name hotkey-worker -p 8080:8080 \
   -e SPRING_RABBITMQ_HOST=rabbitmq \
   -e SPRING_DATA_REDIS_HOST=redis \
   -e HOTKEY_WORKER_ENABLED=true \
-  ghcr.io/hyshmily/hotkey-worker:1.1.5-SNAPSHOT
+  ghcr.io/hyshmily/hotkey-worker:1.1.51
 ```
 
 **Run JAR directly** (no Docker required):
 
 ```bash
 mvn clean package -pl worker
-java -jar worker/target/hotkey-worker-1.1.5-SNAPSHOT.jar
+java -jar worker/target/hotkey-worker-1.1.51.jar
 ```
 
 > Worker packaged from the `worker/` module. Requires RabbitMQ + Redis.
-> Set `HOTKEY_WORKER_ENABLED=true` to activate Worker mode (cache methods throw `UnsupportedOperationException` in this mode).
+> Set `HOTKEY_WORKER_ENABLED=true` to activate Worker mode (cache methods throw `HotKeyModeException` in this mode).
 
 ### 2. Configuration
 
@@ -658,9 +658,9 @@ Worker mode provides cluster-level hot key detection via dedicated nodes. App in
 | Mode        | `worker.enabled`  | Activated beans                                                                       |
 | ----------- | ----------------- | ------------------------------------------------------------------------------------- |
 | App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                                         |
-| Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `UnsupportedOperationException`) |
+| Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `HotKeyModeException`) |
 
-In **Worker-only** mode, cache operations throw `UnsupportedOperationException`.
+In **Worker-only** mode, cache operations throw `HotKeyModeException`.
 
 **Cross-Worker decisionVersion partitioning:** Every Worker has a unique `nodeId` and an `epoch` counter. When broadcasting HOT/COOL decisions, the Worker attaches both as AMQP headers. The app-side `WorkerListener` propagates `nodeId`/`epoch` through the double-checked-lock path into `CacheEntry.decisionNodeId`/`decisionEpoch`. The `VersionGuard` compares decisions per-Worker: an incoming decision wins only if its `epoch` >= the cached entry's `decisionEpoch`, using `nodeId` to partition the version space. This prevents stale decisions from a restarted Worker from overriding fresher ones — each new boot increments the `epoch` counter, resetting the authority.
 
@@ -699,7 +699,7 @@ Each instance declares its own queue (`hotkey.sync:<instanceID>`) bound to a fan
 
 - **`TYPE_REFRESH`** — Versioned refresh. The peer calls `CacheSyncListener.handleRefresh()` to reload from Redis, skipping stale updates based on `dataVersion`. A 4-case comparison (normal-normal, normal-degraded, degraded-normal, degraded-degraded) ensures normal (Redis INCR) dataVersion always wins over degraded (node-local) versions. Sent by `invalidate()` and `putThrough()`.
 - **`TYPE_INVALIDATE`** — Single key invalidation (with version guard). The peer removes the L1 entry only when the incoming `dataVersion` is not stale. Sent by `putBeforeInvalidate()`.
-- **`TYPE_INVALIDATE_ALL`** — Batch invalidation (no version guard). The peer immediately removes all listed keys from L1 without reloading. Sent by `invalidateAll()`.
+- **`TYPE_INVALIDATE_ALL`** — Batch invalidation (no version guard). The peer immediately removes all listed keys from L1 without reloading. Sent by `invalidateAllLocal()`.
 - **`TYPE_RULES_SYNC`** — Rule set replacement. The body is a JSON-serialized `List<Rule>`; the receiver calls `RuleMatcher.syncRules()` to atomically replace the local rule list. Does not trigger a secondary broadcast.
 
 > [!SECURITY]
@@ -771,7 +771,7 @@ long size = hotKey.estimatedSize();    // L1 entry count
 HotKeyCacheStats s = hotKey.stats();   // hit rate, eviction, etc.
 
 // Emergency flush (no broadcast)
-hotKey.invalidateAll();
+hotKey.invalidateAllLocal();
 
 // Batch rule evaluation
 Map<String, Rule.RuleAction> actions = hotKey.evaluateRules(List.of("user:1", "user:2"));

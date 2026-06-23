@@ -53,6 +53,10 @@ replay_pid*
 # Version plugin backup (maven-versions-plugin)
 *.versionsBackup
 
+# Agent configs
+AGENTS.md
+CLAUDE.md
+
 # Generated docs
 HELP.md
 

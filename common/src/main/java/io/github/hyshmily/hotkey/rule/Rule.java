@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.rule;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -117,8 +118,10 @@ public class Rule {
   /** Action to take when a key matches this rule. */
   private RuleAction action;
   /** Compiled regex for WILDCARD and REGEX types; lazily initialised. */
+  @JsonIgnore
   private transient volatile Pattern compiledPattern;
   /** Reusable matcher per thread, avoiding allocation on every match call. */
+  @JsonIgnore
   private final transient ThreadLocal<Matcher> matcherCache = new ThreadLocal<>();
 
   /**

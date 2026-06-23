@@ -8,7 +8,7 @@ This file provides guidance to AI coding assistants when working with code in th
 
 HotKey is a Spring Boot Starter for automatic hot key detection and multi-level cache warming (HeavyKeeper + Caffeine L1 + optional Redis L2 + optional RabbitMQ broadcast).
 
-**Coordinates:** `io.github.hyshmily:hotkey:1.1.4`
+**Coordinates:** `io.github.hyshmily:hotkey:1.1.51`
 
 Two Maven modules under `hotkey-parent:1.1.4`:
 - **`common/`** — Spring Boot Starter (published to Maven Central). Cache logic, algorithm, auto-configuration, sync, reporting, sharding, annotations.
@@ -58,7 +58,7 @@ Worker-only components (`worker/` module): `SlidingWindowDetector`, `TopKValidat
 
 - **Read:** `get()`, `getWithSoftExpire()`, `peek()` (side-effect-free)
 - **Write:** `putThrough()`, `putBeforeInvalidate()`
-- **Invalidate:** `invalidate()`, `invalidateAll()`
+- **Invalidate:** `invalidate()`, `invalidateAll()`, `invalidateAllLocal()`
 - **Introspection:** `isLocalHotKey()`, `isWorkerHotKey()`, `returnLocalHotKeys()`, `returnWorkerHotKeys()`, `returnLocalExpelledHotKeys()`, `returnWorkerExpelledHotKeys()`, `returnLocalTotalDataStreams()`, `returnWorkerTotalDataStreams()`, `estimatedSize()`, `stats()`, `getLocalCache()` (raw Caffeine — introspection only, never write through)
 - **Rule management:** `addBlacklist()`, `removeBlacklist()`, `addWhitelist()`, `removeWhitelist()`, `getAllRules()`, `evaluateRule()`, `isBlacklisted()`, `isWhitelisted()`, `clearAllRules()`, `broadcastAllLocalRulesManually()`
 
@@ -96,7 +96,7 @@ Worker module has its own `WorkerAutoConfiguration` (activated by `@SpringBootAp
 ### Deployment Modes
 
 - **App-only** (`hotkey.worker.enabled=false`, default): Local TopK + HotKeyCache + Reporter.
-- **Worker-only** (`hotkey.worker.enabled=true`): Own TopK, SlidingWindowDetector, Broadcaster. Cache methods throw `UnsupportedOperationException`.
+- **Worker-only** (`hotkey.worker.enabled=true`): Own TopK, SlidingWindowDetector, Broadcaster. Cache methods throw `HotKeyModeException`.
 
 ## Key Patterns
 

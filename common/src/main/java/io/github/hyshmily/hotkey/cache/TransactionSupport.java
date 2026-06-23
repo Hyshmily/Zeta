@@ -79,7 +79,7 @@ public final class TransactionSupport {
 
   /**
    * Defer a task to after transaction commit, or execute synchronously outside a transaction.
-   * Used by {@link HotKeyCache#invalidate}, {@link HotKeyCache#invalidateAll},
+   * Used by {@link HotKeyCache#invalidate}, {@link HotKeyCache#invalidateAllLocal},
    * and {@link HotKeyCache#putBeforeInvalidate}.
    * Exceptions propagate directly to the caller when executed outside a transaction.
    *

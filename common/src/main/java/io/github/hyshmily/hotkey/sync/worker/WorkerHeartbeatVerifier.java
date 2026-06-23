@@ -248,7 +248,7 @@ public class WorkerHeartbeatVerifier {
    * via AMQP Direct reply-to ({@code amq.rabbitmq.reply-to}).
    *
    * <p>The PING carries the application instance ID in the
-   * {@link HotKeyConstants#AMQP_HEADER_VERIFY_APP_INSTANCE} header so the Worker
+   * {@link io.github.hyshmily.hotkey.constants.HotKeyConstants#AMQP_HEADER_VERIFY_APP_INSTANCE} header so the Worker
    * can identify the requester. The reply timeout is set to {@code pingTimeoutMs}
    * on the RabbitTemplate before each call.
    *

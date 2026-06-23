@@ -10,6 +10,7 @@ import io.github.hyshmily.hotkey.rule.Rule.RuleType;
 import java.util.regex.PatternSyntaxException;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class RuleTest {
@@ -302,5 +303,97 @@ class RuleTest {
     assertThat(rule.match("123")).isTrue();
     assertThat(rule.match("12")).isTrue();
     assertThat(rule.match("1")).isFalse();
+  }
+
+  @Test
+  void repeatedWildcardMatchReusesCachedMatcher() {
+    var rule = new Rule(RuleType.WILDCARD, "foo*", RuleAction.BLOCK);
+    assertThat(rule.match("foobar")).isTrue();
+    assertThat(rule.match("foobaz")).isTrue();
+    assertThat(rule.match("bar")).isFalse();
+    assertThat(rule.match("foo")).isTrue();
+  }
+
+  @Test
+  void repeatedRegexMatchReusesCachedMatcher() {
+    var rule = new Rule(RuleType.REGEX, "^user_.*", RuleAction.BLOCK);
+    assertThat(rule.match("user_123")).isTrue();
+    assertThat(rule.match("user_admin")).isTrue();
+    assertThat(rule.match("admin")).isFalse();
+    assertThat(rule.match("user_")).isTrue();
+  }
+
+  @Test
+  void concurrentWildcardMatchWithThreadLocalMatcher() throws Exception {
+    var rule = new Rule(RuleType.WILDCARD, "key-*", RuleAction.BLOCK);
+    var barrier = new CyclicBarrier(10);
+    var errors = new AtomicReference<Throwable>();
+    var threads = new Thread[10];
+    for (int i = 0; i < 10; i++) {
+      final int idx = i;
+      threads[i] = new Thread(() -> {
+        try {
+          barrier.await();
+          for (int j = 0; j < 100; j++) {
+            String k = "key-" + idx + "-" + j;
+            assertThat(rule.match(k)).isTrue();
+            assertThat(rule.match("other")).isFalse();
+          }
+        } catch (Throwable t) {
+          errors.set(t);
+        }
+      });
+      threads[i].start();
+    }
+    for (var t : threads) {
+      t.join();
+    }
+    assertThat(errors).hasValue(null);
+  }
+
+  @Test
+  void concurrentRegexMatchWithThreadLocalMatcher() throws Exception {
+    var rule = new Rule(RuleType.REGEX, "sess\\d{3}", RuleAction.BLOCK);
+    var barrier = new CyclicBarrier(10);
+    var errors = new AtomicReference<Throwable>();
+    var threads = new Thread[10];
+    for (int i = 0; i < 10; i++) {
+      final int idx = i;
+      threads[i] = new Thread(() -> {
+        try {
+          barrier.await();
+          for (int j = 0; j < 100; j++) {
+            String k = "sess" + (100 + idx * 10 + j);
+            assertThat(rule.match(k)).isTrue();
+            assertThat(rule.match("no-match")).isFalse();
+          }
+        } catch (Throwable t) {
+          errors.set(t);
+        }
+      });
+      threads[i].start();
+    }
+    for (var t : threads) {
+      t.join();
+    }
+    assertThat(errors).hasValue(null);
+  }
+
+  @Test
+  void wildcardMatcherCacheDoesNotLeakContextAcrossKeys() {
+    var rule = new Rule(RuleType.WILDCARD, "ab*", RuleAction.BLOCK);
+    assertThat(rule.match("abcdef")).isTrue();
+    assertThat(rule.match("xyz")).isFalse();
+    assertThat(rule.match("ab")).isTrue();
+    assertThat(rule.match("")).isFalse();
+  }
+
+  @Test
+  void regexMatcherCacheDoesNotLeakContextAcrossKeys() {
+    var rule = new Rule(RuleType.REGEX, "\\d+", RuleAction.BLOCK);
+    assertThat(rule.match("abc123def")).isTrue();
+    assertThat(rule.match("abc")).isFalse();
+    assertThat(rule.match("")).isFalse();
+    assertThat(rule.match("999")).isTrue();
   }
 }

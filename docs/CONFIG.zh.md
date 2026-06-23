@@ -47,7 +47,7 @@
 | `evaluateRule(cacheKey)`                               | 对所有规则评估给定 key 并返回首个匹配的动作（无匹配时返回 `ALLOW`）                                                                                                         |
 | `evaluateRules(Collection)`                            | 批量规则评估——返回 `Map<String, RuleAction>`                                                                                                                                |
 | `invalidate(cacheKey)`                                 | 使单个 key 在所有缓存层失效                                                                                                                                                 |
-| `invalidateAll()`                                      | 紧急清空——无广播地失效所有 L1 条目                                                                                                                                         |
+| `invalidateAllLocal()`                                 | 紧急清空——无广播地失效所有 L1 条目                                                                                                                                         |
 | `invalidateAll(cacheKeys...)`                          | 可变参数重载 — 批量失效多个 key                                                                                                                                             |
 | `invalidateAll(Collection)`                            | Collection 重载                                                                                                                                                             |
 | `evictLocal(key)`                                      | 从本地缓存驱逐单个 key，不广播、不 bump 版本号                                                                                                                              |

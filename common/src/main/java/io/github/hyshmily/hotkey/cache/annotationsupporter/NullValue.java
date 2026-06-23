@@ -18,7 +18,7 @@ package io.github.hyshmily.hotkey.cache.annotationsupporter;
 /**
  * Internal sentinel representing an explicitly cached {@code null} value.
  *
- * <p>Stored inside {@link CacheEntry} when the caller caches a null (via
+ * <p>Stored inside {@link io.github.hyshmily.hotkey.model.CacheEntry} when the caller caches a null (via
  * {@code @NullCaching(true)}). The sentinel is unwrapped back to {@code null}
  * when read, allowing the cache to distinguish "entry found but value is null"
  * from "no entry found".

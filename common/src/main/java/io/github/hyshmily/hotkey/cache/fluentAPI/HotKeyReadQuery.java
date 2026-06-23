@@ -21,6 +21,7 @@ import io.github.hyshmily.hotkey.rule.Rule;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import org.springframework.cache.support.NullValue;
 
@@ -59,6 +60,7 @@ public class HotKeyReadQuery<T> {
   private final List<Supplier<T>> fallbacks = new ArrayList<>();
   private T defaultValThisTime = null;
   private boolean defaultSetThisTime = false;
+  private final AtomicBoolean executed = new AtomicBoolean(false);
 
   /**
    * Creates a new read query bound to the given cache key.
@@ -235,6 +237,10 @@ public class HotKeyReadQuery<T> {
    */
   @SuppressWarnings("unchecked")
   public Optional<T> execute() {
+    if (!executed.compareAndSet(false, true)) {
+      throw new IllegalStateException("HotKeyReadQuery can only be executed once");
+    }
+
     if (hotKey.evaluateRule(cacheKey) == Rule.RuleAction.BLOCK) {
       throw new HotKeyBlockedException("Cache key is blocked by HotKey rules: ", cacheKey);
     }

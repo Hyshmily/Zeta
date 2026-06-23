@@ -15,23 +15,21 @@
  */
 package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
-import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
-import org.springframework.cache.Cache;
-import org.springframework.cache.Cache.ValueRetrievalException;
-
-import java.util.Optional;
-import java.util.concurrent.Callable;
-import java.util.function.Supplier;
-
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+
+import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.function.Supplier;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.cache.Cache.ValueRetrievalException;
 
 @DisplayName("HotKeySpringCache tests")
 class HotKeySpringCacheTest {
@@ -110,8 +108,7 @@ class HotKeySpringCacheTest {
   @DisplayName("get with TTL override calls hotKey.computeIfAbsentWithSoftExpire")
   void get_withTtlOverride_callsComputeIfAbsentWithSoftExpire() {
     HotKeyCacheContext.get().apply(5000L, 1000L, false, false);
-    when(hotKey.computeIfAbsentWithSoftExpire(eq("test::myKey"), any(), eq(5000L), eq(1000L)))
-      .thenReturn("value");
+    when(hotKey.computeIfAbsentWithSoftExpire(eq("test::myKey"), any(), eq(5000L), eq(1000L))).thenReturn("value");
     String result = cache.get("myKey", (Callable<String>) () -> "loaded");
     assertThat(result).isEqualTo("value");
     verify(hotKey, never()).computeIfAbsent(anyString(), any());
@@ -122,8 +119,7 @@ class HotKeySpringCacheTest {
   @DisplayName("get with only softTtl override calls computeIfAbsentWithSoftExpire")
   void get_withSoftTtlOverride_only() {
     HotKeyCacheContext.get().apply(0L, 500L, false, false);
-    when(hotKey.computeIfAbsentWithSoftExpire(eq("test::myKey"), any(), eq(0L), eq(500L)))
-      .thenReturn("value");
+    when(hotKey.computeIfAbsentWithSoftExpire(eq("test::myKey"), any(), eq(0L), eq(500L))).thenReturn("value");
     cache.get("myKey", (Callable<String>) () -> "loaded");
     verify(hotKey).computeIfAbsentWithSoftExpire(eq("test::myKey"), any(), eq(0L), eq(500L));
   }
@@ -229,7 +225,7 @@ class HotKeySpringCacheTest {
   }
 
   @Test
-  @DisplayName("clear clears nullCachedKeys and calls invalidateAll")
+  @DisplayName("clear clears nullCachedKeys and calls invalidateAllLocal")
   void clear_clearsNullCachedKeysAndInvalidatesAll() {
     HotKeyCacheContext.get().apply(0, 0, true, false);
     when(hotKey.computeIfAbsent(anyString(), any())).thenReturn(null);
@@ -280,8 +276,14 @@ class HotKeySpringCacheTest {
       supplier.get();
       return null;
     });
-    assertThatThrownBy(() -> cache.get("myKey", (Callable<String>) () -> { throw new RuntimeException("db error"); }))
-      .isInstanceOf(ValueRetrievalException.class);
+    assertThatThrownBy(() ->
+      cache.get(
+        "myKey",
+        (Callable<String>) () -> {
+          throw new RuntimeException("db error");
+        }
+      )
+    ).isInstanceOf(ValueRetrievalException.class);
   }
 
   @Test
