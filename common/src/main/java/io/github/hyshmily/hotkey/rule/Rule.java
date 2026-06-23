@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.rule;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.UUID;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import lombok.Data;
 
@@ -106,15 +107,19 @@ public class Rule {
   private String id;
   /** Timestamp (epoch millis) when this rule was created. */
   private long createdAt;
+
   /** Pattern type used to match cache keys. Defaults to {@link RuleType#EXACT} for Jackson deserialization. */
   @JsonProperty(defaultValue = "EXACT")
   private RuleType type = RuleType.EXACT;
+
   /** Pattern string (exact value, prefix, glob, or regex). */
   private String pattern;
   /** Action to take when a key matches this rule. */
   private RuleAction action;
   /** Compiled regex for WILDCARD and REGEX types; lazily initialised. */
   private transient volatile Pattern compiledPattern;
+  /** Reusable matcher per thread, avoiding allocation on every match call. */
+  private final transient ThreadLocal<Matcher> matcherCache = new ThreadLocal<>();
 
   /**
    * No-arg constructor for frameworks (e.g. Jackson deserialisation).
@@ -176,7 +181,9 @@ public class Rule {
    *         and compilation fails
    */
   public boolean match(String key) {
-    if (type == null) return false;
+    if (type == null) {
+      return false;
+    }
     return switch (type) {
       case EXACT -> key.equals(pattern);
       case PREFIX -> key.startsWith(pattern);
@@ -184,13 +191,23 @@ public class Rule {
         if (compiledPattern == null) {
           prepare();
         }
-        yield compiledPattern.matcher(key).matches();
+        Matcher m = matcherCache.get();
+        if (m == null) {
+          m = compiledPattern.matcher("");
+          matcherCache.set(m);
+        }
+        yield m.reset(key).matches();
       }
       case REGEX -> {
         if (compiledPattern == null) {
           prepare();
         }
-        yield compiledPattern.matcher(key).find();
+        Matcher m = matcherCache.get();
+        if (m == null) {
+          m = compiledPattern.matcher("");
+          matcherCache.set(m);
+        }
+        yield m.reset(key).find();
       }
     };
   }
@@ -205,7 +222,7 @@ public class Rule {
    * ({@code . + ^ $ [ ] \ ( ) { } |}) are escaped.
    *
    * <p>This method is safe for concurrent calls: {@link #compiledPattern}
-   * is {@code volatile}, and {@link java.util.regex.Pattern#compile} is
+   * is {@code volatile}, and  is
    * idempotent (compiling the same pattern twice produces identical,
    * interchangeable objects).
    *
@@ -217,7 +234,9 @@ public class Rule {
    *         pattern cannot be compiled into a valid regular expression
    */
   public void prepare() {
-    if (type == null) return;
+    if (type == null) {
+      return;
+    }
     if (type == RuleType.REGEX) {
       compiledPattern = Pattern.compile(pattern);
     } else if (type == RuleType.WILDCARD) {
