@@ -38,6 +38,14 @@
     <tag>HEAD</tag>
   </scm>
 
+  <distributionManagement>
+    <repository>
+      <id>github</id>
+      <name>GitHub Packages</name>
+      <url>https://maven.pkg.github.com/hyshmily/hotkey</url>
+    </repository>
+  </distributionManagement>
+
   <modules>
     <module>common</module>
     <module>worker</module>
