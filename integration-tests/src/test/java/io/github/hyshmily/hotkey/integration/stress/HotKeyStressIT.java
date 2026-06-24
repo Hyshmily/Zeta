@@ -265,7 +265,6 @@ class HotKeyStressIT {
       Optional.empty(), Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
       new VersionController(Optional.empty(), 60),
-      new RingManager(150),
       new ClusterHealthView(0, 5000, 3));
   }
 
