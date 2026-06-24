@@ -31,7 +31,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ghcr.io/hyshmily/hotkey-worker:1.1.5-SNAPSHOT
+    image: ghcr.io/hyshmily/hotkey-worker:1.1.51
     pull_policy: always
     environment:
       SPRING_RABBITMQ_HOST: rabbitmq
