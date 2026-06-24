@@ -99,6 +99,23 @@ class HotKeyCacheExtensionAspectTest {
       return "result-" + id;
     }
 
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Intercept(trigger = InterceptTrigger.FORCE)
+    public String findInterceptedForceTrueNoFallback(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Intercept(trigger = InterceptTrigger.FORCE)
+    @Fallback
+    public String findInterceptedForceTrueWithFallback(String id) {
+      return "result-" + id;
+    }
+
+    public String findInterceptedForceTrueWithFallbackFallback(String id) {
+      return "fallback-force-true-" + id;
+    }
+
   @Cacheable(cacheNames = "test", key = "#p0")
   @HotKeyCacheTTL(hardTtlMs = 5000)
 
@@ -163,6 +180,30 @@ class HotKeyCacheExtensionAspectTest {
 
     public String findThrowingFallbackMethodFallback(String id) {
       throw new IllegalArgumentException("fallback-threw");
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Intercept(trigger = InterceptTrigger.QPS, QPS = 5)
+    public String findQpsIntercepted(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @Intercept(trigger = InterceptTrigger.QPS, QPS = 5, fallback = "'qps-fallback'")
+    public String findQpsInterceptedWithSpelFallback(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @HotKeyPreload(keys = {"preload-key-a", "preload-key-b"})
+    public String findWithStaticPreload(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @HotKeyPreload(keyExpr = "#id")
+    public String findWithDynamicPreload(String id) {
+      return "result-" + id;
     }
   }
 
@@ -275,6 +316,73 @@ class HotKeyCacheExtensionAspectTest {
 
     assertThat(result).isEqualTo("result-myId");
     verify(pjp).proceed();
+  }
+
+  // ── @Intercept(force=true) tests ──
+
+  @Test
+  @DisplayName("@Intercept(force=true) with non-hot key and no @Fallback returns peek value")
+  void interceptForceTrueNotHotNoFallback_returnsPeekValue() throws Throwable {
+    Method method = TestService.class.getMethod("findInterceptedForceTrueNoFallback", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+
+    when(hotKey.isLocalHotKey("test::myId")).thenReturn(false);
+    when(hotKey.peek("test::myId")).thenReturn(Optional.of("cached-value"));
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("cached-value");
+    verify(pjp, never()).proceed();
+  }
+
+  @Test
+  @DisplayName("@Intercept(force=true) with non-hot key and no @Fallback and peek miss returns null")
+  void interceptForceTrueNotHotNoFallback_peekMiss_returnsNull() throws Throwable {
+    Method method = TestService.class.getMethod("findInterceptedForceTrueNoFallback", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+
+    when(hotKey.isLocalHotKey("test::myId")).thenReturn(false);
+    when(hotKey.peek("test::myId")).thenReturn(Optional.empty());
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isNull();
+    verify(pjp, never()).proceed();
+  }
+
+  @Test
+  @DisplayName("@Intercept(force=true) with non-hot key and @Fallback returns fallback value")
+  void interceptForceTrueNotHotWithFallback_returnsFallback() throws Throwable {
+    Method method = TestService.class.getMethod("findInterceptedForceTrueWithFallback", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+
+    when(hotKey.isLocalHotKey("test::myId")).thenReturn(false);
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("fallback-force-true-myId");
+    verify(pjp, never()).proceed();
   }
 
   @Test
@@ -854,5 +962,156 @@ class HotKeyCacheExtensionAspectTest {
     assertThatThrownBy(() -> aspect.aroundCacheable(pjp, cacheable))
       .isInstanceOf(IllegalArgumentException.class)
       .hasMessage("fallback-threw");
+  }
+
+  // ── @Intercept(trigger = QPS) tests ──
+
+  @Test
+  @DisplayName("@Intercept(QPS=5) below threshold proceeds normally")
+  void qpsBelowThreshold_proceedsNormally() throws Throwable {
+    Method method = TestService.class.getMethod("findQpsIntercepted", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("result-myId");
+  }
+
+  @Test
+  @DisplayName("@Intercept(QPS=5) above threshold returns null (no fallback, no @Fallback)")
+  void qpsAboveThresholdNoFallback_returnsNull() throws Throwable {
+    Method method = TestService.class.getMethod("findQpsIntercepted", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+    when(hotKey.peek(anyString())).thenReturn(Optional.empty());
+
+    // Exceed QPS by calling 6 times (threshold = 5)
+    Object ignored;
+    for (int i = 0; i < 5; i++) {
+      ignored = aspect.aroundCacheable(pjp, cacheable);
+    }
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isNull();
+  }
+
+  @Test
+  @DisplayName("@Intercept(QPS=5) above threshold with SpEL fallback returns fallback")
+  void qpsAboveThresholdWithSpelFallback_returnsFallback() throws Throwable {
+    Method method = TestService.class.getMethod("findQpsInterceptedWithSpelFallback", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    // Exceed QPS by calling 6 times (threshold = 5)
+    Object ignored;
+    for (int i = 0; i < 5; i++) {
+      ignored = aspect.aroundCacheable(pjp, cacheable);
+    }
+    Object result = aspect.aroundCacheable(pjp, cacheable);
+
+    assertThat(result).isEqualTo("qps-fallback");
+  }
+
+  // ── @HotKeyPreload tests ──
+
+  @Test
+  @DisplayName("@HotKeyPreload(keys={...}) calls notifyLocalDetectorDirect for static keys")
+  void staticPreload_inflatesDetector() throws Throwable {
+    Method method = TestService.class.getMethod("findWithStaticPreload", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    aspect.aroundCacheable(pjp, cacheable);
+
+    verify(hotKey).notifyLocalDetectorDirect("test::preload-key-a", Integer.MAX_VALUE);
+    verify(hotKey).notifyLocalDetectorDirect("test::preload-key-b", Integer.MAX_VALUE);
+  }
+
+  @Test
+  @DisplayName("@HotKeyPreload(keyExpr=\"#id\") calls notifyLocalDetectorDirect for dynamic key")
+  void dynamicPreload_inflatesDetector() throws Throwable {
+    Method method = TestService.class.getMethod("findWithDynamicPreload", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myDynamicKey"});
+    when(pjp.proceed()).thenReturn("result-myDynamicKey");
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    aspect.aroundCacheable(pjp, cacheable);
+
+    verify(hotKey).notifyLocalDetectorDirect("test::myDynamicKey", Integer.MAX_VALUE);
+  }
+
+  @Test
+  @DisplayName("@HotKeyPreload static keys are inflated only once")
+  void staticPreload_inflatesOnce() throws Throwable {
+    Method method = TestService.class.getMethod("findWithStaticPreload", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+
+    when(signature.getMethod()).thenReturn(method);
+
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.proceed()).thenReturn("result-myId");
+
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+
+    // Call twice — notifyLocalDetectorDirect should only be called once per key
+    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp, cacheable);
+
+    verify(hotKey, times(1)).notifyLocalDetectorDirect("test::preload-key-a", Integer.MAX_VALUE);
+    verify(hotKey, times(1)).notifyLocalDetectorDirect("test::preload-key-b", Integer.MAX_VALUE);
   }
 }

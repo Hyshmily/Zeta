@@ -179,6 +179,7 @@ public class HeavyKeeper implements TopK {
    * @return an {@link AddResult} with expelled key (or null), hot status, and the input key
    */
   @Override
+  @SuppressWarnings("null")
   public AddResult addDirect(String key, int increment) {
     /* Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key -> same fingerprint) */
     long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
@@ -309,6 +310,7 @@ public class HeavyKeeper implements TopK {
     return results;
   }
 
+  @SuppressWarnings("null")
   private long addToSketch(String key, long increment) {
     long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
     long maxCount = 0;

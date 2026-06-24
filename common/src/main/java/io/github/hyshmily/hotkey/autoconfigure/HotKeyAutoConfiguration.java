@@ -239,7 +239,6 @@ public class HotKeyAutoConfiguration {
    * @param hotKeyExecutor            the dedicated HotKey executor (never {@code null})
    * @param properties                the HotKey configuration properties (never {@code null})
    * @param ruleMatcher               the rule matcher instance (never {@code null})
-   * @param ringManagerProvider       provider for the consistent-hash ring manager (creates default if absent)
    * @param healthViewProvider        provider for the cluster health view (creates default if absent)
    * @return a new HotKeyCache instance with node-local version tracking
    */
@@ -255,7 +254,6 @@ public class HotKeyAutoConfiguration {
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    ObjectProvider<RingManager> ringManagerProvider,
     ObjectProvider<ClusterHealthView> healthViewProvider
   ) {
     return new HotKeyCache(
@@ -268,7 +266,6 @@ public class HotKeyAutoConfiguration {
       hotKeyReporter,
       ruleMatcher,
       new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes()),
-      ringManagerProvider.getIfAvailable(() -> new RingManager(properties.getConsistentHashing().getVirtualNodes())),
       new ClusterHealthView(
         properties.getExpectedWorkerCount(),
         properties.getHeartbeat().getTimeoutMs(),

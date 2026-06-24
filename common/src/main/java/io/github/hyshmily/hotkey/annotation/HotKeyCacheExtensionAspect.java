@@ -15,13 +15,17 @@
  */
 package io.github.hyshmily.hotkey.annotation;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
+import io.github.hyshmily.hotkey.util.window.RollingWindow;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -91,6 +95,26 @@ public class HotKeyCacheExtensionAspect {
   private final Map<Method, Method> fallbackMethodCache = new ConcurrentHashMap<>();
 
   /**
+   * Tracks which keys have already been preload-registered to avoid redundant
+   * {@link HotKey#notifyLocalDetectorDirect(String, int)} calls.
+   * Bounded at 100k entries with 1-hour TTL to prevent unbounded growth.
+   */
+  private final Cache<String, Boolean> registeredPreloadKeys = Caffeine.newBuilder()
+    .maximumSize(100_000)
+    .expireAfterWrite(1, TimeUnit.HOURS)
+    .build();
+
+  /** Cache of resolved {@link HotKeyPreload} annotations keyed by Method. */
+  private final Map<Method, HotKeyPreload> preloadCache = new ConcurrentHashMap<>();
+
+  /**
+   * Per-key QPS sliding windows for {@link InterceptTrigger#QPS} interception.
+   * Each key gets a 10-bucket / 1-second window.
+   * Bounded at 100k entries; idle windows are evicted by Caffeine.
+   */
+  private final Cache<String, RollingWindow> qpsWindows = Caffeine.newBuilder().maximumSize(100_000).build();
+
+  /**
    * Creates a new {@code HotKeyCacheExtensionAspect}.
    *
    * @param hotKey     the HotKey facade
@@ -120,18 +144,44 @@ public class HotKeyCacheExtensionAspect {
     String key = resolveKey(pjp, cacheable.key());
     String prefixedKey = cacheName + properties.getSpringCache().getKeySeparator() + key;
 
+    HotKeyPreload preload = resolvePreloadAnnotation(method);
     HotKeyCacheTTL ttl = method.getAnnotation(HotKeyCacheTTL.class);
     Intercept intercept = method.getAnnotation(Intercept.class);
     Fallback fallback = method.getAnnotation(Fallback.class);
     NullCaching nullCaching = method.getAnnotation(NullCaching.class);
     Broadcast broadcast = method.getAnnotation(Broadcast.class);
 
-    // @Intercept: skip method when key is a local hot key
-    if (intercept != null && hotKey.isLocalHotKey(prefixedKey)) {
-      if (fallback != null) {
-        return resolveFallback(pjp, fallback);
+    // @HotKeyPreload: inflate detection counts after @Intercept (so first call loads normally)
+    // but before context setup (so pjp.proceed() → CacheInterceptor sees inflated counts)
+    if (preload != null) {
+      handlePreload(preload, pjp, cacheName);
+    }
+
+    // @Intercept: skip method when key is a local hot key if necessary
+    if (intercept != null) {
+      String interceptFallback = intercept.fallback();
+
+      switch (intercept.trigger()) {
+        case FORCE -> {
+          return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey);
+        }
+        case IS_LOCAL_HOT -> {
+          if (hotKey.isLocalHotKey(prefixedKey)) {
+            return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey);
+          }
+        }
+        case QPS -> {
+          int qpsThreshold = intercept.QPS();
+
+          if (qpsThreshold > 0) {
+            RollingWindow window = qpsWindows.get(prefixedKey, k -> new RollingWindow(10, 1000));
+            window.add(1);
+            if (window.sum() > qpsThreshold) {
+              return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey);
+            }
+          }
+        }
       }
-      return hotKey.peek(prefixedKey).orElse(null);
     }
 
     // Save-restore context to prevent leakage across nested @Cacheable calls
@@ -156,6 +206,58 @@ public class HotKeyCacheExtensionAspect {
   }
 
   /**
+   * Handle {@link HotKeyPreload @HotKeyPreload} by inflating HeavyKeeper counts
+   * for static and/or dynamic cache keys.
+   *
+   * <p>Each key is inflated at most once, tracked by the bounded Caffeine cache
+   * {@link #registeredPreloadKeys} (100k max, 1-hour TTL). This prevents
+   * unbounded growth from dynamic key expressions while ensuring automatic
+   * re-inflation if a key needs to be preloaded again after a long idle period.
+   *
+   * <p>Static keys ({@link HotKeyPreload#keys}) are inflated immediately.
+   * Dynamic keys ({@link HotKeyPreload#keyExpr}) are evaluated via SpEL against
+   * the current method parameters.
+   *
+   * @param preload   the annotation instance
+   * @param pjp       the join point providing method arguments and target
+   * @param cacheName the resolved cache name from {@code @Cacheable}
+   */
+  private void handlePreload(HotKeyPreload preload, ProceedingJoinPoint pjp, String cacheName) {
+    String separator = properties.getSpringCache().getKeySeparator();
+    int preloadCount = preload.count() > 0 ? preload.count() : Integer.MAX_VALUE;
+
+    // Static keys — register once per key
+    for (String staticKey : preload.keys()) {
+      String fullKey = cacheName + separator + staticKey;
+      if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
+        hotKey.notifyLocalDetectorDirect(fullKey, preloadCount);
+        registeredPreloadKeys.put(fullKey, Boolean.TRUE);
+      }
+    }
+
+    // Dynamic key via SpEL — register once per unique evaluated key
+    String keyExpr = preload.keyExpr();
+    if (!keyExpr.isEmpty()) {
+      try {
+        Expression expression = expressionCache.computeIfAbsent("preload_" + keyExpr, k ->
+          parser.parseExpression(keyExpr)
+        );
+        Object value = expression.getValue(buildEvaluationContext(pjp));
+
+        if (value != null) {
+          String fullKey = cacheName + separator + value;
+          if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
+            hotKey.notifyLocalDetectorDirect(fullKey, preloadCount);
+            registeredPreloadKeys.put(fullKey, Boolean.TRUE);
+          }
+        }
+      } catch (Exception e) {
+        log.warn("Failed to evaluate @HotKeyPreload keyExpr '{}': {}", keyExpr, e.toString());
+      }
+    }
+  }
+
+  /**
    * Intercepts {@link CachePut @CachePut} methods to set the broadcast suppression
    * flag from {@link Broadcast @Broadcast} before the method reaches Spring's
    * {@code CacheInterceptor}.
@@ -168,6 +270,7 @@ public class HotKeyCacheExtensionAspect {
    * @param cachePut the {@code @CachePut} annotation on the intercepted method
    * @return the method return value
    */
+  @SuppressWarnings("unused")
   @Around("@annotation(cachePut)")
   public Object aroundCachePut(ProceedingJoinPoint pjp, CachePut cachePut) throws Throwable {
     return setBroadcast(pjp);
@@ -186,6 +289,7 @@ public class HotKeyCacheExtensionAspect {
    * @param cacheEvict the {@code @CacheEvict} annotation on the intercepted method
    * @return the method return value
    */
+  @SuppressWarnings("unused")
   @Around("@annotation(cacheEvict)")
   public Object aroundCacheEvict(ProceedingJoinPoint pjp, CacheEvict cacheEvict) throws Throwable {
     return setBroadcast(pjp);
@@ -292,6 +396,43 @@ public class HotKeyCacheExtensionAspect {
   }
 
   /**
+   * Resolve the intercept fallback chain when the method call is intercepted.
+   *
+   * <p>Priority order:
+   * <ol>
+   *   <li>{@link Intercept#fallback()} — SpEL expression evaluated against
+   *       method parameters</li>
+   *   <li>{@link Fallback @Fallback} — naming-convention method or SpEL expression</li>
+   *   <li>{@link io.github.hyshmily.hotkey.HotKey#peek(String)} — stale cached
+   *       value if available, otherwise {@code null}</li>
+   * </ol>
+   *
+   * @param pjp               the join point providing method arguments
+   * @param fallback          the method-level {@code @Fallback} annotation
+   *                          (may be {@code null})
+   * @param interceptFallback the fallback SpEL from {@code @Intercept.fallback()}
+   *                          (may be blank)
+   * @param prefixedKey       the fully-qualified cache key (cache name + separator + key)
+   * @return the resolved fallback value, or {@code null} if no fallback is available
+   *         and the cache does not contain the key
+   * @throws Throwable if the SpEL evaluation or fallback method invocation fails
+   */
+  private Object resolveInterceptFallback(
+    ProceedingJoinPoint pjp,
+    Fallback fallback,
+    String interceptFallback,
+    String prefixedKey
+  ) throws Throwable {
+    if (!interceptFallback.isBlank()) {
+      return getExpression(interceptFallback).getValue(buildEvaluationContext(pjp));
+    }
+    if (fallback != null) {
+      return resolveFallback(pjp, fallback);
+    }
+    return hotKey.peek(prefixedKey).orElse(null);
+  }
+
+  /**
    * Resolves the fallback value from a {@link Fallback @Fallback} annotation.
    * <p>If the annotated SpEL expression is non-empty it is evaluated first;
    * otherwise the naming-convention method ({@code {methodName}Fallback}) is invoked.
@@ -377,5 +518,16 @@ public class HotKeyCacheExtensionAspect {
       }
       return null;
     }
+  }
+
+  /**
+   * Resolve {@link HotKeyPreload @HotKeyPreload} from the given method,
+   * using a local cache to avoid repeated reflection lookups.
+   *
+   * @param method the candidate method
+   * @return the {@code @HotKeyPreload} annotation if present, or {@code null}
+   */
+  private HotKeyPreload resolvePreloadAnnotation(Method method) {
+    return preloadCache.computeIfAbsent(method, m -> m.getAnnotation(HotKeyPreload.class));
   }
 }

@@ -58,21 +58,40 @@ public User getUserFallback(Long id) { return new User("guest"); }
 
 ### @Intercept
 
-标记注解，当缓存 key 被归类为本地热点时拦截 READ 操作。
+控制何时拦截 `@Cacheable` 读取操作并返回缓存/降级值。通过 `trigger()` 选择触发模式：
 
-| 条件                          | 行为                                |
-| ----------------------------- | ----------------------------------- |
-| key 为热点 + 存在 `@Fallback` | 返回降级值                          |
-| key 为热点 + 无 `@Fallback`   | `peek()`——有旧值则返回，否则 `null` |
-| key 非热点                    | 正常走缓存路径                      |
+| 触发模式                      | 行为                                                |
+| ----------------------------- | --------------------------------------------------- |
+| `IS_LOCAL_HOT`（默认）        | HeavyKeeper 检测到 key 为本地热点时拦截             |
+| `FORCE`                       | 始终拦截——方法体永不执行                            |
+| `QPS`                         | 单 key QPS 超过阈值时拦截                           |
+
+| 属性       | 类型              | 默认值            | 说明                                              |
+| ---------- | ----------------- | ----------------- | ------------------------------------------------- |
+| `trigger`  | `InterceptTrigger` | `IS_LOCAL_HOT`    | 触发条件                                          |
+| `QPS`      | `int`             | `0`               | 单 key QPS 阈值（`trigger=QPS`）。`0` = 禁用      |
+| `fallback` | `String`          | `""`              | SpEL 降级表达式（优先级高于 `@Fallback`）          |
+
+拦截时降级优先级：`@Intercept.fallback()` (SpEL) → `@Fallback` → `peek()`。
 
 ```java
+// IS_LOCAL_HOT 模式（默认）
 @Cacheable(cacheNames = "users", key = "#id")
 @Intercept
 public User getUser(Long id) {
-  // 当 'users:{id}' 为本地热点时，此方法体完全不执行
+  // 当 'users:{id}' 为本地热点时，跳过方法体
   return userService.getById(id);
 }
+
+// FORCE 模式——始终跳过方法体
+@Cacheable(cacheNames = "products", key = "#id")
+@Intercept(trigger = InterceptTrigger.FORCE, fallback = "'from-cache'")
+public Product getProduct(String id) { ... }
+
+// QPS 模式——单 key QPS 超 100 时降级
+@Cacheable(cacheNames = "products", key = "#id")
+@Intercept(trigger = InterceptTrigger.QPS, QPS = 100, fallback = "'too-fast'")
+public Product getProduct(String id) { ... }
 ```
 
 仅对 `@Cacheable` 方法（READ 操作）生效。`@CachePut` 和 `@CacheEvict` 忽略此注解。
@@ -91,6 +110,27 @@ public User getUser(Long id) { ... }
 | ----------- | ------ | ------------------------------------ |
 | `hardTtlMs` | `0` | 硬 TTL（毫秒）。`0` = 使用全局默认值 |
 | `softTtlMs` | `0` | 软 TTL（毫秒）。`0` = 使用全局默认值 |
+
+### @HotKeyPreload
+
+预膨胀 HeavyKeeper 检测计数，使已知热点 key 立即享受长 TTL 和 `@Intercept` 拦截，无需等待自然检测。
+
+| 属性      | 类型       | 默认值 | 说明                                           |
+| --------- | ---------- | ------ | ---------------------------------------------- |
+| `keys`    | `String[]` | `{}`   | 静态预加载 key（只膨胀一次）                    |
+| `keyExpr` | `String`   | `""`   | SpEL 动态 key 表达式（每次调用时评估）          |
+| `count`   | `int`      | `0`    | 膨胀访问次数。`0` = `Integer.MAX_VALUE`        |
+
+静态 key 在首次方法调用时膨胀；重复 key 通过 Caffeine 缓存（10 万条/1 小时 TTL）自动去重。
+
+```java
+@Cacheable(cacheNames = "products", key = "#id")
+@HotKeyPreload(keys = {"flash-item-001", "flash-item-002"})
+@Intercept
+public Product getProduct(String id) { ... }
+```
+
+仅对 `@Cacheable` 方法生效。`@CachePut` 和 `@CacheEvict` 忽略此注解。
 
 ### @Broadcast
 
@@ -131,7 +171,8 @@ public User getUser(Long id) { ... }
 | 注解              | 在 `@Cacheable` / `@CachePut` / `@CacheEvict` 上的作用          |
 | ----------------- | ---------------------------------------------------------------- |
 | `@HotKeyCacheTTL` | 覆盖硬/软 TTL（仅 `@Cacheable`）                                |
-| `@Intercept`      | 当 key 为本地热点时跳过方法体，通过 `@Fallback` 或 `peek()` 返回保底值（仅 `@Cacheable`） |
+| `@HotKeyPreload`  | 预膨胀 HeavyKeeper 计数，使已知热点 key 立即生效（仅 `@Cacheable`） |
+| `@Intercept`      | 当 key 为本地热点 / QPS 超限时跳过方法体；按 `@Intercept.fallback()`、`@Fallback`、`peek()` 优先级返回保底值（仅 `@Cacheable`） |
 | `@Fallback`       | 被黑名单阻止、拦截或异常时提供回退值（仅 `@Cacheable`）          |
 | `@NullCaching`    | 选择缓存 `null` 返回值（仅 `@Cacheable`）                       |
 | `@Broadcast`      | 禁止跨实例同步消息                                               |

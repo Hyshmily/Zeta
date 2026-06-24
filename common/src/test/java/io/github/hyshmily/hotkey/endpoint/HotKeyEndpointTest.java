@@ -99,7 +99,6 @@ class HotKeyEndpointTest {
       properties,
       hotKeyReporter,
       ruleMatcher,
-      workerHealthMonitor,
       expireManager,
       versionController,
       cacheSyncPublisher,
@@ -208,7 +207,6 @@ class HotKeyEndpointTest {
       null,
       null,
       null,
-      null,
       healthViewProvider
     );
     when(caffeineCache.estimatedSize()).thenReturn(10L);
@@ -240,7 +238,6 @@ class HotKeyEndpointTest {
       null,
       null,
       properties,
-      null,
       null,
       null,
       null,
@@ -279,10 +276,9 @@ class HotKeyEndpointTest {
       null,
       null,
       null,
-      null,
       nullHvProvider
     );
-
+ 
     Map<String, Object> info = ep.hotKeyInfo();
     assertThat(info).containsKey("local");
     assertThat(info).doesNotContainKeys("worker", "sync");
@@ -308,12 +304,11 @@ class HotKeyEndpointTest {
       null,
       null,
       null,
-      null,
       cacheSyncPublisher,
       null,
       nullHvProvider
     );
-
+ 
     Map<String, Object> info = ep.hotKeyInfo();
     assertThat(info).doesNotContainKeys("local", "worker");
     assertThat(info).containsKey("sync");
@@ -337,14 +332,13 @@ class HotKeyEndpointTest {
       properties,
       null,
       null,
-      workerHealthMonitor,
       null,
       null,
       null,
       hotKeyStateMachine,
       healthViewProvider
     );
-
+ 
     Map<String, Object> info = ep.hotKeyInfo();
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
     assertThat(worker).containsEntry("trackedKeys", 3);
@@ -392,9 +386,9 @@ class HotKeyEndpointTest {
       null,
       null,
       null,
-      null,
       healthViewProvider
     );
+ 
     Map<String, Object> info = ep.hotKeyInfo();
     Map<String, Object> local = (Map<String, Object>) info.get("local");
     assertThat(local).containsKey("rules");
@@ -450,10 +444,9 @@ class HotKeyEndpointTest {
       null,
       null,
       null,
-      null,
       healthViewProvider
     );
-
+ 
     Map<String, Object> info = ep.hotKeyInfo();
     Map<String, Object> local = (Map<String, Object>) info.get("local");
 
@@ -479,7 +472,6 @@ class HotKeyEndpointTest {
       properties,
       null,
       null,
-      workerHealthMonitor,
       null,
       null,
       null,

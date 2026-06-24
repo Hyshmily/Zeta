@@ -77,8 +77,6 @@ public class HotKeyCache {
   private final RuleMatcher ruleMatcher;
   /** Manages data version generation for mutation ordering. */
   private final VersionController versionController;
-  /** Monitors Worker cluster health for graceful degradation decisions. */
-  private final RingManager ringManager;
 
   /** Cached view of Worker cluster health, used for COOL promotion decisions. */
   private final ClusterHealthView healthView;

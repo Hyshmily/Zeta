@@ -80,7 +80,6 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<RingManager> healthProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
@@ -93,7 +92,6 @@ class HotKeyActuatorAutoConfigurationTest {
     doReturn(singleFlight).when(sfProvider).getIfAvailable();
     doReturn(reporter).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
-    doReturn(null).when(healthProvider).getIfAvailable();
     doReturn(null).when(expireManagerProvider).getIfAvailable();
     doReturn(null).when(versionControllerProvider).getIfAvailable();
     doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
@@ -107,7 +105,6 @@ class HotKeyActuatorAutoConfigurationTest {
       sfProvider,
       reporterProvider,
       ruleMatcherProvider,
-      healthProvider,
       expireManagerProvider,
       versionControllerProvider,
       cacheSyncPublisherProvider,
@@ -115,10 +112,10 @@ class HotKeyActuatorAutoConfigurationTest {
       healthViewProvider,
       properties
     );
-
+ 
     assertThat(endpoint).isNotNull();
   }
-
+ 
   /**
    * Verifies that the HotKeyEndpoint is still created when all optional ObjectProvider dependencies return null.
    */
@@ -130,7 +127,6 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<RingManager> healthProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
@@ -144,7 +140,6 @@ class HotKeyActuatorAutoConfigurationTest {
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
-    doReturn(null).when(healthProvider).getIfAvailable();
     doReturn(null).when(expireManagerProvider).getIfAvailable();
     doReturn(null).when(versionControllerProvider).getIfAvailable();
     doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
@@ -158,7 +153,6 @@ class HotKeyActuatorAutoConfigurationTest {
       sfProvider,
       reporterProvider,
       ruleMatcherProvider,
-      healthProvider,
       expireManagerProvider,
       versionControllerProvider,
       cacheSyncPublisherProvider,
@@ -166,10 +160,10 @@ class HotKeyActuatorAutoConfigurationTest {
       healthViewProvider,
       properties
     );
-
+ 
     assertThat(endpoint).isNotNull();
   }
-
+ 
   /**
    * Verifies that ringEndpoint is NOT created when consistent-hashing property is disabled.
    */
@@ -204,7 +198,6 @@ class HotKeyActuatorAutoConfigurationTest {
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<HotKeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<RingManager> healthProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
@@ -218,7 +211,6 @@ class HotKeyActuatorAutoConfigurationTest {
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
-    doReturn(null).when(healthProvider).getIfAvailable();
     doReturn(null).when(expireManagerProvider).getIfAvailable();
     doReturn(null).when(versionControllerProvider).getIfAvailable();
     doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
@@ -232,7 +224,6 @@ class HotKeyActuatorAutoConfigurationTest {
       sfProvider,
       reporterProvider,
       ruleMatcherProvider,
-      healthProvider,
       expireManagerProvider,
       versionControllerProvider,
       cacheSyncPublisherProvider,
@@ -240,7 +231,7 @@ class HotKeyActuatorAutoConfigurationTest {
       healthViewProvider,
       properties
     );
-
+ 
     assertThat(endpoint).isNotNull();
   }
 }

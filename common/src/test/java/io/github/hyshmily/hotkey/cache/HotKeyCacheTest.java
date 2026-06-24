@@ -77,7 +77,6 @@ class HotKeyCacheTest {
       Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
       new VersionController(Optional.empty(), 60),
-      mock(RingManager.class),
       mock(ClusterHealthView.class)
     );
   }
@@ -295,10 +294,9 @@ class HotKeyCacheTest {
       Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
       new VersionController(Optional.empty(), 60),
-      mock(RingManager.class),
       mock(ClusterHealthView.class)
     );
-
+ 
     assertThat(cache.getWithSoftExpire("key", () -> "loaded")).contains("loaded");
   }
 
@@ -986,7 +984,6 @@ class HotKeyCacheTest {
         Optional.of(reporter),
         new RuleMatcher(Optional.empty(), Optional.empty()),
         new VersionController(Optional.empty(), 60),
-        mock(RingManager.class),
         healthView
       );
     }

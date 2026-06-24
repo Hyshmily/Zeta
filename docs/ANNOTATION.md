@@ -58,21 +58,40 @@ public User getUserFallback(Long id) { return new User("guest"); }
 
 ### @Intercept
 
-Marker annotation that intercepts READ operations when the cache key is classified as a local hot key.
+Controls when a `@Cacheable` read operation is intercepted and the cached/fallback value is returned instead of executing the method. The trigger mode is selected via `trigger()`:
 
-| Condition                        | Behavior                                                     |
-| -------------------------------- | ------------------------------------------------------------ |
-| Key is hot + `@Fallback` present | Return the fallback value                                    |
-| Key is hot + no `@Fallback`      | `peek()` — return stale entry if available, otherwise `null` |
-| Key is not hot                   | Cache lookup proceeds normally                               |
+| Trigger Mode                    | Behavior                                                     |
+| ------------------------------- | ------------------------------------------------------------ |
+| `IS_LOCAL_HOT` (default)        | Intercept when HeavyKeeper detects the key as a local hot key |
+| `FORCE`                         | Always intercept — method is never executed                  |
+| `QPS`                           | Intercept when per-key request rate exceeds `QPS()` threshold |
+
+| Attribute  | Type              | Default           | Description                                                 |
+| ---------- | ----------------- | ----------------- | ----------------------------------------------------------- |
+| `trigger`  | `InterceptTrigger` | `IS_LOCAL_HOT`    | Condition that triggers interception                        |
+| `QPS`      | `int`             | `0`               | Per-key QPS threshold (`trigger=QPS`). `0` disables check.  |
+| `fallback` | `String`          | `""`              | SpEL fallback expression (takes precedence over `@Fallback`) |
+
+When intercepted, fallback resolution order: `@Intercept.fallback()` (SpEL) → `@Fallback` → `peek()`.
 
 ```java
+// IS_LOCAL_HOT mode (default)
 @Cacheable(cacheNames = "users", key = "#id")
 @Intercept
 public User getUser(Long id) {
   // Skipped entirely when 'users:{id}' is a local hot key
   return userService.getById(id);
 }
+
+// FORCE mode — always skip method body
+@Cacheable(cacheNames = "products", key = "#id")
+@Intercept(trigger = InterceptTrigger.FORCE, fallback = "'from-cache'")
+public Product getProduct(String id) { ... }
+
+// QPS mode — throttle when exceeding 100 req/s per key
+@Cacheable(cacheNames = "products", key = "#id")
+@Intercept(trigger = InterceptTrigger.QPS, QPS = 100, fallback = "'too-fast'")
+public Product getProduct(String id) { ... }
 ```
 
 Only applies to `@Cacheable` methods (READ operations). Ignored on `@CachePut` and `@CacheEvict`.
@@ -91,6 +110,27 @@ public User getUser(Long id) { ... }
 | ----------- | ------- | ----------------------------------------- |
 | `hardTtlMs` | `0`     | Hard TTL in ms. `0` = use global default. |
 | `softTtlMs` | `0`     | Soft TTL in ms. `0` = use global default. |
+
+### @HotKeyPreload
+
+Pre-inflates HeavyKeeper detection counts for known-hot keys, making them immediately eligible for long TTLs and `@Intercept` treatment without waiting for organic detection.
+
+| Attribute | Type      | Default | Description                                                    |
+| --------- | --------- | ------- | -------------------------------------------------------------- |
+| `keys`    | `String[]` | `{}`    | Static cache keys to preload (inflated once)                   |
+| `keyExpr` | `String`   | `""`    | SpEL expression for a dynamic preload key (evaluated per call) |
+| `count`   | `int`      | `0`     | Inflated access count. `0` = `Integer.MAX_VALUE`               |
+
+Static keys are inflated on first method invocation; duplicates are silently ignored via a bounded Caffeine cache (100k max, 1-hour TTL).
+
+```java
+@Cacheable(cacheNames = "products", key = "#id")
+@HotKeyPreload(keys = {"flash-item-001", "flash-item-002"})
+@Intercept
+public Product getProduct(String id) { ... }
+```
+
+Only applies to `@Cacheable` methods. Ignored on `@CachePut` and `@CacheEvict`.
 
 ### @Broadcast
 
@@ -131,7 +171,8 @@ When `hotkey.spring-cache.enabled=true`, `HotKeyCacheExtensionAspect` activates 
 | Annotation    | Role on `@Cacheable` / `@CachePut` / `@CacheEvict`                 |
 | ------------- | ------------------------------------------------------------------ |
 | `@HotKeyCacheTTL` | Override hard/soft TTL (`@Cacheable` only)                    |
-| `@Intercept`      | Skip method when key is local hot key; use `@Fallback` or `peek()` for stale value (`@Cacheable` only) |
+| `@HotKeyPreload`  | Pre-inflate HeavyKeeper counts for known-hot keys (`@Cacheable` only) |
+| `@Intercept`      | Skip method when key is local hot key / QPS exceeded; use `@Intercept.fallback()`, `@Fallback`, or `peek()` for stale value (`@Cacheable` only) |
 | `@Fallback`       | Supply fallback value when blocked, intercepted, or on exception (`@Cacheable` only) |
 | `@NullCaching`    | Opt-in to caching `null` return values (`@Cacheable` only)     |
 | `@Broadcast`      | Suppress cross-instance sync messages                           |

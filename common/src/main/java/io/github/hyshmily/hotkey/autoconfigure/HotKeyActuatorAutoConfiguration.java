@@ -25,8 +25,8 @@ import io.github.hyshmily.hotkey.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import org.springframework.beans.factory.ObjectProvider;
@@ -82,7 +82,6 @@ public class HotKeyActuatorAutoConfiguration {
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param hotKeyReporterProvider      provider for the HotKey reporter (may be absent)
    * @param ruleMatcherProvider         provider for the rule matcher (may be absent)
-   * @param ringManagerProvider         provider for the consistent-hash ring manager (may be absent)
    * @param expireManagerProvider       provider for the cache expiry manager (may be absent)
    * @param versionControllerProvider   provider for the version controller (may be absent)
    * @param cacheSyncPublisherProvider  provider for the cache sync publisher (may be absent)
@@ -93,6 +92,7 @@ public class HotKeyActuatorAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyEndpoint hotKeyEndpoint(
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
     @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
@@ -100,7 +100,6 @@ public class HotKeyActuatorAutoConfiguration {
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<HotKeyReporter> hotKeyReporterProvider,
     ObjectProvider<RuleMatcher> ruleMatcherProvider,
-    ObjectProvider<RingManager> ringManagerProvider,
     ObjectProvider<CacheExpireManager> expireManagerProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
@@ -116,7 +115,6 @@ public class HotKeyActuatorAutoConfiguration {
       properties,
       hotKeyReporterProvider.getIfAvailable(),
       ruleMatcherProvider.getIfAvailable(),
-      ringManagerProvider.getIfAvailable(),
       expireManagerProvider.getIfAvailable(),
       versionControllerProvider.getIfAvailable(),
       cacheSyncPublisherProvider.getIfAvailable(),

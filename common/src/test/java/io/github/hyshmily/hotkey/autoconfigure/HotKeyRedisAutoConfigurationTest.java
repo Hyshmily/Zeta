@@ -26,7 +26,6 @@ import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import java.util.Optional;
@@ -51,9 +50,6 @@ class HotKeyRedisAutoConfigurationTest {
 
   @Mock(lenient = true)
   private ObjectProvider<ClusterHealthView> healthViewProvider;
-
-  @Mock(lenient = true)
-  private ObjectProvider<RingManager> ringManagerProvider;
 
   private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
     AutoConfigurations.of(HotKeyRedisAutoConfiguration.class)
@@ -98,13 +94,12 @@ class HotKeyRedisAutoConfigurationTest {
       redisTemplateProvider,
       properties,
       ruleMatcher,
-      ringManagerProvider,
       healthViewProvider
     );
-
+ 
     assertThat(cache).isNotNull();
   }
-
+ 
   /**
    * Verifies that the HotKeyCache bean is created when optional dependencies (CacheSyncPublisher, HotKeyReporter) are present.
    */
@@ -122,7 +117,7 @@ class HotKeyRedisAutoConfigurationTest {
       Optional.<StringRedisTemplate>empty(),
       Optional.<CacheSyncPublisher>empty()
     );
-
+ 
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
       detector,
@@ -135,7 +130,6 @@ class HotKeyRedisAutoConfigurationTest {
       redisTemplateProvider,
       properties,
       ruleMatcher,
-      ringManagerProvider,
       healthViewProvider
     );
 
@@ -175,5 +169,18 @@ class HotKeyRedisAutoConfigurationTest {
         assertThat(ctx).doesNotHaveBean(HotKeyCache.class);
         assertThat(ctx).doesNotHaveBean(HotKey.class);
       });
+  }
+
+  /**
+   * Verifies that the HotKey facade bean is created by Redis auto-configuration with correct dependencies.
+   */
+  @Test
+  void redisHotKeyBeanIsCreated() {
+    HotKeyCache cache = mock(HotKeyCache.class);
+    HotKeyDetector detector = mock(HotKeyDetector.class);
+    HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
+    HotKey hotKey = config.hotKey(cache, detector);
+    assertThat(hotKey).isNotNull();
+    assertThat(hotKey.isApp()).isTrue();
   }
 }

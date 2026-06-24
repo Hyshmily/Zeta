@@ -46,7 +46,7 @@ HotKey is inspired by [hotkey](https://gitee.com/jd-platform-opensource/hotkey) 
 - **CPU monitoring with EMA smoothing** — Dedicated daemon thread polls process CPU load every 500ms with configurable EMA decay for stable overload detection
 - **Spring Boot auto-configuration** — Add the dependency and it works, zero boilerplate
 - **Worker TopK persistence** — Periodic snapshots of the Worker's HeavyKeeper to Redis; restart recovery in seconds instead of hours of re-accumulation
-- **Spring Cache integration** — Standard `@Cacheable` / `@CachePut` / `@CacheEvict` with HotKey hot-key detection, soft-expire, cross-instance sync, and companion annotations (`@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, `@NullCaching`) for TTL, intercept, fallback, and null-caching; gated by `hotkey.spring-cache.enabled=true`
+- **Spring Cache integration** — Standard `@Cacheable` / `@CachePut` / `@CacheEvict` with HotKey hot-key detection, soft-expire, cross-instance sync, and companion annotations (`@HotKeyCacheTTL`, `@HotKeyPreload`, `@Intercept`, `@Fallback`, `@NullCaching`, `@Broadcast`) for TTL, preload, intercept, fallback, null-caching, and broadcast suppression; gated by `hotkey.spring-cache.enabled=true`
 - **Transaction support** — `TransactionSupport` defers cache writes until after Spring `@Transactional` commits, ensuring cache-data consistency on the write path
 - **Distributed lock** — Redis-based `tryLock` / `tryLockAndRun` with configurable retry counts, Lua-based safe release (GET+DEL), and graceful degradation (null when no Redis)
 
@@ -148,6 +148,34 @@ Just add the starter to your `pom.xml`; Caffeine L1 + local HeavyKeeper + Report
     <artifactId>hotkey</artifactId>
     <version>1.1.51</version>
 </dependency>
+```
+
+**GitHub Packages** (requires GitHub Token):
+
+```xml
+<repositories>
+  <repository>
+    <id>github</id>
+    <name>GitHub Packages</name>
+    <url>https://maven.pkg.github.com/hyshmily/hotkey</url>
+  </repository>
+</repositories>
+
+<dependency>
+  <groupId>io.github.hyshmily</groupId>
+  <artifactId>hotkey</artifactId>
+  <version>1.1.51</version>
+</dependency>
+```
+
+Authentication in `~/.m2/settings.xml`:
+
+```xml
+<server>
+  <id>github</id>
+  <username>hyshmily</username>
+  <password>${env.GITHUB_TOKEN}</password>
+</server>
 ```
 
 #### Worker (Standalone Node) — JAR / Docker
@@ -675,7 +703,8 @@ Enable with `hotkey.spring-cache.enabled=true`. Standard `@Cacheable` / `@CacheP
 | Annotation        | Role on `@Cacheable`                                           |
 | ----------------- | -------------------------------------------------------------- |
 | `@HotKeyCacheTTL` | Override hard/soft TTL                                         |
-| `@Intercept`      | Skip method when key is local hot key; use `@Fallback` or `peek()` for stale value |
+| `@HotKeyPreload`  | Pre-inflate HeavyKeeper counts for known-hot keys              |
+| `@Intercept`      | Skip method via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`); fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
 | `@Fallback`       | Supply fallback value when blocked, intercepted, or on exception |
 | `@NullCaching`    | Opt-in to caching null return values (default `true`)          |
 | `@Broadcast`      | Suppress cross-instance sync messages                          |
@@ -685,6 +714,18 @@ Enable with `hotkey.spring-cache.enabled=true`. Standard `@Cacheable` / `@CacheP
 @HotKeyCacheTTL(softTtlMs = 1000)
 @Intercept @Fallback
 public User getUser(Long id) { ... }
+
+// QPS-based interception
+@Cacheable(cacheNames = "products", key = "#id")
+@Intercept(trigger = InterceptTrigger.QPS, QPS = 500, fallback = "'throttled'")
+@Fallback
+public Product getProduct(String id) { ... }
+
+// Hot key preload for flash-sale items
+@Cacheable(cacheNames = "flash", key = "#id")
+@HotKeyPreload(keys = {"item-001", "item-002"})
+@Intercept
+public String getFlashItem(String id) { ... }
 ```
 
 Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classpath.

@@ -67,8 +67,6 @@ public class HotKeyEndpoint {
   private final HotKeyReporter hotKeyReporter;
   /** Blacklist/whitelist rule evaluator. */
   private final RuleMatcher ruleMatcher;
-  /** Worker shard health monitor (heartbeat + hash ring). */
-  private final RingManager ringManager;
   /** Cache TTL manager for soft/hard expiry. */
   private final CacheExpireManager expireManager;
   /** Version tracking controller (Redis-backed, with local fallback). */

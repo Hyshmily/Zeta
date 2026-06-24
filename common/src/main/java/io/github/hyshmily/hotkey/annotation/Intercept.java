@@ -15,27 +15,64 @@
  */
 package io.github.hyshmily.hotkey.annotation;
 
+import static io.github.hyshmily.hotkey.annotation.InterceptTrigger.IS_LOCAL_HOT;
+
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Marker annotation that intercepts READ operations when the cache key is
- * classified as a local hot key (tracked by the TopK algorithm in L1).
- * <p>
- * When applied:
+ * Marker annotation that controls when a {@code @Cacheable} READ operation is
+ * intercepted and the cached or fallback value is returned instead of executing
+ * the original method body.
+ *
+ * <p>The interception trigger is controlled by {@link #trigger()}:
  * <ul>
- *   <li>If the key is currently hot, the original method is <b>not</b> executed.</li>
- *   <li>If a {@link Fallback @Fallback} is also present, the fallback value is returned.</li>
- *   <li>If no {@link Fallback @Fallback} is present, {@code peek()} is used
- *       (the stale entry if available, otherwise {@code null}).</li>
- *   <li>If the key is <b>not</b> hot, the cache lookup proceeds normally.</li>
+ *   <li>{@link InterceptTrigger#IS_LOCAL_HOT} — intercepts when the HeavyKeeper
+ *       TopK detector recognises the key as hot (default)</li>
+ *   <li>{@link InterceptTrigger#FORCE} — always intercepts</li>
+ *   <li>{@link InterceptTrigger#QPS} — intercepts when the per-key request rate
+ *       exceeds {@link #QPS()}</li>
  * </ul>
- * <p>
- * Only applies to {@link org.springframework.cache.annotation.Cacheable @Cacheable} READ operations.
- * Ignored on WRITE and INVALIDATE.
+ *
+ * <p>When a method is intercepted, the fallback resolution order is:
+ * <ol>
+ *   <li>{@link #fallback()} — SpEL expression evaluated against method parameters</li>
+ *   <li>{@link Fallback @Fallback} — naming-convention method or SpEL expression</li>
+ *   <li>{@code peek()} — stale cached value if available, otherwise {@code null}</li>
+ * </ol>
+ *
+ * <p>Only applies to {@link org.springframework.cache.annotation.Cacheable @Cacheable}
+ * READ operations. Ignored on {@code @CachePut} and {@code @CacheEvict}.
+ *
+ * @see InterceptTrigger
+ * @see HotKeyCacheExtensionAspect
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
-public @interface Intercept {}
+public @interface Intercept {
+
+  /**
+   * Trigger mode that determines when the method call is intercepted.
+   * Defaults to {@link InterceptTrigger#IS_LOCAL_HOT}.
+   */
+  InterceptTrigger trigger() default IS_LOCAL_HOT;
+
+  /**
+   * QPS threshold for {@link InterceptTrigger#QPS} mode.
+   * When the per-key request rate (1-second sliding window) exceeds this
+   * value, subsequent calls are intercepted. A value of {@code 0} means
+   * the QPS check is disabled (equivalent to no-op).
+   */
+  int QPS() default 0;
+
+  /**
+   * SpEL expression evaluated against method parameters to produce a
+   * fallback value when interception triggers. Takes precedence over
+   * the method-level {@link Fallback @Fallback} annotation.
+   *
+   * <p>Example: {@code "'fallback-' + #id"}
+   */
+  String fallback() default "";
+}
