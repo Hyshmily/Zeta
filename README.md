@@ -72,12 +72,6 @@ HotKey is a **read-hotspot governance** framework, not a general-purpose distrib
 | **User sessions / permission snapshots** | Hot users (VIP operations) automatically get longer L1 TTL                                                    |
 | **Preloaded read-only cache (sidecar)**  | Coupon amounts, product images, descriptions — paired with a separate atomic deduction system                 |
 
-> [!TIP]
->
-> HotKey supports deep customization.
->
-> With default settings, the full-chain end-to-end latency (cache miss on A → report → Worker → state machine → RabbitMQ broadcast → cache hit on B) is: **140~200ms (P99: 200ms)**.
-
 ## Quick Start
 
 ### 1. Add Dependency
