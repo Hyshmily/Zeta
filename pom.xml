@@ -188,6 +188,9 @@
   <profiles>
     <profile>
       <id>release</id>
+      <modules>
+        <module>common</module>
+      </modules>
       <build>
         <plugins>
           <plugin>

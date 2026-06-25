@@ -25,7 +25,7 @@ jobs:
         run: mvn clean package -DskipTests --no-transfer-progress
 
       - name: Publish common to Maven Central
-        run: mvn deploy -pl common -am -DskipTests
+        run: mvn clean deploy -P release -DskipTests
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
