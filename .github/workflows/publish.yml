@@ -9,7 +9,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@v4
@@ -23,5 +23,15 @@ jobs:
 
       - name: Publish to GitHub Packages
         run: mvn clean deploy -DskipTests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build worker JAR
+        run: mvn clean package -pl worker -am -DskipTests --no-transfer-progress
+
+      - name: Upload worker jar to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: worker/target/hotkey-worker-*.jar
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
