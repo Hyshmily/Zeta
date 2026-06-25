@@ -68,6 +68,7 @@ public class WorkerConfigNegotiator {
       },
       "config-sync-startup"
     );
+
     waitThread.setDaemon(true);
     waitThread.start();
   }

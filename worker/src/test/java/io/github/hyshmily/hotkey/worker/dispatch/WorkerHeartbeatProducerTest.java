@@ -265,7 +265,7 @@ class WorkerHeartbeatProducerTest {
 
       verify(schedulerMock).scheduleAtFixedRate(
         any(Runnable.class),
-        eq(0L),
+        eq(PING_INTERVAL_MS),
         eq(PING_INTERVAL_MS),
         eq(TimeUnit.MILLISECONDS)
       );

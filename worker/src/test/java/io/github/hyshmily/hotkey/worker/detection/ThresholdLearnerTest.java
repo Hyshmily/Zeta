@@ -48,7 +48,7 @@ class ThresholdLearnerTest {
     properties = new WorkerProperties();
     properties.getGlobalQpsDynamicThreshold().setLearningPeriodMs(0);
     properties.getGlobalQpsDynamicThreshold().setHotThresholdRatio(0.01);
-    properties.getThreshold().setHotThreshold(0);
+    properties.getThreshold().setHotThreshold(10);
   }
 
   /**
