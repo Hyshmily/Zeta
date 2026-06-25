@@ -21,17 +21,21 @@ jobs:
           distribution: "temurin"
           cache: maven
 
+      - name: Build all JARs
+        run: mvn clean package -DskipTests --no-transfer-progress
+
       - name: Publish to GitHub Packages
-        run: mvn clean deploy -DskipTests
+        run: mvn deploy -DskipTests
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build worker JAR
-        run: mvn clean package -pl worker -am -DskipTests --no-transfer-progress
-
-      - name: Upload worker jar to Release
+      - name: Upload JARs to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: worker/target/hotkey-worker-*.jar
+          files: |
+            common/target/hotkey-*.jar
+            common/target/hotkey-*-sources.jar
+            common/target/hotkey-*-javadoc.jar
+            worker/target/hotkey-worker-*.jar
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
