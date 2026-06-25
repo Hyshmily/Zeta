@@ -37,7 +37,7 @@ class CacheSyncPropertiesTest {
     assertThat(props.getQueuePrefix()).isEqualTo("hotkey.sync");
     assertThat(props.getDedupWindowSeconds()).isEqualTo(10);
     assertThat(props.getDedupMaxSize()).isEqualTo(10_000);
-    assertThat(props.getWarmupJitterMs()).isEqualTo(100);
+    assertThat(props.getWarmupJitterMs()).isEqualTo(50);
   }
 
   /**

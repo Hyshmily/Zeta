@@ -66,7 +66,7 @@ public class CacheSyncProperties {
   /** Maximum random jitter (milliseconds) added before each sync cache update.
    * Spreads Redis reads across instances to avoid thundering herds when a
    * single write triggers broadcasts to many peers. */
-  private int warmupJitterMs = 100;
+    private int warmupJitterMs = 50;
 
   /** Number of concurrent RabbitMQ consumers for the sync queue.
    * Higher values increase throughput under load at the cost of more Redis connections. */

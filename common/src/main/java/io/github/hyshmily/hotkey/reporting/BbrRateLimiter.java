@@ -64,6 +64,10 @@ public class BbrRateLimiter {
   private final AtomicLong minRtCache = new AtomicLong(1);
   private volatile long lastDropTime = 0;
 
+  /** Minimum concurrency budget floor — prevents BBR from over-limiting in low-concurrency scenarios.
+   *  Set dynamically to the number of active Worker nodes by {@code HotKeyReporter.flush()}. */
+  private volatile int minInFlight = 1;
+
   /**
    * @deprecated Use {@link #BbrRateLimiter(SystemLoadMonitor, int, long, int, long)}
    *     for explicit configuration of threshold, window, buckets, and cooldown.
@@ -157,9 +161,11 @@ public class BbrRateLimiter {
     inFlight.decrementAndGet();
   }
 
-  /** Record a dropped flush from the gate (tryAcquire failed — never enqueued, inFlight unchanged). */
+  /** Record a dropped flush from the gate (tryAcquire failed — never enqueued, inFlight unchanged).
+   *  Does NOT trigger global cooldown — the next flush cycle is allowed to retry immediately.
+   *  This prevents a transient drop from blocking all subsequent flushes for {@code cooldownMs}.
+   *  The cooldown mechanism is preserved for {@link #onConsumerDrop()} (consumer-side drops). */
   public void onGateDrop() {
-    lastDropTime = System.currentTimeMillis();
     totalDropped.incrementAndGet();
   }
 
@@ -176,6 +182,12 @@ public class BbrRateLimiter {
   /** Current number of in-flight (enqueued but not yet published) batches. */
   public long getInFlight() {
     return inFlight.get();
+  }
+
+  /** Dynamically adjust the min concurrency floor to match the number of active Worker nodes.
+   *  Called automatically each flush cycle by {@code HotKeyReporter}. */
+  public void setMinInFlight(int count) {
+    this.minInFlight = Math.max(1, count);
   }
 
   /** Current computed max concurrency limit. */
@@ -211,7 +223,7 @@ public class BbrRateLimiter {
     if (mp == 0 || mr == 0) {
       return Long.MAX_VALUE;
     }
-    return (long) Math.floor(((double) mp * mr * bucketPerSecond) / 1000.0 + 0.5);
+    return Math.max(minInFlight, (long) Math.floor(((double) mp * mr * bucketPerSecond) / 1000.0 + 0.5));
   }
 
   /** Peak pass rate per bucket in the sliding window. Caller must hold bucketLock. */
@@ -226,7 +238,7 @@ public class BbrRateLimiter {
       return maxPassCache.get();
     }
     final long observed = max;
-    maxPassCache.updateAndGet(c -> Math.max(1, (c + observed) / 2));
+    maxPassCache.updateAndGet(c -> (c + observed) / 2);
     return max;
   }
 
@@ -245,7 +257,7 @@ public class BbrRateLimiter {
       return minRtCache.get();
     }
     final long observed = min;
-    minRtCache.updateAndGet(c -> Math.max(1, (c + observed) / 2));
+    minRtCache.updateAndGet(c -> (c + observed) / 2);
     return min;
   }
 

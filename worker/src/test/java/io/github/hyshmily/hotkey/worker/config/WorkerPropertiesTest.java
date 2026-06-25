@@ -80,7 +80,9 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldHaveDefaultStateMachineValues() {
-    assertThat(properties.getStateMachine().getConfirmDurationMs()).isEqualTo(300);
+    assertThat(properties.getStateMachine().getSmDurationMs()).isEqualTo(500);
+    assertThat(properties.getStateMachine().getSmSlices()).isEqualTo(10);
+    assertThat(properties.getStateMachine().getConfirmDurationMs()).isEqualTo(100);
     assertThat(properties.getStateMachine().getCoolDurationMs()).isEqualTo(15000);
     assertThat(properties.getStateMachine().getPreCoolGraceMs()).isEqualTo(5000);
   }
@@ -102,8 +104,8 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldComputeConfirmWindows() {
-    // confirmDurationMs=300, sliceMs=1000/10=100 => 300/100 = 3
-    assertThat(properties.getConfirmWindows()).isEqualTo(3);
+    // confirmDurationMs=100, sliceMs=500/10=50 => 100/50 = 2
+    assertThat(properties.getConfirmWindows()).isEqualTo(2);
   }
 
   /**
@@ -111,8 +113,8 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldComputeCoolWindows() {
-    // coolDurationMs=15000, sliceMs=100 => 15000/100 = 150
-    assertThat(properties.getCoolWindows()).isEqualTo(150);
+    // coolDurationMs=15000, sliceMs=50 => 15000/50 = 300
+    assertThat(properties.getCoolWindows()).isEqualTo(300);
   }
 
   /**
@@ -120,8 +122,8 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldComputePreCoolGraceWindows() {
-    // preCoolGraceMs=5000, sliceMs=100 => 5000/100 = 50
-    assertThat(properties.getPreCoolGraceWindows()).isEqualTo(50);
+    // preCoolGraceMs=5000, sliceMs=50 => 5000/50 = 100
+    assertThat(properties.getPreCoolGraceWindows()).isEqualTo(100);
   }
 
   /**
@@ -152,8 +154,8 @@ class WorkerPropertiesTest {
   @Test
   void shouldComputeConfirmWindowsWithRounding() {
     properties.getStateMachine().setConfirmDurationMs(350);
-    // sliceMs = 1000/10 = 100
-    assertThat(properties.getConfirmWindows()).isEqualTo(4);
+    // sliceMs = 500/10 = 50
+    assertThat(properties.getConfirmWindows()).isEqualTo(7);
   }
 
   /**
@@ -162,8 +164,8 @@ class WorkerPropertiesTest {
   @Test
   void shouldComputeCoolWindowsWithRounding() {
     properties.getStateMachine().setCoolDurationMs(15500);
-    // sliceMs = 1000/10 = 100
-    assertThat(properties.getCoolWindows()).isEqualTo(155);
+    // sliceMs = 500/10 = 50
+    assertThat(properties.getCoolWindows()).isEqualTo(310);
   }
 
   /**

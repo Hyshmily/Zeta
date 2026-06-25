@@ -48,6 +48,7 @@ class ThresholdLearnerTest {
     properties = new WorkerProperties();
     properties.getGlobalQpsDynamicThreshold().setLearningPeriodMs(0);
     properties.getGlobalQpsDynamicThreshold().setHotThresholdRatio(0.01);
+    properties.getThreshold().setHotThreshold(0);
   }
 
   /**
@@ -103,7 +104,7 @@ class ThresholdLearnerTest {
    * Verifies that the learner floors the threshold at a minimum value of 10.
    */
   @Test
-  void shouldFloorThresholdAtTen() {
+  void shouldFloorThresholdAtHotThreshold() {
     when(qpsEstimator.getQps()).thenReturn(50.0);
     when(detector.getThreshold()).thenReturn(500L);
     ThresholdLearner learner = new ThresholdLearner(qpsEstimator, detector, properties);

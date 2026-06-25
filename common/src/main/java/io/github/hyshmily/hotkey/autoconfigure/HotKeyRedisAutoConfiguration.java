@@ -115,8 +115,7 @@ public class HotKeyRedisAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  @ConditionalOnBean(RedisTemplate.class)
-  @ConditionalOnClass(HotKeyDetector.class)
+  @ConditionalOnBean({ RedisTemplate.class, HotKeyDetector.class })
   @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyCache hotKeyCache(
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,

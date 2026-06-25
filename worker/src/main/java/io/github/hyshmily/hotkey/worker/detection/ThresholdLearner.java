@@ -73,8 +73,8 @@ public class ThresholdLearner implements Runnable {
 
       // New threshold = global QPS * ratio
       long newThreshold = (long) (currentQps * properties.getGlobalQpsDynamicThreshold().getHotThresholdRatio());
-      // Absolute minimum to prevent noise
-      newThreshold = Math.max(10, newThreshold);
+      // Clamp: never below the configured fixed hot threshold (only tighten, never loosen)
+      newThreshold = Math.max(properties.getThreshold().getHotThreshold(), newThreshold);
 
       long oldThreshold = detector.getThreshold();
 

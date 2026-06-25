@@ -68,6 +68,7 @@ public class HotKeySpringCacheAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
+  @ConditionalOnClass(name = "org.aspectj.lang.ProceedingJoinPoint")
   public HotKeyCacheExtensionAspect hotKeyCacheExtensionAspect(HotKey hotKey, HotKeyProperties properties) {
     return new HotKeyCacheExtensionAspect(hotKey, properties);
   }

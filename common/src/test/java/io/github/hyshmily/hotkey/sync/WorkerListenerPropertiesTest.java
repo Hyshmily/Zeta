@@ -35,7 +35,7 @@ class WorkerListenerPropertiesTest {
     assertThat(props.isEnabled()).isFalse();
     assertThat(props.getExchangeName()).isEqualTo("hotkey.broadcast.exchange");
     assertThat(props.getQueuePrefix()).isEqualTo("hotkey.worker");
-    assertThat(props.getWarmupJitterMs()).isEqualTo(100);
+    assertThat(props.getWarmupJitterMs()).isEqualTo(50);
   }
 
   /**

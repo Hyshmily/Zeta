@@ -1,0 +1,49 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: demo-app
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: guest
+    password: guest
+
+hotkey:
+  instance-id: ${INSTANCE_ID:demo-unknown}
+  annotation:
+    enabled: true
+  local:
+    app-name: ${APP_NAME:hotkey-demo}
+    top-k: 200
+    width: 50000
+    depth: 5
+    decay: 0.92
+    min-count: 10
+    local-cache-max-size: 5000
+    local-cache-ttl-minutes: 5
+    default-hard-ttl-ms: 300000
+    default-hot-hard-ttl-ms: 3600000
+    default-soft-ttl-ms: 30000
+    default-hot-soft-ttl-ms: 300000
+    executor-queue-capacity: 50000
+    report-interval-ms: 50
+    report-exchange: hotkey.report.exchange
+    consistent-hashing:
+      enabled: true
+      virtual-nodes: 500
+  spring-cache:
+    enabled: true
+  sync:
+    enabled: true
+    exchange-name: hotkey.sync.exchange
+  worker-listener:
+    enabled: true
+    exchange-name: hotkey.broadcast.exchange
+  report:
+    enabled: true

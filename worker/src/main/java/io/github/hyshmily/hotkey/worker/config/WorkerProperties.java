@@ -73,7 +73,12 @@ public class WorkerProperties {
   @Data
   public static class StateMachine {
 
-    private long confirmDurationMs = 300;
+    private long smDurationMs = 500;
+
+    @Min(1)
+    private int smSlices = 10;
+
+    private long confirmDurationMs = 100;
     private long coolDurationMs = 15000;
     private long preCoolGraceMs = 5000;
     /** Interval for evicting stale sliding-window and state-machine state. Must be >= coolDurationMs * 2. */
@@ -170,12 +175,14 @@ public class WorkerProperties {
   private Persistence persistence = new Persistence();
 
   /**
-   * Number of sliding-window slices that fit within the CONFIRM duration.
+   * Number of state-machine time slices that fit within the CONFIRM duration.
+   * Uses {@code stateMachine.smDurationMs / stateMachine.smSlices} as the slice size,
+   * independent of the sliding-window detector's own slice timing.
    *
    * @return window count for the confirmation phase
    */
   public int getConfirmWindows() {
-    double sliceMs = (double) slidingWindow.getDurationMs() / slidingWindow.getSlices();
+    double sliceMs = (double) stateMachine.getSmDurationMs() / stateMachine.getSmSlices();
     return (int) Math.ceil(stateMachine.getConfirmDurationMs() / sliceMs);
   }
 
@@ -185,7 +192,7 @@ public class WorkerProperties {
    * @return window count for the cool phase
    */
   public int getCoolWindows() {
-    double sliceMs = (double) slidingWindow.getDurationMs() / slidingWindow.getSlices();
+    double sliceMs = (double) stateMachine.getSmDurationMs() / stateMachine.getSmSlices();
     return (int) Math.ceil(stateMachine.getCoolDurationMs() / sliceMs);
   }
 
@@ -195,7 +202,7 @@ public class WorkerProperties {
    * @return window count for the pre-cool grace phase
    */
   public int getPreCoolGraceWindows() {
-    double sliceMs = (double) slidingWindow.getDurationMs() / slidingWindow.getSlices();
+    double sliceMs = (double) stateMachine.getSmDurationMs() / stateMachine.getSmSlices();
     return (int) Math.ceil(stateMachine.getPreCoolGraceMs() / sliceMs);
   }
 }

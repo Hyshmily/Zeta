@@ -56,7 +56,7 @@ import org.springframework.amqp.core.Message;
  *
  * <p><b>Ack-before-update pattern:</b> The AMQP message is acknowledged immediately after
  * parsing (see {@link #handleWorkerMessage}). The actual cache mutation is scheduled
- * asynchronously with a random jitter (see {@link WorkerListenerProperties#warmupJitterMs}).
+ * asynchronously with a random jitter (see {@link WorkerListenerProperties# warmupJitterMs}).
  * This decoupling provides at-most-once delivery semantics — if the application crashes
  * after ack but before the cache write, the decision is lost and will be re-driven by the
  * next Worker heartbeat cycle (see ADR-0004).
@@ -343,6 +343,9 @@ public class WorkerListener {
       return redisLoader.apply(wm.cacheKey());
     } catch (Exception e) {
       log.warn("handleHot: Redis load failed for key={}, trying degraded entry", wm.cacheKey(), e);
+      if (sreRateLimiter != null) {
+        sreRateLimiter.onFailed();
+      }
       return null;
     }
   }

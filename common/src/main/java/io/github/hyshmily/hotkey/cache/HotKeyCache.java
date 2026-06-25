@@ -146,7 +146,8 @@ public class HotKeyCache {
       if (isLogicallyExpired(ce)) {
         return false;
       }
-      return KeyState.HOT == ce.getKeyState();
+      // Also check HeavyKeeper for NORMAL entries promoted by Worker broadcast detection
+      return KeyState.HOT == ce.getKeyState() || hotKeyDetector.contains(cacheKey);
     }
     // Fallback to HeavyKeeper for keys that are hot in the detection engine but not yet
     // promoted to L1 with a CacheEntry wrapper (e.g., during the first detection window).

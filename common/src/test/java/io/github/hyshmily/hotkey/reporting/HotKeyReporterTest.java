@@ -286,7 +286,7 @@ class HotKeyReporterTest {
     assertThat(reporter.bbrPassed()).isZero();
     assertThat(reporter.bbrDropped()).isZero();
     assertThat(reporter.bbrInFlight()).isZero();
-    assertThat(reporter.bbrMaxInFlight()).isZero();
+    assertThat(reporter.bbrMaxInFlight()).isEqualTo(1);
   }
 
   @Test

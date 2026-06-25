@@ -29,7 +29,6 @@ import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -290,7 +289,6 @@ public class HotKeyAutoConfiguration {
   @Bean
   @ConditionalOnBean(HotKeyCache.class)
   @ConditionalOnMissingBean
-  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKey hotKey(
     HotKeyCache hotKeyCache,
     @Qualifier("hotKeyDetector") HotKeyDetector appHotKeyDetector,

@@ -35,6 +35,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -49,6 +50,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  */
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 @Slf4j
+@DependsOn("rabbitAdmin")
 public class WorkerHeartbeatProducer {
 
   /** RabbitMQ template for publishing heartbeat messages. */
@@ -238,12 +240,15 @@ public class WorkerHeartbeatProducer {
   /**
    * Starts the periodic heartbeat sender at the configured ping interval.
    *
-   * <p>First heartbeat is sent immediately on startup (initial delay = 0).
+   * <p>First heartbeat is delayed by {@code pingIntervalMs} to allow the
+   * RabbitMQ connection and exchange declarations (RabbitAdmin) to complete,
+   * preventing channel-level NOT_FOUND errors when the heartbeat exchange
+   * has not yet been declared.
    */
   @PostConstruct
   public void start() {
     try {
-      heartbeatTask = scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, pingIntervalMs, TimeUnit.MILLISECONDS);
+      heartbeatTask = scheduler.scheduleAtFixedRate(this::sendHeartbeat, pingIntervalMs, pingIntervalMs, TimeUnit.MILLISECONDS);
     } catch (Exception e) {
       log.error("Failed to start heartbeat scheduler; Worker heartbeat will not be sent. " +
           "Application continues but App instances may mark this Worker as dead.", e);

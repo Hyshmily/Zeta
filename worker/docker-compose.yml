@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
 
   rabbitmq:
-    image: ${RABBITMQ_IMAGE:-rabbitmq:4-management-alpine}
+    image: ${RABBITMQ_IMAGE:-rabbitmq:4.0-alpine}
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -31,12 +31,13 @@ services:
     restart: unless-stopped
 
   worker:
-    image: ghcr.io/hyshmily/hotkey-worker:1.1.51
+    image: ghcr.io/hyshmily/hotkey-worker:1.1.52
     pull_policy: always
     environment:
       SPRING_RABBITMQ_HOST: rabbitmq
       SPRING_DATA_REDIS_HOST: redis
       HOTKEY_WORKER_ENABLED: "true"
+      # HOTKEY_WORKER_ROUTING_APP_NAME: "myapp"  # 必须与 App 侧 hotkey.local.app-name 一致
     depends_on:
       redis:      { condition: service_healthy }
       rabbitmq:   { condition: service_healthy }

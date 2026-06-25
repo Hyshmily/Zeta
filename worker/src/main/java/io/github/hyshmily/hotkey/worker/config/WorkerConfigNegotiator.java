@@ -78,7 +78,7 @@ public class WorkerConfigNegotiator {
    *
    * @param msg the raw AMQP heartbeat message
    */
-  @RabbitListener(queues = "#{@workerConfigQueue.name}")
+  @RabbitListener(queues = "#{@workerConfigQueue.name}", containerFactory = "workerConfigListenerContainerFactory")
   public void onHeartbeat(Message msg) {
     try {
       doOnHeartbeat(msg);

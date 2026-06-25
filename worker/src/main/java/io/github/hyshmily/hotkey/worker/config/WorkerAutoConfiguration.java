@@ -36,9 +36,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -539,6 +541,24 @@ public class WorkerAutoConfiguration {
     WorkerProperties properties
   ) {
     return new ThresholdLearner(estimator, detector, properties);
+  }
+
+  /**
+   * {@link SimpleRabbitListenerContainerFactory} using {@link SimpleMessageConverter}
+   * for the Worker config listener, avoiding Jackson JSON conversion of heartbeat
+   * messages (which use a custom header-based format).
+   *
+   * @param connectionFactory the RabbitMQ connection factory
+   * @return a configured {@link SimpleRabbitListenerContainerFactory} instance
+   */
+  @Bean
+  public SimpleRabbitListenerContainerFactory workerConfigListenerContainerFactory(
+    ConnectionFactory connectionFactory
+  ) {
+    SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+    factory.setConnectionFactory(connectionFactory);
+    factory.setMessageConverter(new SimpleMessageConverter());
+    return factory;
   }
 
   /**

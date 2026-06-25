@@ -208,7 +208,7 @@ public class HotKeyProperties {
   private String reportExchange = "hotkey.report.exchange";
 
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
-  private long reportIntervalMs = 100;
+  private long reportIntervalMs = 50;
 
   /** Number of shards for report partitioning (only used when consistent-hashing is disabled). */
   private int shardCount = 1;
@@ -320,7 +320,7 @@ public class HotKeyProperties {
     /** Heartbeat exchange name. */
     private String exchangeName = "hotkey.heartbeat.exchange";
     /** Heartbeat timeout (ms). */
-    private int timeoutMs = 3000;
+    private int timeoutMs = 30000;
     /** Verify interval (ms). */
     private long verifyIntervalMs = 1500;
     /** PING timeout (ms). */

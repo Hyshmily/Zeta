@@ -62,7 +62,7 @@ hotkey:
       report-exchange: hotkey.report.exchange
       broadcast-exchange: hotkey.broadcast.exchange
 
-    ## Sliding Window
+    ## Sliding Window (each slice = 1000/10 = 100ms)
     sliding-window:
       duration-ms: 1000
       slices: 10
@@ -72,9 +72,11 @@ hotkey:
       hot-threshold: -1
       hot-threshold-ratio: 0.01
 
-    ## State Machine
+    ## State Machine (each slice = 500/10 = 50ms, confirm = 100/50 = 2 windows)
     state-machine:
-      confirm-duration-ms: 300
+      sm-duration-ms: 500
+      sm-slices: 10
+      confirm-duration-ms: 100
       cool-duration-ms: 15000
       pre-cool-grace-ms: 5000
 

@@ -59,7 +59,7 @@ public class WorkerListenerProperties {
   /** Maximum random jitter (milliseconds) added before each Worker decision cache update.
    * Spreads Redis reads across a small time window to avoid thundering herds
    * when the Worker broadcasts a decision to many app instances simultaneously. */
-  private int warmupJitterMs = 100;
+  private int warmupJitterMs = 50;
 
   /** Number of concurrent RabbitMQ consumers for the Worker decision queue.
    * Higher values increase throughput under load at the cost of more Redis connections. */

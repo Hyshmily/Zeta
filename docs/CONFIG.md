@@ -102,7 +102,7 @@
 | `hotkey.local.refresh-max-pools`        | `100`                    | Max concurrent async refreshes for soft expire (Semaphore)                                                                    |
 | `hotkey.local.version-key-ttl-minutes`  | `60`                     | Redis version key TTL (minutes); minimum 1                                                                                    |
 | `hotkey.local.report-exchange`          | `hotkey.report.exchange` | RabbitMQ exchange for app-to-Worker report messages                                                                           |
-| `hotkey.local.report-interval-ms`       | `100`                    | Interval at which app instances batch and send TopK reports to the Worker (ms)                                                |
+| `hotkey.local.report-interval-ms`       | `50`                     | Interval at which app instances batch and send TopK reports to the Worker (ms)                                                |
 | `hotkey.local.app-name`                 | `"default"`              | Logical application name used as tenant discriminator for Worker routing                                                      |
 | `hotkey.local.shard-count`              | `1`                      | Divisor for auto consumer count calculation (max(4, availableProcessors/2) when 0); routing uses CH by default               |
 | `hotkey.local.instance-id`              | `""` (auto)              | Explicit instance ID for queue naming; auto-detected as `server.port-HOSTNAME` (or `server.port-UUID`) if empty               |
@@ -125,7 +125,7 @@
 | Property                                        | Default                     | Description                                                                                            |
 | ----------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `hotkey.local.heartbeat.exchange-name`          | `hotkey.heartbeat.exchange` | Topic exchange name for epoch-driven structured heartbeats from Workers                                |
-| `hotkey.local.heartbeat.timeout-ms`             | `3000`                      | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window              |
+| `hotkey.local.heartbeat.timeout-ms`             | `30000`                     | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window              |
 | `hotkey.local.heartbeat.verify-interval-ms`     | `1500`                      | Interval (ms) for verifying suspected dead Workers via Direct reply-to PING                            |
 | `hotkey.local.heartbeat.ping-timeout-ms`        | `2000`                      | Timeout (ms) for a PING/PONG verification probe                                                        |
 | `hotkey.local.heartbeat.degrade-after-failures` | `2`                         | Number of consecutive PING failures before degrading the Worker (allow local promotion of its entries) |
@@ -147,6 +147,23 @@
 | `hotkey.local.reporter.bbr-window-ms`        | `10000` | BBR sliding window duration (ms) for tracking max pass rate and min round-trip time                                                                                                                                   |
 | `hotkey.local.reporter.bbr-window-buckets`   | `100`   | Number of buckets dividing the BBR sliding window                                                                                                                                                                     |
 | `hotkey.local.reporter.bbr-cooldown-ms`      | `1000`  | Cooldown period (ms) after a batch is dropped — the limiter refuses all admits during cooldown regardless of CPU state                                                                                                |
+
+### Worker Listener (`hotkey.worker-listener.*`)
+
+| Property                                       | Default                     | Description                                                                                                                    |
+| ---------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `hotkey.worker-listener.enabled`               | `false`                     | **Must be `true` when a Worker cluster is deployed.** Enables heartbeat consumption, Worker hot/cool decision listening, and the ClusterHealthView that drives report routing via consistent-hash ring |
+| `hotkey.worker-listener.exchange-name`         | `hotkey.broadcast.exchange` | FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats; must match Worker-side `hotkey.worker.messaging.broadcast-exchange` |
+| `hotkey.worker-listener.queue-prefix`          | `hotkey.worker`             | Prefix for the per-instance Worker listener queue; final queue: `{prefix}:{instanceId}`                                        |
+| `hotkey.worker-listener.warmup-jitter-ms`      | `50`                        | Random delay (ms) before processing each Worker decision; spreads Redis reads across instances to avoid thundering herd       |
+| `hotkey.worker-listener.concurrent-consumers`  | `2`                         | Number of concurrent RabbitMQ consumers for the Worker decision queue                                                          |
+| `hotkey.worker-listener.prefetch-count`        | `5`                         | AMQP prefetch count per consumer                                                                                               |
+| `hotkey.worker-listener.sre.enabled`           | `true`                      | Enable Google SRE adaptive rate limiter on HOT promotion processing                                                            |
+| `hotkey.worker-listener.sre.success-threshold` | `0.6`                       | Minimum success ratio below which HOT promotions are probabilistically dropped                                                 |
+
+> **⚠️ IMPORTANT: Startup order** — The `hotkey.heartbeat.exchange` and `hotkey.broadcast.exchange` exchanges are created by the App (common module). Worker nodes must **start after the App**, otherwise heartbeats will fail with `NOT_FOUND` and the cluster health ring will remain empty. When using Docker Compose, add `depends_on: app-1: { condition: service_started }` to Worker services. Alternatively, the Worker's heartbeat producer delays its first send by `pingIntervalMs` (default 1000ms) to give RabbitAdmin time to declare the exchange.
+
+> **⚠️ IMPACT when disabled:** Without `worker-listener.enabled=true`, the App does not consume Worker heartbeats → `ClusterHealthView` records stay empty → `getAliveWorkerIds()` returns empty → Reporter `routeNode()` returns `null` → all report batches are **silently dropped**. The Worker never receives any data and never broadcasts HOT/COOL decisions. This is the most common configuration error in deployments with a Worker cluster.
 
 ### Scheduling (`hotkey.scheduling.*`, `hotkey.decay-period`)
 
@@ -180,7 +197,7 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `hotkey.sync.queue-prefix`         | `hotkey.sync`          | Queue name prefix; full name = `{prefix}:{instanceId}`                                      |
 | `hotkey.sync.dedup-window-seconds` | `10`                   | Dedup window for received sync messages (seconds)                                           |
 | `hotkey.sync.dedup-max-size`       | `10000`                | Dedup cache max entries                                                                     |
-| `hotkey.sync.warmup-jitter-ms`     | `100`                  | Random jitter before processing sync messages (prevents herd)                               |
+| `hotkey.sync.warmup-jitter-ms`     | `50`                   | Random jitter before processing sync messages (prevents herd)                               |
 | `hotkey.sync.concurrent-consumers` | `3`                    | Number of concurrent RabbitMQ consumers for sync queue                                      |
 | `hotkey.sync.scheduler-pool-size`  | `4`                    | Thread pool size for async sync jitter delay scheduling                                     |
 | `hotkey.sync.prefetch-count`       | `5`                    | AMQP prefetch count per sync consumer                                                       |
@@ -193,7 +210,7 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `hotkey.worker-listener.enabled`               | `false`                     | Enable listening for Worker HOT/COOL decisions                                  |
 | `hotkey.worker-listener.exchange-name`         | `hotkey.broadcast.exchange` | Fanout exchange name for Worker broadcasts                                      |
 | `hotkey.worker-listener.queue-prefix`          | `hotkey.worker`             | Queue name prefix; full name = `{prefix}:{instanceId}`                          |
-| `hotkey.worker-listener.warmup-jitter-ms`      | `100`                       | Random jitter before processing Worker messages (prevents herd)                 |
+| `hotkey.worker-listener.warmup-jitter-ms`      | `50`                        | Random jitter before processing Worker messages (prevents herd)                 |
 | `hotkey.worker-listener.concurrent-consumers`  | `2`                         | Number of concurrent RabbitMQ consumers for Worker listener queue               |
 | `hotkey.worker-listener.scheduler-pool-size`   | `2`                         | Thread pool size for jittered Worker cache-update tasks                         |
 | `hotkey.worker-listener.prefetch-count`        | `5`                         | AMQP prefetch count per worker-listener consumer                                |
@@ -223,7 +240,9 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `hotkey.worker.threshold.hot-threshold`                              | `1000`                      | Absolute hot-key threshold; `≤0` = use ratio-based                                                                           |
 | `hotkey.worker.threshold.hot-threshold-ratio`                        | `0.01`                      | Hot-key threshold as fraction of estimated global QPS (1%)                                                                   |
 | **`hotkey.worker.state-machine.*`**                                  |                             | **State Machine**                                                                                                            |
-| `hotkey.worker.state-machine.confirm-duration-ms`                    | `300`                       | Duration key must stay above threshold to be confirmed HOT                                                                   |
+| `hotkey.worker.state-machine.sm-duration-ms`                        | `500`                       | State-machine slice window duration (ms). Independent of sliding-window. Each slice = sm-duration-ms / sm-slices.             |
+| `hotkey.worker.state-machine.sm-slices`                             | `10`                        | Number of slices within the state-machine window.                                                                            |
+| `hotkey.worker.state-machine.confirm-duration-ms`                    | `100`                       | Total duration for HOT confirmation (confirmCount = ceil(confirm-duration-ms / slice-ms)). Must be ≥ slice-ms.                |
 | `hotkey.worker.state-machine.cool-duration-ms`                       | `15000`                     | Duration key must stay below threshold to be considered COLD                                                                 |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`                      | `5000`                      | Grace period at end of cool-down for silent revival                                                                          |
 | `hotkey.worker.state-machine.evict-interval-ms`                      | `30000`                     | Stale state eviction interval (ms); must be >= cool-duration-ms \* 2                                                         |

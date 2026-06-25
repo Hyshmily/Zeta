@@ -60,4 +60,7 @@ HELP.md
 worker/.env
 common/cp.txt
 
+# k6 test results
+k6/result/*.json
+
 

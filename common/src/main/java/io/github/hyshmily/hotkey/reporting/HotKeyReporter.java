@@ -228,13 +228,18 @@ public class HotKeyReporter {
         return;
       }
 
-      if (bbrRateLimiter != null && !bbrRateLimiter.tryAcquire()) {
-        bbrRateLimiter.onGateDrop();
-        return;
-      }
-
       // Reconcile ring with alive Worker nodes (from heartbeat state), then route via consistent hash
       ringManager.reconcileFromHealthView(healthView);
+
+      // Set BBR minInFlight to the current number of Workers so that multi-Worker deployments
+      // don't trigger false-positive drops (each Worker produces one ShardBatch per flush).
+      if (bbrRateLimiter != null) {
+        bbrRateLimiter.setMinInFlight(ringManager.nodeCount());
+        if (!bbrRateLimiter.tryAcquire()) {
+          bbrRateLimiter.onGateDrop();
+          return;
+        }
+      }
 
       Map<String, Map<String, Long>> sharded = new HashMap<>();
       long now = System.currentTimeMillis();
@@ -242,12 +247,13 @@ public class HotKeyReporter {
       counters
         .asMap()
         .forEach((key, adder) -> {
-          long val = adder.sumThenReset();
+          long val = adder.sum();
 
           if (val > 0) {
             String target = ringManager.routeNode(key, healthView);
 
             if (target != null) {
+              adder.sumThenReset();
               sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);
             }
           }

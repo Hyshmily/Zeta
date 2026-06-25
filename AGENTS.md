@@ -8,18 +8,19 @@ This file provides guidance to AI coding assistants when working with code in th
 
 HotKey is a Spring Boot Starter for automatic hot key detection and multi-level cache warming (HeavyKeeper + Caffeine L1 + optional Redis L2 + optional RabbitMQ broadcast).
 
-**Coordinates:** `io.github.hyshmily:hotkey:1.1.51`
+**Coordinates:** `io.github.hyshmily:hotkey:1.1.52`
 
-Two Maven modules under `hotkey-parent:1.1.4`:
+Three Maven modules under `hotkey-parent:1.1.52`:
 - **`common/`** — Spring Boot Starter (published to Maven Central). Cache logic, algorithm, auto-configuration, sync, reporting, sharding, annotations.
 - **`worker/`** — Standalone Spring Boot app (never published). Cluster-wide hot key detection via RabbitMQ.
+- **`demo-app/`** — Demo application with REST API for cluster simulation and k6 load testing. Never published.
 
 ## Build Commands
 
 ```bash
 mvn clean package                    # Build all modules (JARs)
 mvn clean package -P release         # Build with GPG signing for Maven Central
-mvn test                             # Run all unit tests (1262 total: 1109 common + 153 worker)
+mvn test                             # Run all unit tests (1488 total: 1308 common + 180 worker)
 mvn javadoc:jar                      # Generate Javadoc JAR (common only)
 mvn source:jar                       # Generate source JAR (common only)
 ```

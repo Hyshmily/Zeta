@@ -98,7 +98,7 @@
 | `hotkey.local.refresh-max-pools`        | `100`                    | 软过期最大并发异步刷新数（信号量）                                                           |
 | `hotkey.local.version-key-ttl-minutes`  | `60`                     | Redis 版本 key TTL（分钟），最小值为 1                                                       |
 | `hotkey.local.report-exchange`          | `hotkey.report.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                                                 |
-| `hotkey.local.report-interval-ms`       | `100`                    | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）                                       |
+| `hotkey.local.report-interval-ms`       | `50`                     | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）                                       |
 | `hotkey.local.app-name`                 | `"default"`              | 逻辑应用名，用于 Worker 路由的租户区分                                                       |
 | `hotkey.local.shard-count`              | `1`                      | 消费者线程数自动计算的除数（max(4, availableProcessors/2)；路由默认使用一致性哈希             |
 | `hotkey.local.instance-id`              | `""`（自动检测）         | 用于队列命名的显式实例 ID；为空时自动检测为 `server.port-HOSTNAME`（或 `server.port-UUID`）  |
@@ -113,7 +113,7 @@
 | 属性                                            | 默认值                      | 说明                                                                   |
 | ----------------------------------------------- | --------------------------- | ---------------------------------------------------------------------- |
 | `hotkey.local.heartbeat.exchange-name`          | `hotkey.heartbeat.exchange` | 心跳 Topic 交换机名称，用于 Worker 的 epoch 驱动结构化心跳             |
-| `hotkey.local.heartbeat.timeout-ms`             | `3000`                      | 超时（毫秒）——在此窗口内未收到心跳则判定 Worker 死亡                   |
+| `hotkey.local.heartbeat.timeout-ms`             | `30000`                     | 超时（毫秒）——在此窗口内未收到心跳则判定 Worker 死亡                   |
 | `hotkey.local.heartbeat.verify-interval-ms`     | `1500`                      | 验证间隔（毫秒）——对怀疑死亡的 Worker 发送 Direct reply-to PING 的间隔 |
 | `hotkey.local.heartbeat.ping-timeout-ms`        | `2000`                      | PING/PONG 验证探针超时（毫秒）                                         |
 | `hotkey.local.heartbeat.degrade-after-failures` | `2`                         | 连续 PING 失败次数超过此值后降级该 Worker（允许本地提升其条目）        |
@@ -135,6 +135,23 @@
 | `hotkey.local.reporter.bbr-window-ms`        | `10000` | BBR 滑动窗口时长（ms），用于追踪最大通过率和最小往返时间                                                                                 |
 | `hotkey.local.reporter.bbr-window-buckets`   | `100`   | BBR 滑动窗口的桶数                                                                                                                       |
 | `hotkey.local.reporter.bbr-cooldown-ms`      | `1000`  | 批次丢弃后的冷却时间（ms）。冷却期内无论 CPU 状态如何，限制器拒绝所有准入                                                                |
+
+### Worker 监听器（`hotkey.worker-listener.*`）
+
+| 属性                                              | 默认值                       | 说明                                                                                                                                                |
+| ------------------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hotkey.worker-listener.enabled`                  | `false`                      | **部署了 Worker 集群时必须设为 `true`**。开启心跳消费、Worker 热/冷决策监听，以及驱动 Reporter 一致性哈希路由的 ClusterHealthView                        |
+| `hotkey.worker-listener.exchange-name`            | `hotkey.broadcast.exchange`  | 接收 Worker HOT/COOL 决策和心跳的 FanoutExchange 名称；必须与 Worker 侧 `hotkey.worker.messaging.broadcast-exchange` 一致                            |
+| `hotkey.worker-listener.queue-prefix`             | `hotkey.worker`              | 实例级 Worker 监听队列前缀；最终队列名 `{prefix}:{instanceId}`                                                                                      |
+| `hotkey.worker-listener.warmup-jitter-ms`         | `50`                         | 处理每个 Worker 决策前的随机延迟（毫秒）；分散各实例的 Redis 读取，避免惊群效应                                                                       |
+| `hotkey.worker-listener.concurrent-consumers`     | `2`                          | Worker 决策队列的并发消费者数                                                                                                                        |
+| `hotkey.worker-listener.prefetch-count`           | `5`                          | 每消费者的 AMQP 预取数                                                                                                                               |
+| `hotkey.worker-listener.sre.enabled`              | `true`                       | 启用 Google SRE 自适应速率限制器作用于 HOT 提升处理                                                                                                  |
+| `hotkey.worker-listener.sre.success-threshold`    | `0.6`                        | 成功率低于此值时概率性丢弃 HOT 提升                                                                                                                 |
+
+> **⚠️ 重要：启动顺序** — `hotkey.heartbeat.exchange` 和 `hotkey.broadcast.exchange` 由 App（common 模块）创建。Worker 节点**必须在 App 之后启动**，否则心跳会因 `NOT_FOUND` 错误失败，集群健康环将始终为空。使用 Docker Compose 时，请为 Worker 服务添加 `depends_on: app-1: { condition: service_started }`。或者，Worker 的心跳生产者延迟首次发送 `pingIntervalMs`（默认 1000ms）以使 RabbitAdmin 有足够时间声明 exchange。
+
+> **⚠️ 未启用时的影响：** 不设置 `worker-listener.enabled=true`，App 不消费 Worker 心跳 → `ClusterHealthView` 记录为空 → `getAliveWorkerIds()` 返回空集 → Reporter 的 `routeNode()` 返回 `null` → 所有 report 批次被**静默丢弃**。Worker 永远收不到任何数据，也永远不会广播 HOT/COOL 决策。这是部署了 Worker 集群时最常见的配置错误。
 
 ### 调度配置（`hotkey.scheduling.*`，`hotkey.decay-period`）
 
@@ -168,7 +185,7 @@
 | `hotkey.sync.queue-prefix`         | `hotkey.sync`          | 队列名前缀；完整名称 = `{prefix}:{instanceId}`                                   |
 | `hotkey.sync.dedup-window-seconds` | `10`                   | 接收同步消息的去重窗口（秒）                                                     |
 | `hotkey.sync.dedup-max-size`       | `10000`                | 去重缓存最大条目数                                                               |
-| `hotkey.sync.warmup-jitter-ms`     | `100`                  | 处理同步消息前的随机 jitter（防止惊群效应）                                      |
+| `hotkey.sync.warmup-jitter-ms`     | `50`                   | 处理同步消息前的随机 jitter（防止惊群效应）                                      |
 | `hotkey.sync.concurrent-consumers` | `3`                    | 同步队列 RabbitMQ 消费者并发数                                                   |
 | `hotkey.sync.scheduler-pool-size`  | `4`                    | 同步 jitter 延迟的线程池大小                                                     |
 | `hotkey.sync.prefetch-count`       | `5`                    | 每个同步消费者的 AMQP 预取数量                                                   |
@@ -181,7 +198,7 @@
 | `hotkey.worker-listener.enabled`               | `false`                     | 启用接收 Worker HOT/COOL 决策                   |
 | `hotkey.worker-listener.exchange-name`         | `hotkey.broadcast.exchange` | Worker 广播 Fanout 交换机名称                   |
 | `hotkey.worker-listener.queue-prefix`          | `hotkey.worker`             | 队列名前缀；完整名称 = `{prefix}:{instanceId}`  |
-| `hotkey.worker-listener.warmup-jitter-ms`      | `100`                       | 处理 Worker 消息前的随机 jitter（防止惊群效应） |
+| `hotkey.worker-listener.warmup-jitter-ms`      | `50`                        | 处理 Worker 消息前的随机 jitter（防止惊群效应） |
 | `hotkey.worker-listener.concurrent-consumers`  | `2`                         | Worker 监听队列 RabbitMQ 消费者并发数           |
 | `hotkey.worker-listener.scheduler-pool-size`   | `2`                         | Worker 监听器抖动缓存更新任务的线程池大小                                       |
 | `hotkey.worker-listener.prefetch-count`        | `5`                         | Worker 监听器每个消费者的 AMQP 预取数量         |
@@ -205,13 +222,15 @@
 | `hotkey.worker.messaging.broadcast-exchange`                         | `hotkey.broadcast.exchange` | HOT/COOL 广播的交换机（Worker 使用路由键发布；可能需要与 worker-listener.exchange-name 对齐）    |
 | `hotkey.worker.messaging.heartbeat-exchange`                         | `hotkey.heartbeat.exchange` | epoch 驱动结构化心跳的 Topic 交换机（必须与 App 端 `hotkey.local.heartbeat.exchange-name` 一致） |
 | **`hotkey.worker.sliding-window.*`**                                 |                             | **滑动窗口**                                                                                     |
-| `hotkey.worker.sliding-window.duration-ms`                           | `1000`                      | 滑动窗口时长（毫秒）                                                                             |
+| `hotkey.worker.sliding-window.duration-ms`                           | `500`                       | 滑动窗口时长（毫秒）                                                                                                         |
 | `hotkey.worker.sliding-window.slices`                                | `10`                        | 每个窗口的时间片数                                                                               |
 | **`hotkey.worker.threshold.*`**                                      |                             | **热点阈值**                                                                                     |
 | `hotkey.worker.threshold.hot-threshold`                              | `1000`                      | 绝对热点阈值；`≤0` = 使用比例阈值                                                                |
 | `hotkey.worker.threshold.hot-threshold-ratio`                        | `0.01`                      | 热点阈值占估计全局 QPS 的比例（1%）                                                              |
 | **`hotkey.worker.state-machine.*`**                                  |                             | **状态机**                                                                                       |
-| `hotkey.worker.state-machine.confirm-duration-ms`                    | `300`                       | key 持续超过阈值才确认 HOT 的时长                                                                |
+| `hotkey.worker.state-machine.sm-duration-ms`                        | `500`                       | 状态机时间片窗口时长（毫秒），独立于滑动窗口。每片 = sm-duration-ms / sm-slices                   |
+| `hotkey.worker.state-machine.sm-slices`                             | `10`                        | 状态机窗口内的时间片数                                                                            |
+| `hotkey.worker.state-machine.confirm-duration-ms`                    | `100`                       | HOT 确认总时长。confirmCount = ceil(confirm-duration-ms / slice-ms)                              |
 | `hotkey.worker.state-machine.cool-duration-ms`                       | `15000`                     | key 持续低于阈值才确认 COLD 的时长                                                               |
 | `hotkey.worker.state-machine.pre-cool-grace-ms`                      | `5000`                      | COOL 结束时的宽限期，允许静默恢复                                                                |
 | `hotkey.worker.state-machine.evict-interval-ms`                      | `30000`                     | 过期状态擦除间隔（毫秒）；必须 >= cool-duration-ms \* 2                                          |

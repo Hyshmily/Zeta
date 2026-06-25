@@ -12,7 +12,7 @@ All cross-instance communication falls into three categories, all of which toler
 
 3. **Rule synchronization:** Rules are gossiped via AMQP and persisted to Redis. Concurrent deletions may temporarily re-appear (ADR-0012). The next rule broadcast or periodic reconciliation fixes the inconsistency.
 
-The inconsistency window is bounded by the shortest periodic interval among the affected paths: 1s (Worker heartbeat/evaluation), configurable `reportIntervalMs` (default 100ms for Reporter), or the next write transaction for sync.
+The inconsistency window is bounded by the shortest periodic interval among the affected paths: 1s (Worker heartbeat/evaluation), configurable `reportIntervalMs` (default 50ms for Reporter), or the next write transaction for sync.
 
 We explicitly choose **not** to provide:
 - Message-level idempotency (no dedup hash)
