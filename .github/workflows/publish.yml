@@ -24,8 +24,8 @@ jobs:
       - name: Build all JARs
         run: mvn clean package -DskipTests --no-transfer-progress
 
-      - name: Publish common to Maven Central
-        run: mvn clean deploy -P release -DskipTests
+      - name: Publish common to GitHub Packages
+        run: mvn deploy -P release -DskipTests --no-transfer-progress
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

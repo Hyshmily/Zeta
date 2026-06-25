@@ -85,7 +85,7 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>hotkey</artifactId>
-  <version>1.1.52</version>
+  <version>1.1.53</version>
 </dependency>
 ```
 
@@ -102,7 +102,7 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.52</version>
+    <version>1.1.53</version>
 </dependency>
 ```
 
@@ -120,7 +120,7 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>hotkey</artifactId>
-  <version>1.1.52</version>
+  <version>1.1.53</version>
 </dependency>
 ```
 
@@ -163,14 +163,14 @@ docker run -d --name hotkey-worker -p 8080:8080 \
   -e SPRING_RABBITMQ_HOST=rabbitmq \
   -e SPRING_DATA_REDIS_HOST=redis \
   -e HOTKEY_WORKER_ENABLED=true \
-  ghcr.io/hyshmily/hotkey-worker:1.1.52
+  ghcr.io/hyshmily/hotkey-worker:1.1.53
 ```
 
 **直接运行 JAR**（无需 Docker）：
 
 ```bash
 mvn clean package -pl worker
-java -jar worker/target/hotkey-worker-1.1.52.jar
+java -jar worker/target/hotkey-worker-1.1.53.jar
 ```
 
 > Worker 由 `worker/` 模块打包。必须连接 RabbitMQ + Redis。
