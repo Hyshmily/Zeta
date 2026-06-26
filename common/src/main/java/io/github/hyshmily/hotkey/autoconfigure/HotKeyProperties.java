@@ -136,6 +136,13 @@ public class HotKeyProperties {
   /** Override soft TTL (ms) for hot keys. 0 means use {@link #defaultHotSoftTtlMs}. */
   private long hotSoftTtlMs;
 
+  /** TTL (seconds) for null/cache-miss entries. Kept short to avoid caching negative results. */
+  private int nullValueTtlSeconds = 10;
+
+  public long effectiveNullTtlMs() {
+    return nullValueTtlSeconds > 0 ? nullValueTtlSeconds * 1000L : Long.MAX_VALUE;
+  }
+
   /**
    * Effective hard TTL for normal keys.
    * Returns the override value if set, otherwise the default.
@@ -320,18 +327,61 @@ public class HotKeyProperties {
     /** Heartbeat exchange name. */
     private String exchangeName = "hotkey.heartbeat.exchange";
     /** Heartbeat timeout (ms). */
-    private int timeoutMs = 30000;
+    private int timeoutMs = 15000;
     /** Verify interval (ms). */
-    private long verifyIntervalMs = 1500;
+    private long verifyIntervalMs = 5000;
     /** PING timeout (ms). */
-    private long pingTimeoutMs = 2000;
+    private long pingTimeoutMs = 3000;
     /** Degrade after consecutive failures. */
-    private int degradeAfterFailures = 2;
+    private int degradeAfterFailures = 3;
+    /** Max backoff (ms) for per-Worker exponential backoff between verification probes. */
+    private long verifyMaxBackoffMs = 60_000;
+    /**
+     * Minimum alive workers for cluster health. 0 = use majority formula (knownWorkerCount / 2 + 1).
+     * Set to a positive value to override the default majority threshold.
+     */
+    private int minAliveWorkers;
   }
 
   /** Worker heartbeat and liveliness detection configuration. */
   @Valid
   private Heartbeat heartbeat = new Heartbeat();
+
+  /**
+   * Configuration for the sliding-window circuit breaker.
+   *
+   * <p>When enabled, protects remote calls (reader suppliers) from cascading failures.
+   * Default is disabled — users should only enable when their cache-load suppliers
+   * (e.g. database queries, remote API calls) are prone to timeout or error cascades.
+   */
+  @Data
+  public static class CircuitBreaker {
+
+    /** Whether circuit breaker is enabled. Default {@code false}. */
+    private boolean enabled = false;
+
+    /** Sliding window duration in milliseconds. */
+    private long windowTimeMs = 10_000;
+
+    /** Number of buckets in the sliding window. */
+    private int windowBuckets = 10;
+
+    /** Failure rate threshold (0.0–1.0) — opens when exceeded. */
+    private double failThreshold = 0.5;
+
+    /** Minimum total requests in the window before the breaker evaluates the failure rate. */
+    private long requestVolumeThreshold = 20;
+
+    /** How long to wait (ms) before allowing a half-open probe request. */
+    private long singleTestIntervalMs = 5_000;
+
+    /** Whether to log state transitions. */
+    private boolean logEnabled = true;
+  }
+
+  /** Circuit breaker configuration. */
+  @Valid
+  private CircuitBreaker circuitBreaker = new CircuitBreaker();
 
   /**
    * Configuration for Spring {@code @Cacheable} / {@code @CachePut} / {@code @CacheEvict} integration.

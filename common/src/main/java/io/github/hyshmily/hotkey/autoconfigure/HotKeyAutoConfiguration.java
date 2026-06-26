@@ -21,6 +21,7 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.HotKeyCircuitBreaker;
 import io.github.hyshmily.hotkey.cache.SingleFlight;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
@@ -136,7 +137,8 @@ public class HotKeyAutoConfiguration {
       properties.getInflightMaxSize(),
       properties.getInflightTtlSeconds(),
       properties.getInflightTimeoutSeconds(),
-      hotKeyExecutor
+      hotKeyExecutor,
+      new HotKeyCircuitBreaker(properties.getCircuitBreaker())
     );
   }
 
@@ -265,6 +267,7 @@ public class HotKeyAutoConfiguration {
       hotKeyReporter,
       ruleMatcher,
       new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes()),
+      properties,
       new ClusterHealthView(
         properties.getExpectedWorkerCount(),
         properties.getHeartbeat().getTimeoutMs(),

@@ -734,12 +734,7 @@ class HotKeyAmqpAutoConfigurationTest {
     assertThat(healthView).isNotNull();
     assertThat(healthView.getKnownWorkerCount()).isEqualTo(0);
 
-    ArgumentCaptor<IntConsumer> captor = ArgumentCaptor.forClass(IntConsumer.class);
-    verify(ringManager).setOnRingReconciled(captor.capture());
-
-    IntConsumer callback = captor.getValue();
-    callback.accept(3);
-
-    assertThat(healthView.getKnownWorkerCount()).isEqualTo(3);
+    // knownWorkerCount stays at 0 in dynamic mode — isClusterHealthy() uses "any alive" logic
+    assertThat(healthView.getKnownWorkerCount()).isEqualTo(0);
   }
 }

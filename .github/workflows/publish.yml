@@ -24,12 +24,24 @@ jobs:
       - name: Build all JARs
         run: mvn clean package -DskipTests --no-transfer-progress
 
+      - name: Package release zip & tar.gz
+        run: |
+          VER=${{ github.ref_name }}
+          mkdir -p packaging/hotkey-worker-${VER}/lib
+          mkdir -p packaging/hotkey-worker-${VER}/docker
+          cp worker/target/hotkey-worker-*.jar packaging/hotkey-worker-${VER}/lib/
+          cp worker/Dockerfile worker/docker-compose.yml packaging/hotkey-worker-${VER}/docker/
+          cp -r docs packaging/hotkey-worker-${VER}/
+          cp README.md README.zh.md LICENSE packaging/hotkey-worker-${VER}/
+          cd packaging && zip -r ../hotkey-worker-${VER}.zip hotkey-worker-${VER}
+          cd packaging && tar czf ../hotkey-worker-${VER}.tar.gz hotkey-worker-${VER}
+
       - name: Publish common to GitHub Packages
         run: mvn deploy -P release -DskipTests --no-transfer-progress
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload JARs to Release
+      - name: Upload JARs and packages to Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -37,5 +49,7 @@ jobs:
             common/target/hotkey-*-sources.jar
             common/target/hotkey-*-javadoc.jar
             worker/target/hotkey-worker-*.jar
+            hotkey-worker-*.zip
+            hotkey-worker-*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -91,14 +91,18 @@ public class StateMachineEndpoint {
    */
   @PostMapping
   public Map<String, Object> set(@RequestBody Map<String, String> body) {
-    if (body.containsKey("confirmCount")) {
-      stateMachine.setConfirmCount(Integer.parseInt(body.get("confirmCount")));
-    }
-    if (body.containsKey("coolCount")) {
-      stateMachine.setCoolCount(Integer.parseInt(body.get("coolCount")));
-    }
-    if (body.containsKey("preCoolGraceCount")) {
-      stateMachine.setPreCoolGraceCount(Integer.parseInt(body.get("preCoolGraceCount")));
+    try {
+      if (body.containsKey("confirmCount")) {
+        stateMachine.setConfirmCount(Integer.parseInt(body.get("confirmCount")));
+      }
+      if (body.containsKey("coolCount")) {
+        stateMachine.setCoolCount(Integer.parseInt(body.get("coolCount")));
+      }
+      if (body.containsKey("preCoolGraceCount")) {
+        stateMachine.setPreCoolGraceCount(Integer.parseInt(body.get("preCoolGraceCount")));
+      }
+    } catch (NumberFormatException e) {
+      return Map.of("status", "error", "message", "Invalid number format: " + e.getMessage());
     }
     var counter = configTimestampCounter.getIfAvailable();
     if (counter != null) {

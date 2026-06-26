@@ -478,10 +478,11 @@ public class HotKeyAmqpAutoConfiguration {
         properties.getHeartbeat().getTimeoutMs(),
         properties.getHeartbeat().getDegradeAfterFailures()
       );
+      view.setMinAliveWorkers(properties.getHeartbeat().getMinAliveWorkers());
       ringManager.setOnRingReconciled(aliveCount -> {
-        if (properties.getExpectedWorkerCount() <= 0) {
-          view.setKnownWorkerCount(Math.max(view.getKnownWorkerCount(), aliveCount));
-        }
+        // knownWorkerCount is managed by the user via
+        // hotkey.local.expected-worker-count. When <=0 (dynamic mode),
+        // isClusterHealthy() uses "any alive" logic so no adjustment needed.
       });
       return view;
     }
@@ -631,6 +632,7 @@ public class HotKeyAmqpAutoConfiguration {
         properties.getHeartbeat().getVerifyIntervalMs(),
         properties.getHeartbeat().getPingTimeoutMs(),
         properties.getHeartbeat().getDegradeAfterFailures(),
+        properties.getHeartbeat().getVerifyMaxBackoffMs(),
         hotKeyScheduler
       );
     }

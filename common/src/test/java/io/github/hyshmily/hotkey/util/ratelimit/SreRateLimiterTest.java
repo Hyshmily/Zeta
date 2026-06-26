@@ -221,6 +221,31 @@ class SreRateLimiterTest {
   }
 
   @Test
+  void negativeMaxRequests_shouldAlwaysAllow() {
+    SreRateLimiter limiter = new SreRateLimiter(1000, 10, -1, 0);
+    for (int i = 0; i < 20; i++) {
+      limiter.tryAcquire();
+      limiter.onSuccess();
+    }
+    // k = -1, accepts > 0 → maxRequests < 0 → guard always returns true
+    for (int i = 0; i < 50; i++) {
+      assertThat(limiter.tryAcquire()).isTrue();
+    }
+  }
+
+  @Test
+  void minSamplesZero_shouldApplyBudgetImmediately() {
+    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 1.5, 0);
+    limiter.onFailed();
+    int allowed = 0;
+    for (int i = 0; i < 100; i++) {
+      if (limiter.tryAcquire()) allowed++;
+      limiter.onFailed();
+    }
+    assertThat(allowed).isLessThan(30);
+  }
+
+  @Test
   void windowRollover_shouldNotBreakLimiter() throws InterruptedException {
     SreRateLimiter limiter = new SreRateLimiter(100, 5, 1.67, 5);
     for (int i = 0; i < 20; i++) {

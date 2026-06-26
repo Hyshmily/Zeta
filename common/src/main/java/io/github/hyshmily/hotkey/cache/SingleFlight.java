@@ -51,6 +51,9 @@ public class SingleFlight {
   /** Maximum number of in-flight keys tracked simultaneously. */
   private final int inflightMaxSize;
 
+  /** Circuit breaker for protecting remote calls from cascading failures. */
+  private final HotKeyCircuitBreaker circuitBreaker;
+
   /**
    * Creates a SingleFlight deduplicator that prevents concurrent in-flight loads
    * for the same key.
@@ -59,12 +62,24 @@ public class SingleFlight {
    * @param ttlSec         time-to-live for dedup entries after write
    * @param timeoutSeconds per-supplier timeout before the future is completed exceptionally
    * @param executor       async executor for supplier execution
+   * @param circuitBreaker circuit breaker for protecting remote calls
    */
-  public SingleFlight(int maxSize, int ttlSec, int timeoutSeconds, Executor executor) {
+  public SingleFlight(int maxSize, int ttlSec, int timeoutSeconds, Executor executor, HotKeyCircuitBreaker circuitBreaker) {
     this.inflightLoads = Caffeine.newBuilder().maximumSize(maxSize).expireAfterWrite(ttlSec, TimeUnit.SECONDS).build();
     this.executor = executor;
     this.timeoutSeconds = timeoutSeconds;
     this.inflightMaxSize = maxSize;
+    this.circuitBreaker = circuitBreaker;
+  }
+
+  /**
+   * Whether the circuit breaker is currently open.
+   * Used by {@code HotKeyCache} to decide whether to return stale cache on miss.
+   *
+   * @return {@code true} if the breaker is open
+   */
+  public boolean isBreakerOpen() {
+    return circuitBreaker.isOpen();
   }
 
   /**
@@ -88,6 +103,11 @@ public class SingleFlight {
    */
   @SuppressWarnings("unchecked")
   public <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
+    if (!circuitBreaker.allowRequest()) {
+      log.debug("CB open, skip load for key={}", cacheKey);
+      return Optional.empty();
+    }
+
     if (estimatedInflightSize() > inflightMaxSize * 0.8) {
       log.warn("SingleFlight inflight queue is high: {}/{}", estimatedInflightSize(), inflightMaxSize);
     }
@@ -95,7 +115,16 @@ public class SingleFlight {
     CompletableFuture<Object> future = inflightLoads
       .asMap()
       .computeIfAbsent(cacheKey, k ->
-        CompletableFuture.supplyAsync(() -> (Object) reader.get(), executor).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
+        CompletableFuture.supplyAsync(() -> {
+          try {
+            Object val = reader.get();
+            circuitBreaker.onSuccess();
+            return val;
+          } catch (Exception e) {
+            circuitBreaker.onFailure();
+            throw e;
+          }
+        }, executor).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
       );
 
     try {

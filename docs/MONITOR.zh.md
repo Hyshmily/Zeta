@@ -20,6 +20,8 @@ management:
 
 通过 `management.endpoints.web.exposure.include=health,info,hotkey` 启用。
 
+支持可选的 `?limit=N` 查询参数限制返回的 TopK 条目数（默认 100）。
+
 ```javascript
 {
   "instanceId": "a1b2c3d4",        // 实例唯一标识
@@ -67,6 +69,7 @@ management:
     "softTtlMs": 30000,             // 有效软 TTL——普通 key（毫秒）
     "hotHardTtlMs": 3600000,        // 有效硬 TTL——热 key（毫秒）
     "hotSoftTtlMs": 300000,         // 有效软 TTL——热 key（毫秒）
+    "nullValueTtlSec": 10,          // null 缓存条目 TTL（秒）
     "refreshPoolAvailable": 100,    // 刷新信号量可用许可数
 
     // ── 版本追踪 ──

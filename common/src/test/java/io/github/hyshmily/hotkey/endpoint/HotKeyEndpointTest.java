@@ -41,7 +41,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.ObjectProvider;
 
 /**
  * Aggregate verification for {@link HotKeyEndpoint}.
@@ -64,7 +63,6 @@ class HotKeyEndpointTest {
   private VersionController versionController;
   private CacheSyncPublisher cacheSyncPublisher;
   private HotKeyStateMachine hotKeyStateMachine;
-  private ObjectProvider<ClusterHealthView> healthViewProvider;
   private ClusterHealthView healthView;
 
   @BeforeEach
@@ -82,29 +80,27 @@ class HotKeyEndpointTest {
     versionController = mock(VersionController.class);
     cacheSyncPublisher = mock(CacheSyncPublisher.class);
     hotKeyStateMachine = mock(HotKeyStateMachine.class);
-    healthViewProvider = mock(ObjectProvider.class);
     healthView = mock(ClusterHealthView.class);
-    when(healthViewProvider.getIfAvailable()).thenReturn(healthView);
     when(healthView.isClusterHealthy()).thenReturn(true);
   }
 
   /* helpers */
 
   private HotKeyEndpoint endpointWithAll() {
-    return new HotKeyEndpoint(
-      hotKeyDetector,
-      workerTopK,
-      caffeineCache,
-      singleFlight,
-      properties,
-      hotKeyReporter,
-      ruleMatcher,
-      expireManager,
-      versionController,
-      cacheSyncPublisher,
-      hotKeyStateMachine,
-      healthViewProvider
-    );
+    return HotKeyEndpoint.builder()
+      .hotKeyDetector(hotKeyDetector)
+      .workerTopK(workerTopK)
+      .caffeineCache(caffeineCache)
+      .singleFlight(singleFlight)
+      .properties(properties)
+      .hotKeyReporter(hotKeyReporter)
+      .ruleMatcher(ruleMatcher)
+      .expireManager(expireManager)
+      .versionController(versionController)
+      .cacheSyncPublisher(cacheSyncPublisher)
+      .hotKeyStateMachine(hotKeyStateMachine)
+      .healthView(healthView)
+      .build();
   }
 
   private void mockTopK(TopK topK, List<Item> items, long total) {
@@ -140,7 +136,7 @@ class HotKeyEndpointTest {
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(15L);
     when(hotKeyStateMachine.getTrackedKeys()).thenReturn(7);
 
-    Map<String, Object> info = endpointWithAll().hotKeyInfo();
+    Map<String, Object> info = endpointWithAll().hotKeyInfo(100);
 
     assertThat(info).containsKeys("instanceId", "nodeId");
     assertThat(info).containsKeys("local", "worker", "sync");
@@ -195,23 +191,18 @@ class HotKeyEndpointTest {
   void localSection_shouldExposeHeavyKeeperParams() {
     HeavyKeeper hk = new HeavyKeeper(10, 500, 4, 0.9, 5);
     hk.addDirect("k1", 20);
-    HotKeyEndpoint ep = new HotKeyEndpoint(
-      hk,
-      null,
-      caffeineCache,
-      singleFlight,
-      properties,
-      hotKeyReporter,
-      ruleMatcher,
-      null,
-      null,
-      null,
-      null,
-      healthViewProvider
-    );
+    HotKeyEndpoint ep = HotKeyEndpoint.builder()
+      .hotKeyDetector(hk)
+      .caffeineCache(caffeineCache)
+      .singleFlight(singleFlight)
+      .properties(properties)
+      .hotKeyReporter(hotKeyReporter)
+      .ruleMatcher(ruleMatcher)
+      .healthView(healthView)
+      .build();
     when(caffeineCache.estimatedSize()).thenReturn(10L);
 
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
 
     assertThat(local).containsEntry("topKCapacity", 10);
@@ -230,23 +221,10 @@ class HotKeyEndpointTest {
    */
   @Test
   void hotKeyInfo_shouldOmitSectionWhenAllComponentsNull() {
-    ObjectProvider<ClusterHealthView> nullHvProvider = mock(ObjectProvider.class);
-    when(nullHvProvider.getIfAvailable()).thenReturn(null);
-    HotKeyEndpoint minimal = new HotKeyEndpoint(
-      null,
-      null,
-      null,
-      null,
-      properties,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      nullHvProvider
-    );
-    Map<String, Object> info = minimal.hotKeyInfo();
+    HotKeyEndpoint minimal = HotKeyEndpoint.builder()
+      .properties(properties)
+      .build();
+    Map<String, Object> info = minimal.hotKeyInfo(100);
     assertThat(info).doesNotContainKeys("local", "worker", "sync");
     assertThat(info).containsKeys("instanceId", "nodeId");
   }
@@ -262,24 +240,13 @@ class HotKeyEndpointTest {
     when(hotKeyDetector.total()).thenReturn(0L);
     when(hotKeyDetector.expelled()).thenReturn(new LinkedBlockingQueue<>());
     when(caffeineCache.estimatedSize()).thenReturn(5L);
-    ObjectProvider<ClusterHealthView> nullHvProvider = mock(ObjectProvider.class);
-    when(nullHvProvider.getIfAvailable()).thenReturn(null);
-    HotKeyEndpoint ep = new HotKeyEndpoint(
-      hotKeyDetector,
-      null,
-      caffeineCache,
-      null,
-      properties,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      nullHvProvider
-    );
+    HotKeyEndpoint ep = HotKeyEndpoint.builder()
+      .hotKeyDetector(hotKeyDetector)
+      .caffeineCache(caffeineCache)
+      .properties(properties)
+      .build();
  
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     assertThat(info).containsKey("local");
     assertThat(info).doesNotContainKeys("worker", "sync");
   }
@@ -292,24 +259,12 @@ class HotKeyEndpointTest {
   @Test
   void hotKeyInfo_shouldIncludeSyncWhenOnlySyncComponents() {
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(5L);
-    ObjectProvider<ClusterHealthView> nullHvProvider = mock(ObjectProvider.class);
-    when(nullHvProvider.getIfAvailable()).thenReturn(null);
-    HotKeyEndpoint ep = new HotKeyEndpoint(
-      null,
-      null,
-      null,
-      null,
-      properties,
-      null,
-      null,
-      null,
-      null,
-      cacheSyncPublisher,
-      null,
-      nullHvProvider
-    );
+    HotKeyEndpoint ep = HotKeyEndpoint.builder()
+      .properties(properties)
+      .cacheSyncPublisher(cacheSyncPublisher)
+      .build();
  
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     assertThat(info).doesNotContainKeys("local", "worker");
     assertThat(info).containsKey("sync");
     assertThat(((Map<String, Object>) info.get("sync"))).containsEntry("dedupCacheSize", 5L);
@@ -324,22 +279,14 @@ class HotKeyEndpointTest {
   void workerSection_shouldListWorkerHealth() {
     mockTopK(workerTopK, List.of(new Item("k", 1)), 10L);
     when(hotKeyStateMachine.getTrackedKeys()).thenReturn(3);
-    HotKeyEndpoint ep = new HotKeyEndpoint(
-      null,
-      workerTopK,
-      null,
-      null,
-      properties,
-      null,
-      null,
-      null,
-      null,
-      null,
-      hotKeyStateMachine,
-      healthViewProvider
-    );
+    HotKeyEndpoint ep = HotKeyEndpoint.builder()
+      .workerTopK(workerTopK)
+      .properties(properties)
+      .hotKeyStateMachine(hotKeyStateMachine)
+      .healthView(healthView)
+      .build();
  
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
     assertThat(worker).containsEntry("trackedKeys", 3);
     assertThat(worker).containsKey("health");
@@ -356,7 +303,7 @@ class HotKeyEndpointTest {
     mockTopK(workerTopK, List.of(), 0L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     HotKeyEndpoint ep = endpointWithAll();
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
     assertThat(local).containsKey("rules");
     assertThat((List<?>) local.get("rules")).isEmpty();
@@ -374,22 +321,15 @@ class HotKeyEndpointTest {
     ruleMatcher.addRule(new Rule(Rule.RuleType.PREFIX, "health:*", Rule.RuleAction.ALLOW_NO_REPORT));
     mockTopK(hotKeyDetector, List.of(), 0L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
-    HotKeyEndpoint ep = new HotKeyEndpoint(
-      hotKeyDetector,
-      null,
-      caffeineCache,
-      null,
-      properties,
-      null,
-      ruleMatcher,
-      null,
-      null,
-      null,
-      null,
-      healthViewProvider
-    );
- 
-    Map<String, Object> info = ep.hotKeyInfo();
+    HotKeyEndpoint ep = HotKeyEndpoint.builder()
+      .hotKeyDetector(hotKeyDetector)
+      .caffeineCache(caffeineCache)
+      .properties(properties)
+      .ruleMatcher(ruleMatcher)
+      .healthView(healthView)
+      .build();
+  
+    Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
     assertThat(local).containsKey("rules");
     List<Map<String, Object>> rules = (List<Map<String, Object>>) local.get("rules");
@@ -414,7 +354,7 @@ class HotKeyEndpointTest {
     when(expireManager.getEffectiveHotSoftTtlMs()).thenReturn(300000L);
     when(expireManager.getRefreshLimiter()).thenReturn(null);
     HotKeyEndpoint ep = endpointWithAll();
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
     assertThat(local).containsEntry("softExpireEnabled", true);
     assertThat(local).doesNotContainKey("refreshPoolAvailable");
@@ -432,22 +372,14 @@ class HotKeyEndpointTest {
     when(customTopK.total()).thenReturn(10L);
     when(customTopK.expelled()).thenReturn(new LinkedBlockingQueue<>());
     when(caffeineCache.estimatedSize()).thenReturn(0L);
-    HotKeyEndpoint ep = new HotKeyEndpoint(
-      customTopK,
-      null,
-      caffeineCache,
-      null,
-      properties,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      healthViewProvider
-    );
+    HotKeyEndpoint ep = HotKeyEndpoint.builder()
+      .hotKeyDetector(customTopK)
+      .caffeineCache(caffeineCache)
+      .properties(properties)
+      .healthView(healthView)
+      .build();
  
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
 
     assertThat(local).containsKey("topKCount");
@@ -462,24 +394,13 @@ class HotKeyEndpointTest {
   @Test
   void workerSection_shouldOmitHealthWhenHealthViewNull() {
     mockTopK(workerTopK, List.of(new Item("wk", 1)), 5L);
-    ObjectProvider<ClusterHealthView> nullHvProvider = mock(ObjectProvider.class);
-    when(nullHvProvider.getIfAvailable()).thenReturn(null);
-    HotKeyEndpoint ep = new HotKeyEndpoint(
-      null,
-      workerTopK,
-      null,
-      null,
-      properties,
-      null,
-      null,
-      null,
-      null,
-      null,
-      hotKeyStateMachine,
-      nullHvProvider
-    );
+    HotKeyEndpoint ep = HotKeyEndpoint.builder()
+      .workerTopK(workerTopK)
+      .properties(properties)
+      .hotKeyStateMachine(hotKeyStateMachine)
+      .build();
 
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
 
     assertThat(worker).doesNotContainKey("health");
@@ -498,7 +419,7 @@ class HotKeyEndpointTest {
     when(workerTopK.expelled()).thenReturn(new LinkedBlockingQueue<>());
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     HotKeyEndpoint ep = endpointWithAll();
-    Map<String, Object> info = ep.hotKeyInfo();
+    Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
 
     assertThat(local).containsKey("expelledQueueSize");
@@ -515,7 +436,7 @@ class HotKeyEndpointTest {
     mockTopK(hotKeyDetector, List.of(new Item("k1", 10)), 200L);
     mockTopK(workerTopK, List.of(new Item("wk1", 5)), 80L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
-    Map<String, Object> info = endpointWithAll().hotKeyInfo();
+    Map<String, Object> info = endpointWithAll().hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
     assertThat(local).containsEntry("topKCount", 1);

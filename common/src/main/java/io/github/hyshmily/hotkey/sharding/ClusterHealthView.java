@@ -68,6 +68,17 @@ public class ClusterHealthView {
   private final long heartbeatTimeoutMs;
   private final int degradeAfterFailures;
 
+  /**
+   * -- SETTER --
+   *  Sets the minimum number of alive Workers required for the cluster to be
+   *  considered healthy. When set to 0 (default), the majority formula
+   *
+   *  is used.
+   *
+   */
+  @Setter
+  private volatile int minAliveWorkers;
+
   @Setter
   @Getter
   private volatile boolean degraded;
@@ -213,6 +224,17 @@ public class ClusterHealthView {
   }
 
   /**
+   * Returns the current verification failure count for a Worker.
+   *
+   * @param workerId the Worker to query; must not be null
+   * @return the failure count, or 0 if the Worker is not tracked
+   */
+  public int getVerifyFailures(String workerId) {
+    WorkerHealthRecord r = records.get(workerId);
+    return r != null ? r.verifyFailures : 0;
+  }
+
+  /**
    * Returns whether the cluster is currently considered healthy based on majority
    * of known Workers being alive.
    *
@@ -235,24 +257,17 @@ public class ClusterHealthView {
    *         {@code false} if no Workers are configured or too few are alive
    */
   public boolean isClusterHealthy() {
-    int currentKnown = knownWorkerCount;
-    if (currentKnown <= 0) {
-      // Fallback: if no expected count configured, use observed alive workers
-      // A cluster with at least 1 alive worker is considered healthy when
-      // expectedWorkerCount was never set (backward compatibility)
-      long aliveCount = records
-        .values()
-        .stream()
-        .filter(r -> r.isAlive(heartbeatTimeoutMs))
-        .count();
-      return aliveCount > 0;
+    int minAlive = minAliveWorkers;
+
+    if (minAlive <= 0) {
+      minAlive = knownWorkerCount / 2 + 1;
     }
     long aliveCount = records
       .values()
       .stream()
       .filter(r -> r.isAlive(heartbeatTimeoutMs))
       .count();
-    return aliveCount >= currentKnown / 2 + 1;
+    return aliveCount >= minAlive;
   }
 
   /**

@@ -143,6 +143,7 @@ public class HotKeyRedisAutoConfiguration {
         Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
         properties.getVersionKeyTtlMinutes()
       ),
+      properties,
       healthViewProvider.getIfAvailable(() ->
         new ClusterHealthView(
           properties.getExpectedWorkerCount(),

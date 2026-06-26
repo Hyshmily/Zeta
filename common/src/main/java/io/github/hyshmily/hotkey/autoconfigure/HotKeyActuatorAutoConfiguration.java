@@ -92,7 +92,6 @@ public class HotKeyActuatorAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyEndpoint hotKeyEndpoint(
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
     @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
@@ -107,20 +106,20 @@ public class HotKeyActuatorAutoConfiguration {
     ObjectProvider<ClusterHealthView> healthViewProvider,
     HotKeyProperties properties
   ) {
-    return new HotKeyEndpoint(
-      hotKeyDetectorProvider.getIfAvailable(),
-      workerTopKProvider.getIfAvailable(),
-      hotLocalCacheProvider.getIfAvailable(),
-      singleFlightProvider.getIfAvailable(),
-      properties,
-      hotKeyReporterProvider.getIfAvailable(),
-      ruleMatcherProvider.getIfAvailable(),
-      expireManagerProvider.getIfAvailable(),
-      versionControllerProvider.getIfAvailable(),
-      cacheSyncPublisherProvider.getIfAvailable(),
-      stateMachineProvider.getIfAvailable(),
-      healthViewProvider
-    );
+    return HotKeyEndpoint.builder()
+      .hotKeyDetector(hotKeyDetectorProvider.getIfAvailable())
+      .workerTopK(workerTopKProvider.getIfAvailable())
+      .caffeineCache(hotLocalCacheProvider.getIfAvailable())
+      .singleFlight(singleFlightProvider.getIfAvailable())
+      .properties(properties)
+      .hotKeyReporter(hotKeyReporterProvider.getIfAvailable())
+      .ruleMatcher(ruleMatcherProvider.getIfAvailable())
+      .expireManager(expireManagerProvider.getIfAvailable())
+      .versionController(versionControllerProvider.getIfAvailable())
+      .cacheSyncPublisher(cacheSyncPublisherProvider.getIfAvailable())
+      .hotKeyStateMachine(stateMachineProvider.getIfAvailable())
+      .healthView(healthViewProvider.getIfAvailable())
+      .build();
   }
 
   /**

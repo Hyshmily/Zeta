@@ -48,6 +48,7 @@ HotKey is inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource
 - **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies configurable random jitter (default ±10%) to every hard/soft TTL via `ThreadLocalRandom`, staggering expiration timestamps; controlled by `hotkey.local.ttl-jitter-enabled` / `ttl-jitter-ratio`
 - **Consistent hashing (enabled by default)** — murmur3_32-based consistent hash ring with heartbeat-driven dynamic Worker routing; elastic scale-out without static shard configuration
 - **BBR adaptive rate limiting** — BBR congestion control fused with CPU EMA monitoring for self-protection; applies backpressure on the Reporter flush path to prevent RabbitMQ/Worker overload
+- **Circuit breaker (optional)** — Sliding-window circuit breaker in `SingleFlight.load()` for protecting remote cache-load suppliers from cascading failures; disabled by default
 - **SRE adaptive rate limiting** — Google SRE formula backpressure on the WorkerListener HOT-path (`K = 1 / successThreshold`, probabilistic rejection below success threshold); independent of BBR, protects the HOT decision consumption path
 - **CPU monitoring with EMA smoothing** — Dedicated daemon thread polling process CPU load every 500ms, configurable EMA decay factor for stable overload detection
 - **Spring Boot auto-configuration** — Zero boilerplate, just add the dependency
@@ -245,6 +246,9 @@ hotkey:
 # No static shard config needed — just add more machines. Deploy Apps first, then Workers.
 ```
 
+> [!IMPORTANT]
+> **Cluster health threshold** — When `expected-worker-count: 0` (dynamic mode, default), `min-alive-workers: 0` resolves to 1 — **any alive Worker = healthy**. When `expected-worker-count: N` (fixed mode), the majority formula `N/2 + 1` applies. Set `min-alive-workers` explicitly (e.g. `2`) to override either mode. See `docs/CONFIG.md` for details.
+
 **Full parameters (override defaults):**
 
 ```yaml
@@ -294,6 +298,9 @@ hotkey:
     refresh-max-pools: 100 # refresh thread pool limit
     version-key-ttl-minutes: 60 # Redis version key TTL
 
+    # ——— Null value TTL ———
+    null-value-ttl-seconds: 10 # TTL for null/cache-miss entries (short, avoids cached negative results)
+
     # ——— Normal key TTL ———
     default-hard-ttl-ms: 300000 # default hard expiry (5min)
     hard-ttl-ms: 0 # override (0=use default)
@@ -315,9 +322,21 @@ hotkey:
     heartbeat:
       exchange-name: "hotkey.heartbeat.exchange" # must match worker.messaging.heartbeat-exchange
       timeout-ms: 15000 # Worker considered dead if no heartbeat within this window
-      verify-interval-ms: 1500 # suspicious Worker verification interval
-      ping-timeout-ms: 2000 # Direct reply-to PING timeout
-      degrade-after-failures: 2 # degrade after N consecutive PING failures
+      verify-interval-ms: 5000 # suspicious Worker verification interval
+      ping-timeout-ms: 3000 # Direct reply-to PING timeout
+      degrade-after-failures: 3 # degrade after N consecutive PING failures (with exponential backoff)
+      verify-max-backoff-ms: 60000 # max exponential backoff between verification probes
+      min-alive-workers: 0 # 0=dynamic (1 alive = healthy); set >0 to require N alive Workers
+
+    # ——— Circuit breaker (optional, disabled by default) ———
+    circuit-breaker:
+      enabled: false
+      window-time-ms: 10000
+      window-buckets: 10
+      fail-threshold: 0.5
+      request-volume-threshold: 20
+      single-test-interval-ms: 5000
+      log-enabled: true
 
     # ——— Reporter rate limiter (BBR + CPU fusion) ———
     reporter:

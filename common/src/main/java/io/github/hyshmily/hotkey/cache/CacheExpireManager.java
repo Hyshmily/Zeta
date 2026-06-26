@@ -109,6 +109,11 @@ public class CacheExpireManager {
     return ttlConfig.isSoftExpireEnabled();
   }
 
+  public long computeNullExpireAt(long nullTtlMs) {
+    long effective = nullTtlMs > 0 ? nullTtlMs : ttlConfig.effectiveNullTtlMs();
+    return toHardExpireTimestamp(effective);
+  }
+
   /**
    * Hard expire timestamp from an explicit TTL duration.
    * Falls back to the normal-key default if {@code hardTtlMs <= 0}.

@@ -23,6 +23,7 @@ mvn clean package -P release         # Build with GPG signing for Maven Central
 mvn test                             # Run all unit tests (1488 total: 1308 common + 180 worker)
 mvn javadoc:jar                      # Generate Javadoc JAR (common only)
 mvn source:jar                       # Generate source JAR (common only)
+mvn clean package -DskipTests && scripts/package-release.sh  # Build + package deployable zip/tar.gz
 ```
 
 **Java version:** 17 | **Code formatting:** Prettier with `prettier-plugin-java` and `@prettier/plugin-xml` (printWidth: 120)

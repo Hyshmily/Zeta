@@ -14,21 +14,18 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.sync.worker;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
-import lombok.extern.slf4j.Slf4j;
 
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
@@ -69,7 +66,9 @@ public class WorkerHeartbeatVerifier {
   private final long verifyIntervalMs;
   private final long pingTimeoutMs;
   private final int degradeAfterFailures;
+  private final long verifyMaxBackoffMs;
   private final ScheduledExecutorService scheduler;
+  private final ConcurrentHashMap<String, Long> nextVerifyTime = new ConcurrentHashMap<>();
   private final boolean ownsScheduler;
   private ScheduledFuture<?> verifyTask;
 
@@ -97,9 +96,10 @@ public class WorkerHeartbeatVerifier {
     String appInstanceId,
     long verifyIntervalMs,
     long pingTimeoutMs,
-    int degradeAfterFailures
+    int degradeAfterFailures,
+    long verifyMaxBackoffMs
   ) {
-    this(rabbitTemplate, healthView, appInstanceId, verifyIntervalMs, pingTimeoutMs, degradeAfterFailures,
+    this(rabbitTemplate, healthView, appInstanceId, verifyIntervalMs, pingTimeoutMs, degradeAfterFailures, verifyMaxBackoffMs,
       Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "hb-verifier");
         t.setDaemon(true);
@@ -131,9 +131,10 @@ public class WorkerHeartbeatVerifier {
     long verifyIntervalMs,
     long pingTimeoutMs,
     int degradeAfterFailures,
+    long verifyMaxBackoffMs,
     ScheduledExecutorService scheduler
   ) {
-    this(rabbitTemplate, healthView, appInstanceId, verifyIntervalMs, pingTimeoutMs, degradeAfterFailures,
+    this(rabbitTemplate, healthView, appInstanceId, verifyIntervalMs, pingTimeoutMs, degradeAfterFailures, verifyMaxBackoffMs,
       scheduler, false);
   }
 
@@ -220,21 +221,32 @@ public class WorkerHeartbeatVerifier {
 
       log.info("Verifying suspected workers: {}", suspected);
 
-      int failures = 0;
       for (String workerId : suspected) {
+        Long skipUntil = nextVerifyTime.get(workerId);
+        if (skipUntil != null && System.currentTimeMillis() < skipUntil) {
+          log.trace("Worker {} in backoff, skip (remaining={}ms)", workerId, skipUntil - System.currentTimeMillis());
+          continue;
+        }
+
         boolean alive = sendPingAndWaitPong(workerId);
         if (!alive) {
-          failures++;
           healthView.markVerificationFailed(workerId);
-          log.warn("Worker {} verification failed (failures={})", workerId, failures);
+
+          int attempt = healthView.getVerifyFailures(workerId);
+          long backoffMs = Math.min(verifyMaxBackoffMs, verifyIntervalMs * (1L << Math.min(attempt, 30)));
+
+          nextVerifyTime.put(workerId, System.currentTimeMillis() + backoffMs);
+          log.warn("Worker {} verification failed (attempt={}, backoff={}ms)", workerId, attempt, backoffMs);
         } else {
-          log.debug("Worker {} verification succeeded", workerId);
+          nextVerifyTime.remove(workerId);
           healthView.recordPong(workerId);
         }
       }
 
-      if (failures >= degradeAfterFailures && !healthView.isClusterHealthy()) {
-        log.warn("Cluster degraded: {} workers unreachable after verification (threshold={})", failures, degradeAfterFailures);
+      boolean anyDegraded = suspected.stream()
+        .anyMatch(id -> healthView.getVerifyFailures(id) >= degradeAfterFailures);
+      if (anyDegraded && !healthView.isClusterHealthy()) {
+        log.warn("Cluster degraded: some workers unreachable after verification (threshold={})", degradeAfterFailures);
         healthView.setDegraded(true);
       }
     } catch (Exception e) {

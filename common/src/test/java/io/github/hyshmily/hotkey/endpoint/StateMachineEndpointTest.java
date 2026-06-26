@@ -140,6 +140,12 @@ class StateMachineEndpointTest {
   }
 
   @Test
+  void set_withInvalidNumber_shouldReturnError() {
+    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "abc"));
+    assertThat(result).containsEntry("status", "error");
+  }
+
+  @Test
   void set_withCounterAvailable_shouldIncrementEachTime() {
     AtomicLong counter = mock(AtomicLong.class);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);

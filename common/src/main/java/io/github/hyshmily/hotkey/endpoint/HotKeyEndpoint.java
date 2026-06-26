@@ -25,7 +25,6 @@ import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
@@ -34,10 +33,10 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
-import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
+import lombok.Builder;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 
 /**
  * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics
@@ -49,8 +48,8 @@ import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
  * dedup, identity, and instance-level health. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
  */
-@Endpoint(id = "hotkey")
-@RequiredArgsConstructor
+@Builder
+@RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkey")
 public class HotKeyEndpoint {
 
   /** App-side TopK detector (HeavyKeeper) for local hot-key frequency tracking. */
@@ -75,18 +74,8 @@ public class HotKeyEndpoint {
   private final CacheSyncPublisher cacheSyncPublisher;
   /** Worker-side hot-key state machine. */
   private final HotKeyStateMachine hotKeyStateMachine;
-  /** Cluster health view provider (optional — unavailable in Worker-only mode). */
-  private final ObjectProvider<ClusterHealthView> healthViewProvider;
-
-  /**
-   * Obtain the cluster health view if available, or {@code null} if the
-   * health view provider is not present (e.g. in Worker-only mode).
-   *
-   * @return the {@link ClusterHealthView} instance, or {@code null}
-   */
-  private ClusterHealthView healthView() {
-    return healthViewProvider.getIfAvailable();
-  }
+  /** Cluster health view (may be {@code null} in Worker-only mode). */
+  private final ClusterHealthView healthView;
 
   /**
    * Collect all diagnostic metrics into a three-section response map:
@@ -99,19 +88,19 @@ public class HotKeyEndpoint {
    *
    * @return a {@link LinkedHashMap} with identity fields and sectioned metrics
    */
-  @ReadOperation
-  public Map<String, Object> hotKeyInfo() {
+  @GetMapping
+  public Map<String, Object> hotKeyInfo(@RequestParam(defaultValue = "100") int limit) {
     Map<String, Object> info = new LinkedHashMap<>();
 
     info.put("instanceId", InstanceIdGenerator.get());
     info.put("nodeId", InstanceIdGenerator.getNodeId());
 
-    Map<String, Object> local = buildLocalSection();
+    Map<String, Object> local = buildLocalSection(limit);
     if (!local.isEmpty()) {
       info.put("local", local);
     }
 
-    Map<String, Object> worker = buildWorkerSection();
+    Map<String, Object> worker = buildWorkerSection(limit);
     if (!worker.isEmpty()) {
       info.put("worker", worker);
     }
@@ -130,13 +119,14 @@ public class HotKeyEndpoint {
    *
    * @return a map of local diagnostic metrics (never {@code null})
    */
-  private Map<String, Object> buildLocalSection() {
+  private Map<String, Object> buildLocalSection(int limit) {
     Map<String, Object> local = new LinkedHashMap<>();
 
     if (hotKeyDetector != null) {
       List<Item> topKList = hotKeyDetector.list();
-      local.put("topK", toTopKEntries(topKList));
-      local.put("topKCount", topKList.size());
+      int actualLimit = Math.min(topKList.size(), Math.max(1, limit));
+      local.put("topK", toTopKEntries(topKList.subList(0, actualLimit)));
+      local.put("topKCount", actualLimit);
       local.put("totalRequests", hotKeyDetector.total());
       local.put("recentlyExpelled", hotKeyDetector.expelled().stream().map(Item::key).limit(10).toList());
       local.put("expelledQueueSize", hotKeyDetector.expelled().size());
@@ -192,6 +182,7 @@ public class HotKeyEndpoint {
       local.put("softTtlMs", expireManager.getEffectiveSoftTtlMs());
       local.put("hotHardTtlMs", expireManager.getEffectiveHotHardTtlMs());
       local.put("hotSoftTtlMs", expireManager.getEffectiveHotSoftTtlMs());
+      local.put("nullValueTtlSec", properties.getNullValueTtlSeconds());
       if (expireManager.getRefreshLimiter() != null) {
         local.put("refreshPoolAvailable", expireManager.getRefreshLimiter().availablePermits());
       }
@@ -211,21 +202,21 @@ public class HotKeyEndpoint {
    *
    * @return a map of worker diagnostic metrics (never {@code null})
    */
-  private Map<String, Object> buildWorkerSection() {
+  private Map<String, Object> buildWorkerSection(int limit) {
     Map<String, Object> worker = new LinkedHashMap<>();
 
     if (workerTopK != null) {
       List<Item> topKList = workerTopK.list();
-      worker.put("topK", toTopKEntries(topKList));
-      worker.put("topKCount", topKList.size());
+      int actualLimit = Math.min(topKList.size(), Math.max(1, limit));
+      worker.put("topK", toTopKEntries(topKList.subList(0, actualLimit)));
+      worker.put("topKCount", actualLimit);
       worker.put("totalRequests", workerTopK.total());
       worker.put("recentlyExpelled", workerTopK.expelled().stream().map(Item::key).limit(10).toList());
       worker.putAll(heavyKeeperConfig(workerTopK));
     }
 
-    ClusterHealthView v = healthView();
-    if (v != null) {
-      worker.put("health", v.isClusterHealthy() ? "healthy" : "unhealthy");
+    if (healthView != null) {
+      worker.put("health", healthView.isClusterHealthy() ? "healthy" : "unhealthy");
     }
 
     if (hotKeyStateMachine != null) {

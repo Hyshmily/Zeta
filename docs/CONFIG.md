@@ -97,6 +97,7 @@
 | `hotkey.local.soft-ttl-ms`              | `0`                      | Per-call soft TTL override for normal keys; 0 = use `default-soft-ttl-ms`                                                     |
 | `hotkey.local.default-hot-soft-ttl-ms`  | `300000` (5min)          | Default soft TTL for hot keys                                                                                                 |
 | `hotkey.local.hot-soft-ttl-ms`          | `0`                      | Per-call soft TTL override for hot keys; 0 = use `default-hot-soft-ttl-ms`                                                    |
+| `hotkey.local.null-value-ttl-seconds`   | `10`                     | TTL (seconds) for null/cache-miss entries; avoids caching negative results too long                                           |
 | `hotkey.local.ttl-jitter-enabled`       | `true`                   | Whether to apply random jitter to TTL expiry timestamps to prevent cache stampedes                                           |
 | `hotkey.local.ttl-jitter-ratio`         | `0.1`                    | Jitter ratio (0.0–1.0); e.g. 0.1 = ±10% random offset applied to all TTL calculations                                        |
 | `hotkey.local.refresh-max-pools`        | `100`                    | Max concurrent async refreshes for soft expire (Semaphore)                                                                    |
@@ -125,10 +126,26 @@
 | Property                                        | Default                     | Description                                                                                            |
 | ----------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `hotkey.local.heartbeat.exchange-name`          | `hotkey.heartbeat.exchange` | Topic exchange name for epoch-driven structured heartbeats from Workers                                |
-| `hotkey.local.heartbeat.timeout-ms`             | `30000`                     | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window              |
-| `hotkey.local.heartbeat.verify-interval-ms`     | `1500`                      | Interval (ms) for verifying suspected dead Workers via Direct reply-to PING                            |
-| `hotkey.local.heartbeat.ping-timeout-ms`        | `2000`                      | Timeout (ms) for a PING/PONG verification probe                                                        |
-| `hotkey.local.heartbeat.degrade-after-failures` | `2`                         | Number of consecutive PING failures before degrading the Worker (allow local promotion of its entries) |
+| `hotkey.local.heartbeat.timeout-ms`             | `15000`                     | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window              |
+| `hotkey.local.heartbeat.verify-interval-ms`     | `5000`                      | Interval (ms) for verifying suspected dead Workers via Direct reply-to PING                            |
+| `hotkey.local.heartbeat.ping-timeout-ms`        | `3000`                      | Timeout (ms) for a PING/PONG verification probe                                                        |
+| `hotkey.local.heartbeat.degrade-after-failures` | `3`                         | Consecutive PING failures before degrading the Worker; uses exponential backoff per Worker             |
+| `hotkey.local.heartbeat.verify-max-backoff-ms`  | `60000`                     | Max exponential backoff (ms) between verification probes for a repeatedly failing Worker               |
+| `hotkey.local.heartbeat.min-alive-workers`      | `0`                         | Minimum alive Workers for cluster health; 0 = use majority formula (knownWorkerCount / 2 + 1)          |
+
+### Circuit Breaker (`hotkey.local.circuit-breaker.*`)
+
+| Property                                                  | Default  | Description                                                                   |
+| --------------------------------------------------------- | -------- | ----------------------------------------------------------------------------- |
+| `hotkey.local.circuit-breaker.enabled`                    | `false`  | Enable sliding-window circuit breaker for remote calls (disabled by default)  |
+| `hotkey.local.circuit-breaker.window-time-ms`             | `10000`  | Sliding window duration (ms)                                                  |
+| `hotkey.local.circuit-breaker.window-buckets`             | `10`     | Number of buckets dividing the sliding window                                 |
+| `hotkey.local.circuit-breaker.fail-threshold`             | `0.5`    | Failure rate threshold (0.0–1.0); opens breaker when exceeded                 |
+| `hotkey.local.circuit-breaker.request-volume-threshold`   | `20`     | Minimum total requests before evaluating failure rate                         |
+| `hotkey.local.circuit-breaker.single-test-interval-ms`    | `5000`   | Interval (ms) between half-open probe requests                                |
+| `hotkey.local.circuit-breaker.log-enabled`                | `true`   | Whether to log state transitions (OPEN/CLOSE/HALF-OPEN)                       |
+
+The circuit breaker wraps `SingleFlight.load()` — when open, `load()` returns `Optional.empty()` immediately without executing the supplier. The calling `HotKeyCache.get()` then falls back to returning any stale L1 entry if available. Only enable when your cache-load suppliers (database queries, remote API calls) are prone to cascading failures.
 
 ### Reporting (`hotkey.report.*`)
 

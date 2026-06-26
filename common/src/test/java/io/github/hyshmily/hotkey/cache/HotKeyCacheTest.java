@@ -77,6 +77,7 @@ class HotKeyCacheTest {
       Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
       new VersionController(Optional.empty(), 60),
+      ttlConfig,
       mock(ClusterHealthView.class)
     );
   }
@@ -294,6 +295,7 @@ class HotKeyCacheTest {
       Optional.empty(),
       new RuleMatcher(Optional.empty(), Optional.empty()),
       new VersionController(Optional.empty(), 60),
+      props,
       mock(ClusterHealthView.class)
     );
  
@@ -982,11 +984,12 @@ class HotKeyCacheTest {
         executor,
         Optional.of(publisher),
         Optional.of(reporter),
-        new RuleMatcher(Optional.empty(), Optional.empty()),
-        new VersionController(Optional.empty(), 60),
-        healthView
-      );
-    }
+      new RuleMatcher(Optional.empty(), Optional.empty()),
+      new VersionController(Optional.empty(), 60),
+      ttlConfig,
+      healthView
+    );
+  }
 
     @Test
     @DisplayName("loadAndCache should promote key to HOT when detected as hot")

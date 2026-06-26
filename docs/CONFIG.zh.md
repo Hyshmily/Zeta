@@ -93,6 +93,7 @@
 | `hotkey.local.soft-ttl-ms`              | `0`                      | 普通 key 每次调用的软 TTL 覆盖；0 = 使用 `default-soft-ttl-ms`                               |
 | `hotkey.local.default-hot-soft-ttl-ms`  | `300000`（5分钟）        | 热点 key 默认软 TTL                                                                          |
 | `hotkey.local.hot-soft-ttl-ms`          | `0`                      | 热点 key 每次调用的软 TTL 覆盖；0 = 使用 `default-hot-soft-ttl-ms`                           |
+| `hotkey.local.null-value-ttl-seconds`   | `10`                     | null 缓存条目 TTL（秒）；避免长时间缓存负结果                                                |
 | `hotkey.local.ttl-jitter-enabled`       | `true`                   | 是否对 TTL 过期时间施加随机偏移以防止缓存雪崩                                                |
 | `hotkey.local.ttl-jitter-ratio`         | `0.1`                    | 偏移比例（0.0–1.0）；例如 0.1 表示对 TTL 计算施加 ±10% 的随机偏移                            |
 | `hotkey.local.refresh-max-pools`        | `100`                    | 软过期最大并发异步刷新数（信号量）                                                           |
@@ -113,10 +114,26 @@
 | 属性                                            | 默认值                      | 说明                                                                   |
 | ----------------------------------------------- | --------------------------- | ---------------------------------------------------------------------- |
 | `hotkey.local.heartbeat.exchange-name`          | `hotkey.heartbeat.exchange` | 心跳 Topic 交换机名称，用于 Worker 的 epoch 驱动结构化心跳             |
-| `hotkey.local.heartbeat.timeout-ms`             | `30000`                     | 超时（毫秒）——在此窗口内未收到心跳则判定 Worker 死亡                   |
-| `hotkey.local.heartbeat.verify-interval-ms`     | `1500`                      | 验证间隔（毫秒）——对怀疑死亡的 Worker 发送 Direct reply-to PING 的间隔 |
-| `hotkey.local.heartbeat.ping-timeout-ms`        | `2000`                      | PING/PONG 验证探针超时（毫秒）                                         |
-| `hotkey.local.heartbeat.degrade-after-failures` | `2`                         | 连续 PING 失败次数超过此值后降级该 Worker（允许本地提升其条目）        |
+| `hotkey.local.heartbeat.timeout-ms`             | `15000`                     | 超时（毫秒）——在此窗口内未收到心跳则判定 Worker 死亡                   |
+| `hotkey.local.heartbeat.verify-interval-ms`     | `5000`                      | 验证间隔（毫秒）——对怀疑死亡的 Worker 发送 Direct reply-to PING 的间隔 |
+| `hotkey.local.heartbeat.ping-timeout-ms`        | `3000`                      | PING/PONG 验证探针超时（毫秒）                                         |
+| `hotkey.local.heartbeat.degrade-after-failures` | `3`                         | 连续 PING 失败次数超过此值后降级该 Worker（按指数退避重试）            |
+| `hotkey.local.heartbeat.verify-max-backoff-ms`  | `60000`                     | 单 Worker 指数退避最大间隔（毫秒）                                     |
+| `hotkey.local.heartbeat.min-alive-workers`      | `0`                         | 集群健康所需最小存活 Worker 数；0=使用多数派公式（knownWorkerCount/2+1）|
+
+### 熔断器配置（`hotkey.local.circuit-breaker.*`）
+
+| 属性                                                        | 默认值   | 说明                                                                 |
+| ----------------------------------------------------------- | -------- | -------------------------------------------------------------------- |
+| `hotkey.local.circuit-breaker.enabled`                      | `false`  | 启用滑动窗口熔断器保护远程调用（默认关闭）                           |
+| `hotkey.local.circuit-breaker.window-time-ms`               | `10000`  | 滑动窗口时长（毫秒）                                                 |
+| `hotkey.local.circuit-breaker.window-buckets`               | `10`     | 滑动窗口桶数                                                         |
+| `hotkey.local.circuit-breaker.fail-threshold`               | `0.5`    | 失败率阈值（0.0–1.0），超过时打开熔断器                              |
+| `hotkey.local.circuit-breaker.request-volume-threshold`     | `20`     | 评估失败率所需的最小请求总数                                         |
+| `hotkey.local.circuit-breaker.single-test-interval-ms`      | `5000`   | 半开探测间隔（毫秒）                                                 |
+| `hotkey.local.circuit-breaker.log-enabled`                  | `true`   | 是否记录状态切换日志（OPEN/CLOSE/HALF-OPEN）                         |
+
+熔断器作用于 `SingleFlight.load()`——打开时 `load()` 立即返回 `Optional.empty()`，`HotKeyCache.get()` 会尝试返回过期缓存（如果 L1 中存在）。仅当缓存加载器（数据库查询、远程 API）容易出现级联故障时再启用。
 
 ### 上报配置（`hotkey.report.*`）
 

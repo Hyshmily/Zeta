@@ -22,6 +22,7 @@ import static org.mockito.Mockito.when;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -533,6 +534,46 @@ class BbrRateLimiterTest {
     }
     forceZeroAllBuckets();
     assertThat(limiter.tryAcquire()).isTrue();
+  }
+
+  // ── setMinInFlight ──
+
+  @Test
+  void setMinInFlight_shouldFloorMaxInFlight() {
+    for (int i = 0; i < 5; i++) {
+      limiter.onEnqueue();
+      limiter.onSuccess(100);
+    }
+    limiter.setMinInFlight(20);
+    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(20);
+  }
+
+  // ── onConsumerDrop edge cases ──
+
+  @Test
+  void onConsumerDrop_withoutOnEnqueue_shouldGoNegative() {
+    limiter.onConsumerDrop();
+    assertThat(limiter.getInFlight()).isNegative();
+  }
+
+  // ── Concurrency ──
+
+  @Test
+  void concurrentAccess_shouldNotCorruptState() throws InterruptedException {
+    int threads = 10;
+    int iterations = 1000;
+    CountDownLatch latch = new CountDownLatch(threads);
+    for (int t = 0; t < threads; t++) {
+      new Thread(() -> {
+        for (int j = 0; j < iterations; j++) {
+          limiter.onEnqueue();
+          limiter.onSuccess(10);
+        }
+        latch.countDown();
+      }).start();
+    }
+    latch.await();
+    assertThat(limiter.getTotalPassed()).isEqualTo((long) threads * iterations);
   }
 
   // ── Reflection helpers ──

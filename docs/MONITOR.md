@@ -20,6 +20,8 @@ When `spring-boot-starter-actuator` is on the classpath, the HotKey endpoint is 
 
 Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
 
+Supports an optional `?limit=N` query parameter to cap the number of TopK entries returned (default 100).
+
 ```javascript
 {
   "instanceId": "a1b2c3d4",        // Instance unique identifier
@@ -67,6 +69,7 @@ Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
     "softTtlMs": 30000,             // Effective soft TTL — normal keys (ms)
     "hotHardTtlMs": 3600000,        // Effective hard TTL — hot keys (ms)
     "hotSoftTtlMs": 300000,         // Effective soft TTL — hot keys (ms)
+    "nullValueTtlSec": 10,          // TTL (seconds) for null/cache-miss entries
     "refreshPoolAvailable": 100,    // Available refresh limiter permits
 
     // ── Version tracking ──
