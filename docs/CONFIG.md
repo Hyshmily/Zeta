@@ -126,11 +126,11 @@
 | Property                                        | Default                     | Description                                                                                            |
 | ----------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `hotkey.local.heartbeat.exchange-name`          | `hotkey.heartbeat.exchange` | Topic exchange name for epoch-driven structured heartbeats from Workers                                |
-| `hotkey.local.heartbeat.timeout-ms`             | `15000`                     | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window              |
+| `hotkey.local.heartbeat.timeout-ms`             | `30000`                     | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window              |
 | `hotkey.local.heartbeat.verify-interval-ms`     | `5000`                      | Interval (ms) for verifying suspected dead Workers via Direct reply-to PING                            |
 | `hotkey.local.heartbeat.ping-timeout-ms`        | `3000`                      | Timeout (ms) for a PING/PONG verification probe                                                        |
 | `hotkey.local.heartbeat.degrade-after-failures` | `3`                         | Consecutive PING failures before degrading the Worker; uses exponential backoff per Worker             |
-| `hotkey.local.heartbeat.verify-max-backoff-ms`  | `60000`                     | Max exponential backoff (ms) between verification probes for a repeatedly failing Worker               |
+| `hotkey.local.heartbeat.verify-max-backoff-ms`  | `600000`                    | Max exponential backoff (ms) between verification probes for a repeatedly failing Worker (10min)       |
 | `hotkey.local.heartbeat.min-alive-workers`      | `0`                         | Minimum alive Workers for cluster health; 0 = use majority formula (knownWorkerCount / 2 + 1)          |
 
 ### Circuit Breaker (`hotkey.local.circuit-breaker.*`)

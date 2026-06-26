@@ -15,7 +15,12 @@
  */
 package io.github.hyshmily.hotkey.sync.worker;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import java.util.Set;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,12 +28,6 @@ import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-
-import java.util.Set;
-import java.util.concurrent.*;
-import java.util.stream.Collectors;
-
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 /**
  * On-demand active heartbeat verifier that probes suspected-dead Workers when
@@ -59,7 +58,6 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 @Slf4j
 public class WorkerHeartbeatVerifier {
 
-
   private final RabbitTemplate rabbitTemplate;
   private final ClusterHealthView healthView;
   private final String appInstanceId;
@@ -73,69 +71,68 @@ public class WorkerHeartbeatVerifier {
   private ScheduledFuture<?> verifyTask;
 
   private static final String QUEUE_VERIFY_PING_PREFIX = "hotkey.verify.ping.";
+  private static final int MAX_BACKOFF_SHIFT = 30;
 
   /**
-   * Creates a verifier with an internally owned single-thread scheduler.
-   * <p>
-   * This constructor is convenience for standalone use and tests. The internal
-   * daemon thread is named {@code hb-verifier}. The caller must invoke
-   * {@link #start()} to begin periodic verification and {@link #stop()} to
-   * release the scheduler resources.
-   *
-   * @param rabbitTemplate        the RabbitMQ template for sending PING messages
-   * @param healthView            the shared cluster health view to update on PONG/failure
-   * @param appInstanceId         the local application instance ID, sent as PING metadata
-   * @param verifyIntervalMs      fixed delay between verification cycles (milliseconds)
-   * @param pingTimeoutMs         maximum time to wait for a PONG response (milliseconds)
-   * @param degradeAfterFailures  number of failed verifications before marking a Worker stale
-   *                              and potentially degrading the cluster
+   * Parameter object for {@link WorkerHeartbeatVerifier} construction.
    */
-  public WorkerHeartbeatVerifier(
-    RabbitTemplate rabbitTemplate,
-    ClusterHealthView healthView,
-    String appInstanceId,
+  public record VerifierConfig(
     long verifyIntervalMs,
     long pingTimeoutMs,
     int degradeAfterFailures,
     long verifyMaxBackoffMs
-  ) {
-    this(rabbitTemplate, healthView, appInstanceId, verifyIntervalMs, pingTimeoutMs, degradeAfterFailures, verifyMaxBackoffMs,
-      Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "hb-verifier");
-        t.setDaemon(true);
-        return t;
-      }), true);
-  }
+  ) {}
 
   /**
-   * Creates a verifier with a caller-supplied external scheduler.
-   * <p>
-   * The caller is responsible for managing the scheduler's lifecycle. When using
-   * this constructor, {@link #stop()} will cancel the verification task but will
-   * <em>not</em> shut down the scheduler. This allows sharing a single scheduler
-   * across multiple listeners and verifiers.
-   *
-   * @param rabbitTemplate        the RabbitMQ template for sending PING messages
-   * @param healthView            the shared cluster health view to update on PONG/failure
-   * @param appInstanceId         the local application instance ID, sent as PING metadata
-   * @param verifyIntervalMs      fixed delay between verification cycles (milliseconds)
-   * @param pingTimeoutMs         maximum time to wait for a PONG response (milliseconds)
-   * @param degradeAfterFailures  number of failed verifications before marking a Worker stale
-   * @param scheduler             the external scheduler for running verification tasks;
-   *                              will not be shut down by {@link #stop()}
+   * Creates a verifier with an internally owned single-thread scheduler.
+   * The internal daemon thread is named {@code hb-verifier}.
    */
   public WorkerHeartbeatVerifier(
     RabbitTemplate rabbitTemplate,
     ClusterHealthView healthView,
     String appInstanceId,
-    long verifyIntervalMs,
-    long pingTimeoutMs,
-    int degradeAfterFailures,
-    long verifyMaxBackoffMs,
+    VerifierConfig config
+  ) {
+    this(
+      rabbitTemplate,
+      healthView,
+      appInstanceId,
+      config.verifyIntervalMs,
+      config.pingTimeoutMs,
+      config.degradeAfterFailures,
+      config.verifyMaxBackoffMs,
+      Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "hb-verifier");
+        t.setDaemon(true);
+        return t;
+      }),
+      true
+    );
+  }
+
+  /**
+   * Creates a verifier with a caller-supplied external scheduler.
+   * The caller manages the scheduler lifecycle — {@link #stop()} cancels
+   * the task but does not shut down the scheduler.
+   */
+  public WorkerHeartbeatVerifier(
+    RabbitTemplate rabbitTemplate,
+    ClusterHealthView healthView,
+    String appInstanceId,
+    VerifierConfig config,
     ScheduledExecutorService scheduler
   ) {
-    this(rabbitTemplate, healthView, appInstanceId, verifyIntervalMs, pingTimeoutMs, degradeAfterFailures, verifyMaxBackoffMs,
-      scheduler, false);
+    this(
+      rabbitTemplate,
+      healthView,
+      appInstanceId,
+      config.verifyIntervalMs,
+      config.pingTimeoutMs,
+      config.degradeAfterFailures,
+      config.verifyMaxBackoffMs,
+      scheduler,
+      false
+    );
   }
 
   /**
@@ -158,15 +155,18 @@ public class WorkerHeartbeatVerifier {
       return;
     }
     try {
-      verifyTask = scheduler.scheduleAtFixedRate(
+      verifyTask = scheduler.scheduleWithFixedDelay(
         this::verifySuspectedWorkers,
         verifyIntervalMs,
         verifyIntervalMs,
         TimeUnit.MILLISECONDS
       );
     } catch (Exception e) {
-      log.error("Failed to start heartbeat verifier scheduler; Worker liveness verification " +
-          "will not run. Application continues but stale Workers may not be detected.", e);
+      log.error(
+        "Failed to start heartbeat verifier scheduler; Worker liveness verification " +
+          "will not run. Application continues but stale Workers may not be detected.",
+        e
+      );
     }
   }
 
@@ -233,7 +233,7 @@ public class WorkerHeartbeatVerifier {
           healthView.markVerificationFailed(workerId);
 
           int attempt = healthView.getVerifyFailures(workerId);
-          long backoffMs = Math.min(verifyMaxBackoffMs, verifyIntervalMs * (1L << Math.min(attempt, 30)));
+          long backoffMs = computeBackoffMs(attempt);
 
           nextVerifyTime.put(workerId, System.currentTimeMillis() + backoffMs);
           log.warn("Worker {} verification failed (attempt={}, backoff={}ms)", workerId, attempt, backoffMs);
@@ -243,8 +243,7 @@ public class WorkerHeartbeatVerifier {
         }
       }
 
-      boolean anyDegraded = suspected.stream()
-        .anyMatch(id -> healthView.getVerifyFailures(id) >= degradeAfterFailures);
+      boolean anyDegraded = suspected.stream().anyMatch(id -> healthView.getVerifyFailures(id) >= degradeAfterFailures);
       if (anyDegraded && !healthView.isClusterHealthy()) {
         log.warn("Cluster degraded: some workers unreachable after verification (threshold={})", degradeAfterFailures);
         healthView.setDegraded(true);
@@ -255,14 +254,25 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
+   * Compute the exponential backoff duration for a verification attempt.
+   * Starts at {@code verifyIntervalMs} and doubles each attempt, capped at
+   * {@code verifyMaxBackoffMs}.
+   *
+   * @param attempt the number of consecutive failures (1-based)
+   * @return the backoff duration in milliseconds
+   */
+  protected long computeBackoffMs(int attempt) {
+    return Math.min(verifyMaxBackoffMs, verifyIntervalMs * (1L << Math.min(attempt, MAX_BACKOFF_SHIFT)));
+  }
+
+  /**
    * Sends a point-to-point PING message to the given Worker's dedicated verification
    * queue ({@code hotkey.verify.ping.{workerId}}) and waits for a PONG response
    * via AMQP Direct reply-to ({@code amq.rabbitmq.reply-to}).
    *
    * <p>The PING carries the application instance ID in the
    * {@link io.github.hyshmily.hotkey.constants.HotKeyConstants#AMQP_HEADER_VERIFY_APP_INSTANCE} header so the Worker
-   * can identify the requester. The reply timeout is set to {@code pingTimeoutMs}
-   * on the RabbitTemplate before each call.
+   * can identify the requester. The reply timeout is set in the message properties.
    *
    * @param workerId the Worker to ping; must not be null
    * @return {@code true} if a non-null PONG response was received within

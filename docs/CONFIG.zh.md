@@ -114,11 +114,11 @@
 | 属性                                            | 默认值                      | 说明                                                                   |
 | ----------------------------------------------- | --------------------------- | ---------------------------------------------------------------------- |
 | `hotkey.local.heartbeat.exchange-name`          | `hotkey.heartbeat.exchange` | 心跳 Topic 交换机名称，用于 Worker 的 epoch 驱动结构化心跳             |
-| `hotkey.local.heartbeat.timeout-ms`             | `15000`                     | 超时（毫秒）——在此窗口内未收到心跳则判定 Worker 死亡                   |
+| `hotkey.local.heartbeat.timeout-ms`             | `30000`                     | 超时（毫秒）——在此窗口内未收到心跳则判定 Worker 死亡                   |
 | `hotkey.local.heartbeat.verify-interval-ms`     | `5000`                      | 验证间隔（毫秒）——对怀疑死亡的 Worker 发送 Direct reply-to PING 的间隔 |
 | `hotkey.local.heartbeat.ping-timeout-ms`        | `3000`                      | PING/PONG 验证探针超时（毫秒）                                         |
 | `hotkey.local.heartbeat.degrade-after-failures` | `3`                         | 连续 PING 失败次数超过此值后降级该 Worker（按指数退避重试）            |
-| `hotkey.local.heartbeat.verify-max-backoff-ms`  | `60000`                     | 单 Worker 指数退避最大间隔（毫秒）                                     |
+| `hotkey.local.heartbeat.verify-max-backoff-ms`  | `600000`                    | 单 Worker 指数退避最大间隔（毫秒，10 分钟）                            |
 | `hotkey.local.heartbeat.min-alive-workers`      | `0`                         | 集群健康所需最小存活 Worker 数；0=使用多数派公式（knownWorkerCount/2+1）|
 
 ### 熔断器配置（`hotkey.local.circuit-breaker.*`）

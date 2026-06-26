@@ -327,7 +327,7 @@ public class HotKeyProperties {
     /** Heartbeat exchange name. */
     private String exchangeName = "hotkey.heartbeat.exchange";
     /** Heartbeat timeout (ms). */
-    private int timeoutMs = 15000;
+    private int timeoutMs = 30000;
     /** Verify interval (ms). */
     private long verifyIntervalMs = 5000;
     /** PING timeout (ms). */
@@ -335,7 +335,7 @@ public class HotKeyProperties {
     /** Degrade after consecutive failures. */
     private int degradeAfterFailures = 3;
     /** Max backoff (ms) for per-Worker exponential backoff between verification probes. */
-    private long verifyMaxBackoffMs = 60_000;
+    private long verifyMaxBackoffMs = 600_000;
     /**
      * Minimum alive workers for cluster health. 0 = use majority formula (knownWorkerCount / 2 + 1).
      * Set to a positive value to override the default majority threshold.

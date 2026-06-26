@@ -46,7 +46,7 @@ class WorkerHeartbeatVerifierTest {
     healthView.onHeartbeat(hb("w1", true));
     healthView.onHeartbeat(hb("w2", false));
     healthView.onHeartbeat(hb("w3", false));
-    verifier = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", 100_000, 500, 2, 60_000);
+    verifier = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(100_000, 500, 2, 60_000));
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, boolean ready) {
@@ -111,7 +111,7 @@ class WorkerHeartbeatVerifierTest {
   @Test
   void shouldReturnEarlyWhenNoSuspectedWorkers() {
     ClusterHealthView emptyView = new ClusterHealthView(3, 5000, 99);
-    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, emptyView, "test-app", 1000, 500, 2, 60_000);
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, emptyView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 2, 60_000));
 
     v.verifySuspectedWorkers();
 
@@ -155,7 +155,7 @@ class WorkerHeartbeatVerifierTest {
 
   @Test
   void shouldScheduleAtFixedRate() throws Exception {
-    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", 50, 500, 2, 60_000);
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 2, 60_000));
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(
       new Message(new byte[0], new MessageProperties())
     );
@@ -200,7 +200,7 @@ class WorkerHeartbeatVerifierTest {
    */
   @Test
   void start_isIdempotent() throws Exception {
-    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", 50, 500, 2, 60_000);
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 2, 60_000));
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(
       new Message(new byte[0], new MessageProperties())
     );
@@ -222,7 +222,7 @@ class WorkerHeartbeatVerifierTest {
     smallView.onHeartbeat(hb("w1", false));
     smallView.onHeartbeat(hb("w2", false));
     smallView.onHeartbeat(hb("w3", false));
-    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, smallView, "test-app", 1000, 500, 0, 60_000);
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, smallView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 0, 60_000));
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(null);
 
     v.verifySuspectedWorkers();
@@ -239,4 +239,5 @@ class WorkerHeartbeatVerifierTest {
     verifier.start();
   }
 }
+
 

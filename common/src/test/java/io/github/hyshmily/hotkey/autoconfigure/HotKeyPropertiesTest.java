@@ -217,11 +217,11 @@ class HotKeyPropertiesTest {
   void heartbeat_shouldHaveDefaultValues() {
     HotKeyProperties p = props();
     assertThat(p.getHeartbeat().getExchangeName()).isEqualTo("hotkey.heartbeat.exchange");
-    assertThat(p.getHeartbeat().getTimeoutMs()).isEqualTo(15000);
+    assertThat(p.getHeartbeat().getTimeoutMs()).isEqualTo(30000);
     assertThat(p.getHeartbeat().getVerifyIntervalMs()).isEqualTo(5000);
     assertThat(p.getHeartbeat().getPingTimeoutMs()).isEqualTo(3000);
     assertThat(p.getHeartbeat().getDegradeAfterFailures()).isEqualTo(3);
-    assertThat(p.getHeartbeat().getVerifyMaxBackoffMs()).isEqualTo(60_000);
+    assertThat(p.getHeartbeat().getVerifyMaxBackoffMs()).isEqualTo(600_000);
     assertThat(p.getHeartbeat().getMinAliveWorkers()).isEqualTo(0);
   }
 

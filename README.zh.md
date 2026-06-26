@@ -4,6 +4,7 @@
   <a href="https://central.sonatype.com/artifact/io.github.hyshmily/hotkey"><img src="https://img.shields.io/maven-central/v/io.github.hyshmily/hotkey?color=blue" alt="Maven Central"></a>
   <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
   <a href="https://coveralls.io/github/Hyshmily/hotkey?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/hotkey/badge.svg?branch=master" alt="Coveralls"></a>
+  <a href="https://github.com/Hyshmily/hotkey/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Hyshmily/hotkey/ci.yml?branch=master&label=CI&logo=github" alt="CI"></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
   <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
@@ -320,11 +321,11 @@ hotkey:
     # ——— 心跳（App 侧；Worker 健康监控） ———
     heartbeat:
       exchange-name: "hotkey.heartbeat.exchange" # 必须与 worker.messaging.heartbeat-exchange 一致
-      timeout-ms: 15000 # 此窗口内无心跳即判定 Worker 死亡
+      timeout-ms: 30000 # 此窗口内无心跳即判定 Worker 死亡
       verify-interval-ms: 5000 # 可疑 Worker 验证间隔（支持指数退避）
       ping-timeout-ms: 3000 # Direct reply-to PING 超时
       degrade-after-failures: 3 # 连续 PING 失败 N 次后降级（指数退避）
-      verify-max-backoff-ms: 60000 # 单 Worker 指数退避最大间隔
+      verify-max-backoff-ms: 600000 # 单 Worker 指数退避最大间隔（10min）
       min-alive-workers: 0 # 0=动态（有1个存活即健康）；设置>0则要求至少N个Worker存活
 
     # ——— 熔断器（可选，默认关闭） ———

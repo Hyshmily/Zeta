@@ -55,7 +55,6 @@ import lombok.extern.slf4j.Slf4j;
  * cross-instance synchronization via {@link CacheSyncPublisher}.
  * All write operations are transaction-aware via {@link TransactionSupport}.
  */
-@SuppressWarnings("DuplicatedCode")
 @RequiredArgsConstructor
 @Slf4j
 public class HotKeyCache {
@@ -462,8 +461,6 @@ public class HotKeyCache {
       if (hotKeyDetector.contains(cacheKey)) {
         long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
         long hotSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveHotSoftTtlMs();
-        long hotHardExpireAtMs = expireManager.computeHardExpireAt(hotHard);
-        long hotSoftExpireAtMs = expireManager.computeSoftExpireAt(hotSoft);
 
         caffeineCache
           .asMap()
@@ -471,19 +468,7 @@ public class HotKeyCache {
             if (isWorkerManagedEntry(existing)) {
               return existing;
             }
-            return CacheEntry.builder()
-              .value(value)
-              .dataVersion(HotKeyConstants.VERSION_DEFAULT)
-              .isVersionDegraded(false)
-              .decisionVersion(0L)
-              .hardTtlMs(hotHard)
-              .hardExpireAtMs(hotHardExpireAtMs)
-              .softTtlMs(hotSoft)
-              .softExpireAtMs(hotSoftExpireAtMs)
-              .keyState(KeyState.HOT)
-              .normalHardTtlMs(effectiveHard)
-              .normalSoftTtlMs(effectiveSoft)
-              .build();
+            return buildEntry(value, hotHard, hotSoft, KeyState.HOT, effectiveHard, effectiveSoft);
           });
 
         if (!skipReport) {
@@ -491,28 +476,13 @@ public class HotKeyCache {
         }
         log.debug("HotKey detected, promoted to L1{}: {}", skipReport ? " (no report)" : " and reported", cacheKey);
       } else {
-        long effectiveHardExpireAtMs = expireManager.computeHardExpireAt(effectiveHard);
-        long effectiveSoftExpireAtMs = expireManager.computeSoftExpireAt(effectiveSoft);
-
         caffeineCache
           .asMap()
           .compute(cacheKey, (k, existing) -> {
             if (isWorkerManagedEntry(existing)) {
               return existing;
             }
-            return CacheEntry.builder()
-              .value(value)
-              .dataVersion(HotKeyConstants.VERSION_DEFAULT)
-              .isVersionDegraded(false)
-              .decisionVersion(0L)
-              .hardTtlMs(effectiveHard)
-              .hardExpireAtMs(effectiveHardExpireAtMs)
-              .softTtlMs(effectiveSoft)
-              .softExpireAtMs(effectiveSoftExpireAtMs)
-              .keyState(KeyState.NORMAL)
-              .normalHardTtlMs(effectiveHard)
-              .normalSoftTtlMs(effectiveSoft)
-              .build();
+            return buildEntry(value, effectiveHard, effectiveSoft, KeyState.NORMAL, effectiveHard, effectiveSoft);
           });
 
         if (!skipReport) {
@@ -522,6 +492,32 @@ public class HotKeyCache {
       }
       return value;
     });
+  }
+
+  private <T> CacheEntry buildEntry(
+    T value,
+    long hardTtlMs,
+    long softTtlMs,
+    KeyState state,
+    long normalHardTtlMs,
+    long normalSoftTtlMs
+  ) {
+    long hardTtlExpireAtMs = expireManager.computeHardExpireAt(hardTtlMs);
+    long softTtlExpireAtMs = softTtlMs > 0 ? expireManager.computeSoftExpireAt(softTtlMs) : 0L;
+
+    return CacheEntry.builder()
+      .value(value)
+      .dataVersion(HotKeyConstants.VERSION_DEFAULT)
+      .isVersionDegraded(false)
+      .decisionVersion(0L)
+      .hardTtlMs(hardTtlMs)
+      .hardExpireAtMs(hardTtlExpireAtMs)
+      .softTtlMs(softTtlMs)
+      .softExpireAtMs(softTtlExpireAtMs)
+      .keyState(state)
+      .normalHardTtlMs(normalHardTtlMs)
+      .normalSoftTtlMs(normalSoftTtlMs)
+      .build();
   }
 
   /**

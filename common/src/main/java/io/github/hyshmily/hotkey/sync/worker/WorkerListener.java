@@ -305,6 +305,9 @@ public class WorkerListener {
         }
 
         if (existing instanceof CacheEntry cacheEntry) {
+          long hardTtlMs = cacheEntry.getNormalHardTtlMs();
+          long hardExpireAtMs = expireManager.computeHardExpireAt(hardTtlMs);
+
           return cacheEntry
             .toBuilder()
             .value(cacheEntry.getValue())
@@ -312,8 +315,8 @@ public class WorkerListener {
             .decisionVersion(wm.decisionVersion())
             .decisionNodeId(wm.nodeId())
             .decisionEpoch(wm.epoch())
-            .hardTtlMs(cacheEntry.getNormalHardTtlMs())
-            .hardExpireAtMs(expireManager.computeHardExpireAt(cacheEntry.getNormalHardTtlMs()))
+            .hardTtlMs(hardTtlMs)
+            .hardExpireAtMs(hardExpireAtMs)
             .softTtlMs(0L)
             .softExpireAtMs(0L)
             .keyState(KeyState.COOL)

@@ -629,10 +629,12 @@ public class HotKeyAmqpAutoConfiguration {
         rabbitTemplate,
         healthView,
         properties.getInstanceId(),
-        properties.getHeartbeat().getVerifyIntervalMs(),
-        properties.getHeartbeat().getPingTimeoutMs(),
-        properties.getHeartbeat().getDegradeAfterFailures(),
-        properties.getHeartbeat().getVerifyMaxBackoffMs(),
+        new WorkerHeartbeatVerifier.VerifierConfig(
+          properties.getHeartbeat().getVerifyIntervalMs(),
+          properties.getHeartbeat().getPingTimeoutMs(),
+          properties.getHeartbeat().getDegradeAfterFailures(),
+          properties.getHeartbeat().getVerifyMaxBackoffMs()
+        ),
         hotKeyScheduler
       );
     }
