@@ -39,26 +39,40 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
- * Publishes cache synchronization messages (INVALIDATE / REFRESH / RULES_SYNC) to all
- * peer application instances via the {@code hotkey.sync.exchange} FanoutExchange.
+ * Publishes cache synchronization messages (INVALIDATE / REFRESH / RULES_SYNC)
+ * to all
+ * peer application instances via the {@code hotkey.sync.exchange}
+ * FanoutExchange.
  *
- * <p>This is the outbound half of the instance-to-instance cache coherence protocol.
- * The inbound half is {@link CacheSyncListener}. Together they ensure that a data
- * mutation on one instance (write, evict, rule change) is propagated to all other
+ * <p>
+ * This is the outbound half of the instance-to-instance cache coherence
+ * protocol.
+ * The inbound half is {@link CacheSyncListener}. Together they ensure that a
+ * data
+ * mutation on one instance (write, evict, rule change) is propagated to all
+ * other
  * instances within the same deployment.
  *
- * <p><b>Responsibility boundary:</b> This publisher handles <em>application-level</em>
- * data changes only (e.g. {@code @CachePut}, {@code @CacheEvict}, {@code invalidateAllLocal}).
- * HOT/COOL lifecycle decisions from the Worker cluster are handled separately by the
+ * <p>
+ * <b>Responsibility boundary:</b> This publisher handles
+ * <em>application-level</em>
+ * data changes only (e.g. {@code @CachePut}, {@code @CacheEvict},
+ * {@code invalidateAllLocal}).
+ * HOT/COOL lifecycle decisions from the Worker cluster are handled separately
+ * by the
  * Worker's {@code WorkerBroadcaster} and received by {@link WorkerListener}.
  *
- * <p><b>Deduplication:</b> A {@link Caffeine} dedup cache keyed by
- * {@code "{type}:{cacheKey}"} prevents redundant broadcasts of the same type+key
+ * <p>
+ * <b>Deduplication:</b> A {@link Caffeine} dedup cache keyed by
+ * {@code "{type}:{cacheKey}"} prevents redundant broadcasts of the same
+ * type+key
  * with a stale version within a configurable time window (see
  * {@link CacheSyncProperties#dedupWindowSeconds}).
  *
- * <p><b>Batch operations:</b> Large invalidations are split into chunks of at most
- * {@value #BATCH_SIZE} keys per AMQP message to stay within reasonable message size limits.
+ * <p>
+ * <b>Batch operations:</b> Large invalidations are split into chunks of at most
+ * {@value #BATCH_SIZE} keys per AMQP message to stay within reasonable message
+ * size limits.
  *
  * @see CacheSyncListener
  * @see SyncMessage
@@ -70,19 +84,30 @@ public class CacheSyncPublisher {
   /** RabbitMQ template for publishing messages to the sync FanoutExchange. */
   private final RabbitTemplate rabbitTemplate;
 
-  /** Configuration for sync exchange name, dedup window, and other sync settings. */
+  /**
+   * Configuration for sync exchange name, dedup window, and other sync settings.
+   */
   private final CacheSyncProperties properties;
 
-  /** Dedup cache keyed by {@code "type:cacheKey"} → dataVersion. Prevents redundant
-   * broadcasts of the same type+key with a stale version within the configured window.
-   * Initialized in {@link #init()} via {@link PostConstruct}. */
+  /**
+   * Dedup cache keyed by {@code "type:cacheKey"} → dataVersion. Prevents
+   * redundant
+   * broadcasts of the same type+key with a stale version within the configured
+   * window.
+   * Initialized in {@link #init()} via {@link PostConstruct}.
+   */
   private Cache<String, Long> recentBroadcasts;
 
-  /** Shared Jackson {@link ObjectMapper} for serializing batch-invalidation key lists to JSON. */
+  /**
+   * Shared Jackson {@link ObjectMapper} for serializing batch-invalidation key
+   * lists to JSON.
+   */
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-  /** Maximum number of keys per single batch-invalidation AMQP message ({@value}).
-   * Batches larger than this are split into multiple messages. */
+  /**
+   * Maximum number of keys per single batch-invalidation AMQP message ({@value}).
+   * Batches larger than this are split into multiple messages.
+   */
   private static final int BATCH_SIZE = 1000;
 
   /**
@@ -90,23 +115,26 @@ public class CacheSyncPublisher {
    * <p>
    * Creates a {@link Caffeine} cache with:
    * <ul>
-   *   <li>Expire-after-write of {@link CacheSyncProperties#dedupWindowSeconds} seconds</li>
-   *   <li>Maximum size of {@link CacheSyncProperties#dedupMaxSize} entries</li>
+   * <li>Expire-after-write of {@link CacheSyncProperties#dedupWindowSeconds}
+   * seconds</li>
+   * <li>Maximum size of {@link CacheSyncProperties#dedupMaxSize} entries</li>
    * </ul>
-   * Called automatically by the Spring container after all dependencies are injected.
+   * Called automatically by the Spring container after all dependencies are
+   * injected.
    */
   @PostConstruct
   public void init() {
     this.recentBroadcasts = Caffeine.newBuilder()
-      .expireAfterWrite(properties.getDedupWindowSeconds(), TimeUnit.SECONDS)
-      .maximumSize(properties.getDedupMaxSize())
-      .build();
+        .expireAfterWrite(properties.getDedupWindowSeconds(), TimeUnit.SECONDS)
+        .maximumSize(properties.getDedupMaxSize())
+        .build();
   }
 
   /**
    * Returns the current estimated size of the deduplication cache.
    * <p>
-   * This is a Caffeine {@code estimatedSize()} — it is an approximation and should
+   * This is a Caffeine {@code estimatedSize()} — it is an approximation and
+   * should
    * not be relied upon for exact accounting.
    *
    * @return estimated number of entries in the dedup cache; {@code 0} if
@@ -120,7 +148,8 @@ public class CacheSyncPublisher {
    * Broadcasts a REFRESH sync message to all peer instances, triggering them
    * to reload the value for the given key from Redis.
    *
-   * <p>Deduplicated: if a REFRESH for the same key with a higher or equal
+   * <p>
+   * Deduplicated: if a REFRESH for the same key with a higher or equal
    * {@code dataVersion} was broadcast within the dedup window, this call is
    * silently skipped.
    *
@@ -138,7 +167,8 @@ public class CacheSyncPublisher {
    * Broadcasts an INVALIDATE sync message to all peer instances, requesting them
    * to remove the specified key from their local cache.
    *
-   * <p>Deduplicated: if an INVALIDATE for the same key with a higher or equal
+   * <p>
+   * Deduplicated: if an INVALIDATE for the same key with a higher or equal
    * {@code dataVersion} was broadcast within the dedup window, this call is
    * silently skipped.
    *
@@ -152,23 +182,28 @@ public class CacheSyncPublisher {
   }
 
   /**
-   * Batch-invalidates multiple keys in a single AMQP message (or multiple messages
+   * Batch-invalidates multiple keys in a single AMQP message (or multiple
+   * messages
    * for very large batches).
    *
-   * <p>The body of each message is a JSON array of key strings. The receiver
+   * <p>
+   * The body of each message is a JSON array of key strings. The receiver
    * ({@link CacheSyncListener}) calls {@code caffeineCache.invalidateAllLocal()}
    * once per batch, which is more efficient
    * than sending individual INVALIDATE messages for each key.
    *
-   * <p>Large collections are automatically split into chunks of at most
+   * <p>
+   * Large collections are automatically split into chunks of at most
    * {@value #BATCH_SIZE} keys per AMQP message to avoid exceeding broker
    * message size limits. Serialization or send failures are logged at ERROR
    * level and do not propagate to the caller.
    *
-   * <p>Note: this method does <em>not</em> go through the version-based dedup
+   * <p>
+   * Note: this method does <em>not</em> go through the version-based dedup
    * cache. All keys are unconditionally broadcast.
    *
-   * @param keys the keys to invalidate; if null or empty the call is a silent no-op
+   * @param keys the keys to invalidate; if null or empty the call is a silent
+   *             no-op
    */
   public void broadcastLocalInvalidateAll(Collection<String> keys) {
     if (keys == null || keys.isEmpty()) {
@@ -197,14 +232,18 @@ public class CacheSyncPublisher {
    * Broadcasts the full rule-set JSON to all peer instances for cross-instance
    * rule synchronization.
    *
-   * <p>Each receiver's {@link io.github.hyshmily.hotkey.rule.RuleMatcher#syncRules}
-   * merges the incoming rules with the local set, guarded by the {@code rulesVersion}
+   * <p>
+   * Each receiver's {@link io.github.hyshmily.hotkey.rule.RuleMatcher#syncRules}
+   * merges the incoming rules with the local set, guarded by the
+   * {@code rulesVersion}
    * to prevent stale overwrites (newer versions win).
    *
-   * <p>If the payload is null or blank, the call is a silent no-op. AMQP publish
+   * <p>
+   * If the payload is null or blank, the call is a silent no-op. AMQP publish
    * failures are logged at ERROR level and do not propagate.
    *
-   * @param rulesJson    the serialized rule-set JSON (new format with version wrapper);
+   * @param rulesJson    the serialized rule-set JSON (new format with version
+   *                     wrapper);
    *                     must be a valid JSON string
    * @param rulesVersion the current rules version at the time of serialization;
    *                     receivers use this for conflict resolution
@@ -230,25 +269,32 @@ public class CacheSyncPublisher {
    * of the same {@code type:cacheKey} composite with a greater or equal
    * {@code dataVersion} exists in the dedup window.
    *
-   * <p><b>Dedup algorithm:</b> Uses {@code Caffeine.asMap().compute()} to atomically
+   * <p>
+   * <b>Dedup algorithm:</b> Uses {@code Caffeine.asMap().compute()} to atomically
    * check and update the dedup cache entry:
    * <ol>
-   *   <li>If an existing entry has {@code oldVersion >= newVersion}, the broadcast
-   *       is skipped (the stale flag is set).</li>
-   *   <li>Otherwise, the dedup cache is updated to the new version and the message
-   *       is published to the sync FanoutExchange.</li>
+   * <li>If an existing entry has {@code oldVersion >= newVersion}, the broadcast
+   * is skipped (the stale flag is set).</li>
+   * <li>Otherwise, the dedup cache is updated to the new version and the message
+   * is published to the sync FanoutExchange.</li>
    * </ol>
    *
-   * <p>The dedup cache entry expires after {@link CacheSyncProperties#getDedupWindowSeconds}
+   * <p>
+   * The dedup cache entry expires after
+   * {@link CacheSyncProperties#getDedupWindowSeconds}
    * seconds, after which a subsequent call with any version will be accepted.
    *
    * @param cacheKey the affected cache key; must not be null or empty
-   * @param type     the sync message type (e.g. {@link SyncMessage#TYPE_INVALIDATE},
+   * @param type     the sync message type (e.g.
+   *                 {@link SyncMessage#TYPE_INVALIDATE},
    *                 {@link SyncMessage#TYPE_REFRESH})
    * @param version  the {@code dataVersion} of the operation
-   * @param degraded whether the version was obtained in degraded mode; passed through
-   *                 to the message headers; also prefixes the dedup compositeKey with "D:"
-   *                 to prevent degraded broadcasts from being blocked by normal ones
+   * @param degraded whether the version was obtained in degraded mode; passed
+   *                 through
+   *                 to the message headers; also prefixes the dedup compositeKey
+   *                 with "D:"
+   *                 to prevent degraded broadcasts from being blocked by normal
+   *                 ones
    */
   private void sendDeduped(String cacheKey, String type, long version, boolean degraded) {
     if (invalidCacheKey(cacheKey) || invalidCacheKey(type)) {
@@ -259,20 +305,19 @@ public class CacheSyncPublisher {
 
     AtomicBoolean skipped = new AtomicBoolean(false);
     recentBroadcasts
-      .asMap()
-      .compute(compositeKey, (k, oldVersion) -> {
-        if (oldVersion != null && oldVersion >= version) {
-          log.debug(
-            "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
-            compositeKey,
-            oldVersion,
-            version
-          );
-          skipped.set(true);
-          return oldVersion;
-        }
-        return version;
-      });
+        .asMap()
+        .compute(compositeKey, (k, oldVersion) -> {
+          if (oldVersion != null && oldVersion >= version) {
+            log.debug(
+                "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
+                compositeKey,
+                oldVersion,
+                version);
+            skipped.set(true);
+            return oldVersion;
+          }
+          return version;
+        });
 
     if (!skipped.get()) {
       try {
