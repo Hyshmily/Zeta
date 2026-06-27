@@ -64,3 +64,7 @@ common/cp.txt
 k6/result/*.json
 
 
+
+# AI agent instructions
+AGENTS.md
+CLAUDE.md
