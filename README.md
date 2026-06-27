@@ -12,53 +12,67 @@
 
 [**中文**](README.zh.md)
 
-HotKey is a highly customizable, high-performance, low-cost, lightweight distributed caching framework that integrates **cache read/write (get/put), automatic hot-key detection, multi-level cache warming, cross-instance broadcast synchronization, AOP annotation interception, and blacklist/whitelist filtering**.
+HotKey is a highly configurable, high-performance, low-cost, lightweight distributed caching and cache-warming framework.
 
-Most local caches store all entries in Caffeine. But under massive key counts:
+It solves cluster-wide **distributed consistent caching** for unforeseen hotspot data at minimal cost:
 
-- **Memory waste** — most keys are read only once
-- **Broadcast storms** — full cache = full invalidation, broadcasts grow linearly with key count
-- **Cache avalanches** — massive keys share the same TTL; when they expire simultaneously, every request penetrates to the DB
+- **Unpredictable hot keys** — A sudden traffic burst causes certain keys to spike unexpectedly; `HeavyKeeper` algorithm detects them in milliseconds
+- **Hot-key synchronization** — RabbitMQ-delivered Worker decisions (HOT/COOL) automatically propagate to every instance's L1 cache; manual broadcast for cross-instance invalidation is also supported
+- **Malicious request amplification** — Unknown users flooding the same endpoint; AOP-based interception lets you decide the response (block, circuit-break, return a default value, etc.)
 
-HotKey's strategy: **cache only the truly hot data.**
+Additionally, HotKey provides:
 
-Using [HeavyKeeper](https://github.com/go-kratos/aegis) (a Count-Min Sketch variant), it achieves **cluster-wide hot-key detection**: dedicated Worker nodes aggregate access reports from all instances — solving the problem where "accessed 100 times by the same pod" vs "accessed once each by 100 pods" is indistinguishable locally.
+### 1. Simple Deployment
+
+- **Multiple deployment modes** — Maven / Docker / JAR
+- **Spring Boot Starter** — Just add the `hotkey` dependency; zero extra configuration
+
+### 2. Practical Features
+
+- **Spring Cache integration** — Standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations working with HotKey's hot-key detection, soft expiry, and cross-instance sync. Companion annotations:
+  - `@HotKeyCacheTTL`: TTL control
+  - `@HotKeyPreload`: Pre-warm keys, skip cold-start wait
+  - `@Intercept`: Custom handling for hot-key requests
+  - `@Fallback`: SpEL expression or naming-convention fallback
+  - `@NullCaching`: Null-value caching to prevent cache penetration
+  - `@Broadcast`: Suppress broadcast — local write only
+- **Multi-level cache** — Fluent API for N-level fallback: `.withPrimary(reader)` runs the full detection pipeline (counts + reports), `.thenExecute(fallback)` degrades step by step without reporting, results written to L1 with optional broadcast
+- **Soft expiry (logical expiration)** — Differentiated softTTL/hardTTL, fully replacing traditional Redis-side logical expiration. Redis stores raw values; HotKey manages expiration at the L1 Caffeine layer. Stale values are returned immediately while the cache refreshes async in the background — lowering P99 latency
+- **Blacklist / whitelist filtering** — Blacklisted keys are automatically blocked; whitelisted keys skip reporting and Worker decisions entirely
+- **Transaction support** — `TransactionSupport` defers cache writes until `@Transactional` commits, ensuring write-path cache-data consistency
+- **Distributed locking** — Redis-based `tryLock` / `tryLockAndRun` with Lua-script safe release
+- **Zero-side-effect read (`peek()`)** — Pure L1 lookup, no detection, no reporting, no refresh
+- **Actuator endpoints** — `/actuator/hotkey` (hot key list with `?limit=N`), `/actuator/hotkeyring` (consistent hash ring), `/actuator/hotkey/worker/state` (state machine inspection + tuning)
+- **Micrometer metrics** — Caffeine hit rate, TopK size, Reporter flush latency, CPU EMA gauge, BBR in-flight count
+
+### 3. Cluster Protection via Multiple Rate Limiters
+
+- **Circuit breaker** — Sliding-window breaker in `SingleFlight.load()`; returns stale L1 value on open, preventing data-source cascading failures
+- **BBR adaptive rate limiting** — BBR congestion control fused with CPU EMA monitoring for self-protection; applies backpressure on the Reporter flush path to prevent RabbitMQ/Worker overload
+- **SRE adaptive rate limiting** — Google SRE formula backpressure on the WorkerListener HOT-path, independent of BBR, protects the HOT decision consumption path
+- **CPU monitoring with EMA smoothing** — Dedicated daemon thread polling process CPU load every 500ms; configurable EMA decay factor for stable overload detection
+
+### 4. Multi-Level Fault Tolerance & Degradation
+
+- **Graceful degradation** — When all Workers are unreachable, Reporter silently drops reports, local TopK assumes authority for HOT promotion; Worker recovery reasserts authority via `decisionVersion >=` — zero manual intervention
+- **Write-path degradation** — `VersionController.nextVersion()` falls back to local negative counter when Redis INCR fails; writes never block
+- **Reporter backpressure** — BBR + CPU EMA; drops batches when RabbitMQ is congested, never blocks business threads
+- **Staleness Guard** — Reporter dispatcher discards batches waiting >5s; Worker-side ReportConsumer also drops messages older than 5s
+- **Poison message protection** — ReportConsumer outer catch-all discards exceptions without requeue, preventing infinite retry loops
+- **State machine rollback** — Worker auto-rolls back to the pre-evaluation snapshot on broadcast failure, preventing inconsistent "semi-hot" states
+- **Transaction consistency** — `TransactionSupport` defers cache writes until `@Transactional` commits
+- **TopK persistence** — Worker restores HeavyKeeper snapshots in seconds, avoiding cold-start misclassification
+- **TTL jitter (±10%)** — Prevents simultaneous expiration of large key groups, avoiding cache avalanches
+- **Consistent hash self-healing** — 32-bit Murmur3 + 500 virtual nodes + heartbeat-driven dynamic routing; Worker scaling requires no static configuration
+- **Decision version control** — Per-Worker monotonic `decisionVersion` + degradation-tolerant `dataVersion` — ensures correct cross-Worker decision ordering
 
 > [!TIP]
 >
-> HotKey supports deep customization.
+> HotKey supports extensive configuration options; see [CONFIG.md](docs/CONFIG.md) for the full reference.
 >
 > With default settings, the full-chain end-to-end latency (cache miss on A → report → Worker decision → state machine confirm → RabbitMQ broadcast → cache hit on B) is: **300ms (P99)**.
 
 HotKey is inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project; algorithm support from [Aegis](https://github.com/go-kratos/aegis).
-
-## Features
-
-<details>
-<summary><b>Click to expand detailed features</b></summary>
-
-- **HeavyKeeper algorithm** — Count-Min Sketch + exponential decay collision resolution for probabilistic Top-K detection
-- **Multi-level cache** — Caffeine (L1) → optional reader callback (L2, e.g., Redis) + caller-side DB fallback via `Optional.orElseGet()`, automatic hot-key promotion
-- **Differentiated TTL** — Independent hard/soft TTLs for hot vs normal keys; hot keys cached longer (1h/5min), normal keys expire faster (5min/30s)
-- **Request coalescing** — Concurrent requests for the same key on L1 miss share a single L2 read via dedicated `SingleFlight` bean
-- **Soft expiry (logical expiration)** — Returns stale data immediately while refreshing asynchronously in the background; reduces p99 latency at the cost of brief stale reads. **Fully replaces traditional Redis-side logical expiration** (`RedisData{data, expireTime}` wrapper pattern) — Redis stores raw values, HotKey manages expiration entirely at the L1 Caffeine layer
-- **Redis collection types** — Supports incremental mutations (List/Set/ZSet) via `putBeforeInvalidate`, no full-value `putThrough` required
-- **Hot-key synchronization** — Optional RabbitMQ fanout (via `hotkey.sync.*`) for cross-instance cache invalidation; separate worker-listener (via `hotkey.worker-listener.*`) for receiving Worker HOT/COOL decisions
-- **Worker mode** — Dedicated cluster-wide hot-key detection nodes; sliding window + state machine pipeline for cross-instance consensus; runtime state-machine tuning via `/actuator/hotkey/worker/state` REST endpoint, propagated via heartbeat-based peer broadcast; cross-Worker `decisionVersion` is partitioned by `nodeId`/`epoch` for safe ordering across Worker restarts; see [Worker Mode](#worker-mode)
-- **Report aggregation** — Every `get()` / `getWithSoftExpire()` call reports to the local `HotKeyReporter`, which periodically batches access counts to Worker nodes (RabbitMQ) for cluster-wide hot-key detection; each Worker's epoch counter ensures decision ordering after restart
-- **TTL jitter (cache avalanche protection)** — `CacheExpireManager` applies configurable random jitter (default ±10%) to every hard/soft TTL via `ThreadLocalRandom`, staggering expiration timestamps; controlled by `hotkey.local.ttl-jitter-enabled` / `ttl-jitter-ratio`
-- **Consistent hashing (enabled by default)** — murmur3_32-based consistent hash ring with heartbeat-driven dynamic Worker routing; elastic scale-out without static shard configuration
-- **BBR adaptive rate limiting** — BBR congestion control fused with CPU EMA monitoring for self-protection; applies backpressure on the Reporter flush path to prevent RabbitMQ/Worker overload
-- **Circuit breaker (optional)** — Sliding-window circuit breaker in `SingleFlight.load()` for protecting remote cache-load suppliers from cascading failures; disabled by default
-- **SRE adaptive rate limiting** — Google SRE formula backpressure on the WorkerListener HOT-path (`K = 1 / successThreshold`, probabilistic rejection below success threshold); independent of BBR, protects the HOT decision consumption path
-- **CPU monitoring with EMA smoothing** — Dedicated daemon thread polling process CPU load every 500ms, configurable EMA decay factor for stable overload detection
-- **Spring Boot auto-configuration** — Zero boilerplate, just add the dependency
-- **Worker TopK persistence** — Periodically snapshots Worker HeavyKeeper to Redis; recovery takes seconds rather than hours of re-accumulation
-- **Spring Cache integration** — Standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations working with HotKey's hot-key detection, soft expiry, cross-instance sync, and companion annotations (`@HotKeyCacheTTL`, `@HotKeyPreload`, `@Intercept`, `@Fallback`, `@NullCaching`, `@Broadcast`) for TTL, preloading, interception, fallback, null-value caching, and broadcast suppression; enabled via `hotkey.spring-cache.enabled=true`
-- **Transaction support** — `TransactionSupport` defers writes until after Spring `@Transactional` commits, ensuring cache-data consistency on write paths
-- **Distributed locking** — Redis-based `tryLock` / `tryLockAndRun` with configurable retries, Lua-script safe release (GET+DEL), graceful fallback when Redis is unavailable (returns null)
-
-</details>
 
 ## Use Cases & Limitations
 

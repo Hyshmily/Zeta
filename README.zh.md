@@ -12,66 +12,67 @@
 
 [**English**](README.md)
 
-HotKey 是一款高度自定义化的高性能、低成本、轻量级分布式缓存框架，集**缓存读写（get/put）、热点自动检测、多级缓存预热、跨实例广播同步、AOP 注解拦截、黑白名单过滤**于一体。
+HotKey 是一款高可配置、高性能、低成本的轻量级分布式缓存与预热框架。
 
-大多数的本地缓存将所有条目一律存入 Caffeine。但在海量 key 下：
+致力于以极低的成本解决集群维度对任意突发性的、无法预先感知的热点数据分布式一致性缓存问题：
 
-- **内存浪费** — 大多数 key 只读一次
-- **广播风暴** — 全量缓存 = 全量失效，广播随 key 数线性增长
-- **缓存雪崩** — 海量 key 使用相同 TTL，同时过期时全部穿透至 DB，瞬时打穿后端
+- **无法预知的热点数据** — 突发大量请求，某些 key 访问量可能突然暴涨，`HeavyKeeper` 算法实现毫秒级实时探测
+- **热点同步问题** — 支持 RabbitMQ 自动推送 Worker 决策（HOT/COOL）到整个集群的 L1 缓存；支持手动广播跨实例同步与失效
+- **热接口恶意请求** — 未知用户突发海量请求同一个接口，支持 AOP 切面拦截，由使用者决定处理策略（拦截、熔断、返回默认值等）
 
-而HotKey 的策略却是：**仅缓存真正的热点数据。**
+除此之外，HotKey 还支持：
 
-通过 [HeavyKeeper](https://github.com/go-kratos/aegis)（Count-Min Sketch 变体）实现**集群维度热点检测**：部署 Worker 节点聚合所有实例的访问报告——解决"被同一 pod 访问 100 次"与"被 100 个 pod 各访问 1 次"在本地无法区分的问题。
+### 1. 简便部署
 
-> [!TIP]
->
-> hotkey 支持高度自定义
->
-> 默认设置全链路端对端(A缓存为未命中->上报->worker决策->状态机确认->RabbitMQ广播->B缓存成功)延迟为:**300ms (P99)**
+- **配置简单** — Maven / Docker / JAR 三种部署模式
+- **Spring Boot Starter** — 引入 `hotkey` 依赖即可运行，零额外配置
+
+### 2. 多种实用功能
+
+- **Spring Cache 集成** — 标准 `@Cacheable` / `@CachePut` / `@CacheEvict` 与 HotKey 热点检测、软过期、跨实例同步协同工作。配套注解包括：
+  - `@HotKeyCacheTTL`：TTL 控制
+  - `@HotKeyPreload`：主动预热，预设热 key 跳过冷启动等待
+  - `@Intercept`：热 key 请求拦截自定义处理
+  - `@Fallback`：SpEL 表达式或命名约定降级
+  - `@NullCaching`：空值缓存防穿透
+  - `@Broadcast`：广播抑制，本地写不推送集群
+- **多级缓存** — 链式编程实现 N 级备用数据源调用。`.withPrimary(reader)` 走完整探测管道（记录并上报），`.thenExecute(fallback)` 逐级降级且绕过上报，结果写入 L1 并可选广播
+- **软失效（逻辑过期）** — 差异化 softTTL/hardTTL 配置，完全替代传统 Redis 侧逻辑过期。Redis 纯值存储，HotKey 在 L1 Caffeine 层管理过期，过期后立即返回旧值并异步刷新，降低 P99 延迟
+- **自定义黑白名单拦截** — 黑名单自动拦截对应 key 请求，白名单自动跳过上报和 Worker 决策
+- **事务支持** — `TransactionSupport` 将写入延迟到 `@Transactional` 提交后执行，保证写路径缓存-数据一致性
+- **分布式锁** — 基于 Redis 的 `tryLock` / `tryLockAndRun`，Lua 脚本安全释放
+- **零副作用读** — `peek()` 纯 L1 查询，不触发检测、不上报、不刷新
+- **Actuator 端点** — `/actuator/hotkey`（热 key 列表）、`/actuator/hotkeyring`（一致性哈希）、`/actuator/hotkey/worker/state`（Worker 状态机）
+- **Micrometer 指标** — Caffeine 命中率、TopK 大小、Reporter 延迟、CPU EMA 等
+
+### 3. 多种限流算法集群保护
+
+- **熔断器** — SingleFlight 内置滑动窗口熔断器，数据源超时/异常时返回 L1 过期值，防止雪崩
+- **BBR 自适应速率限制** — BBR 拥塞控制融合 CPU EMA 监控实现自我保护；在 Reporter 刷盘路径施加背压，防止 RabbitMQ/Worker 过载
+- **SRE 自适应限流** — WorkerListener HOT 路径的 Google SRE 公式背压，独立于 BBR，保护 HOT 决策消费路径
+- **CPU 监控与 EMA 平滑** — 专用守护线程每 500ms 轮询进程 CPU 负载，实现稳定过载检测
+
+### 4. 多级故障保护与降级处理
+
+- **优雅降级** — 全部 Worker 宕机时，Reporter 静默丢弃上报、本地 TopK 接管 HOT 判定；Worker 恢复后重新主导，零人工介入
+- **写路径降级** — `VersionController.nextVersion()` Redis INCR 失败时回退到本地负计数器，写入不中断
+- **Reporter 背压** — BBR + CPU EMA，RabbitMQ 拥堵时自动降频丢包，不阻塞业务线程
+- **Staleness Guard** — Reporter dispatcher 中等待超过 5s 的批次自动丢弃；Worker 侧同样丢弃超 5s 的过期消息
+- **Poison Message 防护** — ReportConsumer 外层 catch-all，异常消息直接丢弃，不进入死信重试循环
+- **状态机回滚** — Worker 广播失败时自动回滚到评估前快照，避免"半热"不一致状态
+- **事务一致性** — `TransactionSupport` 将缓存写入延迟到 `@Transactional` 提交后执行
+- **TopK 持久化** — Worker 重启秒级恢复 TopK 快照，避免冷启动误判
+- **TTL 随机抖动（±10%）** — 防止大量 key 同时过期导致缓存雪崩
+- **一致性哈希自愈** — 32 位 Murmur3 + 500 虚拟节点 + 心跳-driven 动态路由，Worker 扩缩容无需静态配置
+- **决策版本控制** — `decisionVersion` 按 Worker 单调递增 + `dataVersion` 降级容忍，确保跨 Worker 决策顺序正确
 
 HotKey受京东[hotkey](https://gitee.com/jd-platform-opensource/hotkey)项目启发,算法支持来自[Aegis](https://github.com/go-kratos/aegis)
 
-## 特点
-
-<details>
-<summary><b>点击展开详细的hotkey特点</b></summary>
-
-- **HeavyKeeper 算法** — Count-Min Sketch + 指数冲突衰减的概率性 Top-K 检测
-- **多级缓存** — Caffeine (L1) → 可选的 reader 回调（L2，如 Redis）+ 调用方通过 `Optional.orElseGet()` 实现的 DB 回退，自动热点提升
-- **差异化 TTL** — 热点 key 与普通 key 使用独立的硬/软 TTL；热点 key 缓存更久（1h/5min），普通 key 更快过期（5min/30s）
-- **请求合并** — L1 未命中时同 key 并发请求共享同一 L2 读，通过专门的 `SingleFlight` bean
-- **软失效（逻辑过期）** — 立即返回过期旧值，同时后台异步刷新；降低 p99 延迟，代价是短暂脏读。**完全替代传统 Redis 侧逻辑过期**（`RedisData{data, expireTime}` 包装模式）——Redis 纯值存储，由 HotKey 在 L1 Caffeine 层管理过期
-- **Redis 集合类型** — 通过 `putBeforeInvalidate` 支持 List/Set/ZSet 增量写入，无需 `putThrough`
-- **热点同步** — 可选 RabbitMQ fanout（通过 `hotkey.sync.*`）跨实例同步缓存失效；独立的 worker-listener（通过 `hotkey.worker-listener.*`）接收 Worker 发出的 HOT/COOL 决策
-- **Worker 模式** — 专用集群维度热点检测节点；基于滑动窗口 + 状态机管道实现跨实例共识；通过 `/actuator/hotkey/worker/state` REST 端点运行时调整状态机配置，基于心跳的对等广播传播变更；跨 Worker `decisionVersion` 通过 `nodeId`/`epoch` 分区，确保 Worker 重启后的版本排序安全性；详见 [Worker 模式](#worker-模式)
-- **报告聚合** — 每次 `get()` / `getWithSoftExpire()` 调用上报到本地 `HotKeyReporter`，再由 Reporter 周期性地将访问计数批量发送到 Worker 节点（RabbitMQ），用于集群维度热点检测；每个 Worker 的 epoch 计数器在重启后保证决策排序确定性
-- **TTL 随机偏移（缓存雪崩防护）** — `CacheExpireManager` 通过 `ThreadLocalRandom` 对每个硬/软 TTL 施加可配置的随机偏移（默认 ±10%），打散过期时间戳，防止缓存雪崩；由 `hotkey.local.ttl-jitter-enabled` / `ttl-jitter-ratio` 控制
-- **一致性哈希（默认开启）** — 基于 murmur3_32 的一致性哈希环，通过心跳实现动态 Worker 路由；弹性扩缩容无需静态分片配置
-- **BBR 自适应速率限制** — 通过 BBR 拥塞控制融合 CPU EMA 监控实现自我保护；在 Reporter 刷盘路径施加背压，防止 RabbitMQ/Worker 过载
-- **可选的熔断器** — SingleFlight.load() 中的滑动窗口熔断器，保护远程加载器；默认关闭
-- **SRE 自适应限流** — WorkerListener HOT 路径的 Google SRE 公式背压（`K = 1 / successThreshold`，成功率低于阈值时概率性丢弃）；独立于 BBR，保护 HOT 决策消费路径
-- **CPU 监控与 EMA 平滑** — 专用守护线程每 500ms 轮询进程 CPU 负载，可配置 EMA 衰减因子实现稳定过载检测
-- **Spring Boot 自动配置** — 引入依赖即用，零样板代码
-- **Worker TopK 持久化** — 将 Worker 的 HeavyKeeper 定期快照到 Redis；重启恢复只需数秒而非数小时重新积累
-- **Spring Cache 集成** — 标准 `@Cacheable` / `@CachePut` / `@CacheEvict` 注解与 HotKey 热点检测、软过期、跨实例同步和配套注解 (`@HotKeyCacheTTL`、`@HotKeyPreload`、`@Intercept`、`@Fallback`、`@NullCaching`、`@Broadcast`) 协同工作，提供 TTL、预加载、拦截、降级和空值缓存和广播抑制能力；通过 `hotkey.spring-cache.enabled=true` 开启
-- **事务支持** — `TransactionSupport` 将写入延迟到 Spring `@Transactional` 事务提交后执行，保证写入路径的缓存-数据一致性
-- **分布式锁** — 基于 Redis 的 `tryLock` / `tryLockAndRun`，可配置重试次数，Lua 脚本安全释放（GET+DEL），无 Redis 时优雅降级（返回 null）
-
-</details>
-## 适用场景与限制
-
-HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分布式锁。
-
-### 适合的场景
-
-| 场景                       | 为什么适合                                                                      |
-| -------------------------- | ------------------------------------------------------------------------------- |
-| **商品详情/价格页**        | 大促时某几个 SKU 流量暴涨，HeavyKeeper 自动探测 → 延长本地 TTL → 减少穿透 Redis |
-| **爆款文章/视频元数据**    | 突然上热搜，HotKey 自动识别 + 跨实例广播主动预热每个 pod 的 L1                  |
-| **配置/规则/字典缓存**     | 读极频繁、写极少；通过 AMQP 广播跨实例同步，保持一致性                          |
-| **用户会话/权限快照**      | 热用户（VIP 操作）的权限缓存自动获得更长 L1 TTL                                 |
-| **预热类只读缓存（旁路）** | 券面额、商品图、描述等只读字段的缓存——**搭配**独立的原子扣减系统使用            |
+> [!TIP]
+>
+> hotkey 支持自定义参数(完整属性参考见 [CONFIG.zh.md](docs/CONFIG.zh.md))
+>
+> 默认设置全链路端对端(A缓存为未命中->上报->worker决策->状态机确认->RabbitMQ广播->B缓存成功)延迟为:**300ms (P99)**
 
 ## 快速开始
 
@@ -138,9 +139,10 @@ HotKey 的定位是**读热点治理**框架，而非通用分布式缓存或分
 
 #### Worker 节点（独立部署）— JAR / Docker
 
+**前置条件：** Redis+Rabbit MQ
 Worker 是独立 Spring Boot 应用（不发布到 Maven Central）。预构建镜像托管在 GHCR。
 
-**前置条件：** 使用具备 `read:packages` 权限的 GitHub PAT 登录：
+**拉取:** 使用具备 `read:packages` 权限的 GitHub PAT 登录：
 
 ```bash
 echo $PAT | docker login ghcr.io -u hyshmily --password-stdin
@@ -175,9 +177,6 @@ mvn clean package -pl worker
 java -jar worker/target/hotkey-worker-1.1.53.jar
 ```
 
-> Worker 由 `worker/` 模块打包。必须连接 RabbitMQ + Redis。
-> 设置 `HOTKEY_WORKER_ENABLED=true` 激活 Worker 模式（此模式下缓存方法抛出 `HotKeyModeException`）。
-
 ### 2. 配置
 
 默认local本地配置（适用于大多数场景)
@@ -198,7 +197,9 @@ java -jar worker/target/hotkey-worker-1.1.53.jar
 | Reporter 自我保护  | `hotkey.local.reporter.enabled=true`（默认） | Reporter 刷盘的 BBR 背压保护                                    |
 | Spring Cache 集成  | `hotkey.spring-cache.enabled=true`           | `@Cacheable` / `@CachePut` / `@CacheEvict` 融合 HotKey 热点检测 |
 
-所有选项见[配置](#配置)，完整属性参考见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
+完整属性参考见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
+
+参考:
 
 <details>
 <summary><b>快速部署 YAML 模板</b></summary>
@@ -721,22 +722,10 @@ public String getFlashItem(String id) { ... }
 - **`TYPE_INVALIDATE_ALL`** — 批量失效（无版本守卫）。对端立即从 L1 移除所有列出的 key，不重新加载。由 `invalidateAllLocal()` 发送。
 - **`TYPE_RULES_SYNC`** — 规则集替换。body 为 JSON 序列化的 `List<Rule>`，接收端调用 `RuleMatcher.syncRules()` 原子替换本地规则列表。不触发二次广播。
 
-> [!SECURITY]
+> [!CAUTION]
 > 所有三个 RabbitMQ 交换机（`hotkey.sync.exchange`、`hotkey.report.exchange`、`hotkey.broadcast.exchange`）默认使用明文 AMQP 连接。生产环境中应通过 Spring Boot 的 `spring.rabbitmq.ssl.*` 属性配置 TLS：
 >
-> ````yaml
-> spring:
->  rabbitmq:
->    ssl:
->      enabled: true
->      key-store: classpath:client.p12
->      key-store-password: changeit
->      trust-store: classpath:truststore.jks
->      trust-store-password: changeit
-> . ```
->
 > 详见 [Spring Boot RabbitMQ SSL 文档](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title)。
-> ````
 
 ## 规则系统
 
@@ -819,8 +808,6 @@ HotKey 通过 `supplier` 回调形成三级降级链路：
 | HotKey 自身            | L1 不可用；异常或热点降级（若启用） | 应用重启              |
 | L2 后端 (Redis/DB/API) | 每次请求穿透到调用方兜底            | 后端恢复后自动恢复    |
 | L1 Caffeine OOM / 驱逐 | 单 key 被驱逐，下次读取重新回源     | 自动（Caffeine 内部） |
-
-> 调用方始终需要处理 `Optional.empty()` — HotKey 不会隐藏后端故障。
 
 写路径故障表现：
 
