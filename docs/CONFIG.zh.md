@@ -238,6 +238,9 @@
 | `hotkey.worker.messaging.report-exchange`                            | `hotkey.report.exchange`    | App 报告消息的直接交换机                                                                         |
 | `hotkey.worker.messaging.broadcast-exchange`                         | `hotkey.broadcast.exchange` | HOT/COOL 广播的交换机（Worker 使用路由键发布；可能需要与 worker-listener.exchange-name 对齐）    |
 | `hotkey.worker.messaging.heartbeat-exchange`                         | `hotkey.heartbeat.exchange` | epoch 驱动结构化心跳的 Topic 交换机（必须与 App 端 `hotkey.local.heartbeat.exchange-name` 一致） |
+| **`hotkey.worker.report-consumer.*`**                                |                             | **上报消费者**                                                                                   |
+| `hotkey.worker.report-consumer.concurrent-consumers`                 | `8`                         | 上报队列的并发消费者数，最小为 1                                                                  |
+| `hotkey.worker.report-consumer.prefetch-count`                       | `50`                        | 每个消费者的预取数，平衡吞吐量与内存压力                                                          |
 | **`hotkey.worker.sliding-window.*`**                                 |                             | **滑动窗口**                                                                                     |
 | `hotkey.worker.sliding-window.duration-ms`                           | `500`                       | 滑动窗口时长（毫秒）                                                                                                         |
 | `hotkey.worker.sliding-window.slices`                                | `10`                        | 每个窗口的时间片数                                                                               |

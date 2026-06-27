@@ -29,6 +29,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.Collections;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.*;
@@ -76,8 +77,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(workerTopK).addDirect("key1", 5);
-    verify(workerTopK).addDirect("key2", 3);
+    verify(workerTopK).addDirect(Map.of("key1", 5L, "key2", 3L));
     verify(detector).addCount("key1", 5L);
     verify(detector).addCount("key2", 3L);
     verify(globalQpsEstimator).addTotal(8L);
@@ -94,7 +94,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(broadcaster).broadcastHot("hotKey", "sliding_window");
+    verify(broadcaster).broadcastHot(eq("hotKey"), eq("sliding_window"), anyLong());
     verify(topKValidator).markConfirmed("hotKey");
   }
 
@@ -109,7 +109,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(broadcaster).broadcastCool("coolKey");
+    verify(broadcaster).broadcastCool(eq("coolKey"), anyLong());
     verify(topKValidator).markCooled("coolKey");
   }
 
@@ -121,7 +121,7 @@ class ReportConsumerTest {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
     consumer.onReport(message);
 
-    verify(workerTopK, never()).addDirect(anyString(), anyInt());
+    verify(workerTopK, never()).addDirect(any(Map.class));
     verify(detector, never()).addCount(anyString(), anyLong());
     verify(stateMachine, never()).evaluate(anyString(), anyBoolean());
   }
@@ -149,7 +149,7 @@ class ReportConsumerTest {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of());
     consumer.onReport(message);
     verify(globalQpsEstimator).addTotal(0L);
-    verifyNoInteractions(workerTopK);
+    verify(workerTopK).addDirect(Collections.emptyMap());
   }
 
   /**
@@ -164,7 +164,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(workerTopK).addDirect("bigKey", Integer.MAX_VALUE);
+    verify(workerTopK).addDirect(Map.of("bigKey", (long) Integer.MAX_VALUE));
     verify(globalQpsEstimator).addTotal((long) Integer.MAX_VALUE);
   }
 
@@ -180,7 +180,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(workerTopK).addDirect("hugeKey", Integer.MAX_VALUE);
+    verify(workerTopK).addDirect(Map.of("hugeKey", (long) Integer.MAX_VALUE + 1));
   }
 
   /**
@@ -226,8 +226,8 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(broadcaster, never()).broadcastHot(anyString(), anyString());
-    verify(broadcaster, never()).broadcastCool(anyString());
+    verify(broadcaster, never()).broadcastHot(anyString(), anyString(), anyLong());
+    verify(broadcaster, never()).broadcastCool(anyString(), anyLong());
     verify(topKValidator, never()).markConfirmed(anyString());
     verify(topKValidator, never()).markCooled(anyString());
   }
@@ -251,43 +251,9 @@ class ReportConsumerTest {
   }
 
   /**
-   * Verifies that a failed HOT broadcast triggers a state machine rollback and no confirmation.
-   */
-  @Test
-  void broadcastHotFailure_shouldRollbackStateMachine() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
-    when(detector.addCount("hotKey", 100L)).thenReturn(true);
-    when(stateMachine.evaluate("hotKey", true)).thenReturn(HotKeyDecision.hot("hotKey"));
-    when(stateMachine.getStateSnapshot(anyString())).thenReturn(Map.of("currentState", "COLD", "hotStreak", 0, "coolStreak", 0));
-    doThrow(new WorkerBroadcaster.BroadcastFailedException("hotKey", "HOT", 1, new RuntimeException("test")))
-        .when(broadcaster).broadcastHot(anyString(), anyString());
-
-    consumer.onReport(message);
-
-    verify(stateMachine).rollbackToPreviousState(eq("hotKey"), anyMap());
-    verify(topKValidator, never()).markConfirmed(anyString());
-  }
-
-  /**
-   * Verifies that a failed COOL broadcast triggers a state machine rollback and no cooling confirmation.
-   */
-  @Test
-  void broadcastCoolFailure_shouldRollbackStateMachine() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
-    when(detector.addCount("coolKey", 1L)).thenReturn(false);
-    when(stateMachine.evaluate("coolKey", false)).thenReturn(HotKeyDecision.cool("coolKey"));
-    when(stateMachine.getStateSnapshot(anyString())).thenReturn(Map.of("currentState", "HOT", "hotStreak", 0, "coolStreak", 0));
-    doThrow(new WorkerBroadcaster.BroadcastFailedException("coolKey", "COOL", 1, new RuntimeException("test")))
-        .when(broadcaster).broadcastCool(anyString());
-
-    consumer.onReport(message);
-
-    verify(stateMachine).rollbackToPreviousState(eq("coolKey"), anyMap());
-    verify(topKValidator, never()).markCooled(anyString());
-  }
-
-  /**
    * Verifies that a successful HOT broadcast does not trigger a state machine rollback.
+   *
+   * <p>Broadcast failures are fire-and-forget per ADR-0007 — no rollback occurs.
    */
   @Test
   void broadcastHotSuccess_shouldNotRollback() {
@@ -297,9 +263,8 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(broadcaster).broadcastHot("hotKey", "sliding_window");
+    verify(broadcaster).broadcastHot(eq("hotKey"), eq("sliding_window"), anyLong());
     verify(topKValidator).markConfirmed("hotKey");
-    verify(stateMachine, never()).rollbackToPreviousState(anyString(), anyMap());
   }
 
   /**
@@ -313,7 +278,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(broadcaster).broadcastCool("coolKey");
+    verify(broadcaster).broadcastCool(eq("coolKey"), anyLong());
     verify(topKValidator).markCooled("coolKey");
     verify(stateMachine, never()).rollbackToPreviousState(anyString(), anyMap());
   }

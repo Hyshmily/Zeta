@@ -178,6 +178,7 @@ public class HeavyKeeper implements TopK {
    * @param increment the frequency increment (typically 1)
    * @return an {@link AddResult} with expelled key (or null), hot status, and the input key
    */
+  @Deprecated
   @Override
   @SuppressWarnings("null")
   public AddResult addDirect(String key, int increment) {

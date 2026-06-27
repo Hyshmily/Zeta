@@ -40,10 +40,12 @@ import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFacto
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -558,6 +560,45 @@ public class WorkerAutoConfiguration {
     SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
     factory.setConnectionFactory(connectionFactory);
     factory.setMessageConverter(new SimpleMessageConverter());
+    return factory;
+  }
+
+  /**
+   * Fallback JSON message converter for report messages. Active only when the
+   * common module's {@code reportMessageConverter} is absent (e.g. in tests).
+   *
+   * @return a {@link Jackson2JsonMessageConverter} instance
+   */
+  @Bean("reportMessageConverter")
+  @ConditionalOnMissingBean(name = "reportMessageConverter")
+  public MessageConverter reportMessageConverter() {
+    return new org.springframework.amqp.support.converter.Jackson2JsonMessageConverter();
+  }
+
+  /**
+   * Container factory for the {@link ReportConsumer}'s {@code @RabbitListener}.
+   * Lifts throughput above Spring Boot's default (concurrency=1) by exposing
+   * concurrent-consumers and prefetch via {@code hotkey.worker.report-consumer.*}.
+   *
+   * @param connectionFactory the RabbitMQ connection factory
+   * @param reportMessageConverter the JSON message converter for report messages
+   * @param properties worker configuration properties
+   * @return a configured {@link SimpleRabbitListenerContainerFactory} instance
+   */
+  @Bean
+  public SimpleRabbitListenerContainerFactory reportListenerContainerFactory(
+      ConnectionFactory connectionFactory,
+      @Qualifier("reportMessageConverter") MessageConverter reportMessageConverter,
+      WorkerProperties properties
+  ) {
+    SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+    factory.setConnectionFactory(connectionFactory);
+    factory.setMessageConverter(reportMessageConverter);
+    factory.setConcurrentConsumers(properties.getReportConsumer().getConcurrentConsumers());
+    factory.setMaxConcurrentConsumers(properties.getReportConsumer().getConcurrentConsumers());
+    factory.setPrefetchCount(properties.getReportConsumer().getPrefetchCount());
+    factory.setAcknowledgeMode(AcknowledgeMode.AUTO);
+    factory.setDefaultRequeueRejected(false);
     return factory;
   }
 

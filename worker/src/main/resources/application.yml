@@ -85,6 +85,11 @@ hotkey:
       recalculate-interval-ms: 60000
       qps-change-tolerance: 0.5
 
+    ## Report Consumer
+    report-consumer:
+      concurrent-consumers: 8
+      prefetch-count: 50
+
     ## TopK Validation
     topk-validation:
       validate-interval-ms: 60000

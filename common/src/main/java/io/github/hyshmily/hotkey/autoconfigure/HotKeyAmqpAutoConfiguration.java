@@ -17,6 +17,8 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT;
 
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
@@ -35,6 +37,7 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
 import org.springframework.amqp.core.*;
@@ -305,6 +308,29 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
+     * Dedicated scheduler for jitter-delayed cache-update tasks received from
+     * peer instances. Isolated from {@code hotKeyScheduler} so that synchronous
+     * Redis GETs performed by {@code handleRefresh} can never starve the
+     * 50 ms reporter flush tick.
+     *
+     * <p>Pool size is {@code hotkey.sync.scheduler-pool-size} (default 4) but
+     * should be at least {@code hotkey.sync.concurrent-consumers × 2}.
+     *
+     * @param properties the cache sync configuration properties
+     * @return a daemon-thread scheduled executor named {@code hotkey-sync-sched-N}
+     */
+    @Bean(name = "hotKeySyncScheduler", destroyMethod = "shutdown")
+    @ConditionalOnMissingBean(name = "hotKeySyncScheduler")
+    public ScheduledExecutorService hotKeySyncScheduler(CacheSyncProperties properties) {
+      int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
+      return Executors.newScheduledThreadPool(poolSize, r -> {
+        Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-sync");
+        t.setDaemon(true);
+        return t;
+      });
+    }
+
+    /**
      * Default Redis loader used by the sync listener to refresh cache entries via {@code GET}.
      *
      * @param stringRedisTemplate the String-based Redis template for reading values
@@ -332,7 +358,7 @@ public class HotKeyAmqpAutoConfiguration {
       Cache<String, Object> hotLocalCache,
       Function<String, Object> hotKeyRedisLoader,
       CacheSyncProperties properties,
-      @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
+      @Qualifier("hotKeySyncScheduler") ScheduledExecutorService syncScheduler,
       CacheExpireManager expireManager,
       RuleMatcher ruleMatcher
     ) {
@@ -340,7 +366,7 @@ public class HotKeyAmqpAutoConfiguration {
         hotLocalCache,
         hotKeyRedisLoader,
         properties,
-        hotKeyScheduler,
+        syncScheduler,
         expireManager,
         ruleMatcher
       );
@@ -514,6 +540,26 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
+     * Dedicated scheduler for jitter-delayed cache-update tasks received from
+     * the Worker (HOT/COOL decisions). Isolated from {@code hotKeyScheduler}
+     * so that synchronous Redis GETs performed by {@code handleHot} can never
+     * starve the reporter flush tick.
+     *
+     * @param properties the Worker listener configuration properties
+     * @return a daemon-thread scheduled executor named {@code hotkey-worker-sched-N}
+     */
+    @Bean(name = "hotKeyWorkerSchedScheduler", destroyMethod = "shutdown")
+    @ConditionalOnMissingBean(name = "hotKeyWorkerSchedScheduler")
+    public ScheduledExecutorService hotKeyWorkerSchedScheduler(WorkerListenerProperties properties) {
+      int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
+      return Executors.newScheduledThreadPool(poolSize, r -> {
+        Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-worker");
+        t.setDaemon(true);
+        return t;
+      });
+    }
+
+    /**
      * Create the listener that processes HOT/COOL decisions broadcast by the Worker.
      *
      * @param hotLocalCache          the L1 Caffeine cache
@@ -529,7 +575,7 @@ public class HotKeyAmqpAutoConfiguration {
       Cache<String, Object> hotLocalCache,
       Function<String, Object> hotKeyRedisLoader,
       WorkerListenerProperties properties,
-      @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
+      @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
       CacheExpireManager expireManager,
       ObjectProvider<SreRateLimiter> sreRateLimiterProvider
     ) {
@@ -537,7 +583,7 @@ public class HotKeyAmqpAutoConfiguration {
         hotLocalCache,
         hotKeyRedisLoader,
         properties,
-        hotKeyScheduler,
+        workerSchedScheduler,
         expireManager,
         sreRateLimiterProvider.getIfAvailable()
       );

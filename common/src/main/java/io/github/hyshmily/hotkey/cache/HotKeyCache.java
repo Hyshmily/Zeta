@@ -40,7 +40,9 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -594,12 +596,34 @@ public class HotKeyCache {
     }
 
     TransactionSupport.runNowOrAfterCommit(() -> {
-      var vr = versionController.nextVersion(cacheKey);
+      // Local L1 must be dropped synchronously so subsequent reads see the
+      // invalidation immediately, even if the executor is saturated.
       caffeineCache.invalidate(cacheKey);
-      cacheSyncPublisher.ifPresentOrElse(
-        p -> p.broadcastLocalInvalidate(cacheKey, vr.dataVersion(), vr.degraded()),
-        () -> log.debug("invalidate: " + NO_SYNC_PUBLISHER)
-      );
+
+      // Version bump (Redis INCR) + broadcast happen asynchronously. If
+      // hotKeyExecutor rejects or Redis fails, VersionController.nextVersion
+      // already falls back to a degraded local counter (ADR-0009), so the
+      // broadcast still propagates with isVersionDegraded=true and peers
+      // honor it via the 4-case VersionGuard comparison.
+      try {
+        hotKeyExecutor.execute(() -> {
+          try {
+            var vr = versionController.nextVersion(cacheKey);
+            cacheSyncPublisher.ifPresentOrElse(
+              p -> p.broadcastLocalInvalidate(cacheKey, vr.dataVersion(), vr.degraded()),
+              () -> log.debug("invalidate async: " + NO_SYNC_PUBLISHER)
+            );
+          } catch (Exception ex) {
+            log.error("invalidate async broadcast failed for key={}", cacheKey, ex);
+          }
+        });
+      } catch (RejectedExecutionException ree) {
+        log.warn(
+          "invalidate executor rejected for key={}, peer invalidation deferred to next cycle: {}",
+          cacheKey,
+          ree.getMessage()
+        );
+      }
     });
   }
 
@@ -684,29 +708,62 @@ public class HotKeyCache {
       log.debug("putThrough: blocked by rule: {}", cacheKey);
       throw new HotKeyBlockedException("HotKeyCache", cacheKey);
     }
+
+    AtomicBoolean writerOk = new AtomicBoolean(false);
+
     TransactionSupport.runAsyncAfterCommit(
       () -> {
         try {
           writer.run();
+          writerOk.compareAndSet(false, true);
         } catch (Exception e) {
+          // Writer failed — do NOT cache, do NOT broadcast, do NOT bump version.
           log.error("putThrough writer failed for key={}, cache update skipped: {}", cacheKey, e.getMessage(), e);
           return;
         }
-        var vr = versionController.nextVersion(cacheKey);
 
         long effectiveHardTtl = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHardTtlMs();
         long effectiveSoftTtl = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveSoftTtlMs();
 
-        caffeineCache
-          .asMap()
-          .compute(cacheKey, (k, existing) ->
-            buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl)
-          );
+        try {
+          var vr = versionController.nextVersion(cacheKey);
 
-        cacheSyncPublisher.ifPresentOrElse(
-          p -> p.broadcastRefresh(cacheKey, vr.dataVersion(), vr.degraded()),
-          () -> log.debug("putThrough: {}", NO_SYNC_PUBLISHER)
-        );
+          caffeineCache
+            .asMap()
+            .compute(cacheKey, (k, existing) ->
+              buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl)
+            );
+
+          cacheSyncPublisher.ifPresentOrElse(
+            p -> p.broadcastRefresh(cacheKey, vr.dataVersion(), vr.degraded()),
+            () -> log.debug("putThrough: {}", NO_SYNC_PUBLISHER)
+          );
+        } catch (RejectedExecutionException ree) {
+          // hotKeyExecutor saturated mid-body (nextVersion/Redis did run, but
+          // we cannot distinguish here — VersionController.nextVersion already
+          // has its own Redis-degraded fallback path). Cache and broadcast are
+          // skipped; the next read or the next periodic Worker cycle will
+          // reconcile. Logged at ERROR so operators can detect silent drops.
+          log.error(
+            "putThrough executor rejected mid-flight for key={} (local cache NOT updated, broadcast NOT sent)",
+            cacheKey,
+            ree
+          );
+          throw ree; // CompletableFuture.exceptionally downstream decides policy
+        } catch (Exception e) {
+          // Redis-relayed exception or unexpected error. The local L1 is still
+          // updated using a degraded version so the cache remains coherent with
+          // the mutation that already succeeded on the writer.
+          log.error("putThrough cache/broadcast failed for key={} (applying degraded local update)", cacheKey, e);
+          var vr = versionController.fallbackVersion();
+
+          caffeineCache
+            .asMap()
+            .compute(cacheKey, (k, existing) ->
+              buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl)
+            );
+          cacheSyncPublisher.ifPresent(p -> p.broadcastRefresh(cacheKey, vr.dataVersion(), vr.degraded()));
+        }
       },
       hotKeyExecutor
     );
@@ -853,16 +910,32 @@ public class HotKeyCache {
       try {
         mutation.run();
       } catch (Exception e) {
-        log.error("putBeforeInvalidate failed, skip local invalidate and broadcast: {}", cacheKey, e);
+        log.error("putBeforeInvalidate mutation failed, skip invalidate and broadcast: {}", cacheKey, e);
         return;
       }
-      var vr = versionController.nextVersion(cacheKey);
+      // Drop local L1 immediately — subsequent reads on this instance must
+      // re-fetch the mutated value via the reader.
       caffeineCache.invalidate(cacheKey);
 
-      cacheSyncPublisher.ifPresentOrElse(
-        p -> p.broadcastLocalInvalidate(cacheKey, vr.dataVersion(), vr.degraded()),
-        () -> log.debug("putBeforeInvalidate: {}", NO_SYNC_PUBLISHER)
-      );
+      try {
+        hotKeyExecutor.execute(() -> {
+          try {
+            var vr = versionController.nextVersion(cacheKey);
+            cacheSyncPublisher.ifPresentOrElse(
+              p -> p.broadcastLocalInvalidate(cacheKey, vr.dataVersion(), vr.degraded()),
+              () -> log.debug("putBeforeInvalidate async: {}", NO_SYNC_PUBLISHER)
+            );
+          } catch (Exception ex) {
+            log.error("putBeforeInvalidate async broadcast failed for key={}", cacheKey, ex);
+          }
+        });
+      } catch (RejectedExecutionException ree) {
+        log.warn(
+          "putBeforeInvalidate executor rejected for key={}, peer invalidation deferred: {}",
+          cacheKey,
+          ree.getMessage()
+        );
+      }
     });
   }
 

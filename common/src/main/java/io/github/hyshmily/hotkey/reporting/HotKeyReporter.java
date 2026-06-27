@@ -17,12 +17,9 @@ package io.github.hyshmily.hotkey.reporting;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import io.github.hyshmily.hotkey.sharding.RingManager;
+import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
@@ -178,8 +175,11 @@ public class HotKeyReporter {
         dispatcher.consumerCount()
       );
     } catch (Exception e) {
-      log.error("Failed to start HotKeyReporter; per-key counts will not be flushed to Worker. " +
-          "Application continues but Worker hot-key detection will be blind to this instance.", e);
+      log.error(
+        "Failed to start HotKeyReporter; per-key counts will not be flushed to Worker. " +
+          "Application continues but Worker hot-key detection will be blind to this instance.",
+        e
+      );
     }
   }
 
@@ -231,6 +231,20 @@ public class HotKeyReporter {
       // Reconcile ring with alive Worker nodes (from heartbeat state), then route via consistent hash
       ringManager.reconcileFromHealthView(healthView);
 
+      // Snapshot the alive-Worker set ONCE before iterating the counters map;
+      // the previous version called RouteNode per-key, which re-fetched
+      // getAliveWorkerIds() from ClusterHealthView each iteration — allocating
+      // a fresh Set (ConcurrentHashMap.values snapshot) per key — up to
+      // 100 000 keys per flush tick.
+      Set<String> aliveNodes = healthView.getAliveWorkerIds();
+      if (aliveNodes.isEmpty()) {
+        log.warn(
+          "No alive Worker nodes available for routing; dropping all {} keys in this flush",
+          counters.estimatedSize()
+        );
+        return;
+      }
+
       // Set BBR minInFlight to the current number of Workers so that multi-Worker deployments
       // don't trigger false-positive drops (each Worker produces one ShardBatch per flush).
       if (bbrRateLimiter != null) {
@@ -250,7 +264,7 @@ public class HotKeyReporter {
           long val = adder.sum();
 
           if (val > 0) {
-            String target = ringManager.routeNode(key, healthView);
+            String target = ringManager.routeNode(key, aliveNodes);
 
             if (target != null) {
               adder.sumThenReset();

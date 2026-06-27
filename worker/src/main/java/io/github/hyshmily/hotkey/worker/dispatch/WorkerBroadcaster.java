@@ -68,6 +68,17 @@ public class WorkerBroadcaster {
   private final AtomicLong decisionVersionCounter = new AtomicLong(System.currentTimeMillis());
 
   /**
+   * Atomically allocates the next decision version without sending.
+   * Called from within {@link io.github.hyshmily.hotkey.worker.ingest.ReportConsumer#doOnReport}
+   * to pre-allocate a version before enqueuing an async broadcast.
+   *
+   * @return the next monotonically increasing decision version
+   */
+  public long nextDecisionVersion() {
+    return decisionVersionCounter.incrementAndGet();
+  }
+
+  /**
    * Broadcasts a HOT decision for the given key.
    *
    * @param cacheKey the key that has been confirmed as hot
@@ -87,6 +98,21 @@ public class WorkerBroadcaster {
   }
 
   /**
+   * Broadcasts a HOT decision with a pre-allocated version number.
+   *
+   * @param cacheKey the key that has been confirmed as hot
+   * @param source   a label describing the detection source
+   * @param dv       pre-allocated decision version (from {@link #nextDecisionVersion()})
+   */
+  public void broadcastHot(String cacheKey, String source, long dv) {
+    sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
+    log.debug(
+      "Broadcast HOT: key={}, dv={}, source={}, nodeId={}, epoch={}",
+      cacheKey, dv, source, nodeId, epochCounter.get()
+    );
+  }
+
+  /**
    * Broadcasts a COOL decision for the given key.
    *
    * @param cacheKey the key that has been confirmed as fully cooled
@@ -94,7 +120,20 @@ public class WorkerBroadcaster {
   public void broadcastCool(String cacheKey) {
     long dv = decisionVersionCounter.incrementAndGet();
     sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
-    log.debug("Broadcast COOL: key={}, dv={}, nodeId={}, epoch={}", cacheKey, dv, nodeId, epochCounter.get());
+  }
+
+  /**
+   * Broadcasts a COOL decision with a pre-allocated version number.
+   *
+   * @param cacheKey the key that has been confirmed as fully cooled
+   * @param dv       pre-allocated decision version (from {@link #nextDecisionVersion()})
+   */
+  public void broadcastCool(String cacheKey, long dv) {
+    sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
+    log.debug(
+      "Broadcast COOL: key={}, dv={}, nodeId={}, epoch={}",
+      cacheKey, dv, nodeId, epochCounter.get()
+    );
   }
 
   /**
@@ -131,20 +170,7 @@ public class WorkerBroadcaster {
       rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);
     } catch (Exception e) {
       log.error("Failed to broadcast {} for key={}, dv={}: {}", type, cacheKey, version, e.getMessage());
-      throw new BroadcastFailedException(cacheKey, type, version, e);
-    }
-  }
-
-  public static class BroadcastFailedException extends RuntimeException {
-
-    public final String cacheKey, type;
-    public final long version;
-
-    public BroadcastFailedException(String cacheKey, String type, long version, Throwable cause) {
-      super("Broadcast failed: " + type + " for " + cacheKey + " dv=" + version, cause);
-      this.cacheKey = cacheKey;
-      this.type = type;
-      this.version = version;
+      // no throw — ADR-0007 fire-and-forget
     }
   }
 }

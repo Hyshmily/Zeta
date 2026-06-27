@@ -295,6 +295,10 @@ hotkey:
       broadcast-exchange: "hotkey.broadcast.exchange" # 必须与 worker-listener.exchange-name 一致
       heartbeat-exchange: "hotkey.heartbeat.exchange" # 必须与 local.heartbeat.exchange-name 一致
 
+    report-consumer:
+      concurrent-consumers: 8 # 上报队列的并发消费者数
+      prefetch-count: 50 # 每个消费者的预取数
+
     sliding-window:
       duration-ms: 1000 # 窗口时长 (ms)，每片 = 1000/10 = 100ms
       slices: 10 # 窗口切片数

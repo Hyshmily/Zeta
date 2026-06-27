@@ -292,6 +292,10 @@ hotkey:
       broadcast-exchange: "hotkey.broadcast.exchange" # Must match worker-listener.exchange-name
       heartbeat-exchange: "hotkey.heartbeat.exchange" # Must match local.heartbeat.exchange-name
 
+    report-consumer:
+      concurrent-consumers: 8 # Number of concurrent consumers for the report queue
+      prefetch-count: 50 # Prefetch per consumer
+
     sliding-window:
       duration-ms: 1000 # Window duration (ms), each slice = 1000/10 = 100ms
       slices: 10 # Number of window slices

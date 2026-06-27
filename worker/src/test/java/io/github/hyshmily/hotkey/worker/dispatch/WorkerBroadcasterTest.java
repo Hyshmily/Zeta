@@ -17,7 +17,6 @@ package io.github.hyshmily.hotkey.worker.dispatch;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -185,36 +184,28 @@ class WorkerBroadcasterTest {
   }
 
   /**
-   * Verifies that when {@link RabbitTemplate#send} throws, {@code broadcastHot} propagates a
-   * {@link WorkerBroadcaster.BroadcastFailedException} with the correct metadata.
+   * Verifies that when {@link RabbitTemplate#send} throws, the error is silently
+   * logged and does NOT propagate (fire-and-forget per ADR-0007).
    */
   @Test
-  void sendBroadcast_whenRabbitTemplateThrows_shouldThrowBroadcastFailedException() {
+  void sendBroadcast_whenRabbitTemplateThrows_shouldSwallow() {
     doThrow(new RuntimeException("connection lost"))
       .when(rabbitTemplate)
       .send(any(String.class), any(String.class), any(Message.class));
-    assertThatThrownBy(() -> broadcaster.broadcastHot("key", "source"))
-      .isInstanceOf(WorkerBroadcaster.BroadcastFailedException.class)
-      .satisfies(e -> {
-        assertThat(((WorkerBroadcaster.BroadcastFailedException) e).cacheKey).isEqualTo("key");
-        assertThat(((WorkerBroadcaster.BroadcastFailedException) e).type).isEqualTo(WorkerMessage.TYPE_HOT);
-      });
+
+    // Should not throw — ADR-0007 fire-and-forget
+    broadcaster.broadcastHot("key", "source");
   }
 
   /**
-   * Verifies that when {@link RabbitTemplate#send} throws, {@code broadcastCool} propagates a
-   * {@link WorkerBroadcaster.BroadcastFailedException} with the correct metadata.
+   * Verifies that broadcastCool also swallows AMQP send failures.
    */
   @Test
-  void broadcastCool_whenRabbitTemplateThrows_shouldThrowBroadcastFailedException() {
+  void broadcastCool_whenRabbitTemplateThrows_shouldSwallow() {
     doThrow(new RuntimeException("connection lost"))
       .when(rabbitTemplate)
       .send(any(String.class), any(String.class), any(Message.class));
-    assertThatThrownBy(() -> broadcaster.broadcastCool("key"))
-      .isInstanceOf(WorkerBroadcaster.BroadcastFailedException.class)
-      .satisfies(e -> {
-        assertThat(((WorkerBroadcaster.BroadcastFailedException) e).cacheKey).isEqualTo("key");
-        assertThat(((WorkerBroadcaster.BroadcastFailedException) e).type).isEqualTo(WorkerMessage.TYPE_COOL);
-      });
+
+    broadcaster.broadcastCool("key");
   }
 }

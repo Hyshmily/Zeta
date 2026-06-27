@@ -14,20 +14,20 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.autoconfigure;
-import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
-import lombok.RequiredArgsConstructor;
+import jakarta.annotation.PostConstruct;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.scheduling.annotation.Scheduled;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.Collectors;
 
 /**
  * Scheduled tasks for periodic TopK maintenance.
@@ -37,26 +37,43 @@ import java.util.stream.Collectors;
  * to support both the app-side and Worker-side TopK instances when they
  * coexist in the same JVM.
  *
- * <p>Enabled by default; controlled via   {@code hotkey.scheduling.enabled}.
+ * <p>Rather than relying on Spring's {@code @Scheduled} (which uses the
+ * global single-threaded {@code taskScheduler}), tasks are submitted
+ * directly to the shared {@code hotKeyScheduler} via {@link
+ * ScheduledExecutorService#scheduleWithFixedDelay}.  This keeps HotKey's
+ * maintenance tasks isolated from the host application's own scheduled
+ * jobs.
+ *
+ * <p>Enabled by default; controlled via {@code hotkey.scheduling.enabled}.
  */
 @AutoConfiguration(after = HotKeyAutoConfiguration.class)
 @ConditionalOnProperty(name = "hotkey.scheduling.enabled", havingValue = "true", matchIfMissing = true)
 @ConditionalOnBean(TopK.class)
-@EnableScheduling
-@RequiredArgsConstructor
 @Slf4j
 public class HotKeySchedulingConfiguration {
 
-
-  /** All registered TopK instances (both app-side and worker-side). */
   private final List<TopK> topKInstances;
+  private final ScheduledExecutorService scheduler;
+
+  public HotKeySchedulingConfiguration(
+      List<TopK> topKInstances,
+      @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
+  ) {
+    this.topKInstances = topKInstances;
+    this.scheduler = scheduler;
+  }
+
+  @PostConstruct
+  void scheduleTasks() {
+    scheduler.scheduleWithFixedDelay(this::cleanHotKeys, 20, 20, TimeUnit.SECONDS);
+    scheduler.scheduleWithFixedDelay(this::drainExpelled, 10, 10, TimeUnit.SECONDS);
+  }
 
   /**
    * Periodically decay the HeavyKeeper counters for all registered TopK instances.
-    * Controlled by {@code hotkey.decay-period} (default 20 seconds).
+   * Controlled by {@code hotkey.decay-period} (default 20 seconds).
    */
-  @Scheduled(fixedDelayString = "${hotkey.decay-period:20}", timeUnit = java.util.concurrent.TimeUnit.SECONDS)
-  public void cleanHotKeys() {
+  void cleanHotKeys() {
     try {
       topKInstances.forEach(TopK::fading);
       log.debug("HeavyKeeper tick: decayed for {} TopK instance(s)", topKInstances.size());
@@ -69,8 +86,7 @@ public class HotKeySchedulingConfiguration {
    * Periodically drain expelled hot keys from all registered TopK instances.
    * Logs a truncated summary of up to 20 sample keys. Runs every 10 seconds.
    */
-  @Scheduled(fixedDelay = 10_000)
-  public void drainExpelled() {
+  void drainExpelled() {
     try {
       int totalDrained = 0;
       List<String> sampleKeys = new ArrayList<>();

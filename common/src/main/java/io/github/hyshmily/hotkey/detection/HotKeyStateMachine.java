@@ -17,13 +17,16 @@ package io.github.hyshmily.hotkey.detection;
 
 import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
 
+import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -66,14 +69,16 @@ import lombok.Setter;
  *       stops reporting a key.</li>
  * </ul>
  *
- * <p>Thread-safe: per-key state mutations happen through {@link ConcurrentHashMap}
- * with volatile fields on the mutable {@link KeyState} inner class. The state
- * machine supports concurrent evaluation of different keys but serializes
- * evaluations of the same key (key's state is loaded once per evaluation cycle).
+ * <p>Thread-safe: per-key state is guarded by a {@link Striped} lock (1024
+ * stripes). Evaluations of different keys proceed in parallel; evaluations
+ * of the same key are serialized, eliminating the race window between
+ * {@code hotStreak++} and the state transition check caused by concurrent
+ * delivery of the same key across multiple consumer threads.
  *
  * <p>Designed for single-shard workers; each key is owned by exactly one worker
  * thanks to consistent-hash routing on the client side.</p>
  */
+@Slf4j
 @AllArgsConstructor
 public class HotKeyStateMachine {
 
@@ -143,6 +148,16 @@ public class HotKeyStateMachine {
   private final ConcurrentHashMap<String, Long> stateTimestamps = new ConcurrentHashMap<>();
 
   /**
+   * Per-key striped lock — serializes evaluations of the same key when
+   * multiple consumer threads process overlapping messages, preventing
+   * lost increments on {@code hotStreak++} / {@code coolStreak++}.
+   *
+   * <p>1024 stripes keep collision probability below 0.1% at
+   * {@code concurrency=8} while adding negligible memory overhead.
+   */
+  private final Striped<Lock> keyLocks = Striped.lazyWeakLock(1024);
+
+  /**
    * Evaluates the current sliding-window observation for the given key and
    * returns a decision instructing the caller whether to broadcast a HOT or
    * COOL message.
@@ -171,45 +186,51 @@ public class HotKeyStateMachine {
    *         caller should take (HOT, COOL, or NONE)
    */
   public HotKeyDecision evaluate(String key, boolean isHotThisWindow) {
-    // Touch timestamp for eviction tracking
-    stateTimestamps.put(key, System.currentTimeMillis());
+    keyLocks.get(key).lock();
+    try {
+      // Touch timestamp for eviction tracking
+      stateTimestamps.put(key, System.currentTimeMillis());
 
-    KeyState state = states.computeIfAbsent(key, k -> new KeyState());
-    //TODO:反复hot解决
+      KeyState state = states.computeIfAbsent(key, k -> new KeyState());
+      //TODO:反复hot解决
 
-    if (isHotThisWindow) {
-      state.hotStreak++;
-      state.coolStreak = 0; // reset cold streak
+      if (isHotThisWindow) {
+        state.hotStreak++;
+        state.coolStreak = 0; // reset cold streak
 
-      // COLD → CONFIRMED_HOT transition
-      if (state.currentState == COLD && state.hotStreak >= confirmCount) {
-        state.currentState = CONFIRMED_HOT;
-        return HotKeyDecision.hot(key); // broadcast HOT
+        // COLD → CONFIRMED_HOT transition
+        if (state.currentState == COLD && state.hotStreak >= confirmCount) {
+          state.currentState = CONFIRMED_HOT;
+          return HotKeyDecision.hot(key); // broadcast HOT
+        }
+
+        // PRE_COOLING → CONFIRMED_HOT (silent revive)
+        if (state.currentState == PRE_COOLING) {
+          state.currentState = CONFIRMED_HOT;
+          return HotKeyDecision.none(key); // no broadcast — avoid oscillation
+        }
+      } else {
+        state.coolStreak++;
+        state.hotStreak = 0; // reset hot streak
+
+        // CONFIRMED_HOT → PRE_COOLING transition (first cool phase)
+        if (state.currentState == CONFIRMED_HOT && state.coolStreak >= coolCount - preCoolGraceCount) {
+          state.currentState = PRE_COOLING;
+          // no broadcast yet — wait for full cool-down
+        }
+
+        // PRE_COOLING → COLD transition (fully cooled)
+        if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
+          state.currentState = COLD;
+          return HotKeyDecision.cool(key); // broadcast COOL
+        }
       }
 
-      // PRE_COOLING → CONFIRMED_HOT (silent revive)
-      if (state.currentState == PRE_COOLING) {
-        state.currentState = CONFIRMED_HOT;
-        return HotKeyDecision.none(key); // no broadcast — avoid oscillation
-      }
-    } else {
-      state.coolStreak++;
-      state.hotStreak = 0; // reset hot streak
-
-      // CONFIRMED_HOT → PRE_COOLING transition (first cool phase)
-      if (state.currentState == CONFIRMED_HOT && state.coolStreak >= coolCount - preCoolGraceCount) {
-        state.currentState = PRE_COOLING;
-        // no broadcast yet — wait for full cool-down
-      }
-
-      // PRE_COOLING → COLD transition (fully cooled)
-      if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
-        state.currentState = COLD;
-        return HotKeyDecision.cool(key); // broadcast COOL
-      }
+      return HotKeyDecision.none(key);
+    } finally {
+      log.warn("Unexpected StateMachine Exception for key {} ", key);
+      keyLocks.get(key).unlock();
     }
-
-    return HotKeyDecision.none(key);
   }
 
   /**

@@ -26,6 +26,9 @@ import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.LongAdder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -82,93 +85,107 @@ public class ReportConsumer {
    *
    * @param message the deserialized message containing counts for multiple keys
    */
-  @RabbitListener(queues = "#{@reportQueue.name}")
+  @RabbitListener(queues = "#{@reportQueue.name}", containerFactory = "reportListenerContainerFactory")
   public void onReport(ReportMessage message) {
     try {
       doOnReport(message);
     } catch (Exception e) {
-      log.error("Uncaught exception in onReport, discarding message to prevent poison-message requeue loop: appName={}",
-          message != null ? message.appName() : "null", e);
+      log.error(
+        "Uncaught exception in onReport, discarding message to prevent poison-message requeue loop: appName={}",
+        message != null ? message.appName() : "null",
+        e
+      );
     }
   }
 
   private void doOnReport(ReportMessage message) {
     long now = System.currentTimeMillis();
-    long totalQps = 0;
+    LongAdder totalQps = new LongAdder();
 
     // Discard reports that are more than 5 seconds old.
-    // This guards against delayed or re‑delivered messages that would
+    // Guards against delayed or re‑delivered messages that would
     // feed outdated counts into the sliding window.
     if (now - message.timestamp() > stalenessThresholdMs) {
       log.debug("Stale report message, skip: appName={}, age={}ms", message.appName(), now - message.timestamp());
       return;
     }
 
+    Map<String, Long> keyCounts = message.counts();
+
+    // Feed all key counts into the Worker's HeavyKeeper in a single
+    // batch call.  This executes sketch updates per-key under fine-grained
+    // stripe locks, then acquires the global sortedTopK heap
+    // lock exactly ONCE for the entire batch — rather than once per
+    // key — eliminating the P1-3 lock-contention bottleneck.
+    workerTopK.addDirect(keyCounts);
+
+    // Accumulate broadcasts during parallel processing; drain serially
+    // after the stream completes to avoid ForkJoin threads blocking on
+    // AMQP channel write locks.
+    Queue<Runnable> pendingBroadcasts = new ConcurrentLinkedQueue<>();
+
     // Process each key independently
-    for (Map.Entry<String, Long> entry : message.counts().entrySet()) {
-      try {
-        String key = entry.getKey();
-        long count = entry.getValue();
+    keyCounts
+      .entrySet()
+      .parallelStream()
+      .forEach(entry -> {
+        try {
+          String key = entry.getKey();
+          long count = entry.getValue();
 
-        totalQps += count;
-        // Feed the global Worker TopK with the aggregated report count.
-        // This populates the Worker-side HeavyKeeper so TopKValidator can
-        // pre-warm keys based on cross-instance frequency.
-        workerTopK.addDirect(key, (int) Math.min(count, Integer.MAX_VALUE));
+          totalQps.add(count);
 
-        // addCount atomically increments the current time slice and returns
-        // true if the sum of the last windowSize slices exceeds the threshold.
-        boolean isHot = detector.addCount(key, count);
+          // addCount atomically increments the current time slice and returns
+          // true if the sum of the last windowSize slices exceeds the threshold.
+          boolean isHot = detector.addCount(key, count);
 
-        Map<String, Object> stateSnapshot = stateMachine.getStateSnapshot(key);
+          // The state machine tracks consecutive hot/cold windows and applies
+          // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
+          // and PRE_COOLING.
+          HotKeyDecision decision = stateMachine.evaluate(key, isHot);
 
-        // The state machine tracks consecutive hot/cold windows and applies
-        // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
-        // and PRE_COOLING.
-        HotKeyDecision decision = stateMachine.evaluate(key, isHot);
-
-        switch (decision.type()) {
-          case HOT -> {
-            try {
-              // A new hot key has been confirmed.
-              // Broadcast HOT to all app instances so they can pre‑warm
-              // their local caches and enable soft expiration.
-              broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW);
-              // Record the confirmation in TopK for historical ranking.
+          switch (decision.type()) {
+            case HOT -> {
+              // A new hot key has been confirmed. Pre-allocate a decision
+              // version and enqueue the broadcast; actual AMQP send happens
+              // on the consumer thread after parallelStream completes.
+              long dv = broadcaster.nextDecisionVersion();
+              pendingBroadcasts.add(
+                  () -> broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW, dv));
               topKValidator.markConfirmed(key);
-            } catch (WorkerBroadcaster.BroadcastFailedException e) {
-              log.warn("Broadcast HOT failed, rolling back state machine for key={}", key, e);
-              stateMachine.rollbackToPreviousState(key, stateSnapshot);
             }
-          }
-          case COOL -> {
-            try {
-              // The key has fully cooled down.
-              // Broadcast COOL so instances can disable soft expiration
-              // and let the entry be evicted naturally.
-              broadcaster.broadcastCool(key);
-              // Update the TopK tracking accordingly.
+            case COOL -> {
+              long dv = broadcaster.nextDecisionVersion();
+              pendingBroadcasts.add(
+                  () -> broadcaster.broadcastCool(key, dv));
               topKValidator.markCooled(key);
-            } catch (WorkerBroadcaster.BroadcastFailedException e) {
-              log.warn("Broadcast COOL failed, rolling back state machine for key={}", key, e);
-              stateMachine.rollbackToPreviousState(key, stateSnapshot);
+            }
+            case NONE -> {
+              // No state transition occurred – the key remains in its
+              // current lifecycle stage.  Nothing to do.
             }
           }
-          case NONE -> {
-            // No state transition occurred – the key remains in its
-            // current lifecycle stage.  Nothing to do.
-          }
+        } catch (Exception e) {
+          log.error(
+            "Error processing report entry: appName={}, key={}, count={}",
+            message.appName(),
+            entry.getKey(),
+            entry.getValue(),
+            e
+          );
         }
-      } catch (Exception e) {
-        log.error(
-          "Error processing report entry: appName={}, key={}, count={}",
-          message.appName(),
-          entry.getKey(),
-          entry.getValue(),
-          e
-        );
-      }
+      });
+
+    // Drain pending broadcasts serially on the consumer thread.
+    // This avoids ForkJoinPool threads blocking on AMQP channel write
+    // locks under high concurrency (8 concurrent consumers).
+    // Per ADR-0007, lost messages are tolerated by the next periodic cycle.
+    // sendBroadcast no longer throws — errors are logged and swallowed.
+    Runnable task;
+    while ((task = pendingBroadcasts.poll()) != null) {
+      task.run();
     }
-    globalQpsEstimator.addTotal(totalQps);
+
+    globalQpsEstimator.addTotal(totalQps.sum());
   }
 }

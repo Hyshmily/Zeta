@@ -51,6 +51,16 @@ public class WorkerProperties {
     private String heartbeatExchange = "hotkey.heartbeat.exchange";
   }
 
+  /** Container tuning for the report-message RabbitMQ listener. */
+  @Data
+  public static class ReportConsumer {
+
+    @Min(1)
+    private int concurrentConsumers = 8;
+
+    private int prefetchCount = 50;
+  }
+
   /** Sliding-window parameters for local QPS tracking. */
   @Data
   public static class SlidingWindow {
@@ -149,6 +159,9 @@ public class WorkerProperties {
 
   @Valid
   private Messaging messaging = new Messaging();
+
+  @Valid
+  private ReportConsumer reportConsumer = new ReportConsumer();
 
   @Valid
   private SlidingWindow slidingWindow = new SlidingWindow();

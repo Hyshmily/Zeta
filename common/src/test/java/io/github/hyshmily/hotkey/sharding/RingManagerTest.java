@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.sharding;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
@@ -221,7 +222,7 @@ class RingManagerTest {
   @Test
   void routeNode_withNullHealthView_shouldThrow() {
     RingManager manager = new RingManager(10);
-    assertThatNullPointerException().isThrownBy(() -> manager.routeNode("key", null));
+    assertThatNullPointerException().isThrownBy(() -> manager.routeNode("key", (ClusterHealthView) null));
   }
 
   @Test

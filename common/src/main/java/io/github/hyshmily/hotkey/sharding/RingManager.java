@@ -153,4 +153,21 @@ public class RingManager {
     Set<String> alive = healthView.getAliveWorkerIds();
     return ring.locateNode(key, alive::contains);
   }
+
+  /**
+   * Route a key to its target Worker node, using a pre-snapshotted alive-set
+   * supplied by the caller. This avoids re-fetching {@link
+   * ClusterHealthView#getAliveWorkerIds()} per key inside hot loops.
+   *
+   * @param key        the cache key to route
+   * @param aliveNodes the already-snapshotted set of alive Worker ids; must not
+   *                   be {@code null} or modified concurrently
+   * @return the target Worker node id, or {@code null} if no alive nodes
+   */
+  public String routeNode(String key, Set<String> aliveNodes) {
+    if (aliveNodes == null || aliveNodes.isEmpty()) {
+      return null;
+    }
+    return ring.locateNode(key, aliveNodes::contains);
+  }
 }
