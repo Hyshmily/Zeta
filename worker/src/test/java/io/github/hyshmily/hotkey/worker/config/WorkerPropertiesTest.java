@@ -83,8 +83,8 @@ class WorkerPropertiesTest {
     assertThat(properties.getStateMachine().getSmDurationMs()).isEqualTo(500);
     assertThat(properties.getStateMachine().getSmSlices()).isEqualTo(10);
     assertThat(properties.getStateMachine().getConfirmDurationMs()).isEqualTo(100);
-    assertThat(properties.getStateMachine().getCoolDurationMs()).isEqualTo(15000);
-    assertThat(properties.getStateMachine().getPreCoolGraceMs()).isEqualTo(5000);
+    assertThat(properties.getStateMachine().getCoolDurationMs()).isEqualTo(600000);
+    assertThat(properties.getStateMachine().getPreCoolGraceMs()).isEqualTo(60000);
   }
 
   /**
@@ -113,8 +113,8 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldComputeCoolWindows() {
-    // coolDurationMs=15000, sliceMs=50 => 15000/50 = 300
-    assertThat(properties.getCoolWindows()).isEqualTo(300);
+    // coolDurationMs=600000, sliceMs=50 => 600000/50 = 12000
+    assertThat(properties.getCoolWindows()).isEqualTo(12000);
   }
 
   /**
@@ -122,8 +122,8 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldComputePreCoolGraceWindows() {
-    // preCoolGraceMs=5000, sliceMs=50 => 5000/50 = 100
-    assertThat(properties.getPreCoolGraceWindows()).isEqualTo(100);
+    // preCoolGraceMs=60000, sliceMs=50 => 60000/50 = 1200
+    assertThat(properties.getPreCoolGraceWindows()).isEqualTo(1200);
   }
 
   /**
