@@ -94,8 +94,7 @@
 | `hotkey.local.default-hot-soft-ttl-ms`  | `300000`（5分钟）        | 热点 key 默认软 TTL                                                                          |
 | `hotkey.local.hot-soft-ttl-ms`          | `0`                      | 热点 key 每次调用的软 TTL 覆盖；0 = 使用 `default-hot-soft-ttl-ms`                           |
 | `hotkey.local.null-value-ttl-seconds`   | `10`                     | null 缓存条目 TTL（秒）；避免长时间缓存负结果                                                |
-| `hotkey.local.ttl-jitter-enabled`       | `true`                   | 是否对 TTL 过期时间施加随机偏移以防止缓存雪崩                                                |
-| `hotkey.local.ttl-jitter-ratio`         | `0.1`                    | 偏移比例（0.0–1.0）；例如 0.1 表示对 TTL 计算施加 ±10% 的随机偏移                            |
+| `hotkey.local.ttl-jitter-ratio`         | `0.05`                   | 偏移比例（0.0–1.0）；例如 0.05 表示对 TTL 计算施加 ±5% 的随机偏移。始终启用。                 |
 | `hotkey.local.refresh-max-pools`        | `100`                    | 软过期最大并发异步刷新数（信号量）                                                           |
 | `hotkey.local.version-key-ttl-minutes`  | `60`                     | Redis 版本 key TTL（分钟），最小值为 1                                                       |
 | `hotkey.local.report-exchange`          | `hotkey.report.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                                                 |
@@ -251,8 +250,8 @@
 | `hotkey.worker.state-machine.sm-duration-ms`                        | `500`                       | 状态机时间片窗口时长（毫秒），独立于滑动窗口。每片 = sm-duration-ms / sm-slices                   |
 | `hotkey.worker.state-machine.sm-slices`                             | `10`                        | 状态机窗口内的时间片数                                                                            |
 | `hotkey.worker.state-machine.confirm-duration-ms`                    | `100`                       | HOT 确认总时长。confirmCount = ceil(confirm-duration-ms / slice-ms)                              |
-| `hotkey.worker.state-machine.cool-duration-ms`                       | `15000`                     | key 持续低于阈值才确认 COLD 的时长                                                               |
-| `hotkey.worker.state-machine.pre-cool-grace-ms`                      | `5000`                      | COOL 结束时的宽限期，允许静默恢复                                                                |
+| `hotkey.worker.state-machine.cool-duration-ms`                       | `600000`                    | key 持续低于阈值才确认 COLD 的时长                                                               |
+| `hotkey.worker.state-machine.pre-cool-grace-ms`                      | `60000`                     | COOL 结束时的宽限期，允许静默恢复                                                                |
 | `hotkey.worker.state-machine.evict-interval-ms`                      | `30000`                     | 过期状态擦除间隔（毫秒）；必须 >= cool-duration-ms \* 2                                          |
 | **`hotkey.worker.global-qps-dynamic-threshold.*`**                   |                             | **动态阈值（全局 QPS）**                                                                         |
 | `hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms` | `60000`                     | 动态阈值重新计算的时间间隔                                                                       |

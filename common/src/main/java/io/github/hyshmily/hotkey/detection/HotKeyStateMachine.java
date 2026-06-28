@@ -192,7 +192,6 @@ public class HotKeyStateMachine {
       stateTimestamps.put(key, System.currentTimeMillis());
 
       KeyState state = states.computeIfAbsent(key, k -> new KeyState());
-      //TODO:反复hot解决
 
       if (isHotThisWindow) {
         state.hotStreak++;

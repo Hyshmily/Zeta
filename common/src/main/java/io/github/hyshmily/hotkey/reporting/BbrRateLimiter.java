@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.reporting;
 
+import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
+
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -156,7 +158,7 @@ public class BbrRateLimiter {
 
   /** Record a dropped flush from the consumer (stale/failed batch — was enqueued, so decrement inFlight). */
   public void onConsumerDrop() {
-    lastDropTime = System.currentTimeMillis();
+    lastDropTime = currentTimeMillis();
     totalDropped.incrementAndGet();
     inFlight.decrementAndGet();
   }
@@ -200,7 +202,7 @@ public class BbrRateLimiter {
 
   /** Advance the sliding window forward, zeroing any buckets that have elapsed. */
   private void tick() {
-    long now = System.currentTimeMillis();
+    long now = currentTimeMillis();
     long elapsed = now - windowStart;
     if (elapsed < bucketDurationMs) {
       return;
@@ -262,6 +264,6 @@ public class BbrRateLimiter {
   }
 
   private boolean isCooldown() {
-    return System.currentTimeMillis() - lastDropTime < cooldownMs;
+    return currentTimeMillis() - lastDropTime < cooldownMs;
   }
 }

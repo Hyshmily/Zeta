@@ -33,6 +33,7 @@ import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.util.TimeSource;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import jakarta.annotation.Nullable;
@@ -98,7 +99,7 @@ public class HotKeyCache {
    * @return {@code true} if the entry has logically expired
    */
   private static boolean isLogicallyExpired(CacheEntry entry) {
-    return entry.getHardExpireAtMs() != Long.MAX_VALUE && System.currentTimeMillis() >= entry.getHardExpireAtMs();
+    return entry.getHardExpireAtMs() != Long.MAX_VALUE && TimeSource.currentTimeMillis() >= entry.getHardExpireAtMs();
   }
 
   /**
@@ -262,20 +263,7 @@ public class HotKeyCache {
 
           T val = raw instanceof CacheEntry vv ? (T) unwrapNull(vv.getValue()) : (T) raw;
 
-          boolean wasPromoted = promoteLocalHotkeyIfNeeded(cacheKey, raw, val, hardTtlMs, softTtlMs);
-          if (!skipReport) {
-            hotKeyReporter.ifPresent(r -> r.record(cacheKey));
-          }
-
-          // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
-          if (wasPromoted || !skipReport) {
-            Object currentRaw = caffeineCache.getIfPresent(cacheKey);
-            if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
-              return Optional.empty();
-            }
-          }
-
-          return Optional.ofNullable(val);
+          return processHitAndValidate(cacheKey, raw, val, hardTtlMs, softTtlMs, skipReport);
         })
         .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
     } catch (HotKeyBlockedException e) {
@@ -371,20 +359,7 @@ public class HotKeyCache {
             }
           }
 
-          boolean wasPromoted = promoteLocalHotkeyIfNeeded(cacheKey, raw, cached, hardTtlMs, softTtlMs);
-          if (!skipReport) {
-            hotKeyReporter.ifPresent(r -> r.record(cacheKey));
-          }
-
-          // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
-          if (wasPromoted || !skipReport) {
-            Object currentRaw = caffeineCache.getIfPresent(cacheKey);
-            if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
-              return Optional.empty();
-            }
-          }
-
-          return Optional.ofNullable(cached);
+          return processHitAndValidate(cacheKey, raw, cached, hardTtlMs, softTtlMs, skipReport);
         })
         .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport));
     } catch (HotKeyBlockedException e) {
@@ -397,6 +372,45 @@ public class HotKeyCache {
       );
       return Optional.empty();
     }
+  }
+
+  /**
+   * Process a cache hit: trigger local hot-key promotion/renewal and report
+   * to Worker, then re-check logical expiry (TOCTOU guard) after side effects.
+   * <p>Extracted from {@link #get} and {@link #getWithSoftExpire} to eliminate
+   * code duplication.
+   *
+   * @param cacheKey  the cache key
+   * @param raw       the raw value from Caffeine (may be {@link CacheEntry} or bare)
+   * @param cached    the unwrapped cached value
+   * @param hardTtlMs hard TTL override
+   * @param softTtlMs soft TTL override
+   * @param skipReport if {@code true}, skip app-to-Worker reporting
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached value, or empty if logically expired
+   */
+  private <T> Optional<T> processHitAndValidate(
+    String cacheKey,
+    Object raw,
+    T cached,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean skipReport
+  ) {
+    boolean wasProcessed = processLocalHotkeyIfNeeded(cacheKey, raw, cached, hardTtlMs, softTtlMs);
+    if (!skipReport) {
+      hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+    }
+
+    // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
+    if (wasProcessed || !skipReport) {
+      Object currentRaw = caffeineCache.getIfPresent(cacheKey);
+      if (invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
+        return Optional.empty();
+      }
+    }
+
+    return Optional.ofNullable(cached);
   }
 
   /**
@@ -523,18 +537,33 @@ public class HotKeyCache {
   }
 
   /**
-   * Promotes a non-hot entry to HOT state in L1 if the local TopK detector
-   * now considers it a hot key. Preserves existing version and TTL metadata.
-   * {@link KeyState#NORMAL} entries are always eligible; {@link KeyState#COOL}
-   * entries are only eligible when all Workers are dead (graceful fallback).
+   * Process a cache hit for local hot-key management: if the entry is already
+   * HOT and more than half its TTL has elapsed, extend its expiry window;
+   * otherwise promote eligible non-hot entries (NORMAL or COOL-when-all-dead)
+   * to HOT if the local TopK now considers them hot.
+   * <p>
+   * HOT entries that are still within their first half are left untouched —
+   * no need to re-insert the same state.
    *
    * @param cacheKey  the key to promote
    * @param raw       the raw cached value (maybe a {@link CacheEntry} or a bare object)
    * @param val       the extracted value from the cache entry
    * @param hardTtlMs hard TTL override (0 = use configured hot hard TTL)
    * @param softTtlMs soft TTL override (0 = use configured hot soft TTL)
+   * @return {@code true} if a local promotion or expiry extension occurred
    */
-  private boolean promoteLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
+  private boolean processLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
+    if (raw instanceof CacheEntry ce && ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
+      long remainingTtl = ce.getHardExpireAtMs() - TimeSource.currentTimeMillis();
+      long totalTtl = ce.getHardTtlMs();
+
+      if (totalTtl > 0 && remainingTtl < totalTtl / 2) {
+        extendHotExpiry(cacheKey, hardTtlMs, softTtlMs);
+        return true;
+      }
+      return false;
+    }
+
     if (raw instanceof CacheEntry ce && isPromotableState(ce.getKeyState())) {
       hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
       if (!hotKeyDetector.contains(cacheKey)) {
@@ -580,6 +609,39 @@ public class HotKeyCache {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Extend the expiry window of an existing HOT entry without changing its
+   * key state. Re-computes hard and soft expiration timestamps from the
+   * configured hot TTLs (or overrides). Only applies when the entry is still
+   * {@link KeyState#HOT} at the time of the atomic update — if the state
+   * changed concurrently the entry is left untouched.
+   *
+   * @param cacheKey  the key whose expiry to extend
+   * @param hardTtlMs hard TTL override (0 = use configured hot hard TTL)
+   * @param softTtlMs soft TTL override (0 = use configured hot soft TTL)
+   */
+  private void extendHotExpiry(String cacheKey, long hardTtlMs, long softTtlMs) {
+    long hotHard = hardTtlMs > 0 ? hardTtlMs : expireManager.getEffectiveHotHardTtlMs();
+    long hotSoft = softTtlMs > 0 ? softTtlMs : expireManager.getEffectiveHotSoftTtlMs();
+    long hotHardExpireAtMs = expireManager.computeHardExpireAt(hotHard);
+    long hotSoftExpireAtMs = expireManager.computeSoftExpireAt(hotSoft);
+
+    caffeineCache
+      .asMap()
+      .computeIfPresent(cacheKey, (k, existing) -> {
+        if (existing instanceof CacheEntry entry && entry.getKeyState() == KeyState.HOT) {
+          return entry
+            .toBuilder()
+            .hardTtlMs(hotHard)
+            .softTtlMs(hotSoft)
+            .hardExpireAtMs(hotHardExpireAtMs)
+            .softExpireAtMs(hotSoftExpireAtMs)
+            .build();
+        }
+        return existing;
+      });
   }
 
   /**

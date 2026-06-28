@@ -22,6 +22,7 @@ import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
+import io.github.hyshmily.hotkey.util.TimeSource;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -79,6 +80,7 @@ public class HotKeyFacadeAutoConfiguration {
     if (id != null && !id.isBlank()) {
       InstanceIdGenerator.setOverride(id);
     }
+    TimeSource.start();
   }
 
   /**

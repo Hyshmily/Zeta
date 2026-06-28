@@ -192,13 +192,10 @@ public class HotKeyProperties {
     return effectiveSoftTtlMs() > 0 || effectiveHotSoftTtlMs() > 0;
   }
 
-  /** Whether to apply random jitter (±ttlJitterRatio) to TTL expiry timestamps to prevent cache stampedes. */
-  private boolean ttlJitterEnabled = true;
-
   /** Jitter ratio (0.0–1.0) applied to TTLs — e.g. 0.1 means ±10% random offset. */
   @Min(0)
   @Max(1)
-  private double ttlJitterRatio = 0.1;
+  private double ttlJitterRatio = 0.05;
 
   /** Maximum number of concurrent refresh tasks for soft-expiry management. */
   @Min(1)

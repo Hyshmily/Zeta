@@ -1368,6 +1368,89 @@ class HotKeyCacheTest {
     }
 
     @Test
+    @DisplayName("processLocalHotkeyIfNeeded should extend HOT entry expiry when past half TTL")
+    void processLocalHotkeyIfNeeded_shouldExtendHotExpiry() {
+      long originalExpireAt = System.currentTimeMillis() + 5_000;
+      caffeineCache.put(
+        "key1",
+        CacheEntry.builder()
+          .value("v")
+          .dataVersion(1)
+          .isVersionDegraded(false)
+          .decisionVersion(5)
+          .hardTtlMs(60_000)
+          .hardExpireAtMs(originalExpireAt)
+          .softTtlMs(30_000)
+          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .keyState(KeyState.HOT)
+          .normalHardTtlMs(300_000)
+          .normalSoftTtlMs(30_000)
+          .build()
+      );
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+
+      hotKeyCache.get("key1", () -> "loaded");
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+      assertThat(entry.getHardExpireAtMs()).isGreaterThan(originalExpireAt);
+    }
+
+    @Test
+    @DisplayName("processLocalHotkeyIfNeeded should NOT extend HOT entry when within first half")
+    void processLocalHotkeyIfNeeded_shouldNotExtendWithinFirstHalf() {
+      long futureExpireAt = System.currentTimeMillis() + 120_000;
+      caffeineCache.put(
+        "key1",
+        CacheEntry.builder()
+          .value("v")
+          .dataVersion(1)
+          .isVersionDegraded(false)
+          .decisionVersion(5)
+          .hardTtlMs(120_000)
+          .hardExpireAtMs(futureExpireAt)
+          .softTtlMs(30_000)
+          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .keyState(KeyState.HOT)
+          .normalHardTtlMs(300_000)
+          .normalSoftTtlMs(30_000)
+          .build()
+      );
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+
+      hotKeyCache.get("key1", () -> "loaded");
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+      assertThat(entry.getHardExpireAtMs()).isEqualTo(futureExpireAt);
+    }
+
+    @Test
+    @DisplayName("processLocalHotkeyIfNeeded should NOT extend HOT entry with MAX_VALUE hardExpireAt")
+    void processLocalHotkeyIfNeeded_shouldNotExtendMaxValueExpiry() {
+      caffeineCache.put(
+        "key1",
+        CacheEntry.builder()
+          .value("v")
+          .dataVersion(1)
+          .isVersionDegraded(false)
+          .decisionVersion(5)
+          .hardTtlMs(60_000)
+          .hardExpireAtMs(Long.MAX_VALUE)
+          .softTtlMs(30_000)
+          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .keyState(KeyState.HOT)
+          .normalHardTtlMs(300_000)
+          .normalSoftTtlMs(30_000)
+          .build()
+      );
+      when(hotKeyDetector.contains("key1")).thenReturn(true);
+
+      hotKeyCache.get("key1", () -> "loaded");
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+      assertThat(entry.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
+    }
+
+    @Test
     @DisplayName("loadAndCache preserves Worker-managed entry in hot path")
     void loadAndCache_withWorkerManagedEntryInHotPath_preservesIt() {
       when(hotKeyDetector.contains("key1")).thenReturn(true);

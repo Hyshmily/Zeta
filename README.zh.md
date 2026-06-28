@@ -3,11 +3,14 @@
 <p align="center">
   <a href="https://central.sonatype.com/artifact/io.github.hyshmily/hotkey"><img src="https://img.shields.io/maven-central/v/io.github.hyshmily/hotkey?color=blue" alt="Maven Central"></a>
   <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
-  <a href="https://coveralls.io/github/Hyshmily/hotkey?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/hotkey/badge.svg?branch=master" alt="Coveralls"></a>
+  <a href="https://github.com/Hyshmily/hotkey/releases"><img src="https://img.shields.io/github/v/release/Hyshmily/hotkey?color=brightgreen" alt="GitHub Release"></a>
   <a href="https://github.com/Hyshmily/hotkey/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Hyshmily/hotkey/ci.yml?branch=master&label=CI&logo=github" alt="CI"></a>
-  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://coveralls.io/github/Hyshmily/hotkey?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/hotkey/badge.svg?branch=master" alt="Coveralls"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
   <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
+  <a href="https://github.com/Hyshmily/hotkey/commits/master"><img src="https://img.shields.io/github/last-commit/Hyshmily/hotkey/master" alt="Last Commit"></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://visitor-badge.laobi.icu/badge?page_id=Hyshmily.hotkey"><img src="https://visitor-badge.laobi.icu/badge?page_id=Hyshmily.hotkey" alt="Visitors"></a>
 </p>
 
 [**English**](README.md)
@@ -186,8 +189,7 @@ hotkey:
     scheduler-pool-size: 8 # 调度线程池大小
 
     # ——— TTL 抖动（缓存雪崩防护） ———
-    ttl-jitter-enabled: true # 启用 TTL 随机偏移
-    ttl-jitter-ratio: 0.1 # 偏移比例（0.0~1.0），0.1 = ±10%
+    ttl-jitter-ratio: 0.05 # 偏移比例（0.0~1.0），0.05 = ±5%（始终启用）
 
     # ——— 刷新 & 版本控制 ———
     refresh-max-pools: 100 # 刷新线程池上限
@@ -311,8 +313,8 @@ hotkey:
       sm-duration-ms: 500 # 状态机时间片窗口时长 (ms)，独立于滑动窗口
       sm-slices: 10 # 状态机窗口内时间片数，每片 = 500/10 = 50ms
       confirm-duration-ms: 100 # 确认总时长，confirmCount = ceil(100/50) = 2
-      cool-duration-ms: 15000 # 冷却窗口 (ms)，持续冷超过此时长判定为 COOL
-      pre-cool-grace-ms: 5000 # 预冷却宽限期 (ms)
+      cool-duration-ms: 600000 # 冷却窗口 (ms)，持续冷超过此时长判定为 COOL
+      pre-cool-grace-ms: 60000 # 预冷却宽限期 (ms)
       evict-interval-ms: 30000 # 过期状态擦除间隔 (ms)，必须 >= coolDurationMs * 2
 
     global-qps-dynamic-threshold:
@@ -673,7 +675,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 ```
 
 > [!NOTE]
-> **缓存雪崩防护：** `CacheExpireManager` 计算每个过期时间戳时使用 `ThreadLocalRandom` 施加可配置的均匀随机偏移（默认 ±10%）。5 分钟硬 TTL 在默认偏移下实际到期 4.5 ~ 5.5 分钟。通过 `hotkey.local.ttl-jitter-enabled`（开关）和 `hotkey.local.ttl-jitter-ratio`（比例，默认 `0.1` = ±10%）控制。
+> **缓存雪崩防护：** `CacheExpireManager` 通过 `DelayUtil.computeTtlJitter()` 对每个过期时间戳施加均匀随机偏移（默认 ±5%）。5 分钟硬 TTL 在默认偏移下实际到期 4.75 ~ 5.25 分钟。通过 `hotkey.local.ttl-jitter-ratio`（比例，默认 `0.05` = ±5%）控制。始终启用。
 
 > [!TIP]
 > per-call TTL 语义：传入 `0` 表示使用该 key 状态的配置默认值。彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：向 `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` 传入 `hardTtlMs = Long.MAX_VALUE`，entry 永久驻留 Caffeine。此用法受 Caffeine `Expiry` JavaDoc 明确支持：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))

@@ -26,8 +26,8 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.util.TimeSource;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -319,18 +319,6 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that jitter disabled produces exact TTL (within ±1ms tolerance) on soft TTL path.
-   */
-  @Test
-  void toSoftExpireTimestamp_withJitterDisabled_shouldProduceExactTtl() {
-    CacheExpireManager noJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10, false, 0.0);
-    long start = System.currentTimeMillis();
-    long expireAt = noJitter.computeSoftExpireAt(10_000);
-    long elapsed = expireAt - start;
-    assertThat(elapsed).isBetween(9_999L, 10_001L);
-  }
-
-  /**
    * Verifies that isSoftExpired returns true when softExpireAtMs is a past timestamp
    * (positive but earlier than the current time).
    */
@@ -535,23 +523,11 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that jitter disabled produces exact TTL (within ±1ms tolerance).
-   */
-  @Test
-  void toHardExpireTimestamp_withJitterDisabled_shouldProduceExactTtl() {
-    CacheExpireManager noJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10, false, 0.0);
-    long start = System.currentTimeMillis();
-    long expireAt = noJitter.computeHardExpireAt(10_000);
-    long elapsed = expireAt - start;
-    assertThat(elapsed).isBetween(9_999L, 10_001L);
-  }
-
-  /**
    * Verifies that custom ratio (0.5 = ±50%) produces jitter within the configured range.
    */
   @Test
   void toHardExpireTimestamp_withCustomRatio_shouldJitterWithinRange() {
-    CacheExpireManager highJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10, true, 0.5);
+    CacheExpireManager highJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10, 0.5);
     long ttl = 10_000;
     Stream.generate(() -> highJitter.computeHardExpireAt(ttl))
       .limit(100)
@@ -562,12 +538,18 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that the default (0.1 = ±10%) jitter is applied and within range.
+   * Verifies that the default (0.1 = ±10%) jitter is applied and within range for both hard and soft TTL paths.
    */
   @Test
   void toHardExpireTimestamp_withDefaultJitter_shouldJitterWithinRange() {
     long ttl = 10_000;
     Stream.generate(() -> expireManager.computeHardExpireAt(ttl))
+      .limit(100)
+      .forEach(expireAt -> {
+        long diff = expireAt - System.currentTimeMillis();
+        assertThat(diff).isBetween(9_000L, 11_000L);
+      });
+    Stream.generate(() -> expireManager.computeSoftExpireAt(ttl))
       .limit(100)
       .forEach(expireAt -> {
         long diff = expireAt - System.currentTimeMillis();
@@ -603,6 +585,94 @@ class CacheExpireManagerTest {
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
     assertThat((Object) entry.getValue()).isEqualTo("fresh-value");
+  }
+
+  /**
+   * Verifies that toHardExpireTimestamp with a custom jitter ratio uses the given ratio.
+   */
+  @Test
+  void toHardExpireTimestamp_withCustomRatio_shouldUseGivenRatio() {
+    long ttl = 10_000;
+    Stream.generate(() -> expireManager.toHardExpireTimestamp(ttl, 0.5))
+      .limit(50)
+      .forEach(expireAt -> {
+        long diff = expireAt - TimeSource.currentTimeMillis();
+        assertThat(diff).isBetween(5_000L, 15_000L);
+      });
+  }
+
+  /**
+   * Verifies that toHardExpireTimestamp with Long.MAX_VALUE and a custom ratio passes through.
+   */
+  @Test
+  void toHardExpireTimestamp_withMaxValueAndCustomRatio_shouldPassthrough() {
+    assertThat(expireManager.toHardExpireTimestamp(Long.MAX_VALUE, 0.5)).isEqualTo(Long.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that toSoftExpireTimestamp with a custom jitter ratio uses the given ratio.
+   */
+  @Test
+  void toSoftExpireTimestamp_withCustomRatio_shouldUseGivenRatio() {
+    long ttl = 10_000;
+    Stream.generate(() -> expireManager.toSoftExpireTimestamp(ttl, 0.5))
+      .limit(50)
+      .forEach(expireAt -> {
+        long diff = expireAt - TimeSource.currentTimeMillis();
+        assertThat(diff).isBetween(5_000L, 15_000L);
+      });
+  }
+
+  /**
+   * Verifies that toSoftExpireTimestamp with a disabled config returns zero regardless of ratio.
+   */
+  @Test
+  void toSoftExpireTimestamp_withDisabledAndCustomRatio_shouldReturnZero() {
+    ttlConfig.setDefaultSoftTtlMs(0);
+    ttlConfig.setDefaultHotSoftTtlMs(0);
+    CacheExpireManager disabled = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 0);
+    assertThat(disabled.toSoftExpireTimestamp(10_000, 0.5)).isZero();
+  }
+
+  /**
+   * Verifies that toSoftExpireTimestamp with non-positive soft TTL returns zero.
+   */
+  @Test
+  void toSoftExpireTimestamp_withNonPositiveTtlAndCustomRatio_shouldReturnZero() {
+    assertThat(expireManager.toSoftExpireTimestamp(0, 0.5)).isZero();
+    assertThat(expireManager.toSoftExpireTimestamp(-1, 0.5)).isZero();
+  }
+
+  /**
+   * Verifies that toSoftExpireTimestamp with Long.MAX_VALUE passes through.
+   */
+  @Test
+  void toSoftExpireTimestamp_withMaxValueAndCustomRatio_shouldPassthrough() {
+    assertThat(expireManager.toSoftExpireTimestamp(Long.MAX_VALUE, 0.5)).isEqualTo(Long.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that computeNullExpireAt with positive TTL returns a future timestamp.
+   */
+  @Test
+  void computeNullExpireAt_withPositiveTtl_shouldReturnFuture() {
+    assertThat(expireManager.computeNullExpireAt(1_000)).isGreaterThan(TimeSource.currentTimeMillis());
+  }
+
+  /**
+   * Verifies that computeNullExpireAt with zero TTL falls back to config default.
+   */
+  @Test
+  void computeNullExpireAt_withZeroTtl_shouldFallbackToConfig() {
+    assertThat(expireManager.computeNullExpireAt(0)).isGreaterThan(TimeSource.currentTimeMillis());
+  }
+
+  /**
+   * Verifies that computeNullExpireAt with Long.MAX_VALUE passes through.
+   */
+  @Test
+  void computeNullExpireAt_withMaxValue_shouldPassthrough() {
+    assertThat(expireManager.computeNullExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
   }
 
   /**

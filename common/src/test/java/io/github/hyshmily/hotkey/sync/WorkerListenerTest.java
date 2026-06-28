@@ -96,7 +96,7 @@ class WorkerListenerTest {
       CacheEntry ce = (CacheEntry) o;
       assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
       assertThat(ce.getDecisionVersion()).isEqualTo(2L);
-      assertThat(ce.getSoftExpireAtMs()).isZero();
+      assertThat(ce.getSoftExpireAtMs()).isPositive();
     });
   }
 
@@ -269,7 +269,7 @@ class WorkerListenerTest {
       CacheEntry ce = (CacheEntry) o;
       assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
       assertThat(ce.getDecisionVersion()).isEqualTo(1L);
-      assertThat(ce.getSoftExpireAtMs()).isZero();
+      assertThat(ce.getSoftExpireAtMs()).isPositive();
     });
   }
 

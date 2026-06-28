@@ -97,6 +97,15 @@ public class WorkerListener {
    * {@code null} disables rate limiting. */
   private final SreRateLimiter sreRateLimiter;
 
+  /** Fallback hard TTL (seconds) for COOL entries when no normal TTL is configured on the existing entry. */
+  private static final long COOL_DEFAULT_PROTECTION_HARDTTL_TIME = 120;
+  /** Fallback soft TTL (seconds) for COOL entries when no normal TTL is configured on the existing entry. */
+  private static final long COOL_DEFAULT_PROTECTION_SOFTTTL_TIME = 60;
+  /** Jitter ratio for COOL fallback hard TTL (±20%). */
+  private static final double COOL_DEFAULT_PROTECTION_HARDTTL_TIME_RATIO = 0.2;
+  /** Jitter ratio for COOL fallback soft TTL (±20%). */
+  private static final double COOL_DEFAULT_PROTECTION_SOFTTTL_TIME_RATIO = 0.2;
+
   /**
    * RabbitMQ message callback for incoming Worker decisions. Acknowledges the message
    * immediately after parsing (ack-before-update), then schedules the actual cache
@@ -305,8 +314,20 @@ public class WorkerListener {
         }
 
         if (existing instanceof CacheEntry cacheEntry) {
-          long hardTtlMs = cacheEntry.getNormalHardTtlMs();
-          long hardExpireAtMs = expireManager.computeHardExpireAt(hardTtlMs);
+          long normalHardTtlMs = cacheEntry.getNormalHardTtlMs();
+          long normalSoftTtlMs = cacheEntry.getNormalSoftTtlMs();
+
+          long hardTtlMsIfZero = normalHardTtlMs > 0 ? normalHardTtlMs : COOL_DEFAULT_PROTECTION_HARDTTL_TIME;
+          long softTtlMsIfZero = normalSoftTtlMs > 0 ? normalSoftTtlMs : COOL_DEFAULT_PROTECTION_SOFTTTL_TIME;
+
+          long hardTtlExpireAtMs = expireManager.toHardExpireTimestamp(
+            hardTtlMsIfZero,
+            COOL_DEFAULT_PROTECTION_HARDTTL_TIME_RATIO
+          );
+          long softTtlExpireAtMs = expireManager.toSoftExpireTimestamp(
+            softTtlMsIfZero,
+            COOL_DEFAULT_PROTECTION_SOFTTTL_TIME_RATIO
+          );
 
           return cacheEntry
             .toBuilder()
@@ -315,10 +336,10 @@ public class WorkerListener {
             .decisionVersion(wm.decisionVersion())
             .decisionNodeId(wm.nodeId())
             .decisionEpoch(wm.epoch())
-            .hardTtlMs(hardTtlMs)
-            .hardExpireAtMs(hardExpireAtMs)
-            .softTtlMs(0L)
-            .softExpireAtMs(0L)
+            .hardTtlMs(hardTtlMsIfZero)
+            .hardExpireAtMs(hardTtlExpireAtMs)
+            .softTtlMs(softTtlMsIfZero)
+            .softExpireAtMs(softTtlExpireAtMs)
             .keyState(KeyState.COOL)
             .build();
         }

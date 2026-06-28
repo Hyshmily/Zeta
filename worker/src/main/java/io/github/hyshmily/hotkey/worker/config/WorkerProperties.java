@@ -89,10 +89,10 @@ public class WorkerProperties {
     private int smSlices = 10;
 
     private long confirmDurationMs = 100;
-    private long coolDurationMs = 15000;
-    private long preCoolGraceMs = 5000;
-    /** Interval for evicting stale sliding-window and state-machine state. Must be >= coolDurationMs * 2. */
-    private long evictIntervalMs = 30000;
+    private long coolDurationMs = 600_000;
+    private long preCoolGraceMs = 60_000;
+    /** Interval for evicting stale sliding-window and state-machine state. */
+    private long evictIntervalMs = 30_000;
   }
 
   /** Dynamic threshold adaptation based on global QPS changes. */

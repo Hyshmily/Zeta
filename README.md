@@ -3,11 +3,14 @@
 <p align="center">
   <a href="https://central.sonatype.com/artifact/io.github.hyshmily/hotkey"><img src="https://img.shields.io/maven-central/v/io.github.hyshmily/hotkey?color=blue" alt="Maven Central"></a>
   <a href="https://jitpack.io/#Hyshmily/HotKey"><img src="https://jitpack.io/v/Hyshmily/HotKey.svg" alt="JitPack"></a>
-  <a href="https://coveralls.io/github/Hyshmily/hotkey?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/hotkey/badge.svg?branch=master" alt="Coveralls"></a>
+  <a href="https://github.com/Hyshmily/hotkey/releases"><img src="https://img.shields.io/github/v/release/Hyshmily/hotkey?color=brightgreen" alt="GitHub Release"></a>
   <a href="https://github.com/Hyshmily/hotkey/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Hyshmily/hotkey/ci.yml?branch=master&label=CI&logo=github" alt="CI"></a>
-  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://coveralls.io/github/Hyshmily/hotkey?branch=master"><img src="https://coveralls.io/repos/github/Hyshmily/hotkey/badge.svg?branch=master" alt="Coveralls"></a>
   <a href="https://openjdk.java.net/"><img src="https://img.shields.io/badge/Java-17-orange" alt="Java"></a>
   <a href="https://spring.io/projects/spring-boot"><img src="https://img.shields.io/badge/Spring%20Boot-3.5.3-brightgreen" alt="Spring Boot"></a>
+  <a href="https://github.com/Hyshmily/hotkey/commits/master"><img src="https://img.shields.io/github/last-commit/Hyshmily/hotkey/master" alt="Last Commit"></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://visitor-badge.laobi.icu/badge?page_id=Hyshmily.hotkey"><img src="https://visitor-badge.laobi.icu/badge?page_id=Hyshmily.hotkey" alt="Visitors"></a>
 </p>
 
 [**中文版**](README.zh.md)
@@ -183,8 +186,7 @@ hotkey:
     scheduler-pool-size: 8 # Scheduler thread pool size
 
     # ——— TTL Jitter (Cache Stampede Protection) ———
-    ttl-jitter-enabled: true # Enable random TTL offset
-    ttl-jitter-ratio: 0.1 # Offset ratio (0.0~1.0), 0.1 = ±10%
+    ttl-jitter-ratio: 0.05 # Offset ratio (0.0~1.0), 0.05 = ±5% (always enabled)
 
     # ——— Refresh & Version Control ———
     refresh-max-pools: 100 # Refresh thread pool limit
@@ -308,8 +310,8 @@ hotkey:
       sm-duration-ms: 500 # State machine time-slice window duration (ms), independent of sliding window
       sm-slices: 10 # Time slices in state machine window, each slice = 500/10 = 50ms
       confirm-duration-ms: 100 # Total confirmation duration, confirmCount = ceil(100/50) = 2
-      cool-duration-ms: 15000 # Cooling window (ms), sustained cold beyond this marks COOL
-      pre-cool-grace-ms: 5000 # Pre-cooling grace period (ms)
+      cool-duration-ms: 600000 # Cooling window (ms), sustained cold beyond this marks COOL
+      pre-cool-grace-ms: 60000 # Pre-cooling grace period (ms)
       evict-interval-ms: 30000 # Expired state eviction interval (ms), must be >= coolDurationMs * 2
 
     global-qps-dynamic-threshold:
@@ -669,7 +671,7 @@ hotKey.putThrough("weather:" + city, weatherData,
 ```
 
 > [!NOTE]
-> **Cache stampede protection:** `CacheExpireManager` applies a configurable uniform random offset (default ±10%) to each expiry timestamp using `ThreadLocalRandom`. With the default offset, a 5-minute hard TTL actually expires between 4.5 and 5.5 minutes. Controlled by `hotkey.local.ttl-jitter-enabled` (on/off) and `hotkey.local.ttl-jitter-ratio` (ratio, default `0.1` = ±10%).
+> **Cache stampede protection:** `CacheExpireManager` applies a uniform random offset (default ±5%) to each expiry timestamp via `DelayUtil.computeTtlJitter()`. With the default offset, a 5-minute hard TTL actually expires between 4.75 and 5.25 minutes. Controlled by `hotkey.local.ttl-jitter-ratio` (default `0.05` = ±5%). Always enabled.
 
 > [!TIP]
 > Per-call TTL semantics: passing `0` means "use the configured default for this key state." For pure logical expiry (hard TTL never evicts): pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` — the entry stays in Caffeine permanently. This usage is explicitly supported by Caffeine's `Expiry` JavaDoc: *"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."* ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))

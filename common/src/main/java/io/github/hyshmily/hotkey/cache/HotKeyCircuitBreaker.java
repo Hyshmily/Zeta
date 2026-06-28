@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.cache;
 
+import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
+
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import lombok.extern.slf4j.Slf4j;
 
@@ -90,7 +92,7 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
       return true;
     }
 
-    long now = System.currentTimeMillis();
+    long now = currentTimeMillis();
     long lastTest = lastHalfOpenAttempt.get();
     if (
       now - openTimestamp > config.getSingleTestIntervalMs() &&
@@ -154,7 +156,7 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
       double rate = (double) totalFail / (totalSuccess + totalFail);
 
       if (rate > config.getFailThreshold() && open.compareAndSet(false, true)) {
-        openTimestamp = System.currentTimeMillis();
+        openTimestamp = currentTimeMillis();
 
         if (config.isLogEnabled()) {
           log.info("CB OPEN (failRate={}, total={})", rate, totalSuccess + totalFail);

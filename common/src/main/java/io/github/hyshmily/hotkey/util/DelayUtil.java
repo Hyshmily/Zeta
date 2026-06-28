@@ -20,7 +20,8 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Utility for introducing random jitter before executing a task.
+ * Utility for introducing random jitter before executing a task
+ * or computing TTL-based expiration timestamps.
  * Used internally by broadcast listeners to spread Redis reads
  * evenly across instances. Non-instantiable — private constructor.
  */
@@ -44,6 +45,18 @@ public final class DelayUtil {
       }
     }
     scheduler.schedule(task, 0, TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Compute a random jitter offset for a TTL duration.
+   * Returns a value in the range {@code [-ttlMs * ttlJitterRatio, ttlMs * ttlJitterRatio)}.
+   *
+   * @param ttlMs          the base TTL duration in milliseconds
+   * @param ttlJitterRatio the jitter ratio (0.0–1.0)
+   * @return random jitter offset in milliseconds (maybe negative, zero, or positive)
+   */
+  public static long computeTtlJitter(long ttlMs, double ttlJitterRatio) {
+    return (long) (ttlMs * ttlJitterRatio * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
   }
 
   /** Private constructor to prevent instantiation of this utility class. */

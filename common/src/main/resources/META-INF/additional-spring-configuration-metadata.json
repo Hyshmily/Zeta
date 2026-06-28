@@ -173,16 +173,10 @@
       "defaultValue": 0
     },
     {
-      "name": "hotkey.local.ttl-jitter-enabled",
-      "type": "java.lang.Boolean",
-      "description": "Whether to apply random jitter to TTL expiry timestamps to prevent cache stampedes.",
-      "defaultValue": true
-    },
-    {
       "name": "hotkey.local.ttl-jitter-ratio",
       "type": "java.lang.Double",
-      "description": "Jitter ratio (0.0-1.0) applied to TTLs e.g. 0.1 means +/- 10% random offset.",
-      "defaultValue": 0.1
+      "description": "Jitter ratio (0.0-1.0) applied to TTLs e.g. 0.05 means +/- 5% random offset.",
+      "defaultValue": 0.05
     },
     {
       "name": "hotkey.local.refresh-max-pools",

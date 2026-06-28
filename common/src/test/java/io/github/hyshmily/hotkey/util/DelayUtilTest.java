@@ -149,4 +149,47 @@ class DelayUtilTest {
     assertThatCode(() -> DelayUtil.floatTimeDelay(() -> {}, 100, null))
         .isInstanceOf(NullPointerException.class);
   }
+
+  // ── computeTtlJitter ──
+
+  @Test
+  void computeTtlJitter_withZeroRatio_shouldReturnZero() {
+    assertThat(DelayUtil.computeTtlJitter(10_000, 0.0)).isZero();
+  }
+
+  @Test
+  void computeTtlJitter_withZeroTtl_shouldReturnZero() {
+    assertThat(DelayUtil.computeTtlJitter(0, 0.1)).isZero();
+  }
+
+  @Test
+  void computeTtlJitter_withNegativeTtl_shouldHandleGracefully() {
+    long jitter = DelayUtil.computeTtlJitter(-1000, 0.1);
+    assertThat(jitter).isBetween(-100L, 99L);
+  }
+
+  @Test
+  void computeTtlJitter_withPositiveRatio_shouldBeWithinRange() {
+    long ttl = 10_000;
+    double ratio = 0.1;
+    for (int i = 0; i < 100; i++) {
+      long jitter = DelayUtil.computeTtlJitter(ttl, ratio);
+      assertThat(jitter).isBetween(- (long) (ttl * ratio), (long) (ttl * ratio) - 1);
+    }
+  }
+
+  @Test
+  void computeTtlJitter_withMaxRatio_shouldBeWithinRange() {
+    long ttl = 10_000;
+    for (int i = 0; i < 100; i++) {
+      long jitter = DelayUtil.computeTtlJitter(ttl, 1.0);
+      assertThat(jitter).isBetween(-10_000L, 9_999L);
+    }
+  }
+
+  @Test
+  void computeTtlJitter_withLargeTtl_shouldHandleOverflow() {
+    long jitter = DelayUtil.computeTtlJitter(Long.MAX_VALUE, 1.0);
+    assertThat(jitter).isBetween(Long.MIN_VALUE, Long.MAX_VALUE);
+  }
 }

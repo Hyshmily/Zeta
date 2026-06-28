@@ -20,6 +20,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
+import io.github.hyshmily.hotkey.util.TimeSource;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.concurrent.CountDownLatch;
@@ -32,6 +33,10 @@ import org.junit.jupiter.api.Test;
  * cooldown logic, and internal state propagation.
  */
 class BbrRateLimiterTest {
+
+  static {
+    TimeSource.start();
+  }
 
   private static final int CPU_THRESHOLD = 800;
   private static final long WINDOW_MS = 500;
@@ -360,7 +365,7 @@ class BbrRateLimiterTest {
 
     // Advance 3 buckets.
     long bucketDurationMs = WINDOW_MS / BUCKETS;
-    wsField.set(limiter, System.currentTimeMillis() - (3 * bucketDurationMs + 10));
+    wsField.set(limiter, TimeSource.currentTimeMillis() - (3 * bucketDurationMs + 10));
 
     invokeTick();
 
@@ -392,7 +397,7 @@ class BbrRateLimiterTest {
     assertThat(passBuckets[beforeBucket]).isGreaterThan(0);
 
     long bucketDurationMs = WINDOW_MS / BUCKETS;
-    wsField.set(limiter, System.currentTimeMillis() - (BUCKETS * bucketDurationMs + 10));
+    wsField.set(limiter, TimeSource.currentTimeMillis() - (BUCKETS * bucketDurationMs + 10));
 
     invokeTick();
 
@@ -451,7 +456,7 @@ class BbrRateLimiterTest {
     // Simulate cooldown expiry via reflection.
     Field dropField = BbrRateLimiter.class.getDeclaredField("lastDropTime");
     dropField.setAccessible(true);
-    dropField.set(limiter, System.currentTimeMillis() - COOLDOWN_MS - 100);
+    dropField.set(limiter, TimeSource.currentTimeMillis() - COOLDOWN_MS - 100);
 
     assertThat(limiter.tryAcquire()).isTrue();
   }
@@ -588,7 +593,7 @@ class BbrRateLimiterTest {
     Field wsField = BbrRateLimiter.class.getDeclaredField("windowStart");
     wsField.setAccessible(true);
     long bucketDurationMs = WINDOW_MS / BUCKETS;
-    wsField.set(limiter, System.currentTimeMillis() - (count * bucketDurationMs + 10));
+    wsField.set(limiter, TimeSource.currentTimeMillis() - (count * bucketDurationMs + 10));
     invokeTick();
   }
 
@@ -596,7 +601,7 @@ class BbrRateLimiterTest {
     Field wsField = BbrRateLimiter.class.getDeclaredField("windowStart");
     wsField.setAccessible(true);
     long bucketDurationMs = WINDOW_MS / BUCKETS;
-    wsField.set(limiter, System.currentTimeMillis() - (BUCKETS * bucketDurationMs + 10));
+    wsField.set(limiter, TimeSource.currentTimeMillis() - (BUCKETS * bucketDurationMs + 10));
     invokeTick();
   }
 }
