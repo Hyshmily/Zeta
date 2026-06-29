@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.hotkeydetector.doublebuffer;
 
+import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,11 +56,20 @@ import org.springframework.beans.factory.InitializingBean;
 @Slf4j
 public class BufferedCounter implements InitializingBean, Destroyable {
 
-  /** Maximum number of distinct keys held in one buffer before forced swap ({@value}). */
-  private static final int MAX_BUFFER_SIZE = 10_000;
+  /** Default maximum distinct keys in one buffer before forced swap ({@value}). */
+  static final int DEFAULT_MAX_BUFFER_SIZE = 10_000;
 
-  /** Fixed flush interval in milliseconds ({@value}). */
-  private static final long FLUSH_INTERVAL_MS = 500;
+  /** Default flush interval in milliseconds ({@value}). */
+  static final long DEFAULT_FLUSH_INTERVAL_MS = 500;
+
+  /** Default eager swap ratio ({@value}). */
+  static final double DEFAULT_EAGER_SWAP_RATIO = 0.8;
+
+  private final int maxBufferSize;
+
+  private final long flushIntervalMs;
+
+  private final double eagerSwapRatio;
 
   private final AtomicReference<CounterBuffer> active;
 
@@ -73,38 +83,62 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
   /**
    * Creates a buffered counter that flushes aggregated counts to the given consumer.
-   * Creates its own single-thread scheduler (backward-compatible).
+   * Creates its own single-thread scheduler with default parameters ({@value DEFAULT_MAX_BUFFER_SIZE}
+   * max keys, {@value DEFAULT_FLUSH_INTERVAL_MS} ms interval, {@value DEFAULT_EAGER_SWAP_RATIO} swap ratio).
    *
    * @param batchConsumer callback receiving the aggregated key-count map on each flush
    */
   public BufferedCounter(Consumer<Map<String, Long>> batchConsumer) {
-    this(
-      batchConsumer,
-      Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "buffered-counter-flusher")),
-      true
-    );
+    this(batchConsumer, DEFAULT_MAX_BUFFER_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, true, null);
   }
 
   /**
-   * Creates a buffered counter with an externally provided scheduler.
+   * Creates a buffered counter with an externally provided shared scheduler and default parameters.
    *
    * @param batchConsumer callback receiving the aggregated key-count map on each flush
    * @param scheduler     the shared scheduler (not shut down on destroy)
    */
   public BufferedCounter(Consumer<Map<String, Long>> batchConsumer, ScheduledExecutorService scheduler) {
-    this(batchConsumer, scheduler, false);
+    this(batchConsumer, DEFAULT_MAX_BUFFER_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, false, scheduler);
+  }
+
+  /**
+   * Creates a buffered counter with custom parameters and an externally provided shared scheduler.
+   *
+   * @param batchConsumer   callback receiving the aggregated key-count map on each flush
+   * @param maxBufferSize   maximum distinct keys in one buffer before forced eager swap
+   * @param flushIntervalMs fixed delay between consecutive flushes in milliseconds
+   * @param eagerSwapRatio  fraction of {@code maxBufferSize} that triggers an eager buffer swap (0.0 – 1.0)
+   * @param scheduler       the shared scheduler (not shut down on destroy)
+   */
+  public BufferedCounter(
+    Consumer<Map<String, Long>> batchConsumer,
+    int maxBufferSize,
+    long flushIntervalMs,
+    double eagerSwapRatio,
+    ScheduledExecutorService scheduler
+  ) {
+    this(batchConsumer, maxBufferSize, flushIntervalMs, eagerSwapRatio, false, scheduler);
   }
 
   private BufferedCounter(
     Consumer<Map<String, Long>> batchConsumer,
-    ScheduledExecutorService scheduler,
-    boolean ownsScheduler
+    int maxBufferSize,
+    long flushIntervalMs,
+    double eagerSwapRatio,
+    boolean ownsScheduler,
+    ScheduledExecutorService scheduler
   ) {
     this.batchConsumer = batchConsumer;
+    this.maxBufferSize = maxBufferSize;
+    this.flushIntervalMs = flushIntervalMs;
+    this.eagerSwapRatio = eagerSwapRatio;
     this.active = new AtomicReference<>(new CounterBuffer());
     this.standbyRef = new AtomicReference<>(new CounterBuffer());
-    this.scheduler = scheduler;
     this.ownsScheduler = ownsScheduler;
+    this.scheduler = ownsScheduler
+      ? Executors.newSingleThreadScheduledExecutor(new HotKeyThreadFactory("hotkey-buffered-counter-flusher"))
+      : scheduler;
   }
 
   /**
@@ -122,11 +156,32 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     CounterBuffer buffer = active.get();
     buffer.add(key, delta);
 
-    if (buffer.size() >= MAX_BUFFER_SIZE * 0.8) {
+    if (buffer.size() >= maxBufferSize * eagerSwapRatio) {
       trySwitch();
     }
   }
 
+  /**
+   * Return an approximate count of distinct keys request across both buffers.
+   *
+   * @return sum of distinct keys request in the active and standby buffers
+   */
+  public long estimatedSizeOfKeysCount() {
+    return (long) active.get().size() + (long) standbyRef.get().size();
+  }
+
+  /**
+   * Drain all remaining counts from both buffers without calling the consumer.
+   * After this call both buffers are empty and ready for reuse.
+   */
+  public void clear() {
+    active.getAndSet(new CounterBuffer()).drain();
+    standbyRef.getAndSet(new CounterBuffer()).drain();
+  }
+
+  /**
+   * try to switch the active buffer with a new one and move the old one to standby for flushing.
+   */
   private void trySwitch() {
     CounterBuffer newBuffer = new CounterBuffer();
     CounterBuffer oldBuffer = active.getAndSet(newBuffer);
@@ -144,7 +199,6 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
       drainBuffer(flushedActive);
       drainBuffer(flushedStandby);
-      log.trace("BufferedCounter flush tick: active={}, standby={}", flushedActive.size(), flushedStandby.size());
     } catch (Exception e) {
       log.error("Scheduled flushStandby failed", e);
     }
@@ -166,7 +220,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   @Override
   public void afterPropertiesSet() {
     try {
-      scheduler.scheduleAtFixedRate(this::flushStandby, FLUSH_INTERVAL_MS, FLUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
+      scheduler.scheduleAtFixedRate(this::flushStandby, flushIntervalMs, flushIntervalMs, TimeUnit.MILLISECONDS);
     } catch (Exception e) {
       log.error(
         "Failed to start BufferedCounter flush scheduler; buffered counts will not " +

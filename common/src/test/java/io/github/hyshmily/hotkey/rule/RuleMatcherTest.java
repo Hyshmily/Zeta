@@ -16,6 +16,8 @@
 package io.github.hyshmily.hotkey.rule;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -297,10 +299,10 @@ class RuleMatcherTest {
   }
 
   @Test
-  void evaluateRule_withEmptyKey_shouldMatchExactEmptyRule() {
-    ruleMatcher.addRule(RuleMatcher.of("", RuleAction.BLOCK));
-    assertThat(ruleMatcher.evaluateRule("")).isEqualTo(RuleAction.BLOCK);
-    assertThat(ruleMatcher.evaluateRule("x")).isEqualTo(RuleAction.ALLOW);
+  void addRule_withEmptyPattern_shouldThrowIllegalArgumentException() {
+    assertThatIllegalArgumentException()
+      .isThrownBy(() -> ruleMatcher.addRule(RuleMatcher.of("", RuleAction.BLOCK)))
+      .withMessage("pattern must not be null or empty");
   }
 
   @Test
@@ -363,6 +365,39 @@ class RuleMatcherTest {
     ruleMatcher.removeRule("a", RuleAction.BLOCK);
     ruleMatcher.removeRule("b", RuleAction.ALLOW_NO_REPORT);
     assertThat(ruleMatcher.getAllRules()).hasSize(1);
+  }
+
+  @Test
+  void addRule_withNullRule_shouldThrowNullPointerException() {
+    assertThatNullPointerException()
+      .isThrownBy(() -> ruleMatcher.addRule(null))
+      .withMessage("rule must not be null");
+  }
+
+  @Test
+  void addRule_withNullPattern_shouldThrowIllegalArgumentException() {
+    Rule rule = new Rule(Rule.RuleType.EXACT, null, RuleAction.BLOCK);
+    assertThatIllegalArgumentException()
+      .isThrownBy(() -> ruleMatcher.addRule(rule))
+      .withMessage("pattern must not be null or empty");
+  }
+
+  @Test
+  void addRule_withNullAction_shouldThrowIllegalArgumentException() {
+    Rule rule = new Rule(Rule.RuleType.EXACT, "foo", null);
+    assertThatIllegalArgumentException()
+      .isThrownBy(() -> ruleMatcher.addRule(rule))
+      .withMessage("action must not be null");
+  }
+
+  @Test
+  void addRule_withInvalidRegex_shouldThrowPatternSyntaxException() {
+    Rule rule = new Rule();
+    rule.setType(Rule.RuleType.REGEX);
+    rule.setPattern("[invalid");
+    rule.setAction(RuleAction.BLOCK);
+    assertThatExceptionOfType(java.util.regex.PatternSyntaxException.class)
+      .isThrownBy(() -> ruleMatcher.addRule(rule));
   }
 
   @Test

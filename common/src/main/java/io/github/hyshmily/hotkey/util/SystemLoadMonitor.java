@@ -67,11 +67,8 @@ public class SystemLoadMonitor {
    *                       values outside (0, 1) fall back to the default (0.95)
    */
   public SystemLoadMonitor(long pollIntervalMs, double decay) {
-    this(Executors.newSingleThreadScheduledExecutor(r -> {
-      Thread t = new Thread(r, "cpu-monitor");
-      t.setDaemon(true);
-      return t;
-    }), pollIntervalMs, decay, true);
+    this(Executors.newSingleThreadScheduledExecutor(
+      new HotKeyThreadFactory("hotkey-cpu-monitor")), pollIntervalMs, decay, true);
   }
 
   /**

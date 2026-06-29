@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.worker.ingest;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING_WINDOW;
+import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
@@ -99,7 +100,7 @@ public class ReportConsumer {
   }
 
   private void doOnReport(ReportMessage message) {
-    long now = System.currentTimeMillis();
+    long now = currentTimeMillis();
     LongAdder totalQps = new LongAdder();
 
     // Discard reports that are more than 5 seconds old.

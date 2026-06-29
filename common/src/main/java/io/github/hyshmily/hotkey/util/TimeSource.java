@@ -15,8 +15,8 @@
  */
 package io.github.hyshmily.hotkey.util;
 
-import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -35,40 +35,38 @@ import lombok.extern.slf4j.Slf4j;
 public final class TimeSource {
 
   private static volatile long currentMillis = System.currentTimeMillis();
-  private static final AtomicBoolean threadStarted = new AtomicBoolean(false);
   private static final AtomicBoolean threadRunning = new AtomicBoolean(false);
+  private static final AtomicInteger threadTryCount = new AtomicInteger(0);
+  private static final int THREAD_TRY_MAX = 3;
 
   /**
-   * Start the background clock-cache thread.  Idempotent — subsequent calls
-   * are no-ops.  Called automatically during {@code HotKeyFacadeAutoConfiguration}
+   * Start the background clock-cache thread.  Idempotent after the thread is
+   * running.  If the thread dies unexpectedly it will be restarted up to
+   * {@link #THREAD_TRY_MAX} times with a 1-second delay between attempts.
+   * Called automatically during {@code HotKeyFacadeAutoConfiguration}
    * initialisation.
    */
-  @SuppressWarnings("all")
+  @SuppressWarnings("BusyWait")
   public static void start() {
-    if (threadStarted.compareAndSet(false, true)) {
-      threadRunning.compareAndSet(false, true);
-
-      Thread t = new Thread(
-        () -> {
-          while (threadRunning.get()) {
-            currentMillis = System.currentTimeMillis();
-            try {
-              Thread.sleep(5);
-            } catch (InterruptedException e) {
-              threadRunning.compareAndSet(true, false);
-              threadStarted.compareAndSet(true, false);
-
-              log.error(
-                "TimeSource thread interrupted, stopping time cache thread.Fallback to System.currentTimeMillis()",
-                e
-              );
-              break;
-            }
+    if (threadTryCount.incrementAndGet() <= THREAD_TRY_MAX && threadRunning.compareAndSet(false, true)) {
+      Thread t = new HotKeyThreadFactory("TimeSource").newThread(() -> {
+        while (threadRunning.get()) {
+          currentMillis = System.currentTimeMillis();
+          try {
+            Thread.sleep(5);
+          } catch (InterruptedException ignored) {
+            threadRunning.set(false);
           }
-        },
-        HotKeyConstants.THREAD_PREFIX_HOTKEY + "time-cache"
-      );
-      t.setDaemon(true);
+        }
+      });
+      t.setUncaughtExceptionHandler((th, ex) -> {
+        log.error("TimeSource thread terminated unexpectedly, will restart after 1s.", ex);
+        threadRunning.set(false);
+        try {
+          Thread.sleep(1000);
+        } catch (InterruptedException ignored) {}
+        start();
+      });
       t.start();
     }
   }
@@ -84,11 +82,7 @@ public final class TimeSource {
    * @return current time in milliseconds (epoch-based)
    */
   public static long currentTimeMillis() {
-    if (threadStarted.get() || threadRunning.get()) {
-      return currentMillis;
-    } else {
-      return System.currentTimeMillis();
-    }
+    return threadRunning.get() ? currentMillis : System.currentTimeMillis();
   }
 
   private TimeSource() {}

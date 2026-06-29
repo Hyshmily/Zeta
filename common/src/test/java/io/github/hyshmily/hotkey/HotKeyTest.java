@@ -168,12 +168,8 @@ class HotKeyTest {
     assertThatThrownBy(() -> workerOnly.isLocalHotKey("k")).isInstanceOf(HotKeyModeException.class);
     assertThatThrownBy(() -> workerOnly.peek("k")).isInstanceOf(HotKeyModeException.class);
     assertThatThrownBy(() -> workerOnly.invalidate("k")).isInstanceOf(HotKeyModeException.class);
-    assertThatThrownBy(() -> workerOnly.putThrough("k", "v", () -> {})).isInstanceOf(
-      HotKeyModeException.class
-    );
-    assertThatThrownBy(() -> workerOnly.putBeforeInvalidate("k", () -> {})).isInstanceOf(
-      HotKeyModeException.class
-    );
+    assertThatThrownBy(() -> workerOnly.putThrough("k", "v", () -> {})).isInstanceOf(HotKeyModeException.class);
+    assertThatThrownBy(() -> workerOnly.putBeforeInvalidate("k", () -> {})).isInstanceOf(HotKeyModeException.class);
   }
 
   @Test
@@ -561,7 +557,7 @@ class HotKeyTest {
     verify(hotKeyCache).putLocal("k", "v", 0L, 0L);
   }
 
-  // ── estimatedSize ──
+  // ── estimatedSizeOfKeysCount ──
 
   @Test
   void estimatedSize_shouldDelegateToCache() {
@@ -709,9 +705,7 @@ class HotKeyTest {
   @Test
   void areLocalHotKeys_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.areLocalHotKeys(List.of("k"))).isInstanceOf(
-      HotKeyModeException.class
-    );
+    assertThatThrownBy(() -> workerOnly.areLocalHotKeys(List.of("k"))).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── areWorkerHotKeys ──
@@ -801,9 +795,7 @@ class HotKeyTest {
   @Test
   void removeBlacklist_collection_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.removeBlacklist(List.of("x"))).isInstanceOf(
-      HotKeyModeException.class
-    );
+    assertThatThrownBy(() -> workerOnly.removeBlacklist(List.of("x"))).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── addWhitelist(Collection) / removeWhitelist(Collection) ──
@@ -831,9 +823,7 @@ class HotKeyTest {
   @Test
   void removeWhitelist_collection_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.removeWhitelist(List.of("x"))).isInstanceOf(
-      HotKeyModeException.class
-    );
+    assertThatThrownBy(() -> workerOnly.removeWhitelist(List.of("x"))).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── evaluateRules(Collection) ──

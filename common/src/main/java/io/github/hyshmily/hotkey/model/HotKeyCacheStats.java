@@ -28,7 +28,7 @@ package io.github.hyshmily.hotkey.model;
  *       {@code recordStats()} is enabled (automatic when Micrometer is on
  *       the classpath). When stats recording is disabled, all four fields
  *       report {@code 0}.</li>
- *   <li>{@code estimatedSize} is always available — it reflects the
+ *   <li>{@code estimatedSizeOfKeysCount} is always available — it reflects the
  *       underlying Caffeine estimate and does not require stats recording.</li>
  * </ul>
  *

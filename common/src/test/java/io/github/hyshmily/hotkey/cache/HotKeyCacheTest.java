@@ -32,7 +32,6 @@ import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import java.util.Arrays;
@@ -298,7 +297,7 @@ class HotKeyCacheTest {
       props,
       mock(ClusterHealthView.class)
     );
- 
+
     assertThat(cache.getWithSoftExpire("key", () -> "loaded")).contains("loaded");
   }
 
@@ -583,7 +582,7 @@ class HotKeyCacheTest {
   }
 
   /**
-   * Verifies that estimatedSize returns a positive count for cached entries.
+   * Verifies that estimatedSizeOfKeysCount returns a positive count for cached entries.
    */
   @Test
   void estimatedSize_shouldReturnEstimate() {
@@ -984,12 +983,12 @@ class HotKeyCacheTest {
         executor,
         Optional.of(publisher),
         Optional.of(reporter),
-      new RuleMatcher(Optional.empty(), Optional.empty()),
-      new VersionController(Optional.empty(), 60),
-      ttlConfig,
-      healthView
-    );
-  }
+        new RuleMatcher(Optional.empty(), Optional.empty()),
+        new VersionController(Optional.empty(), 60),
+        ttlConfig,
+        healthView
+      );
+    }
 
     @Test
     @DisplayName("loadAndCache should promote key to HOT when detected as hot")

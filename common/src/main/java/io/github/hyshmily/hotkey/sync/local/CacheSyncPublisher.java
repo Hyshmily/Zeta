@@ -125,15 +125,15 @@ public class CacheSyncPublisher {
   @PostConstruct
   public void init() {
     this.recentBroadcasts = Caffeine.newBuilder()
-        .expireAfterWrite(properties.getDedupWindowSeconds(), TimeUnit.SECONDS)
-        .maximumSize(properties.getDedupMaxSize())
-        .build();
+      .expireAfterWrite(properties.getDedupWindowSeconds(), TimeUnit.SECONDS)
+      .maximumSize(properties.getDedupMaxSize())
+      .build();
   }
 
   /**
    * Returns the current estimated size of the deduplication cache.
    * <p>
-   * This is a Caffeine {@code estimatedSize()} — it is an approximation and
+   * This is a Caffeine {@code estimatedSizeOfKeysCount()} — it is an approximation and
    * should
    * not be relied upon for exact accounting.
    *
@@ -305,19 +305,20 @@ public class CacheSyncPublisher {
 
     AtomicBoolean skipped = new AtomicBoolean(false);
     recentBroadcasts
-        .asMap()
-        .compute(compositeKey, (k, oldVersion) -> {
-          if (oldVersion != null && oldVersion >= version) {
-            log.debug(
-                "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
-                compositeKey,
-                oldVersion,
-                version);
-            skipped.set(true);
-            return oldVersion;
-          }
-          return version;
-        });
+      .asMap()
+      .compute(compositeKey, (k, oldVersion) -> {
+        if (oldVersion != null && oldVersion >= version) {
+          log.debug(
+            "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
+            compositeKey,
+            oldVersion,
+            version
+          );
+          skipped.set(true);
+          return oldVersion;
+        }
+        return version;
+      });
 
     if (!skipped.get()) {
       try {

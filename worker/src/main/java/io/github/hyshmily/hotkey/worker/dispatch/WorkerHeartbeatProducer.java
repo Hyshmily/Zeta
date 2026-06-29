@@ -19,6 +19,7 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HE
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.lang.management.ManagementFactory;
@@ -130,11 +131,7 @@ public class WorkerHeartbeatProducer {
       broadcaster,
       initEpoch(workerId, null),
       System.currentTimeMillis(),
-      Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "hb-producer");
-        t.setDaemon(true);
-        return t;
-      }),
+      Executors.newSingleThreadScheduledExecutor(new HotKeyThreadFactory("hotkey-hb-producer")),
       true,
       configTimestampCounter,
       pingIntervalMs

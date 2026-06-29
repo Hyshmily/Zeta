@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.worker.detection;
 
+import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -130,7 +132,7 @@ public class SlidingWindowDetector {
    */
   public boolean addCount(String key, long count) {
     // Capture current time once to avoid redundant system calls.
-    long now = System.currentTimeMillis();
+    long now = currentTimeMillis();
 
     // Obtain or create the circular buffer for this key.
     AtomicLong[] slices = windows.get(key);
@@ -174,7 +176,7 @@ public class SlidingWindowDetector {
    *                     considered stale and evicted; must be non-negative
    */
   public void evictStale(long staleAfterMs) {
-    long now = System.currentTimeMillis();
+    long now = currentTimeMillis();
 
     // This is a best‑effort snapshot; concurrent addCount calls may update
     // lastAccessTime after this collection, so we must re‑check later.
@@ -274,7 +276,7 @@ public class SlidingWindowDetector {
     if (slices == null) {
       return 0;
     }
-    int currentIndex = (int) ((System.currentTimeMillis() / timeMillisPerSlice) % slices.length);
+    int currentIndex = (int) ((currentTimeMillis() / timeMillisPerSlice) % slices.length);
     return getWindowSum(slices, currentIndex);
   }
 

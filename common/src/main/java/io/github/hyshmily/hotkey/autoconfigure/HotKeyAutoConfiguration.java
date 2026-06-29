@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
@@ -344,7 +346,7 @@ public class HotKeyAutoConfiguration {
                 // See Expiry Javadoc: Long.MAX_VALUE signals "no expiration".
                 return Long.MAX_VALUE;
               }
-              long remainingMs = entry.getHardExpireAtMs() - System.currentTimeMillis();
+              long remainingMs = entry.getHardExpireAtMs() - currentTimeMillis();
               return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
             }
             return TimeUnit.MINUTES.toNanos(properties.getLocalCacheTtlMinutes());
@@ -373,7 +375,7 @@ public class HotKeyAutoConfiguration {
                 // Preserve pure logical expiry across updates (e.g. broadcast refresh).
                 return Long.MAX_VALUE;
               }
-              long remainingMs = entry.getHardExpireAtMs() - System.currentTimeMillis();
+              long remainingMs = entry.getHardExpireAtMs() - currentTimeMillis();
               return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
             }
             return currentDuration;

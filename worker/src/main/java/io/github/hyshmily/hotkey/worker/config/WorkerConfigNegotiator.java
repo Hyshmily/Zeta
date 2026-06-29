@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.worker.config;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -55,7 +56,7 @@ public class WorkerConfigNegotiator {
    */
   @PostConstruct
   void syncOnStartup() {
-    Thread waitThread = new Thread(
+    Thread waitThread = new HotKeyThreadFactory("hotkey-config-sync-startup").newThread(
       () -> {
         try {
           boolean received = startupLatch.await(3000, TimeUnit.MILLISECONDS);
@@ -65,11 +66,8 @@ public class WorkerConfigNegotiator {
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
         }
-      },
-      "config-sync-startup"
+      }
     );
-
-    waitThread.setDaemon(true);
     waitThread.start();
   }
 

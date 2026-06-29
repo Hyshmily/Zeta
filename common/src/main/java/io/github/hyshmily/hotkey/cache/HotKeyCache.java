@@ -122,7 +122,6 @@ public class HotKeyCache {
   }
 
   /**
-  /**
    * Check whether an existing cache entry is managed by the Worker (HOT or COOL).
    * Worker-managed entries preserve their original normal TTLs through writes.
    *
@@ -1009,10 +1008,13 @@ public class HotKeyCache {
    */
   public void addBlacklist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
-      log.debug("blacklist: invalid cacheKey");
+      log.debug("addBlacklist: invalid cacheKey '{}'", cacheKey);
       return;
     }
-    TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.addRule(RuleMatcher.of(cacheKey, RuleAction.BLOCK)));
+    TransactionSupport.runNowOrAfterCommit(() -> {
+      ruleMatcher.addRule(RuleMatcher.of(cacheKey, RuleAction.BLOCK));
+      log.info("Blacklist added: '{}'", cacheKey);
+    });
   }
 
   /**
@@ -1023,12 +1025,13 @@ public class HotKeyCache {
    */
   public void addWhitelist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
-      log.debug("whitelist: invalid cacheKey");
+      log.debug("addWhitelist: invalid cacheKey '{}'", cacheKey);
       return;
     }
-    TransactionSupport.runNowOrAfterCommit(() ->
-      ruleMatcher.addRule(RuleMatcher.of(cacheKey, RuleAction.ALLOW_NO_REPORT))
-    );
+    TransactionSupport.runNowOrAfterCommit(() -> {
+      ruleMatcher.addRule(RuleMatcher.of(cacheKey, RuleAction.ALLOW_NO_REPORT));
+      log.info("Whitelist added: '{}'", cacheKey);
+    });
   }
 
   /**
@@ -1038,10 +1041,14 @@ public class HotKeyCache {
    */
   public void unBlacklist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
-      log.debug("unblacklist: invalid cacheKey");
+      log.debug("unBlacklist: invalid cacheKey '{}'", cacheKey);
       return;
     }
-    TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.removeRule(cacheKey, RuleAction.BLOCK));
+    TransactionSupport.runNowOrAfterCommit(() -> {
+      if (ruleMatcher.removeRule(cacheKey, RuleAction.BLOCK)) {
+        log.info("Blacklist removed: '{}'", cacheKey);
+      }
+    });
   }
 
   /**
@@ -1051,10 +1058,14 @@ public class HotKeyCache {
    */
   public void unWhitelist(String cacheKey) {
     if (invalidCacheKey(cacheKey)) {
-      log.debug("unwhitelist: invalid cacheKey");
+      log.debug("unWhitelist: invalid cacheKey '{}'", cacheKey);
       return;
     }
-    TransactionSupport.runNowOrAfterCommit(() -> ruleMatcher.removeRule(cacheKey, RuleAction.ALLOW_NO_REPORT));
+    TransactionSupport.runNowOrAfterCommit(() -> {
+      if (ruleMatcher.removeRule(cacheKey, RuleAction.ALLOW_NO_REPORT)) {
+        log.info("Whitelist removed: '{}'", cacheKey);
+      }
+    });
   }
 
   /**
@@ -1104,7 +1115,7 @@ public class HotKeyCache {
    * Return a snapshot of basic L1 cache statistics.
    * <p>
    * Hit/miss/eviction counters are populated only when Caffeine's
-   * {@code recordStats()} is enabled.  {@code estimatedSize} is always
+   * {@code recordStats()} is enabled.  {@code estimatedSizeOfKeysCount} is always
    * available.
    *
    * @return a {@link HotKeyCacheStats} record; hit/miss counters are {@code 0}

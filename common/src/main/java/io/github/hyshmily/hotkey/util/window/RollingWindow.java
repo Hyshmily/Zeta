@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.util.window;
 
+import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
+
 /**
  * A fixed-size time-based sliding window backed by a circular {@code long[]}.
  *
@@ -59,7 +61,7 @@ public final class RollingWindow {
     this.windowSize = windowSize;
     this.bucketDurationMs = windowDurationMs / windowSize;
     this.buckets = new long[windowSize];
-    this.windowStart = System.currentTimeMillis();
+    this.windowStart = currentTimeMillis();
   }
 
   /**
@@ -147,7 +149,7 @@ public final class RollingWindow {
    */
   public synchronized void reset() {
     java.util.Arrays.fill(buckets, 0);
-    windowStart = System.currentTimeMillis();
+    windowStart = currentTimeMillis();
     currentBucket = 0;
   }
 
@@ -162,7 +164,7 @@ public final class RollingWindow {
 
   /** Advance the window, zeroing buckets that have elapsed. */
   private void tick() {
-    long now = System.currentTimeMillis();
+    long now = currentTimeMillis();
     long elapsed = now - windowStart;
     if (elapsed < bucketDurationMs) {
       return;

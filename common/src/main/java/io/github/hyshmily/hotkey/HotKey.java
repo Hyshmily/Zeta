@@ -730,7 +730,7 @@ public class HotKey {
    * Return a snapshot of basic L1 cache statistics.
    * <p>
    * Hit/miss/eviction counters are populated only when Caffeine's
-   * {@code recordStats()} is enabled. {@code estimatedSize} is always
+   * {@code recordStats()} is enabled. {@code estimatedSizeOfKeysCount} is always
    * available.
    *
    * @return a {@link HotKeyCacheStats} record, or {@code null} in Worker-only mode;
@@ -1453,7 +1453,4 @@ public class HotKey {
       throw new HotKeyModeException(operation, currentModeLabel(), "App-mode TopK detector");
     }
   }
-
-
 }
-

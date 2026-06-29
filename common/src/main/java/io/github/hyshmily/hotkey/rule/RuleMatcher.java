@@ -183,10 +183,24 @@ public class RuleMatcher {
    *             its internal pattern is compiled
    */
   public void addRule(Rule rule) {
+    Objects.requireNonNull(rule, "rule must not be null");
+    if (rule.getPattern() == null || rule.getPattern().isEmpty()) {
+      throw new IllegalArgumentException("pattern must not be null or empty");
+    }
+    if (rule.getAction() == null) {
+      throw new IllegalArgumentException("action must not be null");
+    }
+
     rule.prepare();
     rulesList.add(rule);
     rulesVersion.incrementAndGet();
     persistAndBroadcastRules();
+
+    if (log.isInfoEnabled()) {
+      log.info(
+        "Rule added: pattern='{}', type={}, action={} (total: {}, version: {})",
+        rule.getPattern(), rule.getType(), rule.getAction(), rulesList.size(), rulesVersion.get());
+    }
   }
 
   /**
@@ -205,14 +219,17 @@ public class RuleMatcher {
    *         if no matching rule was found
    */
   public boolean removeRule(String pattern, RuleAction action) {
-    log.info("Attempting to remove rule: pattern='{}', action={}", pattern, action);
     boolean removed = rulesList.removeIf(
       existing -> existing.getPattern().equals(pattern) && existing.getAction() == action
     );
     if (removed) {
       rulesVersion.incrementAndGet();
-
       persistAndBroadcastRules();
+      log.info(
+        "Rule removed: pattern='{}', action={} (total: {}, version: {})",
+        pattern, action, rulesList.size(), rulesVersion.get());
+    } else {
+      log.warn("Rule not found for removal: pattern='{}', action={}", pattern, action);
     }
     return removed;
   }
@@ -226,11 +243,12 @@ public class RuleMatcher {
    * empty state.
    */
   public void clearRules() {
+    int before = rulesList.size();
     rulesList.clear();
     rulesVersion.incrementAndGet();
 
     persistAndBroadcastRules();
-    log.info("All rules cleared and broadcasted");
+    log.info("All rules cleared (removed: {}, version: {})", before, rulesVersion.get());
   }
 
   /**
@@ -246,13 +264,16 @@ public class RuleMatcher {
   public int removeRulesByAction(RuleAction action) {
     int before = rulesList.size();
     rulesList.removeIf(r -> r.getAction() == action);
+    int removed = before - rulesList.size();
 
-    if (rulesList.size() < before) {
+    if (removed > 0) {
       rulesVersion.incrementAndGet();
-
       persistAndBroadcastRules();
+      log.info(
+        "Rules removed by action: {} (removed: {}, total: {}, version: {})",
+        action, removed, rulesList.size(), rulesVersion.get());
     }
-    return before - rulesList.size();
+    return removed;
   }
 
   /**
@@ -267,10 +288,12 @@ public class RuleMatcher {
    */
   public void removeRule(int index) {
     if (index >= 0 && index < rulesList.size()) {
-      rulesList.remove(index);
+      Rule removed = rulesList.remove(index);
       rulesVersion.incrementAndGet();
-
       persistAndBroadcastRules();
+      log.info(
+        "Rule removed by index {}: pattern='{}', action={} (total: {}, version: {})",
+        index, removed.getPattern(), removed.getAction(), rulesList.size(), rulesVersion.get());
     }
   }
 
@@ -320,12 +343,14 @@ public class RuleMatcher {
    *     insertion, must not be {@code null}
    */
   public void replaceRules(List<Rule> newRules) {
+    int oldSize = rulesList.size();
     List<Rule> replacement = new CopyOnWriteArrayList<>();
     newRules.forEach(r -> {
       r.prepare();
       replacement.add(r);
     });
     rulesList = replacement;
+    log.info("Rules replaced: {} -> {} rules", oldSize, replacement.size());
   }
 
   /** @return a snapshot of the current rules (safe for iteration). */

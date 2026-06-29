@@ -282,6 +282,52 @@ class BufferedCounterTest {
   }
 
   @Test
+  void constructor_withCustomParams_shouldUseThem() throws Exception {
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    try {
+      List<Map<String, Long>> customBatches = new ArrayList<>();
+      BufferedCounter custom = new BufferedCounter(customBatches::add, 5, 50, 0.8, sched);
+      custom.afterPropertiesSet();
+
+      custom.count("k1", 1);
+      custom.count("k2", 1);
+      custom.count("k3", 1);
+      custom.count("k4", 1);
+
+      Thread.sleep(150);
+      custom.destroy();
+
+      assertThat(customBatches).isNotEmpty();
+      long total = customBatches.stream()
+        .flatMap(m -> m.values().stream())
+        .mapToLong(Long::longValue)
+        .sum();
+      assertThat(total).isEqualTo(4);
+    } finally {
+      sched.shutdown();
+    }
+  }
+
+  @Test
+  void estimatedSize_OfKeysCount_shouldReturnSumOfBothBuffers() {
+    counter.count("a", 1);
+    counter.count("b", 2);
+    assertThat(counter.estimatedSizeOfKeysCount()).isEqualTo(2);
+  }
+
+  @Test
+  void clear_shouldDrainAllCounters() {
+    counter.count("x", 5);
+    counter.count("y", 3);
+    counter.clear();
+
+    List<Map<String, Long>> afterClear = new ArrayList<>();
+    BufferedCounter cleared = new BufferedCounter(afterClear::add);
+    cleared.destroy();
+    assertThat(afterClear).isEmpty();
+  }
+
+  @Test
   void destroy_withConcurrentCount_shouldNotDeadlock() throws Exception {
     ExecutorService exec = Executors.newFixedThreadPool(2);
     AtomicBoolean stopped = new AtomicBoolean(false);

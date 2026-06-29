@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.exception;
 
+import lombok.Getter;
+
 /**
  * Thrown when a {@link io.github.hyshmily.hotkey.HotKey} API is called in a
  * deployment mode that does not support it.
@@ -40,13 +42,13 @@ package io.github.hyshmily.hotkey.exception;
  * @see io.github.hyshmily.hotkey.HotKey#isApp()
  * @see io.github.hyshmily.hotkey.HotKey#isWorker()
  */
+@Getter
 public class HotKeyModeException extends RuntimeException {
 
-  /** The API operation name that triggered the exception. */
   private final String operation;
-  /** Human-readable label of the current deployment mode. */
+
   private final String currentMode;
-  /** Human-readable label of the mode required to perform the operation. */
+
   private final String requiredMode;
 
   /**
@@ -59,34 +61,9 @@ public class HotKeyModeException extends RuntimeException {
    *                      the operation (e.g. {@code "App-mode cache"})
    */
   public HotKeyModeException(String operation, String currentMode, String requiredMode) {
-    super("HotKey '" + operation + "' requires " + requiredMode +
-          ", but instance is in " + currentMode);
+    super("HotKey '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode);
     this.operation = operation;
     this.currentMode = currentMode;
     this.requiredMode = requiredMode;
-  }
-
-  /**
-   * Returns the API operation name that triggered the exception.
-   * @return the operation name (never {@code null})
-   */
-  public String getOperation() {
-    return operation;
-  }
-
-  /**
-   * Returns the human-readable label of the current deployment mode.
-   * @return the current mode label (never {@code null})
-   */
-  public String getCurrentMode() {
-    return currentMode;
-  }
-
-  /**
-   * Returns the human-readable label of the mode required to perform the operation.
-   * @return the required mode label (never {@code null})
-   */
-  public String getRequiredMode() {
-    return requiredMode;
   }
 }

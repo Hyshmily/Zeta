@@ -164,6 +164,8 @@ public class HotKeyEndpoint {
             Map.of(
               "id",
               rule.getId(),
+              "action",
+              rule.getAction(),
               "type",
               rule.getType(),
               "pattern",

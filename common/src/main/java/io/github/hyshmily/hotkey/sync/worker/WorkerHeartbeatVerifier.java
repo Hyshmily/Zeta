@@ -17,7 +17,10 @@ package io.github.hyshmily.hotkey.sync.worker;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
+import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
+
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
@@ -101,11 +104,7 @@ public class WorkerHeartbeatVerifier {
       config.pingTimeoutMs,
       config.degradeAfterFailures,
       config.verifyMaxBackoffMs,
-      Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "hb-verifier");
-        t.setDaemon(true);
-        return t;
-      }),
+      Executors.newSingleThreadScheduledExecutor(new HotKeyThreadFactory("hotkey-hb-verifier")),
       true
     );
   }
@@ -223,8 +222,8 @@ public class WorkerHeartbeatVerifier {
 
       for (String workerId : suspected) {
         Long skipUntil = nextVerifyTime.get(workerId);
-        if (skipUntil != null && System.currentTimeMillis() < skipUntil) {
-          log.trace("Worker {} in backoff, skip (remaining={}ms)", workerId, skipUntil - System.currentTimeMillis());
+        if (skipUntil != null && currentTimeMillis() < skipUntil) {
+          log.trace("Worker {} in backoff, skip (remaining={}ms)", workerId, skipUntil - currentTimeMillis());
           continue;
         }
 
@@ -235,7 +234,7 @@ public class WorkerHeartbeatVerifier {
           int attempt = healthView.getVerifyFailures(workerId);
           long backoffMs = computeBackoffMs(attempt);
 
-          nextVerifyTime.put(workerId, System.currentTimeMillis() + backoffMs);
+          nextVerifyTime.put(workerId, currentTimeMillis() + backoffMs);
           log.warn("Worker {} verification failed (attempt={}, backoff={}ms)", workerId, attempt, backoffMs);
         } else {
           nextVerifyTime.remove(workerId);

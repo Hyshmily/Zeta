@@ -104,7 +104,7 @@ public class BbrRateLimiter {
     this.passBuckets = new long[bucketCount];
     this.rtBuckets = new long[bucketCount];
     this.rtCounts = new int[bucketCount];
-    this.windowStart = System.currentTimeMillis();
+    this.windowStart = currentTimeMillis();
   }
 
   /**

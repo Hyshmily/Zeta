@@ -21,6 +21,7 @@ import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
+import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.TimeSource;
 import jakarta.annotation.PostConstruct;
@@ -62,11 +63,8 @@ public class HotKeyFacadeAutoConfiguration {
   @Bean("hotKeyScheduler")
   @ConditionalOnMissingBean(name = "hotKeyScheduler")
   public ScheduledExecutorService hotKeyScheduler() {
-    return Executors.newScheduledThreadPool(properties.getSchedulerPoolSize(), r -> {
-      Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_SCHEDULER);
-      t.setDaemon(true);
-      return t;
-    });
+    return Executors.newScheduledThreadPool(properties.getSchedulerPoolSize(),
+      new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER));
   }
 
   /**

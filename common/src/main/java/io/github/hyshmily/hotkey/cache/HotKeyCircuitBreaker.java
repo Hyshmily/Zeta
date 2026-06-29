@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.cache;
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.ScheduledExecutorService;
@@ -45,11 +46,7 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
 
   private static final ScheduledExecutorService SCHEDULER = new ScheduledThreadPoolExecutor(
     Runtime.getRuntime().availableProcessors(),
-    r -> {
-      Thread t = new Thread(r, "hotkey-cb");
-      t.setDaemon(true);
-      return t;
-    }
+    new HotKeyThreadFactory("hotkey-cb")
   );
 
   private final HotKeyProperties.CircuitBreaker config;
@@ -62,6 +59,14 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
   private final AtomicLong lastHalfOpenAttempt = new AtomicLong(0L);
   private final ScheduledFuture<?> slideFuture;
 
+  /**
+   * Creates a new circuit breaker with sliding-window failure tracking.
+   * <p>
+   * Initialises the success/failure bucket ring and schedules a periodic
+   * slide task on the shared {@link #SCHEDULER} to advance the window.
+   *
+   * @param config the circuit breaker configuration (window size, thresholds, etc.)
+   */
   public HotKeyCircuitBreaker(HotKeyProperties.CircuitBreaker config) {
     this.config = config;
     this.bucketSize = config.getWindowBuckets();

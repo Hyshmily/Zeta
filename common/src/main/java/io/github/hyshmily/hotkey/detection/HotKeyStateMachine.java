@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.detection;
 
 import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
+import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
@@ -189,7 +190,7 @@ public class HotKeyStateMachine {
     keyLocks.get(key).lock();
     try {
       // Touch timestamp for eviction tracking
-      stateTimestamps.put(key, System.currentTimeMillis());
+      stateTimestamps.put(key, currentTimeMillis());
 
       KeyState state = states.computeIfAbsent(key, k -> new KeyState());
 
@@ -274,7 +275,7 @@ public class HotKeyStateMachine {
    * @param staleAfterMs maximum idle time in milliseconds before a key is evicted
    */
   public void evictStale(long staleAfterMs) {
-    long now = System.currentTimeMillis();
+    long now = currentTimeMillis();
     // Remove state entries whose last touch is older than the threshold
     states
       .keySet()

@@ -34,6 +34,7 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
+import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
@@ -323,11 +324,8 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotKeySyncScheduler")
     public ScheduledExecutorService hotKeySyncScheduler(CacheSyncProperties properties) {
       int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
-      return Executors.newScheduledThreadPool(poolSize, r -> {
-        Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-sync");
-        t.setDaemon(true);
-        return t;
-      });
+      return Executors.newScheduledThreadPool(poolSize,
+        new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-sync"));
     }
 
     /**
@@ -552,11 +550,8 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotKeyWorkerSchedScheduler")
     public ScheduledExecutorService hotKeyWorkerSchedScheduler(WorkerListenerProperties properties) {
       int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
-      return Executors.newScheduledThreadPool(poolSize, r -> {
-        Thread t = new Thread(r, HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-worker");
-        t.setDaemon(true);
-        return t;
-      });
+      return Executors.newScheduledThreadPool(poolSize,
+        new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-worker"));
     }
 
     /**
