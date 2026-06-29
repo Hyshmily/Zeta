@@ -16,8 +16,6 @@
 
 package io.github.hyshmily.hotkey.worker.detection;
 
-import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
-
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -108,7 +106,7 @@ public class GlobalQpsEstimator {
    *         if no accesses have been recorded
    */
   public long getWindowTotal() {
-    long now = currentTimeMillis();
+    long now = System.currentTimeMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) % slices.length);
     long sum = 0;
     for (int i = 0; i < windowSize; i++) {

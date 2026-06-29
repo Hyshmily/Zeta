@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.hotkey.sharding;
 
-import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
-
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
 import java.util.Set;
@@ -136,7 +134,7 @@ public class ClusterHealthView {
    */
   public void onHeartbeat(WorkerHeartbeatMessage hb) {
     records.compute(hb.workerId(), (id, existing) -> {
-      long now = currentTimeMillis();
+      long now = System.currentTimeMillis();
 
       if (existing == null || hb.epoch() > existing.epoch) {
         WorkerHealthRecord r = new WorkerHealthRecord();
@@ -162,7 +160,7 @@ public class ClusterHealthView {
       return existing;
     });
 
-    lastAnyHeartbeatTime = currentTimeMillis();
+    lastAnyHeartbeatTime = System.currentTimeMillis();
     if (degraded && isClusterHealthy()) {
       log.info(
         "Cluster has recovered from degraded state. Alive workers: {}/{}, clearing degraded flag.",
@@ -186,7 +184,7 @@ public class ClusterHealthView {
    */
   public void recordPong(String workerId) {
     records.computeIfPresent(workerId, (id, r) -> {
-      r.lastHeartbeatTime = currentTimeMillis();
+      r.lastHeartbeatTime = System.currentTimeMillis();
       r.verifyFailures = 0;
       return r;
     });
@@ -346,7 +344,7 @@ public class ClusterHealthView {
      *         within the timeout window
      */
     public boolean isAlive(long timeoutMs) {
-      return readyToServe && !stale && currentTimeMillis() - lastHeartbeatTime < timeoutMs;
+      return readyToServe && !stale && System.currentTimeMillis() - lastHeartbeatTime < timeoutMs;
     }
   }
 }
