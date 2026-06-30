@@ -87,36 +87,9 @@ Beyond that, HotKey also provides:
 >
 > Default full-chain end-to-end latency: **300ms (P99)**
 
-```
-          ┌──────────────┬──────────────┬──────────────┬───────────────┐
-          0ms            50ms          100ms          150ms          200ms
-          │              │              │              │
-L1 Hit    █┤  0.01ms
-          (Caffeine direct hit, instant return)
 
-L1 Miss   ██┤  +~10ms ← SingleFlight(3s timeout) + L2 Redis/DataBase fallback
+![latency](docs/img/latency.png)
 
-Report    ███████████┤  +~25ms(P50) ← report-interval-ms=50 triggers flush
-
-↑AMQP pub ██┤  +~5ms ← network + RabbitMQ enqueue
-
-Worker    ██┤  +~5ms ← dequeue + deserialization
-consume
-
-Sliding   ██████████████████████████████┤  +~100ms (hot key identifiable within ~100ms)
-window
-
-State     ██████████████████████████████┤  +~100ms (2×confirm window, 50ms each)
-machine
-
-↓Decision ██┤  +~5ms (AMQP fanout to all App instances)
-broadcast
-
-Warmup    ███┤  +~25ms(P50) ← warmupJitterMs=50, uniform avg
-jitter
-
-L1 Cache  █┤ +~5ms ← (Caffeine cache , query from Redis)
-```
 
 HotKey is inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project; algorithmic support comes from [Aegis](https://github.com/go-kratos/aegis).
 
@@ -527,14 +500,14 @@ Optional<String> r = hotKey.get("user:123", () -> redisTemplate.opsForValue().ge
 Optional<String> r = hotKey.getWithSoftExpire("user:123", () -> redisTemplate.opsForValue().get("user:123"));
 
 // E. Fluent read API with fallback chain
-Optional<User> user = hotKey
+User user = hotKey
   .read("user:42")
   .withPrimary(userRepo::findById)
   .thenExecute(backupRepo::findById)
   .withHardTtl(30_000)
   .withSoftTtl(10_000)
   .allowBroadcast()
-  .execute();
+  .executeOrNull();
 ```
 
 **Soft expiry** returns stale values immediately while triggering an async background refresh. Redis stores pure values without wrapping — HotKey manages expiry entirely at the L1 Caffeine layer.

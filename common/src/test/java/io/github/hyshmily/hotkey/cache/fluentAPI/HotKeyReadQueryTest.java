@@ -185,9 +185,9 @@ class HotKeyReadQueryTest {
   void execute_shouldReturnDefaultWhenAllNull() {
     when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
     when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
-    Optional<String> result =
-      query.withPrimary(() -> null).thenExecute(() -> null).orElseThisTime("default").execute();
-    assertThat(result).contains("default");
+    String result =
+      query.withPrimary(() -> null).thenExecute(() -> null).executeOrNull("default");
+    assertThat(result).isEqualTo("default");
   }
 
   // ── All null, no default → empty ──
@@ -198,6 +198,24 @@ class HotKeyReadQueryTest {
     when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
     Optional<String> result = query.withPrimary(() -> null).execute();
     assertThat(result).isEmpty();
+  }
+
+  // ── executeOrNull ──
+
+  @Test
+  void executeOrNull_shouldReturnNullWhenEmpty() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    String result = query.withPrimary(() -> null).executeOrNull();
+    assertThat(result).isNull();
+  }
+
+  @Test
+  void executeOrNull_shouldReturnValueWhenCached() {
+    when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
+    when(hotKey.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("cached"));
+    String result = query.withPrimary(() -> "db").executeOrNull();
+    assertThat(result).isEqualTo("cached");
   }
 
   // ── TTL overrides ──
@@ -245,8 +263,7 @@ class HotKeyReadQueryTest {
       .allowNull()
       .thenExecute(fallback)
       .withHardTtl(1000L)
-      .withSoftTtl(100L)
-      .orElseThisTime("oops");
+      .withSoftTtl(100L);
     assertThat(q.execute()).contains("v");
   }
 

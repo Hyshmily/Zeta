@@ -35,17 +35,17 @@ import org.springframework.cache.support.NullValue;
  *
  * <h3>Usage</h3>
  * <pre>
- *   Optional&lt;User&gt; user = hotKey.read("user:42")
+ *   User user = hotKey.read("user:42")
  *       .withPrimary(userRepository::findById)
  *       .thenExecute(backupRepository::findById)
  *       .withHardTtl(30_000)
  *       .withSoftTtl(10_000)
  *       .allowBroadcast()
- *       .execute();
+ *       .executeOrNull();
  * </pre>
  *
  * <p>Created via {@link HotKey#read(String)}. Instances are single-use;
- * call {@link #execute()} exactly once.
+ * call {@link #execute()} or {@link #executeOrNull()} exactly once.
  */
 public class HotKeyReadQuery<T> {
 
@@ -58,8 +58,6 @@ public class HotKeyReadQuery<T> {
   private boolean isAllowNullCaching = true;
   private boolean isAllowBroadcast = false;
   private final List<Supplier<T>> fallbacks = new ArrayList<>();
-  private T defaultValThisTime = null;
-  private boolean defaultSetThisTime = false;
   private final AtomicBoolean executed = new AtomicBoolean(false);
 
   /**
@@ -200,23 +198,6 @@ public class HotKeyReadQuery<T> {
   }
 
   /**
-   * Set a default value to return when all readers return {@code null}.
-   *
-   * <p>The default value is <b>not</b> cached.  It is returned only for
-   * this single invocation of {@link #execute()}.  If a value is set via
-   * both {@code orElseThisTime} and a fallback reader, the fallback value
-   * takes precedence and is cached.
-   *
-   * @param defaultValue the value to return if all readers return {@code null}
-   * @return this query instance
-   */
-  public HotKeyReadQuery<T> orElseThisTime(T defaultValue) {
-    this.defaultValThisTime = defaultValue;
-    this.defaultSetThisTime = true;
-    return this;
-  }
-
-  /**
    * Execute the read query.
    *
    * <p>The execution order is:
@@ -228,13 +209,44 @@ public class HotKeyReadQuery<T> {
    *   <li>If no value is available, iterate fallback readers in registration
    *       order.  Each non-null result is cached (locally or with broadcast
    *       depending on {@code isAllowBroadcast}) and returned.</li>
-   *   <li>If all readers return {@code null}, return the default value
-   *       (if set) or {@link Optional#empty()}.</li>
+   *   <li>If all readers return {@code null}, return {@link Optional#empty()}.</li>
    * </ol>
    *
    * @return an {@link Optional} containing the resolved value, or empty
    * @throws HotKeyBlockedException if the key matches a block rule
    */
+  /**
+   * Execute the read query and return the resolved value, or {@code null} if no
+   * value is available.
+   *
+   * <p>Convenience terminal method that preserves compile-time type inference
+   * in simple {@code return} statements, avoiding the need to unwrap an
+   * {@link Optional}.
+   *
+   * @return the resolved value, or {@code null} if empty
+   * @throws HotKeyBlockedException if the key matches a block rule
+   * @throws IllegalStateException if this query has already been executed
+   */
+  public T executeOrNull() {
+    return execute().orElse(null);
+  }
+
+  /**
+   * Execute the read query and return the resolved value, or the given
+   * {@code defaultValue} if all readers return {@code null}.
+   *
+   * <p>The default value is <b>not</b> cached.  It is returned only for this
+   * single invocation.
+   *
+   * @param defaultValue the value to return if all readers return {@code null}
+   * @return the resolved value, or {@code defaultValue} if empty
+   * @throws HotKeyBlockedException if the key matches a block rule
+   * @throws IllegalStateException if this query has already been executed
+   */
+  public T executeOrNull(T defaultValue) {
+    return execute().orElse(defaultValue);
+  }
+
   @SuppressWarnings("unchecked")
   public Optional<T> execute() {
     if (!executed.compareAndSet(false, true)) {
@@ -287,9 +299,6 @@ public class HotKeyReadQuery<T> {
       }
     }
 
-    if (defaultSetThisTime) {
-      return Optional.ofNullable(defaultValThisTime);
-    }
     return Optional.empty();
   }
 }

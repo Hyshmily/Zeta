@@ -47,7 +47,11 @@
 - **Report** — Per-key frequency count sent from App to Worker via AMQP. Aggregated locally (Caffeine, 30s, 100k max) before batching.
 - **Broadcast** — AMQP exchange `hotkey.broadcast.exchange` for cross-instance sync (cache values, HOT/COOL decisions) and Worker-to-App decision delivery.
 - **putLocal** — Local-only L1 write without version bump, broadcast, hot-key detection, or reporting. Preserves existing entry metadata. Useful for fallback caching and cache pre-warming.
-- **Fluent Read API** — `HotKeyReadQuery` returned by `hotKey.read(key)`. Builder pattern: `.withPrimary(reader)`, `.thenExecute(fallback)`, `.withTtl(hard, soft)`, `.allowBroadcast()`, `.allowNull()`, `.execute()`. Eliminates manual fallback chain orchestration.
+- **Fluent Read API** — `HotKeyReadQuery` returned by `hotKey.read(key)`. Builder
+  pattern: `.withPrimary(reader)`, `.thenExecute(fallback)`, `.withTtl(hard, soft)`,
+  `.allowBroadcast()`, `.allowNull()`. Terminal: `.execute()` returns `Optional<T>`;
+  `.executeOrNull()` returns `T` directly. Eliminates manual fallback chain
+  orchestration.
 - **Fluent Write API** — `HotKeyWriteCommand` returned by `hotKey.write(key)`. Builder pattern: `.withHardTtl()`, `.withSoftTtl()`, `.putThrough(value, writer)`, `.putBeforeInvalidate(mutation)`, `.invalidate()`.
 - **CacheMode** — Enum: `GET` (standard cache-aside) or `GET_WITH_SOFT_EXPIRE` (stale-while-revalidate). Used by `HotKeyReadQuery.withPrimary(reader, mode)`.
 - **@Intercept** — AOP annotation for read-side interception. Calls `hotKeyDetector.add()` (keeps TopK accurate) but skips `reporter.record()` (avoids flooding Worker). Does NOT trigger Worker report flow. Applied via `HotKeyCacheExtensionAspect` on `@Cacheable` methods.
