@@ -44,8 +44,8 @@ import lombok.extern.slf4j.Slf4j;
  * a Worker restart.
  *
  * <p><b>Thread safety:</b> All record mutations use {@link ConcurrentHashMap#compute}
- * and {@code computeIfPresent} for atomic per-Worker updates. The {@code degraded}
- * flag and {@code lastAnyHeartbeatTime} are {@code volatile} fields safe for
+ * and {@code computeIfPresent} for atomic per-Worker updates. The
+ * {@code lastAnyHeartbeatTime} is a {@code volatile} field safe for
  * concurrent read/write.
  *
  * @see WorkerHeartbeatMessage
@@ -57,31 +57,14 @@ public class ClusterHealthView {
   /** Per-Worker health records keyed by Worker ID. Thread-safe via {@link ConcurrentHashMap}. */
   private final ConcurrentMap<String, WorkerHealthRecord> records = new ConcurrentHashMap<>();
 
-  /**
-   * -- GETTER --
-   *  Returns the current expected Worker count.
-   *
-   */
   @Getter
   private volatile int knownWorkerCount;
 
   private final long heartbeatTimeoutMs;
   private final int degradeAfterFailures;
 
-  /**
-   * -- SETTER --
-   *  Sets the minimum number of alive Workers required for the cluster to be
-   *  considered healthy. When set to 0 (default), the majority formula
-   *
-   *  is used.
-   *
-   */
   @Setter
   private volatile int minAliveWorkers;
-
-  @Setter
-  @Getter
-  private volatile boolean degraded;
 
   @Getter
   private volatile long lastAnyHeartbeatTime;
@@ -142,7 +125,6 @@ public class ClusterHealthView {
         r.workerId = hb.workerId();
         r.epoch = hb.epoch();
         r.lastHeartbeatTime = now;
-        r.firstHeartbeatTime = now;
         r.readyToServe = hb.readyToServe();
         return r;
       }
@@ -152,23 +134,12 @@ public class ClusterHealthView {
       }
 
       existing.lastHeartbeatTime = now;
-      existing.decisionVersionHwm = Math.max(existing.decisionVersionHwm, hb.decisionVersionHwm());
-      existing.loadFactor = hb.loadFactor();
       existing.readyToServe = hb.readyToServe();
       existing.stale = false;
-      existing.restarted = false;
       return existing;
     });
 
     lastAnyHeartbeatTime = System.currentTimeMillis();
-    if (degraded && isClusterHealthy()) {
-      log.info(
-        "Cluster has recovered from degraded state. Alive workers: {}/{}, clearing degraded flag.",
-        getAliveWorkerIds().size(),
-        knownWorkerCount
-      );
-      this.degraded = false;
-    }
   }
 
   /**
@@ -177,8 +148,6 @@ public class ClusterHealthView {
    *
    * <p>Resets the Worker's verification failure count to zero and updates its
    * heartbeat timestamp to now, effectively restoring it to the alive set.
-   * If the cluster is currently degraded and this PONG brings it back to health,
-   * the degraded flag is cleared.
    *
    * @param workerId the Worker that responded with a PONG; must not be null
    */
@@ -188,15 +157,6 @@ public class ClusterHealthView {
       r.verifyFailures = 0;
       return r;
     });
-
-    if (degraded && isClusterHealthy()) {
-      log.info(
-        "Cluster has recovered from degraded state via pong. Alive workers: {}/{}, clearing degraded flag.",
-        getAliveWorkerIds().size(),
-        knownWorkerCount
-      );
-      this.degraded = false;
-    }
   }
 
   /**
@@ -232,6 +192,15 @@ public class ClusterHealthView {
   public int getVerifyFailures(String workerId) {
     WorkerHealthRecord r = records.get(workerId);
     return r != null ? r.verifyFailures : 0;
+  }
+
+  /**
+   * Removes the health record for a Worker that has been confirmed dead.
+   *
+   * @param workerId the Worker to remove; must not be null
+   */
+  public void removeRecord(String workerId) {
+    records.remove(workerId);
   }
 
   /**
@@ -316,12 +285,8 @@ public class ClusterHealthView {
     public volatile String workerId;
     public volatile long epoch;
     public volatile long lastHeartbeatTime;
-    public volatile long firstHeartbeatTime;
-    public volatile long decisionVersionHwm;
-    public volatile double loadFactor;
     public volatile boolean readyToServe;
     public volatile boolean stale;
-    public volatile boolean restarted;
     public volatile int verifyFailures;
 
     /**

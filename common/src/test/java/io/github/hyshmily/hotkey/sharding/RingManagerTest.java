@@ -18,7 +18,6 @@ package io.github.hyshmily.hotkey.sharding;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
@@ -26,15 +25,7 @@ import org.junit.jupiter.api.Test;
 class RingManagerTest {
 
   private static void registerAlive(ClusterHealthView healthView, String nodeId) {
-    healthView.onHeartbeat(
-      new WorkerHeartbeatMessage(nodeId, 1, System.currentTimeMillis(), 0, 0, true, 0, 0, 0, 0, 0)
-    );
-  }
-
-  @Test
-  void defaultMode_shouldBeAuto() {
-    RingManager manager = new RingManager(10);
-    assertThat(manager.isManualMode()).isFalse();
+    healthView.onHeartbeat(new WorkerHeartbeatMessage(nodeId, 1, 0, 0, true, 0, 0, 0, 0));
   }
 
   @Test
@@ -71,81 +62,13 @@ class RingManagerTest {
   }
 
   @Test
-  void addNode_shouldSwitchToManualMode() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("manual-a");
-    manager.addNode("manual-b");
-
-    assertThat(manager.isManualMode()).isTrue();
-    assertThat(manager.getCurrentNodes()).containsExactlyInAnyOrder("manual-a", "manual-b");
-  }
-
-  @Test
-  void addNode_shouldIgnoreSubsequentReconcile() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("manual-a");
-
-    manager.reconcileFromHealthView(new ClusterHealthView(0, 30000, 3));
-    assertThat(manager.getCurrentNodes()).containsExactly("manual-a");
-  }
-
-  @Test
-  void addNode_shouldBeIncremental() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("first");
-    assertThat(manager.getCurrentNodes()).containsExactly("first");
-
-    manager.addNode("second");
-    assertThat(manager.getCurrentNodes()).containsExactlyInAnyOrder("first", "second");
-  }
-
-  @Test
-  void removeNode_shouldWorkInManualMode() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("a");
-    manager.addNode("b");
-    manager.removeNode("a");
-    assertThat(manager.getCurrentNodes()).containsExactly("b");
-  }
-
-  @Test
-  void removeNode_shouldStartManualModeFromCurrentNodes() {
-    RingManager manager = new RingManager(10);
-    ClusterHealthView healthView = new ClusterHealthView(3, 30000, 3);
-    registerAlive(healthView, "a");
-    registerAlive(healthView, "b");
-    registerAlive(healthView, "c");
-    manager.reconcileFromHealthView(healthView);
-    manager.removeNode("c");
-
-    assertThat(manager.isManualMode()).isTrue();
-    assertThat(manager.getCurrentNodes()).containsExactlyInAnyOrder("a", "b");
-  }
-
-  @Test
-  void resetToAuto_shouldReenableAutoMode() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("manual");
-    assertThat(manager.isManualMode()).isTrue();
-
-    manager.resetToAuto();
-    assertThat(manager.isManualMode()).isFalse();
-
-    ClusterHealthView healthView = new ClusterHealthView(1, 30000, 3);
-    registerAlive(healthView, "auto-a");
-    manager.reconcileFromHealthView(healthView);
-    assertThat(manager.getCurrentNodes()).containsExactly("auto-a");
-  }
-
-  @Test
   void routeNode_shouldRouteToCorrectNode() {
     RingManager manager = new RingManager(10);
-    manager.addNode("target-a");
-    manager.addNode("target-b");
-
     ClusterHealthView healthView = new ClusterHealthView(2, 30000, 3);
     registerAlive(healthView, "target-a");
     registerAlive(healthView, "target-b");
+    manager.reconcileFromHealthView(healthView);
+
     String node = manager.routeNode("some-key", healthView);
     assertThat(node).isIn("target-a", "target-b");
   }
@@ -174,48 +97,11 @@ class RingManagerTest {
   }
 
   @Test
-  void reconcile_doesNotAffectManualMode() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("manual");
-    manager.reconcileFromHealthView(new ClusterHealthView(0, 30000, 3));
-    assertThat(manager.getCurrentNodes()).containsExactly("manual");
-  }
-
-  @Test
-  void addNode_withNull_shouldThrow() {
-    RingManager manager = new RingManager(10);
-    assertThatNullPointerException().isThrownBy(() -> manager.addNode(null));
-  }
-
-  @Test
-  void removeNode_withNull_shouldNotThrow() {
-    RingManager manager = new RingManager(10);
-    manager.removeNode(null);
-    assertThat(manager.getCurrentNodes()).isEmpty();
-  }
-
-  @Test
-  void removeNode_nonExistent_shouldBeIgnored() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("a");
-    manager.addNode("b");
-    manager.removeNode("non-existent");
-    assertThat(manager.getCurrentNodes()).containsExactlyInAnyOrder("a", "b");
-  }
-
-  @Test
-  void removeNode_onEmptyRing_shouldNotThrow() {
-    RingManager manager = new RingManager(10);
-    manager.removeNode("ghost");
-    assertThat(manager.getCurrentNodes()).isEmpty();
-  }
-
-  @Test
   void routeNode_withNullKey_shouldThrow() {
     RingManager manager = new RingManager(10);
-    manager.addNode("worker-1");
     ClusterHealthView hv = new ClusterHealthView(1, 30000, 3);
     registerAlive(hv, "worker-1");
+    manager.reconcileFromHealthView(hv);
     assertThatNullPointerException().isThrownBy(() -> manager.routeNode(null, hv));
   }
 
@@ -226,25 +112,6 @@ class RingManagerTest {
   }
 
   @Test
-  void resetToAuto_whenAlreadyAuto_shouldBeNoOp() {
-    RingManager manager = new RingManager(10);
-    manager.resetToAuto();
-    assertThat(manager.isManualMode()).isFalse();
-  }
-
-  @Test
-  void addRemoveCycle_shouldWorkRepeatedly() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("x");
-    manager.removeNode("x");
-    assertThat(manager.getCurrentNodes()).isEmpty();
-    manager.addNode("y");
-    assertThat(manager.getCurrentNodes()).containsExactly("y");
-    manager.removeNode("y");
-    assertThat(manager.getCurrentNodes()).isEmpty();
-  }
-
-  @Test
   void reconcileFromHealthView_withNull_shouldThrow() {
     RingManager manager = new RingManager(10);
     assertThatNullPointerException().isThrownBy(() -> manager.reconcileFromHealthView(null));
@@ -252,10 +119,6 @@ class RingManagerTest {
 
   // ── onRingReconciled callback (P0-1) ──
 
-  /**
-   * Verifies that onRingReconciled is invoked with the correct alive count
-   * when the ring is rebuilt during auto-mode reconciliation.
-   */
   @Test
   void reconcileFromHealthView_shouldInvokeOnRingReconciled() {
     RingManager manager = new RingManager(10);
@@ -272,28 +135,6 @@ class RingManagerTest {
     assertThat(capturedCount[0]).isEqualTo(3);
   }
 
-  /**
-   * Verifies that onRingReconciled is NOT invoked in manual mode
-   * (when overrideNodes is set via addNode).
-   */
-  @Test
-  void reconcileFromHealthView_withManualMode_shouldNotInvokeOnRingReconciled() {
-    RingManager manager = new RingManager(10);
-    manager.addNode("manual-a");
-
-    final boolean[] invoked = { false };
-    manager.setOnRingReconciled(count -> invoked[0] = true);
-
-    ClusterHealthView healthView = new ClusterHealthView(1, 30000, 3);
-    registerAlive(healthView, "auto-b");
-    manager.reconcileFromHealthView(healthView);
-
-    assertThat(invoked[0]).isFalse();
-  }
-
-  /**
-   * Verifies that onRingReconciled is NOT invoked when the alive set hasn't changed.
-   */
   @Test
   void reconcileFromHealthView_withSameNodes_shouldNotInvokeOnRingReconciled() {
     RingManager manager = new RingManager(10);
@@ -304,14 +145,11 @@ class RingManagerTest {
     manager.setOnRingReconciled(count -> invocationCount[0]++);
 
     manager.reconcileFromHealthView(healthView);
-    manager.reconcileFromHealthView(healthView); // second call, same nodes
+    manager.reconcileFromHealthView(healthView);
 
-    assertThat(invocationCount[0]).isEqualTo(1); // only called once on first rebuild
+    assertThat(invocationCount[0]).isEqualTo(1);
   }
 
-  /**
-   * Verifies that setting onRingReconciled to null does not cause NPE on reconcile.
-   */
   @Test
   void reconcileFromHealthView_withNullOnRingReconciled_shouldNotThrow() {
     RingManager manager = new RingManager(10);

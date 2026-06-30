@@ -212,8 +212,6 @@ class WorkerHeartbeatProducerTest {
       assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, 10);
       assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, 3);
       assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTs);
-      // confirm=3, cool=10, grace=3 → fingerprint = 31*(31*3+10)+3 = 3196
-      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_FP, 3196);
     }
   }
 

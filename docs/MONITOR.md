@@ -137,23 +137,12 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 
 ## 3. Consistent Hash Ring Management
 
-When consistent hashing is enabled (`hotkey.local.consistent-hashing.enabled=true`) and `spring-boot-starter-web` is on the classpath, a REST controller (`RingEndpoint.java`) is registered at `/actuator/hotkeyring` for runtime ring management.
+When consistent hashing is enabled (`hotkey.local.consistent-hashing.enabled=true`) and `spring-boot-starter-web` is on the classpath, a REST controller (`RingEndpoint.java`) is registered at `/actuator/hotkeyring` for ring inspection.
 
-| Method   | Path                                | Description                                           |
-| -------- | ----------------------------------- | ----------------------------------------------------- |
-| `GET`    | `/actuator/hotkeyring`              | Ring topology and current mode (`auto`/`manual`)      |
-| `GET`    | `/actuator/hotkeyring/{key}`        | Query which node handles a given key                  |
-| `POST`   | `/actuator/hotkeyring`              | Add a node (body: `{"nodeId":"..."}`)                 |
-| `DELETE` | `/actuator/hotkeyring/{nodeId}`     | Remove a node                                         |
-| `POST`   | `/actuator/hotkeyring/rebuild`      | Switch back to automatic mode from manual             |
-
-**Example — add a node:**
-
-```bash
-curl -X POST http://localhost:8080/actuator/hotkeyring \
-  -H "Content-Type: application/json" \
-  -d '{"nodeId":"worker-3"}'
-```
+| Method | Path                                | Description                           |
+| ------ | ----------------------------------- | ------------------------------------- |
+| `GET`  | `/actuator/hotkeyring`              | Ring topology and node count          |
+| `GET`  | `/actuator/hotkeyring/{key}`        | Query which node handles a given key  |
 
 ## 4. Worker State Machine Runtime Configuration
 

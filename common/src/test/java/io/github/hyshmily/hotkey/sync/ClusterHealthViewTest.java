@@ -36,11 +36,11 @@ class ClusterHealthViewTest {
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, long epoch, boolean ready) {
-    return new WorkerHeartbeatMessage(workerId, epoch, System.currentTimeMillis(), 0, 0.0, ready, 0, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(workerId, epoch, 0, 0.0, ready, 0, 0, 0, 0);
   }
 
   private static WorkerHeartbeatMessage hbWithHwm(String workerId, long epoch, boolean ready, long hwm) {
-    return new WorkerHeartbeatMessage(workerId, epoch, System.currentTimeMillis(), hwm, 0.0, ready, 0, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(workerId, epoch, hwm, 0.0, ready, 0, 0, 0, 0);
   }
 
   // ── onHeartbeat ──
@@ -335,29 +335,6 @@ class ClusterHealthViewTest {
     assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
     assertThat(view.getAllWorkerIds()).containsExactly("w1");
     executor.shutdown();
-  }
-
-  /**
-   * Verifies that onHeartbeat clears the degraded flag when cluster recovers.
-   */
-  @Test
-  void onHeartbeat_withDegradedFlag_shouldRecover() {
-    view.setDegraded(true);
-    view.onHeartbeat(hb("w1", 1, true));
-    view.onHeartbeat(hb("w2", 1, true));
-    assertThat(view.isDegraded()).isFalse();
-  }
-
-  /**
-   * Verifies that recordPong clears the degraded flag when cluster recovers.
-   */
-  @Test
-  void recordPong_withDegradedFlag_shouldRecover() {
-    view.onHeartbeat(hb("w1", 1, true));
-    view.onHeartbeat(hb("w2", 1, true));
-    view.setDegraded(true);
-    view.recordPong("w3");
-    assertThat(view.isDegraded()).isFalse();
   }
 
   /**

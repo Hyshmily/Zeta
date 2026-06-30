@@ -240,7 +240,7 @@ hotkey:
     # ——— 心跳（App 侧；Worker 健康监控） ———
     heartbeat:
       exchange-name: "hotkey.heartbeat.exchange" # 必须与 worker.messaging.heartbeat-exchange 一致
-      timeout-ms: 30000 # 此窗口内无心跳即判定 Worker 死亡
+      timeout-ms: 10000 # 此窗口内无心跳即判定 Worker 死亡
       verify-interval-ms: 5000 # 可疑 Worker 验证间隔（支持指数退避）
       ping-timeout-ms: 3000 # Direct reply-to PING 超时
       degrade-after-failures: 3 # 连续 PING 失败 N 次后降级（指数退避）

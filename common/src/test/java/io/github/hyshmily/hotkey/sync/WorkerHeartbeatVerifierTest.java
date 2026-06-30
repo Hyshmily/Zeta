@@ -17,14 +17,12 @@ package io.github.hyshmily.hotkey.sync;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
-import java.util.concurrent.RejectedExecutionException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -46,11 +44,16 @@ class WorkerHeartbeatVerifierTest {
     healthView.onHeartbeat(hb("w1", true));
     healthView.onHeartbeat(hb("w2", false));
     healthView.onHeartbeat(hb("w3", false));
-    verifier = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(100_000, 500, 2, 60_000));
+    verifier = new WorkerHeartbeatVerifier(
+      rabbitTemplate,
+      healthView,
+      "test-app",
+      new WorkerHeartbeatVerifier.VerifierConfig(100_000, 500, 60_000)
+    );
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, boolean ready) {
-    return new WorkerHeartbeatMessage(workerId, 1, System.currentTimeMillis(), 0, 0.0, ready, 0, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(workerId, 1, 0, 0.0, ready, 0, 0, 0, 0);
   }
 
   // ── sendPingAndWaitPong ──
@@ -111,7 +114,12 @@ class WorkerHeartbeatVerifierTest {
   @Test
   void shouldReturnEarlyWhenNoSuspectedWorkers() {
     ClusterHealthView emptyView = new ClusterHealthView(3, 5000, 99);
-    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, emptyView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 2, 60_000));
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
+      rabbitTemplate,
+      emptyView,
+      "test-app",
+      new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000)
+    );
 
     v.verifySuspectedWorkers();
 
@@ -140,22 +148,16 @@ class WorkerHeartbeatVerifierTest {
     verify(healthView).markVerificationFailed("w3");
   }
 
-  @Test
-  void shouldSetDegradedWhenFailuresExceedThreshold() {
-    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(null);
-    when(healthView.getVerifyFailures("w2")).thenReturn(2);
-    when(healthView.getVerifyFailures("w3")).thenReturn(2);
-
-    verifier.verifySuspectedWorkers();
-
-    verify(healthView).setDegraded(true);
-  }
-
   // ── start ──
 
   @Test
   void shouldScheduleAtFixedRate() throws Exception {
-    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 2, 60_000));
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
+      rabbitTemplate,
+      healthView,
+      "test-app",
+      new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 60_000)
+    );
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(
       new Message(new byte[0], new MessageProperties())
     );
@@ -188,7 +190,7 @@ class WorkerHeartbeatVerifierTest {
    */
   @Test
   void verifySuspectedWorkers_withException_shouldSwallow() {
-    when(healthView.isClusterHealthy()).thenThrow(new RuntimeException("Unexpected error"));
+    when(healthView.getAllWorkerIds()).thenThrow(new RuntimeException("Unexpected error"));
 
     verifier.verifySuspectedWorkers();
 
@@ -200,7 +202,12 @@ class WorkerHeartbeatVerifierTest {
    */
   @Test
   void start_isIdempotent() throws Exception {
-    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, healthView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 2, 60_000));
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
+      rabbitTemplate,
+      healthView,
+      "test-app",
+      new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 60_000)
+    );
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(
       new Message(new byte[0], new MessageProperties())
     );
@@ -213,23 +220,6 @@ class WorkerHeartbeatVerifierTest {
     verify(rabbitTemplate, atLeast(1)).sendAndReceive(anyString(), anyString(), any());
   }
 
-  /**
-   * Verifies that setting degradeAfterFailures to 0 marks all failures as immediate degradation.
-   */
-  @Test
-  void degradeAfterFailuresZero_shouldDegradeOnFirstFailure() {
-    ClusterHealthView smallView = new ClusterHealthView(3, 5000, 0);
-    smallView.onHeartbeat(hb("w1", false));
-    smallView.onHeartbeat(hb("w2", false));
-    smallView.onHeartbeat(hb("w3", false));
-    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(rabbitTemplate, smallView, "test-app", new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 0, 60_000));
-    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(null);
-
-    v.verifySuspectedWorkers();
-
-    assertThat(smallView.isDegraded()).isTrue();
-  }
-
   // ── stop ──
 
   @Test
@@ -239,5 +229,3 @@ class WorkerHeartbeatVerifierTest {
     verifier.start();
   }
 }
-
-

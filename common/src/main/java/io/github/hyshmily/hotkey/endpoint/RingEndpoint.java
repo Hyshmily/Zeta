@@ -15,25 +15,25 @@
  */
 package io.github.hyshmily.hotkey.endpoint;
 
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.util.Assert;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Actuator {@code /actuator/hotkeyring} endpoint for consistent-hash ring CRUD.
+ * Actuator {@code /actuator/hotkeyring} endpoint for consistent-hash ring inspection.
  *
  * <p>Operations:
  * <ul>
- *   <li>{@code GET /actuator/hotkeyring} — ring topology and mode
+ *   <li>{@code GET /actuator/hotkeyring} — ring topology
  *   <li>{@code GET /actuator/hotkeyring/{key}} — query which node handles a key
- *   <li>{@code POST /actuator/hotkeyring} — addDirect a node (body: {@code {"nodeId":"..."}})
- *   <li>{@code DELETE /actuator/hotkeyring/{nodeId}} — remove a node
- *   <li>{@code POST /actuator/hotkeyring/rebuild} — switch back to auto mode
  * </ul>
  */
 @RestController
@@ -48,19 +48,15 @@ public class RingEndpoint {
   private final ObjectProvider<ClusterHealthView> healthViewProvider;
 
   /**
-   * Return the current ring topology, mode (auto/manual), node count,
-   * virtual node count, and the sorted list of live nodes.
-   * <p>In {@code auto} mode the ring is rebuilt from heartbeat-discovered
-   * nodes; in {@code manual} mode the topology is operator-defined via
-   * {@link #addNode(Map)} / {@link #removeNode(String)}.</p>
+   * Return the current ring topology: node count, virtual node count,
+   * and the sorted list of live nodes.
    *
-   * @return a map containing {@code mode}, {@code nodeCount},
-   *         {@code virtualNodes}, and {@code nodes} entries
+   * @return a map containing {@code nodeCount}, {@code virtualNodes},
+   *         and {@code nodes} entries
    */
   @GetMapping
   public Map<String, Object> ringInfo() {
     Map<String, Object> result = new LinkedHashMap<>();
-    result.put("mode", ringManager.isManualMode() ? "manual" : "auto");
     result.put("nodeCount", ringManager.nodeCount());
     result.put("virtualNodes", ringManager.getVirtualNodeCount());
     result.put("nodes", ringManager.getCurrentNodes().stream().sorted().toList());
@@ -88,50 +84,5 @@ public class RingEndpoint {
     }
     result.put("nodeId", ringManager.routeNode(key, view));
     return result;
-  }
-
-  /**
-   * Add a physical node to the ring.  If the ring is currently in auto
-   * mode, this call implicitly switches it to manual mode so the topology
-   * stays under operator control.
-   *
-   * @param body a map containing the {@code "nodeId"} to addDirect
-   * @return a status map confirming the action
-   */
-  @PostMapping
-  public Map<String, Object> addNode(@RequestBody Map<String, String> body) {
-    String nodeId = body.get("nodeId");
-    Assert.hasText(nodeId, "nodeId must not be empty");
-    ringManager.addNode(nodeId);
-    return Map.of("status", "ok", "action", "addNode", "nodeId", nodeId);
-  }
-
-  /**
-   * Remove a physical node from the ring.  If the ring is currently in auto
-   * mode, this call implicitly switches it to manual mode so the topology
-   * stays under operator control.
-   *
-   * @param nodeId the ID of the node to remove; must not be empty
-   * @return a status map confirming the action
-   * @throws IllegalArgumentException if {@code nodeId} is empty
-   */
-  @DeleteMapping("/{nodeId}")
-  public Map<String, Object> removeNode(@PathVariable String nodeId) {
-    Assert.hasText(nodeId, "nodeId must not be empty");
-    ringManager.removeNode(nodeId);
-    return Map.of("status", "ok", "action", "removeNode", "nodeId", nodeId);
-  }
-
-  /**
-   * Reset the ring to auto mode, reverting any previous manual topology
-   * changes.  The next heartbeat reconciliation cycle will rebuild the
-   * ring from the set of currently discovered Worker nodes.
-   *
-   * @return a status map confirming the switch to auto mode
-   */
-  @PostMapping("/rebuild")
-  public Map<String, Object> rebuild() {
-    ringManager.resetToAuto();
-    return Map.of("status", "ok", "action", "rebuild", "mode", "auto");
   }
 }

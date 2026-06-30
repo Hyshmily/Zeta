@@ -125,7 +125,7 @@
 | Property                                        | Default                     | Description                                                                                            |
 | ----------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `hotkey.local.heartbeat.exchange-name`          | `hotkey.heartbeat.exchange` | Topic exchange name for epoch-driven structured heartbeats from Workers                                |
-| `hotkey.local.heartbeat.timeout-ms`             | `30000`                     | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window              |
+| `hotkey.local.heartbeat.timeout-ms`             | `10000`                     | Timeout (ms) — a Worker is considered dead if no heartbeat is received within this window              |
 | `hotkey.local.heartbeat.verify-interval-ms`     | `5000`                      | Interval (ms) for verifying suspected dead Workers via Direct reply-to PING                            |
 | `hotkey.local.heartbeat.ping-timeout-ms`        | `3000`                      | Timeout (ms) for a PING/PONG verification probe                                                        |
 | `hotkey.local.heartbeat.degrade-after-failures` | `3`                         | Consecutive PING failures before degrading the Worker; uses exponential backoff per Worker             |

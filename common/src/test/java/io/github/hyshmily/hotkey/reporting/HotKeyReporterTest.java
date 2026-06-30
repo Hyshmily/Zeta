@@ -22,8 +22,8 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import java.util.List;
@@ -91,7 +91,7 @@ class HotKeyReporterTest {
   }
 
   private static void registerWorker(ClusterHealthView hv, String workerId) {
-    hv.onHeartbeat(new WorkerHeartbeatMessage(workerId, 1, System.currentTimeMillis(), 0, 0.0, true, 0, 0, 0, 0, 0));
+    hv.onHeartbeat(new WorkerHeartbeatMessage(workerId, 1, 0, 0.0, true, 0, 0, 0, 0));
   }
 
   private void awaitPublish(int minCount) throws InterruptedException {
@@ -318,8 +318,9 @@ class HotKeyReporterTest {
   @Test
   void start_withFailedScheduler_shouldHandleGracefully() {
     ScheduledExecutorService brokenScheduler = mock(ScheduledExecutorService.class);
-    when(brokenScheduler.scheduleAtFixedRate(any(), anyLong(), anyLong(), any()))
-      .thenThrow(new RuntimeException("scheduler failure"));
+    when(brokenScheduler.scheduleAtFixedRate(any(), anyLong(), anyLong(), any())).thenThrow(
+      new RuntimeException("scheduler failure")
+    );
     HotKeyReporter failingReporter = new HotKeyReporter(
       testPublisher,
       brokenScheduler,

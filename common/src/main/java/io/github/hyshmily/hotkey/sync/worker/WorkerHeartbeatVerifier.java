@@ -16,7 +16,6 @@
 package io.github.hyshmily.hotkey.sync.worker;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
-
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
@@ -37,18 +36,15 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * passive heartbeat monitoring indicates a potential failure.
  *
  * <p>Under normal operation, the {@link ClusterHealthView} is updated passively
- * by incoming heartbeat messages. This verifier activates only when one or more
- * Workers have exceeded the {@code heartbeatTimeoutMs} window — it sends a
- * point-to-point PING message to each suspected Worker's dedicated verification
- * queue ({@code hotkey.verify.ping.{workerId}}) via Direct reply-to and awaits
+ * by incoming heartbeat messages. This verifier sends a point-to-point PING
+ * message to each suspected Worker's dedicated verification queue
+ * ({@code hotkey.verify.ping.{workerId}}) via Direct reply-to and awaits
  * a PONG response.
  *
- * <p><b>Failure escalation:</b> If cumulative failures across all suspected Workers
- * reach {@code degradeAfterFailures} and the cluster remains unhealthy, the health
- * view is marked as degraded via {@link ClusterHealthView#degraded}, triggering
- * graceful degradation behaviour (see ADR-0009). Workers that respond are restored
- * to the alive set; Workers that fail repeatedly are marked as stale and excluded
- * from majority-based health checks.
+ * <p>Workers that respond are restored to the alive set via
+ * {@link ClusterHealthView#recordPong}; Workers that fail repeatedly are
+ * marked as stale via {@link ClusterHealthView#markVerificationFailed} and
+ * excluded from health-majority calculations.
  *
  * <p><b>Thread safety:</b> The verification loop runs on a single daemon thread
  * ({@code hb-verifier}). The {@link ClusterHealthView} uses {@code ConcurrentHashMap}
@@ -66,7 +62,6 @@ public class WorkerHeartbeatVerifier {
   private final String appInstanceId;
   private final long verifyIntervalMs;
   private final long pingTimeoutMs;
-  private final int degradeAfterFailures;
   private final long verifyMaxBackoffMs;
   private final ScheduledExecutorService scheduler;
   private final ConcurrentHashMap<String, Long> nextVerifyTime = new ConcurrentHashMap<>();
@@ -75,16 +70,12 @@ public class WorkerHeartbeatVerifier {
 
   private static final String QUEUE_VERIFY_PING_PREFIX = "hotkey.verify.ping.";
   private static final int MAX_BACKOFF_SHIFT = 30;
+  private static final int MAX_RETRY = 5;
 
   /**
    * Parameter object for {@link WorkerHeartbeatVerifier} construction.
    */
-  public record VerifierConfig(
-    long verifyIntervalMs,
-    long pingTimeoutMs,
-    int degradeAfterFailures,
-    long verifyMaxBackoffMs
-  ) {}
+  public record VerifierConfig(long verifyIntervalMs, long pingTimeoutMs, long verifyMaxBackoffMs) {}
 
   /**
    * Creates a verifier with an internally owned single-thread scheduler.
@@ -102,7 +93,6 @@ public class WorkerHeartbeatVerifier {
       appInstanceId,
       config.verifyIntervalMs,
       config.pingTimeoutMs,
-      config.degradeAfterFailures,
       config.verifyMaxBackoffMs,
       Executors.newSingleThreadScheduledExecutor(new HotKeyThreadFactory("hotkey-hb-verifier")),
       true
@@ -127,7 +117,6 @@ public class WorkerHeartbeatVerifier {
       appInstanceId,
       config.verifyIntervalMs,
       config.pingTimeoutMs,
-      config.degradeAfterFailures,
       config.verifyMaxBackoffMs,
       scheduler,
       false
@@ -194,31 +183,25 @@ public class WorkerHeartbeatVerifier {
    * <em>not</em> currently marked alive, sends each a PING via Direct reply-to,
    * and updates the health view based on the response.
    *
-   * <p>If the cluster is healthy (majority of Workers alive), the verification
-   * is skipped entirely — no need for active probing. When cumulative failures
-   * across all suspected Workers reach {@code degradeAfterFailures} and the cluster
-   * remains unhealthy, the cluster is marked as degraded.
+   * <p>When cumulative failures across all suspected Workers reach
+   * {@code degradeAfterFailures} and the cluster remains unhealthy, the cluster
+   * is marked as degraded.
    *
    * <p>This method is called periodically by the scheduled task and is also
    * safe to invoke manually for testing.
    */
   public void verifySuspectedWorkers() {
     try {
-      if (healthView.isClusterHealthy()) {
-        return;
-      }
-
       Set<String> suspected = healthView
         .getAllWorkerIds()
         .stream()
         .filter(id -> !healthView.getAliveWorkerIds().contains(id))
+        .filter(id -> healthView.getVerifyFailures(id) < MAX_RETRY)
         .collect(Collectors.toSet());
 
       if (suspected.isEmpty()) {
         return;
       }
-
-      log.info("Verifying suspected workers: {}", suspected);
 
       for (String workerId : suspected) {
         Long skipUntil = nextVerifyTime.get(workerId);
@@ -232,6 +215,13 @@ public class WorkerHeartbeatVerifier {
           healthView.markVerificationFailed(workerId);
 
           int attempt = healthView.getVerifyFailures(workerId);
+          if (attempt >= MAX_RETRY) {
+            log.warn("Worker {} confirmed dead ({} failures), removing record", workerId, MAX_RETRY);
+            healthView.removeRecord(workerId);
+            nextVerifyTime.remove(workerId);
+            continue;
+          }
+
           long backoffMs = computeBackoffMs(attempt);
 
           nextVerifyTime.put(workerId, currentTimeMillis() + backoffMs);
@@ -240,12 +230,10 @@ public class WorkerHeartbeatVerifier {
           nextVerifyTime.remove(workerId);
           healthView.recordPong(workerId);
         }
-      }
 
-      boolean anyDegraded = suspected.stream().anyMatch(id -> healthView.getVerifyFailures(id) >= degradeAfterFailures);
-      if (anyDegraded && !healthView.isClusterHealthy()) {
-        log.warn("Cluster degraded: some workers unreachable after verification (threshold={})", degradeAfterFailures);
-        healthView.setDegraded(true);
+        if (!healthView.isClusterHealthy()) {
+          log.warn("Cluster is unhealthy after verifying worker {}", workerId);
+        }
       }
     } catch (Exception e) {
       log.error("Scheduled verifySuspectedWorkers failed", e);
@@ -253,15 +241,27 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
-   * Compute the exponential backoff duration for a verification attempt.
-   * Starts at {@code verifyIntervalMs} and doubles each attempt, capped at
-   * {@code verifyMaxBackoffMs}.
+   * <p>Uses a two-phase exponential strategy: <em>dense start, steep extension</em>.
+   * First 3 attempts grow slowly (half the naive power) so early retries cluster
+   * closely; attempts 4-5 grow aggressively (double the naive power) to spread
+   * late retries further apart. Capped at {@code verifyMaxBackoffMs}.
+   *
+   * <table>
+   *   <caption>Multiplier over {@code verifyIntervalMs}</caption>
+   *   <tr><th>Attempt</th><th>Shift</th><th>Multiplier</th></tr>
+   *   <tr><td>1</td><td>0</td><td>1×</td></tr>
+   *   <tr><td>2</td><td>1</td><td>2×</td></tr>
+   *   <tr><td>3</td><td>2</td><td>4×</td></tr>
+   *   <tr><td>4</td><td>5</td><td>32×</td></tr>
+   *   <tr><td>5</td><td>6</td><td>64×</td></tr>
+   * </table>
    *
    * @param attempt the number of consecutive failures (1-based)
    * @return the backoff duration in milliseconds
    */
   protected long computeBackoffMs(int attempt) {
-    return Math.min(verifyMaxBackoffMs, verifyIntervalMs * (1L << Math.min(attempt, MAX_BACKOFF_SHIFT)));
+    int shift = attempt <= 3 ? (attempt - 1) : (attempt + 1);
+    return Math.min(verifyMaxBackoffMs, verifyIntervalMs * (1L << Math.min(shift, MAX_BACKOFF_SHIFT)));
   }
 
   /**

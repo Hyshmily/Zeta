@@ -17,7 +17,6 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -217,7 +216,7 @@ class HotKeyPropertiesTest {
   void heartbeat_shouldHaveDefaultValues() {
     HotKeyProperties p = props();
     assertThat(p.getHeartbeat().getExchangeName()).isEqualTo("hotkey.heartbeat.exchange");
-    assertThat(p.getHeartbeat().getTimeoutMs()).isEqualTo(30000);
+    assertThat(p.getHeartbeat().getTimeoutMs()).isEqualTo(10000);
     assertThat(p.getHeartbeat().getVerifyIntervalMs()).isEqualTo(5000);
     assertThat(p.getHeartbeat().getPingTimeoutMs()).isEqualTo(3000);
     assertThat(p.getHeartbeat().getDegradeAfterFailures()).isEqualTo(3);

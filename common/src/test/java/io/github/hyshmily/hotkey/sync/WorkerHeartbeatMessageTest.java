@@ -30,28 +30,14 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void toMessage_shouldSetAllHeaders() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
-      "worker-1",
-      5L,
-      1000L,
-      42L,
-      0.75,
-      true,
-      12345,
-      3,
-      10,
-      2,
-      9999L
-    );
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("worker-1", 5L, 42L, 0.75, true, 3, 10, 2, 9999L);
     Message msg = hb.toMessage();
     var h = msg.getMessageProperties();
     assertThat((String) h.getHeader(AMQP_HEADER_TYPE)).isEqualTo(WorkerHeartbeatMessage.TYPE);
     assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_EPOCH)).longValue()).isEqualTo(5L);
-    assertThat(((Number) h.getHeader(AMQP_HEADER_TIMESTAMP)).longValue()).isEqualTo(1000L);
     assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_DV_HWM)).longValue()).isEqualTo(42L);
     assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_LOAD)).doubleValue()).isEqualTo(0.75);
     assertThat((Boolean) h.getHeader(AMQP_HEADER_HEARTBEAT_READY)).isTrue();
-    assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP)).intValue()).isEqualTo(12345);
     assertThat((String) h.getHeader(AMQP_HEADER_NODE_ID)).isEqualTo("worker-1");
     assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM)).intValue()).isEqualTo(3);
     assertThat(((Number) h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL)).intValue()).isEqualTo(10);
@@ -61,26 +47,14 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void toMessage_bodyShouldBeWorkerIdBytes() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("worker-x", 1L, 0L, 0L, 0.0, false, 0, 0, 0, 0, 0L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("worker-x", 1L, 0L, 0.0, false, 0, 0, 0, 0L);
     Message msg = hb.toMessage();
     assertThat(new String(msg.getBody(), StandardCharsets.UTF_8)).isEqualTo("worker-x");
   }
 
   @Test
   void from_shouldRoundTrip() {
-    WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(
-      "w-42",
-      7L,
-      2000L,
-      99L,
-      0.5,
-      true,
-      54321,
-      5,
-      8,
-      1,
-      7777L
-    );
+    WorkerHeartbeatMessage original = new WorkerHeartbeatMessage("w-42", 7L, 99L, 0.5, true, 5, 8, 1, 7777L);
     Message msg = original.toMessage();
     WorkerHeartbeatMessage restored = WorkerHeartbeatMessage.from(msg);
     assertThat(restored).isEqualTo(original);
@@ -114,11 +88,9 @@ class WorkerHeartbeatMessageTest {
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
     assertThat(hb.workerId()).isEmpty();
     assertThat(hb.epoch()).isZero();
-    assertThat(hb.timestamp()).isZero();
     assertThat(hb.decisionVersionHwm()).isZero();
     assertThat(hb.loadFactor()).isZero();
     assertThat(hb.readyToServe()).isFalse();
-    assertThat(hb.configFingerprint()).isZero();
     assertThat(hb.configConfirmCount()).isZero();
     assertThat(hb.configCoolCount()).isZero();
     assertThat(hb.configGraceCount()).isZero();
@@ -131,11 +103,9 @@ class WorkerHeartbeatMessageTest {
     props.setHeader(AMQP_HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
     props.setHeader(AMQP_HEADER_NODE_ID, 123);
     props.setHeader(AMQP_HEADER_HEARTBEAT_EPOCH, "not-a-number");
-    props.setHeader(AMQP_HEADER_TIMESTAMP, "bad");
     props.setHeader(AMQP_HEADER_HEARTBEAT_DV_HWM, "bad");
     props.setHeader(AMQP_HEADER_HEARTBEAT_LOAD, "bad");
     props.setHeader(AMQP_HEADER_HEARTBEAT_READY, "not-boolean");
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP, "bad");
     props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, "bad");
     props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, "bad");
     props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, "bad");
@@ -144,11 +114,9 @@ class WorkerHeartbeatMessageTest {
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
     assertThat(hb.workerId()).isEmpty();
     assertThat(hb.epoch()).isZero();
-    assertThat(hb.timestamp()).isZero();
     assertThat(hb.decisionVersionHwm()).isZero();
     assertThat(hb.loadFactor()).isZero();
     assertThat(hb.readyToServe()).isFalse();
-    assertThat(hb.configFingerprint()).isZero();
     assertThat(hb.configConfirmCount()).isZero();
     assertThat(hb.configCoolCount()).isZero();
     assertThat(hb.configGraceCount()).isZero();
@@ -162,14 +130,12 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void constructor_shouldSetAllFields() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("w-1", 2L, 3L, 4L, 0.5, true, 100, 6, 7, 8, 9L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("w-1", 2L, 4L, 0.5, true, 6, 7, 8, 9L);
     assertThat(hb.workerId()).isEqualTo("w-1");
     assertThat(hb.epoch()).isEqualTo(2L);
-    assertThat(hb.timestamp()).isEqualTo(3L);
     assertThat(hb.decisionVersionHwm()).isEqualTo(4L);
     assertThat(hb.loadFactor()).isEqualTo(0.5);
     assertThat(hb.readyToServe()).isTrue();
-    assertThat(hb.configFingerprint()).isEqualTo(100);
     assertThat(hb.configConfirmCount()).isEqualTo(6);
     assertThat(hb.configCoolCount()).isEqualTo(7);
     assertThat(hb.configGraceCount()).isEqualTo(8);

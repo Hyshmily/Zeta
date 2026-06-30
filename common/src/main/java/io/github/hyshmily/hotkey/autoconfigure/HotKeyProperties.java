@@ -324,7 +324,7 @@ public class HotKeyProperties {
     /** Heartbeat exchange name. */
     private String exchangeName = "hotkey.heartbeat.exchange";
     /** Heartbeat timeout (ms). */
-    private int timeoutMs = 30000;
+    private int timeoutMs = 10000;
     /** Verify interval (ms). */
     private long verifyIntervalMs = 5000;
     /** PING timeout (ms). */

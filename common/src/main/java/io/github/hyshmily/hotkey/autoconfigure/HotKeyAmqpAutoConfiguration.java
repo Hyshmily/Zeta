@@ -17,16 +17,15 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT;
 
-import io.github.hyshmily.hotkey.constants.HotKeyConstants;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
@@ -324,8 +323,10 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotKeySyncScheduler")
     public ScheduledExecutorService hotKeySyncScheduler(CacheSyncProperties properties) {
       int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
-      return Executors.newScheduledThreadPool(poolSize,
-        new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-sync"));
+      return Executors.newScheduledThreadPool(
+        poolSize,
+        new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-sync")
+      );
     }
 
     /**
@@ -391,7 +392,9 @@ public class HotKeyAmqpAutoConfiguration {
       container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
       container.setConcurrentConsumers(properties.getConcurrentConsumers());
       container.setPrefetchCount(properties.getPrefetchCount());
-      container.setErrorHandler(t -> log.warn("Sync listener uncaught exception (message will be requeued by container)", t));
+      container.setErrorHandler(t ->
+        log.warn("Sync listener uncaught exception (message will be requeued by container)", t)
+      );
       container.setMessageListener(
         (ChannelAwareMessageListener) (msg, channel) -> cacheSyncListener.handleSyncMessage(channel, msg)
       );
@@ -550,8 +553,10 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotKeyWorkerSchedScheduler")
     public ScheduledExecutorService hotKeyWorkerSchedScheduler(WorkerListenerProperties properties) {
       int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
-      return Executors.newScheduledThreadPool(poolSize,
-        new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-worker"));
+      return Executors.newScheduledThreadPool(
+        poolSize,
+        new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER + "-worker")
+      );
     }
 
     /**
@@ -644,7 +649,9 @@ public class HotKeyAmqpAutoConfiguration {
       );
       container.setConcurrentConsumers(properties.getConcurrentConsumers());
       container.setPrefetchCount(properties.getPrefetchCount());
-      container.setErrorHandler(t -> log.warn("Worker listener uncaught exception (message will be requeued by container)", t));
+      container.setErrorHandler(t ->
+        log.warn("Worker listener uncaught exception (message will be requeued by container)", t)
+      );
       container.setAutoStartup(properties.isAutoStartup());
       return container;
     }
@@ -673,7 +680,6 @@ public class HotKeyAmqpAutoConfiguration {
         new WorkerHeartbeatVerifier.VerifierConfig(
           properties.getHeartbeat().getVerifyIntervalMs(),
           properties.getHeartbeat().getPingTimeoutMs(),
-          properties.getHeartbeat().getDegradeAfterFailures(),
           properties.getHeartbeat().getVerifyMaxBackoffMs()
         ),
         hotKeyScheduler

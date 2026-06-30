@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.hotkey.sharding;
 
-import java.util.HashSet;
 import java.util.Set;
 import java.util.function.IntConsumer;
 import lombok.Getter;
@@ -24,13 +23,8 @@ import lombok.Setter;
 /**
  * Manages the consistent-hash ring for Worker shard routing.
  *
- * <p>Operates in two modes:
- * <ul>
- *   <li><b>Auto mode</b> (default) — the ring is rebuilt automatically from
- *       the live Worker set reported by {@link ClusterHealthView}.</li>
- *   <li><b>Manual mode</b> — an operator has pinned the ring to a specific
- *       set of nodes via {@link #addNode} / {@link #removeNode}.</li>
- * </ul>
+ * <p>The ring is rebuilt automatically from the live Worker set reported
+ * by {@link ClusterHealthView} on each reconciliation cycle.
  */
 public class RingManager {
 
@@ -39,8 +33,6 @@ public class RingManager {
 
   @Getter
   private final int virtualNodeCount;
-
-  private volatile Set<String> overrideNodes; // null=auto mode
 
   @Setter
   private IntConsumer onRingReconciled;
@@ -56,23 +48,15 @@ public class RingManager {
   }
 
   /**
-   * Rebuild the ring from the health view (auto mode) or the override set (manual mode).
+   * Rebuild the ring from the current cluster health view.
    *
    * @param healthView the current cluster health view; must not be {@code null}
    * @throws NullPointerException if {@code healthView} is {@code null}
    */
   public synchronized void reconcileFromHealthView(ClusterHealthView healthView) {
-    if (overrideNodes != null) {
-      if (!overrideNodes.equals(ring.getNodes())) {
-        ring.rebuild(overrideNodes);
-      }
-      return;
-    }
-
     Set<String> alive = healthView.getAliveWorkerIds();
     if (!alive.equals(ring.getNodes())) {
       ring.rebuild(alive);
-
       if (onRingReconciled != null) {
         onRingReconciled.accept(alive.size());
       }
@@ -80,53 +64,9 @@ public class RingManager {
   }
 
   /**
-   * Add a physical node to the ring. Switches to manual mode.
-   *
-   * @param nodeId the node identifier to addDirect; must not be {@code null}
-   * @throws NullPointerException if {@code nodeId} is {@code null}
-   */
-  public synchronized void addNode(String nodeId) {
-    if (overrideNodes == null) {
-      overrideNodes = new HashSet<>(ring.getNodes());
-    }
-    overrideNodes.add(nodeId);
-    ring.rebuild(overrideNodes);
-  }
-
-  /**
-   * Remove a physical node from the ring. Switches to manual mode.
-   *
-   * @param nodeId the node identifier to remove; must not be {@code null}
-   * @throws NullPointerException if {@code nodeId} is {@code null}
-   */
-  public synchronized void removeNode(String nodeId) {
-    if (overrideNodes == null) {
-      overrideNodes = new HashSet<>(ring.getNodes());
-    }
-    overrideNodes.remove(nodeId);
-    ring.rebuild(overrideNodes);
-  }
-
-  /**
-   * Reset to auto mode — the ring will be rebuilt from the health view on next reconciliation.
-   */
-  public synchronized void resetToAuto() {
-    overrideNodes = null;
-  }
-
-  /**
-   * Whether the ring is in manual mode (operator-pinned node set).
-   *
-   * @return {@code true} if in manual mode
-   */
-  public boolean isManualMode() {
-    return overrideNodes != null;
-  }
-
-  /**
    * Return the current set of nodes on the ring.
    *
-   * @return the set of live (or pinned) node identifiers
+   * @return the set of live node identifiers
    */
   public Set<String> getCurrentNodes() {
     return ring.getNodes();

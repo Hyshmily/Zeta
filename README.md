@@ -246,7 +246,7 @@ hotkey:
     # ——— Heartbeat (App side; Worker health monitoring) ———
     heartbeat:
       exchange-name: "hotkey.heartbeat.exchange" # Must match worker.messaging.heartbeat-exchange
-      timeout-ms: 30000 # Worker deemed dead if no heartbeat received within this window
+      timeout-ms: 10000 # Worker deemed dead if no heartbeat received within this window
       verify-interval-ms: 5000 # Suspected Worker verification interval (supports exponential backoff)
       ping-timeout-ms: 3000 # Direct reply-to PING timeout
       degrade-after-failures: 3 # Degrade after N consecutive PING failures (exponential backoff)

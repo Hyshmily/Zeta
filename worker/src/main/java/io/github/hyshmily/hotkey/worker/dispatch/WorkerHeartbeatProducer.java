@@ -35,8 +35,8 @@ import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -221,20 +221,6 @@ public class WorkerHeartbeatProducer {
   }
 
   /**
-   * Computes an integer fingerprint of the current state-machine config
-   * (confirm count, cool count, grace count) so receivers can quickly
-   * detect config changes without comparing individual fields.
-   *
-   * @return config fingerprint hash
-   */
-  private int computeConfigFingerprint() {
-    int hash = stateMachine.getConfirmCount();
-    hash = 31 * hash + stateMachine.getCoolCount();
-    hash = 31 * hash + stateMachine.getPreCoolGraceCount();
-    return hash;
-  }
-
-  /**
    * Starts the periodic heartbeat sender at the configured ping interval.
    *
    * <p>First heartbeat is delayed by {@code pingIntervalMs} to allow the
@@ -245,10 +231,18 @@ public class WorkerHeartbeatProducer {
   @PostConstruct
   public void start() {
     try {
-      heartbeatTask = scheduler.scheduleAtFixedRate(this::sendHeartbeat, pingIntervalMs, pingIntervalMs, TimeUnit.MILLISECONDS);
+      heartbeatTask = scheduler.scheduleAtFixedRate(
+        this::sendHeartbeat,
+        pingIntervalMs,
+        pingIntervalMs,
+        TimeUnit.MILLISECONDS
+      );
     } catch (Exception e) {
-      log.error("Failed to start heartbeat scheduler; Worker heartbeat will not be sent. " +
-          "Application continues but App instances may mark this Worker as dead.", e);
+      log.error(
+        "Failed to start heartbeat scheduler; Worker heartbeat will not be sent. " +
+          "Application continues but App instances may mark this Worker as dead.",
+        e
+      );
     }
   }
 
@@ -281,11 +275,9 @@ public class WorkerHeartbeatProducer {
       WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
         workerId,
         epoch,
-        System.currentTimeMillis(),
         broadcaster.getCurrentDecisionVersion(),
         computeLoadFactor(),
         isReadyToServe(),
-        computeConfigFingerprint(),
         stateMachine.getConfirmCount(),
         stateMachine.getCoolCount(),
         stateMachine.getPreCoolGraceCount(),
