@@ -21,6 +21,7 @@ import static io.github.hyshmily.hotkey.sync.worker.WorkerMessage.TYPE_HOT;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
@@ -30,7 +31,6 @@ import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -78,9 +78,9 @@ public class WorkerListener {
    * Accessed atomically via {@code asMap().compute()} for thread-safe updates. */
   private final Cache<String, Object> caffeineCache;
 
-  /** Function that loads the current value from Redis given a cache key.
+  /** Loads the current value from Redis given a cache key.
    * Used during HOT promotion to fetch the authoritative value before writing to L1. */
-  private final Function<String, Object> redisLoader;
+  private final CacheLoader redisLoader;
 
   /** Configuration for Worker exchange name, queue prefix, jitter settings, and rate limiter. */
   private final WorkerListenerProperties properties;
@@ -364,7 +364,7 @@ public class WorkerListener {
    */
   private Object loadFromRedis(WorkerMessage wm) {
     try {
-      return redisLoader.apply(wm.cacheKey());
+      return redisLoader.load(wm.cacheKey());
     } catch (Exception e) {
       log.warn("handleHot: Redis load failed for key={}, trying degraded entry", wm.cacheKey(), e);
       if (sreRateLimiter != null) {

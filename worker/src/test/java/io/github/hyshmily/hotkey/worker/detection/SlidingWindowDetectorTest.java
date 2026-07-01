@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -206,18 +206,20 @@ class SlidingWindowDetectorTest {
     SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
 
     Method clearMethod = SlidingWindowDetector.class.getDeclaredMethod(
-        "clearStaleSlices", AtomicLong[].class, int.class);
+      "clearStaleSlices",
+      AtomicLongArray.class,
+      int.class
+    );
     clearMethod.setAccessible(true);
 
-    Method sumMethod = SlidingWindowDetector.class.getDeclaredMethod(
-        "getWindowSum", AtomicLong[].class, int.class);
+    Method sumMethod = SlidingWindowDetector.class.getDeclaredMethod("getWindowSum", AtomicLongArray.class, int.class);
     sumMethod.setAccessible(true);
 
     int arrayLen = 10; // 2 * windowSize
-    AtomicLong[] slices = new AtomicLong[arrayLen];
     for (int ci = 0; ci < arrayLen; ci++) {
+      AtomicLongArray slices = new AtomicLongArray(arrayLen);
       for (int i = 0; i < arrayLen; i++) {
-        slices[i] = new AtomicLong(i * 10L);
+        slices.set(i, i * 10L);
       }
 
       clearMethod.invoke(detector, slices, ci);
@@ -273,24 +275,27 @@ class SlidingWindowDetectorTest {
   @Test
   void shouldHandleNullKey() {
     SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 100);
-    assertThatThrownBy(() -> detector.addCount(null, 1))
-        .isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> detector.addCount(null, 1)).isInstanceOf(NullPointerException.class);
   }
 
   /**
-   * Verifies that {@code clearStaleSlices} handles an array where all entries are null
-   * without throwing a {@link NullPointerException}.
+   * Verifies that {@code clearStaleSlices} handles a fresh (all-zero) array
+   * without throwing any exception.  With {@link AtomicLongArray} there are
+   * no null entries — all elements are pre-initialised to zero.
    */
   @Test
-  void clearStaleSlices_shouldHandleAllNullSlices() throws Exception {
+  void clearStaleSlices_shouldHandleAllZeroedSlices() throws Exception {
     SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
     Method clearMethod = SlidingWindowDetector.class.getDeclaredMethod(
-        "clearStaleSlices", AtomicLong[].class, int.class);
+      "clearStaleSlices",
+      AtomicLongArray.class,
+      int.class
+    );
     clearMethod.setAccessible(true);
 
-    AtomicLong[] slices = new AtomicLong[10]; // all entries are null
+    AtomicLongArray slices = new AtomicLongArray(10); // all entries are 0
     clearMethod.invoke(detector, slices, 3);
-    // No exception expected — the method guards against null slices
+    // No exception expected
   }
 
   /**
@@ -356,28 +361,26 @@ class SlidingWindowDetectorTest {
   }
 
   /**
-   * Verifies that {@code getWindowSum} treats null slice entries in the
+   * Verifies that {@code getWindowSum} treats zero-valued slice entries in the
    * circular buffer as zero when computing the window sum.
    */
   @Test
-  void getWindowSum_shouldReturnZeroForNullSliceEntry() throws Exception {
+  void getWindowSum_shouldReturnZeroForZeroedSliceEntry() throws Exception {
     SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
-    Method sumMethod = SlidingWindowDetector.class.getDeclaredMethod(
-        "getWindowSum", AtomicLong[].class, int.class);
+    Method sumMethod = SlidingWindowDetector.class.getDeclaredMethod("getWindowSum", AtomicLongArray.class, int.class);
     sumMethod.setAccessible(true);
 
     int arrayLen = 10; // 2 * windowSize
-    AtomicLong[] slices = new AtomicLong[arrayLen];
-    slices[0] = new AtomicLong(10);
-    slices[1] = new AtomicLong(20);
-    // Indices 2-9 remain null
+    AtomicLongArray slices = new AtomicLongArray(arrayLen); // all zero by default
+    slices.set(0, 10);
+    slices.set(1, 20);
 
-    // currentIndex = 9, window covers 9,8,7,6,5 — all null
-    long sumForNullRange = (long) sumMethod.invoke(detector, slices, 9);
-    assertThat(sumForNullRange).isZero();
+    // currentIndex = 9, window covers 9,8,7,6,5 — all zero
+    long sumForZeroRange = (long) sumMethod.invoke(detector, slices, 9);
+    assertThat(sumForZeroRange).isZero();
 
-    // currentIndex = 1, window covers 1,0,9,8,7 — indices 1 and 0 are set, rest are null
-    long sumWithPartialNulls = (long) sumMethod.invoke(detector, slices, 1);
-    assertThat(sumWithPartialNulls).isEqualTo(30);
+    // currentIndex = 1, window covers 1,0,9,8,7 — indices 1 and 0 are set, rest are zero
+    long sumWithPartialValues = (long) sumMethod.invoke(detector, slices, 1);
+    assertThat(sumWithPartialValues).isEqualTo(30);
   }
 }

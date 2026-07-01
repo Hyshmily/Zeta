@@ -32,10 +32,10 @@ import lombok.Getter;
  *
  * <p>The exception carries three fields to help diagnose the mismatch:
  * <ul>
- *   <li>{@link #getOperation()} — the API name that was called</li>
- *   <li>{@link #getCurrentMode()} — the human-readable label of the current
+ *   <li>{@code getOperation()} — the API name that was called</li>
+ *   <li>{@code getCurrentMode()} — the human-readable label of the current
  *       deployment mode (e.g. {@code "Worker-only mode"})</li>
- *   <li>{@link #getRequiredMode()} — the human-readable label of the mode
+ *   <li>{@code getRequiredMode()} — the human-readable label of the mode
  *       required to perform the operation (e.g. {@code "App-mode cache"})</li>
  * </ul>
  *

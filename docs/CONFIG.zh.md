@@ -75,6 +75,8 @@
 | `hotkey.local.width`                    | `50000`                  | Count-Min Sketch 宽度                                                                        |
 | `hotkey.local.depth`                    | `5`                      | Count-Min Sketch 深度（行数）                                                                |
 | `hotkey.local.decay`                    | `0.92`                   | 冲突衰减因子                                                                                 |
+
+> **设计说明：** 应用端 HeavyKeeper 使用更宽（50k）但更浅（depth 5）的 Sketch，衰减稍慢（0.92）。较宽的 Sketch 在单 key 插入时减少指纹冲突概率。较浅的深度足以满足应用端快速*启发式*本地升级判断的需要——它不做权威的 HOT/COOL 决策。参见下方 [Worker 端 HeavyKeeper](#hotkeyworkerheavy-keeper) 的对比配置。
 | `hotkey.local.min-count`                | `10`                     | 热点 key 最低计数阈值                                                                        |
 | `hotkey.local.local-cache-max-size`     | `1000`                   | Caffeine L1 最大条目数                                                                       |
 | `hotkey.local.local-cache-ttl-minutes`  | `5`                      | Caffeine L1 写入 TTL（分钟）                                                                 |
@@ -268,6 +270,8 @@
 | `hotkey.worker.heavy-keeper.depth`                                   | `10`                        | Worker 端 Count-Min Sketch 深度                                                                  |
 | `hotkey.worker.heavy-keeper.decay`                                   | `0.9`                       | Worker 端 HeavyKeeper 衰减因子                                                                   |
 | `hotkey.worker.heavy-keeper.min-count`                               | `10`                        | Worker 端最低计数阈值                                                                            |
+
+> **设计说明：** Worker 端 HeavyKeeper 优先保证频率估计边界而不是插入速度——使用更窄（20k）但更深（depth 10）的 Sketch，衰减略快（0.9）。批量报表消费者每次喂入大量 key-count 映射（最多 10k keys），更大的深度能提供更精确的批量频率估计。更快的衰减使 Worker 能更快适应流量变化，从而做出权威的 HOT/COOL 决策。与 [应用端配置](#core-hotkeylocal-) 对比。
 | **`hotkey.worker.heartbeat.*`**                                      |                             | **心跳**                                                                                         |
 | `hotkey.worker.heartbeat.ping-interval-ms`                           | `1000`                      | 结构化心跳发送间隔（毫秒）                                                                       |
 | **`hotkey.worker.persistence.*`**                                    |                             | **TopK 持久化（热启动）**                                                                        |

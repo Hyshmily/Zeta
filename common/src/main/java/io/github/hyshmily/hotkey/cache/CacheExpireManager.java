@@ -276,7 +276,7 @@ public class CacheExpireManager {
   /**
    * Triggers an asynchronous background refresh for the given cache key if the
    * current entry has reached its soft expiry threshold. The caller (typically
-   * {@link #getWithSoftExpire}) has already returned the stale value to the
+   * {@link io.github.hyshmily.hotkey.cache.HotKeyCache#getWithSoftExpire HotKeyCache.getWithSoftExpire}) has already returned the stale value to the
    * client, so this method executes entirely in the background without blocking
    * the caller.
    *

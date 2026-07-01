@@ -178,83 +178,10 @@ public class HeavyKeeper implements TopK {
    * @param increment the frequency increment (typically 1)
    * @return an {@link AddResult} with expelled key (or null), hot status, and the input key
    */
-  @Deprecated
   @Override
-  @SuppressWarnings("null")
   public AddResult addDirect(String key, int increment) {
-    /* Compute fingerprint with Guava Murmur3_32 (fixed seed ensures same key -> same fingerprint) */
-    long itemFingerprint = Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).padToLong() & 0xFFFFFFFFL;
-    long maxCount = 0L;
-
-    for (int i = 0; i < depth; i++) {
-      int hash = (int) (itemFingerprint ^ (i * 0x9e3779b97f4a7c15L));
-      int bucketIndex = Math.floorMod(hash, width);
-      int index = i * width + bucketIndex;
-      Object lock = lockStripes[index & lockMask];
-
-      synchronized (lock) {
-        if (counts[index] == 0) {
-          fingerprints[index] = itemFingerprint;
-          counts[index] = increment;
-
-          maxCount = Math.max(maxCount, increment);
-        } else if (fingerprints[index] == itemFingerprint) {
-          counts[index] += increment;
-
-          maxCount = Math.max(maxCount, counts[index]);
-        } else {
-          // HeavyKeeper probabilistic decay: sample the decay count from a
-          // Binomial(increment, decayProb) distribution in O(1) instead of
-          // looping increment times.  This keeps lock hold time bounded even
-          // when the Worker-side batch increment is large.
-          ThreadLocalRandom rng = ThreadLocalRandom.current();
-          double decayProb = (counts[index] < LOOKUP_TABLE_SIZE)
-            ? lookupTable[(int) counts[index]]
-            : lookupTable[LOOKUP_TABLE_SIZE - 1];
-
-          int decays = sampleBinomial(increment, decayProb, rng);
-          if (decays >= counts[index]) {
-            fingerprints[index] = itemFingerprint;
-            counts[index] = increment;
-          } else {
-            counts[index] -= decays;
-          }
-          maxCount = Math.max(maxCount, counts[index]);
-        }
-      }
-    }
-
-    total.add(increment);
-
-    if (maxCount < minCount) {
-      return AddResult.cold();
-    }
-
-    synchronized (sortedTopK) {
-      Node existing = heapIndex.remove(key);
-      if (existing != null) {
-        sortedTopK.remove(existing);
-      }
-
-      boolean isHot = false;
-      String expelled = null;
-
-      if (sortedTopK.size() < k || maxCount >= sortedTopK.firstKey().count) {
-        Node newNode = new Node(key, maxCount);
-        if (sortedTopK.size() >= k) {
-          Node removed = sortedTopK.pollFirstEntry().getKey();
-          expelled = removed.key;
-          heapIndex.remove(removed.key);
-          if (!expelledQueue.offer(new Item(expelled, removed.count))) {
-            log.warn("Expelled queue full, dropping key: {}", expelled);
-          }
-        }
-        sortedTopK.put(newNode, Boolean.TRUE);
-        heapIndex.put(key, newNode);
-        isHot = true;
-      }
-      return new AddResult(expelled, isHot, key);
-    }
+    long maxCount = addToSketch(key, increment);
+    return updateHeap(key, maxCount);
   }
 
   /**
@@ -269,21 +196,31 @@ public class HeavyKeeper implements TopK {
    */
   @Override
   public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+    // First pass: update sketch counters and collect maxCounts (no heap lock).
     Map<String, Long> maxCounts = new HashMap<>(keyCounts.size());
     for (var entry : keyCounts.entrySet()) {
       long max = addToSketch(entry.getKey(), entry.getValue());
       maxCounts.put(entry.getKey(), max);
     }
 
+    // Second pass: only lock the heap for keys that meet minCount,
+    // reducing heap-lock hold time from O(all keys) to O(candidates).
     List<AddResult> results = new ArrayList<>();
+    List<Map.Entry<String, Long>> candidates = new ArrayList<>(maxCounts.size());
+    for (var entry : maxCounts.entrySet()) {
+      if (entry.getValue() >= minCount) {
+        candidates.add(entry);
+      }
+    }
+
+    if (candidates.isEmpty()) {
+      return results;
+    }
 
     synchronized (sortedTopK) {
-      for (var entry : keyCounts.entrySet()) {
+      for (var entry : candidates) {
         String key = entry.getKey();
-        long maxCount = maxCounts.get(key);
-        if (maxCount < minCount) {
-          continue;
-        }
+        long maxCount = entry.getValue();
 
         Node existing = heapIndex.remove(key);
         if (existing != null) {
@@ -309,6 +246,45 @@ public class HeavyKeeper implements TopK {
       }
     }
     return results;
+  }
+
+  /**
+   * Update the TopK heap with the estimated count for a single key.
+   * If the key's count meets {@link #minCount} and is high enough
+   * to enter (or remain in) the TopK set, the heap is updated under
+   * the shared heap lock.
+   *
+   * @param key      the cache key
+   * @param maxCount the estimated count from the sketch
+   * @return an {@link AddResult} describing whether the key entered the TopK set
+   */
+  private AddResult updateHeap(String key, long maxCount) {
+    if (maxCount < minCount) {
+      return AddResult.cold();
+    }
+    synchronized (sortedTopK) {
+      Node existing = heapIndex.remove(key);
+      if (existing != null) {
+        sortedTopK.remove(existing);
+      }
+
+      if (sortedTopK.size() < k || maxCount >= sortedTopK.firstKey().count) {
+        Node newNode = new Node(key, maxCount);
+        String expelled = null;
+        if (sortedTopK.size() >= k) {
+          Node removed = sortedTopK.pollFirstEntry().getKey();
+          expelled = removed.key;
+          heapIndex.remove(removed.key);
+          if (!expelledQueue.offer(new Item(expelled, removed.count))) {
+            log.warn("Expelled queue full, dropping key: {}", expelled);
+          }
+        }
+        sortedTopK.put(newNode, Boolean.TRUE);
+        heapIndex.put(key, newNode);
+        return new AddResult(expelled, true, key);
+      }
+      return new AddResult(null, false, key);
+    }
   }
 
   @SuppressWarnings("null")
@@ -413,12 +389,13 @@ public class HeavyKeeper implements TopK {
    */
   @Override
   public void fading() {
-    // Halve all sketch counters under per-stripe locks to prevent concurrent
-    // addDirect() from observing torn long values (JLS 17.7).
-    // Lock overhead is negligible — called once per decay interval (~30 s).
-    for (int i = 0; i < counts.length; i++) {
-      synchronized (lockStripes[i & lockMask]) {
-        counts[i] >>= 1;
+    // Halve all sketch counters using per-stripe locking — one lock acquire
+    // per stripe instead of per-slot, reducing ~250k lock ops to 256.
+    for (int stripe = 0; stripe < LOCK_STRIPES; stripe++) {
+      synchronized (lockStripes[stripe]) {
+        for (int i = stripe; i < counts.length; i += LOCK_STRIPES) {
+          counts[i] >>= 1;
+        }
       }
     }
 
@@ -489,9 +466,13 @@ public class HeavyKeeper implements TopK {
   /**
    * Sample from a Binomial(n, p) distribution in O(1) expected time.
    *
-   * <p>Uses direct simulation for small n (≤10) and normal approximation
-   * for larger n when np(1-p) > 9.  Falls back to direct simulation for
-   * moderate n.
+   * <p>Uses direct simulation for small n (≤10), normal approximation for
+   * {@code np(1-p) > 4.0} (lowered from 9.0 for broader coverage), and a
+   * Poisson approximation for the remaining small-λ case.  The Poisson
+   * approximation uses Knuth's algorithm with O(λ) expected iterations
+   * where λ = np.  After the symmetry reduction (p → 1-p when p > 0.5),
+   * λ ≤ 8 whenever the normal approximation is not applicable, so the
+   * pathological O(n) fallback is eliminated entirely.
    */
   private static int sampleBinomial(int n, double p, ThreadLocalRandom rng) {
     if (n <= 0) {
@@ -502,6 +483,12 @@ public class HeavyKeeper implements TopK {
     }
     if (p <= 0.0) {
       return 0;
+    }
+
+    // Use symmetry: Binomial(n, p) = n - Binomial(n, 1-p)
+    // to keep p in [0, 0.5] so λ = np is bounded when npq is small.
+    if (p > 0.5) {
+      return n - sampleBinomial(n, 1.0 - p, rng);
     }
 
     double q = 1.0 - p;
@@ -519,17 +506,23 @@ public class HeavyKeeper implements TopK {
     double np = n * p;
     double npq = np * q;
 
-    if (npq > 9.0) {
+    // Normal approximation — lowered from 9.0 to 4.0.
+    // Acceptable for a probabilistic sketch where small errors are inherent.
+    if (npq > 4.0) {
       int k = (int) Math.round(np + Math.sqrt(npq) * rng.nextGaussian());
       return Math.max(0, Math.min(n, k));
     }
 
+    // Poisson approximation Binomial(n, p) ≈ Poisson(λ) with λ = np.
+    // After symmetry reduction p ≤ 0.5, so λ = np ≤ npq / q ≤ 4 / 0.5 = 8.
+    // Knuth's algorithm runs in O(λ) expected iterations.
+    double L = Math.exp(-np);
     int k = 0;
-    for (int i = 0; i < n; i++) {
-      if (rng.nextDouble() < p) {
-        k++;
-      }
-    }
-    return k;
+    double prod = 1.0;
+    do {
+      k++;
+      prod *= rng.nextDouble();
+    } while (prod > L);
+    return Math.min(k - 1, n);
   }
 }

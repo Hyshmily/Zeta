@@ -26,6 +26,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -38,7 +39,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
@@ -59,7 +59,7 @@ class CacheSyncListenerTest {
   @BeforeEach
   void setUp() throws IOException {
     cache = Caffeine.newBuilder().maximumSize(100).build();
-    Function<String, Object> redisLoader = k -> "refreshed";
+    CacheLoader redisLoader = k -> "refreshed";
     CacheSyncProperties properties = new CacheSyncProperties();
     properties.setWarmupJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -149,7 +149,7 @@ class CacheSyncListenerTest {
   @Test
   void handleSyncMessage_withRefreshAndNullRedisValue_shouldLogAndReturn() throws IOException {
     cache.put("key1", entry(1, false, 0));
-    Function<String, Object> nullLoader = k -> null;
+    CacheLoader nullLoader = k -> null;
     CacheSyncProperties properties = new CacheSyncProperties();
     properties.setWarmupJitterMs(0);
     HotKeyProperties ttlConfig = new HotKeyProperties();
@@ -256,7 +256,7 @@ class CacheSyncListenerTest {
    */
   @Test
   void handleSyncMessage_withRefreshAndRedisException_shouldAck() throws IOException {
-    Function<String, Object> failingLoader = k -> {
+    CacheLoader failingLoader = k -> {
       throw new RuntimeException("Redis down");
     };
     CacheSyncProperties props = new CacheSyncProperties();
@@ -322,7 +322,7 @@ class CacheSyncListenerTest {
    */
   @Test
   void handleSyncMessage_withRefreshOnStringValueAndNullLoaderReturn_shouldPreserve() throws IOException {
-    Function<String, Object> nullLoader = k -> null;
+    CacheLoader nullLoader = k -> null;
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
     HotKeyProperties ttlConfig = new HotKeyProperties();

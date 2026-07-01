@@ -40,7 +40,7 @@ import org.springframework.beans.factory.InitializingBean;
  * both buffers into the downstream consumer (see {@link #flushStandby()}).
  *
  * <p><b>Eager swap:</b> When the active buffer exceeds 80 % of
- * {@link #MAX_BUFFER_SIZE}, the buffers are swapped eagerly to prevent any
+ * {@link #DEFAULT_MAX_BUFFER_SIZE}, the buffers are swapped eagerly to prevent any
  * single buffer from growing unbounded under a traffic spike. The hot path
  * (the {@code count} call) remains lock-free — it only does an atomic
  * {@code getAndSet} on the active reference.
@@ -252,6 +252,9 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     private final ConcurrentHashMap<String, LongAdder> counters = new ConcurrentHashMap<>();
     private final LongAdder totalSize = new LongAdder();
 
+    /** Reusable result map — avoids allocation on every drain cycle. */
+    private Map<String, Long> reusableResult;
+
     /**
      * Record one or more accesses for the given key in this buffer.
      *
@@ -285,19 +288,27 @@ public class BufferedCounter implements InitializingBean, Destroyable {
      * Atomically drain all counters and return a snapshot of the accumulated
      * counts. After this call the buffer is empty and ready for reuse.
      *
+     * <p>The returned map is reused between calls to reduce GC pressure.
+     * The caller must not retain a reference beyond the synchronous
+     * {@code batchConsumer.accept()} callback.
+     *
      * @return a map of keys to their accumulated counts, never {@code null}
      */
     Map<String, Long> drain() {
       Map<String, LongAdder> oldCounters = counters;
 
-      Map<String, Long> result = new HashMap<>(oldCounters.size());
+      if (reusableResult == null) {
+        reusableResult = new HashMap<>(oldCounters.size());
+      } else {
+        reusableResult.clear();
+      }
       oldCounters.forEach((key, adder) -> {
         long val = adder.sumThenReset();
         if (val > 0) {
-          result.put(key, val);
+          reusableResult.put(key, val);
         }
       });
-      return result;
+      return reusableResult;
     }
   }
 }

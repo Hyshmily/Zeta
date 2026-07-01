@@ -19,6 +19,7 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HE
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
@@ -39,7 +40,6 @@ import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Function;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -333,12 +333,12 @@ public class HotKeyAmqpAutoConfiguration {
      * Default Redis loader used by the sync listener to refresh cache entries via {@code GET}.
      *
      * @param stringRedisTemplate the String-based Redis template for reading values
-     * @return a {@link Function} that reads a key from Redis and returns its value
+     * @return a {@link CacheLoader} that reads a key from Redis and returns its value
      */
     @Bean
-    @ConditionalOnMissingBean(name = "hotKeyRedisLoader")
-    public Function<String, Object> hotKeyRedisLoader(StringRedisTemplate stringRedisTemplate) {
-      return key -> stringRedisTemplate.opsForValue().get(key);
+    @ConditionalOnMissingBean(CacheLoader.class)
+    public CacheLoader hotKeyRedisLoader(StringRedisTemplate stringRedisTemplate) {
+      return new io.github.hyshmily.hotkey.cache.loader.RedisCacheLoader(stringRedisTemplate);
     }
 
     /**
@@ -355,7 +355,7 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean
     public CacheSyncListener cacheSyncListener(
       Cache<String, Object> hotLocalCache,
-      Function<String, Object> hotKeyRedisLoader,
+      CacheLoader hotKeyRedisLoader,
       CacheSyncProperties properties,
       @Qualifier("hotKeySyncScheduler") ScheduledExecutorService syncScheduler,
       CacheExpireManager expireManager,
@@ -573,7 +573,7 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean
     public WorkerListener workerListener(
       Cache<String, Object> hotLocalCache,
-      Function<String, Object> hotKeyRedisLoader,
+      CacheLoader hotKeyRedisLoader,
       WorkerListenerProperties properties,
       @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
       CacheExpireManager expireManager,

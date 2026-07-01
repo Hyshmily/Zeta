@@ -186,6 +186,14 @@ public class HotKeyStateMachine {
    *         caller should take (HOT, COOL, or NONE)
    */
   public HotKeyDecision evaluate(String key, boolean isHotThisWindow) {
+    // Fast path: never-before-seen key on a cold window — no state to
+    // mutate (no accumulated hotStreak to reset), skip striped-lock
+    // acquisition entirely.
+    if (!isHotThisWindow && !states.containsKey(key)) {
+      stateTimestamps.put(key, System.currentTimeMillis());
+      return HotKeyDecision.none(key);
+    }
+
     keyLocks.get(key).lock();
     try {
       // Touch timestamp for eviction tracking
@@ -226,8 +234,10 @@ public class HotKeyStateMachine {
       }
 
       return HotKeyDecision.none(key);
+    } catch (Exception e) {
+      log.warn("Unexpected StateMachine Exception for key {}", key, e);
+      return HotKeyDecision.none(key);
     } finally {
-      log.warn("Unexpected StateMachine Exception for key {} ", key);
       keyLocks.get(key).unlock();
     }
   }

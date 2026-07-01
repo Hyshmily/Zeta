@@ -17,16 +17,18 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
@@ -36,11 +38,8 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Function;
-import java.util.function.IntConsumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -240,7 +239,7 @@ class HotKeyAmqpAutoConfigurationTest {
   @Test
   void cacheSyncListenerIsCreatedWithRequiredDependencies() {
     Cache<String, Object> localCache = mock(Cache.class);
-    Function<String, Object> redisLoader = mock(Function.class);
+    CacheLoader redisLoader = mock(CacheLoader.class);
     CacheSyncProperties props = new CacheSyncProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     CacheExpireManager expireManager = mock(CacheExpireManager.class);
@@ -361,7 +360,7 @@ class HotKeyAmqpAutoConfigurationTest {
   @Test
   void workerListenerIsCreatedWithRequiredDependencies() {
     Cache<String, Object> localCache = mock(Cache.class);
-    Function<String, Object> redisLoader = mock(Function.class);
+    CacheLoader redisLoader = mock(CacheLoader.class);
     WorkerListenerProperties props = new WorkerListenerProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     CacheExpireManager expireManager = mock(CacheExpireManager.class);
@@ -482,7 +481,7 @@ class HotKeyAmqpAutoConfigurationTest {
     );
 
     HotKeyAmqpAutoConfiguration.SyncConfiguration config = new HotKeyAmqpAutoConfiguration.SyncConfiguration();
-    Function<String, Object> loader = config.hotKeyRedisLoader(redisTemplate);
+    CacheLoader loader = config.hotKeyRedisLoader(redisTemplate);
 
     assertThat(loader).isNotNull();
   }

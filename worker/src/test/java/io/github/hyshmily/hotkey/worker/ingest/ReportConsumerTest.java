@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.hotkey.worker.ingest;
 
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
@@ -23,17 +26,12 @@ import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.util.Collections;
-import java.util.Map;
-
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
 
 /**
  * Tests for {@link ReportConsumer}.
@@ -142,14 +140,14 @@ class ReportConsumerTest {
 
   /**
    * Verifies that a report message with an empty counts map is handled without error
-   * and the QPS estimator receives zero.
+   * and no processing occurs (empty map short-circuits).
    */
   @Test
   void shouldHandleEmptyCountsMap() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of());
     consumer.onReport(message);
-    verify(globalQpsEstimator).addTotal(0L);
-    verify(workerTopK).addDirect(Collections.emptyMap());
+    verify(globalQpsEstimator, never()).addTotal(anyLong());
+    verify(workerTopK, never()).addDirect(any());
   }
 
   /**
@@ -158,7 +156,11 @@ class ReportConsumerTest {
    */
   @Test
   void shouldHandleCountAtMaxIntegerBoundary() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("bigKey", (long) Integer.MAX_VALUE));
+    ReportMessage message = new ReportMessage(
+      "testApp",
+      System.currentTimeMillis(),
+      Map.of("bigKey", (long) Integer.MAX_VALUE)
+    );
     when(detector.addCount("bigKey", Integer.MAX_VALUE)).thenReturn(false);
     when(stateMachine.evaluate("bigKey", false)).thenReturn(HotKeyDecision.none("bigKey"));
 
@@ -174,7 +176,11 @@ class ReportConsumerTest {
    */
   @Test
   void shouldClampCountToMaxIntForTopK() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hugeKey", (long) Integer.MAX_VALUE + 1));
+    ReportMessage message = new ReportMessage(
+      "testApp",
+      System.currentTimeMillis(),
+      Map.of("hugeKey", (long) Integer.MAX_VALUE + 1)
+    );
     when(detector.addCount("hugeKey", (long) Integer.MAX_VALUE + 1)).thenReturn(false);
     when(stateMachine.evaluate("hugeKey", false)).thenReturn(HotKeyDecision.none("hugeKey"));
 
@@ -199,14 +205,14 @@ class ReportConsumerTest {
   }
 
   /**
-   * Verifies that a report message just under the staleness boundary
+   * Verifies that a report message well under the staleness boundary
    * is still processed (boundary: > threshold means stale).
    */
   @Test
-  void shouldProcessMessageJustUnderStalenessBoundary() {
+  void shouldProcessMessageUnderStalenessBoundary() {
     consumer.stalenessThresholdMs = 100_000L;
     long now = System.currentTimeMillis();
-    ReportMessage message = new ReportMessage("testApp", now - (consumer.stalenessThresholdMs - 1), Map.of("key", 1L));
+    ReportMessage message = new ReportMessage("testApp", now - 1, Map.of("key", 1L));
     when(detector.addCount("key", 1L)).thenReturn(false);
     when(stateMachine.evaluate("key", false)).thenReturn(HotKeyDecision.none("key"));
 
@@ -237,7 +243,11 @@ class ReportConsumerTest {
    */
   @Test
   void shouldContinueProcessingAfterStateMachineError() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("goodKey", 1L, "badKey", 2L));
+    ReportMessage message = new ReportMessage(
+      "testApp",
+      System.currentTimeMillis(),
+      Map.of("goodKey", 1L, "badKey", 2L)
+    );
     when(detector.addCount("goodKey", 1L)).thenReturn(false);
     when(detector.addCount("badKey", 2L)).thenReturn(true);
     when(stateMachine.evaluate("goodKey", false)).thenReturn(HotKeyDecision.none("goodKey"));

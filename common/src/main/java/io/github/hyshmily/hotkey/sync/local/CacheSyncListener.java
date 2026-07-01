@@ -22,6 +22,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
@@ -30,7 +31,6 @@ import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Function;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -82,9 +82,9 @@ public class CacheSyncListener {
    * Accessed atomically via {@code asMap().compute()} for thread-safe updates. */
   private final Cache<String, Object> caffeineCache;
 
-  /** Function that loads the current value from Redis given a cache key.
+  /** Loads the current value from Redis given a cache key.
    * Used during REFRESH to fetch the authoritative value before writing to L1. */
-  private final Function<String, Object> redisLoader;
+  private final CacheLoader redisLoader;
 
   /** Configuration for sync exchange name, jitter settings, and consumer concurrency. */
   private final CacheSyncProperties properties;
@@ -352,7 +352,7 @@ public class CacheSyncListener {
    */
   private Object loadFromRedis(SyncMessage sm) {
     try {
-      return redisLoader.apply(sm.cacheKey());
+      return redisLoader.load(sm.cacheKey());
     } catch (Exception e) {
       log.warn("handleRefresh: Redis load failed for key={}", sm.cacheKey(), e);
       return null;

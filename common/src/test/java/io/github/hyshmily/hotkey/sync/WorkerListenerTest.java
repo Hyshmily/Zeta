@@ -26,6 +26,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
@@ -38,7 +39,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Function;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
@@ -58,7 +58,7 @@ class WorkerListenerTest {
   @BeforeEach
   void setUp() throws IOException {
     cache = Caffeine.newBuilder().maximumSize(100).build();
-    Function<String, Object> redisLoader = k -> "refreshed";
+    CacheLoader redisLoader = k -> "refreshed";
     WorkerListenerProperties properties = new WorkerListenerProperties();
     properties.setWarmupJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -255,13 +255,17 @@ class WorkerListenerTest {
    */
   @Test
   void handleWorkerMessage_cool_onDegradedEntry_shouldDowngrade() throws IOException, InterruptedException {
-    cache.put("key1", entry(0, true, 0).toBuilder()
-      .keyState(KeyState.NORMAL)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .build());
+    cache.put(
+      "key1",
+      entry(0, true, 0)
+        .toBuilder()
+        .keyState(KeyState.NORMAL)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .build()
+    );
     listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     awaitWorkerTasks();

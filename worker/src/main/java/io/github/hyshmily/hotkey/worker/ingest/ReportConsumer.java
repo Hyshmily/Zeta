@@ -26,6 +26,8 @@ import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.TopKValidator;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -81,6 +83,12 @@ public class ReportConsumer {
   /** Staleness threshold in milliseconds. Package-visible for testing. */
   long stalenessThresholdMs = 5000L;
 
+  /** Max keys per chunk for parallel processing. Beyond this, keys are split into chunks. */
+  private static final int CHUNK_SIZE = 1000;
+
+  /** Log a drain-progress summary when the pending broadcast queue exceeds this threshold. */
+  private static final int BATCH_DRAIN_WARN_THRESHOLD = 5000;
+
   /**
    * Main entry point for batched report messages.
    *
@@ -112,6 +120,7 @@ public class ReportConsumer {
     }
 
     Map<String, Long> keyCounts = message.counts();
+    if (keyCounts.isEmpty()) return;
 
     // Feed all key counts into the Worker's HeavyKeeper in a single
     // batch call.  This executes sketch updates per-key under fine-grained
@@ -120,71 +129,89 @@ public class ReportConsumer {
     // key — eliminating the P1-3 lock-contention bottleneck.
     workerTopK.addDirect(keyCounts);
 
-    // Accumulate broadcasts during parallel processing; drain serially
-    // after the stream completes to avoid ForkJoin threads blocking on
-    // AMQP channel write locks.
-    Queue<Runnable> pendingBroadcasts = new ConcurrentLinkedQueue<>();
+    List<Map.Entry<String, Long>> entries = new ArrayList<>(keyCounts.entrySet());
+    int totalKeys = entries.size();
 
-    // Process each key independently
-    keyCounts
-      .entrySet()
-      .parallelStream()
-      .forEach(entry -> {
-        try {
-          String key = entry.getKey();
-          long count = entry.getValue();
+    for (int chunkStart = 0; chunkStart < totalKeys; chunkStart += CHUNK_SIZE) {
+      int chunkEnd = Math.min(chunkStart + CHUNK_SIZE, totalKeys);
+      List<Map.Entry<String, Long>> chunk = entries.subList(chunkStart, chunkEnd);
 
-          totalQps.add(count);
+      // Accumulate broadcasts during parallel processing; drain serially
+      // after the stream completes to avoid ForkJoin threads blocking on
+      // AMQP channel write locks.
+      Queue<Runnable> pendingBroadcasts = new ConcurrentLinkedQueue<>();
 
-          // addCount atomically increments the current time slice and returns
-          // true if the sum of the last windowSize slices exceeds the threshold.
-          boolean isHot = detector.addCount(key, count);
+      // Process each key independently
+      chunk
+        .parallelStream()
+        .forEach(entry -> {
+          try {
+            String key = entry.getKey();
+            long count = entry.getValue();
 
-          // The state machine tracks consecutive hot/cold windows and applies
-          // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
-          // and PRE_COOLING.
-          HotKeyDecision decision = stateMachine.evaluate(key, isHot);
+            totalQps.add(count);
 
-          switch (decision.type()) {
-            case HOT -> {
-              // A new hot key has been confirmed. Pre-allocate a decision
-              // version and enqueue the broadcast; actual AMQP send happens
-              // on the consumer thread after parallelStream completes.
-              long dv = broadcaster.nextDecisionVersion();
-              pendingBroadcasts.add(
-                  () -> broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW, dv));
-              topKValidator.markConfirmed(key);
+            // addCount atomically increments the current time slice and returns
+            // true if the sum of the last windowSize slices exceeds the threshold.
+            boolean isHot = detector.addCount(key, count);
+
+            // The state machine tracks consecutive hot/cold windows and applies
+            // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
+            // and PRE_COOLING.
+            HotKeyDecision decision = stateMachine.evaluate(key, isHot);
+
+            switch (decision.type()) {
+              case HOT -> {
+                // A new hot key has been confirmed. Pre-allocate a decision
+                // version and enqueue the broadcast; actual AMQP send happens
+                // on the consumer thread after parallelStream completes.
+                long dv = broadcaster.nextDecisionVersion();
+                pendingBroadcasts.add(() -> broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW, dv));
+                topKValidator.markConfirmed(key);
+              }
+              case COOL -> {
+                long dv = broadcaster.nextDecisionVersion();
+                pendingBroadcasts.add(() -> broadcaster.broadcastCool(key, dv));
+                topKValidator.markCooled(key);
+              }
+              case NONE -> {
+                // No state transition occurred – the key remains in its
+                // current lifecycle stage.  Nothing to do.
+              }
             }
-            case COOL -> {
-              long dv = broadcaster.nextDecisionVersion();
-              pendingBroadcasts.add(
-                  () -> broadcaster.broadcastCool(key, dv));
-              topKValidator.markCooled(key);
-            }
-            case NONE -> {
-              // No state transition occurred – the key remains in its
-              // current lifecycle stage.  Nothing to do.
-            }
+          } catch (Exception e) {
+            log.error(
+              "Error processing report entry: appName={}, key={}, count={}",
+              message.appName(),
+              entry.getKey(),
+              entry.getValue(),
+              e
+            );
           }
-        } catch (Exception e) {
-          log.error(
-            "Error processing report entry: appName={}, key={}, count={}",
-            message.appName(),
-            entry.getKey(),
-            entry.getValue(),
-            e
-          );
-        }
-      });
+        });
 
-    // Drain pending broadcasts serially on the consumer thread.
-    // This avoids ForkJoinPool threads blocking on AMQP channel write
-    // locks under high concurrency (8 concurrent consumers).
-    // Per ADR-0007, lost messages are tolerated by the next periodic cycle.
-    // sendBroadcast no longer throws — errors are logged and swallowed.
-    Runnable task;
-    while ((task = pendingBroadcasts.poll()) != null) {
-      task.run();
+      // Drain pending broadcasts serially on the consumer thread.
+      // This avoids ForkJoinPool threads blocking on AMQP channel write
+      // locks under high concurrency (8 concurrent consumers).
+      // Per ADR-0007, lost messages are tolerated by the next periodic cycle.
+      // sendBroadcast no longer throws — errors are logged and swallowed.
+      int drainedCount = 0;
+      Runnable task;
+      while ((task = pendingBroadcasts.poll()) != null) {
+        task.run();
+        drainedCount++;
+      }
+
+      if (drainedCount >= BATCH_DRAIN_WARN_THRESHOLD) {
+        log.info(
+          "ReportConsumer drained {} broadcasts for chunk {}/{} of {} keys from app={}",
+          drainedCount,
+          (chunkStart / CHUNK_SIZE) + 1,
+          (totalKeys + CHUNK_SIZE - 1) / CHUNK_SIZE,
+          totalKeys,
+          message.appName()
+        );
+      }
     }
 
     globalQpsEstimator.addTotal(totalQps.sum());
