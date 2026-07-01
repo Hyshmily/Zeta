@@ -93,7 +93,10 @@ public class HotKeyAutoConfiguration {
       properties.getDepth(),
       properties.getDecay(),
       properties.getMinCount(),
-      properties.getExpelledQueueCapacity()
+      properties.getExpelledQueueCapacity(),
+      properties.isCoolingProtectionEnabled(),
+      properties.getCoolingProtectionThreshold(),
+      properties.getCoolingProtectionMaxTenure()
     );
   }
 

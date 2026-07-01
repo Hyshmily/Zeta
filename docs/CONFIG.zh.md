@@ -78,6 +78,9 @@
 
 > **设计说明：** 应用端 HeavyKeeper 使用更宽（50k）但更浅（depth 5）的 Sketch，衰减稍慢（0.92）。较宽的 Sketch 在单 key 插入时减少指纹冲突概率。较浅的深度足以满足应用端快速*启发式*本地升级判断的需要——它不做权威的 HOT/COOL 决策。参见下方 [Worker 端 HeavyKeeper](#hotkeyworkerheavy-keeper) 的对比配置。
 | `hotkey.local.min-count`                | `10`                     | 热点 key 最低计数阈值                                                                        |
+| `hotkey.local.cooling-protection.enabled` | `false`                | 启用冷却保护——对长期高热 key 应用更温和的衰减，防止短暂流量低谷导致其被逐出 heap              |
+| `hotkey.local.cooling-protection.threshold` | `5`                   | 存活 decay 周期数后激活保护（30s 间隔下约 150s）                                             |
+| `hotkey.local.cooling-protection.max-tenure` | `20`                 | tenure 上限，超过不再增加保护力度。必须大于 `threshold`                                      |
 | `hotkey.local.local-cache-max-size`     | `1000`                   | Caffeine L1 最大条目数                                                                       |
 | `hotkey.local.local-cache-ttl-minutes`  | `5`                      | Caffeine L1 写入 TTL（分钟）                                                                 |
 | `hotkey.local.inflight-max-size`        | `50000`                  | Inflight 去重最大条目数                                                                      |

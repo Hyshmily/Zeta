@@ -24,7 +24,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
-import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
@@ -63,24 +62,12 @@ public class HeavyKeeper implements TopK {
   /** Number of lock stripes for fine-grained concurrency ({@value}). Must be a power of two. */
   private static final int LOCK_STRIPES = 256;
 
-  /**
-   * -- GETTER --
-   * Maximum number of hot keys tracked.
-   */
   @Getter
   private final int k;
 
-  /**
-   * -- GETTER --
-   * Width of the Count-Min Sketch (columns per row).
-   */
   @Getter
   private final int width;
 
-  /**
-   * -- GETTER --
-   * Depth of the Count-Min Sketch (rows / hash functions).
-   */
   @Getter
   private final int depth;
 
@@ -107,12 +94,17 @@ public class HeavyKeeper implements TopK {
   /** Running total of all tracked data streams since startup or last {@link #fading()}. */
   private final LongAdder total;
 
-  /**
-   * -- GETTER --
-   * Minimum count threshold before a key can enter the TopK set.
-   */
   @Getter
   private final int minCount;
+
+  @Getter
+  private final boolean coolingProtectionEnabled;
+
+  @Getter
+  private final int coolingProtectionThreshold;
+
+  @Getter
+  private final int coolingProtectionMaxTenure;
 
   /**
    * Construct a HeavyKeeper instance.
@@ -124,7 +116,7 @@ public class HeavyKeeper implements TopK {
    * @param minCount minimum count threshold before a key can enter the TopK set
    */
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount) {
-    this(k, width, depth, decay, minCount, 50_000);
+    this(k, width, depth, decay, minCount, 50_000, false, 5, 20);
   }
 
   /**
@@ -138,6 +130,33 @@ public class HeavyKeeper implements TopK {
    * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled items
    */
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount, int expelledQueueCapacity) {
+    this(k, width, depth, decay, minCount, expelledQueueCapacity, false, 5, 20);
+  }
+
+  /**
+   * Construct a HeavyKeeper instance with cooling protection.
+   *
+   * @param k                          maximum number of hot keys to track
+   * @param width                      width of the Count-Min Sketch (number of columns per row)
+   * @param depth                      depth of the Count-Min Sketch (number of rows / hash functions)
+   * @param decay                      probabilistic decay factor (0.0–1.0); higher values preserve counts longer
+   * @param minCount                   minimum count threshold before a key can enter the TopK set
+   * @param expelledQueueCapacity      capacity of the bounded blocking queue for expelled items
+   * @param coolingProtectionEnabled   enable cooling protection for long-hot keys
+   * @param coolingProtectionThreshold number of decay cycles before protection activates
+   * @param coolingProtectionMaxTenure max tenure counter for cooling protection
+   */
+  public HeavyKeeper(
+    int k,
+    int width,
+    int depth,
+    double decay,
+    int minCount,
+    int expelledQueueCapacity,
+    boolean coolingProtectionEnabled,
+    int coolingProtectionThreshold,
+    int coolingProtectionMaxTenure
+  ) {
     if (k <= 0) {
       throw new IllegalArgumentException("TopK must be greater than 0, but got: " + k);
     }
@@ -164,6 +183,10 @@ public class HeavyKeeper implements TopK {
     this.heapIndex = new ConcurrentHashMap<>();
     this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
     this.total = new LongAdder();
+
+    this.coolingProtectionEnabled = coolingProtectionEnabled;
+    this.coolingProtectionThreshold = coolingProtectionThreshold;
+    this.coolingProtectionMaxTenure = coolingProtectionMaxTenure;
   }
 
   /**
@@ -399,14 +422,23 @@ public class HeavyKeeper implements TopK {
       }
     }
 
-    // Rebuild the TopK set: halve all counts and discard entries that drop to 0.
+    // Rebuild the TopK set: halve all counts (or apply gentler decay
+    // for long-hot keys when cooling protection is enabled) and discard
+    // entries that drop to 0.
     synchronized (sortedTopK) {
       TreeMap<Node, Boolean> newMap = new TreeMap<>(sortedTopK.comparator());
       heapIndex.clear();
       for (Node node : sortedTopK.keySet()) {
-        long half = node.count >> 1;
+        int newTenure = Math.min(node.tenure + 1, coolingProtectionMaxTenure);
+        long half;
+        if (coolingProtectionEnabled && newTenure > coolingProtectionThreshold) {
+          // count * 3/4 via shifts (no floating point)
+          half = (node.count >> 1) + (node.count >> 2);
+        } else {
+          half = node.count >> 1;
+        }
         if (half > 0) {
-          Node newNode = new Node(node.key, half);
+          Node newNode = new Node(node.key, half, newTenure);
           newMap.put(newNode, Boolean.TRUE);
           heapIndex.put(node.key, newNode);
         }
@@ -454,13 +486,24 @@ public class HeavyKeeper implements TopK {
   }
 
   /** A key-count pair used as an entry in the sorted TopK tree. */
-  @AllArgsConstructor
   private static class Node {
 
     /** The cache key. */
     final String key;
     /** Its current estimated count. */
     final long count;
+    /** Number of decay cycles this node has survived (cooling protection). */
+    final int tenure;
+
+    Node(String key, long count) {
+      this(key, count, 0);
+    }
+
+    Node(String key, long count, int tenure) {
+      this.key = key;
+      this.count = count;
+      this.tenure = tenure;
+    }
   }
 
   /**
