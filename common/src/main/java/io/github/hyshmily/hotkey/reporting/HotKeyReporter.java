@@ -27,9 +27,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-
 
 /**
  * Periodically aggregates per-key access counts and publishes them
@@ -69,8 +69,11 @@ public class HotKeyReporter {
 
   /** Publishes aggregated reports to RabbitMQ. */
   private final ReportPublisher reportPublisher;
+
   /** Scheduler for the periodic flush loop. */
+  @Getter
   private final ScheduledExecutorService scheduler;
+
   /** Fixed delay between report flushes in milliseconds. */
   private final long reportIntervalMs;
   /** Name of this application instance, included in report messages. */

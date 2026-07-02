@@ -358,7 +358,7 @@ Simply add the starter to your `pom.xml`; Caffeine L1 + local HeavyKeeper + Repo
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>hotkey</artifactId>
-  <version>1.1.53</version>
+  <version>1.1.54</version>
 </dependency>
 ```
 
@@ -375,7 +375,7 @@ Simply add the starter to your `pom.xml`; Caffeine L1 + local HeavyKeeper + Repo
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>hotkey</artifactId>
-    <version>1.1.53</version>
+    <version>1.1.54</version>
 </dependency>
 ```
 
@@ -393,7 +393,7 @@ Simply add the starter to your `pom.xml`; Caffeine L1 + local HeavyKeeper + Repo
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>hotkey</artifactId>
-  <version>1.1.53</version>
+  <version>1.1.54</version>
 </dependency>
 ```
 
@@ -440,14 +440,14 @@ docker run -d --name hotkey-worker -p 8080:8080 \
   -e SPRING_RABBITMQ_HOST=rabbitmq \
   -e SPRING_DATA_REDIS_HOST=redis \
   -e HOTKEY_WORKER_ENABLED=true \
-  ghcr.io/hyshmily/hotkey-worker:1.1.53
+  ghcr.io/hyshmily/hotkey-worker:1.1.54
 ```
 
 **Run JAR directly** (no Docker):
 
 ```bash
 mvn clean package -pl worker
-java -jar worker/target/hotkey-worker-1.1.53.jar
+java -jar worker/target/hotkey-worker-1.1.54.jar
 ```
 
 ### 2. Configuration

@@ -110,8 +110,6 @@ public class HeavyKeeper implements TopK {
 
   /** Pre-computed decay probability lookup table size ({@value}). */
   private static final int LOOKUP_TABLE_SIZE = 65536;
-  /** Number of lock stripes for fine-grained concurrency ({@value}). Must be a power of two. */
-  private static final int LOCK_STRIPES = 2048;
 
   @Getter
   private final int k;
@@ -199,8 +197,7 @@ public class HeavyKeeper implements TopK {
   @Getter
   private final int minCount;
 
-  /** Base decay factor cached for the beyond-lookup-table {@link Math#pow} fallback. */
-  private final double decayBase;
+
 
   /**
    * Construct a HeavyKeeper instance.
@@ -263,17 +260,20 @@ public class HeavyKeeper implements TopK {
     for (int i = 0; i < LOOKUP_TABLE_SIZE; i++) {
       lookupTable[i] = Math.pow(decay, i);
     }
-    this.decayBase = decay;
 
     int totalSlots = depth * width;
+    int stripes = 1;
+    while (stripes < 2048 && totalSlots / (stripes << 1) >= 4) {
+      stripes <<= 1;
+    }
     this.fingerprints = new long[totalSlots];
     this.windows = new long[totalSlots * windowCount];
     this.slotSums = new long[totalSlots];
-    this.lockStripes = new Object[LOCK_STRIPES];
-    for (int i = 0; i < LOCK_STRIPES; i++) {
+    this.lockStripes = new Object[stripes];
+    for (int i = 0; i < stripes; i++) {
       lockStripes[i] = new Object();
     }
-    this.lockMask = LOCK_STRIPES - 1;
+    this.lockMask = stripes - 1;
     this.widthIsPow2 = width > 0 && (width & (width - 1)) == 0;
     this.widthMask = width - 1;
 
@@ -594,9 +594,9 @@ public class HeavyKeeper implements TopK {
    * owning stripe lock, keeping {@link #slotSums} in sync.
    */
   private void rotateSketchWindows(int aw) {
-    for (int stripe = 0; stripe < LOCK_STRIPES; stripe++) {
+    for (int stripe = 0; stripe < lockStripes.length; stripe++) {
       synchronized (lockStripes[stripe]) {
-        for (int i = stripe; i < slotSums.length; i += LOCK_STRIPES) {
+        for (int i = stripe; i < slotSums.length; i += lockStripes.length) {
           long oldWindow = windows[i * windowStride + aw];
           if (oldWindow != 0) {
             windows[i * windowStride + aw] = 0;
