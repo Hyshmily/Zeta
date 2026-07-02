@@ -43,7 +43,6 @@ Beyond that, HotKey also provides:
   - `@Fallback`: SpEL expression or naming-convention fallback
   - `@NullCaching`: Null-value caching to prevent cache penetration
   - `@Broadcast`: Broadcast suppression, local writes bypass cluster sync
-- **Cooling Protection** — Long-hot keys receive gentler decay after sustained hot status, preventing unnecessary eviction during brief access dips. Configurable via `hotkey.local.cooling-protection.*`.
 - **Multi-level Cache** — Fluent API for chaining N-level backup data sources. `.withPrimary(reader)` goes through the full detection pipeline (records and reports), `.thenExecute(fallback)` degrades stepwise bypassing reporting. Results are written to L1 with optional broadcast.
 - **Soft Expiry (Logical Expiration)** — Differentiated softTTL/hardTTL configuration, completely replacing traditional Redis-side logical expiry. Redis stores pure values, HotKey manages expiry at the L1 Caffeine layer — stale values are returned immediately with async background refresh, reducing P99 latency.
 - **Custom Blacklist/Whitelist Interception** — Blacklist automatically blocks matching key requests; whitelist skips reporting and Worker decisions.
@@ -76,7 +75,7 @@ Beyond that, HotKey also provides:
 - **State Machine Rollback** — If Worker broadcast fails, it automatically rolls back to the pre-evaluation snapshot, preventing a "half-hot" inconsistent state.
 - **Transactional Consistency** — `TransactionSupport` defers cache writes until after `@Transactional` commits.
 - **TopK Persistence** — Worker restores TopK snapshots in seconds on restart, avoiding cold-start misjudgment.
-- **Cooling Protection** — Long-hot keys in the local TopK receive gentler decay (`count × 3/4` instead of `count >>= 1`) after sustained hot status (~150s), preventing eviction during transient traffic dips.
+- **Sliding-Window Sketch** — Sketch counters use a rotating ring buffer per slot (default 3 windows). Prolonged traffic gaps are rotated out instead of decaying the current count, so long-hot keys retain their standing while newly rising keys are detected quickly.
 - **TTL Jitter (±10%)** — Prevents cache stampedes when large numbers of keys expire simultaneously.
 - **Consistent Hash Self-Healing** — 32-bit Murmur3 + 500 virtual nodes + heartbeat-driven dynamic routing; Worker scaling requires no static configuration.
 - **Decision Version Control** — `decisionVersion` is monotonically increasing per Worker + `dataVersion` tolerates degradation, ensuring correct cross-Worker decision ordering.
@@ -89,9 +88,7 @@ Beyond that, HotKey also provides:
 >
 > Default full-chain end-to-end latency: **300ms (P99)**
 
-
 ![latency](docs/img/latency.png)
-
 
 HotKey is inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project; algorithmic support comes from [Aegis](https://github.com/go-kratos/aegis).
 

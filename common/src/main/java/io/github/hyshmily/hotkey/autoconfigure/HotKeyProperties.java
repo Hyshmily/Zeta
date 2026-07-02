@@ -112,22 +112,10 @@ public class HotKeyProperties {
   @Min(1)
   private int expelledQueueCapacity = 50_000;
 
-  /** Enable cooling protection for long-hot keys in HeavyKeeper decay. */
-  private boolean coolingProtectionEnabled = false;
-
-  /**
-   * Number of decay cycles a key must survive before cooling protection activates.
-   * At 30s interval, threshold=5 means ~150s of sustained hot status.
-   */
+  /** Number of sliding time windows per sketch slot (ring buffer depth). Default 3. */
   @Min(1)
-  private int coolingProtectionThreshold = 5;
-
-  /**
-   * Maximum tenure counter for cooling protection. Higher values don't increase
-   * protection further. Must be &gt; {@link #coolingProtectionThreshold}.
-   */
-  @Min(2)
-  private int coolingProtectionMaxTenure = 20;
+  @Max(10)
+  private int sketchWindowCount = 3;
 
   /** Default hard TTL (ms) for normal keys — fallback when {@link #hardTtlMs} is not set. */
   private long defaultHardTtlMs = 300_000;

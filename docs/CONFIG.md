@@ -82,9 +82,7 @@
 
 > **Design note:** The app-side HeavyKeeper uses wider (50k) but shallower (depth 5) sketch dimensions with slightly slower decay (0.92) compared to the Worker side. A wider sketch reduces fingerprint-collision probability on single-key inserts (the app path). Shallower depth is acceptable because the app only needs a fast *heuristic* for local promotion — it does not make authoritative HOT/COOL decisions. See [Worker-side HeavyKeeper](#hotkeyworkerheavy-keeper) below for the contrasting configuration.
 | `hotkey.local.min-count`                | `10`                     | Minimum count threshold for hot key                                                                                           |
-| `hotkey.local.cooling-protection.enabled` | `false`                | Enable cooling protection — gentler decay for long-hot keys, preventing eviction during brief traffic dips                    |
-| `hotkey.local.cooling-protection.threshold` | `5`                   | Number of decay cycles (~150s at 30s interval) before a key qualifies for cooling protection                                   |
-| `hotkey.local.cooling-protection.max-tenure` | `20`                 | Max tenure counter; higher values no longer increase protection. Must be > `threshold`                                         |
+| `hotkey.local.sketch-window-count`      | `3`                      | Sliding-window depth per sketch slot (ring buffer). W=3 covers 3×decay-interval of data, eliminating hot-key drift. Range 1–10 |
 | `hotkey.local.local-cache-max-size`     | `1000`                   | Caffeine L1 max entries                                                                                                       |
 | `hotkey.local.local-cache-ttl-minutes`  | `5`                      | Caffeine L1 write-based TTL (minutes)                                                                                         |
 | `hotkey.local.inflight-max-size`        | `50000`                  | In-flight dedup max entries                                                                                                   |

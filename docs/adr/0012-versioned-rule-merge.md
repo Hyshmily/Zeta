@@ -15,7 +15,7 @@ Introduce a third version space (`rulesVersion`, `AtomicLong`), make `persistAnd
 
 ## Consequences
 
-- Deletions are **eventually consistent** (per ADR-0006): a concurrently added rule may temporarily reappear after a peer deletes it, until the next merge cycle.
+- Deletions are **eventually consistent** (per ADR-0013): a concurrently added rule may temporarily reappear after a peer deletes it, until the next merge cycle.
 - Both-write guarantees that a freshly started instance with no broadcast history still gets the latest rules from Redis on first access.
 - The Lua CAS guards against stale-write races but does not prevent concurrent additions from different instances — merge-on-receive handles that.
 - `rulesVersion` space is per-rule-set (global), not per-rule. A single `AtomicLong` suffices because rule changes are administrative operations (low frequency, small payload).

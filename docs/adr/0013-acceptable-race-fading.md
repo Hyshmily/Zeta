@@ -30,4 +30,4 @@ We explicitly choose **not** to provide:
 - A process-crash between ack and update causes a one-cycle delay in cache sync or decision application — never permanent divergence.
 - Under extreme network partition (>broadcast interval), some instances may serve stale data. The next heatbeat from a live Worker re-converges all instances.
 - No need for persistent message store or replay infrastructure in the library.
-- The acceptable window is configurable via `hotkey.worker-listener.jitter-max-ms`, `hotkey.sync.dedup-window-sec`, etc.
+- The acceptable window is configurable via `hotkey.worker-listener.warmup-jitter-ms`, `hotkey.sync.dedup-window-seconds`, etc.

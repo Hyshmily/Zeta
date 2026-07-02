@@ -94,9 +94,7 @@ public class HotKeyAutoConfiguration {
       properties.getDecay(),
       properties.getMinCount(),
       properties.getExpelledQueueCapacity(),
-      properties.isCoolingProtectionEnabled(),
-      properties.getCoolingProtectionThreshold(),
-      properties.getCoolingProtectionMaxTenure()
+      properties.getSketchWindowCount()
     );
   }
 

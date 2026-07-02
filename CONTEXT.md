@@ -12,7 +12,7 @@
 - **KeyState** — Enum: `NORMAL` / `HOT` / `COOL`. HOT and COOL are set by the Worker; NORMAL is the default. Transitions: `NORMAL ↔ HOT` (via Worker broadcast), `HOT ↔ COOL` (via Worker broadcast), `COOL → NORMAL` (via expiry + reload).
 - **NORMAL** — Default state. No Worker involvement. Local TopK can freely promote to HOT.
 - **HOT** — Worker-broadcasted hot decision OR local promotion result. Longest TTLs (hotHardTtl / hotSoftTtl). Never degraded or overwritten by local decisions.
-- **COOL** — Worker-broadcasted cool decision. Preserved when at least one Worker is alive. Eligible for local promotion to HOT only when **all** Workers are dead (graceful degradation mode).
+- **COOL** — Worker-broadcasted cool decision. Preserved when the Worker cluster is healthy (majority quorum satisfied). Eligible for local promotion to HOT only when majority quorum fails (graceful degradation mode).
 
 ## Components
 
@@ -20,7 +20,7 @@
 - **Worker** — Standalone Spring Boot application (`hotkey-worker`). Consumes App reports via AMQP, runs its own TopK, emits HOT/COOL decisions back to Apps via broadcast. Published as a separate module, never deployed to Maven Central.
 - **TopK** — Interface for the hot key detection algorithm. Implemented by `HeavyKeeper` (Count-Min Sketch variant). Tracks the `K` most frequent keys. The app-side facade is **HotKeyDetector** which wraps HeavyKeeper and adds a buffered `add` path for batched frequency updates.
 - **SingleFlight** — Deduplication mechanism that coalesces concurrent loads for the same key into a single execution. Prevents thundering herd.
-- **Rule** — A cache access rule with a `pattern`, `action` (`BLOCK`/`ALLOW_NO_REPORT`/`ALLOW`), and `type` (`EXACT`/`PREFIX`/`WILDCARD`/`REGEX`). Rules are serialized to JSON for Redis persistence and AMQP broadcast. **JSON must include `"type"`** — Jackson deserialization defaults it to `null`, and `match()` skips (returns `false`) any rule whose type is `null`. Managed by `RuleMatcher`.
+- **Rule** — A cache access rule with a `pattern`, `action` (`BLOCK`/`ALLOW_NO_REPORT`/`ALLOW`), and `type` (`EXACT`/`PREFIX`/`WILDCARD`/`REGEX`). Rules are serialized to JSON for Redis persistence and AMQP broadcast. **JSON should include `"type"`** — the Java field initializer defaults to `RuleType.EXACT`, and `match()` defensively returns `false` if `type` is `null` (e.g. from manual `setType(null)`). Managed by `RuleMatcher`.
 
 ## Versions
 
@@ -31,8 +31,8 @@
 
 ## Lifecycle
 
-- **Graceful Degradation** — When all Workers are detected as dead (`RingManager.isAnyWorkerAlive()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
-- **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `promoteLocalHotkeyIfNeeded`) or by Worker broadcast (in `handleHot`).
+- **Graceful Degradation** — When the Worker cluster fails majority quorum (`ClusterHealthView.isClusterHealthy()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
+- **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `processLocalHotkeyIfNeeded`) or by Worker broadcast (in `handleHot`).
 - **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `CacheExpireManager` to prevent cache stampedes. Controlled by `hotkey.local.ttl-jitter-ratio` (default 0.05 = ±5%). Always enabled.
 - **Expire** — Two-tier: **soft expire** (stale-while-revalidate, returns stale data + async refresh) and **hard expire** (absolute TTL, entry invalidated). Soft expire only applies to HOT and COOL entries.
 - **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `HotKeyCacheManager` (implements `CacheManager`) and `HotKeySpringCache` (implements `Cache`). Enabled via `hotkey.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
@@ -59,6 +59,6 @@
 
 ## Failure Behavior
 
-- **Worker All Dead** — All Worker shards have missed the heartbeat window (5s timeout). Activated threshold: `RingManager.isAnyWorkerAlive() == false`. Local TopK assumes authority: COOL entries become promotable, `isWorkerManagedEntry` returns false. Worker broadcast on recovery overrides local promotions via decisionVersion.
+- **Worker Majority Dead** — A majority of Worker shards have missed the heartbeat window (5s timeout). Activated threshold: `ClusterHealthView.isClusterHealthy()` returns `false`. Local TopK assumes authority: COOL entries become promotable, `isWorkerManagedEntry` returns false. Worker broadcast on recovery overrides local promotions via decisionVersion.
 - **Worker Partial Dead** — Some shards alive, some not. Alive shards continue normally. Dead shard's keys are routed to other shards via consistent-hashing ring reconciliation.
 - **Redis Degraded** — `nextVersion()` falls back to node-local counter (`Long.MIN_VALUE + counter`). Broadcast carries `isVersionDegraded=true`. Peers apply 4-case comparison to prevent degraded versions overwriting normal ones.

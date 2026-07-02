@@ -79,8 +79,8 @@ public class ClusterHealthView {
    * Updates the expected Worker count for majority-quorum health calculations.
    * <p>Called during initialization (from configuration) and dynamically
    * when the ring is reconciled from observed heartbeats.
-   * <p>If the new count is 0, the cluster is always considered unhealthy.
-   * If the new count is greater than the previous, the quorum threshold
+   * <p>If the new count is 0, the cluster is considered healthy when at least
+   * one alive Worker is observed. If the new count is greater than the previous, the quorum threshold
    * adjusts accordingly.
    *
    * @param count the new expected Worker count; must be {@code >= 0}
