@@ -38,7 +38,7 @@ jobs:
           (cd packaging && tar czf "../hotkey-worker-${VER}.tar.gz" "hotkey-worker-${VER}")
 
       - name: Publish common to GitHub Packages
-        run: mvn deploy -P release -DskipTests -Dgpg.skip=true --no-transfer-progress
+        run: mvn deploy -DskipTests --no-transfer-progress
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
