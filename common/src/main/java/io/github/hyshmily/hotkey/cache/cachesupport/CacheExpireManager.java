@@ -155,7 +155,7 @@ public class CacheExpireManager {
    * @return absolute epoch-ms timestamp for hard expiry
    */
   public long computeHardExpireAt(long hardTtlMs) {
-    return toHardExpireTimestamp(resolveEffectiveHard(hardTtlMs));
+    return toHardExpireTimestamp(resolveEffectiveHardTtl(hardTtlMs));
   }
 
   /**
@@ -188,7 +188,7 @@ public class CacheExpireManager {
     if (!isSoftExpireEnabled()) {
       return 0L;
     }
-    return toSoftExpireTimestamp(resolveEffectiveSoft(softTtlMs));
+    return toSoftExpireTimestamp(resolveEffectiveSoftTtl(softTtlMs));
   }
 
   /**
@@ -207,7 +207,7 @@ public class CacheExpireManager {
    * @param hardTtlMs hard TTL override ({@code 0} or negative uses default)
    * @return effective hard TTL duration in milliseconds
    */
-  public long resolveEffectiveHard(long hardTtlMs) {
+  public long resolveEffectiveHardTtl(long hardTtlMs) {
     return hardTtlMs > 0 ? hardTtlMs : getEffectiveHardTtlMs();
   }
 
@@ -247,7 +247,7 @@ public class CacheExpireManager {
    * @param softTtlMs soft TTL override ({@code 0} or negative uses default)
    * @return effective soft TTL duration in milliseconds
    */
-  public long resolveEffectiveSoft(long softTtlMs) {
+  public long resolveEffectiveSoftTtl(long softTtlMs) {
     return softTtlMs > 0 ? softTtlMs : getEffectiveSoftTtlMs();
   }
 
@@ -269,6 +269,241 @@ public class CacheExpireManager {
    */
   public long resolveEffectiveHotSoft(long softTtlMs) {
     return softTtlMs > 0 ? softTtlMs : getEffectiveHotSoftTtlMs();
+  }
+
+  /**
+   * Build a {@link CacheEntry} from fully resolved fields, including
+   * decision metadata (node, epoch), pre-computed expire timestamps,
+   * and normal-TTL values. Normal TTL is applied via
+   * {@link #applyNormalTtl} after construction.
+   * <p>
+   * This overload accepts pre-computed hard/soft expire timestamps,
+   * which is useful when the caller already knows the exact expiry
+   * baseline (e.g., when copying from an existing entry).
+   *
+   * @param value              the cached value
+   * @param dataVersion        the data version for cross-instance sync
+   * @param isVersionDegraded  whether the data version is degraded (local fallback)
+   * @param decisionVersion    the Worker decision version
+   * @param decisionNodeId     the Worker node ID that produced the decision
+   * @param decisionEpoch      the epoch (restart counter) of the decision Worker
+   * @param hardTtlMs          hard TTL duration in milliseconds
+   * @param softTtlMs          soft TTL duration in milliseconds
+   * @param hardExpireAtMs     pre-computed hard expiry absolute timestamp
+   * @param softExpireAtMs     pre-computed soft expiry absolute timestamp
+   * @param normalHardTtlMs    normal (non-hot) hard TTL for state reversion
+   * @param normalSoftTtlMs    normal (non-hot) soft TTL for state reversion
+   * @param keyState           the initial key state (NORMAL, HOT, COOL)
+   * @return a new {@link CacheEntry} with all fields set
+   */
+  public CacheEntry createBuilder(
+    Object value,
+    long dataVersion,
+    boolean isVersionDegraded,
+    long decisionVersion,
+    String decisionNodeId,
+    long decisionEpoch,
+    long hardTtlMs,
+    long softTtlMs,
+    long hardExpireAtMs,
+    long softExpireAtMs,
+    long normalHardTtlMs,
+    long normalSoftTtlMs,
+    KeyState keyState
+  ) {
+    return applyNormalTtl(
+      CacheEntry.builder()
+        .value(value)
+        .dataVersion(dataVersion)
+        .isVersionDegraded(isVersionDegraded)
+        .decisionVersion(decisionVersion)
+        .decisionNodeId(decisionNodeId)
+        .decisionEpoch(decisionEpoch)
+        .hardTtlMs(hardTtlMs)
+        .softTtlMs(softTtlMs)
+        .hardExpireAtMs(hardExpireAtMs)
+        .softExpireAtMs(softExpireAtMs)
+        .keyState(keyState)
+        .build(),
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /**
+   * Build a {@link CacheEntry} from fully resolved fields with decision
+   * metadata but without pre-computed expire timestamps. Expire timestamps
+   * are computed automatically via {@link #applyTtl}.
+   * <p>
+   * The {@code hardTtlMs} and {@code softTtlMs} passed here are used both
+   * as field values <em>and</em> as inputs to {@code applyTtl}, which
+   * overwrites the expire-at timestamps. This is the typical path for
+   * entries sourced from a remote reader (Worker or Redis) where the
+   * caller does not pre-compute timestamps.
+   *
+   * @param value              the cached value
+   * @param dataVersion        the data version for cross-instance sync
+   * @param isVersionDegraded  whether the data version is degraded
+   * @param decisionVersion    the Worker decision version
+   * @param decisionNodeId     the Worker node ID that produced the decision
+   * @param decisionEpoch      the epoch (restart counter) of the decision Worker
+   * @param hardTtlMs          hard TTL duration in milliseconds
+   * @param softTtlMs          soft TTL duration in milliseconds
+   * @param normalHardTtlMs    normal (non-hot) hard TTL for state reversion
+   * @param normalSoftTtlMs    normal (non-hot) soft TTL for state reversion
+   * @param keyState           the initial key state
+   * @return a new {@link CacheEntry} with expire timestamps computed
+   */
+  public CacheEntry createBuilder(
+    Object value,
+    long dataVersion,
+    boolean isVersionDegraded,
+    long decisionVersion,
+    String decisionNodeId,
+    long decisionEpoch,
+    long hardTtlMs,
+    long softTtlMs,
+    long normalHardTtlMs,
+    long normalSoftTtlMs,
+    KeyState keyState
+  ) {
+    return applyTtl(
+      applyNormalTtl(
+        CacheEntry.builder()
+          .value(value)
+          .dataVersion(dataVersion)
+          .isVersionDegraded(isVersionDegraded)
+          .decisionVersion(decisionVersion)
+          .decisionNodeId(decisionNodeId)
+          .decisionEpoch(decisionEpoch)
+          .hardTtlMs(hardTtlMs)
+          .softTtlMs(softTtlMs)
+          .keyState(keyState)
+          .build(),
+        normalHardTtlMs,
+        normalSoftTtlMs
+      ),
+      hardTtlMs,
+      softTtlMs
+    );
+  }
+
+  /**
+   * Build a {@link CacheEntry} with pre-computed expire timestamps
+   * but without decision node/epoch metadata. Normal TTL is applied
+   * via {@link #applyNormalTtl} after construction.
+   * <p>
+   * This overload omits {@code decisionNodeId} and {@code decisionEpoch},
+   * which is appropriate for entries created by local promotion (no
+   * Worker origin). The expire timestamps are caller-supplied.
+   *
+   * @param value              the cached value
+   * @param dataVersion        the data version for cross-instance sync
+   * @param isVersionDegraded  whether the data version is degraded
+   * @param decisionVersion    the Worker decision version (0 for local)
+   * @param hardTtlMs          hard TTL duration in milliseconds
+   * @param softTtlMs          soft TTL duration in milliseconds
+   * @param hardExpireAtMs     pre-computed hard expiry absolute timestamp
+   * @param softExpireAtMs     pre-computed soft expiry absolute timestamp
+   * @param normalHardTtlMs    normal (non-hot) hard TTL for state reversion
+   * @param normalSoftTtlMs    normal (non-hot) soft TTL for state reversion
+   * @param keyState           the initial key state
+   * @return a new {@link CacheEntry} with all fields set
+   */
+  public CacheEntry createBuilder(
+    Object value,
+    long dataVersion,
+    boolean isVersionDegraded,
+    long decisionVersion,
+    long hardTtlMs,
+    long softTtlMs,
+    long hardExpireAtMs,
+    long softExpireAtMs,
+    long normalHardTtlMs,
+    long normalSoftTtlMs,
+    KeyState keyState
+  ) {
+    return applyNormalTtl(
+      CacheEntry.builder()
+        .value(value)
+        .dataVersion(dataVersion)
+        .isVersionDegraded(isVersionDegraded)
+        .decisionVersion(decisionVersion)
+        .hardTtlMs(hardTtlMs)
+        .softTtlMs(softTtlMs)
+        .hardExpireAtMs(hardExpireAtMs)
+        .softExpireAtMs(softExpireAtMs)
+        .keyState(keyState)
+        .build(),
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /**
+   * Build a {@link CacheEntry} from raw fields without pre-computed
+   * expire timestamps or decision metadata. Expire timestamps are
+   * computed via {@link #applyTtl} after normal TTL is set.
+   * <p>
+   * This is the most compact overload, suitable for local promotions
+   * where the caller has no Worker decision context and wants
+   * timestamps computed automatically.
+   *
+   * @param value              the cached value
+   * @param dataVersion        the data version for cross-instance sync
+   * @param isVersionDegraded  whether the data version is degraded
+   * @param decisionVersion    the Worker decision version (0 for local)
+   * @param hardTtlMs          hard TTL duration in milliseconds
+   * @param softTtlMs          soft TTL duration in milliseconds
+   * @param normalHardTtlMs    normal (non-hot) hard TTL for state reversion
+   * @param normalSoftTtlMs    normal (non-hot) soft TTL for state reversion
+   * @param keyState           the initial key state
+   * @return a new {@link CacheEntry} with expire timestamps computed
+   */
+  public CacheEntry createBuilder(
+    Object value,
+    long dataVersion,
+    boolean isVersionDegraded,
+    long decisionVersion,
+    long hardTtlMs,
+    long softTtlMs,
+    long normalHardTtlMs,
+    long normalSoftTtlMs,
+    KeyState keyState
+  ) {
+    return applyTtl(
+      applyNormalTtl(
+        CacheEntry.builder()
+          .value(value)
+          .dataVersion(dataVersion)
+          .isVersionDegraded(isVersionDegraded)
+          .decisionVersion(decisionVersion)
+          .keyState(keyState)
+          .build(),
+        normalHardTtlMs,
+        normalSoftTtlMs
+      ),
+      hardTtlMs,
+      softTtlMs
+    );
+  }
+
+  /**
+   * Create a copy of the entry with the normal (non-hot) TTL values set,
+   * leaving all other fields (hot TTLs, versions, state) untouched.
+   * <p>
+   * The normal TTLs ({@code normalHardTtlMs}, {@code normalSoftTtlMs})
+   * are the baseline TTL values that the entry reverts to when its key
+   * state transitions from HOT back to NORMAL. These are recorded at
+   * entry creation and preserved across state transitions.
+   *
+   * @param original   the source {@link CacheEntry} to copy
+   * @param hardTtlMs  normal hard TTL duration in milliseconds
+   * @param softTtlMs  normal soft TTL duration in milliseconds
+   * @return a new {@link CacheEntry} with the normal TTL fields updated
+   */
+  public CacheEntry applyNormalTtl(CacheEntry original, long hardTtlMs, long softTtlMs) {
+    return original.toBuilder().normalHardTtlMs(hardTtlMs).normalSoftTtlMs(softTtlMs).build();
   }
 
   /**
@@ -294,6 +529,30 @@ public class CacheExpireManager {
       .hardExpireAtMs(computeHardExpireAt(hardTtlMs))
       .softExpireAtMs(computeSoftExpireAt(softTtlMs))
       .build();
+  }
+
+  /**
+   * Create a copy of the entry with only the hard TTL updated, leaving the
+   * existing soft TTL and all version/state fields untouched.
+   *
+   * @param original   the source {@link CacheEntry} to copy
+   * @param hardTtlMs  hard TTL duration in milliseconds
+   * @return a new {@link CacheEntry} with the updated hard TTL and expiration
+   */
+  public CacheEntry applyHardTtl(CacheEntry original, long hardTtlMs) {
+    return original.toBuilder().hardTtlMs(hardTtlMs).hardExpireAtMs(computeHardExpireAt(hardTtlMs)).build();
+  }
+
+  /**
+   * Create a copy of the entry with only the soft TTL updated, leaving the
+   * existing hard TTL and all version/state fields untouched.
+   *
+   * @param original   the source {@link CacheEntry} to copy
+   * @param softTtlMs  soft TTL duration in milliseconds
+   * @return a new {@link CacheEntry} with the updated soft TTL and expiration
+   */
+  public CacheEntry applySoftTtl(CacheEntry original, long softTtlMs) {
+    return original.toBuilder().softTtlMs(softTtlMs).softExpireAtMs(computeSoftExpireAt(softTtlMs)).build();
   }
 
   /**
@@ -461,27 +720,22 @@ public class CacheExpireManager {
                       log.debug("Async refresh discarded: newer version exists: {}", cacheKey);
                       return entry;
                     }
-                    return entry
-                      .toBuilder()
-                      .value(value)
-                      .softTtlMs(softTtlMs)
-                      .softExpireAtMs(computeSoftExpireAt(softTtlMs))
-                      .build();
+                    return applySoftTtl(entry.toBuilder().value(value).build(), softTtlMs);
                   })
                   .orElseGet(() ->
-                    CacheEntry.builder()
-                      .value(value)
-                      .dataVersion(VERSION_DEFAULT)
-                      .isVersionDegraded(false)
-                      .decisionVersion(0L)
-                      .hardTtlMs(0L)
-                      .hardExpireAtMs(Long.MAX_VALUE)
-                      .softTtlMs(softTtlMs)
-                      .softExpireAtMs(computeSoftExpireAt(softTtlMs))
-                      .keyState(KeyState.NORMAL)
-                      .normalHardTtlMs(0L)
-                      .normalSoftTtlMs(0L)
-                      .build()
+                    createBuilder(
+                      value,
+                      VERSION_DEFAULT,
+                      false,
+                      VERSION_DEFAULT,
+                      0L,
+                      softTtlMs,
+                      Long.MAX_VALUE,
+                      computeSoftExpireAt(softTtlMs),
+                      0L,
+                      0L,
+                      KeyState.NORMAL
+                    )
                   )
               );
           }
@@ -515,7 +769,7 @@ public class CacheExpireManager {
   public void extendExpiry(String cacheKey, long hardTtlMs, long softTtlMs) {
     long hard = resolveEffectiveHotHard(hardTtlMs);
     long soft = resolveEffectiveHotSoft(softTtlMs);
-    updateExpiry(cacheKey, hard, soft, true, true);
+    extendExpiry(cacheKey, hard, soft, true, true);
   }
 
   /**
@@ -534,7 +788,7 @@ public class CacheExpireManager {
    */
   public void extendHardExpiry(String cacheKey, long hardTtlMs) {
     long hard = resolveEffectiveHotHard(hardTtlMs);
-    updateExpiry(cacheKey, hard, 0, true, false);
+    extendExpiry(cacheKey, hard, 0, true, false);
   }
 
   /**
@@ -551,7 +805,7 @@ public class CacheExpireManager {
    */
   public void extendSoftExpiry(String cacheKey, long softTtlMs) {
     long soft = resolveEffectiveHotSoft(softTtlMs);
-    updateExpiry(cacheKey, 0, soft, false, true);
+    extendExpiry(cacheKey, 0, soft, false, true);
   }
 
   /**
@@ -563,19 +817,16 @@ public class CacheExpireManager {
    * @param updateHard  whether to update the hard expiry timestamp
    * @param updateSoft  whether to update the soft expiry timestamp
    */
-  private void updateExpiry(String cacheKey, long hardTtlMs, long softTtlMs, boolean updateHard, boolean updateSoft) {
-    long hardExpire = updateHard ? computeHardExpireAt(hardTtlMs) : 0;
-    long softExpire = updateSoft ? computeSoftExpireAt(softTtlMs) : 0;
-
+  private void extendExpiry(String cacheKey, long hardTtlMs, long softTtlMs, boolean updateHard, boolean updateSoft) {
     caffeineCache
       .asMap()
       .computeIfPresent(cacheKey, (k, existing) -> {
         if (existing instanceof CacheEntry entry) {
           if (updateHard) {
-            entry = entry.toBuilder().hardTtlMs(hardTtlMs).hardExpireAtMs(hardExpire).build();
+            entry = applyHardTtl(entry, resolveEffectiveHardTtl(hardTtlMs));
           }
           if (updateSoft) {
-            entry = entry.toBuilder().softTtlMs(softTtlMs).softExpireAtMs(softExpire).build();
+            entry = applySoftTtl(entry, resolveEffectiveSoftTtl(softTtlMs));
           }
           return entry;
         }

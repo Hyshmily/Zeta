@@ -25,6 +25,7 @@ import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
+import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import io.github.hyshmily.hotkey.util.DelayUtil;
@@ -313,30 +314,33 @@ public class CacheSyncListener {
         }
 
         if (existing instanceof CacheEntry cacheEntry) {
+          long hardExpireAt = expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs());
+          long softExpireAt = expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs());
           return cacheEntry
             .toBuilder()
             .value(value)
             .dataVersion(sm.version())
             .isVersionDegraded(sm.isVersionDegraded())
-            .hardExpireAtMs(expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs()))
-            .softExpireAtMs(expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs()))
+            .hardExpireAtMs(hardExpireAt)
+            .softExpireAtMs(softExpireAt)
             .build();
         }
-
-        // Entry was evicted from L1 — create fresh CacheEntry with default metadata
-        return CacheEntry.builder()
-          .value(value)
-          .dataVersion(sm.version())
-          .isVersionDegraded(sm.isVersionDegraded())
-          .decisionVersion(0L)
-          .hardTtlMs(expireManager.getEffectiveHardTtlMs())
-          .hardExpireAtMs(expireManager.computeHardExpireAt(expireManager.getEffectiveHardTtlMs()))
-          .softTtlMs(expireManager.getEffectiveSoftTtlMs())
-          .softExpireAtMs(expireManager.computeSoftExpireAt(expireManager.getEffectiveSoftTtlMs()))
-          .keyState(io.github.hyshmily.hotkey.model.KeyState.NORMAL)
-          .normalHardTtlMs(expireManager.getEffectiveHardTtlMs())
-          .normalSoftTtlMs(expireManager.getEffectiveSoftTtlMs())
-          .build();
+        long defaultHardTtlMs = expireManager.getEffectiveHardTtlMs();
+        long defaultSoftTtlMs = expireManager.getEffectiveSoftTtlMs();
+        //Entry was evicted from L1 — create fresh CacheEntry with default metadata
+        return expireManager.applyTtl(
+          CacheEntry.builder()
+            .value(value)
+            .dataVersion(sm.version())
+            .isVersionDegraded(sm.isVersionDegraded())
+            .decisionVersion(0L)
+            .keyState(KeyState.NORMAL)
+            .normalHardTtlMs(defaultHardTtlMs)
+            .normalSoftTtlMs(defaultSoftTtlMs)
+            .build(),
+          defaultHardTtlMs,
+          defaultSoftTtlMs
+        );
       });
     log.debug("Refreshed by sync: {}", sm.cacheKey());
   }

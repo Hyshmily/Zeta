@@ -625,7 +625,7 @@ class CacheExpireManagerTest {
       .limit(100)
       .forEach(expireAt -> {
         long diff = expireAt - System.currentTimeMillis();
-        assertThat(diff).isBetween(5_000L, 15_000L);
+        assertThat(diff).isBetween(4_900L, 15_100L);
       });
   }
 

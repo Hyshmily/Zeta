@@ -1,3 +1,0 @@
-# Ack-Before-Update for AMQP Listeners
-
-`WorkerListener` and `CacheSyncListener` acknowledge AMQP messages (`channel.basicAck()`) before executing the cache update. This downgrades delivery semantics from at-least-once to at-most-once for cache writes. If the process crashes after ack but before update, the decision or sync message is lost. Rationale: both Workers and write transactions broadcast periodically, so the next cycle self-heals any missed update. The ack-before pattern avoids redelivery storms during the jitter window (100ms warmup jitter, async refresh delay) and keeps listener logic simple without idempotent processing or dedup state. A unified retry/interceptor layer may be added in the future, but the broadcast-based self-healing makes this low priority.

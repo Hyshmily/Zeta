@@ -243,39 +243,42 @@ public class WorkerListener {
     caffeineCache
       .asMap()
       .compute(wm.cacheKey(), (key, existing) -> {
+        long defultHotHardTtl = expireManager.getEffectiveHotHardTtlMs();
+        long defultHotSoftTtl = expireManager.getEffectiveHotSoftTtlMs();
+
         // DCL second check – atomic with to write
         if (existing instanceof CacheEntry ce) {
           if (VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion(), wm.nodeId(), wm.epoch())) {
             return existing;
           }
 
-          return ce
-            .toBuilder()
-            .value(value)
-            .decisionVersion(wm.decisionVersion())
-            .decisionNodeId(wm.nodeId())
-            .decisionEpoch(wm.epoch())
-            .hardTtlMs(expireManager.getEffectiveHotHardTtlMs())
-            .hardExpireAtMs(expireManager.computeHotHardExpireAt())
-            .softTtlMs(expireManager.getEffectiveHotSoftTtlMs())
-            .softExpireAtMs(expireManager.computeHotSoftExpireAt())
-            .keyState(KeyState.HOT)
-            .build();
+          return expireManager.applyTtl(
+            ce
+              .toBuilder()
+              .value(value)
+              .decisionVersion(wm.decisionVersion())
+              .decisionNodeId(wm.nodeId())
+              .decisionEpoch(wm.epoch())
+              .keyState(KeyState.HOT)
+              .build(),
+            defultHotHardTtl,
+            defultHotSoftTtl
+          );
         }
 
-        return CacheEntry.builder()
-          .value(value)
-          .dataVersion(0)
-          .isVersionDegraded(false)
-          .decisionVersion(wm.decisionVersion())
-          .hardTtlMs(expireManager.getEffectiveHotHardTtlMs())
-          .hardExpireAtMs(expireManager.computeHotHardExpireAt())
-          .softTtlMs(expireManager.getEffectiveHotSoftTtlMs())
-          .softExpireAtMs(expireManager.computeHotSoftExpireAt())
-          .keyState(KeyState.HOT)
-          .normalHardTtlMs(expireManager.getEffectiveHardTtlMs())
-          .normalSoftTtlMs(expireManager.getEffectiveSoftTtlMs())
-          .build();
+        return expireManager.applyTtl(
+          CacheEntry.builder()
+            .value(value)
+            .dataVersion(0)
+            .isVersionDegraded(false)
+            .decisionVersion(wm.decisionVersion())
+            .keyState(KeyState.HOT)
+            .normalHardTtlMs(expireManager.getEffectiveHardTtlMs())
+            .normalSoftTtlMs(expireManager.getEffectiveSoftTtlMs())
+            .build(),
+          defultHotHardTtl,
+          defultHotSoftTtl
+        );
       });
     log.debug("HotKey promoted by Worker: {}", wm.cacheKey());
     if (sreRateLimiter != null) {

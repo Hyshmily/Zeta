@@ -1,5 +1,6 @@
 # Java
 **/target/**
+packaging/
 !**/target/testresult/
 !**/target/testresult/**
 *.class
