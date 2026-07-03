@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
@@ -50,6 +51,7 @@ import org.springframework.context.annotation.Bean;
  * {@code HotKey} facade singleton is available early and the instance ID
  * override is set before any queue-creating auto-configuration runs.
  */
+@Internal
 @AutoConfiguration
 @RequiredArgsConstructor
 public class HotKeyFacadeAutoConfiguration {
@@ -63,8 +65,10 @@ public class HotKeyFacadeAutoConfiguration {
   @Bean("hotKeyScheduler")
   @ConditionalOnMissingBean(name = "hotKeyScheduler")
   public ScheduledExecutorService hotKeyScheduler() {
-    return Executors.newScheduledThreadPool(properties.getSchedulerPoolSize(),
-      new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER));
+    return Executors.newScheduledThreadPool(
+      properties.getSchedulerPoolSize(),
+      new HotKeyThreadFactory(HotKeyConstants.THREAD_PREFIX_SCHEDULER)
+    );
   }
 
   /**

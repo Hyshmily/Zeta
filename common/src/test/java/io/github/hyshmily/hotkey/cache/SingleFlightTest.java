@@ -19,7 +19,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.HotKeyCircuitBreaker;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -89,8 +90,12 @@ class SingleFlightTest {
   @Test
   void load_shouldPropagateSupplierException() {
     assertThatThrownBy(() ->
-      singleFlight.load("key", () -> { throw new RuntimeException("fail"); })
-    ).isInstanceOf(RuntimeException.class).hasMessage("fail");
+      singleFlight.load("key", () -> {
+        throw new RuntimeException("fail");
+      })
+    )
+      .isInstanceOf(RuntimeException.class)
+      .hasMessage("fail");
   }
 
   /**
@@ -243,7 +248,9 @@ class SingleFlightTest {
   @Test
   void estimatedInflightSize_shouldReturnZeroAfterAllComplete() throws InterruptedException {
     try {
-      singleFlight.load("to-evict", () -> { throw new RuntimeException("fail"); });
+      singleFlight.load("to-evict", () -> {
+        throw new RuntimeException("fail");
+      });
     } catch (RuntimeException e) {
       // expected — exception invalidates the entry
     }
@@ -265,7 +272,9 @@ class SingleFlightTest {
         }
         return "too-late";
       })
-    ).isInstanceOf(RuntimeException.class).hasMessageContaining("timeout-key");
+    )
+      .isInstanceOf(RuntimeException.class)
+      .hasMessageContaining("timeout-key");
   }
 
   /**
@@ -276,7 +285,9 @@ class SingleFlightTest {
   void load_afterException_shouldRetryAndSucceed() {
     // First call fails with exception — cache entry is invalidated
     try {
-      singleFlight.load("retry-key", () -> { throw new RuntimeException("first-fail"); });
+      singleFlight.load("retry-key", () -> {
+        throw new RuntimeException("first-fail");
+      });
     } catch (RuntimeException e) {
       // expected
     }
@@ -356,9 +367,7 @@ class SingleFlightTest {
   @Test
   void load_withHighInflight_shouldLogWarning() {
     SingleFlight smallPool = new SingleFlight(5, 10, 5, executor, disabledBreaker);
-    java.util.stream.IntStream.range(0, 10).forEach(idx ->
-      smallPool.load("k" + idx, () -> "v" + idx)
-    );
+    java.util.stream.IntStream.range(0, 10).forEach(idx -> smallPool.load("k" + idx, () -> "v" + idx));
     assertThat(smallPool.estimatedInflightSize()).isNotNegative();
   }
 
@@ -396,7 +405,9 @@ class SingleFlightTest {
   @Test
   void load_withErrorCause_shouldPropagate() {
     assertThatThrownBy(() ->
-      singleFlight.load("error-key", () -> { throw new Error("simulated-error"); })
+      singleFlight.load("error-key", () -> {
+        throw new Error("simulated-error");
+      })
     ).isInstanceOf(Error.class);
   }
 

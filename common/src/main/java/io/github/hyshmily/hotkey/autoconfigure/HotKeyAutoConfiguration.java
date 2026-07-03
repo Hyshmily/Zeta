@@ -21,10 +21,11 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.HotKeyCircuitBreaker;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.HotKeyCircuitBreaker;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
@@ -66,6 +67,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
  * Worker is active ({@code hotkey.worker.enabled=true}). It runs when
  * Worker is disabled or the property is absent.
  */
+@Internal
 @AutoConfiguration(after = RedisAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "hotkey.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
 @EnableConfigurationProperties(HotKeyProperties.class)

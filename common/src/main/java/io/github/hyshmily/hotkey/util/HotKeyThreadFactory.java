@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.util;
 
+import io.github.hyshmily.hotkey.Internal;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.jspecify.annotations.NonNull;
@@ -27,6 +28,7 @@ import org.jspecify.annotations.NonNull;
  * Thread names follow the pattern {@code <namePrefix><N>} where {@code N} is an
  * auto-incrementing counter starting at 1 (e.g. {@code hotkey-scheduler-1}).
  */
+@Internal
 public class HotKeyThreadFactory implements ThreadFactory {
 
   private final ThreadGroup group;

@@ -15,8 +15,9 @@
  */
 package io.github.hyshmily.hotkey.hotkeydetector;
 
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.hotkeydetector.doublebuffer.BufferedCounter;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.AddResult;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
@@ -51,6 +52,7 @@ import org.springframework.beans.factory.InitializingBean;
  * <p>Thread-safe: all public methods delegate to the thread-safe
  * HeavyKeeper and BufferedCounter implementations.
  */
+@Internal
 public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
 
   private final HeavyKeeper heavyKeeper;

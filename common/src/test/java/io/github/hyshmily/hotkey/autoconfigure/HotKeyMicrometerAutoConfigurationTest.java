@@ -21,8 +21,8 @@ import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;

@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.util;
-import lombok.extern.slf4j.Slf4j;
 
+import io.github.hyshmily.hotkey.Internal;
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.util.concurrent.Executors;
@@ -24,6 +24,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Monitors system CPU load using the JDK platform MXBean with EMA smoothing.
@@ -35,9 +36,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Polling interval defaults to 500 ms. The monitor is started and stopped
  * explicitly via {@link #start()} / {@link #stop()}.
  */
+@Internal
 @Slf4j
 public class SystemLoadMonitor {
-
 
   private static final double DEFAULT_DECAY = 0.95;
   private static final long DEFAULT_POLL_MS = 500;
@@ -67,8 +68,12 @@ public class SystemLoadMonitor {
    *                       values outside (0, 1) fall back to the default (0.95)
    */
   public SystemLoadMonitor(long pollIntervalMs, double decay) {
-    this(Executors.newSingleThreadScheduledExecutor(
-      new HotKeyThreadFactory("hotkey-cpu-monitor")), pollIntervalMs, decay, true);
+    this(
+      Executors.newSingleThreadScheduledExecutor(new HotKeyThreadFactory("hotkey-cpu-monitor")),
+      pollIntervalMs,
+      decay,
+      true
+    );
   }
 
   /**
@@ -82,7 +87,12 @@ public class SystemLoadMonitor {
     this(scheduler, pollIntervalMs, decay, false);
   }
 
-  private SystemLoadMonitor(ScheduledExecutorService scheduler, long pollIntervalMs, double decay, boolean ownsScheduler) {
+  private SystemLoadMonitor(
+    ScheduledExecutorService scheduler,
+    long pollIntervalMs,
+    double decay,
+    boolean ownsScheduler
+  ) {
     this.pollIntervalMs = pollIntervalMs > 0 ? pollIntervalMs : DEFAULT_POLL_MS;
     this.decay = (decay > 0 && decay < 1) ? decay : DEFAULT_DECAY;
     this.scheduler = scheduler;
@@ -98,8 +108,11 @@ public class SystemLoadMonitor {
       flushTask = scheduler.scheduleAtFixedRate(this::sample, 0, pollIntervalMs, TimeUnit.MILLISECONDS);
       log.debug("SystemLoadMonitor started: pollIntervalMs={}, decay={}", pollIntervalMs, decay);
     } catch (Exception e) {
-      log.error("Failed to start SystemLoadMonitor sampler; CPU-based BBR backpressure " +
-          "will fall back to 0 CPU load (permissive).", e);
+      log.error(
+        "Failed to start SystemLoadMonitor sampler; CPU-based BBR backpressure " +
+          "will fall back to 0 CPU load (permissive).",
+        e
+      );
     }
   }
 
@@ -140,8 +153,7 @@ public class SystemLoadMonitor {
       if (osBean instanceof com.sun.management.OperatingSystemMXBean sunOsBean) {
         return Math.min(1.0, Math.max(0.0, sunOsBean.getCpuLoad()));
       }
-    } catch (Exception ignored) {
-    }
+    } catch (Exception ignored) {}
     return 0.0;
   }
 

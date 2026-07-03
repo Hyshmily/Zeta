@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.hotkeydetector.doublebuffer;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import java.util.HashMap;
 import java.util.Map;
@@ -54,6 +55,7 @@ import org.springframework.beans.factory.InitializingBean;
  * multiple threads.
  */
 @Slf4j
+@Internal
 public class BufferedCounter implements InitializingBean, Destroyable {
 
   /** Default maximum distinct keys in one buffer before forced swap ({@value}). */

@@ -13,8 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache;
+package io.github.hyshmily.hotkey.cache.cachesupport;
 
+import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import lombok.extern.slf4j.Slf4j;
@@ -43,6 +45,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * an {@code afterCompletion} callback manually.
  */
 @Slf4j
+@Internal
 public final class TransactionSupport {
 
   /**

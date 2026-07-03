@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.sync.worker;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -39,6 +40,7 @@ import org.springframework.validation.annotation.Validated;
 @Data
 @Validated
 @ConfigurationProperties(prefix = "hotkey.worker-listener")
+@Internal
 public class WorkerListenerProperties {
 
   /** Whether the Worker decision listener is enabled. Set to {@code true} when

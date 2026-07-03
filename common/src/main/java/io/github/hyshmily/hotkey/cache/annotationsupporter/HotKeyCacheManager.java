@@ -16,15 +16,15 @@
 package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
 import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import org.jspecify.annotations.NonNull;
-import org.springframework.cache.Cache;
-import org.springframework.cache.CacheManager;
-
 import java.util.Collection;
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import org.jspecify.annotations.NonNull;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
 
 /**
  * Spring {@link CacheManager} implementation that lazily creates
@@ -43,6 +43,7 @@ import java.util.concurrent.ConcurrentMap;
  * @see HotKeySpringCache
  * @see org.springframework.cache.CacheManager
  */
+@Internal
 public class HotKeyCacheManager implements CacheManager {
 
   private final ConcurrentMap<String, Cache> cacheMap = new ConcurrentHashMap<>();

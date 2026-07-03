@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.cache.loader;
 
+import io.github.hyshmily.hotkey.Internal;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -26,6 +27,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * key does not exist. The caller is responsible for deserialization.
  */
 @RequiredArgsConstructor
+@Internal
 public class RedisCacheLoader implements CacheLoader {
 
   private final StringRedisTemplate redisTemplate;

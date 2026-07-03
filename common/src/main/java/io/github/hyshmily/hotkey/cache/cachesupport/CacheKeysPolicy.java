@@ -13,7 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache;
+package io.github.hyshmily.hotkey.cache.cachesupport;
+
+import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.HotKeyCache;
 
 /**
  * Static utility for validating cache key inputs across the library.
@@ -22,6 +25,7 @@ package io.github.hyshmily.hotkey.cache;
  * keys must be non-null and non-blank. Invalid keys are silently skipped
  * by all cache operations in {@link HotKeyCache}.
  */
+@Internal
 public final class CacheKeysPolicy {
 
   /**

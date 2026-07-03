@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.util.version;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import java.util.List;
@@ -48,6 +49,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
  * @see VersionGuard
  * @see HotKeyConstants#REDIS_VERSION_KEY_PREFIX
  */
+@Internal
 @RequiredArgsConstructor
 @Slf4j
 public class VersionController {

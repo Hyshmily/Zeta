@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.sharding;
 
+import io.github.hyshmily.hotkey.Internal;
 import java.util.Set;
 import java.util.function.IntConsumer;
 import lombok.Getter;
@@ -26,6 +27,7 @@ import lombok.Setter;
  * <p>The ring is rebuilt automatically from the live Worker set reported
  * by {@link ClusterHealthView} on each reconciliation cycle.
  */
+@Internal
 public class RingManager {
 
   @Getter

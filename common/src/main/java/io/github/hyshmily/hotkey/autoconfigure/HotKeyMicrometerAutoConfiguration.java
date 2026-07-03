@@ -16,8 +16,9 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
@@ -58,6 +59,7 @@ import org.springframework.context.annotation.Bean;
  * <p>Thread-safe: Micrometer's {@link MeterRegistry} is thread-safe; gauge supplier lambdas
  * delegate to thread-safe component methods.
  */
+@Internal
 @AutoConfiguration(after = HotKeyAutoConfiguration.class)
 @ConditionalOnClass(MeterBinder.class)
 @EnableConfigurationProperties(HotKeyProperties.class)

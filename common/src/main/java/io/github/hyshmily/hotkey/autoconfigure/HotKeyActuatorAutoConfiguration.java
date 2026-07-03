@@ -16,8 +16,9 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.endpoint.RingEndpoint;
@@ -64,6 +65,7 @@ import org.springframework.context.annotation.Bean;
  * Missing dependencies are silently passed as {@code null} and guarded
  * inside each endpoint.
  */
+@Internal
 @AutoConfiguration
 @ConditionalOnClass(Endpoint.class)
 @EnableConfigurationProperties(HotKeyProperties.class)

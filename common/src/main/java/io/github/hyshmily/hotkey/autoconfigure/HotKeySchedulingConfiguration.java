@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import jakarta.annotation.PostConstruct;
@@ -46,6 +47,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
  *
  * <p>Enabled by default; controlled via {@code hotkey.scheduling.enabled}.
  */
+@Internal
 @AutoConfiguration(after = HotKeyAutoConfiguration.class)
 @ConditionalOnProperty(name = "hotkey.scheduling.enabled", havingValue = "true", matchIfMissing = true)
 @ConditionalOnBean(TopK.class)
@@ -56,8 +58,8 @@ public class HotKeySchedulingConfiguration {
   private final ScheduledExecutorService scheduler;
 
   public HotKeySchedulingConfiguration(
-      List<TopK> topKInstances,
-      @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
+    List<TopK> topKInstances,
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
     this.topKInstances = topKInstances;
     this.scheduler = scheduler;

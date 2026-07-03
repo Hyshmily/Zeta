@@ -15,9 +15,10 @@
  */
 package io.github.hyshmily.hotkey.sync.local;
 
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -59,6 +60,7 @@ import org.springframework.amqp.core.Message;
  * @param rulesVersion      the rules version for {@code TYPE_RULES_SYNC} messages;
  *                          {@link HotKeyConstants#VERSION_DEFAULT} (0) for other types
  */
+@Internal
 public record SyncMessage(String cacheKey, String type, long version, boolean isVersionDegraded, long rulesVersion) {
   /** Invalidates a single cache key across all peer instances. */
   public static final String TYPE_INVALIDATE = "INVALIDATE";

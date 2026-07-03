@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.annotation.HotKeyCacheExtensionAspect;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheManager;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -38,6 +39,7 @@ import org.springframework.context.annotation.Bean;
  * enabling {@code @Cacheable} / {@code @CachePut} / {@code @CacheEvict} annotations
  * to trigger hot-key detection, soft-expire, and cross-instance broadcast.
  */
+@Internal
 @AutoConfiguration
 @ConditionalOnProperty(prefix = "hotkey.spring-cache", name = "enabled", havingValue = "true")
 @ConditionalOnClass(name = "org.springframework.cache.support.AbstractValueAdaptingCache")

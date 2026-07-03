@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.util;
 
+import io.github.hyshmily.hotkey.Internal;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
@@ -25,6 +26,7 @@ import java.util.concurrent.TimeUnit;
  * Used internally by broadcast listeners to spread Redis reads
  * evenly across instances. Non-instantiable — private constructor.
  */
+@Internal
 public final class DelayUtil {
 
   /**

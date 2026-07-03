@@ -21,6 +21,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import jakarta.annotation.PostConstruct;
@@ -60,6 +61,7 @@ import org.springframework.data.redis.core.script.RedisScript;
  * all mutating methods synchronize via the list's snapshot semantics. The
  * version counter is an {@link java.util.concurrent.atomic.AtomicLong}.
  */
+@Internal
 @RequiredArgsConstructor
 @Slf4j
 public class RuleMatcher {
@@ -199,7 +201,12 @@ public class RuleMatcher {
     if (log.isInfoEnabled()) {
       log.info(
         "Rule added: pattern='{}', type={}, action={} (total: {}, version: {})",
-        rule.getPattern(), rule.getType(), rule.getAction(), rulesList.size(), rulesVersion.get());
+        rule.getPattern(),
+        rule.getType(),
+        rule.getAction(),
+        rulesList.size(),
+        rulesVersion.get()
+      );
     }
   }
 
@@ -227,7 +234,11 @@ public class RuleMatcher {
       persistAndBroadcastRules();
       log.info(
         "Rule removed: pattern='{}', action={} (total: {}, version: {})",
-        pattern, action, rulesList.size(), rulesVersion.get());
+        pattern,
+        action,
+        rulesList.size(),
+        rulesVersion.get()
+      );
     } else {
       log.warn("Rule not found for removal: pattern='{}', action={}", pattern, action);
     }
@@ -271,7 +282,11 @@ public class RuleMatcher {
       persistAndBroadcastRules();
       log.info(
         "Rules removed by action: {} (removed: {}, total: {}, version: {})",
-        action, removed, rulesList.size(), rulesVersion.get());
+        action,
+        removed,
+        rulesList.size(),
+        rulesVersion.get()
+      );
     }
     return removed;
   }
@@ -293,7 +308,12 @@ public class RuleMatcher {
       persistAndBroadcastRules();
       log.info(
         "Rule removed by index {}: pattern='{}', action={} (total: {}, version: {})",
-        index, removed.getPattern(), removed.getAction(), rulesList.size(), rulesVersion.get());
+        index,
+        removed.getPattern(),
+        removed.getAction(),
+        rulesList.size(),
+        rulesVersion.get()
+      );
     }
   }
 

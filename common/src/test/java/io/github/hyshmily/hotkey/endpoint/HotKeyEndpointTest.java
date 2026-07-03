@@ -21,8 +21,8 @@ import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
@@ -30,8 +30,8 @@ import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import java.util.List;
@@ -221,9 +221,7 @@ class HotKeyEndpointTest {
    */
   @Test
   void hotKeyInfo_shouldOmitSectionWhenAllComponentsNull() {
-    HotKeyEndpoint minimal = HotKeyEndpoint.builder()
-      .properties(properties)
-      .build();
+    HotKeyEndpoint minimal = HotKeyEndpoint.builder().properties(properties).build();
     Map<String, Object> info = minimal.hotKeyInfo(100);
     assertThat(info).doesNotContainKeys("local", "worker", "sync");
     assertThat(info).containsKeys("instanceId", "nodeId");
@@ -245,7 +243,7 @@ class HotKeyEndpointTest {
       .caffeineCache(caffeineCache)
       .properties(properties)
       .build();
- 
+
     Map<String, Object> info = ep.hotKeyInfo(100);
     assertThat(info).containsKey("local");
     assertThat(info).doesNotContainKeys("worker", "sync");
@@ -259,11 +257,8 @@ class HotKeyEndpointTest {
   @Test
   void hotKeyInfo_shouldIncludeSyncWhenOnlySyncComponents() {
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(5L);
-    HotKeyEndpoint ep = HotKeyEndpoint.builder()
-      .properties(properties)
-      .cacheSyncPublisher(cacheSyncPublisher)
-      .build();
- 
+    HotKeyEndpoint ep = HotKeyEndpoint.builder().properties(properties).cacheSyncPublisher(cacheSyncPublisher).build();
+
     Map<String, Object> info = ep.hotKeyInfo(100);
     assertThat(info).doesNotContainKeys("local", "worker");
     assertThat(info).containsKey("sync");
@@ -285,7 +280,7 @@ class HotKeyEndpointTest {
       .hotKeyStateMachine(hotKeyStateMachine)
       .healthView(healthView)
       .build();
- 
+
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
     assertThat(worker).containsEntry("trackedKeys", 3);
@@ -328,7 +323,7 @@ class HotKeyEndpointTest {
       .ruleMatcher(ruleMatcher)
       .healthView(healthView)
       .build();
-  
+
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
     assertThat(local).containsKey("rules");
@@ -378,7 +373,7 @@ class HotKeyEndpointTest {
       .properties(properties)
       .healthView(healthView)
       .build();
- 
+
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
 

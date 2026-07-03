@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.reporting;
 
+import io.github.hyshmily.hotkey.Internal;
 import java.util.Map;
 
 /**
@@ -24,8 +25,5 @@ import java.util.Map;
  * @param timestamp the time at which the report was generated
  * @param counts    a map of key → cumulative access count
  */
-public record ReportMessage(
-  String appName,
-  long timestamp,
-  Map<String, Long> counts
-) {}
+@Internal
+public record ReportMessage(String appName, long timestamp, Map<String, Long> counts) {}

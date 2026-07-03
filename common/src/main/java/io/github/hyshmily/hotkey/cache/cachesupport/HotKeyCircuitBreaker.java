@@ -13,14 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache;
+package io.github.hyshmily.hotkey.cache.cachesupport;
 
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -28,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Sliding-window circuit breaker for protecting remote calls from cascading failures.
@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.LongAdder;
  * <p>This class is thread-safe.
  */
 @Slf4j
+@Internal
 public class HotKeyCircuitBreaker implements AutoCloseable {
 
   private static final ScheduledExecutorService SCHEDULER = new ScheduledThreadPoolExecutor(
@@ -148,7 +149,8 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
   }
 
   private void evaluateThreshold() {
-    long totalSuccess = 0, totalFail = 0;
+    long totalSuccess = 0,
+      totalFail = 0;
 
     for (LongAdder a : successBuckets) {
       totalSuccess += a.sum();

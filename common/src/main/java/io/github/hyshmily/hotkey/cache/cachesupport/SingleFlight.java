@@ -13,10 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache;
+package io.github.hyshmily.hotkey.cache.cachesupport;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.hotkey.Internal;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -40,6 +41,7 @@ import lombok.extern.slf4j.Slf4j;
  * This class is thread-safe.
  */
 @Slf4j
+@Internal
 public class SingleFlight {
 
   /** Caffeine cache tracking currently in-flight loads (key -> CompletableFuture). */
@@ -64,7 +66,13 @@ public class SingleFlight {
    * @param executor       async executor for supplier execution
    * @param circuitBreaker circuit breaker for protecting remote calls
    */
-  public SingleFlight(int maxSize, int ttlSec, int timeoutSeconds, Executor executor, HotKeyCircuitBreaker circuitBreaker) {
+  public SingleFlight(
+    int maxSize,
+    int ttlSec,
+    int timeoutSeconds,
+    Executor executor,
+    HotKeyCircuitBreaker circuitBreaker
+  ) {
     this.inflightLoads = Caffeine.newBuilder().maximumSize(maxSize).expireAfterWrite(ttlSec, TimeUnit.SECONDS).build();
     this.executor = executor;
     this.timeoutSeconds = timeoutSeconds;
@@ -115,16 +123,19 @@ public class SingleFlight {
     CompletableFuture<Object> future = inflightLoads
       .asMap()
       .computeIfAbsent(cacheKey, k ->
-        CompletableFuture.supplyAsync(() -> {
-          try {
-            Object val = reader.get();
-            circuitBreaker.onSuccess();
-            return val;
-          } catch (Exception e) {
-            circuitBreaker.onFailure();
-            throw e;
-          }
-        }, executor).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
+        CompletableFuture.supplyAsync(
+          () -> {
+            try {
+              Object val = reader.get();
+              circuitBreaker.onSuccess();
+              return val;
+            } catch (Exception e) {
+              circuitBreaker.onFailure();
+              throw e;
+            }
+          },
+          executor
+        ).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
       );
 
     try {

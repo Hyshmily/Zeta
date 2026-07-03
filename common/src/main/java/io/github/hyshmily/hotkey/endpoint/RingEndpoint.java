@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.endpoint;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.LinkedHashMap;
@@ -36,6 +37,7 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code GET /actuator/hotkeyring/{key}} — query which node handles a key
  * </ul>
  */
+@Internal
 @RestController
 @RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkeyring")
 @RequiredArgsConstructor

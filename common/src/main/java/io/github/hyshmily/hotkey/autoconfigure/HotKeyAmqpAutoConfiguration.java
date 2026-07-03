@@ -18,7 +18,8 @@ package io.github.hyshmily.hotkey.autoconfigure;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HEARTBEAT;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
@@ -81,6 +82,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * receives HOT/COOL decisions from the Worker via {@link FanoutExchange}.
  * Requires Redis.
  */
+@Internal
 @AutoConfiguration(after = { RedisAutoConfiguration.class, RabbitAutoConfiguration.class })
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @EnableConfigurationProperties({ HotKeyProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class })

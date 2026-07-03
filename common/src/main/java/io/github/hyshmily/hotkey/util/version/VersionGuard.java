@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.util.version;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
@@ -54,6 +55,7 @@ import java.util.Objects;
  * @see WorkerListener
  * @see CacheSyncListener
  */
+@Internal
 public final class VersionGuard {
 
   /**

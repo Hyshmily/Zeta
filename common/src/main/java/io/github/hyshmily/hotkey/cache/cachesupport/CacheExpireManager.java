@@ -13,11 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache;
+package io.github.hyshmily.hotkey.cache.cachesupport;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.VERSION_DEFAULT;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
@@ -37,6 +38,7 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Getter
 @Slf4j
+@Internal
 public class CacheExpireManager {
 
   /** The underlying L1 Caffeine cache instance. */
@@ -54,6 +56,8 @@ public class CacheExpireManager {
   private final double defaultTtlJitterRatio;
 
   private static final long refreshTimeoutSeconds = 30;
+
+  private static final int BLOCKED_TAG = -1;
 
   /**
    * Creates a CacheExpireManager with the given Caffeine cache, executor, and TTL config.
@@ -106,6 +110,38 @@ public class CacheExpireManager {
     return ttlConfig.isSoftExpireEnabled();
   }
 
+  /**
+   * Check whether a {@link CacheEntry} has logically expired based on its
+   * {@code hardExpireAtMs}.  Entries with {@code hardExpireAtMs == Long.MAX_VALUE}
+   * are treated as permanent (never logically expire).
+   *
+   * @param entry the cache entry to inspect
+   * @return {@code true} if the entry has logically expired
+   */
+  public boolean isLogicallyExpired(CacheEntry entry) {
+    return entry.getHardExpireAtMs() != Long.MAX_VALUE && TimeSource.currentTimeMillis() >= entry.getHardExpireAtMs();
+  }
+
+  /**
+   * Check whether the given raw cache value is a logically expired {@link CacheEntry}
+   * and, if so, invalidate it and return {@code true}.
+   * <p>Eliminates code duplication between {@link io.github.hyshmily.hotkey.cache.HotKeyCache#get}
+   * and {@link io.github.hyshmily.hotkey.cache.HotKeyCache#getWithSoftExpire},
+   * which both perform this check before and after side effects (TOCTOU guard).
+   *
+   * @param cacheKey the cache key to invalidate if expired
+   * @param raw      the raw value from the Caffeine cache
+   * @return {@code true} if the entry was expired and has been invalidated
+   */
+  public boolean invalidateIfIsLogicallyExpired(String cacheKey, Object raw) {
+    if (raw instanceof CacheEntry ce && isLogicallyExpired(ce)) {
+      caffeineCache.invalidate(cacheKey);
+      log.debug("Cache entry logically expired during processing, reloading: {}", cacheKey);
+      return true;
+    }
+    return false;
+  }
+
   public long computeNullExpireAt(long nullTtlMs) {
     long effective = nullTtlMs > 0 ? nullTtlMs : ttlConfig.effectiveNullTtlMs();
     return toHardExpireTimestamp(effective);
@@ -119,8 +155,7 @@ public class CacheExpireManager {
    * @return absolute epoch-ms timestamp for hard expiry
    */
   public long computeHardExpireAt(long hardTtlMs) {
-    long effective = hardTtlMs > 0 ? hardTtlMs : ttlConfig.effectiveHardTtlMs();
-    return toHardExpireTimestamp(effective);
+    return toHardExpireTimestamp(resolveEffectiveHard(hardTtlMs));
   }
 
   /**
@@ -153,8 +188,7 @@ public class CacheExpireManager {
     if (!isSoftExpireEnabled()) {
       return 0L;
     }
-    long effective = softTtlMs > 0 ? softTtlMs : ttlConfig.effectiveSoftTtlMs();
-    return toSoftExpireTimestamp(effective);
+    return toSoftExpireTimestamp(resolveEffectiveSoft(softTtlMs));
   }
 
   /**
@@ -167,12 +201,34 @@ public class CacheExpireManager {
   }
 
   /**
+   * Resolve effective hard TTL for normal keys: use the override value if
+   * positive, otherwise fall back to the configured default.
+   *
+   * @param hardTtlMs hard TTL override ({@code 0} or negative uses default)
+   * @return effective hard TTL duration in milliseconds
+   */
+  public long resolveEffectiveHard(long hardTtlMs) {
+    return hardTtlMs > 0 ? hardTtlMs : getEffectiveHardTtlMs();
+  }
+
+  /**
    * Effective hard TTL for hot keys (override > default).
    *
    * @return effective hot hard TTL duration in milliseconds
    */
   public long getEffectiveHotHardTtlMs() {
     return ttlConfig.effectiveHotHardTtlMs();
+  }
+
+  /**
+   * Resolve effective hard TTL for hot keys: use the override value if
+   * positive, otherwise fall back to the configured hot-key hard TTL.
+   *
+   * @param hardTtlMs hard TTL override ({@code 0} or negative uses default)
+   * @return effective hot-key hard TTL duration in milliseconds
+   */
+  public long resolveEffectiveHotHard(long hardTtlMs) {
+    return hardTtlMs > 0 ? hardTtlMs : getEffectiveHotHardTtlMs();
   }
 
   /**
@@ -185,12 +241,59 @@ public class CacheExpireManager {
   }
 
   /**
+   * Resolve effective soft TTL for normal keys: use the override value if
+   * positive, otherwise fall back to the configured default.
+   *
+   * @param softTtlMs soft TTL override ({@code 0} or negative uses default)
+   * @return effective soft TTL duration in milliseconds
+   */
+  public long resolveEffectiveSoft(long softTtlMs) {
+    return softTtlMs > 0 ? softTtlMs : getEffectiveSoftTtlMs();
+  }
+
+  /**
    * Effective soft TTL for hot keys (override > default).
    *
    * @return effective hot soft TTL duration in milliseconds
    */
   public long getEffectiveHotSoftTtlMs() {
     return ttlConfig.effectiveHotSoftTtlMs();
+  }
+
+  /**
+   * Resolve effective soft TTL for hot keys: use the override value if
+   * positive, otherwise fall back to the configured hot-key soft TTL.
+   *
+   * @param softTtlMs soft TTL override ({@code 0} or negative uses default)
+   * @return effective hot-key soft TTL duration in milliseconds
+   */
+  public long resolveEffectiveHotSoft(long softTtlMs) {
+    return softTtlMs > 0 ? softTtlMs : getEffectiveHotSoftTtlMs();
+  }
+
+  /**
+   * Create a new {@link CacheEntry} with updated TTL fields, preserving all
+   * other metadata from the supplied original entry.
+   *
+   * <p>Sets {@code hardTtlMs}, {@code softTtlMs},
+   * {@code hardExpireAtMs} (via {@link #computeHardExpireAt}),
+   * and {@code softExpireAtMs} (via {@link #computeSoftExpireAt}).
+   *
+   * @param original   an existing {@link CacheEntry} whose metadata should be preserved;
+   *                   must not be null
+   * @param hardTtlMs  hard TTL duration in milliseconds
+   * @param softTtlMs  soft TTL duration in milliseconds
+   * @return a new {@link CacheEntry} with the updated TTL timestamps,
+   *         while keeping all version, state, and normal TTL fields unchanged
+   */
+  public CacheEntry applyTtl(CacheEntry original, long hardTtlMs, long softTtlMs) {
+    return original
+      .toBuilder()
+      .hardTtlMs(hardTtlMs)
+      .softTtlMs(softTtlMs)
+      .hardExpireAtMs(computeHardExpireAt(hardTtlMs))
+      .softExpireAtMs(computeSoftExpireAt(softTtlMs))
+      .build();
   }
 
   /**
@@ -394,5 +497,89 @@ public class CacheExpireManager {
       // any concurrent caller for this key.
       return task;
     });
+  }
+
+  /**
+   * Extend both the hard and soft expiry for a cache entry.
+   *
+   * <p>If the caller passes {@code 0} for either TTL, the configured default
+   * hot TTL ({@link #getEffectiveHotHardTtlMs()} / {@link #getEffectiveHotSoftTtlMs()})
+   * is used.
+   *
+   * @param cacheKey  the key whose expiry should be extended
+   * @param hardTtlMs new hard TTL in milliseconds; {@code 0} to use the
+   *                  configured hot hard TTL
+   * @param softTtlMs new soft TTL in milliseconds; {@code 0} to use the
+   *                  configured hot soft TTL
+   */
+  public void extendExpiry(String cacheKey, long hardTtlMs, long softTtlMs) {
+    long hard = resolveEffectiveHotHard(hardTtlMs);
+    long soft = resolveEffectiveHotSoft(softTtlMs);
+    updateExpiry(cacheKey, hard, soft, true, true);
+  }
+
+  /**
+   * Extend only the hard expiry for a cache entry, leaving the soft expiry
+   * unchanged. Useful when promoting a NORMAL or COOL entry to HOT — the
+   * hard TTL must be lengthened to the hot‑key value, but the existing soft
+   * expiry (if any) should be preserved because it reflects a more recent
+   * refresh cycle.
+   *
+   * <p>If the caller passes {@code 0} the configured default hot hard TTL
+   * ({@link #getEffectiveHotHardTtlMs()}) is used.
+   *
+   * @param cacheKey  the key whose hard expiry should be extended
+   * @param hardTtlMs new hard TTL in milliseconds; {@code 0} to use the
+   *                  configured hot hard TTL
+   */
+  public void extendHardExpiry(String cacheKey, long hardTtlMs) {
+    long hard = resolveEffectiveHotHard(hardTtlMs);
+    updateExpiry(cacheKey, hard, 0, true, false);
+  }
+
+  /**
+   * Extend only the soft expiry for a cache entry, leaving the hard expiry
+   * unchanged. Useful when a background refresh has completed and the caller
+   * wants to reset the soft TTL without affecting the hard TTL.
+   *
+   * <p>If the caller passes {@code 0} the configured default hot soft TTL
+   * ({@link #getEffectiveHotSoftTtlMs()}) is used.
+   *
+   * @param cacheKey  the key whose soft expiry should be extended
+   * @param softTtlMs new soft TTL in milliseconds; {@code 0} to use the
+   *                  configured hot soft TTL
+   */
+  public void extendSoftExpiry(String cacheKey, long softTtlMs) {
+    long soft = resolveEffectiveHotSoft(softTtlMs);
+    updateExpiry(cacheKey, 0, soft, false, true);
+  }
+
+  /**
+   * Atomically update the expiry timestamps of an existing cache entry.
+   *
+   * @param cacheKey    the key whose expiry should be extended
+   * @param hardTtlMs   new hard TTL in milliseconds (ignored if {@code updateHard} is false)
+   * @param softTtlMs   new soft TTL in milliseconds (ignored if {@code updateSoft} is false)
+   * @param updateHard  whether to update the hard expiry timestamp
+   * @param updateSoft  whether to update the soft expiry timestamp
+   */
+  private void updateExpiry(String cacheKey, long hardTtlMs, long softTtlMs, boolean updateHard, boolean updateSoft) {
+    long hardExpire = updateHard ? computeHardExpireAt(hardTtlMs) : 0;
+    long softExpire = updateSoft ? computeSoftExpireAt(softTtlMs) : 0;
+
+    caffeineCache
+      .asMap()
+      .computeIfPresent(cacheKey, (k, existing) -> {
+        if (existing instanceof CacheEntry entry) {
+          if (updateHard) {
+            entry = entry.toBuilder().hardTtlMs(hardTtlMs).hardExpireAtMs(hardExpire).build();
+          }
+          if (updateSoft) {
+            entry = entry.toBuilder().softTtlMs(softTtlMs).softExpireAtMs(softExpire).build();
+          }
+          return entry;
+        }
+        return existing;
+      });
   }
 }

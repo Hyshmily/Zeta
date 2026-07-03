@@ -17,22 +17,15 @@ package io.github.hyshmily.hotkey.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.util.TimeSource;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
@@ -121,8 +114,7 @@ class CacheExpireManagerTest {
     ttlConfig.setDefaultSoftTtlMs(0);
     ttlConfig.setDefaultHotSoftTtlMs(0);
     CacheExpireManager disabled = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 0);
-    assertThatThrownBy(() -> disabled.isSoftExpired("key"))
-      .isInstanceOf(IllegalStateException.class);
+    assertThatThrownBy(() -> disabled.isSoftExpired("key")).isInstanceOf(IllegalStateException.class);
   }
 
   /**
@@ -130,19 +122,22 @@ class CacheExpireManagerTest {
    */
   @Test
   void triggerBackgroundRefresh_shouldAcquireAndReleasePermit() {
-    caffeineCache.put("key", CacheEntry.builder()
-      .value("old")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build());
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("old")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
     expireManager.triggerBackgroundRefresh("key", () -> "newValue", 30_000);
 
@@ -230,29 +225,38 @@ class CacheExpireManagerTest {
    */
   @Test
   void triggerBackgroundRefresh_withStaleVersion_shouldDiscardResult() {
-    caffeineCache.put("key", CacheEntry.builder()
-      .value("original")
-      .dataVersion(5)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() + 300_000)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build());
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(5)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 300_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
-    expireManager.triggerBackgroundRefresh("key", () -> {
-      caffeineCache.asMap().computeIfPresent("key", (k, existing) -> {
-        if (existing instanceof CacheEntry ce) {
-          return ce.toBuilder().dataVersion(10).build();
-        }
-        return existing;
-      });
-      return "stale-value";
-    }, 30_000);
+    expireManager.triggerBackgroundRefresh(
+      "key",
+      () -> {
+        caffeineCache
+          .asMap()
+          .computeIfPresent("key", (k, existing) -> {
+            if (existing instanceof CacheEntry ce) {
+              return ce.toBuilder().dataVersion(10).build();
+            }
+            return existing;
+          });
+        return "stale-value";
+      },
+      30_000
+    );
 
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
@@ -325,10 +329,17 @@ class CacheExpireManagerTest {
   @Test
   void isSoftExpired_withExpiredEntry_shouldReturnTrue() {
     CacheEntry entry = CacheEntry.builder()
-      .value("v").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000).softExpireAtMs(1L)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .value("v")
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(0)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(30_000)
+      .softExpireAtMs(1L)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
       .build();
     assertThat(expireManager.isSoftExpired(entry)).isTrue();
   }
@@ -340,10 +351,17 @@ class CacheExpireManagerTest {
   @Test
   void isSoftExpired_withMaxValue_shouldReturnFalse() {
     CacheEntry entry = CacheEntry.builder()
-      .value("v").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(Long.MAX_VALUE).softExpireAtMs(Long.MAX_VALUE)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .value("v")
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(0)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(Long.MAX_VALUE)
+      .softExpireAtMs(Long.MAX_VALUE)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
       .build();
     caffeineCache.put("perm", entry);
     assertThat(expireManager.isSoftExpired(entry)).isFalse();
@@ -356,10 +374,17 @@ class CacheExpireManagerTest {
   @Test
   void isSoftExpired_withZeroExpireAt_shouldReturnTrue() {
     CacheEntry entry = CacheEntry.builder()
-      .value("v").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(0).softExpireAtMs(0)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
+      .value("v")
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(0)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(0)
+      .softExpireAtMs(0)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
       .build();
     caffeineCache.put("zero", entry);
     assertThat(expireManager.isSoftExpired(entry)).isTrue();
@@ -382,12 +407,22 @@ class CacheExpireManagerTest {
     Executor asyncExec = Executors.newCachedThreadPool();
     CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
 
-    caffeineCache.put("key", CacheEntry.builder()
-      .value("original").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
     asyncExpire.triggerBackgroundRefresh("key", () -> null, 30_000);
     Thread.sleep(200);
@@ -406,30 +441,54 @@ class CacheExpireManagerTest {
     Executor asyncExec = Executors.newCachedThreadPool();
     CacheExpireManager limited = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 1);
 
-    caffeineCache.put("key1", CacheEntry.builder()
-      .value("original1").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
-    caffeineCache.put("key2", CacheEntry.builder()
-      .value("original2").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("original1")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    caffeineCache.put(
+      "key2",
+      CacheEntry.builder()
+        .value("original2")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
     CountDownLatch blockLatch = new CountDownLatch(1);
 
     // First call blocks the supplier, holding the only permit
-    limited.triggerBackgroundRefresh("key1", () -> {
-      try {
-        blockLatch.await(5, TimeUnit.SECONDS);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-      return "first-value";
-    }, 30_000);
+    limited.triggerBackgroundRefresh(
+      "key1",
+      () -> {
+        try {
+          blockLatch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        return "first-value";
+      },
+      30_000
+    );
 
     // Give first call time to acquire the permit
     Thread.sleep(50);
@@ -459,35 +518,53 @@ class CacheExpireManagerTest {
     Executor asyncExec = Executors.newCachedThreadPool();
     CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
 
-    caffeineCache.put("key", CacheEntry.builder()
-      .value("original").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
     AtomicInteger counter = new AtomicInteger(0);
     CountDownLatch blockLatch = new CountDownLatch(1);
 
     // First call blocks the supplier
-    asyncExpire.triggerBackgroundRefresh("key", () -> {
-      counter.incrementAndGet();
-      try {
-        blockLatch.await(5, TimeUnit.SECONDS);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-      return "first";
-    }, 30_000);
+    asyncExpire.triggerBackgroundRefresh(
+      "key",
+      () -> {
+        counter.incrementAndGet();
+        try {
+          blockLatch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        return "first";
+      },
+      30_000
+    );
 
     // Give first call time to register in pendingRefreshes
     Thread.sleep(50);
 
     // Second call for same key should be deduped (supplier not invoked)
-    asyncExpire.triggerBackgroundRefresh("key", () -> {
-      counter.incrementAndGet();
-      return "second";
-    }, 30_000);
+    asyncExpire.triggerBackgroundRefresh(
+      "key",
+      () -> {
+        counter.incrementAndGet();
+        return "second";
+      },
+      30_000
+    );
 
     blockLatch.countDown();
     Thread.sleep(300);
@@ -504,16 +581,30 @@ class CacheExpireManagerTest {
     Executor asyncExec = Executors.newCachedThreadPool();
     CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
 
-    caffeineCache.put("key", CacheEntry.builder()
-      .value("original").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
-    asyncExpire.triggerBackgroundRefresh("key", () -> {
-      throw new RuntimeException("refresh-failed");
-    }, 30_000);
+    asyncExpire.triggerBackgroundRefresh(
+      "key",
+      () -> {
+        throw new RuntimeException("refresh-failed");
+      },
+      30_000
+    );
 
     Thread.sleep(200);
 
@@ -527,7 +618,8 @@ class CacheExpireManagerTest {
    */
   @Test
   void toHardExpireTimestamp_withCustomRatio_shouldJitterWithinRange() {
-    CacheExpireManager highJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10, 0.5);
+    ttlConfig.setTtlJitterRatio(0.5);
+    CacheExpireManager highJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10);
     long ttl = 10_000;
     Stream.generate(() -> highJitter.computeHardExpireAt(ttl))
       .limit(100)
@@ -566,17 +658,31 @@ class CacheExpireManagerTest {
     Executor asyncExec = Executors.newCachedThreadPool();
     CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
 
-    caffeineCache.put("key", CacheEntry.builder()
-      .value("original").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
-    asyncExpire.triggerBackgroundRefresh("key", () -> {
-      caffeineCache.invalidate("key");
-      return "fresh-value";
-    }, 30_000);
+    asyncExpire.triggerBackgroundRefresh(
+      "key",
+      () -> {
+        caffeineCache.invalidate("key");
+        return "fresh-value";
+      },
+      30_000
+    );
 
     Thread.sleep(200);
 
@@ -682,15 +788,27 @@ class CacheExpireManagerTest {
    */
   @Test
   void triggerBackgroundRefresh_withRejectedExecution_shouldReleaseResources() {
-    Executor rejectingExecutor = task -> { throw new RejectedExecutionException("rejected"); };
+    Executor rejectingExecutor = task -> {
+      throw new RejectedExecutionException("rejected");
+    };
     CacheExpireManager rejectingMgr = new CacheExpireManager(caffeineCache, rejectingExecutor, ttlConfig, 10);
 
-    caffeineCache.put("key", CacheEntry.builder()
-      .value("original").dataVersion(1).isVersionDegraded(false)
-      .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-      .build());
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("original")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
 
     rejectingMgr.triggerBackgroundRefresh("key", () -> "newValue", 30_000);
 
@@ -709,12 +827,22 @@ class CacheExpireManagerTest {
     try {
       CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
 
-      caffeineCache.put("key", CacheEntry.builder()
-        .value("original").dataVersion(1).isVersionDegraded(false)
-        .decisionVersion(0).hardTtlMs(300_000).hardExpireAtMs(Long.MAX_VALUE)
-        .softTtlMs(30_000).softExpireAtMs(System.currentTimeMillis() + 30_000)
-        .keyState(KeyState.HOT).normalHardTtlMs(300_000).normalSoftTtlMs(30_000)
-        .build());
+      caffeineCache.put(
+        "key",
+        CacheEntry.builder()
+          .value("original")
+          .dataVersion(1)
+          .isVersionDegraded(false)
+          .decisionVersion(0)
+          .hardTtlMs(300_000)
+          .hardExpireAtMs(Long.MAX_VALUE)
+          .softTtlMs(30_000)
+          .softExpireAtMs(System.currentTimeMillis() + 30_000)
+          .keyState(KeyState.HOT)
+          .normalHardTtlMs(300_000)
+          .normalSoftTtlMs(30_000)
+          .build()
+      );
 
       asyncExpire.triggerBackgroundRefresh("key", () -> "updated", 30_000);
       Thread.sleep(200);

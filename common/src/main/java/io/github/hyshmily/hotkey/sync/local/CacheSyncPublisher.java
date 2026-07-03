@@ -15,13 +15,14 @@
  */
 package io.github.hyshmily.hotkey.sync.local;
 
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import jakarta.annotation.PostConstruct;
@@ -79,6 +80,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  */
 @RequiredArgsConstructor
 @Slf4j
+@Internal
 public class CacheSyncPublisher {
 
   /** RabbitMQ template for publishing messages to the sync FanoutExchange. */

@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.sync.distributedlock.impl.RedisLockProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -38,6 +39,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * {@code tryLock()} / {@code tryLockAndRun()} simply return
  * {@code null} / {@code false}.
  */
+@Internal
 @AutoConfiguration(after = HotKeyFacadeAutoConfiguration.class)
 @ConditionalOnClass(name = "org.springframework.data.redis.core.StringRedisTemplate")
 public class HotKeyLockAutoConfiguration {

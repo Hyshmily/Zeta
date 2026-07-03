@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.sync.distributedlock;
 
+import io.github.hyshmily.hotkey.Internal;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -25,6 +26,7 @@ import java.util.concurrent.TimeUnit;
  * implementation validates and falls back to defaults when parameters are
  * illegal).
  */
+@Internal
 public interface LockProvider {
   /**
    * Attempt to acquire a distributed lock with the provider's default retry

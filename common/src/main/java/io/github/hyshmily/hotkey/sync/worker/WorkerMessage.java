@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.sync.worker;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.sync.local.SyncMessage;
 import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.nio.charset.StandardCharsets;
@@ -47,6 +48,7 @@ import org.springframework.amqp.core.Message;
  * @param epoch           the originating Worker's restart generation counter; receivers
  *                        unconditionally accept decisions from a higher epoch (see ADR-0010)
  */
+@Internal
 public record WorkerMessage(
   String cacheKey,
   String type,

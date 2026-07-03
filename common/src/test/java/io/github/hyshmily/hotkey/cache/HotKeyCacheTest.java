@@ -23,6 +23,8 @@ import static org.mockito.Mockito.*;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.model.CacheEntry;

@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.sync.worker;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import java.nio.charset.StandardCharsets;
 import org.springframework.amqp.core.Message;
@@ -64,6 +65,7 @@ import org.springframework.amqp.core.MessageProperties;
  * @see ClusterHealthView
  * @see WorkerHeartbeatVerifier
  */
+@Internal
 public record WorkerHeartbeatMessage(
   String workerId,
   long epoch,

@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.util;
 
+import io.github.hyshmily.hotkey.Internal;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.extern.slf4j.Slf4j;
@@ -31,6 +32,7 @@ import lombok.extern.slf4j.Slf4j;
  * All time-sensitive components in the hot-path (expiry, rate limiting, circuit
  * breaker) use this source instead of {@code System.currentTimeMillis()}.
  */
+@Internal
 @Slf4j
 public final class TimeSource {
 

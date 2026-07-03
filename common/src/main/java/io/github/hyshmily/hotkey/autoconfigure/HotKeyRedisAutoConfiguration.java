@@ -17,13 +17,13 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -60,6 +60,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * <p>Also creates a {@link RuleMatcher} with optional Redis persistence,
  * enabling rule CRUD operations to survive app restarts.
  */
+@Internal
 @AutoConfiguration(after = { HotKeyAutoConfiguration.class, RedisAutoConfiguration.class })
 @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
 @EnableConfigurationProperties(HotKeyProperties.class)

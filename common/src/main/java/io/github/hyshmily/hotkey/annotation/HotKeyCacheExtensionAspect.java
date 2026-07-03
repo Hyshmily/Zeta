@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.annotation;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
 import io.github.hyshmily.hotkey.util.window.RollingWindow;
@@ -71,6 +72,7 @@ import org.springframework.expression.spel.standard.SpelExpressionParser;
  * companion annotations ({@code @HotKeyCacheTTL}, {@code @Intercept},
  * {@code @Fallback}, {@code @NullCaching}) are ignored on these methods.
  */
+@Internal
 @Aspect
 @Order(Ordered.HIGHEST_PRECEDENCE)
 @Slf4j

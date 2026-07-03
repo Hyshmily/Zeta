@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.sharding;
 
 import com.google.common.hash.Hashing;
+import io.github.hyshmily.hotkey.Internal;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.Predicate;
@@ -30,6 +31,7 @@ import lombok.extern.slf4j.Slf4j;
  * is rebuilt atomically via {@link #rebuild(Set)} — no partial mutations, safe for
  * lock-free reads on the hot path.
  */
+@Internal
 @RequiredArgsConstructor
 @Slf4j
 public class ConsistentHashRing {

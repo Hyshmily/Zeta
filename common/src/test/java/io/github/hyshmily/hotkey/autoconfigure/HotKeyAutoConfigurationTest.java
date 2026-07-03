@@ -15,28 +15,24 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import java.util.concurrent.Executor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-
-import java.util.Optional;
-import java.util.concurrent.Executor;
-import java.util.concurrent.ScheduledExecutorService;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
 
 /**
  * Tests for {@link HotKeyAutoConfiguration}.
@@ -46,9 +42,7 @@ class HotKeyAutoConfigurationTest {
 
   private final ApplicationContextRunner runner = new ApplicationContextRunner()
     .withPropertyValues("hotkey.local.topK=200")
-    .withConfiguration(AutoConfigurations.of(
-      HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
-    ));
+    .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class));
 
   /**
    * Verifies that all default beans (TopK, Cache, SingleFlight, CacheExpireManager, Executor, HotKeyCache, HotKey) are created.
@@ -91,9 +85,7 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean("hotKeyDetector", HotKeyDetector.class, () -> mock(HotKeyDetector.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(
-        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
-      ))
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).hasSingleBean(HotKeyDetector.class);
         assertThat(ctx.getBean("hotKeyDetector")).isSameAs(ctx.getBean(HotKeyDetector.class));
@@ -109,9 +101,7 @@ class HotKeyAutoConfigurationTest {
       .withAllowBeanDefinitionOverriding(true)
       .withBean("hotLocalCache", Cache.class, () -> mock(Cache.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(
-        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
-      ))
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(Cache.class));
   }
 
@@ -123,9 +113,7 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean(SingleFlight.class, () -> mock(SingleFlight.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(
-        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
-      ))
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(SingleFlight.class));
   }
 
@@ -137,9 +125,7 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean(CacheExpireManager.class, () -> mock(CacheExpireManager.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(
-        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
-      ))
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(CacheExpireManager.class));
   }
 
@@ -151,9 +137,7 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean("hotKeyExecutor", Executor.class, () -> mock(Executor.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(
-        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
-      ))
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).hasBean("hotKeyExecutor");
         assertThat(ctx.getBean("hotKeyExecutor")).isInstanceOf(Executor.class);
@@ -190,9 +174,7 @@ class HotKeyAutoConfigurationTest {
     new ApplicationContextRunner()
       .withBean(HotKey.class, () -> mock(HotKey.class))
       .withPropertyValues("hotkey.local.topK=200")
-      .withConfiguration(AutoConfigurations.of(
-        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
-      ))
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKey.class));
   }
 
@@ -203,9 +185,7 @@ class HotKeyAutoConfigurationTest {
   void hotLocalCache_shouldRespectMaxSizeProperty() {
     new ApplicationContextRunner()
       .withPropertyValues("hotkey.local.topK=200", "hotkey.local.local-cache-max-size=500")
-      .withConfiguration(AutoConfigurations.of(
-        HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class
-      ))
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).hasSingleBean(Cache.class);
         Cache<String, Object> cache = ctx.getBean(Cache.class);
@@ -238,8 +218,15 @@ class HotKeyAutoConfigurationTest {
     HotKeyDetector detector = mock(HotKeyDetector.class);
     TopK workerTopK = mock(TopK.class);
     ObjectProvider<TopK> provider = new ObjectProvider<>() {
-      @Override public TopK getIfAvailable() { return workerTopK; }
-      @Override public TopK getObject() { return workerTopK; }
+      @Override
+      public TopK getIfAvailable() {
+        return workerTopK;
+      }
+
+      @Override
+      public TopK getObject() {
+        return workerTopK;
+      }
     };
     HotKey hotKey = config.hotKey(cache, detector, provider);
     assertThat(hotKey).isNotNull();
@@ -256,8 +243,15 @@ class HotKeyAutoConfigurationTest {
     HotKeyCache cache = mock(HotKeyCache.class);
     HotKeyDetector detector = mock(HotKeyDetector.class);
     ObjectProvider<TopK> provider = new ObjectProvider<>() {
-      @Override public TopK getIfAvailable() { return null; }
-      @Override public TopK getObject() { return null; }
+      @Override
+      public TopK getIfAvailable() {
+        return null;
+      }
+
+      @Override
+      public TopK getObject() {
+        return null;
+      }
     };
     HotKey hotKey = config.hotKey(cache, detector, provider);
     assertThat(hotKey).isNotNull();

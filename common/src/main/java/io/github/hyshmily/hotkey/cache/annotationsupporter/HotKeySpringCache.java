@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
 import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import jakarta.annotation.Nullable;
 import java.util.Objects;
@@ -48,6 +49,7 @@ import org.springframework.cache.support.AbstractValueAdaptingCache;
  *
  * <p>This class is stateless and thread-safe.
  */
+@Internal
 public class HotKeySpringCache extends AbstractValueAdaptingCache {
 
   private final String name;

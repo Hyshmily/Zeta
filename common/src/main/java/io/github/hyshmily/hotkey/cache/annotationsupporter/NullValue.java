@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
+import io.github.hyshmily.hotkey.Internal;
+
 /**
  * Internal sentinel representing an explicitly cached {@code null} value.
  *
@@ -23,6 +25,7 @@ package io.github.hyshmily.hotkey.cache.annotationsupporter;
  * when read, allowing the cache to distinguish "entry found but value is null"
  * from "no entry found".
  */
+@Internal
 public final class NullValue {
 
   /** Singleton instance. */

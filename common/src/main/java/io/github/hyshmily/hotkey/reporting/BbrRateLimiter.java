@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.reporting;
 
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -36,6 +37,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * when the reporting pipeline is saturated, providing back-pressure that is
  * proportional to system load.
  */
+@Internal
 public class BbrRateLimiter {
 
   private static final long DEFAULT_WINDOW_MS = 10_000;

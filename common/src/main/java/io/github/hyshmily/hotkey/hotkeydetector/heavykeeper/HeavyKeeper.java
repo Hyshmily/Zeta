@@ -16,9 +16,7 @@
 package io.github.hyshmily.hotkey.hotkeydetector.heavykeeper;
 
 import com.google.common.hash.Hashing;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
+import io.github.hyshmily.hotkey.Internal;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -29,6 +27,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAccumulator;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
@@ -106,6 +106,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * @see <a href="../../../../../../../docs/adr/0014-heavykeeper-concurrency-choices.md">ADR-0014: HeavyKeeper concurrency data-structure choices</a>
  */
 @Slf4j
+@Internal
 public class HeavyKeeper implements TopK {
 
   /** Pre-computed decay probability lookup table size ({@value}). */
@@ -197,8 +198,6 @@ public class HeavyKeeper implements TopK {
   @Getter
   private final int minCount;
 
-
-
   /**
    * Construct a HeavyKeeper instance.
    *
@@ -263,8 +262,17 @@ public class HeavyKeeper implements TopK {
 
     int totalSlots = depth * width;
     int stripes = 1;
-    while (stripes < 2048 && totalSlots / (stripes << 1) >= 4) {
-      stripes <<= 1;
+    if (totalSlots <= 4096) {
+      while (stripes < totalSlots) {
+        stripes <<= 1;
+      }
+    } else {
+      while (stripes < totalSlots / 2) {
+        stripes <<= 1;
+      }
+      if (stripes > 4096) {
+        stripes = 4096;
+      }
     }
     this.fingerprints = new long[totalSlots];
     this.windows = new long[totalSlots * windowCount];

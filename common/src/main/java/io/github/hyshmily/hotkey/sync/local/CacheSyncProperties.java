@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.sync.local;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -37,6 +38,7 @@ import org.springframework.validation.annotation.Validated;
 @Data
 @Validated
 @ConfigurationProperties(prefix = "hotkey.sync")
+@Internal
 public class CacheSyncProperties {
 
   /** Whether instance-to-instance cache synchronization is enabled.
@@ -66,7 +68,7 @@ public class CacheSyncProperties {
   /** Maximum random jitter (milliseconds) added before each sync cache update.
    * Spreads Redis reads across instances to avoid thundering herds when a
    * single write triggers broadcasts to many peers. */
-    private int warmupJitterMs = 50;
+  private int warmupJitterMs = 50;
 
   /** Number of concurrent RabbitMQ consumers for the sync queue.
    * Higher values increase throughput under load at the cost of more Redis connections. */

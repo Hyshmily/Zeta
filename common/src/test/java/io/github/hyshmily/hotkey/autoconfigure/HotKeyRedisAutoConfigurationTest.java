@@ -20,9 +20,9 @@ import static org.mockito.Mockito.mock;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -96,10 +96,10 @@ class HotKeyRedisAutoConfigurationTest {
       ruleMatcher,
       healthViewProvider
     );
- 
+
     assertThat(cache).isNotNull();
   }
- 
+
   /**
    * Verifies that the HotKeyCache bean is created when optional dependencies (CacheSyncPublisher, HotKeyReporter) are present.
    */
@@ -117,7 +117,7 @@ class HotKeyRedisAutoConfigurationTest {
       Optional.<StringRedisTemplate>empty(),
       Optional.<CacheSyncPublisher>empty()
     );
- 
+
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
       detector,

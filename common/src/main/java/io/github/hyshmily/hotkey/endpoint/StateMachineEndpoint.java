@@ -15,13 +15,13 @@
  */
 package io.github.hyshmily.hotkey.endpoint;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.web.bind.annotation.*;
-
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.web.bind.annotation.*;
 
 /**
  * Actuator endpoint for reading and updating the Worker's state-machine
@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>Endpoint path: {@code /actuator/hotkey/worker/state}.
  */
+@Internal
 @RestController
 @RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkey/worker/state")
 public class StateMachineEndpoint {
@@ -49,9 +50,7 @@ public class StateMachineEndpoint {
    * @param configTimestampCounter shared atomic counter bumped on each config change;
    *                               propagated to peer Workers via heartbeat broadcast
    */
-  public StateMachineEndpoint(
-      HotKeyStateMachine stateMachine,
-      ObjectProvider<AtomicLong> configTimestampCounter) {
+  public StateMachineEndpoint(HotKeyStateMachine stateMachine, ObjectProvider<AtomicLong> configTimestampCounter) {
     this.stateMachine = stateMachine;
     this.configTimestampCounter = configTimestampCounter;
   }

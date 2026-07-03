@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheKeysPolicy;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -96,8 +97,8 @@ class CacheKeysPolicyTest {
    */
   @Test
   void constructor_shouldBePrivate() {
-    assertThatThrownBy(() ->
-      CacheKeysPolicy.class.getDeclaredConstructor().newInstance()
-    ).isInstanceOf(IllegalAccessException.class);
+    assertThatThrownBy(() -> CacheKeysPolicy.class.getDeclaredConstructor().newInstance()).isInstanceOf(
+      IllegalAccessException.class
+    );
   }
 }

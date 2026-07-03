@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
+import io.github.hyshmily.hotkey.Internal;
 import jakarta.annotation.Nullable;
 
 /**
@@ -36,25 +37,26 @@ import jakarta.annotation.Nullable;
  * @see HotKeySpringCache
  * @see NullValue
  */
+@Internal
 public final class HotKeyCacheContext {
 
-/**
- * Immutable snapshot of all thread-bound cache parameters captured at a
- * specific point in time by {@link #snapshot()}.
- * <p>
- * This record carries the complete set of per-invocation overrides that
- * companion aspects (e.g., {@code @HotKeyCacheTTL}, {@code @NullCaching},
- * {@code @Broadcast}) apply before the Spring cache interceptor executes.
- * <p>
- * A value of {@code 0} for {@code hardTtlMs} or {@code softTtlMs} means
- * "use the global default" rather than "no expiry".
- *
- * @param hardTtlMs    hard TTL override in milliseconds (0 = use global default)
- * @param softTtlMs    soft TTL override in milliseconds (0 = use global default)
- * @param allowNull    whether {@code null} return values may be cached in L1
- * @param skipBroadcast whether to skip broadcasting sync messages to peers
- */
-public record ContextValues(long hardTtlMs, long softTtlMs, boolean allowNull, boolean skipBroadcast) {}
+  /**
+   * Immutable snapshot of all thread-bound cache parameters captured at a
+   * specific point in time by {@link #snapshot()}.
+   * <p>
+   * This record carries the complete set of per-invocation overrides that
+   * companion aspects (e.g., {@code @HotKeyCacheTTL}, {@code @NullCaching},
+   * {@code @Broadcast}) apply before the Spring cache interceptor executes.
+   * <p>
+   * A value of {@code 0} for {@code hardTtlMs} or {@code softTtlMs} means
+   * "use the global default" rather than "no expiry".
+   *
+   * @param hardTtlMs    hard TTL override in milliseconds (0 = use global default)
+   * @param softTtlMs    soft TTL override in milliseconds (0 = use global default)
+   * @param allowNull    whether {@code null} return values may be cached in L1
+   * @param skipBroadcast whether to skip broadcasting sync messages to peers
+   */
+  public record ContextValues(long hardTtlMs, long softTtlMs, boolean allowNull, boolean skipBroadcast) {}
 
   private static final ThreadLocal<ContextValues> HOLDER = new ThreadLocal<>();
   private static final HotKeyCacheContext INSTANCE = new HotKeyCacheContext();
@@ -85,18 +87,18 @@ public record ContextValues(long hardTtlMs, long softTtlMs, boolean allowNull, b
    * {@code allowNull} is {@code false}), the thread-local context is cleared
    * to avoid unnecessary storage.
    *
- * @param hardTtlMs    hard TTL override in milliseconds, or {@code 0} for default
- * @param softTtlMs    soft TTL override in milliseconds, or {@code 0} for default
- * @param allowNull    whether to allow caching null values in L1
- * @param skipBroadcast whether to skip broadcasting sync messages to peers
- */
-public void apply(long hardTtlMs, long softTtlMs, boolean allowNull, boolean skipBroadcast) {
-  if (hardTtlMs > 0 || softTtlMs > 0 || allowNull || skipBroadcast) {
-    HOLDER.set(new ContextValues(hardTtlMs, softTtlMs, allowNull, skipBroadcast));
-  } else {
-    HOLDER.remove();
+   * @param hardTtlMs    hard TTL override in milliseconds, or {@code 0} for default
+   * @param softTtlMs    soft TTL override in milliseconds, or {@code 0} for default
+   * @param allowNull    whether to allow caching null values in L1
+   * @param skipBroadcast whether to skip broadcasting sync messages to peers
+   */
+  public void apply(long hardTtlMs, long softTtlMs, boolean allowNull, boolean skipBroadcast) {
+    if (hardTtlMs > 0 || softTtlMs > 0 || allowNull || skipBroadcast) {
+      HOLDER.set(new ContextValues(hardTtlMs, softTtlMs, allowNull, skipBroadcast));
+    } else {
+      HOLDER.remove();
+    }
   }
-}
 
   /**
    * Returns the hard TTL override (in milliseconds) active for the current
@@ -189,5 +191,4 @@ public void apply(long hardTtlMs, long softTtlMs, boolean allowNull, boolean ski
       HOLDER.remove();
     }
   }
-
 }

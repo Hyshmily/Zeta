@@ -20,8 +20,8 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.endpoint.RingEndpoint;
@@ -29,8 +29,8 @@ import io.github.hyshmily.hotkey.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import org.junit.jupiter.api.Test;
@@ -112,10 +112,10 @@ class HotKeyActuatorAutoConfigurationTest {
       healthViewProvider,
       properties
     );
- 
+
     assertThat(endpoint).isNotNull();
   }
- 
+
   /**
    * Verifies that the HotKeyEndpoint is still created when all optional ObjectProvider dependencies return null.
    */
@@ -160,10 +160,10 @@ class HotKeyActuatorAutoConfigurationTest {
       healthViewProvider,
       properties
     );
- 
+
     assertThat(endpoint).isNotNull();
   }
- 
+
   /**
    * Verifies that ringEndpoint is NOT created when consistent-hashing property is disabled.
    */
@@ -231,7 +231,7 @@ class HotKeyActuatorAutoConfigurationTest {
       healthViewProvider,
       properties
     );
- 
+
     assertThat(endpoint).isNotNull();
   }
 }

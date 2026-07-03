@@ -16,9 +16,10 @@
 package io.github.hyshmily.hotkey.endpoint;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
-import io.github.hyshmily.hotkey.cache.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
@@ -48,6 +49,7 @@ import org.springframework.web.bind.annotation.RequestParam;
  * dedup, identity, and instance-level health. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
  */
+@Internal
 @Builder
 @RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkey")
 public class HotKeyEndpoint {

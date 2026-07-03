@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.detection;
 import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
 
 import com.google.common.util.concurrent.Striped;
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import java.util.Collections;
 import java.util.Map;
@@ -78,6 +79,7 @@ import lombok.extern.slf4j.Slf4j;
  * <p>Designed for single-shard workers; each key is owned by exactly one worker
  * thanks to consistent-hash routing on the client side.</p>
  */
+@Internal
 @Slf4j
 @AllArgsConstructor
 public class HotKeyStateMachine {

@@ -21,7 +21,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
-import io.github.hyshmily.hotkey.cache.CacheExpireManager;
+import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -73,6 +74,7 @@ import org.springframework.amqp.core.Message;
  */
 @RequiredArgsConstructor
 @Slf4j
+@Internal
 public class CacheSyncListener {
 
   /** Shared Jackson {@link ObjectMapper} for deserializing batch-invalidation key lists from JSON. */

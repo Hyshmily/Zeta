@@ -1,0 +1,3 @@
+# No Publisher Confirms on AMQP Publish Paths
+
+Three publish paths (ReportPublisher, WorkerBroadcaster, CacheSyncPublisher) omit RabbitMQ publisher confirms because all three are state-oriented (not command-oriented) — loss is ephemeral and the next periodic cycle self-heals within bounded time. `ReportPublisher` resends within `reportIntervalMs` (default 1s), `WorkerBroadcaster` re-evaluates HOT/COOL on the next window, and `CacheSyncPublisher` has Caffeine `expireAfterWrite` as a final consistency backstop. Adding confirms would add latency, increase channel pressure, and complicate error handling for no durability gain. Do not enable publisher confirms. Accept ephemeral message loss.

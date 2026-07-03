@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.util.window;
 
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
+import io.github.hyshmily.hotkey.Internal;
 import java.util.concurrent.atomic.AtomicLongArray;
 
 /**
@@ -43,6 +44,7 @@ import java.util.concurrent.atomic.AtomicLongArray;
  *
  * @see io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter
  */
+@Internal
 public final class RollingWindow {
 
   private final AtomicLongArray buckets;

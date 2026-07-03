@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.reporting;
-import lombok.extern.slf4j.Slf4j;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_REPORT;
 
+import io.github.hyshmily.hotkey.Internal;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
@@ -29,8 +30,8 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  */
 @RequiredArgsConstructor
 @Slf4j
+@Internal
 public class ReportPublisher {
-
 
   /** RabbitMQ template for message publishing. */
   private final RabbitTemplate rabbitTemplate;

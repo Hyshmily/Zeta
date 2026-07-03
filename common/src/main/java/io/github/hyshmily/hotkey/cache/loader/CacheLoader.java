@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.hotkey.cache.loader;
 
+import io.github.hyshmily.hotkey.Internal;
+
 /**
  * Strategy interface for loading a cache entry value from the underlying
  * data store (typically Redis L2) by key.
@@ -25,6 +27,7 @@ package io.github.hyshmily.hotkey.cache.loader;
  * <p>Implementations must be thread-safe. Returning {@code null} signals
  * that the key does not exist in the data store.
  */
+@Internal
 public interface CacheLoader {
 
   /**

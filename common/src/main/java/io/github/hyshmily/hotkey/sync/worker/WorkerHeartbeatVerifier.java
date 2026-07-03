@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.sync.worker;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import java.util.Set;
@@ -55,6 +56,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  */
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 @Slf4j
+@Internal
 public class WorkerHeartbeatVerifier {
 
   private final RabbitTemplate rabbitTemplate;

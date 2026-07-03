@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.util.ratelimit;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.util.window.RollingWindow;
 
 /**
@@ -29,6 +30,7 @@ import io.github.hyshmily.hotkey.util.window.RollingWindow;
  * — driven by {@link RollingWindow}.  The caller reports outcomes via
  * {@link #onSuccess()} and {@link #onFailed()}.
  */
+@Internal
 public class SreRateLimiter {
 
   private final RollingWindow successWindow;
@@ -61,17 +63,17 @@ public class SreRateLimiter {
   public boolean tryAcquire() {
     long total = totalWindow.sum();
     if (total < minSamples) {
-        return true;
+      return true;
     }
 
     long maxRequests = (long) (k * successWindow.sum());
     // Guard against degenerate rollover
     if (maxRequests < 0) {
-        return true;
+      return true;
     }
 
     if (total < maxRequests) {
-        return true;
+      return true;
     }
 
     // Probabilistic drop
@@ -91,11 +93,10 @@ public class SreRateLimiter {
    * after a request that passed {@link #tryAcquire()} completed with a failure
    * (e.g. timeout, error response). This reduces the effective success rate and
    * tightens the adaptive budget for subsequent requests.
-    */
+   */
   public void onFailed() {
     totalWindow.add(1);
   }
-
 
   private static boolean trueOnProbability(double p) {
     return Math.random() < p;

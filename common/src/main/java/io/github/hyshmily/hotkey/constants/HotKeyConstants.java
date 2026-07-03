@@ -15,12 +15,15 @@
  */
 package io.github.hyshmily.hotkey.constants;
 
+import io.github.hyshmily.hotkey.Internal;
+
 /**
  * Shared constants used across the HotKey library.
  *
  * <p>Groups include AMQP message header names, thread name prefixes,
  * routing keys, queue prefixes, and version tracking defaults.
  */
+@Internal
 public final class HotKeyConstants {
 
   /** Utility class — do not instantiate. */

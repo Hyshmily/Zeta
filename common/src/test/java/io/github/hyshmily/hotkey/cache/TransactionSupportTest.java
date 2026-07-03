@@ -18,7 +18,7 @@ package io.github.hyshmily.hotkey.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import io.github.hyshmily.hotkey.cache.TransactionSupport;
+import io.github.hyshmily.hotkey.cache.cachesupport.TransactionSupport;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -51,10 +51,13 @@ class TransactionSupportTest {
     CountDownLatch latch = new CountDownLatch(1);
     Executor executor = Executors.newSingleThreadExecutor();
 
-    TransactionSupport.runAsyncAfterCommit(() -> {
-      executed.set(true);
-      latch.countDown();
-    }, executor);
+    TransactionSupport.runAsyncAfterCommit(
+      () -> {
+        executed.set(true);
+        latch.countDown();
+      },
+      executor
+    );
 
     assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
     assertThat(executed).isTrue();
@@ -70,7 +73,9 @@ class TransactionSupportTest {
       TransactionSupport.runNowOrAfterCommit(() -> {
         throw new RuntimeException("task-failed");
       })
-    ).isInstanceOf(RuntimeException.class).hasMessage("task-failed");
+    )
+      .isInstanceOf(RuntimeException.class)
+      .hasMessage("task-failed");
   }
 
   /**
@@ -83,11 +88,14 @@ class TransactionSupportTest {
     CountDownLatch latch = new CountDownLatch(1);
     Executor executor = Executors.newSingleThreadExecutor();
 
-    TransactionSupport.runAsyncAfterCommit(() -> {
-      executed.set(true);
-      latch.countDown();
-      throw new RuntimeException("async-fail");
-    }, executor);
+    TransactionSupport.runAsyncAfterCommit(
+      () -> {
+        executed.set(true);
+        latch.countDown();
+        throw new RuntimeException("async-fail");
+      },
+      executor
+    );
 
     assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
     assertThat(executed).isTrue();
@@ -104,7 +112,9 @@ class TransactionSupportTest {
       TransactionSupport.runNowOrAfterCommit(() -> {
         throw new IllegalStateException("state-error");
       })
-    ).isInstanceOf(IllegalStateException.class).hasMessage("state-error");
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("state-error");
   }
 
   // ── Transaction-aware paths ──
@@ -122,8 +132,7 @@ class TransactionSupportTest {
 
       assertThat(executed).isFalse();
 
-      TransactionSynchronizationManager.getSynchronizations()
-        .forEach(s -> s.afterCommit());
+      TransactionSynchronizationManager.getSynchronizations().forEach(s -> s.afterCommit());
 
       assertThat(executed).isTrue();
     } finally {
@@ -144,8 +153,7 @@ class TransactionSupportTest {
 
       assertThat(executed).isFalse();
 
-      TransactionSynchronizationManager.getSynchronizations()
-        .forEach(s -> s.afterCommit());
+      TransactionSynchronizationManager.getSynchronizations().forEach(s -> s.afterCommit());
 
       assertThat(executed).isTrue();
     } finally {
@@ -160,10 +168,13 @@ class TransactionSupportTest {
   @Test
   void runAsyncAfterCommit_withException_shouldInvokeExceptionallyCallback() {
     AtomicBoolean executed = new AtomicBoolean(false);
-    TransactionSupport.runAsyncAfterCommit(() -> {
-      executed.set(true);
-      throw new RuntimeException("async-fail");
-    }, Runnable::run);
+    TransactionSupport.runAsyncAfterCommit(
+      () -> {
+        executed.set(true);
+        throw new RuntimeException("async-fail");
+      },
+      Runnable::run
+    );
 
     assertThat(executed).isTrue();
   }

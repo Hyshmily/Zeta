@@ -15,8 +15,9 @@
  */
 package io.github.hyshmily.hotkey.sync.distributedlock.impl;
 
-import static io.github.hyshmily.hotkey.cache.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
@@ -54,6 +55,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
  */
 @Slf4j
 @RequiredArgsConstructor
+@Internal
 public class RedisLockProvider implements LockProvider {
 
   private static final DefaultRedisScript<Long> UNLOCK_SCRIPT = new DefaultRedisScript<>(

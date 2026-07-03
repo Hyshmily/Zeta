@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.reporting;
 
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.hotkeydetector.doublebuffer.BufferedCounter;
 import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
@@ -56,6 +57,7 @@ import lombok.extern.slf4j.Slf4j;
  * the counts are lost — at most one {@code reportIntervalMs} window.
  */
 @Slf4j
+@Internal
 public class HotKeyReporter {
 
   /** Maximum distinct keys in the BufferedCounter before eager swap. */

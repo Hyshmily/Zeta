@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.cachesupport.HotKeyCircuitBreaker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 

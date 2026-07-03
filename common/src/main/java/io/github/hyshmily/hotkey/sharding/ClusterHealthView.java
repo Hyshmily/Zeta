@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.sharding;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
 import java.util.Set;
@@ -51,6 +52,7 @@ import lombok.extern.slf4j.Slf4j;
  * @see WorkerHeartbeatMessage
  * @see WorkerHeartbeatVerifier
  */
+@Internal
 @Slf4j
 public class ClusterHealthView {
 

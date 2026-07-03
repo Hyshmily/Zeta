@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.util;
 
+import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.util.UUID;
 
@@ -28,6 +29,7 @@ import java.util.UUID;
  *   <li>Random {@link UUID} + {@code server.port} system property</li>
  * </ol>
  */
+@Internal
 public final class InstanceIdGenerator {
 
   /** Private constructor to prevent instantiation of this utility class. */
