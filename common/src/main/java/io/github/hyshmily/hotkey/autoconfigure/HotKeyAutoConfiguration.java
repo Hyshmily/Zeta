@@ -22,19 +22,24 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
-import io.github.hyshmily.hotkey.cache.cachesupport.HotKeyCircuitBreaker;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.CircuitBreakerImpl;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.SingleFlightImpl;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.model.CacheEntry;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.hotkey.sharding.HealthView;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
+import io.github.hyshmily.hotkey.util.version.impl.VersionControllerImpl;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -136,12 +141,12 @@ public class HotKeyAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public SingleFlight singleFlight(HotKeyProperties properties, @Qualifier("hotKeyExecutor") Executor hotKeyExecutor) {
-    return new SingleFlight(
+    return new SingleFlightImpl(
       properties.getInflightMaxSize(),
       properties.getInflightTtlSeconds(),
       properties.getInflightTimeoutSeconds(),
       hotKeyExecutor,
-      new HotKeyCircuitBreaker(properties.getCircuitBreaker())
+      new CircuitBreakerImpl(properties.getCircuitBreaker())
     );
   }
 
@@ -157,16 +162,16 @@ public class HotKeyAutoConfiguration {
    * @param hotLocalCache  the L1 Caffeine cache (never {@code null})
    * @param hotKeyExecutor the dedicated HotKey executor for async refresh tasks (never {@code null})
    * @param properties     the HotKey configuration properties (never {@code null})
-   * @return a new CacheExpireManager instance
+   * @return a new ExpireManagerImpl instance
    */
   @Bean
   @ConditionalOnMissingBean
-  public CacheExpireManager expireManager(
+  public ExpireManager expireManager(
     Cache<String, Object> hotLocalCache,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     HotKeyProperties properties
   ) {
-    return new CacheExpireManager(hotLocalCache, hotKeyExecutor, properties, properties.getRefreshMaxPools());
+    return new ExpireManagerImpl(hotLocalCache, hotKeyExecutor, properties, properties.getRefreshMaxPools());
   }
 
   /**
@@ -223,7 +228,7 @@ public class HotKeyAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean({ RuleMatcher.class, StringRedisTemplate.class })
   public RuleMatcher ruleMatcher(ObjectProvider<CacheSyncPublisher> publisherProvider) {
-    return new RuleMatcher(Optional.empty(), Optional.ofNullable(publisherProvider.getIfAvailable()));
+    return new RuleMatcherImpl(Optional.empty(), Optional.ofNullable(publisherProvider.getIfAvailable()));
   }
 
   /**
@@ -253,13 +258,13 @@ public class HotKeyAutoConfiguration {
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,
     SingleFlight singleFlight,
-    CacheExpireManager expireManager,
+    ExpireManager expireManager,
     Optional<CacheSyncPublisher> syncPublisher,
-    Optional<HotKeyReporter> hotKeyReporter,
+    Optional<KeyReporter> hotKeyReporter,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    ObjectProvider<ClusterHealthView> healthViewProvider
+    ObjectProvider<HealthView> healthViewProvider
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -270,10 +275,10 @@ public class HotKeyAutoConfiguration {
       syncPublisher,
       hotKeyReporter,
       ruleMatcher,
-      new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes()),
+      new VersionControllerImpl(Optional.empty(), properties.getVersionKeyTtlMinutes()),
       properties,
       healthViewProvider.getIfAvailable(() ->
-        new ClusterHealthView(
+        new HealthViewImpl(
           properties.getExpectedWorkerCount(),
           properties.getHeartbeat().getTimeoutMs(),
           properties.getHeartbeat().getDegradeAfterFailures()

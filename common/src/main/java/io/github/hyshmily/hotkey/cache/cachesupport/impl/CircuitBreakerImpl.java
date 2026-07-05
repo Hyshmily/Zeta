@@ -13,12 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache.cachesupport;
+package io.github.hyshmily.hotkey.cache.cachesupport.impl;
 
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -43,7 +44,7 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 @Internal
-public class HotKeyCircuitBreaker implements AutoCloseable {
+public class CircuitBreakerImpl implements CircuitBreaker {
 
   private static final ScheduledExecutorService SCHEDULER = new ScheduledThreadPoolExecutor(
     Runtime.getRuntime().availableProcessors(),
@@ -68,7 +69,7 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
    *
    * @param config the circuit breaker configuration (window size, thresholds, etc.)
    */
-  public HotKeyCircuitBreaker(HotKeyProperties.CircuitBreaker config) {
+  public CircuitBreakerImpl(HotKeyProperties.CircuitBreaker config) {
     this.config = config;
     this.bucketSize = config.getWindowBuckets();
     this.successBuckets = new LongAdder[bucketSize];
@@ -87,6 +88,7 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
    *
    * @return {@code true} if the request may proceed
    */
+  @Override
   public boolean allowRequest() {
     if (!config.isEnabled()) {
       if (open.get()) {
@@ -114,6 +116,7 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
   }
 
   /** Record a successful call. If the breaker was open, attempt to close it. */
+  @Override
   public void onSuccess() {
     if (!config.isEnabled()) {
       return;
@@ -128,6 +131,7 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
   }
 
   /** Record a failed call. */
+  @Override
   public void onFailure() {
     if (config.isEnabled()) {
       failBuckets[currentIndex].increment();
@@ -136,6 +140,7 @@ public class HotKeyCircuitBreaker implements AutoCloseable {
   }
 
   /** Whether the breaker is currently open. */
+  @Override
   public boolean isOpen() {
     return open.get() && config.isEnabled();
   }

@@ -25,11 +25,13 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
 import io.github.hyshmily.hotkey.sync.local.SyncMessage;
@@ -64,7 +66,7 @@ class CacheSyncListenerTest {
     properties.setWarmupJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     ruleMatcher = mock(RuleMatcher.class);
 
     listener = new CacheSyncListener(cache, redisLoader, properties, scheduler, expireManager, ruleMatcher);
@@ -153,7 +155,7 @@ class CacheSyncListenerTest {
     CacheSyncProperties properties = new CacheSyncProperties();
     properties.setWarmupJitterMs(0);
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     CacheSyncListener nullListener = new CacheSyncListener(
       cache,
       nullLoader,
@@ -262,7 +264,7 @@ class CacheSyncListenerTest {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     CacheSyncListener failingListener = new CacheSyncListener(
       cache,
       failingLoader,
@@ -326,7 +328,7 @@ class CacheSyncListenerTest {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     CacheSyncListener nullListener = new CacheSyncListener(
       cache,
       nullLoader,

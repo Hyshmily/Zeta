@@ -18,18 +18,18 @@ package io.github.hyshmily.hotkey.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.HotKeyCircuitBreaker;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.CircuitBreakerImpl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link HotKeyCircuitBreaker} covering all state transitions,
+ * Tests for {@link CircuitBreakerImpl} covering all state transitions,
  * backoff scenarios, disabled path, and close lifecycle.
  */
-class HotKeyCircuitBreakerTest {
+class CircuitBreakerImplTest {
 
   private HotKeyProperties.CircuitBreaker config;
-  private HotKeyCircuitBreaker breaker;
+  private CircuitBreakerImpl breaker;
 
   @BeforeEach
   void setUp() {
@@ -41,13 +41,13 @@ class HotKeyCircuitBreakerTest {
     config.setWindowBuckets(10);
     config.setSingleTestIntervalMs(100);
     config.setLogEnabled(false);
-    breaker = new HotKeyCircuitBreaker(config);
+    breaker = new CircuitBreakerImpl(config);
   }
 
   @Test
   void allowRequest_whenDisabled_shouldReturnTrue() {
     config.setEnabled(false);
-    HotKeyCircuitBreaker cb = new HotKeyCircuitBreaker(config);
+    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
     assertThat(cb.allowRequest()).isTrue();
   }
 
@@ -74,7 +74,7 @@ class HotKeyCircuitBreakerTest {
   @Test
   void onSuccess_whenDisabled_shouldDoNothing() {
     config.setEnabled(false);
-    HotKeyCircuitBreaker cb = new HotKeyCircuitBreaker(config);
+    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
     cb.onSuccess();
     assertThat(cb.isOpen()).isFalse();
   }
@@ -83,7 +83,7 @@ class HotKeyCircuitBreakerTest {
   void onSuccess_whenClosed_shouldIncrementSuccess() throws Exception {
     config.setFailThreshold(0.4);
     config.setRequestVolumeThreshold(3);
-    breaker = new HotKeyCircuitBreaker(config);
+    breaker = new CircuitBreakerImpl(config);
     breaker.onSuccess();
     breaker.onSuccess();
     breaker.onFailure();
@@ -103,7 +103,7 @@ class HotKeyCircuitBreakerTest {
   @Test
   void onFailure_whenDisabled_shouldDoNothing() {
     config.setEnabled(false);
-    HotKeyCircuitBreaker cb = new HotKeyCircuitBreaker(config);
+    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
     cb.onFailure();
   }
 
@@ -116,7 +116,7 @@ class HotKeyCircuitBreakerTest {
   @Test
   void isOpen_whenDisabled_shouldReturnFalse() {
     config.setEnabled(false);
-    HotKeyCircuitBreaker cb = new HotKeyCircuitBreaker(config);
+    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
     cb.onFailure();
     cb.onFailure();
     assertThat(cb.isOpen()).isFalse();
@@ -172,7 +172,7 @@ class HotKeyCircuitBreakerTest {
     config.setLogEnabled(true);
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
-    HotKeyCircuitBreaker cb = new HotKeyCircuitBreaker(config);
+    CircuitBreakerImpl cb = new CircuitBreakerImpl(config);
 
     cb.onFailure();
     // allowRequest on open breaker triggers log in half-open path
@@ -185,7 +185,7 @@ class HotKeyCircuitBreakerTest {
     config.setFailThreshold(0.1);
     config.setRequestVolumeThreshold(1);
     // Re-create with new config
-    breaker = new HotKeyCircuitBreaker(config);
+    breaker = new CircuitBreakerImpl(config);
     breaker.onFailure();
     Thread.sleep(50);
   }

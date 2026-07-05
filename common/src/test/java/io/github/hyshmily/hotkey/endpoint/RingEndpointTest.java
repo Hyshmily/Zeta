@@ -6,7 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.List;
 import java.util.Map;
@@ -18,7 +18,7 @@ import org.springframework.beans.factory.ObjectProvider;
 class RingEndpointTest {
 
   private RingManager ringManager;
-  private ObjectProvider<ClusterHealthView> healthViewProvider;
+  private ObjectProvider<HealthView> healthViewProvider;
   private RingEndpoint endpoint;
 
   @BeforeEach
@@ -42,9 +42,9 @@ class RingEndpointTest {
 
   @Test
   void keyMapping_shouldReturnKeyAndNodeId() {
-    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    HealthView healthView = mock(HealthView.class);
     when(healthViewProvider.getIfAvailable()).thenReturn(healthView);
-    when(ringManager.routeNode(eq("myKey"), any(ClusterHealthView.class))).thenReturn("worker-1");
+    when(ringManager.routeNode(eq("myKey"), any(HealthView.class))).thenReturn("worker-1");
 
     Map<String, Object> result = endpoint.keyMapping("myKey");
 
@@ -54,12 +54,12 @@ class RingEndpointTest {
   @Test
   void keyMapping_shouldFallbackToDefaultHealthViewWhenProviderReturnsNull() {
     when(healthViewProvider.getIfAvailable()).thenReturn(null);
-    when(ringManager.routeNode(eq("fallbackKey"), any(ClusterHealthView.class))).thenReturn("placeholder");
+    when(ringManager.routeNode(eq("fallbackKey"), any(HealthView.class))).thenReturn("placeholder");
 
     Map<String, Object> result = endpoint.keyMapping("fallbackKey");
 
     assertThat(result).containsEntry("key", "fallbackKey").containsEntry("nodeId", "placeholder");
-    verify(ringManager).routeNode(eq("fallbackKey"), any(ClusterHealthView.class));
+    verify(ringManager).routeNode(eq("fallbackKey"), any(HealthView.class));
   }
 
   @Test
@@ -74,9 +74,9 @@ class RingEndpointTest {
 
   @Test
   void keyMapping_shouldHandleSingleCharacterKey() {
-    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    HealthView healthView = mock(HealthView.class);
     when(healthViewProvider.getIfAvailable()).thenReturn(healthView);
-    when(ringManager.routeNode(eq("x"), any(ClusterHealthView.class))).thenReturn("worker-1");
+    when(ringManager.routeNode(eq("x"), any(HealthView.class))).thenReturn("worker-1");
 
     Map<String, Object> result = endpoint.keyMapping("x");
 

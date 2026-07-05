@@ -18,7 +18,7 @@ package io.github.hyshmily.hotkey.sync.worker;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import java.nio.charset.StandardCharsets;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -30,7 +30,7 @@ import org.springframework.amqp.core.MessageProperties;
  *
  * <p>Broadcast on the dedicated {@code hotkey.heartbeat.exchange} (Topic exchange).
  * Each App instance consumes all heartbeats from all Workers and updates its local
- * {@link ClusterHealthView} accordingly.
+ * {@link io.github.hyshmily.hotkey.sharding.HealthView} accordingly.
  *
  * <p><b>Fields:</b>
  * <ul>

@@ -19,7 +19,7 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import java.util.Set;
 import java.util.concurrent.*;
@@ -36,22 +36,22 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * On-demand active heartbeat verifier that probes suspected-dead Workers when
  * passive heartbeat monitoring indicates a potential failure.
  *
- * <p>Under normal operation, the {@link ClusterHealthView} is updated passively
+ * <p>Under normal operation, the {@link HealthView} is updated passively
  * by incoming heartbeat messages. This verifier sends a point-to-point PING
  * message to each suspected Worker's dedicated verification queue
  * ({@code hotkey.verify.ping.{workerId}}) via Direct reply-to and awaits
  * a PONG response.
  *
  * <p>Workers that respond are restored to the alive set via
- * {@link ClusterHealthView#recordPong}; Workers that fail repeatedly are
- * marked as stale via {@link ClusterHealthView#markVerificationFailed} and
+ * {@link HealthView#recordPong}; Workers that fail repeatedly are
+ * marked as stale via {@link HealthView#markVerificationFailed} and
  * excluded from health-majority calculations.
  *
  * <p><b>Thread safety:</b> The verification loop runs on a single daemon thread
- * ({@code hb-verifier}). The {@link ClusterHealthView} uses {@code ConcurrentHashMap}
+ * ({@code hb-verifier}). The {@link HealthView} uses {@code ConcurrentHashMap}
  * internally, so concurrent heartbeat reception and verification are safe.
  *
- * @see ClusterHealthView
+ * @see HealthView
  * @see WorkerHeartbeatMessage
  */
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
@@ -60,7 +60,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 public class WorkerHeartbeatVerifier {
 
   private final RabbitTemplate rabbitTemplate;
-  private final ClusterHealthView healthView;
+  private final HealthView healthView;
   private final String appInstanceId;
   private final long verifyIntervalMs;
   private final long pingTimeoutMs;
@@ -85,7 +85,7 @@ public class WorkerHeartbeatVerifier {
    */
   public WorkerHeartbeatVerifier(
     RabbitTemplate rabbitTemplate,
-    ClusterHealthView healthView,
+    HealthView healthView,
     String appInstanceId,
     VerifierConfig config
   ) {
@@ -108,7 +108,7 @@ public class WorkerHeartbeatVerifier {
    */
   public WorkerHeartbeatVerifier(
     RabbitTemplate rabbitTemplate,
-    ClusterHealthView healthView,
+    HealthView healthView,
     String appInstanceId,
     VerifierConfig config,
     ScheduledExecutorService scheduler
@@ -129,7 +129,7 @@ public class WorkerHeartbeatVerifier {
    * Starts the periodic heartbeat verification at a fixed rate.
    *
    * <p>Every {@code verifyIntervalMs} milliseconds, iterates over all Workers in
-   * {@link ClusterHealthView} that have exceeded {@code heartbeatTimeoutMs} without
+   * {@link HealthView} that have exceeded {@code heartbeatTimeoutMs} without
    * a heartbeat and sends each a PING via Direct reply-to. On PONG, the Worker's
    * health record is restored; on timeout, the failure counter is incremented.
    * <p>
@@ -181,7 +181,7 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
-   * Iterates over all Workers registered in {@link ClusterHealthView} that are
+   * Iterates over all Workers registered in {@link HealthView} that are
    * <em>not</em> currently marked alive, sends each a PING via Direct reply-to,
    * and updates the health view based on the response.
    *

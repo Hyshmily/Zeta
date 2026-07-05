@@ -17,16 +17,16 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.endpoint.RingEndpoint;
 import io.github.hyshmily.hotkey.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -99,13 +99,13 @@ public class HotKeyActuatorAutoConfiguration {
     @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
     ObjectProvider<Cache<String, Object>> hotLocalCacheProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
-    ObjectProvider<HotKeyReporter> hotKeyReporterProvider,
+    ObjectProvider<KeyReporter> hotKeyReporterProvider,
     ObjectProvider<RuleMatcher> ruleMatcherProvider,
-    ObjectProvider<CacheExpireManager> expireManagerProvider,
+    ObjectProvider<ExpireManager> expireManagerProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
     ObjectProvider<HotKeyStateMachine> stateMachineProvider,
-    ObjectProvider<ClusterHealthView> healthViewProvider,
+    ObjectProvider<HealthView> healthViewProvider,
     HotKeyProperties properties
   ) {
     return HotKeyEndpoint.builder()
@@ -132,7 +132,7 @@ public class HotKeyActuatorAutoConfiguration {
    * Provides REST endpoints at {@code /actuator/hotkeyring} for viewing and
    * modifying the consistent-hash ring topology.
    *
-   * @param ringManager        the ring manager for consistent-hash topology (never {@code null})
+   * @param ringManagerProvider        the ring manager for consistent-hash topology (never {@code null})
    * @param healthViewProvider optional provider for the cluster health view (may be absent)
    * @return a new {@link RingEndpoint} instance
    */
@@ -142,7 +142,7 @@ public class HotKeyActuatorAutoConfiguration {
   @ConditionalOnMissingBean
   public RingEndpoint ringEndpoint(
     ObjectProvider<RingManager> ringManagerProvider,
-    ObjectProvider<ClusterHealthView> healthViewProvider
+    ObjectProvider<HealthView> healthViewProvider
   ) {
     return new RingEndpoint(ringManagerProvider.getIfAvailable(), healthViewProvider);
   }

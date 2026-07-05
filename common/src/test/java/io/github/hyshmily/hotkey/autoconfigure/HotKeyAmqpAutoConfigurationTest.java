@@ -21,14 +21,18 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
+import io.github.hyshmily.hotkey.reporting.impl.BbrRateLimiterImpl;
+import io.github.hyshmily.hotkey.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
+import io.github.hyshmily.hotkey.sharding.impl.RingManagerImpl;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
@@ -37,6 +41,7 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import io.github.hyshmily.hotkey.util.ratelimit.impl.SreRateLimiterImpl;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -75,7 +80,7 @@ class HotKeyAmqpAutoConfigurationTest {
   void reportConfigIsSkippedWhenRabbitTemplateBeanNotPresent() {
     reportRunner.run(ctx -> {
       assertThat(ctx).doesNotHaveBean(ReportPublisher.class);
-      assertThat(ctx).doesNotHaveBean(HotKeyReporter.class);
+      assertThat(ctx).doesNotHaveBean(KeyReporterImpl.class);
     });
   }
 
@@ -89,7 +94,7 @@ class HotKeyAmqpAutoConfigurationTest {
       .withPropertyValues("hotkey.report.enabled=false")
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(ReportPublisher.class);
-        assertThat(ctx).doesNotHaveBean(HotKeyReporter.class);
+        assertThat(ctx).doesNotHaveBean(KeyReporterImpl.class);
       });
   }
 
@@ -118,7 +123,7 @@ class HotKeyAmqpAutoConfigurationTest {
   }
 
   /**
-   * Verifies that HotKeyReporter is created with its required dependencies.
+   * Verifies that KeyReporterImpl is created with its required dependencies.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -126,15 +131,15 @@ class HotKeyAmqpAutoConfigurationTest {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     HotKeyProperties properties = new HotKeyProperties();
-    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
+    ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
 
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
-    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
-    HotKeyReporter reporter = config.hotKeyReporter(
+    ObjectProvider<BbrRateLimiterImpl> bbrProvider = mock(ObjectProvider.class);
+    KeyReporter reporter = config.hotKeyReporter(
       reportPublisher,
       scheduler,
       properties,
-      new RingManager(150),
+      new RingManagerImpl(150),
       healthViewProvider,
       bbrProvider
     );
@@ -242,7 +247,7 @@ class HotKeyAmqpAutoConfigurationTest {
     CacheLoader redisLoader = mock(CacheLoader.class);
     CacheSyncProperties props = new CacheSyncProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
-    CacheExpireManager expireManager = mock(CacheExpireManager.class);
+    ExpireManager expireManager = mock(ExpireManager.class);
 
     HotKeyAmqpAutoConfiguration.SyncConfiguration config = new HotKeyAmqpAutoConfiguration.SyncConfiguration();
     CacheSyncListener listener = config.cacheSyncListener(
@@ -363,11 +368,11 @@ class HotKeyAmqpAutoConfigurationTest {
     CacheLoader redisLoader = mock(CacheLoader.class);
     WorkerListenerProperties props = new WorkerListenerProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
-    CacheExpireManager expireManager = mock(CacheExpireManager.class);
+    ExpireManager expireManager = mock(ExpireManager.class);
 
     HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    ObjectProvider<SreRateLimiter> sreProvider = mock(ObjectProvider.class);
+    ObjectProvider<SreRateLimiterImpl> sreProvider = mock(ObjectProvider.class);
     WorkerListener listener = config.workerListener(
       localCache,
       redisLoader,
@@ -443,12 +448,12 @@ class HotKeyAmqpAutoConfigurationTest {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     HotKeyProperties properties = new HotKeyProperties();
-    RingManager ringManager = new RingManager(150);
-    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
-    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
+    RingManager ringManager = new RingManagerImpl(150);
+    ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
+    ObjectProvider<BbrRateLimiterImpl> bbrProvider = mock(ObjectProvider.class);
 
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
-    HotKeyReporter reporter = config.hotKeyReporter(
+    KeyReporter reporter = config.hotKeyReporter(
       reportPublisher,
       scheduler,
       properties,
@@ -459,8 +464,6 @@ class HotKeyAmqpAutoConfigurationTest {
 
     assertThat(reporter).isNotNull();
   }
-
-  // ── SyncConfiguration remaining beans ──
 
   @Test
   void cacheSyncPublisherIsCreatedWithAllDependencies() {
@@ -552,7 +555,7 @@ class HotKeyAmqpAutoConfigurationTest {
   @Test
   void heartbeatContainerIsCreated() {
     ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
-    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    HealthView healthView = mock(HealthView.class);
     Queue heartbeatQueue = new Queue("hotkey.heartbeat:test");
 
     HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
@@ -586,7 +589,7 @@ class HotKeyAmqpAutoConfigurationTest {
   @Test
   void workerHeartbeatVerifierIsCreated() {
     RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
-    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    HealthView healthView = mock(HealthView.class);
     HotKeyProperties properties = new HotKeyProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
 
@@ -667,16 +670,16 @@ class HotKeyAmqpAutoConfigurationTest {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     HotKeyProperties properties = new HotKeyProperties();
-    RingManager ringManager = new RingManager(150);
-    ClusterHealthView customHealthView = new ClusterHealthView(3, 5000, 2);
+    RingManager ringManager = new RingManagerImpl(150);
+    HealthView customHealthView = new HealthViewImpl(3, 5000, 2);
 
-    ObjectProvider<ClusterHealthView> healthViewProvider = mock(ObjectProvider.class);
+    ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
     when(healthViewProvider.getIfAvailable(any())).thenReturn(customHealthView);
 
-    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
+    ObjectProvider<BbrRateLimiterImpl> bbrProvider = mock(ObjectProvider.class);
 
     HotKeyAmqpAutoConfiguration.ReportConfiguration config = new HotKeyAmqpAutoConfiguration.ReportConfiguration();
-    HotKeyReporter reporter = config.hotKeyReporter(
+    KeyReporter reporter = config.hotKeyReporter(
       reportPublisher,
       scheduler,
       properties,

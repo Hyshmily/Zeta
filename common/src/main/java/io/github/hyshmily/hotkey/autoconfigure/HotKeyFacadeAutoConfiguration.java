@@ -22,8 +22,9 @@ import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
+import io.github.hyshmily.hotkey.sharding.HealthView;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
@@ -90,21 +91,21 @@ public class HotKeyFacadeAutoConfiguration {
   }
 
   /**
-   * Create the shared {@link ClusterHealthView} for tracking Worker cluster health.
+   * Create the shared {@link HealthView} for tracking Worker cluster health.
    *
    * <p>Declared here (the always-active, first-registered auto-configuration) so that
    * a single singleton is available to all consumers — {@link HotKeyCache},
-   * {@link HotKeyEndpoint}, {@link HotKeyReporter}, {@link WorkerHeartbeatVerifier},
+   * {@link HotKeyEndpoint}, {@link KeyReporter}, {@link WorkerHeartbeatVerifier},
    * and the heartbeat listener container — eliminating the risk of multiple
    * inconsistent instances with independent state.
    *
    * @param properties the HotKey configuration properties
-   * @return a new {@link ClusterHealthView} instance
+   * @return a new {@link HealthViewImpl} instance
    */
   @Bean
   @ConditionalOnMissingBean
-  public ClusterHealthView clusterHealthView(HotKeyProperties properties) {
-    ClusterHealthView view = new ClusterHealthView(
+  public HealthView clusterHealthView(HotKeyProperties properties) {
+    HealthView view = new HealthViewImpl(
       properties.getExpectedWorkerCount(),
       properties.getHeartbeat().getTimeoutMs(),
       properties.getHeartbeat().getDegradeAfterFailures()

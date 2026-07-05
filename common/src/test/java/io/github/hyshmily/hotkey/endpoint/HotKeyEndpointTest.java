@@ -21,16 +21,19 @@ import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.hotkey.sharding.HealthView;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -56,14 +59,14 @@ class HotKeyEndpointTest {
   private Cache<String, Object> caffeineCache;
   private SingleFlight singleFlight;
   private HotKeyProperties properties;
-  private HotKeyReporter hotKeyReporter;
+  private KeyReporter KeyReporter;
   private RuleMatcher ruleMatcher;
   private RingManager workerHealthMonitor;
-  private CacheExpireManager expireManager;
+  private ExpireManager expireManager;
   private VersionController versionController;
   private CacheSyncPublisher cacheSyncPublisher;
   private HotKeyStateMachine hotKeyStateMachine;
-  private ClusterHealthView healthView;
+  private HealthView healthView;
 
   @BeforeEach
   @SuppressWarnings("unchecked")
@@ -73,14 +76,14 @@ class HotKeyEndpointTest {
     caffeineCache = mock(Cache.class);
     singleFlight = mock(SingleFlight.class);
     properties = new HotKeyProperties();
-    hotKeyReporter = mock(HotKeyReporter.class);
-    ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
+    KeyReporter = mock(KeyReporter.class);
+    ruleMatcher = new RuleMatcherImpl(Optional.empty(), Optional.empty());
     workerHealthMonitor = mock(RingManager.class);
-    expireManager = mock(CacheExpireManager.class);
+    expireManager = mock(ExpireManager.class);
     versionController = mock(VersionController.class);
     cacheSyncPublisher = mock(CacheSyncPublisher.class);
     hotKeyStateMachine = mock(HotKeyStateMachine.class);
-    healthView = mock(ClusterHealthView.class);
+    healthView = mock(HealthView.class);
     when(healthView.isClusterHealthy()).thenReturn(true);
   }
 
@@ -93,7 +96,7 @@ class HotKeyEndpointTest {
       .caffeineCache(caffeineCache)
       .singleFlight(singleFlight)
       .properties(properties)
-      .hotKeyReporter(hotKeyReporter)
+      .hotKeyReporter(KeyReporter)
       .ruleMatcher(ruleMatcher)
       .expireManager(expireManager)
       .versionController(versionController)
@@ -120,11 +123,11 @@ class HotKeyEndpointTest {
     mockTopK(workerTopK, List.of(new Item("wk1", 5)), 80L);
     when(caffeineCache.estimatedSize()).thenReturn(42L);
     when(singleFlight.estimatedInflightSize()).thenReturn(3L);
-    when(hotKeyReporter.dispatcherDepth()).thenReturn(7);
-    when(hotKeyReporter.dispatcherCapacity()).thenReturn(10000);
-    when(hotKeyReporter.dispatcherExpired()).thenReturn(2L);
-    when(hotKeyReporter.dispatcherDropped()).thenReturn(1L);
-    when(hotKeyReporter.getPendingKeyCount()).thenReturn(5L);
+    when(KeyReporter.dispatcherDepth()).thenReturn(7);
+    when(KeyReporter.dispatcherCapacity()).thenReturn(10000);
+    when(KeyReporter.dispatcherExpired()).thenReturn(2L);
+    when(KeyReporter.dispatcherDropped()).thenReturn(1L);
+    when(KeyReporter.getPendingKeyCount()).thenReturn(5L);
     when(expireManager.isSoftExpireEnabled()).thenReturn(true);
     when(expireManager.getEffectiveHardTtlMs()).thenReturn(300000L);
     when(expireManager.getEffectiveSoftTtlMs()).thenReturn(30000L);
@@ -196,7 +199,7 @@ class HotKeyEndpointTest {
       .caffeineCache(caffeineCache)
       .singleFlight(singleFlight)
       .properties(properties)
-      .hotKeyReporter(hotKeyReporter)
+      .hotKeyReporter(KeyReporter)
       .ruleMatcher(ruleMatcher)
       .healthView(healthView)
       .build();
@@ -311,7 +314,7 @@ class HotKeyEndpointTest {
    */
   @Test
   void localSection_shouldIncludeRules() {
-    ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
+    ruleMatcher = new RuleMatcherImpl(Optional.empty(), Optional.empty());
     ruleMatcher.addRule(new Rule(Rule.RuleType.PREFIX, "secret:*", Rule.RuleAction.BLOCK));
     ruleMatcher.addRule(new Rule(Rule.RuleType.PREFIX, "health:*", Rule.RuleAction.ALLOW_NO_REPORT));
     mockTopK(hotKeyDetector, List.of(), 0L);

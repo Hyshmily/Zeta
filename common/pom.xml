@@ -113,7 +113,6 @@
           <argLine>@{argLine}</argLine>
         </configuration>
       </plugin>
-
     </plugins>
   </build>
 </project>

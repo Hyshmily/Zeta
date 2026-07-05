@@ -16,7 +16,8 @@
 package io.github.hyshmily.hotkey.endpoint;
 
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -45,9 +46,9 @@ public class RingEndpoint {
   @Nullable
   private final RingManager ringManager;
 
-  private final ObjectProvider<ClusterHealthView> healthViewProvider;
+  private final ObjectProvider<HealthView> healthViewProvider;
 
-  public RingEndpoint(@Nullable RingManager ringManager, ObjectProvider<ClusterHealthView> healthViewProvider) {
+  public RingEndpoint(@Nullable RingManager ringManager, ObjectProvider<HealthView> healthViewProvider) {
     this.ringManager = ringManager;
     this.healthViewProvider = healthViewProvider;
   }
@@ -89,9 +90,9 @@ public class RingEndpoint {
     }
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("key", key);
-    ClusterHealthView view = healthViewProvider.getIfAvailable();
+    HealthView view = healthViewProvider.getIfAvailable();
     if (view == null) {
-      view = new ClusterHealthView(0, 0, 0);
+      view = new HealthViewImpl(0, 0, 0);
     }
     result.put("nodeId", ringManager.routeNode(key, view));
     return result;

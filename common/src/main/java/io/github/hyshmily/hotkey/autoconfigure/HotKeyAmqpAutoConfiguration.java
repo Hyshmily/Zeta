@@ -19,15 +19,19 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_HE
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
+import io.github.hyshmily.hotkey.reporting.impl.BbrRateLimiterImpl;
+import io.github.hyshmily.hotkey.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
+import io.github.hyshmily.hotkey.sharding.impl.RingManagerImpl;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
@@ -38,7 +42,9 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
+import io.github.hyshmily.hotkey.util.impl.SystemLoadMonitorImpl;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import io.github.hyshmily.hotkey.util.ratelimit.impl.SreRateLimiterImpl;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.springframework.amqp.core.*;
@@ -147,7 +153,7 @@ public class HotKeyAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public RingManager ringManager(HotKeyProperties properties) {
-      return new RingManager(properties.getConsistentHashing().getVirtualNodes());
+      return new RingManagerImpl(properties.getConsistentHashing().getVirtualNodes());
     }
 
     /**
@@ -167,7 +173,7 @@ public class HotKeyAmqpAutoConfiguration {
       @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
     ) {
       HotKeyProperties.ReporterLimiter cfg = properties.getReporter();
-      return new SystemLoadMonitor(hotKeyScheduler, cfg.getCpuPollIntervalMs(), cfg.getCpuDecay());
+      return new SystemLoadMonitorImpl(hotKeyScheduler, cfg.getCpuPollIntervalMs(), cfg.getCpuDecay());
     }
 
     /**
@@ -189,9 +195,9 @@ public class HotKeyAmqpAutoConfiguration {
       havingValue = "true",
       matchIfMissing = true
     )
-    public BbrRateLimiter hotKeyBbrRateLimiter(SystemLoadMonitor cpuMonitor, HotKeyProperties properties) {
+    public BbrRateLimiterImpl hotKeyBbrRateLimiter(SystemLoadMonitor cpuMonitor, HotKeyProperties properties) {
       HotKeyProperties.ReporterLimiter cfg = properties.getReporter();
-      return new BbrRateLimiter(
+      return new BbrRateLimiterImpl(
         cpuMonitor,
         cfg.getCpuThreshold(),
         cfg.getBbrWindowMs(),
@@ -201,7 +207,7 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
-     * Create the {@link HotKeyReporter} that aggregates per-key counts and flushes them
+     * Create the {@link KeyReporter} that aggregates per-key counts and flushes them
      * at the configured interval.
      *
      * @param reportPublisher       the report publisher for sending batches
@@ -209,19 +215,19 @@ public class HotKeyAmqpAutoConfiguration {
      * @param ringManager           the consistent-hash ring manager
      * @param healthViewProvider    optional provider for the cluster health view
      * @param bbrRateLimiterProvider optional provider for the BBR rate limiter
-     * @return a new {@link HotKeyReporter} instance
+     * @return a new {@link KeyReporterImpl} instance
      */
     @Bean(initMethod = "start", destroyMethod = "stop")
     @ConditionalOnMissingBean
-    public HotKeyReporter hotKeyReporter(
+    public KeyReporter hotKeyReporter(
       ReportPublisher reportPublisher,
       @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
       HotKeyProperties properties,
       RingManager ringManager,
-      ObjectProvider<ClusterHealthView> healthViewProvider,
-      ObjectProvider<BbrRateLimiter> bbrRateLimiterProvider
+      ObjectProvider<HealthView> healthViewProvider,
+      ObjectProvider<BbrRateLimiterImpl> bbrRateLimiterProvider
     ) {
-      HotKeyReporter reporter = new HotKeyReporter(
+      KeyReporterImpl reporter = new KeyReporterImpl(
         reportPublisher,
         hotKeyScheduler,
         properties.getReportIntervalMs(),
@@ -231,7 +237,7 @@ public class HotKeyAmqpAutoConfiguration {
         properties.effectiveConsumerCount(),
         ringManager,
         healthViewProvider.getIfAvailable(() ->
-          new ClusterHealthView(
+          new HealthViewImpl(
             properties.getExpectedWorkerCount(),
             properties.getHeartbeat().getTimeoutMs(),
             properties.getHeartbeat().getDegradeAfterFailures()
@@ -360,7 +366,7 @@ public class HotKeyAmqpAutoConfiguration {
       CacheLoader hotKeyRedisLoader,
       CacheSyncProperties properties,
       @Qualifier("hotKeySyncScheduler") ScheduledExecutorService syncScheduler,
-      CacheExpireManager expireManager,
+      ExpireManager expireManager,
       RuleMatcher ruleMatcher
     ) {
       return new CacheSyncListener(
@@ -508,9 +514,9 @@ public class HotKeyAmqpAutoConfiguration {
       havingValue = "true",
       matchIfMissing = true
     )
-    public SreRateLimiter hotKeySreRateLimiter(WorkerListenerProperties properties) {
+    public SreRateLimiterImpl hotKeySreRateLimiter(WorkerListenerProperties properties) {
       WorkerListenerProperties.Sre sreConfig = properties.getSre();
-      return new SreRateLimiter(
+      return new SreRateLimiterImpl(
         sreConfig.getWindowMs(),
         sreConfig.getBuckets(),
         1.0 / sreConfig.getSuccessThreshold(),
@@ -554,8 +560,8 @@ public class HotKeyAmqpAutoConfiguration {
       CacheLoader hotKeyRedisLoader,
       WorkerListenerProperties properties,
       @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
-      CacheExpireManager expireManager,
-      ObjectProvider<SreRateLimiter> sreRateLimiterProvider
+      ExpireManager expireManager,
+      ObjectProvider<SreRateLimiterImpl> sreRateLimiterProvider
     ) {
       return new WorkerListener(
         hotLocalCache,
@@ -579,7 +585,7 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotkeyHeartbeatContainer")
     public SimpleMessageListenerContainer heartbeatContainer(
       ConnectionFactory connectionFactory,
-      ClusterHealthView healthView,
+      HealthView healthView,
       Queue hotkeyHeartbeatQueue
     ) {
       SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
@@ -647,7 +653,7 @@ public class HotKeyAmqpAutoConfiguration {
     @ConditionalOnMissingBean
     public WorkerHeartbeatVerifier workerHeartbeatVerifier(
       RabbitTemplate rabbitTemplate,
-      ClusterHealthView healthView,
+      HealthView healthView,
       HotKeyProperties properties,
       @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
     ) {

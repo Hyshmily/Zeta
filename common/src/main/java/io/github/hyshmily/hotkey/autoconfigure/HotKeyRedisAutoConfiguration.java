@@ -18,14 +18,17 @@ package io.github.hyshmily.hotkey.autoconfigure;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.hotkey.sharding.HealthView;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
+import io.github.hyshmily.hotkey.util.version.impl.VersionControllerImpl;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import org.springframework.beans.factory.ObjectProvider;
@@ -85,7 +88,7 @@ public class HotKeyRedisAutoConfiguration {
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
     ObjectProvider<CacheSyncPublisher> publisherProvider
   ) {
-    return new RuleMatcher(
+    return new RuleMatcherImpl(
       Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
       Optional.ofNullable(publisherProvider.getIfAvailable())
     );
@@ -121,14 +124,14 @@ public class HotKeyRedisAutoConfiguration {
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,
     SingleFlight singleFlight,
-    CacheExpireManager expireManager,
+    ExpireManager expireManager,
     Optional<CacheSyncPublisher> syncPublisher,
-    Optional<HotKeyReporter> hotKeyReporter,
+    Optional<KeyReporter> hotKeyReporter,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    ObjectProvider<ClusterHealthView> healthViewProvider
+    ObjectProvider<HealthView> healthViewProvider
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -139,13 +142,13 @@ public class HotKeyRedisAutoConfiguration {
       syncPublisher,
       hotKeyReporter,
       ruleMatcher,
-      new VersionController(
+      new VersionControllerImpl(
         Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
         properties.getVersionKeyTtlMinutes()
       ),
       properties,
       healthViewProvider.getIfAvailable(() ->
-        new ClusterHealthView(
+        new HealthViewImpl(
           properties.getExpectedWorkerCount(),
           properties.getHeartbeat().getTimeoutMs(),
           properties.getHeartbeat().getDegradeAfterFailures()

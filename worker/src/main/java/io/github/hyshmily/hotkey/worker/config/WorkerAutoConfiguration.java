@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.worker.config;
 
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.detection.impl.HotKeyStateMachineImpl;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
@@ -188,7 +189,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public HotKeyStateMachine hotKeyStateMachine(WorkerProperties properties) {
-    return new HotKeyStateMachine(
+    return new HotKeyStateMachineImpl(
       properties.getConfirmWindows(),
       properties.getCoolWindows(),
       properties.getPreCoolGraceWindows()

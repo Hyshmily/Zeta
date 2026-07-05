@@ -25,7 +25,8 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
@@ -33,6 +34,7 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import io.github.hyshmily.hotkey.util.ratelimit.impl.SreRateLimiterImpl;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
@@ -63,7 +65,7 @@ class WorkerListenerTest {
     properties.setWarmupJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     listener = new WorkerListener(cache, redisLoader, properties, scheduler, expireManager, null);
     channel = mock(Channel.class);
   }
@@ -125,13 +127,13 @@ class WorkerListenerTest {
    */
   @Test
   void handleWorkerMessage_hot_withSreThrottling_shouldSkip() throws IOException, InterruptedException {
-    SreRateLimiter limiter = mock(SreRateLimiter.class);
+    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
     when(limiter.tryAcquire()).thenReturn(false);
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     WorkerListener throttled = new WorkerListener(cache, k -> "v", props, sched, expireManager, limiter);
 
     cache.put("key1", hotEntry());
@@ -156,7 +158,7 @@ class WorkerListenerTest {
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     WorkerListener nullLoader = new WorkerListener(cache, k -> null, props, sched, expireManager, null);
 
     nullLoader.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
@@ -191,7 +193,7 @@ class WorkerListenerTest {
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     WorkerListener failingLoader = new WorkerListener(
       cache,
       k -> {
@@ -313,13 +315,13 @@ class WorkerListenerTest {
    */
   @Test
   void handleWorkerMessage_hot_withSreSuccess_shouldCallOnSuccess() throws IOException, InterruptedException {
-    SreRateLimiter limiter = mock(SreRateLimiter.class);
+    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
     when(limiter.tryAcquire()).thenReturn(true);
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    CacheExpireManager expireManager = new CacheExpireManager(cache, Runnable::run, ttlConfig, 10);
+    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     WorkerListener throttled = new WorkerListener(cache, k -> "fresh", props, sched, expireManager, limiter);
 
     cache.put("key1", entry(1, false, 0));

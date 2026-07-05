@@ -21,8 +21,9 @@ import static org.mockito.Mockito.mock;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.concurrent.Executor;
@@ -43,7 +44,7 @@ class HotKeyAutoConfigurationTest {
     .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class));
 
   /**
-   * Verifies that all default beans (TopK, Cache, SingleFlight, CacheExpireManager, Executor, HotKeyCache, HotKey) are created.
+   * Verifies that all default beans (TopK, Cache, SingleFlight, ExpireManagerImpl, Executor, HotKeyCache, HotKey) are created.
    */
   @Test
   void allBeansAreCreatedByDefault() {
@@ -52,7 +53,7 @@ class HotKeyAutoConfigurationTest {
       assertThat(ctx.getBean("hotKeyDetector")).isInstanceOf(HotKeyDetector.class);
       assertThat(ctx).hasSingleBean(Cache.class);
       assertThat(ctx).hasSingleBean(SingleFlight.class);
-      assertThat(ctx).hasSingleBean(CacheExpireManager.class);
+      assertThat(ctx).hasSingleBean(ExpireManager.class);
       assertThat(ctx).hasBean("hotKeyExecutor");
       assertThat(ctx.getBean("hotKeyExecutor")).isInstanceOf(Executor.class);
       assertThat(ctx).hasSingleBean(HotKeyCache.class);
@@ -116,15 +117,15 @@ class HotKeyAutoConfigurationTest {
   }
 
   /**
-   * Verifies that a custom CacheExpireManager bean overrides the default one.
+   * Verifies that a custom ExpireManagerImpl bean overrides the default one.
    */
   @Test
   void expireManagerCanBeOverridden() {
     new ApplicationContextRunner()
-      .withBean(CacheExpireManager.class, () -> mock(CacheExpireManager.class))
+      .withBean(ExpireManager.class, () -> mock(ExpireManager.class))
       .withPropertyValues("hotkey.local.topK=200")
       .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
-      .run(ctx -> assertThat(ctx).hasSingleBean(CacheExpireManager.class));
+      .run(ctx -> assertThat(ctx).hasSingleBean(ExpireManager.class));
   }
 
   /**

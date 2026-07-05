@@ -2,7 +2,7 @@ package io.github.hyshmily.hotkey.demo.controller;
 
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -35,7 +35,7 @@ public class TestController {
   private StringRedisTemplate redisTemplate;
 
   @Autowired(required = false)
-  private ClusterHealthView healthView;
+  private HealthView healthView;
 
   @Autowired(required = false)
   private RabbitTemplate rabbitTemplate;

@@ -23,7 +23,9 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
+import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
+import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -44,7 +46,7 @@ class RuleMatcherTest {
 
   @BeforeEach
   void setUp() {
-    ruleMatcher = new RuleMatcher(Optional.empty(), Optional.empty());
+    ruleMatcher = new RuleMatcherImpl(Optional.empty(), Optional.empty());
   }
 
   /**
@@ -405,6 +407,16 @@ class RuleMatcherTest {
     assertThatNullPointerException().isThrownBy(() -> ruleMatcher.replaceRules(Collections.singletonList(null)));
   }
 
+  private static void callInitRules(RuleMatcher ruleMatcher) {
+    try {
+      Method m = RuleMatcherImpl.class.getDeclaredMethod("initRules");
+      m.setAccessible(true);
+      m.invoke(ruleMatcher);
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
   @Nested
   @DisplayName("With Redis and CacheSyncPublisher")
   class WithRedisAndPublisher {
@@ -421,7 +433,7 @@ class RuleMatcherTest {
       valueOps = mock(ValueOperations.class);
       when(redisTemplate.opsForValue()).thenReturn(valueOps);
       publisher = mock(CacheSyncPublisher.class);
-      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.of(publisher));
+      ruleMatcher = new RuleMatcherImpl(Optional.of(redisTemplate), Optional.of(publisher));
     }
 
     @Test
@@ -545,8 +557,8 @@ class RuleMatcherTest {
       when(valueOps.get(anyString())).thenReturn(
         "[{\"pattern\":\"redis-loaded\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]"
       );
-      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
-      ruleMatcher.initRules();
+      ruleMatcher = new RuleMatcherImpl(Optional.of(redisTemplate), Optional.empty());
+      callInitRules(ruleMatcher);
       assertThat(ruleMatcher.evaluateRule("redis-loaded")).isEqualTo(RuleAction.BLOCK);
     }
 
@@ -554,8 +566,8 @@ class RuleMatcherTest {
     @DisplayName("initRules should handle null Redis value gracefully")
     void initRules_shouldHandleNullRedisValue() {
       when(valueOps.get(anyString())).thenReturn(null);
-      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
-      ruleMatcher.initRules();
+      ruleMatcher = new RuleMatcherImpl(Optional.of(redisTemplate), Optional.empty());
+      callInitRules(ruleMatcher);
       assertThat(ruleMatcher.getAllRules()).isEmpty();
     }
 
@@ -563,8 +575,8 @@ class RuleMatcherTest {
     @DisplayName("initRules should handle empty Redis value gracefully")
     void initRules_shouldHandleEmptyRedisValue() {
       when(valueOps.get(anyString())).thenReturn("");
-      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
-      ruleMatcher.initRules();
+      ruleMatcher = new RuleMatcherImpl(Optional.of(redisTemplate), Optional.empty());
+      callInitRules(ruleMatcher);
       assertThat(ruleMatcher.getAllRules()).isEmpty();
     }
 
@@ -572,8 +584,8 @@ class RuleMatcherTest {
     @DisplayName("initRules should handle malformed JSON in Redis gracefully")
     void initRules_shouldHandleMalformedRedisJson() {
       when(valueOps.get(anyString())).thenReturn("not valid json");
-      ruleMatcher = new RuleMatcher(Optional.of(redisTemplate), Optional.empty());
-      ruleMatcher.initRules();
+      ruleMatcher = new RuleMatcherImpl(Optional.of(redisTemplate), Optional.empty());
+      callInitRules(ruleMatcher);
       assertThat(ruleMatcher.getAllRules()).isEmpty();
     }
   }

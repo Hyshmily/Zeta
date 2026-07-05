@@ -13,13 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.cache.cachesupport;
+package io.github.hyshmily.hotkey.cache.cachesupport.impl;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.VERSION_DEFAULT;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.util.DelayUtil;
@@ -39,7 +40,7 @@ import lombok.extern.slf4j.Slf4j;
 @Getter
 @Slf4j
 @Internal
-public class CacheExpireManager {
+public class ExpireManagerImpl implements ExpireManager {
 
   /** The underlying L1 Caffeine cache instance. */
   private final Cache<String, Object> caffeineCache;
@@ -81,14 +82,14 @@ public class CacheExpireManager {
   }
 
   /**
-   * Creates a CacheExpireManager with the given Caffeine cache, executor, and TTL config.
+   * Creates a ExpireManagerImpl with the given Caffeine cache, executor, and TTL config.
    *
    * @param caffeineCache   the underlying L1 Caffeine cache
    * @param executor        async executor for background refresh
    * @param ttlConfig       TTL configuration (normal and hot-key variants)
    * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
    */
-  public CacheExpireManager(
+  public ExpireManagerImpl(
     Cache<String, Object> caffeineCache,
     Executor executor,
     HotKeyProperties ttlConfig,
@@ -104,9 +105,9 @@ public class CacheExpireManager {
   }
 
   /**
-   * Create a CacheExpireManager with explicit jitter ratio (for testing).
+   * Create a ExpireManagerImpl with explicit jitter ratio (for testing).
    */
-  CacheExpireManager(
+  ExpireManagerImpl(
     Cache<String, Object> caffeineCache,
     Executor executor,
     HotKeyProperties ttlConfig,
@@ -646,7 +647,7 @@ public class CacheExpireManager {
   public boolean isSoftExpired(Object cacheEntry) {
     if (!isSoftExpireEnabled()) {
       throw new IllegalStateException(
-        "CacheExpireManager soft expire is disabled, isSoftExpired() should not be called"
+        "ExpireManager soft expire is disabled, isSoftExpired() should not be called"
       );
     }
     if (cacheEntry instanceof CacheEntry ce) {

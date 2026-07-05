@@ -23,19 +23,22 @@ import static org.mockito.Mockito.*;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
+import io.github.hyshmily.hotkey.util.version.impl.VersionControllerImpl;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -54,7 +57,7 @@ class HotKeyCacheTest {
   private HotKeyDetector hotKeyDetector;
   private Cache<String, Object> caffeineCache;
   private SingleFlight singleFlight;
-  private CacheExpireManager expireManager;
+  private ExpireManager expireManager;
   private Executor executor;
   private HotKeyCache hotKeyCache;
 
@@ -66,7 +69,7 @@ class HotKeyCacheTest {
     singleFlight = mock(SingleFlight.class);
     executor = Runnable::run;
     HotKeyProperties ttlConfig = new HotKeyProperties();
-    expireManager = new CacheExpireManager(caffeineCache, executor, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
 
     hotKeyCache = new HotKeyCache(
       hotKeyDetector,
@@ -76,10 +79,10 @@ class HotKeyCacheTest {
       executor,
       Optional.empty(),
       Optional.empty(),
-      new RuleMatcher(Optional.empty(), Optional.empty()),
-      new VersionController(Optional.empty(), 60),
+      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
+      new VersionControllerImpl(Optional.empty(), 60),
       ttlConfig,
-      mock(ClusterHealthView.class)
+      mock(HealthView.class)
     );
   }
 
@@ -282,7 +285,7 @@ class HotKeyCacheTest {
     HotKeyProperties props = new HotKeyProperties();
     props.setDefaultSoftTtlMs(0);
     props.setDefaultHotSoftTtlMs(0);
-    CacheExpireManager noSoft = new CacheExpireManager(caffeineCache, executor, props, 10);
+    ExpireManager noSoft = new ExpireManagerImpl(caffeineCache, executor, props, 10);
 
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loaded"));
 
@@ -294,10 +297,10 @@ class HotKeyCacheTest {
       executor,
       Optional.empty(),
       Optional.empty(),
-      new RuleMatcher(Optional.empty(), Optional.empty()),
-      new VersionController(Optional.empty(), 60),
+      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
+      new VersionControllerImpl(Optional.empty(), 60),
       props,
-      mock(ClusterHealthView.class)
+      mock(HealthView.class)
     );
 
     assertThat(cache.getWithSoftExpire("key", () -> "loaded")).contains("loaded");
@@ -959,11 +962,11 @@ class HotKeyCacheTest {
     private HotKeyDetector hotKeyDetector;
     private Cache<String, Object> caffeineCache;
     private SingleFlight singleFlight;
-    private CacheExpireManager expireManager;
+    private ExpireManager expireManager;
     private Executor executor;
     private HotKeyCache hotKeyCache;
     private CacheSyncPublisher publisher;
-    private ClusterHealthView healthView;
+    private HealthView healthView;
 
     @BeforeEach
     void setUp() {
@@ -972,10 +975,10 @@ class HotKeyCacheTest {
       singleFlight = mock(SingleFlight.class);
       executor = Runnable::run;
       HotKeyProperties ttlConfig = new HotKeyProperties();
-      expireManager = new CacheExpireManager(caffeineCache, executor, ttlConfig, 10);
+      expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
       publisher = mock(CacheSyncPublisher.class);
-      healthView = mock(ClusterHealthView.class);
-      HotKeyReporter reporter = mock(HotKeyReporter.class);
+      healthView = mock(HealthView.class);
+      KeyReporter reporter = mock(KeyReporter.class);
 
       hotKeyCache = new HotKeyCache(
         hotKeyDetector,
@@ -985,8 +988,8 @@ class HotKeyCacheTest {
         executor,
         Optional.of(publisher),
         Optional.of(reporter),
-        new RuleMatcher(Optional.empty(), Optional.empty()),
-        new VersionController(Optional.empty(), 60),
+        new RuleMatcherImpl(Optional.empty(), Optional.empty()),
+        new VersionControllerImpl(Optional.empty(), 60),
         ttlConfig,
         healthView
       );

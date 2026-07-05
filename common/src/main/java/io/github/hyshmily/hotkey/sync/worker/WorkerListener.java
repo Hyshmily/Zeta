@@ -21,13 +21,14 @@ import static io.github.hyshmily.hotkey.sync.worker.WorkerMessage.TYPE_HOT;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
+import io.github.hyshmily.hotkey.util.ratelimit.impl.SreRateLimiterImpl;
 import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.io.IOException;
 import java.util.Optional;
@@ -92,12 +93,12 @@ public class WorkerListener {
   private final ScheduledExecutorService scheduler;
 
   /** Computes hard and soft expiry timestamps for HOT-promoted and default-TTL entries. */
-  private final CacheExpireManager expireManager;
+  private final ExpireManager expireManager;
 
   /** Optional SRE adaptive rate limiter for HOT decision processing.
    * When non-null, HOT promotions are probabilistically dropped during overload.
    * {@code null} disables rate limiting. */
-  private final SreRateLimiter sreRateLimiter;
+  private final SreRateLimiterImpl sreRateLimiter;
 
   /** Fallback hard TTL (seconds) for COOL entries when no normal TTL is configured on the existing entry. */
   private static final long COOL_DEFAULT_PROTECTION_HARDTTL_TIME = 120;

@@ -21,7 +21,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.util.TimeSource;
@@ -32,11 +33,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link CacheExpireManager}, covering soft-expire logic, TTL computation, and background refresh.
+ * Tests for {@link ExpireManager}, covering soft-expire logic, TTL computation, and background refresh.
  */
 class CacheExpireManagerTest {
 
-  private CacheExpireManager expireManager;
+  private ExpireManager expireManager;
   private Cache<String, Object> caffeineCache;
   private HotKeyProperties ttlConfig;
 
@@ -45,7 +46,7 @@ class CacheExpireManagerTest {
     caffeineCache = Caffeine.newBuilder().maximumSize(100).build();
     ttlConfig = new HotKeyProperties();
     Executor executor = Runnable::run;
-    expireManager = new CacheExpireManager(caffeineCache, executor, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
   }
 
   /**
@@ -113,7 +114,7 @@ class CacheExpireManagerTest {
   void isSoftExpired_whenDisabled_shouldThrow() {
     ttlConfig.setDefaultSoftTtlMs(0);
     ttlConfig.setDefaultHotSoftTtlMs(0);
-    CacheExpireManager disabled = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 0);
+    ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
     assertThatThrownBy(() -> disabled.isSoftExpired("key")).isInstanceOf(IllegalStateException.class);
   }
 
@@ -203,7 +204,7 @@ class CacheExpireManagerTest {
   void computeSoftExpireAt_withDisabledConfig_shouldReturnMaxValue() {
     ttlConfig.setDefaultSoftTtlMs(0);
     ttlConfig.setDefaultHotSoftTtlMs(0);
-    CacheExpireManager disabled = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 0);
+    ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
     assertThat(disabled.computeSoftExpireAt(0)).isZero();
   }
 
@@ -215,7 +216,7 @@ class CacheExpireManagerTest {
     ttlConfig.setDefaultSoftTtlMs(0);
     ttlConfig.setDefaultHotSoftTtlMs(0);
     caffeineCache.put("key", "plain-value");
-    CacheExpireManager disabled = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 0);
+    ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
     disabled.triggerBackgroundRefresh("key", () -> "should-not-run", 1_000);
     assertThat(caffeineCache.getIfPresent("key")).isEqualTo("plain-value");
   }
@@ -405,7 +406,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withNullResult_shouldNotUpdateCache() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
 
     caffeineCache.put(
       "key",
@@ -439,7 +440,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withExhaustedLimiter_shouldSkip() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    CacheExpireManager limited = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 1);
+    ExpireManager limited = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 1);
 
     caffeineCache.put(
       "key1",
@@ -516,7 +517,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withSameKey_shouldDeduplicate() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
 
     caffeineCache.put(
       "key",
@@ -579,7 +580,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldPreserveExistingEntry() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
 
     caffeineCache.put(
       "key",
@@ -619,7 +620,7 @@ class CacheExpireManagerTest {
   @Test
   void toHardExpireTimestamp_withCustomRatio_shouldJitterWithinRange() {
     ttlConfig.setTtlJitterRatio(0.5);
-    CacheExpireManager highJitter = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 10);
+    ExpireManager highJitter = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 10);
     long ttl = 10_000;
     Stream.generate(() -> highJitter.computeHardExpireAt(ttl))
       .limit(100)
@@ -656,7 +657,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withEvictedKeyDuringRefresh_shouldNotError() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
 
     caffeineCache.put(
       "key",
@@ -736,7 +737,7 @@ class CacheExpireManagerTest {
   void toSoftExpireTimestamp_withDisabledAndCustomRatio_shouldReturnZero() {
     ttlConfig.setDefaultSoftTtlMs(0);
     ttlConfig.setDefaultHotSoftTtlMs(0);
-    CacheExpireManager disabled = new CacheExpireManager(caffeineCache, Runnable::run, ttlConfig, 0);
+    ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
     assertThat(disabled.toSoftExpireTimestamp(10_000, 0.5)).isZero();
   }
 
@@ -791,7 +792,7 @@ class CacheExpireManagerTest {
     Executor rejectingExecutor = task -> {
       throw new RejectedExecutionException("rejected");
     };
-    CacheExpireManager rejectingMgr = new CacheExpireManager(caffeineCache, rejectingExecutor, ttlConfig, 10);
+    ExpireManager rejectingMgr = new ExpireManagerImpl(caffeineCache, rejectingExecutor, ttlConfig, 10);
 
     caffeineCache.put(
       "key",
@@ -825,7 +826,7 @@ class CacheExpireManagerTest {
   void triggerBackgroundRefresh_async_withRefreshTimeoutEnabled_shouldWorkNormally() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
     try {
-      CacheExpireManager asyncExpire = new CacheExpireManager(caffeineCache, asyncExec, ttlConfig, 10);
+      ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
 
       caffeineCache.put(
         "key",

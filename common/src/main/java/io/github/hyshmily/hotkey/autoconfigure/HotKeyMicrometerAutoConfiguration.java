@@ -17,12 +17,12 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -135,12 +135,12 @@ public class HotKeyMicrometerAutoConfiguration {
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
     @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
-    ObjectProvider<HotKeyReporter> reporterProvider,
-    ObjectProvider<CacheExpireManager> expireManagerProvider,
+    ObjectProvider<KeyReporter> reporterProvider,
+    ObjectProvider<ExpireManager> expireManagerProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
     ObjectProvider<HotKeyStateMachine> stateMachineProvider,
-    ObjectProvider<ClusterHealthView> healthViewProvider,
+    ObjectProvider<HealthView> healthViewProvider,
     ObjectProvider<SystemLoadMonitor> cpuMonitorProvider
   ) {
     return registry -> {
@@ -219,7 +219,7 @@ public class HotKeyMicrometerAutoConfiguration {
    * @param reporter the HotKey reporter
    * @param registry the Micrometer meter registry
    */
-  private static void registerReporterGauges(HotKeyReporter reporter, MeterRegistry registry) {
+  private static void registerReporterGauges(KeyReporter reporter, MeterRegistry registry) {
     Gauge.builder("hotkey.reporter.queue.depth", reporter, r -> (double) r.dispatcherDepth()).register(registry);
     Gauge.builder("hotkey.reporter.queue.dropped.total", reporter, r -> (double) r.dispatcherDropped()).register(
       registry

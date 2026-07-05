@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import io.github.hyshmily.hotkey.reporting.impl.BbrRateLimiterImpl;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.TimeSource;
 import java.lang.reflect.Field;
@@ -50,14 +51,14 @@ class BbrRateLimiterTest {
   void setUp() {
     cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
-    limiter = new BbrRateLimiter(cpuMonitor, CPU_THRESHOLD, WINDOW_MS, BUCKETS, COOLDOWN_MS);
+    limiter = new BbrRateLimiterImpl(cpuMonitor, CPU_THRESHOLD, WINDOW_MS, BUCKETS, COOLDOWN_MS);
   }
 
   // ── Constructor ──
 
   @Test
   void deprecatedConstructor_shouldDelegateToFullConstructor() {
-    BbrRateLimiter l = new BbrRateLimiter(cpuMonitor);
+    BbrRateLimiter l = new BbrRateLimiterImpl(cpuMonitor);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.99);
     assertThat(l.tryAcquire()).isTrue();
     l.onEnqueue();
@@ -234,7 +235,7 @@ class BbrRateLimiterTest {
 
   @Test
   void maxInFlight_whenZeroPass_shouldReturnMaxValue() throws Exception {
-    Field cacheField = BbrRateLimiter.class.getDeclaredField("maxPassCache");
+    Field cacheField = BbrRateLimiterImpl.class.getDeclaredField("maxPassCache");
     cacheField.setAccessible(true);
     AtomicLong cache = (AtomicLong) cacheField.get(limiter);
     cache.set(0);
@@ -243,7 +244,7 @@ class BbrRateLimiterTest {
 
   @Test
   void maxInFlight_whenZeroRt_shouldReturnMaxValue() throws Exception {
-    Field cacheField = BbrRateLimiter.class.getDeclaredField("minRtCache");
+    Field cacheField = BbrRateLimiterImpl.class.getDeclaredField("minRtCache");
     cacheField.setAccessible(true);
     AtomicLong cache = (AtomicLong) cacheField.get(limiter);
     cache.set(0);
@@ -331,11 +332,11 @@ class BbrRateLimiterTest {
 
   @Test
   void tick_whenNoTimeElapsed_shouldDoNothing() throws Exception {
-    Field wsField = BbrRateLimiter.class.getDeclaredField("windowStart");
+    Field wsField = BbrRateLimiterImpl.class.getDeclaredField("windowStart");
     wsField.setAccessible(true);
     wsField.set(limiter, System.currentTimeMillis());
 
-    Field cbField = BbrRateLimiter.class.getDeclaredField("currentBucket");
+    Field cbField = BbrRateLimiterImpl.class.getDeclaredField("currentBucket");
     cbField.setAccessible(true);
     int before = cbField.getInt(limiter);
 
@@ -352,11 +353,11 @@ class BbrRateLimiterTest {
       limiter.onSuccess(100);
     }
 
-    Field wsField = BbrRateLimiter.class.getDeclaredField("windowStart");
+    Field wsField = BbrRateLimiterImpl.class.getDeclaredField("windowStart");
     wsField.setAccessible(true);
-    Field cbField = BbrRateLimiter.class.getDeclaredField("currentBucket");
+    Field cbField = BbrRateLimiterImpl.class.getDeclaredField("currentBucket");
     cbField.setAccessible(true);
-    Field pbField = BbrRateLimiter.class.getDeclaredField("passBuckets");
+    Field pbField = BbrRateLimiterImpl.class.getDeclaredField("passBuckets");
     pbField.setAccessible(true);
 
     int beforeBucket = cbField.getInt(limiter);
@@ -385,11 +386,11 @@ class BbrRateLimiterTest {
       limiter.onSuccess(100);
     }
 
-    Field wsField = BbrRateLimiter.class.getDeclaredField("windowStart");
+    Field wsField = BbrRateLimiterImpl.class.getDeclaredField("windowStart");
     wsField.setAccessible(true);
-    Field cbField = BbrRateLimiter.class.getDeclaredField("currentBucket");
+    Field cbField = BbrRateLimiterImpl.class.getDeclaredField("currentBucket");
     cbField.setAccessible(true);
-    Field pbField = BbrRateLimiter.class.getDeclaredField("passBuckets");
+    Field pbField = BbrRateLimiterImpl.class.getDeclaredField("passBuckets");
     pbField.setAccessible(true);
 
     int beforeBucket = cbField.getInt(limiter);
@@ -454,7 +455,7 @@ class BbrRateLimiterTest {
     assertThat(limiter.tryAcquire()).isFalse();
 
     // Simulate cooldown expiry via reflection.
-    Field dropField = BbrRateLimiter.class.getDeclaredField("lastDropTime");
+    Field dropField = BbrRateLimiterImpl.class.getDeclaredField("lastDropTime");
     dropField.setAccessible(true);
     dropField.set(limiter, TimeSource.currentTimeMillis() - COOLDOWN_MS - 100);
 
@@ -483,7 +484,6 @@ class BbrRateLimiterTest {
     assertThat(limiter.getTotalDropped()).isEqualTo(1);
     assertThat(limiter.getInFlight()).isEqualTo(1); // consumerDrop decrements inFlight
   }
-
 
   // ── Edge Cases ──
 
@@ -575,7 +575,8 @@ class BbrRateLimiterTest {
           limiter.onSuccess(10);
         }
         latch.countDown();
-      }).start();
+      })
+        .start();
     }
     latch.await();
     assertThat(limiter.getTotalPassed()).isEqualTo((long) threads * iterations);
@@ -584,13 +585,13 @@ class BbrRateLimiterTest {
   // ── Reflection helpers ──
 
   private void invokeTick() throws Exception {
-    Method tick = BbrRateLimiter.class.getDeclaredMethod("tick");
+    Method tick = BbrRateLimiterImpl.class.getDeclaredMethod("tick");
     tick.setAccessible(true);
     tick.invoke(limiter);
   }
 
   private void advanceBuckets(int count) throws Exception {
-    Field wsField = BbrRateLimiter.class.getDeclaredField("windowStart");
+    Field wsField = BbrRateLimiterImpl.class.getDeclaredField("windowStart");
     wsField.setAccessible(true);
     long bucketDurationMs = WINDOW_MS / BUCKETS;
     wsField.set(limiter, TimeSource.currentTimeMillis() - (count * bucketDurationMs + 10));
@@ -598,7 +599,7 @@ class BbrRateLimiterTest {
   }
 
   private void forceZeroAllBuckets() throws Exception {
-    Field wsField = BbrRateLimiter.class.getDeclaredField("windowStart");
+    Field wsField = BbrRateLimiterImpl.class.getDeclaredField("windowStart");
     wsField.setAccessible(true);
     long bucketDurationMs = WINDOW_MS / BUCKETS;
     wsField.set(limiter, TimeSource.currentTimeMillis() - (BUCKETS * bucketDurationMs + 10));

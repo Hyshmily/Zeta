@@ -23,7 +23,7 @@ import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.NullValue;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.cache.cachesupport.TransactionSupport;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
@@ -32,11 +32,11 @@ import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.TimeSource;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -75,13 +75,13 @@ public class HotKeyCache {
   /** Deduplicator preventing concurrent in-flight loads for the same key. */
   private final SingleFlight singleFlight;
   /** Manages hard and soft TTL computation for cache entries. */
-  private final CacheExpireManager expireManager;
+  private final ExpireManager expireManager;
   /** Executor for async cache operations (promotion, soft refresh). */
   private final Executor hotKeyExecutor;
   /** Optional publisher for cross-instance cache synchronization. */
   private final Optional<CacheSyncPublisher> cacheSyncPublisher;
   /** Optional reporter for app-to-Worker hot key reporting. */
-  private final Optional<HotKeyReporter> hotKeyReporter;
+  private final Optional<KeyReporter> hotKeyReporter;
   /** Matches cache keys against blacklist/whitelist rules. */
   private final RuleMatcher ruleMatcher;
   /** Manages data version generation for mutation ordering. */
@@ -91,7 +91,7 @@ public class HotKeyCache {
   private final HotKeyProperties hotKeyProperties;
 
   /** Cached view of Worker cluster health, used for COOL promotion decisions. */
-  private final ClusterHealthView healthView;
+  private final HealthView healthView;
 
   /** Log message constant when no sync publisher is available. */
   private static final String NO_SYNC_PUBLISHER = HotKeyConstants.NO_SYNC_PUBLISHER;

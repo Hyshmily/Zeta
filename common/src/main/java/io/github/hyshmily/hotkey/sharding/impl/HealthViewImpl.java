@@ -13,9 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.sharding;
+package io.github.hyshmily.hotkey.sharding.impl;
 
 import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
 import java.util.Set;
@@ -54,7 +55,7 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Internal
 @Slf4j
-public class ClusterHealthView {
+public class HealthViewImpl implements HealthView {
 
   /** Per-Worker health records keyed by Worker ID. Thread-safe via {@link ConcurrentHashMap}. */
   private final ConcurrentMap<String, WorkerHealthRecord> records = new ConcurrentHashMap<>();
@@ -71,7 +72,7 @@ public class ClusterHealthView {
   @Getter
   private volatile long lastAnyHeartbeatTime;
 
-  public ClusterHealthView(int knownWorkerCount, long heartbeatTimeoutMs, int degradeAfterFailures) {
+  public HealthViewImpl(int knownWorkerCount, long heartbeatTimeoutMs, int degradeAfterFailures) {
     this.knownWorkerCount = knownWorkerCount;
     this.heartbeatTimeoutMs = heartbeatTimeoutMs;
     this.degradeAfterFailures = degradeAfterFailures;

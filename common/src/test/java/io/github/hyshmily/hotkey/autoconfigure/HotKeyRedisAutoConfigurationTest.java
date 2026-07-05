@@ -21,12 +21,13 @@ import static org.mockito.Mockito.mock;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -49,7 +50,7 @@ class HotKeyRedisAutoConfigurationTest {
   private ObjectProvider<StringRedisTemplate> redisTemplateProvider;
 
   @Mock(lenient = true)
-  private ObjectProvider<ClusterHealthView> healthViewProvider;
+  private ObjectProvider<HealthView> healthViewProvider;
 
   private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
     AutoConfigurations.of(HotKeyRedisAutoConfiguration.class)
@@ -75,10 +76,10 @@ class HotKeyRedisAutoConfigurationTest {
     HotKeyDetector detector = mock(HotKeyDetector.class);
     Cache<String, Object> localCache = mock(Cache.class);
     SingleFlight singleFlight = mock(SingleFlight.class);
-    CacheExpireManager expireManager = mock(CacheExpireManager.class);
+    ExpireManager expireManager = mock(ExpireManager.class);
     Executor executor = mock(Executor.class);
 
-    RuleMatcher ruleMatcher = new RuleMatcher(
+    RuleMatcher ruleMatcher = new RuleMatcherImpl(
       Optional.<StringRedisTemplate>empty(),
       Optional.<CacheSyncPublisher>empty()
     );
@@ -89,7 +90,7 @@ class HotKeyRedisAutoConfigurationTest {
       singleFlight,
       expireManager,
       Optional.<CacheSyncPublisher>empty(),
-      Optional.<HotKeyReporter>empty(),
+      Optional.<KeyReporter>empty(),
       executor,
       redisTemplateProvider,
       properties,
@@ -101,7 +102,7 @@ class HotKeyRedisAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the HotKeyCache bean is created when optional dependencies (CacheSyncPublisher, HotKeyReporter) are present.
+   * Verifies that the HotKeyCache bean is created when optional dependencies (CacheSyncPublisher, KeyReporter) are present.
    */
   @Test
   void hotKeyCacheBeanAcceptsOptionalDependencies() {
@@ -109,11 +110,11 @@ class HotKeyRedisAutoConfigurationTest {
     HotKeyDetector detector = mock(HotKeyDetector.class);
     Cache<String, Object> localCache = mock(Cache.class);
     SingleFlight singleFlight = mock(SingleFlight.class);
-    CacheExpireManager expireManager = mock(CacheExpireManager.class);
+    ExpireManager expireManager = mock(ExpireManager.class);
     Executor executor = mock(Executor.class);
     CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
-    HotKeyReporter reporter = mock(HotKeyReporter.class);
-    RuleMatcher ruleMatcher = new RuleMatcher(
+    KeyReporter reporter = mock(KeyReporter.class);
+    RuleMatcher ruleMatcher = new RuleMatcherImpl(
       Optional.<StringRedisTemplate>empty(),
       Optional.<CacheSyncPublisher>empty()
     );
@@ -147,7 +148,7 @@ class HotKeyRedisAutoConfigurationTest {
       .withBean(HotKeyDetector.class, () -> mock(HotKeyDetector.class))
       .withBean(Cache.class, () -> mock(Cache.class))
       .withBean(SingleFlight.class, () -> mock(SingleFlight.class))
-      .withBean(CacheExpireManager.class, () -> mock(CacheExpireManager.class))
+      .withBean(ExpireManager.class, () -> mock(ExpireManager.class))
       .withBean("hotKeyExecutor", Executor.class, () -> mock(Executor.class))
       .withBean(HotKeyProperties.class, HotKeyProperties::new)
       .withConfiguration(AutoConfigurations.of(HotKeyRedisAutoConfiguration.class))

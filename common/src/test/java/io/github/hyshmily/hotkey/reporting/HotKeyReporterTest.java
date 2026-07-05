@@ -22,8 +22,12 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.reporting.impl.BbrRateLimiterImpl;
+import io.github.hyshmily.hotkey.reporting.impl.KeyReporterImpl;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
+import io.github.hyshmily.hotkey.sharding.impl.RingManagerImpl;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import java.util.List;
@@ -44,8 +48,8 @@ class HotKeyReporterTest {
   private ScheduledExecutorService scheduler;
   private TestReportPublisher testPublisher;
   private RingManager ringManager;
-  private ClusterHealthView healthView;
-  private HotKeyReporter reporter;
+  private HealthView healthView;
+  private KeyReporterImpl reporter;
 
   static class TestReportPublisher extends ReportPublisher {
 
@@ -69,9 +73,9 @@ class HotKeyReporterTest {
   void setUp() {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     testPublisher = new TestReportPublisher();
-    ringManager = new RingManager(150);
-    healthView = new ClusterHealthView(3, 30000, 3);
-    reporter = new HotKeyReporter(
+    ringManager = new RingManagerImpl(150);
+    healthView = new HealthViewImpl(3, 30000, 3);
+    reporter = new KeyReporterImpl(
       testPublisher,
       scheduler,
       REPORT_INTERVAL_MS,
@@ -90,7 +94,7 @@ class HotKeyReporterTest {
     scheduler.shutdownNow();
   }
 
-  private static void registerWorker(ClusterHealthView hv, String workerId) {
+  private static void registerWorker(HealthView hv, String workerId) {
     hv.onHeartbeat(new WorkerHeartbeatMessage(workerId, 1, 0, 0.0, true, 0, 0, 0, 0));
   }
 
@@ -281,7 +285,7 @@ class HotKeyReporterTest {
   void flush_withBbrRateLimiter_shouldWireCorrectly() {
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.9);
-    BbrRateLimiter bbr = new BbrRateLimiter(cpuMonitor, 800, 500, 5, 1000);
+    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000);
     reporter.setBbrRateLimiter(bbr);
     assertThat(reporter.bbrPassed()).isZero();
     assertThat(reporter.bbrDropped()).isZero();
@@ -293,7 +297,7 @@ class HotKeyReporterTest {
   void flush_withBbrRateLimiterAndRecords_shouldTrackMetrics() throws Exception {
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
-    BbrRateLimiter bbr = new BbrRateLimiter(cpuMonitor, 800, 500, 5, 1000);
+    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000);
     reporter.setBbrRateLimiter(bbr);
     registerWorker(healthView, "worker-1");
     reporter.start();
@@ -306,7 +310,7 @@ class HotKeyReporterTest {
   void flush_withHighCpuBbr_shouldDropRecords() throws Exception {
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(1.0);
-    BbrRateLimiter bbr = new BbrRateLimiter(cpuMonitor, 800, 500, 5, 1000);
+    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000);
     reporter.setBbrRateLimiter(bbr);
     registerWorker(healthView, "worker-1");
     reporter.start();
@@ -321,7 +325,7 @@ class HotKeyReporterTest {
     when(brokenScheduler.scheduleAtFixedRate(any(), anyLong(), anyLong(), any())).thenThrow(
       new RuntimeException("scheduler failure")
     );
-    HotKeyReporter failingReporter = new HotKeyReporter(
+    KeyReporter failingReporter = new KeyReporterImpl(
       testPublisher,
       brokenScheduler,
       REPORT_INTERVAL_MS,

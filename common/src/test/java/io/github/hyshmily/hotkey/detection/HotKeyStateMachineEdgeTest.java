@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
+import io.github.hyshmily.hotkey.detection.impl.HotKeyStateMachineImpl;
 import io.github.hyshmily.hotkey.model.HotKeyDecision.DecisionType;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,7 +37,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void shouldHandleSingleHotWindow() {
-    HotKeyStateMachine m = new HotKeyStateMachine(1, 5, 2);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(1, 5, 2);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
   }
 
@@ -45,7 +46,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void shouldHandleImmediateCooling() {
-    HotKeyStateMachine m = new HotKeyStateMachine(1, 2, 1);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(1, 2, 1);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
     assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.COOL);
@@ -63,40 +64,40 @@ class HotKeyStateMachineEdgeTest {
   }
 
   private static HotKeyDecision machine(String key, boolean hot) {
-    HotKeyStateMachine m = new HotKeyStateMachine(2, 5, 2);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(2, 5, 2);
     return m.evaluate(key, hot);
   }
 
   @Test
   void nullKey_shouldThrowNullPointer() {
-    HotKeyStateMachine m = new HotKeyStateMachine(2, 5, 2);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(2, 5, 2);
     assertThatNullPointerException().isThrownBy(() -> m.evaluate(null, true));
   }
 
   @Test
   void emptyKey_shouldBeTracked() {
-    HotKeyStateMachine m = new HotKeyStateMachine(2, 5, 2);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(2, 5, 2);
     assertThat(m.evaluate("", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("", true).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void reset_nonExistentKey_shouldNotThrow() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     m.reset("never-added");
     assertThat(m.getTrackedKeys()).isZero();
   }
 
   @Test
   void evictStale_withEmptyState_shouldNotThrow() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     m.evictStale(1000);
     assertThat(m.getTrackedKeys()).isZero();
   }
 
   @Test
   void reset_shouldClearTrackedCount() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     m.evaluate("key", true);
     assertThat(m.getTrackedKeys()).isEqualTo(1);
     m.reset("key");
@@ -105,7 +106,7 @@ class HotKeyStateMachineEdgeTest {
 
   @Test
   void repeatedReset_shouldBeSafe() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     m.evaluate("key", true);
     m.reset("key");
     m.reset("key");
@@ -114,7 +115,7 @@ class HotKeyStateMachineEdgeTest {
 
   @Test
   void getTrackedKeys_shouldReflectActiveKeys() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     assertThat(m.getTrackedKeys()).isZero();
     m.evaluate("k1", true);
     assertThat(m.getTrackedKeys()).isEqualTo(1);
@@ -126,7 +127,7 @@ class HotKeyStateMachineEdgeTest {
 
   @Test
   void hotStreak_resetsOnColdWindow() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
@@ -137,21 +138,21 @@ class HotKeyStateMachineEdgeTest {
 
   @Test
   void confirmCountOfOne_shouldPromoteImmediately() {
-    HotKeyStateMachine m = new HotKeyStateMachine(1, 5, 2);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(1, 5, 2);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
     assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
   }
 
   @Test
   void coolCount_one_shouldCoolImmediately() {
-    HotKeyStateMachine m = new HotKeyStateMachine(1, 1, 0);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(1, 1, 0);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
     assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.COOL);
   }
 
   @Test
   void evictStale_shouldOnlyRemoveStaleKeys() throws InterruptedException {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     m.evaluate("stale", true);
     Thread.sleep(1);
     m.evictStale(0);
@@ -160,7 +161,7 @@ class HotKeyStateMachineEdgeTest {
 
   @Test
   void settingThresholds_shouldAffectTransitions() {
-    HotKeyStateMachine m = new HotKeyStateMachine(5, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(5, 10, 4);
     m.setConfirmCount(1);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
   }
@@ -172,7 +173,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void getStateSnapshot_shouldReturnCorrectSnapshot() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
@@ -190,7 +191,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void getStateSnapshot_nonExistentKey_shouldReturnEmptyMap() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     assertThat(m.getStateSnapshot("never-added")).isEmpty();
   }
 
@@ -200,7 +201,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void rollbackToPreviousState_shouldRestoreState() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
@@ -224,7 +225,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void rollbackToPreviousState_withNull_shouldReset() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
@@ -240,7 +241,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void rollbackToPreviousState_nonExistentKey_shouldNotThrow() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     Map<String, Object> snapshot = Map.of(
       "currentState", "CONFIRMED_HOT",
       "hotStreak", 3,
@@ -255,7 +256,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void rollbackToPreviousState_fromCold_shouldRestore() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.NONE);
     Map<String, Object> snap = m.getStateSnapshot("key");
     assertThat(snap).containsEntry("currentState", "COLD");
@@ -269,7 +270,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void rollbackToPreviousState_fromPreCooling_shouldRestore() {
-    HotKeyStateMachine m = new HotKeyStateMachine(1, 5, 2);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(1, 5, 2);
     assertThat(m.evaluate("key", true).type()).isEqualTo(DecisionType.HOT);
     assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", false).type()).isEqualTo(DecisionType.NONE);
@@ -287,7 +288,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void rollbackToPreviousState_withInvalidStateName_shouldThrow() {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     Map<String, Object> bad = Map.of(
       "currentState", "NON_EXISTENT_STATE",
       "hotStreak", 0,
@@ -302,7 +303,7 @@ class HotKeyStateMachineEdgeTest {
    */
   @Test
   void evictStale_shouldCleanOrphanedTimestamps() throws InterruptedException {
-    HotKeyStateMachine m = new HotKeyStateMachine(3, 10, 4);
+    HotKeyStateMachine m = new HotKeyStateMachineImpl(3, 10, 4);
     m.evaluate("key", true);
     m.reset("key");
     Thread.sleep(1);

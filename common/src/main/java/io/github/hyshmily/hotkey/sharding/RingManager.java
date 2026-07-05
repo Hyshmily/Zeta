@@ -18,98 +18,45 @@ package io.github.hyshmily.hotkey.sharding;
 import io.github.hyshmily.hotkey.Internal;
 import java.util.Set;
 import java.util.function.IntConsumer;
-import lombok.Getter;
-import lombok.Setter;
 
 /**
  * Manages the consistent-hash ring for Worker shard routing.
- *
- * <p>The ring is rebuilt automatically from the live Worker set reported
- * by {@link ClusterHealthView} on each reconciliation cycle.
  */
 @Internal
-public class RingManager {
-
-  @Getter
-  private final ConsistentHashRing ring;
-
-  @Getter
-  private final int virtualNodeCount;
-
-  @Setter
-  private IntConsumer onRingReconciled;
-
-  /**
-   * Creates a ring manager with the given virtual-node count.
-   *
-   * @param virtualNodeCount virtual copies per physical shard on the ring
-   */
-  public RingManager(int virtualNodeCount) {
-    this.virtualNodeCount = virtualNodeCount;
-    this.ring = new ConsistentHashRing(virtualNodeCount);
-  }
+public interface RingManager {
 
   /**
    * Rebuild the ring from the current cluster health view.
-   *
-   * @param healthView the current cluster health view; must not be {@code null}
-   * @throws NullPointerException if {@code healthView} is {@code null}
    */
-  public synchronized void reconcileFromHealthView(ClusterHealthView healthView) {
-    Set<String> alive = healthView.getAliveWorkerIds();
-    if (!alive.equals(ring.getNodes())) {
-      ring.rebuild(alive);
-      if (onRingReconciled != null) {
-        onRingReconciled.accept(alive.size());
-      }
-    }
-  }
+  void reconcileFromHealthView(HealthView healthView);
 
   /**
    * Return the current set of nodes on the ring.
-   *
-   * @return the set of live node identifiers
    */
-  public Set<String> getCurrentNodes() {
-    return ring.getNodes();
-  }
+  Set<String> getCurrentNodes();
 
   /**
    * Return the number of physical nodes currently on the ring.
-   *
-   * @return the node count
    */
-  public int nodeCount() {
-    return ring.nodeCount();
-  }
+  int nodeCount();
+
+  /**
+   * Return the virtual node count.
+   */
+  int getVirtualNodeCount();
 
   /**
    * Route a key to the responsible Worker node.
-   *
-   * @param key        the cache key to route; must not be {@code null}
-   * @param healthView the current cluster health view; must not be {@code null}
-   * @return the node identifier that owns the key, or {@code null} if no node is available
-   * @throws NullPointerException if {@code key} or {@code healthView} is {@code null}
    */
-  public String routeNode(String key, ClusterHealthView healthView) {
-    Set<String> alive = healthView.getAliveWorkerIds();
-    return ring.locateNode(key, alive::contains);
-  }
+  String routeNode(String key, HealthView healthView);
 
   /**
-   * Route a key to its target Worker node, using a pre-snapshotted alive-set
-   * supplied by the caller. This avoids re-fetching {@link
-   * ClusterHealthView#getAliveWorkerIds()} per key inside hot loops.
-   *
-   * @param key        the cache key to route
-   * @param aliveNodes the already-snapshotted set of alive Worker ids; must not
-   *                   be {@code null} or modified concurrently
-   * @return the target Worker node id, or {@code null} if no alive nodes
+   * Route a key to its target Worker node, using a pre-snapshotted alive-set.
    */
-  public String routeNode(String key, Set<String> aliveNodes) {
-    if (aliveNodes == null || aliveNodes.isEmpty()) {
-      return null;
-    }
-    return ring.locateNode(key, aliveNodes::contains);
-  }
+  String routeNode(String key, Set<String> aliveNodes);
+
+  /**
+   * Set the callback invoked after each ring reconciliation.
+   */
+  void setOnRingReconciled(IntConsumer onRingReconciled);
 }

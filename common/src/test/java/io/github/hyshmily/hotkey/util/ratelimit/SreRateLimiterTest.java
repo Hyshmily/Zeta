@@ -17,13 +17,14 @@ package io.github.hyshmily.hotkey.util.ratelimit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.hotkey.util.ratelimit.impl.SreRateLimiterImpl;
 import org.junit.jupiter.api.Test;
 
 class SreRateLimiterTest {
 
   @Test
   void shouldAllowBelowMinSamples() {
-    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 1.67, 10);
+    SreRateLimiter limiter = new SreRateLimiterImpl(1000, 10, 1.67, 10);
     for (int i = 0; i < 5; i++) {
       assertThat(limiter.tryAcquire()).as("should allow below minSamples").isTrue();
       limiter.onSuccess();
@@ -32,7 +33,7 @@ class SreRateLimiterTest {
 
   @Test
   void highSuccessRate_shouldAllowAlmostAll() {
-    SreRateLimiter limiter = new SreRateLimiter(3000, 10, 1.67, 20);
+    SreRateLimiter limiter = new SreRateLimiterImpl(3000, 10, 1.67, 20);
     int allowed = 0;
     for (int i = 0; i < 200; i++) {
       if (limiter.tryAcquire()) {
@@ -47,7 +48,7 @@ class SreRateLimiterTest {
 
   @Test
   void zeroSuccess_shouldDropAlmostAll() {
-    SreRateLimiter limiter = new SreRateLimiter(3000, 10, 1.67, 20);
+    SreRateLimiter limiter = new SreRateLimiterImpl(3000, 10, 1.67, 20);
     for (int i = 0; i < 20; i++) {
       assertThat(limiter.tryAcquire()).isTrue();
       limiter.onFailed();
@@ -64,7 +65,7 @@ class SreRateLimiterTest {
 
   @Test
   void with50PercentSuccess_shouldAllowAroundHalf() {
-    SreRateLimiter limiter = new SreRateLimiter(5000, 10, 1, 20);
+    SreRateLimiter limiter = new SreRateLimiterImpl(5000, 10, 1, 20);
     int allowed = 0;
     int N = 1000;
     for (int i = 0; i < N; i++) {
@@ -82,7 +83,7 @@ class SreRateLimiterTest {
 
   @Test
   void with100PercentSuccess_shouldApproach100Percent() {
-    SreRateLimiter limiter = new SreRateLimiter(3000, 10, 1.67, 20);
+    SreRateLimiter limiter = new SreRateLimiterImpl(3000, 10, 1.67, 20);
     int allowed = 0;
     for (int i = 0; i < 200; i++) {
       if (limiter.tryAcquire()) {
@@ -95,7 +96,7 @@ class SreRateLimiterTest {
 
   @Test
   void withRecovery_shouldAllowMoreAfterRecovery() {
-    SreRateLimiter limiter = new SreRateLimiter(5000, 10, 1.67, 10);
+    SreRateLimiter limiter = new SreRateLimiterImpl(5000, 10, 1.67, 10);
     for (int i = 0; i < 50; i++) {
       limiter.tryAcquire();
       limiter.onFailed();
@@ -123,7 +124,7 @@ class SreRateLimiterTest {
 
   @Test
   void withExactMinSamples_boundary() {
-    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 1.67, 10);
+    SreRateLimiter limiter = new SreRateLimiterImpl(1000, 10, 1.67, 10);
     for (int i = 0; i < 10; i++) {
       assertThat(limiter.tryAcquire()).isTrue();
       limiter.onFailed();
@@ -140,7 +141,7 @@ class SreRateLimiterTest {
 
   @Test
   void withVeryLowK() {
-    SreRateLimiter limiter = new SreRateLimiter(5000, 10, 0.5, 20);
+    SreRateLimiter limiter = new SreRateLimiterImpl(5000, 10, 0.5, 20);
     int allowed = 0;
     int N = 500;
     for (int i = 0; i < N; i++) {
@@ -157,7 +158,7 @@ class SreRateLimiterTest {
 
   @Test
   void withVeryHighK() {
-    SreRateLimiter limiter = new SreRateLimiter(5000, 10, 10, 20);
+    SreRateLimiter limiter = new SreRateLimiterImpl(5000, 10, 10, 20);
     int allowed = 0;
     int N = 500;
     for (int i = 0; i < N; i++) {
@@ -175,7 +176,7 @@ class SreRateLimiterTest {
 
   @Test
   void zeroK_shouldAllowOnlyBeforeMinSamples() {
-    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 0, 5);
+    SreRateLimiter limiter = new SreRateLimiterImpl(1000, 10, 0, 5);
     // With k=0, maxRequests=0; only requests below minSamples(5) pass
     for (int i = 0; i < 5; i++) {
       assertThat(limiter.tryAcquire()).isTrue();
@@ -194,7 +195,7 @@ class SreRateLimiterTest {
 
   @Test
   void negativeK_shouldTriggerDegenerateGuard() {
-    SreRateLimiter limiter = new SreRateLimiter(1000, 10, -1, 5);
+    SreRateLimiter limiter = new SreRateLimiterImpl(1000, 10, -1, 5);
     for (int i = 0; i < 10; i++) {
       assertThat(limiter.tryAcquire()).isTrue();
       limiter.onSuccess();
@@ -208,21 +209,21 @@ class SreRateLimiterTest {
 
   @Test
   void zeroMinSamples_shouldActivateImmediately() {
-    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 1, 0);
+    SreRateLimiter limiter = new SreRateLimiterImpl(1000, 10, 1, 0);
     // First call should still be allowed (total < minSamples → true, minSamples=0)
     assertThat(limiter.tryAcquire()).isTrue();
   }
 
   @Test
   void onSuccessAndOnFailed_withoutTryAcquire_shouldNotThrow() {
-    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 1.67, 5);
+    SreRateLimiter limiter = new SreRateLimiterImpl(1000, 10, 1.67, 5);
     limiter.onSuccess();
     limiter.onFailed();
   }
 
   @Test
   void negativeMaxRequests_shouldAlwaysAllow() {
-    SreRateLimiter limiter = new SreRateLimiter(1000, 10, -1, 0);
+    SreRateLimiter limiter = new SreRateLimiterImpl(1000, 10, -1, 0);
     for (int i = 0; i < 20; i++) {
       limiter.tryAcquire();
       limiter.onSuccess();
@@ -235,7 +236,7 @@ class SreRateLimiterTest {
 
   @Test
   void minSamplesZero_shouldApplyBudgetImmediately() {
-    SreRateLimiter limiter = new SreRateLimiter(1000, 10, 1.5, 0);
+    SreRateLimiter limiter = new SreRateLimiterImpl(1000, 10, 1.5, 0);
     limiter.onFailed();
     int allowed = 0;
     for (int i = 0; i < 100; i++) {
@@ -247,7 +248,7 @@ class SreRateLimiterTest {
 
   @Test
   void windowRollover_shouldNotBreakLimiter() throws InterruptedException {
-    SreRateLimiter limiter = new SreRateLimiter(100, 5, 1.67, 5);
+    SreRateLimiter limiter = new SreRateLimiterImpl(100, 5, 1.67, 5);
     for (int i = 0; i < 20; i++) {
       limiter.tryAcquire();
       limiter.onSuccess();

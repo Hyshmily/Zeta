@@ -3,6 +3,8 @@ package io.github.hyshmily.hotkey.util;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
 
+import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
+import io.github.hyshmily.hotkey.util.impl.SystemLoadMonitorImpl;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.concurrent.CountDownLatch;
@@ -18,52 +20,52 @@ class SystemLoadMonitorTest {
 
   @Test
   void deprecatedConstructor_shouldDelegateToFullConstructor() {
-    SystemLoadMonitor monitor = new SystemLoadMonitor();
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl();
     assertThat(monitor.getCpuLoadEMA()).isEqualTo(0.0);
     monitor.stop();
   }
 
   @Test
   void constructor_shouldClampNonPositivePollInterval() throws Exception {
-    Field pollField = SystemLoadMonitor.class.getDeclaredField("pollIntervalMs");
+    Field pollField = SystemLoadMonitorImpl.class.getDeclaredField("pollIntervalMs");
     pollField.setAccessible(true);
 
-    SystemLoadMonitor zeroPoll = new SystemLoadMonitor(0, 0.5);
+    SystemLoadMonitor zeroPoll = new SystemLoadMonitorImpl(0, 0.5);
     assertThat(pollField.getLong(zeroPoll)).isEqualTo(DEFAULT_POLL_MS);
 
-    SystemLoadMonitor negPoll = new SystemLoadMonitor(-100, 0.5);
+    SystemLoadMonitor negPoll = new SystemLoadMonitorImpl(-100, 0.5);
     assertThat(pollField.getLong(negPoll)).isEqualTo(DEFAULT_POLL_MS);
   }
 
   @Test
   void constructor_shouldClampInvalidDecay() throws Exception {
-    Field decayField = SystemLoadMonitor.class.getDeclaredField("decay");
+    Field decayField = SystemLoadMonitorImpl.class.getDeclaredField("decay");
     decayField.setAccessible(true);
 
-    assertThat(decayField.getDouble(new SystemLoadMonitor(100, 0))).isEqualTo(DEFAULT_DECAY);
-    assertThat(decayField.getDouble(new SystemLoadMonitor(100, -0.1))).isEqualTo(DEFAULT_DECAY);
-    assertThat(decayField.getDouble(new SystemLoadMonitor(100, 1.0))).isEqualTo(DEFAULT_DECAY);
-    assertThat(decayField.getDouble(new SystemLoadMonitor(100, 1.5))).isEqualTo(DEFAULT_DECAY);
+    assertThat(decayField.getDouble(new SystemLoadMonitorImpl(100, 0))).isEqualTo(DEFAULT_DECAY);
+    assertThat(decayField.getDouble(new SystemLoadMonitorImpl(100, -0.1))).isEqualTo(DEFAULT_DECAY);
+    assertThat(decayField.getDouble(new SystemLoadMonitorImpl(100, 1.0))).isEqualTo(DEFAULT_DECAY);
+    assertThat(decayField.getDouble(new SystemLoadMonitorImpl(100, 1.5))).isEqualTo(DEFAULT_DECAY);
   }
 
   @Test
   void getCpuLoadEMA_shouldReturnZeroBeforeAnySample() {
-    SystemLoadMonitor monitor = new SystemLoadMonitor(100, 0.5);
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(100, 0.5);
     assertThat(monitor.getCpuLoadEMA()).isEqualTo(0.0);
     monitor.stop();
   }
 
   @Test
   void constructor_shouldClampNaNDecayToDefault() throws Exception {
-    Field decayField = SystemLoadMonitor.class.getDeclaredField("decay");
+    Field decayField = SystemLoadMonitorImpl.class.getDeclaredField("decay");
     decayField.setAccessible(true);
-    assertThat(decayField.getDouble(new SystemLoadMonitor(100, Double.NaN))).isEqualTo(DEFAULT_DECAY);
+    assertThat(decayField.getDouble(new SystemLoadMonitorImpl(100, Double.NaN))).isEqualTo(DEFAULT_DECAY);
   }
 
   @Test
   void sharedSchedulerConstructor_shouldUseProvidedScheduler() {
     var scheduler = Executors.newSingleThreadScheduledExecutor();
-    SystemLoadMonitor monitor = new SystemLoadMonitor(scheduler, 100, 0.5);
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(scheduler, 100, 0.5);
     monitor.start();
     monitor.stop();
     // shared scheduler should NOT be shut down by stop()
@@ -73,7 +75,7 @@ class SystemLoadMonitorTest {
 
   @Test
   void start_shouldBeIdempotent() {
-    SystemLoadMonitor monitor = new SystemLoadMonitor(50, 0.5);
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(50, 0.5);
     monitor.start();
     monitor.start();
     monitor.stop();
@@ -90,7 +92,7 @@ class SystemLoadMonitorTest {
 
   @Test
   void stop_shouldNotBreakGetCpuLoadEMA() {
-    SystemLoadMonitor monitor = new SystemLoadMonitor(100, 0.5);
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(100, 0.5);
     monitor.start();
     monitor.stop();
     // After stop the EMA may be 0 or may have captured a brief sample;
@@ -100,7 +102,7 @@ class SystemLoadMonitorTest {
 
   @Test
   void stop_shouldBeSafeToCallMultipleTimes() {
-    SystemLoadMonitor monitor = new SystemLoadMonitor(100, 0.5);
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(100, 0.5);
     monitor.stop();
     monitor.stop();
   }
@@ -108,7 +110,7 @@ class SystemLoadMonitorTest {
   @Test
   void sample_whenRawAboveZero_shouldInitializeEmaDirectly() throws Exception {
     TestableMonitor monitor = new TestableMonitor(0.5, 0.8);
-    Method sample = SystemLoadMonitor.class.getDeclaredMethod("sample");
+    Method sample = SystemLoadMonitorImpl.class.getDeclaredMethod("sample");
     sample.setAccessible(true);
     sample.invoke(monitor);
     assertThat(monitor.getCpuLoadEMA()).isCloseTo(0.8, within(1e-12));
@@ -117,7 +119,7 @@ class SystemLoadMonitorTest {
   @Test
   void sample_whenRawIsZero_shouldNotInitializeEma() throws Exception {
     TestableMonitor monitor = new TestableMonitor(0.5, 0.0);
-    Method sample = SystemLoadMonitor.class.getDeclaredMethod("sample");
+    Method sample = SystemLoadMonitorImpl.class.getDeclaredMethod("sample");
     sample.setAccessible(true);
     sample.invoke(monitor);
     assertThat(monitor.getCpuLoadEMA()).isEqualTo(0.0);
@@ -127,7 +129,7 @@ class SystemLoadMonitorTest {
   void sample_shouldApplyEmaFormulaOnSubsequentCalls() throws Exception {
     double decay = 0.6;
     TestableMonitor monitor = new TestableMonitor(decay, 1.0, 0.5, 0.0);
-    Method sample = SystemLoadMonitor.class.getDeclaredMethod("sample");
+    Method sample = SystemLoadMonitorImpl.class.getDeclaredMethod("sample");
     sample.setAccessible(true);
 
     sample.invoke(monitor);
@@ -144,14 +146,14 @@ class SystemLoadMonitorTest {
 
   @Test
   void getCpuLoadRaw_shouldReturnClampedValue() {
-    SystemLoadMonitor monitor = new SystemLoadMonitor();
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl();
     assertThat(monitor.getCpuLoadRaw()).isBetween(0.0, 1.0);
     monitor.stop();
   }
 
   @Test
   void threadSafety_concurrentReads_shouldNotCorruptEma() throws Exception {
-    SystemLoadMonitor monitor = new SystemLoadMonitor(10, 0.5);
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(10, 0.5);
     monitor.start();
     ExecutorService exec = Executors.newFixedThreadPool(4);
     CountDownLatch latch = new CountDownLatch(1);
@@ -173,7 +175,8 @@ class SystemLoadMonitorTest {
     monitor.stop();
   }
 
-  static class TestableMonitor extends SystemLoadMonitor {
+  static class TestableMonitor extends SystemLoadMonitorImpl {
+
     private final double[] rawValues;
     private int index;
 

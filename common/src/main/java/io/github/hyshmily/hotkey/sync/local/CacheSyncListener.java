@@ -22,7 +22,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
@@ -97,7 +97,7 @@ public class CacheSyncListener {
   private final ScheduledExecutorService scheduler;
 
   /** Computes hard and soft expiry timestamps for refreshed entries. */
-  private final CacheExpireManager expireManager;
+  private final ExpireManager expireManager;
 
   /** Hot-key rule matcher whose rule set is updated when a RULES_SYNC message arrives. */
   private final RuleMatcher ruleMatcher;

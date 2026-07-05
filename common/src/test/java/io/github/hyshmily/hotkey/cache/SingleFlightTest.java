@@ -19,8 +19,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.HotKeyCircuitBreaker;
+import io.github.hyshmily.hotkey.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.CircuitBreakerImpl;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.SingleFlightImpl;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -38,13 +40,13 @@ class SingleFlightTest {
 
   private SingleFlight singleFlight;
   private Executor executor;
-  private HotKeyCircuitBreaker disabledBreaker;
+  private CircuitBreaker disabledBreaker;
 
   @BeforeEach
   void setUp() {
     executor = Executors.newCachedThreadPool();
-    disabledBreaker = new HotKeyCircuitBreaker(new HotKeyProperties.CircuitBreaker());
-    singleFlight = new SingleFlight(1000, 10, 5, executor, disabledBreaker);
+    disabledBreaker = new CircuitBreakerImpl(new HotKeyProperties.CircuitBreaker());
+    singleFlight = new SingleFlightImpl(1000, 10, 5, executor, disabledBreaker);
   }
 
   /**
@@ -152,7 +154,7 @@ class SingleFlightTest {
    */
   @Test
   void load_withTTLExpiry_shouldAllowNewLoadAfterExpiry() throws InterruptedException {
-    SingleFlight shortTtl = new SingleFlight(1000, 1, 5, executor, disabledBreaker);
+    SingleFlight shortTtl = new SingleFlightImpl(1000, 1, 5, executor, disabledBreaker);
     AtomicInteger counter = new AtomicInteger(0);
 
     shortTtl.load("key", () -> {
@@ -176,7 +178,7 @@ class SingleFlightTest {
    */
   @Test
   void load_withMaxInflight_shouldLimit() throws InterruptedException {
-    SingleFlight limited = new SingleFlight(1, 10, 5, executor, disabledBreaker);
+    SingleFlight limited = new SingleFlightImpl(1, 10, 5, executor, disabledBreaker);
     AtomicInteger callCounter = new AtomicInteger(0);
     CountDownLatch startLatch = new CountDownLatch(1);
     CountDownLatch doneLatch = new CountDownLatch(5);
@@ -262,7 +264,7 @@ class SingleFlightTest {
    */
   @Test
   void load_withTimeout_shouldThrow() {
-    SingleFlight shortTimeout = new SingleFlight(1000, 10, 1, executor, disabledBreaker);
+    SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, executor, disabledBreaker);
     assertThatThrownBy(() ->
       shortTimeout.load("timeout-key", () -> {
         try {
@@ -338,7 +340,7 @@ class SingleFlightTest {
    */
   @Test
   void load_afterTimeout_shouldRetrySupplier() throws InterruptedException {
-    SingleFlight shortTimeout = new SingleFlight(1000, 10, 1, executor, disabledBreaker);
+    SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, executor, disabledBreaker);
 
     // First load times out
     try {
@@ -366,7 +368,7 @@ class SingleFlightTest {
    */
   @Test
   void load_withHighInflight_shouldLogWarning() {
-    SingleFlight smallPool = new SingleFlight(5, 10, 5, executor, disabledBreaker);
+    SingleFlight smallPool = new SingleFlightImpl(5, 10, 5, executor, disabledBreaker);
     java.util.stream.IntStream.range(0, 10).forEach(idx -> smallPool.load("k" + idx, () -> "v" + idx));
     assertThat(smallPool.estimatedInflightSize()).isNotNegative();
   }
@@ -417,9 +419,9 @@ class SingleFlightTest {
     cfg.setEnabled(true);
     cfg.setFailThreshold(0.1);
     cfg.setRequestVolumeThreshold(1);
-    HotKeyCircuitBreaker breaker = new HotKeyCircuitBreaker(cfg);
+    CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
     breaker.onFailure();
-    SingleFlight sf = new SingleFlight(1000, 10, 5, executor, breaker);
+    SingleFlight sf = new SingleFlightImpl(1000, 10, 5, executor, breaker);
     assertThat(sf.load("key", () -> "val")).isEmpty();
     assertThat(sf.isBreakerOpen()).isTrue();
   }

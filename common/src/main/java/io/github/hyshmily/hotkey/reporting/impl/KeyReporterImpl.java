@@ -13,13 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.hotkey.reporting;
+package io.github.hyshmily.hotkey.reporting.impl;
 
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.hotkeydetector.doublebuffer.BufferedCounter;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.reporting.impl.BbrRateLimiterImpl;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
+import io.github.hyshmily.hotkey.reporting.ReportMessage;
+import io.github.hyshmily.hotkey.reporting.ReportPublisher;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
@@ -51,14 +55,14 @@ import lombok.extern.slf4j.Slf4j;
  * RabbitMQ publisher.  When the queue is full, {@code onFlush()} drops
  * batches after a configurable timeout.
  *
- * <p>When a {@link BbrRateLimiter} is configured, each flush cycle is submitted
+ * <p>When a {@link io.github.hyshmily.hotkey.reporting.BbrRateLimiter} is configured, each flush cycle is submitted
  * to the BBR for admission control.  If the pipeline is saturated (high CPU
  * and/or excessive in-flight batches), the flushed batch is dropped and
  * the counts are lost — at most one {@code reportIntervalMs} window.
  */
 @Slf4j
 @Internal
-public class HotKeyReporter {
+public class KeyReporterImpl implements KeyReporter {
 
   /** Maximum distinct keys in the BufferedCounter before eager swap. */
   private static final int MAX_BUFFER_SIZE = 100_000;
@@ -89,13 +93,13 @@ public class HotKeyReporter {
   /** Consistent-hashing ring manager for Worker node routing. */
   private final RingManager ringManager;
   /** Cluster health view for filtering dead Workers. */
-  private final ClusterHealthView healthView;
+  private final HealthView healthView;
 
   private volatile int lastNodeCount = -1;
 
   /** Optional BBR adaptive rate limiter; null disables BBR gating. */
   @Setter
-  private volatile BbrRateLimiter bbrRateLimiter;
+  private volatile BbrRateLimiterImpl bbrRateLimiter;
 
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
@@ -115,7 +119,7 @@ public class HotKeyReporter {
    * @param ringManager         consistent-hashing ring manager for Worker node routing
    * @param healthView          cluster health view for filtering dead Workers
    */
-  public HotKeyReporter(
+  public KeyReporterImpl(
     ReportPublisher reportPublisher,
     ScheduledExecutorService scheduler,
     long reportIntervalMs,
@@ -124,7 +128,7 @@ public class HotKeyReporter {
     int queueOfferTimeoutMs,
     int consumerCount,
     RingManager ringManager,
-    ClusterHealthView healthView
+    HealthView healthView
   ) {
     this.reportPublisher = reportPublisher;
     this.scheduler = scheduler;
@@ -177,7 +181,7 @@ public class HotKeyReporter {
    */
   public void start() {
     if (!started.compareAndSet(false, true)) {
-      log.debug("HotKeyReporter already started, skip");
+      log.debug("KeyReporterImpl already started, skip");
       return;
     }
     try {
@@ -187,7 +191,7 @@ public class HotKeyReporter {
       bufferedCounter.afterPropertiesSet();
 
       log.info(
-        "HotKeyReporter started: appName={}, intervalMs={}, queueCapacity={}, consumers={}",
+        "KeyReporterImpl started: appName={}, intervalMs={}, queueCapacity={}, consumers={}",
         appName,
         reportIntervalMs,
         queueCapacity,
@@ -195,7 +199,7 @@ public class HotKeyReporter {
       );
     } catch (Exception e) {
       log.error(
-        "Failed to start HotKeyReporter; per-key counts will not be flushed to Worker. " +
+        "Failed to start KeyReporterImpl; per-key counts will not be flushed to Worker. " +
           "Application continues but Worker hot-key detection will be blind to this instance.",
         e
       );
@@ -475,7 +479,7 @@ public class HotKeyReporter {
      * finish. After shutdown, the queue may still contain unconsumed
      * batches — they are discarded.
      *
-     * <p>This method is called from {@link HotKeyReporter#stop()} and is
+     * <p>This method is called from {@link KeyReporterImpl#stop()} and is
      * idempotent. However, after shutdown the dispatcher cannot be
      * restarted.
      */

@@ -20,7 +20,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,13 +35,13 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 class WorkerHeartbeatVerifierTest {
 
   private RabbitTemplate rabbitTemplate;
-  private ClusterHealthView healthView;
+  private HealthView healthView;
   private WorkerHeartbeatVerifier verifier;
 
   @BeforeEach
   void setUp() {
     rabbitTemplate = mock(RabbitTemplate.class);
-    healthView = spy(new ClusterHealthView(3, 500_000, 99));
+    healthView = spy(new HealthViewImpl(3, 500_000, 99));
     healthView.onHeartbeat(hb("w1", true));
     healthView.onHeartbeat(hb("w2", false));
     healthView.onHeartbeat(hb("w3", false));
@@ -113,7 +114,7 @@ class WorkerHeartbeatVerifierTest {
 
   @Test
   void shouldReturnEarlyWhenNoSuspectedWorkers() {
-    ClusterHealthView emptyView = new ClusterHealthView(3, 5000, 99);
+    HealthView emptyView = new HealthViewImpl(3, 5000, 99);
     WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
       rabbitTemplate,
       emptyView,

@@ -21,13 +21,13 @@ import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -107,18 +107,18 @@ class HotKeyMicrometerAutoConfigurationTest {
     TopK workerTopK = mockTopK(3, 500L, 1, 99);
     SingleFlight sf = mock(SingleFlight.class);
     when(sf.estimatedInflightSize()).thenReturn(2L);
-    HotKeyReporter reporter = mock(HotKeyReporter.class);
+    KeyReporter reporter = mock(KeyReporter.class);
     when(reporter.dispatcherDepth()).thenReturn(10);
     when(reporter.dispatcherDropped()).thenReturn(5L);
     when(reporter.dispatcherExpired()).thenReturn(3L);
     when(reporter.getPendingKeyCount()).thenReturn(200L);
-    CacheExpireManager expireManager = mock(CacheExpireManager.class);
+    ExpireManager expireManager = mock(ExpireManager.class);
     when(expireManager.getRefreshLimiter()).thenReturn(new Semaphore(8));
     VersionController vc = mock(VersionController.class);
     when(vc.getDegradedVersionCount()).thenReturn(7L);
     CacheSyncPublisher csp = mock(CacheSyncPublisher.class);
     when(csp.getDedupCacheSize()).thenReturn(15L);
-    ClusterHealthView healthView = mock(ClusterHealthView.class);
+    HealthView healthView = mock(HealthView.class);
     when(healthView.isClusterHealthy()).thenReturn(true);
     HotKeyStateMachine sm = mock(HotKeyStateMachine.class);
     when(sm.getTrackedKeys()).thenReturn(12);
@@ -182,11 +182,11 @@ class HotKeyMicrometerAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the custom MeterBinder gracefully handles a null refresh limiter from CacheExpireManager.
+   * Verifies that the custom MeterBinder gracefully handles a null refresh limiter from ExpireManagerImpl.
    */
   @Test
   void customMeterBinder_handlesNullRefreshLimiter() {
-    CacheExpireManager expireManager = mock(CacheExpireManager.class);
+    ExpireManager expireManager = mock(ExpireManager.class);
     when(expireManager.getRefreshLimiter()).thenReturn(null);
 
     MeterBinder binder = config.hotKeyCustomMetrics(

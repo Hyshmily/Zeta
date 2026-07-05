@@ -17,7 +17,8 @@ package io.github.hyshmily.hotkey.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatMessage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -28,11 +29,11 @@ import org.junit.jupiter.api.Test;
 
 class ClusterHealthViewTest {
 
-  private ClusterHealthView view;
+  private HealthView view;
 
   @BeforeEach
   void setUp() {
-    view = new ClusterHealthView(3, 5000, 2);
+    view = new HealthViewImpl(3, 5000, 2);
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, long epoch, boolean ready) {
@@ -136,7 +137,7 @@ class ClusterHealthViewTest {
 
   @Test
   void shouldReturnFalseWhenKnownWorkerCountIsZero() {
-    ClusterHealthView emptyView = new ClusterHealthView(0, 5000, 2);
+    HealthView emptyView = new HealthViewImpl(0, 5000, 2);
     assertThat(emptyView.isClusterHealthy()).isFalse();
   }
 
@@ -172,7 +173,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void setKnownWorkerCount_fromZeroToPositive_switchesToMajorityQuorum() {
-    ClusterHealthView view = new ClusterHealthView(0, 5000, 2);
+    HealthView view = new HealthViewImpl(0, 5000, 2);
     view.onHeartbeat(hb("w1", 1, true));
     view.onHeartbeat(hb("w2", 1, true));
     view.onHeartbeat(hb("w3", 1, true));
@@ -200,7 +201,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void setKnownWorkerCount_withNegativeValue_shouldIgnore() {
-    ClusterHealthView view = new ClusterHealthView(3, 5000, 2);
+    HealthView view = new HealthViewImpl(3, 5000, 2);
     view.onHeartbeat(hb("w1", 1, true));
     view.onHeartbeat(hb("w2", 1, true));
     view.onHeartbeat(hb("w3", 1, true));
@@ -268,7 +269,7 @@ class ClusterHealthViewTest {
 
   @Test
   void isAliveShouldReturnTrueWhenReadyAndNotStaleAndWithinTimeout() {
-    ClusterHealthView.WorkerHealthRecord r = new ClusterHealthView.WorkerHealthRecord();
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
     r.lastHeartbeatTime = System.currentTimeMillis();
@@ -277,7 +278,7 @@ class ClusterHealthViewTest {
 
   @Test
   void isAliveShouldReturnFalseWhenNotReady() {
-    ClusterHealthView.WorkerHealthRecord r = new ClusterHealthView.WorkerHealthRecord();
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = false;
     r.stale = false;
     r.lastHeartbeatTime = System.currentTimeMillis();
@@ -286,7 +287,7 @@ class ClusterHealthViewTest {
 
   @Test
   void isAliveShouldReturnFalseWhenStale() {
-    ClusterHealthView.WorkerHealthRecord r = new ClusterHealthView.WorkerHealthRecord();
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = true;
     r.lastHeartbeatTime = System.currentTimeMillis();
@@ -295,7 +296,7 @@ class ClusterHealthViewTest {
 
   @Test
   void isAliveShouldReturnFalseWhenTimedOut() {
-    ClusterHealthView.WorkerHealthRecord r = new ClusterHealthView.WorkerHealthRecord();
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
     r.lastHeartbeatTime = System.currentTimeMillis() - 100;
@@ -363,7 +364,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isAlive_exactTimeoutBoundary_shouldReturnFalse() {
-    ClusterHealthView.WorkerHealthRecord r = new ClusterHealthView.WorkerHealthRecord();
+    HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
     r.lastHeartbeatTime = System.currentTimeMillis() - 5000;
@@ -376,7 +377,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_withZeroKnownWorkersAndAliveWorkers_shouldReturnTrue() {
-    ClusterHealthView empty = new ClusterHealthView(0, 5000, 2);
+    HealthView empty = new HealthViewImpl(0, 5000, 2);
     empty.onHeartbeat(hb("w1", 1, true));
     empty.onHeartbeat(hb("w2", 1, true));
     assertThat(empty.isClusterHealthy()).isTrue();
@@ -388,7 +389,7 @@ class ClusterHealthViewTest {
    */
   @Test
   void isClusterHealthy_withZeroKnownWorkersAndNoAliveWorkers_shouldReturnFalse() {
-    ClusterHealthView empty = new ClusterHealthView(0, 5000, 2);
+    HealthView empty = new HealthViewImpl(0, 5000, 2);
     assertThat(empty.isClusterHealthy()).isFalse();
   }
 

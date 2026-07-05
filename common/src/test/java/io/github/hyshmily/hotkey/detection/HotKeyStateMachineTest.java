@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.hotkey.detection.impl.HotKeyStateMachineImpl;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import io.github.hyshmily.hotkey.model.HotKeyDecision.DecisionType;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,7 +33,7 @@ class HotKeyStateMachineTest {
 
   @BeforeEach
   void setUp() {
-    machine = new HotKeyStateMachine(3, 10, 4);
+    machine = new HotKeyStateMachineImpl(3, 10, 4);
   }
 
   /**

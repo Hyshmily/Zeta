@@ -18,15 +18,15 @@ package io.github.hyshmily.hotkey.endpoint;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
+import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
-import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
+import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.version.VersionController;
@@ -65,11 +65,11 @@ public class HotKeyEndpoint {
   /** HotKey configuration properties. */
   private final HotKeyProperties properties;
   /** App-to-Worker report aggregator. */
-  private final HotKeyReporter hotKeyReporter;
+  private final KeyReporter hotKeyReporter;
   /** Blacklist/whitelist rule evaluator. */
   private final RuleMatcher ruleMatcher;
   /** Cache TTL manager for soft/hard expiry. */
-  private final CacheExpireManager expireManager;
+  private final ExpireManager expireManager;
   /** Version tracking controller (Redis-backed, with local fallback). */
   private final VersionController versionController;
   /** Cross-instance cache sync publisher (AMQP). */
@@ -77,7 +77,7 @@ public class HotKeyEndpoint {
   /** Worker-side hot-key state machine. */
   private final HotKeyStateMachine hotKeyStateMachine;
   /** Cluster health view (may be {@code null} in Worker-only mode). */
-  private final ClusterHealthView healthView;
+  private final HealthView healthView;
 
   /**
    * Collect all diagnostic metrics into a three-section response map:
