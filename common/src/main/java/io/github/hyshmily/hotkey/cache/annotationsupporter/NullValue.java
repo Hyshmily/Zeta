@@ -16,6 +16,8 @@
 package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
 import io.github.hyshmily.hotkey.Internal;
+import java.io.Serial;
+import java.io.Serializable;
 
 /**
  * Internal sentinel representing an explicitly cached {@code null} value.
@@ -26,10 +28,15 @@ import io.github.hyshmily.hotkey.Internal;
  * from "no entry found".
  */
 @Internal
-public final class NullValue {
+public final class NullValue implements Serializable {
 
   /** Singleton instance. */
   public static final NullValue INSTANCE = new NullValue();
 
   private NullValue() {}
+
+  @Serial
+  private Object readResolve() {
+    return INSTANCE;
+  }
 }

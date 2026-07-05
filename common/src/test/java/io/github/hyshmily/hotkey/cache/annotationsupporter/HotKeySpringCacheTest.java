@@ -142,23 +142,24 @@ class HotKeySpringCacheTest {
   }
 
   @Test
-  @DisplayName("get stores NullValue when result is null and allowNull is true")
-  void get_whenNullAndAllowNull_storesNullValue() {
+  @DisplayName("get returns null when result is null and allowNull is true")
+  void get_whenNullAndAllowNull_returnsNull() {
     HotKeyCacheContext.get().apply(0, 0, true, false);
     when(hotKey.computeIfAbsent(anyString(), any())).thenReturn(null);
     String result = cache.get("myKey", (Callable<String>) () -> null);
     assertThat(result).isNull();
-    verify(hotKey).putThrough(eq("test::myKey"), isNull(), any());
+    verify(hotKey, never()).putThrough(anyString(), any(), any());
+    verify(hotKey, never()).putLocal(anyString(), any());
   }
 
   @Test
-  @DisplayName("get with allowNull and skipBroadcast uses putLocal for null sentinel")
-  void get_whenNullAllowNullAndSkipBroadcast_usesPutLocal() {
+  @DisplayName("get with allowNull and skipBroadcast does not call putLocal")
+  void get_whenNullAllowNullAndSkipBroadcast_doesNotCallPutLocal() {
     HotKeyCacheContext.get().apply(0, 0, true, true);
     when(hotKey.computeIfAbsent(anyString(), any())).thenReturn(null);
     String result = cache.get("myKey", (Callable<String>) () -> null);
     assertThat(result).isNull();
-    verify(hotKey).putLocal("test::myKey", null);
+    verify(hotKey, never()).putLocal(anyString(), any());
     verify(hotKey, never()).putThrough(anyString(), any(), any());
   }
 
@@ -234,7 +235,8 @@ class HotKeySpringCacheTest {
     HotKeyCacheContext.get().restore(null);
 
     cache.clear();
-    verify(hotKey).invalidateAll();
+    verify(hotKey).invalidateAllLocal();
+    verify(hotKey, never()).invalidateAll();
     when(hotKey.peek("test::key1")).thenReturn(Optional.empty());
     when(hotKey.peek("test::key2")).thenReturn(Optional.empty());
     assertThat(cache.lookup("key1")).isNull();
@@ -306,12 +308,13 @@ class HotKeySpringCacheTest {
   }
 
   @Test
-  @DisplayName("get with allowNull and skipBroadcast=false calls putThrough for null")
-  void get_whenNullAllowNullAndNoSkipBroadcast_usesPutThrough() {
+  @DisplayName("get with allowNull and skipBroadcast=false does not call putThrough")
+  void get_whenNullAllowNullAndNoSkipBroadcast_doesNotCallPutThrough() {
     HotKeyCacheContext.get().apply(0, 0, true, false);
     when(hotKey.computeIfAbsent(anyString(), any())).thenReturn(null);
     String result = cache.get("myKey", (Callable<String>) () -> null);
     assertThat(result).isNull();
-    verify(hotKey).putThrough(eq("test::myKey"), isNull(), any());
+    verify(hotKey, never()).putThrough(anyString(), any(), any());
+    verify(hotKey, never()).putLocal(anyString(), any());
   }
 }

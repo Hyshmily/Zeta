@@ -20,7 +20,7 @@ import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sharding.RingManager;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import lombok.RequiredArgsConstructor;
+import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.util.Assert;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -40,14 +40,17 @@ import org.springframework.web.bind.annotation.RestController;
 @Internal
 @RestController
 @RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkeyring")
-@RequiredArgsConstructor
 public class RingEndpoint {
 
-  /** Consistent-hash ring manager for shard routing. */
+  @Nullable
   private final RingManager ringManager;
 
-  /** Cluster health view provider (optional — unavailable in Worker-only mode). */
   private final ObjectProvider<ClusterHealthView> healthViewProvider;
+
+  public RingEndpoint(@Nullable RingManager ringManager, ObjectProvider<ClusterHealthView> healthViewProvider) {
+    this.ringManager = ringManager;
+    this.healthViewProvider = healthViewProvider;
+  }
 
   /**
    * Return the current ring topology: node count, virtual node count,
@@ -58,6 +61,9 @@ public class RingEndpoint {
    */
   @GetMapping
   public Map<String, Object> ringInfo() {
+    if (ringManager == null) {
+      return Map.of("error", "RingManager not available (RabbitMQ absent)");
+    }
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("nodeCount", ringManager.nodeCount());
     result.put("virtualNodes", ringManager.getVirtualNodeCount());
@@ -78,6 +84,9 @@ public class RingEndpoint {
   @GetMapping("/{key}")
   public Map<String, Object> keyMapping(@PathVariable String key) {
     Assert.hasText(key, "key must not be empty");
+    if (ringManager == null) {
+      return Map.of("error", "RingManager not available (RabbitMQ absent)");
+    }
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("key", key);
     ClusterHealthView view = healthViewProvider.getIfAvailable();

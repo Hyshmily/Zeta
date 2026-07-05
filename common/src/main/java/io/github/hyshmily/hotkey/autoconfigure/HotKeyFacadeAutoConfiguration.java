@@ -19,9 +19,13 @@ import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import io.github.hyshmily.hotkey.endpoint.HotKeyEndpoint;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.hotkey.reporting.HotKeyReporter;
+import io.github.hyshmily.hotkey.sharding.ClusterHealthView;
 import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
+import io.github.hyshmily.hotkey.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import io.github.hyshmily.hotkey.util.TimeSource;
@@ -83,6 +87,30 @@ public class HotKeyFacadeAutoConfiguration {
       InstanceIdGenerator.setOverride(id);
     }
     TimeSource.start();
+  }
+
+  /**
+   * Create the shared {@link ClusterHealthView} for tracking Worker cluster health.
+   *
+   * <p>Declared here (the always-active, first-registered auto-configuration) so that
+   * a single singleton is available to all consumers — {@link HotKeyCache},
+   * {@link HotKeyEndpoint}, {@link HotKeyReporter}, {@link WorkerHeartbeatVerifier},
+   * and the heartbeat listener container — eliminating the risk of multiple
+   * inconsistent instances with independent state.
+   *
+   * @param properties the HotKey configuration properties
+   * @return a new {@link ClusterHealthView} instance
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public ClusterHealthView clusterHealthView(HotKeyProperties properties) {
+    ClusterHealthView view = new ClusterHealthView(
+      properties.getExpectedWorkerCount(),
+      properties.getHeartbeat().getTimeoutMs(),
+      properties.getHeartbeat().getDegradeAfterFailures()
+    );
+    view.setMinAliveWorkers(properties.getHeartbeat().getMinAliveWorkers());
+    return view;
   }
 
   /**

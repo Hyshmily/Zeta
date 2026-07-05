@@ -20,7 +20,6 @@ import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
-import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
@@ -46,7 +45,6 @@ import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
@@ -190,9 +188,10 @@ public class HotKeyAutoConfiguration {
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
   public Executor hotKeyExecutor(HotKeyProperties properties) {
     ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-    executor.setCorePoolSize(properties.getExecutorCorePoolSize());
+    executor.setCorePoolSize(0);
     executor.setMaxPoolSize(properties.getExecutorMaxPoolSize());
     executor.setQueueCapacity(properties.getExecutorQueueCapacity());
+    executor.setAllowCoreThreadTimeOut(true);
     executor.setThreadNamePrefix(HotKeyConstants.THREAD_PREFIX_HOTKEY);
     executor.setWaitForTasksToCompleteOnShutdown(true);
     executor.setAwaitTerminationSeconds(60);
@@ -273,36 +272,14 @@ public class HotKeyAutoConfiguration {
       ruleMatcher,
       new VersionController(Optional.empty(), properties.getVersionKeyTtlMinutes()),
       properties,
-      new ClusterHealthView(
-        properties.getExpectedWorkerCount(),
-        properties.getHeartbeat().getTimeoutMs(),
-        properties.getHeartbeat().getDegradeAfterFailures()
+      healthViewProvider.getIfAvailable(() ->
+        new ClusterHealthView(
+          properties.getExpectedWorkerCount(),
+          properties.getHeartbeat().getTimeoutMs(),
+          properties.getHeartbeat().getDegradeAfterFailures()
+        )
       )
     );
-  }
-
-  /**
-   * Fallback {@link HotKey} facade bean.
-   *
-   * <p>Only active when a {@link HotKeyCache} bean exists but no {@link HotKey}
-   * has been defined yet. The primary {@link HotKey} creator is
-   * {@link HotKeyFacadeAutoConfiguration} — this fallback covers the case where
-   * that auto-configuration is excluded or its bean is overridden.
-   *
-   * @param hotKeyCache    the HotKeyCache instance (never {@code null})
-   * @param appHotKeyDetector the app-side TopK detector (never {@code null})
-   * @param workerTopKProvider     the Worker-side TopK algorithm (may be {@code null})
-   * @return a new HotKey facade instance
-   */
-  @Bean
-  @ConditionalOnBean(HotKeyCache.class)
-  @ConditionalOnMissingBean
-  public HotKey hotKey(
-    HotKeyCache hotKeyCache,
-    @Qualifier("hotKeyDetector") HotKeyDetector appHotKeyDetector,
-    @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider
-  ) {
-    return new HotKey(hotKeyCache, appHotKeyDetector, workerTopKProvider.getIfAvailable());
   }
 
   /**

@@ -140,8 +140,11 @@ public class HotKeyActuatorAutoConfiguration {
   @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
   @ConditionalOnProperty(prefix = "hotkey.local.consistent-hashing", name = "enabled", havingValue = "true")
   @ConditionalOnMissingBean
-  public RingEndpoint ringEndpoint(RingManager ringManager, ObjectProvider<ClusterHealthView> healthViewProvider) {
-    return new RingEndpoint(ringManager, healthViewProvider);
+  public RingEndpoint ringEndpoint(
+    ObjectProvider<RingManager> ringManagerProvider,
+    ObjectProvider<ClusterHealthView> healthViewProvider
+  ) {
+    return new RingEndpoint(ringManagerProvider.getIfAvailable(), healthViewProvider);
   }
 
   /**

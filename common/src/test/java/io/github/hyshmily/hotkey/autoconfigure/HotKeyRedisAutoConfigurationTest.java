@@ -137,20 +137,6 @@ class HotKeyRedisAutoConfigurationTest {
   }
 
   /**
-   * Verifies that a HotKey facade bean is created when a HotKeyCache bean exists.
-   */
-  @Test
-  void fallbackHotKeyBeanIsCreatedWhenCacheExists() {
-    HotKeyCache cache = mock(HotKeyCache.class);
-    HotKeyDetector detector = mock(HotKeyDetector.class);
-
-    HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
-    HotKey hotKey = config.hotKey(cache, detector);
-
-    assertThat(hotKey).isNotNull();
-  }
-
-  /**
    * Verifies that the Redis auto-configuration is skipped when RedisTemplate class is not available at runtime.
    */
   @Test
@@ -169,18 +155,5 @@ class HotKeyRedisAutoConfigurationTest {
         assertThat(ctx).doesNotHaveBean(HotKeyCache.class);
         assertThat(ctx).doesNotHaveBean(HotKey.class);
       });
-  }
-
-  /**
-   * Verifies that the HotKey facade bean is created by Redis auto-configuration with correct dependencies.
-   */
-  @Test
-  void redisHotKeyBeanIsCreated() {
-    HotKeyCache cache = mock(HotKeyCache.class);
-    HotKeyDetector detector = mock(HotKeyDetector.class);
-    HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
-    HotKey hotKey = config.hotKey(cache, detector);
-    assertThat(hotKey).isNotNull();
-    assertThat(hotKey.isApp()).isTrue();
   }
 }

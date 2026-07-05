@@ -18,6 +18,7 @@ package io.github.hyshmily.hotkey.cache.annotationsupporter;
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext.ContextValues;
 import jakarta.annotation.Nullable;
 import java.util.Objects;
 import java.util.concurrent.Callable;
@@ -44,7 +45,7 @@ import org.springframework.cache.support.AbstractValueAdaptingCache;
  *   <li>{@link #put} — uses {@link HotKey#putThrough} with a no-op writer (the
  *       mutating method was already executed by the {@code CacheInterceptor})</li>
  *   <li>{@link #evict} — uses {@link HotKey#invalidate}</li>
- *   <li>{@link #clear} — uses {@link HotKey#invalidateAll}</li>
+ *   <li>{@link #clear} — uses {@link HotKey#invalidateAllLocal}</li>
  * </ul>
  *
  * <p>This class is stateless and thread-safe.
@@ -149,9 +150,9 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   public <T> T get(@NonNull Object key, @NonNull Callable<T> valueLoader) {
     String prefixed = prefixedKey(key);
 
-    long hardTtlMs = HotKeyCacheContext.get().getHardTtlMs();
-    long softTtlMs = HotKeyCacheContext.get().getSoftTtlMs();
-    boolean allowNull = HotKeyCacheContext.get().isAllowNull();
+    ContextValues cv = HotKeyCacheContext.get().getValues();
+    long hardTtlMs = cv != null ? cv.hardTtlMs() : 0L;
+    long softTtlMs = cv != null ? cv.softTtlMs() : 0L;
 
     Supplier<Object> loader = () -> {
       try {
@@ -171,15 +172,6 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
       return (T) fromStoreValue(result);
     }
 
-    // Cache miss: store NullValue sentinel if null-caching is enabled
-    if (allowNull) {
-      if (HotKeyCacheContext.get().isSkipBroadcast()) {
-        hotKey.putLocal(prefixed, null);
-      } else {
-        hotKey.putThrough(prefixed, null, () -> {});
-      }
-    }
-
     return null;
   }
 
@@ -197,7 +189,10 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
     String prefixed = prefixedKey(key);
     Object storeValue = toStoreValue(value);
 
-    if (HotKeyCacheContext.get().isSkipBroadcast()) {
+    ContextValues cv = HotKeyCacheContext.get().getValues();
+    boolean skipBroadcast = cv != null && cv.skipBroadcast();
+
+    if (skipBroadcast) {
       hotKey.putLocal(prefixed, storeValue);
     } else {
       hotKey.putThrough(prefixed, storeValue, () -> {});
@@ -215,7 +210,8 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   @Override
   public void evict(@NonNull Object key) {
     String prefixed = prefixedKey(key);
-    if (HotKeyCacheContext.get().isSkipBroadcast()) {
+    ContextValues cv = HotKeyCacheContext.get().getValues();
+    if (cv != null && cv.skipBroadcast()) {
       hotKey.evictLocal(prefixed);
     } else {
       hotKey.invalidate(prefixed);
@@ -225,14 +221,12 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   /**
    * {@inheritDoc}
    *
-   * <p>Invalidates all entries via {@link HotKey#invalidateAll}.
+   * <p>Invalidates all local entries via {@link HotKey#invalidateAllLocal}.
+   * Broadcast is intentionally suppressed: {@code clear()} is a local-only
+   * defensive measure.
    */
   @Override
   public void clear() {
-    /*
-     * This is a defensive measure, we agreed that such out-of-bounds behavior shouldn't happen in a distributed cluster
-     * Banned broadcast is essential.
-     */
-    hotKey.invalidateAll();
+    hotKey.invalidateAllLocal();
   }
 }

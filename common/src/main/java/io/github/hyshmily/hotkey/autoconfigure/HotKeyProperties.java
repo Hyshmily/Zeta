@@ -243,8 +243,10 @@ public class HotKeyProperties {
    * @return the effective number of consumer threads
    */
   public int effectiveConsumerCount() {
-    return consumerCount > 0 ? consumerCount : Math.max(4, Runtime.getRuntime().availableProcessors() / 2);
+    return consumerCount > 0 ? consumerCount : Math.max(4, CACHED_PROCESSORS / 2);
   }
+
+  private static final int CACHED_PROCESSORS = Runtime.getRuntime().availableProcessors();
 
   /**
    * Configuration for consistent-hashing based report routing.
@@ -393,9 +395,6 @@ public class HotKeyProperties {
    */
   @Data
   public static class SpringCache {
-
-    /** Whether Spring Cache integration is enabled ({@code hotkey.spring-cache.enabled}). */
-    private boolean enabled = false;
 
     /** Separator between cache name and key in the internal cache key string. */
     private String keySeparator = "::";

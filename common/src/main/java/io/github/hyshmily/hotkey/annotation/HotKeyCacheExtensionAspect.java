@@ -22,12 +22,13 @@ import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
 import io.github.hyshmily.hotkey.util.window.RollingWindow;
+import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicInteger;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -107,8 +108,18 @@ public class HotKeyCacheExtensionAspect {
     .expireAfterWrite(1, TimeUnit.HOURS)
     .build();
 
-  /** Cache of resolved {@link HotKeyPreload} annotations keyed by Method. */
+  /** Cache of resolved companion annotations keyed by Method. */
   private final Map<Method, HotKeyPreload> preloadCache = new ConcurrentHashMap<>();
+
+  private record AnnotationSet(
+    HotKeyCacheTTL ttl,
+    Intercept intercept,
+    Fallback fallback,
+    NullCaching nullCaching,
+    Broadcast broadcast
+  ) {}
+
+  private final Map<Method, AnnotationSet> annotationCache = new ConcurrentHashMap<>();
 
   /**
    * Per-key QPS sliding windows for {@link InterceptTrigger#QPS} interception.
@@ -121,7 +132,7 @@ public class HotKeyCacheExtensionAspect {
    * Per-key concurrent thread counters for {@link InterceptTrigger#CONCURRENT_THREADS} interception.
    * Incremented before method execution, decremented in {@code finally}.
    */
-  private final ConcurrentHashMap<String, LongAdder> concurrentCounters = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, AtomicInteger> concurrentCounters = new ConcurrentHashMap<>();
 
   /**
    * Creates a new {@code HotKeyCacheExtensionAspect}.
@@ -150,20 +161,21 @@ public class HotKeyCacheExtensionAspect {
   public Object aroundCacheable(ProceedingJoinPoint pjp, Cacheable cacheable) throws Throwable {
     Method method = resolveMethod(pjp);
     String cacheName = resolveCacheName(cacheable);
-    String key = resolveKey(pjp, cacheable.key());
+    String key = resolveKey(pjp, cacheable.key(), method);
     String prefixedKey = cacheName + properties.getSpringCache().getKeySeparator() + key;
 
     HotKeyPreload preload = resolvePreloadAnnotation(method);
-    HotKeyCacheTTL ttl = method.getAnnotation(HotKeyCacheTTL.class);
-    Intercept intercept = method.getAnnotation(Intercept.class);
-    Fallback fallback = method.getAnnotation(Fallback.class);
-    NullCaching nullCaching = method.getAnnotation(NullCaching.class);
-    Broadcast broadcast = method.getAnnotation(Broadcast.class);
+    AnnotationSet ann = resolveAnnotations(method);
+    HotKeyCacheTTL ttl = ann.ttl();
+    Intercept intercept = ann.intercept();
+    Fallback fallback = ann.fallback();
+    NullCaching nullCaching = ann.nullCaching();
+    Broadcast broadcast = ann.broadcast();
 
     // @HotKeyPreload: inflate detection counts after @Intercept (so first call loads normally)
     // but before context setup (so pjp.proceed() → CacheInterceptor sees inflated counts)
     if (preload != null) {
-      handlePreload(preload, pjp, cacheName);
+      handlePreload(preload, pjp, cacheName, method);
     }
 
     // @Intercept: skip method when key is a local hot key if necessary
@@ -173,11 +185,11 @@ public class HotKeyCacheExtensionAspect {
 
       switch (intercept.trigger()) {
         case FORCE -> {
-          return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey);
+          return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
         }
         case IS_LOCAL_HOT -> {
           if (hotKey.isLocalHotKey(prefixedKey)) {
-            return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey);
+            return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
           }
         }
         case QPS -> {
@@ -187,18 +199,18 @@ public class HotKeyCacheExtensionAspect {
             RollingWindow window = qpsWindows.get(prefixedKey, k -> new RollingWindow(10, 1000));
             window.add(1);
             if (window.sum() > qpsThreshold) {
-              return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey);
+              return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
             }
           }
         }
         case CONCURRENT_THREADS -> {
           int maxThreads = intercept.concurrentThreads();
           if (maxThreads > 0) {
-            LongAdder counter = concurrentCounters.computeIfAbsent(prefixedKey, k -> new LongAdder());
-            if (counter.sum() >= maxThreads) {
-              return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey);
+            AtomicInteger counter = concurrentCounters.computeIfAbsent(prefixedKey, k -> new AtomicInteger(0));
+            if (counter.incrementAndGet() > maxThreads) {
+              counter.decrementAndGet();
+              return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
             }
-            counter.increment();
             needsDecrement = true;
           }
         }
@@ -218,14 +230,14 @@ public class HotKeyCacheExtensionAspect {
     } catch (Throwable e) {
       if (fallback != null) {
         log.warn("[HotKeyCacheExtension] fallback triggered for key={}, reason={}", prefixedKey, e.getMessage());
-        return resolveFallback(pjp, fallback);
+        return resolveFallback(pjp, fallback, method);
       }
       throw e;
     } finally {
       if (needsDecrement) {
-        LongAdder counter = concurrentCounters.get(prefixedKey);
+        AtomicInteger counter = concurrentCounters.get(prefixedKey);
         if (counter != null) {
-          counter.decrement();
+          counter.decrementAndGet();
         }
       }
       HotKeyCacheContext.get().restore(prev);
@@ -249,7 +261,7 @@ public class HotKeyCacheExtensionAspect {
    * @param pjp       the join point providing method arguments and target
    * @param cacheName the resolved cache name from {@code @Cacheable}
    */
-  private void handlePreload(HotKeyPreload preload, ProceedingJoinPoint pjp, String cacheName) {
+  private void handlePreload(HotKeyPreload preload, ProceedingJoinPoint pjp, String cacheName, Method method) {
     String separator = properties.getSpringCache().getKeySeparator();
     int preloadCount = preload.count() > 0 ? preload.count() : Integer.MAX_VALUE;
 
@@ -269,7 +281,7 @@ public class HotKeyCacheExtensionAspect {
         Expression expression = expressionCache.computeIfAbsent("preload_" + keyExpr, k ->
           parser.parseExpression(keyExpr)
         );
-        Object value = expression.getValue(buildEvaluationContext(pjp));
+        Object value = expression.getValue(buildEvaluationContext(pjp, method));
 
         if (value != null) {
           String fullKey = cacheName + separator + value;
@@ -285,40 +297,22 @@ public class HotKeyCacheExtensionAspect {
   }
 
   /**
-   * Intercepts {@link CachePut @CachePut} methods to set the broadcast suppression
-   * flag from {@link Broadcast @Broadcast} before the method reaches Spring's
-   * {@code CacheInterceptor}.
+   * Intercepts both {@link CachePut @CachePut} and {@link CacheEvict @CacheEvict}
+   * methods to set the broadcast suppression flag from {@link Broadcast @Broadcast}
+   * before the method reaches Spring's {@code CacheInterceptor}.
    *
    * <p>Only the {@code @Broadcast} annotation is read here. Other companion
    * annotations ({@code @HotKeyCacheTTL}, {@code @Intercept}, {@code @Fallback},
-   * {@code @NullCaching}) are ignored on {@code @CachePut} methods.
+   * {@code @NullCaching}) are ignored on write/evict methods.
    *
-   * @param pjp      the join point for the intercepted method
-   * @param cachePut the {@code @CachePut} annotation on the intercepted method
+   * @param pjp the join point for the intercepted method
    * @return the method return value
    */
   @SuppressWarnings("unused")
-  @Around("@annotation(cachePut)")
-  public Object aroundCachePut(ProceedingJoinPoint pjp, CachePut cachePut) throws Throwable {
-    return setBroadcast(pjp);
-  }
-
-  /**
-   * Intercepts {@link CacheEvict @CacheEvict} methods to set the broadcast
-   * suppression flag from {@link Broadcast @Broadcast} before the method reaches
-   * Spring's {@code CacheInterceptor}.
-   *
-   * <p>Only the {@code @Broadcast} annotation is read here. Other companion
-   * annotations ({@code @HotKeyCacheTTL}, {@code @Intercept}, {@code @Fallback},
-   * {@code @NullCaching}) are ignored on {@code @CacheEvict} methods.
-   *
-   * @param pjp       the join point for the intercepted method
-   * @param cacheEvict the {@code @CacheEvict} annotation on the intercepted method
-   * @return the method return value
-   */
-  @SuppressWarnings("unused")
-  @Around("@annotation(cacheEvict)")
-  public Object aroundCacheEvict(ProceedingJoinPoint pjp, CacheEvict cacheEvict) throws Throwable {
+  @Around(
+    "@annotation(org.springframework.cache.annotation.CachePut) || @annotation(org.springframework.cache.annotation.CacheEvict)"
+  )
+  public Object aroundCachePutOrEvict(ProceedingJoinPoint pjp) throws Throwable {
     return setBroadcast(pjp);
   }
 
@@ -361,7 +355,7 @@ public class HotKeyCacheExtensionAspect {
    * @param expression the SpEL expression to evaluate
    * @return the evaluated cache key string, or all arguments as string if expression is empty
    */
-  private String resolveKey(ProceedingJoinPoint pjp, String expression) {
+  private String resolveKey(ProceedingJoinPoint pjp, String expression, Method method) {
     if (expression.isEmpty()) {
       Object[] args = pjp.getArgs();
       if (args.length == 0) {
@@ -372,7 +366,7 @@ public class HotKeyCacheExtensionAspect {
       }
       return new SimpleKey(args).toString();
     }
-    return getExpression(expression).getValue(buildEvaluationContext(pjp), String.class);
+    return getExpression(expression).getValue(buildEvaluationContext(pjp, method), String.class);
   }
 
   /**
@@ -402,13 +396,8 @@ public class HotKeyCacheExtensionAspect {
    * @param pjp the join point providing method arguments and target
    * @return a configured evaluation context with method parameters as variables
    */
-  private EvaluationContext buildEvaluationContext(ProceedingJoinPoint pjp) {
-    return new MethodBasedEvaluationContext(
-      pjp.getTarget(),
-      resolveMethod(pjp),
-      pjp.getArgs(),
-      parameterNameDiscoverer
-    );
+  private EvaluationContext buildEvaluationContext(ProceedingJoinPoint pjp, Method method) {
+    return new MethodBasedEvaluationContext(pjp.getTarget(), method, pjp.getArgs(), parameterNameDiscoverer);
   }
 
   /**
@@ -448,13 +437,14 @@ public class HotKeyCacheExtensionAspect {
     ProceedingJoinPoint pjp,
     Fallback fallback,
     String interceptFallback,
-    String prefixedKey
+    String prefixedKey,
+    Method method
   ) throws Throwable {
     if (!interceptFallback.isBlank()) {
-      return getExpression(interceptFallback).getValue(buildEvaluationContext(pjp));
+      return getExpression(interceptFallback).getValue(buildEvaluationContext(pjp, method));
     }
     if (fallback != null) {
-      return resolveFallback(pjp, fallback);
+      return resolveFallback(pjp, fallback, method);
     }
     return hotKey.peek(prefixedKey).orElse(null);
   }
@@ -468,9 +458,9 @@ public class HotKeyCacheExtensionAspect {
    * @param fallback the fallback annotation
    * @return the resolved fallback value
    */
-  private Object resolveFallback(ProceedingJoinPoint pjp, Fallback fallback) throws Throwable {
+  private Object resolveFallback(ProceedingJoinPoint pjp, Fallback fallback, Method method) throws Throwable {
     if (!fallback.value().isEmpty()) {
-      return getExpression(fallback.value()).getValue(buildEvaluationContext(pjp));
+      return getExpression(fallback.value()).getValue(buildEvaluationContext(pjp, method));
     }
     return invokeFallbackMethod(pjp);
   }
@@ -556,5 +546,29 @@ public class HotKeyCacheExtensionAspect {
    */
   private HotKeyPreload resolvePreloadAnnotation(Method method) {
     return preloadCache.computeIfAbsent(method, m -> m.getAnnotation(HotKeyPreload.class));
+  }
+
+  private AnnotationSet resolveAnnotations(Method method) {
+    return annotationCache.computeIfAbsent(method, m -> {
+      HotKeyCacheTTL ttl = null;
+      Intercept intercept = null;
+      Fallback fallback = null;
+      NullCaching nullCaching = null;
+      Broadcast broadcast = null;
+      for (Annotation a : m.getDeclaredAnnotations()) {
+        if (a instanceof HotKeyCacheTTL t) {
+          ttl = t;
+        } else if (a instanceof Intercept i) {
+          intercept = i;
+        } else if (a instanceof Fallback f) {
+          fallback = f;
+        } else if (a instanceof NullCaching n) {
+          nullCaching = n;
+        } else if (a instanceof Broadcast b) {
+          broadcast = b;
+        }
+      }
+      return new AnnotationSet(ttl, intercept, fallback, nullCaching, broadcast);
+    });
   }
 }

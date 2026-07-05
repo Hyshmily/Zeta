@@ -57,7 +57,28 @@ public class CacheExpireManager {
 
   private static final long refreshTimeoutSeconds = 30;
 
-  private static final int BLOCKED_TAG = -1;
+  private record EntrySnapshot(
+    long dataVersion,
+    long decisionVersion,
+    String decisionNodeId,
+    long decisionEpoch,
+    KeyState keyState
+  ) {
+    static final EntrySnapshot DEFAULT = new EntrySnapshot(VERSION_DEFAULT, VERSION_DEFAULT, null, 0L, KeyState.NORMAL);
+  }
+
+  private static EntrySnapshot snapshotEntry(Object raw) {
+    if (raw instanceof CacheEntry entry) {
+      return new EntrySnapshot(
+        entry.getDataVersion(),
+        entry.getDecisionVersion(),
+        entry.getDecisionNodeId(),
+        entry.getDecisionEpoch(),
+        entry.getKeyState()
+      );
+    }
+    return EntrySnapshot.DEFAULT;
+  }
 
   /**
    * Creates a CacheExpireManager with the given Caffeine cache, executor, and TTL config.
@@ -671,85 +692,95 @@ public class CacheExpireManager {
         return null;
       }
 
-      // Snapshot the current data version so that we can detect whether a
-      // newer write has superseded the cache entry while this refresh was
-      // in-flight.
-      long refreshStartDataVersion = Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
-        .filter(CacheEntry.class::isInstance)
-        .map(CacheEntry.class::cast)
-        .map(CacheEntry::getDataVersion)
-        .orElse(VERSION_DEFAULT);
-
-      // Build the async refresh task with timeout protection.
-      CompletableFuture<?> task;
       try {
-        task = CompletableFuture.supplyAsync(reader, executor).orTimeout(refreshTimeoutSeconds, TimeUnit.SECONDS);
-      } catch (RejectedExecutionException e) {
-        // Executor saturated – release the limiter permit and leave no
-        // pending marker so the next read can retry immediately.
-        refreshLimiter.release();
-        log.warn("Background refresh rejected by executor (saturated), key={}", cacheKey);
-        return null;
-      }
+        // Snapshot the current entry metadata so we can detect superseding
+        // writes and preserve Worker decision state across the refresh.
+        EntrySnapshot snap = snapshotEntry(caffeineCache.getIfPresent(cacheKey));
+        final long refreshStartDataVersion = snap.dataVersion();
+        final long refreshStartDecisionVersion = snap.decisionVersion();
+        final String refreshStartDecisionNodeId = snap.decisionNodeId();
+        final long refreshStartDecisionEpoch = snap.decisionEpoch();
+        final KeyState refreshStartKeyState = snap.keyState();
 
-      // When the refresh completes (success, failure or timeout), update the
-      // cache entry if the value is still applicable, and always release the
-      // resources.
-      task.whenComplete((value, error) -> {
+        // Build the async refresh task with timeout protection.
+        CompletableFuture<?> task;
         try {
-          if (error != null) {
-            if (error instanceof TimeoutException) {
-              log.warn("Background soft refresh timed out after {}s: {}", refreshTimeoutSeconds, cacheKey);
-            } else {
-              log.warn("Background soft refresh failed: {}", cacheKey, error);
-            }
-            return;
-          }
-          if (value != null) {
-            caffeineCache
-              .asMap()
-              .compute(cacheKey, (key, existingEntry) ->
-                Optional.ofNullable(existingEntry)
-                  .filter(CacheEntry.class::isInstance)
-                  .map(CacheEntry.class::cast)
-                  .map(entry -> {
-                    // Version guard: if a newer write has
-                    // arrived while we were refreshing,
-                    // discard the stale refresh result.
-                    if (entry.getDataVersion() > refreshStartDataVersion) {
-                      log.debug("Async refresh discarded: newer version exists: {}", cacheKey);
-                      return entry;
-                    }
-                    return applySoftTtl(entry.toBuilder().value(value).build(), softTtlMs);
-                  })
-                  .orElseGet(() ->
-                    createBuilder(
-                      value,
-                      VERSION_DEFAULT,
-                      false,
-                      VERSION_DEFAULT,
-                      0L,
-                      softTtlMs,
-                      Long.MAX_VALUE,
-                      computeSoftExpireAt(softTtlMs),
-                      0L,
-                      0L,
-                      KeyState.NORMAL
-                    )
-                  )
-              );
-          }
-        } finally {
-          // Always release the limiter permit and remove the in-flight
-          // marker so that a future refresh can be scheduled.
+          task = CompletableFuture.supplyAsync(reader, executor).orTimeout(refreshTimeoutSeconds, TimeUnit.SECONDS);
+        } catch (RejectedExecutionException e) {
+          // Executor saturated – release the limiter permit and leave no
+          // pending marker so the next read can retry immediately.
           refreshLimiter.release();
-          pendingRefreshes.remove(cacheKey);
+          log.warn("Background refresh rejected by executor (saturated), key={}", cacheKey);
+          return null;
         }
-      });
 
-      // Return the new task; it will be stored in the map and visible to
-      // any concurrent caller for this key.
-      return task;
+        // When the refresh completes (success, failure or timeout), update the
+        // cache entry if the value is still applicable, and always release the
+        // resources.
+        task.whenComplete((value, error) -> {
+          try {
+            if (error != null) {
+              if (error instanceof TimeoutException) {
+                log.warn("Background soft refresh timed out after {}s: {}", refreshTimeoutSeconds, cacheKey);
+              } else {
+                log.warn("Background soft refresh failed: {}", cacheKey, error);
+              }
+              return;
+            }
+            if (value != null) {
+              caffeineCache
+                .asMap()
+                .compute(cacheKey, (key, existingEntry) ->
+                  Optional.ofNullable(existingEntry)
+                    .filter(CacheEntry.class::isInstance)
+                    .map(CacheEntry.class::cast)
+                    .map(entry -> {
+                      // Version guard: if a newer write has
+                      // arrived while we were refreshing,
+                      // discard the stale refresh result.
+                      if (entry.getDataVersion() > refreshStartDataVersion) {
+                        log.debug("Async refresh discarded: newer version exists: {}", cacheKey);
+                        return entry;
+                      }
+                      return applySoftTtl(entry.toBuilder().value(value).build(), softTtlMs);
+                    })
+                    .orElseGet(() ->
+                      createBuilder(
+                        value,
+                        VERSION_DEFAULT,
+                        false,
+                        refreshStartDecisionVersion,
+                        refreshStartDecisionNodeId,
+                        refreshStartDecisionEpoch,
+                        0L,
+                        softTtlMs,
+                        Long.MAX_VALUE,
+                        computeSoftExpireAt(softTtlMs),
+                        0L,
+                        0L,
+                        refreshStartKeyState
+                      )
+                    )
+                );
+            }
+          } finally {
+            // Always release the limiter permit and remove the in-flight
+            // marker so that a future refresh can be scheduled.
+            refreshLimiter.release();
+            pendingRefreshes.remove(cacheKey);
+          }
+        });
+
+        // Return the new task; it will be stored in the map and visible to
+        // any concurrent caller for this key.
+        return task;
+      } catch (Throwable t) {
+        // Unexpected failure before task creation (getIfPresent NPE, supplyAsync Error,
+        // etc.) — release the semaphore so the refresh limiter does not permanently
+        // lose a slot. The compute() will not store any entry, so the next read can retry.
+        refreshLimiter.release();
+        throw t;
+      }
     });
   }
 

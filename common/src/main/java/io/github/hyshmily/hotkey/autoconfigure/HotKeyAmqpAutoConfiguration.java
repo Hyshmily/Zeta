@@ -493,30 +493,6 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
-     * Create the {@link ClusterHealthView} for tracking Worker cluster health.
-     *
-     * @param ringManager the consistent-hash ring manager
-     * @param properties  the HotKey configuration properties
-     * @return a new {@link ClusterHealthView} instance
-     */
-    @Bean
-    @ConditionalOnMissingBean
-    public ClusterHealthView clusterHealthView(RingManager ringManager, HotKeyProperties properties) {
-      ClusterHealthView view = new ClusterHealthView(
-        properties.getExpectedWorkerCount(),
-        properties.getHeartbeat().getTimeoutMs(),
-        properties.getHeartbeat().getDegradeAfterFailures()
-      );
-      view.setMinAliveWorkers(properties.getHeartbeat().getMinAliveWorkers());
-      ringManager.setOnRingReconciled(aliveCount -> {
-        // knownWorkerCount is managed by the user via
-        // hotkey.local.expected-worker-count. When <=0 (dynamic mode),
-        // isClusterHealthy() uses "any alive" logic so no adjustment needed.
-      });
-      return view;
-    }
-
-    /**
      * Create the SRE adaptive rate limiter for WorkerListener HOT-path throttling.
      * <p>
      * Disabled when {@code hotkey.worker-listener.sre.enabled=false}.

@@ -101,6 +101,20 @@ public final class HotKeyCacheContext {
   }
 
   /**
+   * Returns the current thread's context values, or {@code null} if no
+   * overrides are active.
+   * <p>
+   * Prefer this single call over accessing individual getters when multiple
+   * fields are needed — it avoids repeated {@link ThreadLocal} lookups.
+   *
+   * @return the current {@link ContextValues}, or {@code null} for defaults
+   */
+  @Nullable
+  public ContextValues getValues() {
+    return HOLDER.get();
+  }
+
+  /**
    * Returns the hard TTL override (in milliseconds) active for the current
    * thread's cache operation.
    * <p>
@@ -110,7 +124,7 @@ public final class HotKeyCacheContext {
    * @return the hard TTL override in milliseconds, or {@code 0} for default
    */
   public long getHardTtlMs() {
-    ContextValues v = HOLDER.get();
+    ContextValues v = getValues();
     return v != null ? v.hardTtlMs() : 0L;
   }
 
@@ -124,7 +138,7 @@ public final class HotKeyCacheContext {
    * @return the soft TTL override in milliseconds, or {@code 0} for default
    */
   public long getSoftTtlMs() {
-    ContextValues v = HOLDER.get();
+    ContextValues v = getValues();
     return v != null ? v.softTtlMs() : 0L;
   }
 
@@ -139,7 +153,7 @@ public final class HotKeyCacheContext {
    * @return {@code true} if null caching is enabled for this thread
    */
   public boolean isAllowNull() {
-    ContextValues v = HOLDER.get();
+    ContextValues v = getValues();
     return v != null && v.allowNull();
   }
 
@@ -154,7 +168,7 @@ public final class HotKeyCacheContext {
    * @return {@code true} if broadcast is suppressed for this thread
    */
   public boolean isSkipBroadcast() {
-    ContextValues v = HOLDER.get();
+    ContextValues v = getValues();
     return v != null && v.skipBroadcast();
   }
 
@@ -169,7 +183,7 @@ public final class HotKeyCacheContext {
    */
   @Nullable
   public ContextValues snapshot() {
-    return HOLDER.get();
+    return getValues();
   }
 
   /**

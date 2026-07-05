@@ -15,9 +15,19 @@
  */
 package io.github.hyshmily.hotkey.annotation;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.*;
+
 import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.*;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.junit.jupiter.api.AfterEach;
@@ -27,14 +37,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.CachePut;
 import org.springframework.cache.annotation.Cacheable;
-
-import java.lang.reflect.Method;
-import java.util.Optional;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
 
 @DisplayName("HotKeyCacheExtensionAspect tests")
 class HotKeyCacheExtensionAspectTest {
@@ -66,6 +68,7 @@ class HotKeyCacheExtensionAspectTest {
   }
 
   static class TestInterfaceImpl implements TestInterface {
+
     @Override
     public String find(String id) {
       return "impl-" + id;
@@ -73,6 +76,7 @@ class HotKeyCacheExtensionAspectTest {
   }
 
   static class TestService {
+
     @Cacheable(cacheNames = "test", key = "#p0")
     public String find(String id) {
       return "result-" + id;
@@ -116,9 +120,8 @@ class HotKeyCacheExtensionAspectTest {
       return "fallback-force-true-" + id;
     }
 
-  @Cacheable(cacheNames = "test", key = "#p0")
-  @HotKeyCacheTTL(hardTtlMs = 5000)
-
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @HotKeyCacheTTL(hardTtlMs = 5000)
     public String findWithTtl(String id) {
       return "result-" + id;
     }
@@ -195,7 +198,13 @@ class HotKeyCacheExtensionAspectTest {
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @HotKeyPreload(keys = {"preload-key-a", "preload-key-b"})
+    @Intercept(trigger = InterceptTrigger.CONCURRENT_THREADS, concurrentThreads = 2)
+    public String findConcurrentThreadsIntercepted(String id) {
+      return "result-" + id;
+    }
+
+    @Cacheable(cacheNames = "test", key = "#p0")
+    @HotKeyPreload(keys = { "preload-key-a", "preload-key-b" })
     public String findWithStaticPreload(String id) {
       return "result-" + id;
     }
@@ -208,6 +217,7 @@ class HotKeyCacheExtensionAspectTest {
   }
 
   static class NoArgService {
+
     @Cacheable(cacheNames = "test")
     public String find() {
       return "no-arg";
@@ -215,6 +225,7 @@ class HotKeyCacheExtensionAspectTest {
   }
 
   static class MultiArgService {
+
     @Cacheable(cacheNames = "test")
     public String find(String a, String b) {
       return a + b;
@@ -222,6 +233,7 @@ class HotKeyCacheExtensionAspectTest {
   }
 
   static class ArrayArgService {
+
     @Cacheable(cacheNames = "test")
     public String find(String[] ids) {
       return "array";
@@ -229,6 +241,7 @@ class HotKeyCacheExtensionAspectTest {
   }
 
   static class SpelFallbackService {
+
     @Cacheable(cacheNames = "test", key = "#p0")
     @Intercept
     @Fallback("'spel-fallback-value'")
@@ -238,12 +251,14 @@ class HotKeyCacheExtensionAspectTest {
   }
 
   static class BaseFallbackService {
+
     public String findFallback(String id) {
       return "base-fallback-" + id;
     }
   }
 
   static class DerivedFallbackService extends BaseFallbackService {
+
     @Cacheable(cacheNames = "test", key = "#p0")
     @Fallback
     public String find(String id) {
@@ -264,7 +279,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(hotKey.isLocalHotKey("test::myId")).thenReturn(true);
 
@@ -285,7 +300,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(hotKey.isLocalHotKey("test::myId")).thenReturn(true);
     when(hotKey.peek("test::myId")).thenReturn(Optional.of("cached-value"));
@@ -307,7 +322,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     when(hotKey.isLocalHotKey("test::myId")).thenReturn(false);
@@ -331,7 +346,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(hotKey.isLocalHotKey("test::myId")).thenReturn(false);
     when(hotKey.peek("test::myId")).thenReturn(Optional.of("cached-value"));
@@ -353,7 +368,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(hotKey.isLocalHotKey("test::myId")).thenReturn(false);
     when(hotKey.peek("test::myId")).thenReturn(Optional.empty());
@@ -375,7 +390,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(hotKey.isLocalHotKey("test::myId")).thenReturn(false);
 
@@ -398,7 +413,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -421,7 +436,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -442,7 +457,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("from-method"));
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -463,7 +478,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("from-method"));
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -480,8 +495,8 @@ class HotKeyCacheExtensionAspectTest {
   void resolveCacheName_usesCacheNames() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
-    when(cacheable.cacheNames()).thenReturn(new String[] {"fromCacheNames"});
-    when(cacheable.value()).thenReturn(new String[] {"fromValue"});
+    when(cacheable.cacheNames()).thenReturn(new String[] { "fromCacheNames" });
+    when(cacheable.value()).thenReturn(new String[] { "fromValue" });
     when(cacheable.key()).thenReturn("");
 
     MethodSignature signature = mock(MethodSignature.class);
@@ -490,7 +505,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("ok");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -502,7 +517,7 @@ class HotKeyCacheExtensionAspectTest {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
     when(cacheable.cacheNames()).thenReturn(new String[0]);
-    when(cacheable.value()).thenReturn(new String[] {"fromValue"});
+    when(cacheable.value()).thenReturn(new String[] { "fromValue" });
     when(cacheable.key()).thenReturn("");
 
     MethodSignature signature = mock(MethodSignature.class);
@@ -511,7 +526,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("ok");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -532,7 +547,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(method);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("ok");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -546,7 +561,7 @@ class HotKeyCacheExtensionAspectTest {
     HotKeyCacheContext.get().restore(null);
 
     Cacheable cacheable = mock(Cacheable.class);
-    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.cacheNames()).thenReturn(new String[] { "test" });
     when(cacheable.value()).thenReturn(new String[0]);
     when(cacheable.key()).thenReturn("");
 
@@ -556,7 +571,7 @@ class HotKeyCacheExtensionAspectTest {
     when(signature.getMethod()).thenReturn(TestService.class.getMethod("find", String.class));
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -574,7 +589,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"spelKey"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "spelKey" });
     when(pjp.proceed()).thenReturn("result-spelKey");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -587,7 +602,7 @@ class HotKeyCacheExtensionAspectTest {
   void resolveMethod_unwrapsInterfaceMethod() throws Throwable {
     Method interfaceMethod = TestInterface.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
-    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.cacheNames()).thenReturn(new String[] { "test" });
     when(cacheable.value()).thenReturn(new String[0]);
     when(cacheable.key()).thenReturn("");
 
@@ -597,7 +612,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestInterfaceImpl());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("impl-myId");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -620,7 +635,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
       assertThat(HotKeyCacheContext.get().getHardTtlMs()).isEqualTo(5000L);
       return "result-myId";
@@ -647,7 +662,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
       assertThat(HotKeyCacheContext.get().isSkipBroadcast()).isTrue();
       return "result-myId";
@@ -664,7 +679,6 @@ class HotKeyCacheExtensionAspectTest {
     HotKeyCacheContext.get().restore(null);
 
     Method method = TestService.class.getMethod("putBroadcastOff", String.class);
-    CachePut cachePut = method.getAnnotation(CachePut.class);
     MethodSignature signature = mock(MethodSignature.class);
 
     when(signature.getMethod()).thenReturn(method);
@@ -672,13 +686,13 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
       assertThat(HotKeyCacheContext.get().isSkipBroadcast()).isTrue();
       return "result-myId";
     });
 
-    aspect.aroundCachePut(pjp, cachePut);
+    aspect.aroundCachePutOrEvict(pjp);
   }
 
   @Test
@@ -687,7 +701,6 @@ class HotKeyCacheExtensionAspectTest {
     HotKeyCacheContext.get().restore(null);
 
     Method method = TestService.class.getMethod("evictBroadcastOff", String.class);
-    CacheEvict cacheEvict = method.getAnnotation(CacheEvict.class);
     MethodSignature signature = mock(MethodSignature.class);
 
     when(signature.getMethod()).thenReturn(method);
@@ -695,13 +708,13 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
       assertThat(HotKeyCacheContext.get().isSkipBroadcast()).isTrue();
       return null;
     });
 
-    aspect.aroundCacheEvict(pjp, cacheEvict);
+    aspect.aroundCachePutOrEvict(pjp);
   }
 
   @Test
@@ -710,7 +723,6 @@ class HotKeyCacheExtensionAspectTest {
     HotKeyCacheContext.get().restore(null);
 
     Method method = TestService.class.getMethod("putBroadcastDefault", String.class);
-    CachePut cachePut = method.getAnnotation(CachePut.class);
     MethodSignature signature = mock(MethodSignature.class);
 
     when(signature.getMethod()).thenReturn(method);
@@ -718,13 +730,13 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
       assertThat(HotKeyCacheContext.get().isSkipBroadcast()).isFalse();
       return "result-myId";
     });
 
-    aspect.aroundCachePut(pjp, cachePut);
+    aspect.aroundCachePutOrEvict(pjp);
   }
 
   // ── NullCaching tests ──
@@ -743,7 +755,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
       assertThat(HotKeyCacheContext.get().isAllowNull()).isTrue();
       return "result-myId";
@@ -761,7 +773,7 @@ class HotKeyCacheExtensionAspectTest {
   void resolveKey_emptyExpressionWithNoArgs() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
-    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.cacheNames()).thenReturn(new String[] { "test" });
     when(cacheable.value()).thenReturn(new String[0]);
     when(cacheable.key()).thenReturn("");
 
@@ -783,7 +795,7 @@ class HotKeyCacheExtensionAspectTest {
   void resolveKey_emptyExpressionWithMultipleArgs() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
-    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.cacheNames()).thenReturn(new String[] { "test" });
     when(cacheable.value()).thenReturn(new String[0]);
     when(cacheable.key()).thenReturn("");
 
@@ -793,7 +805,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"a", "b"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "a", "b" });
     when(pjp.proceed()).thenReturn("ok");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -805,7 +817,7 @@ class HotKeyCacheExtensionAspectTest {
   void resolveKey_emptyExpressionWithSingleNullArg() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
-    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.cacheNames()).thenReturn(new String[] { "test" });
     when(cacheable.value()).thenReturn(new String[0]);
     when(cacheable.key()).thenReturn("");
 
@@ -815,7 +827,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {null});
+    when(pjp.getArgs()).thenReturn(new Object[] { null });
     when(pjp.proceed()).thenReturn("ok");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -827,7 +839,7 @@ class HotKeyCacheExtensionAspectTest {
   void resolveKey_emptyExpressionWithArrayArg() throws Throwable {
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
-    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.cacheNames()).thenReturn(new String[] { "test" });
     when(cacheable.value()).thenReturn(new String[0]);
     when(cacheable.key()).thenReturn("");
 
@@ -837,7 +849,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {new String[] {"x"}});
+    when(pjp.getArgs()).thenReturn(new Object[] { new String[] { "x" } });
     when(pjp.proceed()).thenReturn("ok");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -851,7 +863,7 @@ class HotKeyCacheExtensionAspectTest {
   void resolveMethod_keepsInterfaceMethodWhenNoSuchMethod() throws Throwable {
     Method interfaceMethod = TestInterface.class.getMethod("find", String.class);
     Cacheable cacheable = mock(Cacheable.class);
-    when(cacheable.cacheNames()).thenReturn(new String[] {"test"});
+    when(cacheable.cacheNames()).thenReturn(new String[] { "test" });
     when(cacheable.value()).thenReturn(new String[0]);
     when(cacheable.key()).thenReturn("");
 
@@ -861,7 +873,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new Object());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     aspect.aroundCacheable(pjp, cacheable);
@@ -882,7 +894,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new SpelFallbackService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
     when(hotKey.isLocalHotKey("test::myId")).thenReturn(true);
 
@@ -906,7 +918,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("error"));
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -930,7 +942,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new DerivedFallbackService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("error"));
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -954,7 +966,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("original-error"));
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -978,7 +990,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -1000,7 +1012,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -1028,7 +1040,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -1041,6 +1053,58 @@ class HotKeyCacheExtensionAspectTest {
     Object result = aspect.aroundCacheable(pjp, cacheable);
 
     assertThat(result).isEqualTo("qps-fallback");
+  }
+
+  // ── @Intercept(CONCURRENT_THREADS) tests ──
+
+  @Test
+  @DisplayName("@Intercept(CONCURRENT_THREADS=2) allows 2 through, intercepts 3rd")
+  void concurrentThreads_guardsCorrectly() throws Throwable {
+    Method method = TestService.class.getMethod("findConcurrentThreadsIntercepted", String.class);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
+    when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
+    when(hotKey.peek(anyString())).thenReturn(Optional.of("cached-value"));
+
+    CountDownLatch enterLatch = new CountDownLatch(2);
+    CountDownLatch blockLatch = new CountDownLatch(1);
+
+    when(pjp.proceed()).thenAnswer(invocation -> {
+      enterLatch.countDown();
+      blockLatch.await(5, TimeUnit.SECONDS);
+      return "result-myId";
+    });
+
+    ExecutorService exec = Executors.newFixedThreadPool(3);
+    List<Future<Object>> futures = new ArrayList<>();
+    for (int i = 0; i < 3; i++) {
+      futures.add(
+        exec.submit(() -> {
+          try {
+            return aspect.aroundCacheable(pjp, cacheable);
+          } catch (Throwable e) {
+            throw new RuntimeException(e);
+          }
+        })
+      );
+    }
+
+    assertThat(enterLatch.await(5, TimeUnit.SECONDS)).isTrue();
+
+    // Small window for the 3rd thread to hit the atomic guard and be intercepted
+    Thread.sleep(100);
+
+    blockLatch.countDown();
+    exec.shutdown();
+    exec.awaitTermination(5, TimeUnit.SECONDS);
+
+    verify(pjp, times(2)).proceed();
   }
 
   // ── @HotKeyPreload tests ──
@@ -1057,7 +1121,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -1080,7 +1144,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myDynamicKey"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myDynamicKey" });
     when(pjp.proceed()).thenReturn("result-myDynamicKey");
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);
@@ -1102,7 +1166,7 @@ class HotKeyCacheExtensionAspectTest {
     ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
-    when(pjp.getArgs()).thenReturn(new Object[] {"myId"});
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
     when(hotKey.isLocalHotKey(anyString())).thenReturn(false);

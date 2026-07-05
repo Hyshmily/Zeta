@@ -24,13 +24,11 @@ import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.concurrent.Executor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -206,56 +204,5 @@ class HotKeyAutoConfigurationTest {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(RuleMatcher.class);
     });
-  }
-
-  /**
-   * Verifies that the HotKey fallback bean is created when HotKeyCache exists.
-   */
-  @Test
-  void hotKeyFallback_shouldIncludeWorkerTopKWhenAvailable() {
-    HotKeyAutoConfiguration config = new HotKeyAutoConfiguration();
-    HotKeyCache cache = mock(HotKeyCache.class);
-    HotKeyDetector detector = mock(HotKeyDetector.class);
-    TopK workerTopK = mock(TopK.class);
-    ObjectProvider<TopK> provider = new ObjectProvider<>() {
-      @Override
-      public TopK getIfAvailable() {
-        return workerTopK;
-      }
-
-      @Override
-      public TopK getObject() {
-        return workerTopK;
-      }
-    };
-    HotKey hotKey = config.hotKey(cache, detector, provider);
-    assertThat(hotKey).isNotNull();
-    assertThat(hotKey.isApp()).isTrue();
-    assertThat(hotKey.isWorker()).isTrue();
-  }
-
-  /**
-   * Verifies that the HotKey fallback bean handles absent worker TopK gracefully.
-   */
-  @Test
-  void hotKeyFallback_shouldHandleAbsentWorkerTopK() {
-    HotKeyAutoConfiguration config = new HotKeyAutoConfiguration();
-    HotKeyCache cache = mock(HotKeyCache.class);
-    HotKeyDetector detector = mock(HotKeyDetector.class);
-    ObjectProvider<TopK> provider = new ObjectProvider<>() {
-      @Override
-      public TopK getIfAvailable() {
-        return null;
-      }
-
-      @Override
-      public TopK getObject() {
-        return null;
-      }
-    };
-    HotKey hotKey = config.hotKey(cache, detector, provider);
-    assertThat(hotKey).isNotNull();
-    assertThat(hotKey.isApp()).isTrue();
-    assertThat(hotKey.isWorker()).isFalse();
   }
 }

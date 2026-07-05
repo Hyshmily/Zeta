@@ -550,20 +550,6 @@ class HotKeyAmqpAutoConfigurationTest {
   }
 
   @Test
-  void clusterHealthViewIsCreatedWithCorrectProperties() {
-    RingManager ringManager = mock(RingManager.class);
-    HotKeyProperties properties = new HotKeyProperties();
-    properties.getHeartbeat().setTimeoutMs(5000);
-    properties.getHeartbeat().setDegradeAfterFailures(3);
-
-    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
-      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    ClusterHealthView healthView = config.clusterHealthView(ringManager, properties);
-
-    assertThat(healthView).isNotNull();
-  }
-
-  @Test
   void heartbeatContainerIsCreated() {
     ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
     ClusterHealthView healthView = mock(ClusterHealthView.class);
@@ -676,22 +662,6 @@ class HotKeyAmqpAutoConfigurationTest {
   }
 
   @Test
-  void clusterHealthView_shouldUseExpectedWorkerCountFromProperties() {
-    RingManager ringManager = mock(RingManager.class);
-    HotKeyProperties properties = new HotKeyProperties();
-    properties.setExpectedWorkerCount(5);
-    properties.getHeartbeat().setTimeoutMs(4000);
-    properties.getHeartbeat().setDegradeAfterFailures(2);
-
-    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
-      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    ClusterHealthView healthView = config.clusterHealthView(ringManager, properties);
-
-    assertThat(healthView).isNotNull();
-    assertThat(healthView.getKnownWorkerCount()).isEqualTo(5);
-  }
-
-  @Test
   @SuppressWarnings("unchecked")
   void hotKeyReporter_withHealthViewProvider_shouldCreateClusterHealthViewWithProperties() {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
@@ -716,24 +686,5 @@ class HotKeyAmqpAutoConfigurationTest {
     );
 
     assertThat(reporter).isNotNull();
-  }
-
-  @Test
-  void clusterHealthView_withZeroExpectedWorkerCount_shouldEnableDynamicUpdate() {
-    RingManager ringManager = mock(RingManager.class);
-    HotKeyProperties properties = new HotKeyProperties();
-    properties.setExpectedWorkerCount(0);
-    properties.getHeartbeat().setTimeoutMs(3000);
-    properties.getHeartbeat().setDegradeAfterFailures(2);
-
-    HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration config =
-      new HotKeyAmqpAutoConfiguration.WorkerListenerConfiguration();
-    ClusterHealthView healthView = config.clusterHealthView(ringManager, properties);
-
-    assertThat(healthView).isNotNull();
-    assertThat(healthView.getKnownWorkerCount()).isEqualTo(0);
-
-    // knownWorkerCount stays at 0 in dynamic mode — isClusterHealthy() uses "any alive" logic
-    assertThat(healthView.getKnownWorkerCount()).isEqualTo(0);
   }
 }

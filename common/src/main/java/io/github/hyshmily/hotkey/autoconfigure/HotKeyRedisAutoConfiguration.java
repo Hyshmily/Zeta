@@ -16,7 +16,6 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.CacheExpireManager;
@@ -153,26 +152,5 @@ public class HotKeyRedisAutoConfiguration {
         )
       )
     );
-  }
-
-  /**
-   * Fallback {@link HotKey} facade bean for the Redis-enhanced path.
-   *
-   * <p>Only active when a {@link HotKeyCache} bean exists but no {@link HotKey}
-   * has been defined yet. This covers the case where the primary
-   * {@link HotKeyFacadeAutoConfiguration} is excluded and the {@link HotKeyCache}
-   * originates from this configuration. The returned facade provides the full
-   * public API including read/write/invalidate operations, TopK introspection,
-   * and rule management.
-   *
-   * @param hotKeyCache    the Redis-backed HotKeyCache instance (never {@code null})
-   * @param hotKeyDetector the app-side TopK detector (never {@code null})
-   * @return a new HotKey facade instance
-   */
-  @Bean
-  @ConditionalOnBean(HotKeyCache.class)
-  @ConditionalOnMissingBean
-  public HotKey hotKey(HotKeyCache hotKeyCache, @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector) {
-    return new HotKey(hotKeyCache, hotKeyDetector, null);
   }
 }

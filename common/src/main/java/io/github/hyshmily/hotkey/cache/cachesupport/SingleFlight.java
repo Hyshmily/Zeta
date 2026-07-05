@@ -129,7 +129,7 @@ public class SingleFlight {
               Object val = reader.get();
               circuitBreaker.onSuccess();
               return val;
-            } catch (Exception e) {
+            } catch (Exception | Error e) {
               circuitBreaker.onFailure();
               throw e;
             }

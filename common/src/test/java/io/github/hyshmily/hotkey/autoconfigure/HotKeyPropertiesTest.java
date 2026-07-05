@@ -244,7 +244,6 @@ class HotKeyPropertiesTest {
   @Test
   void springCache_shouldHaveDefaultValues() {
     HotKeyProperties p = props();
-    assertThat(p.getSpringCache().isEnabled()).isFalse();
     assertThat(p.getSpringCache().getKeySeparator()).isEqualTo("::");
   }
 }
