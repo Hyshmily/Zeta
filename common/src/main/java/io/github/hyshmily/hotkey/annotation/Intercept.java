@@ -34,6 +34,8 @@ import java.lang.annotation.Target;
  *   <li>{@link InterceptTrigger#FORCE} — always intercepts</li>
  *   <li>{@link InterceptTrigger#QPS} — intercepts when the per-key request rate
  *       exceeds {@link #QPS()}</li>
+ *   <li>{@link InterceptTrigger#CONCURRENT_THREADS} — intercepts when the per-key
+ *       concurrent thread count exceeds {@link #concurrentThreads()}</li>
  * </ul>
  *
  * <p>When a method is intercepted, the fallback resolution order is:
@@ -52,7 +54,6 @@ import java.lang.annotation.Target;
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
 public @interface Intercept {
-
   /**
    * Trigger mode that determines when the method call is intercepted.
    * Defaults to {@link InterceptTrigger#IS_LOCAL_HOT}.
@@ -66,6 +67,14 @@ public @interface Intercept {
    * the QPS check is disabled (equivalent to no-op).
    */
   int QPS() default 0;
+
+  /**
+   * Concurrent thread threshold for {@link InterceptTrigger#CONCURRENT_THREADS} mode.
+   * When the number of in-flight threads for the given cache key exceeds this
+   * value, subsequent calls are intercepted. A value of {@code 0} means
+   * the check is disabled.
+   */
+  int concurrentThreads() default 0;
 
   /**
    * SpEL expression evaluated against method parameters to produce a

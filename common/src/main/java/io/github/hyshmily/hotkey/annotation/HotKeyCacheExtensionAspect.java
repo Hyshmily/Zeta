@@ -27,6 +27,7 @@ import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -117,6 +118,12 @@ public class HotKeyCacheExtensionAspect {
   private final Cache<String, RollingWindow> qpsWindows = Caffeine.newBuilder().maximumSize(100_000).build();
 
   /**
+   * Per-key concurrent thread counters for {@link InterceptTrigger#CONCURRENT_THREADS} interception.
+   * Incremented before method execution, decremented in {@code finally}.
+   */
+  private final ConcurrentHashMap<String, LongAdder> concurrentCounters = new ConcurrentHashMap<>();
+
+  /**
    * Creates a new {@code HotKeyCacheExtensionAspect}.
    *
    * @param hotKey     the HotKey facade
@@ -160,6 +167,7 @@ public class HotKeyCacheExtensionAspect {
     }
 
     // @Intercept: skip method when key is a local hot key if necessary
+    boolean needsDecrement = false;
     if (intercept != null) {
       String interceptFallback = intercept.fallback();
 
@@ -183,6 +191,17 @@ public class HotKeyCacheExtensionAspect {
             }
           }
         }
+        case CONCURRENT_THREADS -> {
+          int maxThreads = intercept.concurrentThreads();
+          if (maxThreads > 0) {
+            LongAdder counter = concurrentCounters.computeIfAbsent(prefixedKey, k -> new LongAdder());
+            if (counter.sum() >= maxThreads) {
+              return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey);
+            }
+            counter.increment();
+            needsDecrement = true;
+          }
+        }
       }
     }
 
@@ -203,6 +222,12 @@ public class HotKeyCacheExtensionAspect {
       }
       throw e;
     } finally {
+      if (needsDecrement) {
+        LongAdder counter = concurrentCounters.get(prefixedKey);
+        if (counter != null) {
+          counter.decrement();
+        }
+      }
       HotKeyCacheContext.get().restore(prev);
     }
   }

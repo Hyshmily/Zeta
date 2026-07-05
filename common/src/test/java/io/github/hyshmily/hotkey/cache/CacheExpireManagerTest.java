@@ -854,4 +854,343 @@ class CacheExpireManagerTest {
       ((java.util.concurrent.ExecutorService) asyncExec).shutdownNow();
     }
   }
+
+  // ── applyHardTtl / applySoftTtl / applyNormalTtl ──────────────
+
+  /**
+   * Verifies that applyHardTtl updates the hard TTL and expire-at while
+   * preserving the soft TTL and all version/state fields.
+   */
+  @Test
+  void applyHardTtl_shouldUpdateHardTtlAndPreserveSoftTtl() {
+    long now = System.currentTimeMillis();
+    CacheEntry original = CacheEntry.builder()
+      .value("v")
+      .dataVersion(10)
+      .isVersionDegraded(true)
+      .decisionVersion(5)
+      .hardTtlMs(60_000)
+      .hardExpireAtMs(now + 60_000)
+      .softTtlMs(30_000)
+      .softExpireAtMs(now + 30_000)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
+      .build();
+
+    CacheEntry updated = expireManager.applyHardTtl(original, 120_000);
+
+    assertThat(updated.getHardTtlMs()).isEqualTo(120_000);
+    assertThat(updated.getHardExpireAtMs()).isGreaterThan(original.getHardExpireAtMs());
+    assertThat(updated.getSoftTtlMs()).isEqualTo(30_000);
+    assertThat(updated.getSoftExpireAtMs()).isEqualTo(original.getSoftExpireAtMs());
+    assertThat(updated.getDataVersion()).isEqualTo(10);
+    assertThat(updated.isVersionDegraded()).isTrue();
+    assertThat(updated.getDecisionVersion()).isEqualTo(5);
+    assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * Verifies that applySoftTtl updates the soft TTL and expire-at while
+   * preserving the hard TTL and all version/state fields.
+   */
+  @Test
+  void applySoftTtl_shouldUpdateSoftTtlAndPreserveHardTtl() {
+    long now = System.currentTimeMillis();
+    CacheEntry original = CacheEntry.builder()
+      .value("v")
+      .dataVersion(10)
+      .isVersionDegraded(true)
+      .decisionVersion(5)
+      .hardTtlMs(60_000)
+      .hardExpireAtMs(now + 60_000)
+      .softTtlMs(30_000)
+      .softExpireAtMs(now + 30_000)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
+      .build();
+
+    CacheEntry updated = expireManager.applySoftTtl(original, 120_000);
+
+    assertThat(updated.getSoftTtlMs()).isEqualTo(120_000);
+    assertThat(updated.getSoftExpireAtMs()).isGreaterThan(original.getSoftExpireAtMs());
+    assertThat(updated.getHardTtlMs()).isEqualTo(60_000);
+    assertThat(updated.getHardExpireAtMs()).isEqualTo(original.getHardExpireAtMs());
+    assertThat(updated.getDataVersion()).isEqualTo(10);
+    assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * Verifies that applyNormalTtl updates only the normal TTL fields
+   * (normalHardTtlMs, normalSoftTtlMs), leaving all other fields untouched.
+   */
+  @Test
+  void applyNormalTtl_shouldUpdateNormalTtlFields() {
+    CacheEntry original = CacheEntry.builder()
+      .value("v")
+      .dataVersion(10)
+      .isVersionDegraded(false)
+      .decisionVersion(5)
+      .hardTtlMs(60_000)
+      .hardExpireAtMs(System.currentTimeMillis() + 60_000)
+      .softTtlMs(30_000)
+      .softExpireAtMs(System.currentTimeMillis() + 30_000)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
+      .build();
+
+    CacheEntry updated = expireManager.applyNormalTtl(original, 600_000, 60_000);
+
+    assertThat(updated.getNormalHardTtlMs()).isEqualTo(600_000);
+    assertThat(updated.getNormalSoftTtlMs()).isEqualTo(60_000);
+    assertThat(updated.getHardTtlMs()).isEqualTo(60_000);
+    assertThat(updated.getSoftTtlMs()).isEqualTo(30_000);
+    assertThat(updated.getDataVersion()).isEqualTo(10);
+    assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  // ── createBuilder overloads ────────────────────────────────────
+
+  /**
+   * Verifies that createBuilder (overload with decision metadata and
+   * pre-computed expire timestamps) sets all fields correctly.
+   */
+  @Test
+  void createBuilder_withDecisionMetadataAndExpireTimestamps_shouldSetAllFields() {
+    long now = System.currentTimeMillis();
+    CacheEntry entry = expireManager.createBuilder(
+      "value",
+      42,
+      true,
+      7,
+      "worker-1",
+      3,
+      60_000,
+      30_000,
+      now + 60_000,
+      now + 30_000,
+      300_000,
+      30_000,
+      KeyState.HOT
+    );
+
+    assertThat(entry.getValue()).isEqualTo("value");
+    assertThat(entry.getDataVersion()).isEqualTo(42);
+    assertThat(entry.isVersionDegraded()).isTrue();
+    assertThat(entry.getDecisionVersion()).isEqualTo(7);
+    assertThat(entry.getDecisionNodeId()).isEqualTo("worker-1");
+    assertThat(entry.getDecisionEpoch()).isEqualTo(3);
+    assertThat(entry.getHardTtlMs()).isEqualTo(60_000);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(30_000);
+    assertThat(entry.getHardExpireAtMs()).isEqualTo(now + 60_000);
+    assertThat(entry.getSoftExpireAtMs()).isEqualTo(now + 30_000);
+    assertThat(entry.getNormalHardTtlMs()).isEqualTo(300_000);
+    assertThat(entry.getNormalSoftTtlMs()).isEqualTo(30_000);
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * Verifies that createBuilder (overload with decision metadata but no
+   * expire timestamps) computes expire-at via applyTtl.
+   */
+  @Test
+  void createBuilder_withDecisionMetadataAndNoExpireTimestamps_shouldComputeExpire() {
+    long before = System.currentTimeMillis();
+    CacheEntry entry = expireManager.createBuilder(
+      "value",
+      42,
+      false,
+      7,
+      "worker-1",
+      3,
+      60_000,
+      30_000,
+      300_000,
+      30_000,
+      KeyState.HOT
+    );
+
+    assertThat(entry.getValue()).isEqualTo("value");
+    assertThat(entry.getDataVersion()).isEqualTo(42);
+    assertThat(entry.getDecisionVersion()).isEqualTo(7);
+    assertThat(entry.getDecisionNodeId()).isEqualTo("worker-1");
+    assertThat(entry.getDecisionEpoch()).isEqualTo(3);
+    assertThat(entry.getHardTtlMs()).isEqualTo(60_000);
+    assertThat(entry.getHardExpireAtMs()).isGreaterThan(before);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(30_000);
+    assertThat(entry.getSoftExpireAtMs()).isGreaterThan(before);
+    assertThat(entry.getNormalHardTtlMs()).isEqualTo(300_000);
+    assertThat(entry.getNormalSoftTtlMs()).isEqualTo(30_000);
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * Verifies that createBuilder (overload without decision metadata,
+   * with pre-computed expire timestamps) sets all fields correctly.
+   */
+  @Test
+  void createBuilder_withoutDecisionMetadataWithExpireTimestamps_shouldSetAllFields() {
+    long now = System.currentTimeMillis();
+    CacheEntry entry = expireManager.createBuilder(
+      "value",
+      42,
+      false,
+      7,
+      60_000,
+      30_000,
+      now + 60_000,
+      now + 30_000,
+      300_000,
+      30_000,
+      KeyState.NORMAL
+    );
+
+    assertThat(entry.getValue()).isEqualTo("value");
+    assertThat(entry.getDataVersion()).isEqualTo(42);
+    assertThat(entry.getDecisionVersion()).isEqualTo(7);
+    assertThat(entry.getDecisionNodeId()).isNull();
+    assertThat(entry.getDecisionEpoch()).isZero();
+    assertThat(entry.getHardTtlMs()).isEqualTo(60_000);
+    assertThat(entry.getHardExpireAtMs()).isEqualTo(now + 60_000);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(30_000);
+    assertThat(entry.getNormalHardTtlMs()).isEqualTo(300_000);
+    assertThat(entry.getNormalSoftTtlMs()).isEqualTo(30_000);
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+  }
+
+  /**
+   * Verifies that createBuilder (raw fields overload, no decision meta,
+   * no expire timestamps) produces a correctly built entry with
+   * timestamps computed via applyTtl.
+   */
+  @Test
+  void createBuilder_rawFields_shouldComputeExpireAndSetFields() {
+    long before = System.currentTimeMillis();
+    CacheEntry entry = expireManager.createBuilder(
+      "value",
+      42,
+      false,
+      7,
+      60_000,
+      30_000,
+      300_000,
+      30_000,
+      KeyState.NORMAL
+    );
+
+    assertThat(entry.getValue()).isEqualTo("value");
+    assertThat(entry.getDataVersion()).isEqualTo(42);
+    assertThat(entry.getDecisionVersion()).isEqualTo(7);
+    assertThat(entry.getDecisionNodeId()).isNull();
+    assertThat(entry.getDecisionEpoch()).isZero();
+    assertThat(entry.getHardTtlMs()).isEqualTo(60_000);
+    assertThat(entry.getHardExpireAtMs()).isGreaterThan(before);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(30_000);
+    assertThat(entry.getSoftExpireAtMs()).isGreaterThan(before);
+    assertThat(entry.getNormalHardTtlMs()).isEqualTo(300_000);
+    assertThat(entry.getNormalSoftTtlMs()).isEqualTo(30_000);
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+  }
+
+  // ── extendExpiry / extendHardExpiry / extendSoftExpiry ─────────
+
+  /**
+   * Verifies that extendExpiry updates both hard and soft expire-at
+   * timestamps in the cached entry.
+   */
+  @Test
+  void extendExpiry_shouldExtendBothHardAndSoftExpiry() {
+    long closeExpire = System.currentTimeMillis() + 1_000;
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("v")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(60_000)
+        .hardExpireAtMs(closeExpire)
+        .softTtlMs(30_000)
+        .softExpireAtMs(closeExpire)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    expireManager.extendExpiry("key", 120_000, 60_000);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat(entry.getHardExpireAtMs()).isGreaterThan(closeExpire);
+    assertThat(entry.getSoftExpireAtMs()).isGreaterThan(closeExpire);
+  }
+
+  /**
+   * Verifies that extendHardExpiry updates only the hard expire-at
+   * timestamp, leaving the soft expire-at unchanged.
+   */
+  @Test
+  void extendHardExpiry_shouldOnlyExtendHardExpiry() {
+    long closeExpire = System.currentTimeMillis() + 1_000;
+    long farExpire = System.currentTimeMillis() + 60_000;
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("v")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(60_000)
+        .hardExpireAtMs(closeExpire)
+        .softTtlMs(30_000)
+        .softExpireAtMs(farExpire)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    expireManager.extendHardExpiry("key", 120_000);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat(entry.getHardExpireAtMs()).isGreaterThan(closeExpire);
+    assertThat(entry.getSoftExpireAtMs()).isEqualTo(farExpire);
+  }
+
+  /**
+   * Verifies that extendSoftExpiry updates only the soft expire-at
+   * timestamp, leaving the hard expire-at unchanged.
+   */
+  @Test
+  void extendSoftExpiry_shouldOnlyExtendSoftExpiry() {
+    long closeExpire = System.currentTimeMillis() + 1_000;
+    long farExpire = System.currentTimeMillis() + 60_000;
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("v")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(60_000)
+        .hardExpireAtMs(farExpire)
+        .softTtlMs(30_000)
+        .softExpireAtMs(closeExpire)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    expireManager.extendSoftExpiry("key", 60_000);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(entry).isNotNull();
+    assertThat(entry.getSoftExpireAtMs()).isGreaterThan(closeExpire);
+    assertThat(entry.getHardExpireAtMs()).isEqualTo(farExpire);
+  }
 }

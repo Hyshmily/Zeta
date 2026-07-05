@@ -55,6 +55,9 @@
 | `refresh(key, reader)`                                 | 本地驱逐后通过 supplier 加载并缓存；使用默认 TTL                                                                                                                            |
 | `refresh(key, reader, hardTtlMs, softTtlMs)`           | 本地驱逐后通过 supplier 加载并缓存，带显式 TTL 覆盖                                                                                                                         |
 | `refreshAll(Map)`                                      | 批量刷新——本地驱逐所有 key 后通过提供的 suppliers 加载                                                                                                                      |
+| `registerRefresh(key, supplier, hardTtlMs, softTtlMs)` | 注册定时后台刷新；按 `softTtlMs × 1.1` 间隔调度 `getWithSoftExpire`；替换同 key 已有注册                                                                                   |
+| `updateRefresh(key, supplier, hardTtlMs, softTtlMs)`   | 运行时更新刷新配置；委托给 `registerRefresh`                                                                                                                                |
+| `unregisterRefresh(key)`                               | 取消指定 key 的定时刷新                                                                                                                                                     |
 | `returnLocalHotKeys()`                                 | 应用端 Top-K 快照（key + 计数）                                                                                                                                             |
 | `returnLocalTopNHotKeys(n)`                            | 从本地探测器返回前 N 个热点 key，按频率排序                                                                                                                                 |
 | `returnLocalExpelledHotKeys()`                         | 获取应用端被挤出的热点 key 队列；由内部定时器周期性清空                                                                                                                     |

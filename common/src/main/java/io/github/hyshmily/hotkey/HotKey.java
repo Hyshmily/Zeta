@@ -29,13 +29,13 @@ import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.hotkey.sync.distributedlock.LockProvider;
+import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import java.util.*;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
+import org.springframework.beans.factory.DisposableBean;
 
 /**
  * Public facade for the HotKey library — the sole public API entry point.
@@ -61,7 +61,7 @@ import org.jspecify.annotations.Nullable;
  * {@link UnsupportedOperationException} (cache read/write) or return
  * empty / zero (TopK queries).
  */
-public class HotKey {
+public class HotKey implements DisposableBean {
 
   /**
    * Cache orchestrator that manages L1 (Caffeine), version tracking, TTL
@@ -85,6 +85,16 @@ public class HotKey {
    * (graceful degradation — {@link #tryLock} returns {@code null}).
    */
   private final LockProvider lockProvider;
+
+  /**
+   * Scheduler for timed background refresh tasks (lazily initialized).
+   */
+  private volatile ScheduledExecutorService refreshScheduler;
+
+  /**
+   * Per-key scheduled refresh futures, keyed by cache key.
+   */
+  private final ConcurrentHashMap<String, ScheduledFuture<?>> refreshFutures;
 
   /**
    * Create a HotKey facade with all three optional components.
@@ -131,6 +141,7 @@ public class HotKey {
     this.appHotKeyDetector = appHotKeyDetector;
     this.workerTopKAlgorithm = workerTopKAlgorithm;
     this.lockProvider = lockProvider;
+    this.refreshFutures = new ConcurrentHashMap<>();
   }
 
   /**
@@ -899,6 +910,107 @@ public class HotKey {
     }
   }
 
+  /**
+   * Lazy-initialize the refresh scheduler.
+   * Uses double-checked locking for thread safety.
+   */
+  private ScheduledExecutorService getScheduler() {
+    ScheduledExecutorService s = refreshScheduler;
+    if (s == null) {
+      synchronized (this) {
+        s = refreshScheduler;
+        if (s == null) {
+          s = Executors.newScheduledThreadPool(2, new HotKeyThreadFactory("hotkey-refresh"));
+          refreshScheduler = s;
+        }
+      }
+    }
+    return s;
+  }
+
+  /**
+   * Register a timed background refresh for the given key.
+   * <p>
+   * Schedules {@link #getWithSoftExpire} at an interval slightly longer than
+   * the soft TTL ({@code softTtlMs × 1.1}) to guarantee the entry is stale
+   * when the timer fires, ensuring every cycle triggers an async refresh via
+   * {@code triggerBackgroundRefresh}.
+   * <p>
+   * The scheduler is created lazily on first registration (no threads before
+   * first use). Uses a 2-thread pool to prevent a slow supplier from blocking
+   * other refresh keys.
+   * <p>
+   * If a previous registration exists for the same key, it is cancelled and
+   * replaced.
+   *
+   * @param key       the cache key to refresh
+   * @param supplier  the value supplier for refresh
+   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @param softTtlMs soft TTL override (also used as the base interval)
+   * @param <T>       the value type
+   */
+  public <T> void registerRefresh(String key, Supplier<T> supplier, long hardTtlMs, long softTtlMs) {
+    long intervalMs = (long) (softTtlMs * 1.1);
+    if (intervalMs < 1) {
+      intervalMs = 1;
+    }
+    ScheduledFuture<?> prev = refreshFutures.put(
+      key,
+      getScheduler().scheduleWithFixedDelay(
+        () -> getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs),
+        intervalMs,
+        intervalMs,
+        TimeUnit.MILLISECONDS
+      )
+    );
+    if (prev != null) {
+      prev.cancel(false);
+    }
+  }
+
+  /**
+   * Update the refresh configuration for a key at runtime.
+   * <p>
+   * Cancels any existing scheduled task and registers a new one with the
+   * given TTLs. If no prior registration exists, this behaves identically
+   * to {@link #registerRefresh}.
+   *
+   * @param key       the cache key
+   * @param supplier  the value supplier for refresh
+   * @param hardTtlMs new hard TTL override
+   * @param softTtlMs new soft TTL override (also used as the base interval)
+   * @param <T>       the value type
+   */
+  public <T> void updateRefresh(String key, Supplier<T> supplier, long hardTtlMs, long softTtlMs) {
+    registerRefresh(key, supplier, hardTtlMs, softTtlMs);
+  }
+
+  /**
+   * Cancel the timed refresh for the given key.
+   *
+   * @param key the cache key to stop refreshing
+   */
+  public void unregisterRefresh(String key) {
+    ScheduledFuture<?> f = refreshFutures.remove(key);
+    if (f != null) {
+      f.cancel(false);
+    }
+  }
+
+  /**
+   * Cancel all timed refreshes and shut down the refresh scheduler.
+   * Called automatically by Spring when this bean is destroyed.
+   */
+  @Override
+  public void destroy() {
+    refreshFutures.values().forEach(f -> f.cancel(false));
+    refreshFutures.clear();
+    ScheduledExecutorService s = refreshScheduler;
+    if (s != null) {
+      s.shutdown();
+    }
+  }
+
   //------------------------------------------------------------------------
 
   /**
@@ -1430,12 +1542,6 @@ public class HotKey {
     return "Uninitialized mode (no cache, no TopK)";
   }
 
-  /**
-   * Requires app-side cache; throws {@link HotKeyModeException} with an
-   * operation-tagged message when running in Worker-only mode.
-   *
-   * @param operation the API operation name (e.g. {@code "get"}, {@code "putThrough"})
-   */
   private void requireAppCache(String operation) {
     if (hotKeyCache == null) {
       throw new HotKeyModeException(operation, currentModeLabel(), "App-mode cache");

@@ -44,4 +44,12 @@ public enum InterceptTrigger {
    * (10 buckets, 1-second window) per unique key.
    */
   QPS,
+
+  /**
+   * Intercept when the per-key concurrent thread count exceeds the
+   * configured {@link Intercept#concurrentThreads()} threshold.
+   * The counter increments before method execution and decrements
+   * in a {@code finally} block, ensuring accurate live count.
+   */
+  CONCURRENT_THREADS,
 }

@@ -33,7 +33,10 @@ import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -871,5 +874,63 @@ class HotKeyTest {
   void isWhitelisted_collection_whenCacheNull_shouldReturnAllFalse() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThat(workerOnly.isWhitelisted(List.of("k1"))).containsEntry("k1", false);
+  }
+
+  // ── registerRefresh / unregisterRefresh ────────────────────────
+
+  @Test
+  void unregisterRefresh_shouldNotThrow() throws InterruptedException {
+    CountDownLatch firstCallLatch = new CountDownLatch(1);
+    when(hotKeyCache.getWithSoftExpire(eq("cancel-key"), any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+      firstCallLatch.countDown();
+      return Optional.of("v");
+    });
+
+    hotKey.registerRefresh("cancel-key", () -> "v", 300_000L, 10L);
+    assertThat(firstCallLatch.await(5, TimeUnit.SECONDS)).as("first scheduled refresh occurred").isTrue();
+
+    hotKey.unregisterRefresh("cancel-key");
+
+    verify(hotKeyCache, atLeastOnce()).getWithSoftExpire(eq("cancel-key"), any(), eq(300_000L), eq(10L));
+  }
+
+  @Test
+  void registerRefresh_replacesExistingRegistration() throws InterruptedException {
+    AtomicInteger callCount = new AtomicInteger(0);
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+      callCount.incrementAndGet();
+      return Optional.of("v");
+    });
+
+    hotKey.registerRefresh("dup-key", () -> "v1", 300_000L, 5L);
+    Thread.sleep(20);
+    hotKey.registerRefresh("dup-key", () -> "v2", 300_000L, 5L);
+
+    int countBefore = callCount.get();
+    Thread.sleep(30);
+    int countAfter = callCount.get();
+
+    assertThat(countAfter).isGreaterThan(countBefore);
+  }
+
+  @Test
+  void registerRefresh_invokesGetWithSoftExpire() throws InterruptedException {
+    CountDownLatch latch = new CountDownLatch(1);
+    when(hotKeyCache.getWithSoftExpire(eq("k1"), any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+      latch.countDown();
+      return Optional.of("v");
+    });
+
+    hotKey.registerRefresh("k1", () -> "v", 300_000L, 5L);
+    assertThat(latch.await(5, TimeUnit.SECONDS)).as("getWithSoftExpire was invoked by scheduled refresh").isTrue();
+
+    hotKey.unregisterRefresh("k1");
+  }
+
+  @Test
+  void destroy_shouldNotThrow() {
+    hotKey.registerRefresh("k1", () -> "v", 300_000L, 10_000L);
+    hotKey.destroy();
+    verify(hotKeyCache, never()).getWithSoftExpire(eq("k1"), any(), anyLong(), anyLong());
   }
 }

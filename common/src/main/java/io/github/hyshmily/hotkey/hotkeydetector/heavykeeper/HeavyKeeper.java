@@ -51,7 +51,7 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p><b>Concurrency model:</b> Thread-safe with three tiers:
  * <ol>
- *   <li>Fine-grained striped synchronization ({@link #LOCK_STRIPES} stripes)
+ *   <li>Fine-grained striped synchronization (up to 4096 stripes)
  *       on individual sketch buckets for low-contention sketch updates.
  *       {@code synchronized(Object[])} was retained over {@link ReentrantLock}
  *       and {@link java.util.concurrent.locks.StampedLock} after a
@@ -92,7 +92,7 @@ import lombok.extern.slf4j.Slf4j;
  *   <li>Per-slot {@link #slotSums} array maintains the running window sum in
  *       O(1), removing the {@code windowCount}-length loop from the locked
  *       sketch-update path.</li>
- *   <li>Lock stripes raised from 256 to {@value #LOCK_STRIPES} to further
+ *   <li>Lock stripes raised from 256 to up to 4096 to further
  *       reduceCollision contention on the sketch.</li>
  *   <li>Window ring buffer flattened from {@code long[][] windows} to a single
  *       1D {@code long[] windows} (indexed {@code slot * windowCount + w}).

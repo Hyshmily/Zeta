@@ -17,6 +17,8 @@
 
 HotKey is a highly configurable, high-performance, low-cost lightweight distributed caching and prefetching framework.
 
+**HotKey decouples business code from the entire distributed coordination infrastructure through Redis and RabbitMQ.** Your application just needs to call `hotKey.get(key, reader)` — local TopK detection, async reporting to the Worker, cluster-wide HOT/COOL decision broadcast, cross-instance cache invalidation, and stale-while-revalidate refresh all happen transparently behind the scenes.
+
 It is designed to solve cluster-wide distributed-consistency hot-key caching problems for arbitrary, unpredictable traffic surges at minimal cost:
 
 - **Unpredictable hot keys** — A sudden burst of requests can cause certain keys to see exploding access volumes. The `HeavyKeeper` algorithm provides millisecond-level real-time detection.
@@ -86,7 +88,10 @@ Beyond that, HotKey also provides:
 >
 > HotKey supports custom parameters (see [CONFIG.zh.md](docs/CONFIG.zh.md) for the full property reference).
 >
-> Default full-chain end-to-end latency: **300ms (P99)**
+> Default full-chain end-to-end latency: **300ms (P99)** — this includes HTTP routing, serialization, and Tomcat thread scheduling overhead.
+> Direct Java invocation benchmarks:
+> - `peek` **~16M ops/s** (pure Caffeine lookup, no side effects)
+> - `get` (L1 hit) **~15M ops/s** (full path with TopK + Reporter)
 
 ![latency](docs/img/latency.png)
 
@@ -558,6 +563,11 @@ hotKey.evictLocal(List.of("user:1", "user:2", "user:3")); // Batch
 hotKey.refresh("user:123", () -> loadUser(123));
 hotKey.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // With TTL override
 hotKey.refreshAll(Map.of("user:1", () -> loadUser(1), "user:2", () -> loadUser(2))); // Batch
+
+// J1. registerRefresh / updateRefresh — Timed background refresh (softTtlMs = interval)
+hotKey.registerRefresh("user:123", () -> loadUser(123), 300_000L, 60_000L);  // Every 60s
+hotKey.updateRefresh("user:123", () -> loadUser(123), 300_000L, 30_000L);    // Change to 30s
+hotKey.unregisterRefresh("user:123");                                         // Stop
 
 // K. Fluent write API
 hotKey.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
