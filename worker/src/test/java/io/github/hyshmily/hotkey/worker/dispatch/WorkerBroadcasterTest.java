@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
@@ -50,13 +51,7 @@ class WorkerBroadcasterTest {
 
   @BeforeEach
   void setUp() {
-    broadcaster = new WorkerBroadcaster(
-      rabbitTemplate,
-      "hotkey.broadcast.exchange",
-      "testApp",
-      "test-node",
-      epochCounter
-    );
+    broadcaster = new WorkerBroadcaster(rabbitTemplate, EXCHANGE_BROADCAST, "testApp", "test-node", epochCounter);
   }
 
   /**
@@ -65,11 +60,7 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendHotWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastHot("myKey", "test_source");
-    verify(rabbitTemplate).send(
-      eq("hotkey.broadcast.exchange"),
-      eq(ROUTING_KEY_BROADCAST + "testApp"),
-      messageCaptor.capture()
-    );
+    verify(rabbitTemplate).send(eq(EXCHANGE_BROADCAST), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_HOT);
@@ -83,11 +74,7 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendCoolWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastCool("myKey");
-    verify(rabbitTemplate).send(
-      eq("hotkey.broadcast.exchange"),
-      eq(ROUTING_KEY_BROADCAST + "testApp"),
-      messageCaptor.capture()
-    );
+    verify(rabbitTemplate).send(eq(EXCHANGE_BROADCAST), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_COOL);

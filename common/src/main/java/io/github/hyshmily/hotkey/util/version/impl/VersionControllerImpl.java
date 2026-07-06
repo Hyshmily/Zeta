@@ -19,6 +19,7 @@ import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.VersionController;
+import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;

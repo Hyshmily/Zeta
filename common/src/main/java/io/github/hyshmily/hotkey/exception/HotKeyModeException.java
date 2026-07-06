@@ -43,7 +43,7 @@ import lombok.Getter;
  * @see io.github.hyshmily.hotkey.HotKey#isWorker()
  */
 @Getter
-public class HotKeyModeException extends RuntimeException {
+public class HotKeyModeException extends HotKeyContextException {
 
   private final String operation;
 
@@ -61,7 +61,8 @@ public class HotKeyModeException extends RuntimeException {
    *                      the operation (e.g. {@code "App-mode cache"})
    */
   public HotKeyModeException(String operation, String currentMode, String requiredMode) {
-    super("HotKey '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode);
+    super("HotKeyModeException",
+        "HotKey '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode);
     this.operation = operation;
     this.currentMode = currentMode;
     this.requiredMode = requiredMode;

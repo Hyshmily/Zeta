@@ -117,4 +117,16 @@ public final class HotKeyConstants {
 
   /** Redis key prefix for distributed lock entries. */
   public static final String REDIS_LOCK_KEY_PREFIX = "hotkey:lock:";
+
+  /** Exchange name for app-to-Worker report routing (topic). */
+  public static final String EXCHANGE_REPORT = "hotkey.report.exchange";
+
+  /** Exchange name for Worker heartbeat broadcasts (topic). */
+  public static final String EXCHANGE_HEARTBEAT = "hotkey.heartbeat.exchange";
+
+  /** Exchange name for Worker HOT/COOL decision broadcasts (fanout). */
+  public static final String EXCHANGE_BROADCAST = "hotkey.broadcast.exchange";
+
+  /** Exchange name for cross-instance cache sync broadcasts (fanout). */
+  public static final String EXCHANGE_SYNC = "hotkey.sync.exchange";
 }

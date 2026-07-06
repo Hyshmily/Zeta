@@ -283,6 +283,13 @@ public class HeavyKeeper implements TopK {
     }
     this.lockMask = stripes - 1;
     this.widthIsPow2 = width > 0 && (width & (width - 1)) == 0;
+    if (!widthIsPow2) {
+      log.warn(
+        "Width {} is not a power of two; bucket index will use slow modulo. " +
+          "Recommended: use a power of two for optimal performance.",
+        width
+      );
+    }
     this.widthMask = width - 1;
 
     this.locCache = new ConcurrentHashMap<>(4096);
@@ -315,15 +322,8 @@ public class HeavyKeeper implements TopK {
     }
 
     long fp = Hashing.murmur3_128().hashString(key, StandardCharsets.UTF_8).asLong();
-    int[] idx = new int[depth];
-
-    for (int i = 0; i < depth; i++) {
-      idx[i] = i * width + bucketIndex(fp, i);
-    }
-
-    SlotLoc loc = new SlotLoc(fp, idx);
+    SlotLoc loc = new SlotLoc(fp);
     SlotLoc prev = locCache.putIfAbsent(key, loc);
-
     return prev != null ? prev : loc;
   }
 
@@ -474,14 +474,16 @@ public class HeavyKeeper implements TopK {
   }
 
   /**
-   * Return the total number of data streams (accesses) tracked since startup
-   * or the last {@link #fading()} reset.
+   * Return the approximate number of distinct keys currently tracked in the
+   * TopK set. This is an O(1) call backed by {@link ConcurrentHashMap#size()}.
    *
-   * <p>This counter is maintained by a {@link LongAdder} and is periodically
-   * halved by {@link #fading()} to prevent unbounded growth.
-   *
-   * @return total access count since last fading
+   * @return number of keys in the hot set (at most {@link #k})
    */
+  @Override
+  public int estimatedSize() {
+    return members.size();
+  }
+
   @Override
   public long total() {
     return total.sum();
@@ -502,7 +504,7 @@ public class HeavyKeeper implements TopK {
     long maxCount = 0;
 
     for (int i = 0; i < depth; i++) {
-      int index = loc.idx[i];
+      int index = i * width + bucketIndex(loc.fp, i);
       Object lock = lockStripes[index & lockMask];
 
       //noinspection SynchronizationOnLocalVariableOrMethodParameter
@@ -776,8 +778,8 @@ public class HeavyKeeper implements TopK {
     return snapshot;
   }
 
-  /** Cached fingerprint and pre-computed sketch indices for a single key. */
-  private record SlotLoc(long fp, int[] idx) {}
+  /** Cached Murmur3 fingerprint for a single key. */
+  private record SlotLoc(long fp) {}
 
   /**
    * A key-count pair used as an entry in the TopK membership set. The count

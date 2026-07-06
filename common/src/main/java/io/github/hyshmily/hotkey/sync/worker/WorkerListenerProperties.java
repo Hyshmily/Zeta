@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.sync.worker;
 
 import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -49,7 +50,7 @@ public class WorkerListenerProperties {
 
   /** FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats.
    * Must match the {@code hotkey.worker.messaging.broadcast-exchange} on the Worker side. */
-  private String exchangeName = "hotkey.broadcast.exchange";
+  private String exchangeName = HotKeyConstants.EXCHANGE_BROADCAST;
 
   /** Prefix for the per-instance queue name, suffixed with the instance ID
    * from {@link InstanceIdGenerator}. Final queue: {@code {queuePrefix}:{instanceId}}. */

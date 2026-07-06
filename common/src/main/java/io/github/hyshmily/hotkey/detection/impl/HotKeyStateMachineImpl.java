@@ -17,10 +17,9 @@ package io.github.hyshmily.hotkey.detection.impl;
 
 import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
 
-import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
-
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
 import java.util.Collections;
 import java.util.Map;
@@ -161,11 +160,11 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
     // mutate (no accumulated hotStreak to reset), skip striped-lock
     // acquisition entirely.
     if (!isHotThisWindow && !states.containsKey(key)) {
-      stateTimestamps.put(key, System.currentTimeMillis());
       return HotKeyDecision.none(key);
     }
 
-    keyLocks.get(key).lock();
+    Lock lock = keyLocks.get(key);
+    lock.lock();
     try {
       // Touch timestamp for eviction tracking
       stateTimestamps.put(key, System.currentTimeMillis());
@@ -192,7 +191,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
         state.hotStreak = 0; // reset hot streak
 
         // CONFIRMED_HOT → PRE_COOLING transition (first cool phase)
-        if (state.currentState == CONFIRMED_HOT && state.coolStreak >= coolCount - preCoolGraceCount) {
+        if (state.currentState == CONFIRMED_HOT && state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
           state.currentState = PRE_COOLING;
           // no broadcast yet — wait for full cool-down
         }
@@ -209,7 +208,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
       log.warn("Unexpected StateMachine Exception for key {}", key, e);
       return HotKeyDecision.none(key);
     } finally {
-      keyLocks.get(key).unlock();
+      lock.unlock();
     }
   }
 
@@ -256,30 +255,45 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
    */
   public void evictStale(long staleAfterMs) {
     long now = System.currentTimeMillis();
-    // Remove state entries whose last touch is older than the threshold
+    // Single pass: remove stale state and its timestamp together
     states
       .keySet()
       .removeIf(key -> {
         Long last = stateTimestamps.get(key);
-        return last != null && now - last > staleAfterMs;
+        if (last == null) {
+          return false;
+        }
+        if (now - last > staleAfterMs) {
+          stateTimestamps.remove(key);
+          return true;
+        }
+        return false;
       });
-    // Purge orphaned timestamps
-    stateTimestamps.keySet().removeIf(k -> !states.containsKey(k));
+    // Orphaned timestamps from reset() — only scan when needed
+    if (states.size() < stateTimestamps.size()) {
+      stateTimestamps.keySet().removeIf(k -> !states.containsKey(k));
+    }
   }
 
   public Map<String, Object> getStateSnapshot(String key) {
-    KeyState keyState = states.get(key);
-    if (keyState == null) {
-      return Collections.emptyMap();
+    Lock lock = keyLocks.get(key);
+    lock.lock();
+    try {
+      KeyState keyState = states.get(key);
+      if (keyState == null) {
+        return Collections.emptyMap();
+      }
+      return Map.of(
+        "currentState",
+        keyState.currentState.name(),
+        "hotStreak",
+        keyState.hotStreak,
+        "coolStreak",
+        keyState.coolStreak
+      );
+    } finally {
+      lock.unlock();
     }
-    return Map.of(
-      "currentState",
-      keyState.currentState.name(),
-      "hotStreak",
-      keyState.hotStreak,
-      "coolStreak",
-      keyState.coolStreak
-    );
   }
 
   /**
@@ -289,16 +303,22 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
    * @param key the key whose state machine should be rolled back
    */
   public void rollbackToPreviousState(String key, Map<String, Object> previousState) {
-    if (previousState == null) {
-      // No previous state; treat as reset
-      reset(key);
-      return;
-    }
+    Lock lock = keyLocks.get(key);
+    lock.lock();
+    try {
+      if (previousState == null) {
+        // No previous state; treat as reset
+        reset(key);
+        return;
+      }
 
-    KeyState keyState = states.computeIfAbsent(key, k -> new KeyState());
-    keyState.currentState = State.valueOf((String) previousState.get("currentState"));
-    keyState.hotStreak = (int) previousState.get("hotStreak");
-    keyState.coolStreak = (int) previousState.get("coolStreak");
+      KeyState keyState = states.computeIfAbsent(key, k -> new KeyState());
+      keyState.currentState = State.valueOf((String) previousState.get("currentState"));
+      keyState.hotStreak = (int) previousState.get("hotStreak");
+      keyState.coolStreak = (int) previousState.get("coolStreak");
+    } finally {
+      lock.unlock();
+    }
   }
 
   private static class KeyState {

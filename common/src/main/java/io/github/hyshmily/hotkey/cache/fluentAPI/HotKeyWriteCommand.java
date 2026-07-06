@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.cache.fluentAPI;
 
 import io.github.hyshmily.hotkey.HotKey;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Fluent write command for the HotKey cache.
@@ -44,6 +45,7 @@ public class HotKeyWriteCommand<T> {
   private final String cacheKey;
   private long hardTtlMs = 0;
   private long softTtlMs = 0;
+  private final AtomicBoolean executed = new AtomicBoolean(false);
 
   /**
    * Creates a new write command bound to the given cache key.
@@ -85,6 +87,9 @@ public class HotKeyWriteCommand<T> {
    * @param writer the data-source mutation to execute before caching
    */
   public void putThrough(T value, Runnable writer) {
+    if (!executed.compareAndSet(false, true)) {
+      throw new IllegalStateException("HotKeyWriteCommand can only be executed once");
+    }
     hotKey.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs);
   }
 
@@ -95,6 +100,9 @@ public class HotKeyWriteCommand<T> {
    * @param mutation the mutation to execute
    */
   public void putBeforeInvalidate(Runnable mutation) {
+    if (!executed.compareAndSet(false, true)) {
+      throw new IllegalStateException("HotKeyWriteCommand can only be executed once");
+    }
     hotKey.putBeforeInvalidate(cacheKey, mutation);
   }
 
@@ -103,6 +111,9 @@ public class HotKeyWriteCommand<T> {
    * Next {@code get()} will re-fetch from the reader.
    */
   public void invalidate() {
+    if (!executed.compareAndSet(false, true)) {
+      throw new IllegalStateException("HotKeyWriteCommand can only be executed once");
+    }
     hotKey.invalidate(cacheKey);
   }
 }

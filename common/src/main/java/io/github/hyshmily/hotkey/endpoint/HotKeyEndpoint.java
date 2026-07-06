@@ -38,6 +38,7 @@ import lombok.Builder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
 /**
  * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics
@@ -48,9 +49,15 @@ import org.springframework.web.bind.annotation.RequestParam;
  * algorithm configuration, TTL settings, version tracking state, broadcast
  * dedup, identity, and instance-level health. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
+ *
+ * <p><b>Security:</b> This endpoint returns sensitive runtime data including
+ * actual cache key names and cluster topology. Protect it via Spring Security
+ * (e.g. {@code management.endpoint.hotkey.roles=ADMIN}) to prevent information
+ * leakage in production environments.
  */
 @Internal
 @Builder
+@RestController
 @RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkey")
 public class HotKeyEndpoint {
 

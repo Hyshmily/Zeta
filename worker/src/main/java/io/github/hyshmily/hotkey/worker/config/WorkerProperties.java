@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.worker.config;
 
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import lombok.Data;
@@ -46,9 +47,9 @@ public class WorkerProperties {
   @Data
   public static class Messaging {
 
-    private String reportExchange = "hotkey.report.exchange";
-    private String broadcastExchange = "hotkey.broadcast.exchange";
-    private String heartbeatExchange = "hotkey.heartbeat.exchange";
+    private String reportExchange = HotKeyConstants.EXCHANGE_REPORT;
+    private String broadcastExchange = HotKeyConstants.EXCHANGE_BROADCAST;
+    private String heartbeatExchange = HotKeyConstants.EXCHANGE_HEARTBEAT;
   }
 
   /** Container tuning for the report-message RabbitMQ listener. */

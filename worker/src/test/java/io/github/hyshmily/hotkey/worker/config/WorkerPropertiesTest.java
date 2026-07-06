@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.hotkey.worker.config;
 
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -53,8 +54,8 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldHaveDefaultMessagingValues() {
-    assertThat(properties.getMessaging().getReportExchange()).isEqualTo("hotkey.report.exchange");
-    assertThat(properties.getMessaging().getBroadcastExchange()).isEqualTo("hotkey.broadcast.exchange");
+    assertThat(properties.getMessaging().getReportExchange()).isEqualTo(HotKeyConstants.EXCHANGE_REPORT);
+    assertThat(properties.getMessaging().getBroadcastExchange()).isEqualTo(HotKeyConstants.EXCHANGE_BROADCAST);
   }
 
   /**

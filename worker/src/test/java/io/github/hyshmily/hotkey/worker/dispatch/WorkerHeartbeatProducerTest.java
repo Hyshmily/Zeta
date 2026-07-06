@@ -73,7 +73,7 @@ class WorkerHeartbeatProducerTest {
   private ArgumentCaptor<Message> messageCaptor;
 
   private static final String WORKER_ID = "worker1";
-  private static final String HB_EXCHANGE = "hotkey.heartbeat.exchange";
+  private static final String HB_EXCHANGE = EXCHANGE_HEARTBEAT;
   private static final long PING_INTERVAL_MS = 1000L;
 
   /** Each file-based test gets its own temp directory for isolation. */

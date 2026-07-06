@@ -17,8 +17,8 @@ package io.github.hyshmily.hotkey.endpoint;
 
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.sharding.HealthView;
-import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sharding.RingManager;
+import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
@@ -37,6 +37,11 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code GET /actuator/hotkeyring} — ring topology
  *   <li>{@code GET /actuator/hotkeyring/{key}} — query which node handles a key
  * </ul>
+ *
+ * <p><b>Security:</b> This endpoint exposes cluster topology (live node addresses)
+ * and per-key routing information. Protect it via Spring Security
+ * (e.g. {@code management.endpoint.hotkeyring.roles=ADMIN}) to prevent
+ * internal infrastructure discovery in production environments.
  */
 @Internal
 @RestController

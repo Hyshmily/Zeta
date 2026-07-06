@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
-import io.github.hyshmily.hotkey.sharding.HealthView;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -214,7 +214,7 @@ public class HotKeyProperties {
   private String appName = "default";
 
   /** Exchange name for app-to-Worker report routing. */
-  private String reportExchange = "hotkey.report.exchange";
+  private String reportExchange = HotKeyConstants.EXCHANGE_REPORT;
 
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
   private long reportIntervalMs = 50;
@@ -329,7 +329,7 @@ public class HotKeyProperties {
   public static class Heartbeat {
 
     /** Heartbeat exchange name. */
-    private String exchangeName = "hotkey.heartbeat.exchange";
+    private String exchangeName = HotKeyConstants.EXCHANGE_HEARTBEAT;
     /** Heartbeat timeout (ms). */
     private int timeoutMs = 10000;
     /** Verify interval (ms). */

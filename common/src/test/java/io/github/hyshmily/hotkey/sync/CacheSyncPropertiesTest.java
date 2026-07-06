@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncProperties;
 import org.junit.jupiter.api.Test;
 
@@ -33,7 +34,7 @@ class CacheSyncPropertiesTest {
   void shouldHaveDefaultValues() {
     CacheSyncProperties props = new CacheSyncProperties();
     assertThat(props.isEnabled()).isFalse();
-    assertThat(props.getExchangeName()).isEqualTo("hotkey.sync.exchange");
+    assertThat(props.getExchangeName()).isEqualTo(HotKeyConstants.EXCHANGE_SYNC);
     assertThat(props.getQueuePrefix()).isEqualTo("hotkey.sync");
     assertThat(props.getDedupWindowSeconds()).isEqualTo(10);
     assertThat(props.getDedupMaxSize()).isEqualTo(10_000);

@@ -243,10 +243,30 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   public void destroy() {
     if (ownsScheduler) {
       scheduler.shutdown();
+      try {
+        if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+          scheduler.shutdownNow();
+        }
+      } catch (InterruptedException e) {
+        scheduler.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
     }
     // Swap any remaining active data into standby and flush both
     trySwitch();
     flushStandby();
+  }
+
+  /**
+   * Returns the ratio of the active buffer's current distinct-key count
+   * to {@code maxBufferSize}. A value {@code >= 0.8} (the default
+   * {@code eagerSwapRatio}) indicates the buffer is close to triggering
+   * an eager swap.
+   *
+   * @return saturation ratio in the {@code [0, 1+)} range
+   */
+  public double activeBufferSaturation() {
+    return (double) active.get().size() / maxBufferSize;
   }
 
   private static class CounterBuffer {

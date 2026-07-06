@@ -22,11 +22,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
@@ -67,9 +63,7 @@ class BufferedCounterTest {
     counter.destroy();
 
     assertThat(batches).hasSize(1);
-    assertThat(batches.get(0))
-        .containsEntry("key1", 1L)
-        .containsEntry("key2", 2L);
+    assertThat(batches.get(0)).containsEntry("key1", 1L).containsEntry("key2", 2L);
   }
 
   @Test
@@ -172,10 +166,7 @@ class BufferedCounterTest {
       }
     }
 
-    assertThat(merged)
-        .containsEntry("k1", 1L)
-        .containsEntry("k2", 1L)
-        .containsEntry("k3", 1L);
+    assertThat(merged).containsEntry("k1", 1L).containsEntry("k2", 1L).containsEntry("k3", 1L);
   }
 
   @Test
@@ -194,15 +185,12 @@ class BufferedCounterTest {
       }
     }
 
-    assertThat(merged)
-        .containsEntry("before_switch", 1L)
-        .containsEntry("after_switch", 1L);
+    assertThat(merged).containsEntry("before_switch", 1L).containsEntry("after_switch", 1L);
   }
 
   @Test
   void count_shouldThrowOnNullKey() {
-    assertThatThrownBy(() -> counter.count(null, 1))
-        .isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> counter.count(null, 1)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
@@ -298,7 +286,8 @@ class BufferedCounterTest {
       custom.destroy();
 
       assertThat(customBatches).isNotEmpty();
-      long total = customBatches.stream()
+      long total = customBatches
+        .stream()
         .flatMap(m -> m.values().stream())
         .mapToLong(Long::longValue)
         .sum();
@@ -347,5 +336,47 @@ class BufferedCounterTest {
     });
     exec.shutdown();
     assertThat(exec.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+  }
+
+  @Test
+  void destroy_withMultipleConcurrentCounters_shouldNotHang() throws Exception {
+    int threadCount = 4;
+    ExecutorService exec = Executors.newFixedThreadPool(threadCount + 1);
+    AtomicBoolean running = new AtomicBoolean(true);
+    for (int i = 0; i < threadCount; i++) {
+      String key = "k" + i;
+      exec.submit(() -> {
+        while (running.get()) {
+          counter.count(key, 1);
+        }
+      });
+    }
+    Thread.sleep(100);
+    exec.submit(() -> {
+      counter.destroy();
+      running.set(false);
+    });
+    exec.shutdown();
+    assertThat(exec.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(batches).isNotEmpty();
+  }
+
+  @Test
+  void activeBufferSaturation_shouldReturnRatio() {
+    double emptySat = counter.activeBufferSaturation();
+    assertThat(emptySat).isBetween(0.0, 0.1);
+    for (int i = 0; i < 100; i++) {
+      counter.count("key" + i, 1);
+    }
+    double afterSat = counter.activeBufferSaturation();
+    assertThat(afterSat).isGreaterThan(emptySat);
+  }
+
+  @Test
+  void activeBufferSaturation_shouldNeverBeNegative() {
+    for (int i = 0; i < 10; i++) {
+      counter.count("k", -5);
+    }
+    assertThat(counter.activeBufferSaturation()).isNotNegative();
   }
 }

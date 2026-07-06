@@ -65,7 +65,7 @@ public class TestController {
             () -> {
               supplierCalls.incrementAndGet();
               try {
-      Thread.sleep(200);
+                Thread.sleep(200);
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
               }
@@ -109,7 +109,7 @@ public class TestController {
     Map<String, Object> results = new LinkedHashMap<>();
     results.put("scenario", "version-degradation");
 
-    String syncExchange = "hotkey.sync.exchange";
+    String syncExchange = HotKeyConstants.EXCHANGE_SYNC;
     String keyPrefix = "test:degr:";
 
     String k1 = keyPrefix + "norm";
@@ -141,7 +141,7 @@ public class TestController {
     if (rabbitTemplate == null) {
       return ResponseEntity.ok(Map.of("status", "SKIPPED", "reason", "RabbitMQ not available"));
     }
-    String broadcastExchange = "hotkey.broadcast.exchange";
+    String broadcastExchange = HotKeyConstants.EXCHANGE_BROADCAST;
     long dv = System.currentTimeMillis();
 
     MessageProperties props = new MessageProperties();
@@ -269,20 +269,36 @@ public class TestController {
   @PostMapping("/null-cache/{key}")
   public ResponseEntity<Map<String, Object>> nullCache(@PathVariable String key) {
     int[] callCount = { 0 };
-    Object first = hotKey.computeIfAbsent(key, () -> {
-      callCount[0]++;
-      return null;
-    }, 300000, 30000);
-    Object second = hotKey.computeIfAbsent(key, () -> {
-      callCount[0]++;
-      return null;
-    }, 300000, 30000);
-    return ResponseEntity.ok(Map.of(
-      "scenario", "null-cache",
-      "firstResult", first == null ? "null" : first,
-      "secondResult", second == null ? "null" : second,
-      "callCount", callCount[0]
-    ));
+    Object first = hotKey.computeIfAbsent(
+      key,
+      () -> {
+        callCount[0]++;
+        return null;
+      },
+      300000,
+      30000
+    );
+    Object second = hotKey.computeIfAbsent(
+      key,
+      () -> {
+        callCount[0]++;
+        return null;
+      },
+      300000,
+      30000
+    );
+    return ResponseEntity.ok(
+      Map.of(
+        "scenario",
+        "null-cache",
+        "firstResult",
+        first == null ? "null" : first,
+        "secondResult",
+        second == null ? "null" : second,
+        "callCount",
+        callCount[0]
+      )
+    );
   }
 
   @PostMapping("/worker-e2e/{key}")
@@ -339,11 +355,7 @@ public class TestController {
   public ResponseEntity<Map<String, Object>> preload(@PathVariable String key) {
     hotKey.notifyLocalDetectorDirect(key, Integer.MAX_VALUE);
     boolean isHot = hotKey.isLocalHotKey(key);
-    return ResponseEntity.ok(Map.of(
-      "scenario", "preload",
-      "key", key,
-      "isLocalHotKey", isHot
-    ));
+    return ResponseEntity.ok(Map.of("scenario", "preload", "key", key, "isLocalHotKey", isHot));
   }
 
   @PostMapping("/all")

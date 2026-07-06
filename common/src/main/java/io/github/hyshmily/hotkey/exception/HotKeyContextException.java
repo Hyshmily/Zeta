@@ -15,10 +15,11 @@
  */
 package io.github.hyshmily.hotkey.exception;
 
+import lombok.Getter;
+
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import lombok.Getter;
 
 /**
  * Base exception carrying the source class name and the instant at which this
@@ -28,8 +29,9 @@ import lombok.Getter;
 @Getter
 public class HotKeyContextException extends RuntimeException {
 
-  private static final DateTimeFormatter FMT =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
+  private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(
+    ZoneOffset.UTC
+  );
 
   /** Simple name of the source class that threw this exception. */
   private final String sourceClass;
@@ -54,7 +56,7 @@ public class HotKeyContextException extends RuntimeException {
    *
    * @param sourceClass the simple name of the throwing class
    * @param message     the detail message
-   * @param cause       the cause (may be {@code null})
+   * @param cause       the cause (maybe {@code null})
    */
   public HotKeyContextException(String sourceClass, String message, Throwable cause) {
     super(message, cause);

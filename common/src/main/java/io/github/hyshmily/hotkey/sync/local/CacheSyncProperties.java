@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.sync.local;
 
 import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.util.InstanceIdGenerator;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -47,7 +48,7 @@ public class CacheSyncProperties {
   private boolean enabled = false;
 
   /** FanoutExchange name for broadcasting INVALIDATE, REFRESH, and RULES_SYNC messages. */
-  private String exchangeName = "hotkey.sync.exchange";
+  private String exchangeName = HotKeyConstants.EXCHANGE_SYNC;
 
   /** Prefix for the per-instance queue name, suffixed with the instance ID
    * from {@link InstanceIdGenerator}. Final queue: {@code {queuePrefix}:{instanceId}}. */

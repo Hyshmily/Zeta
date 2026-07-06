@@ -22,13 +22,6 @@ import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
 import io.github.hyshmily.hotkey.util.window.RollingWindow;
-import java.lang.annotation.Annotation;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -46,6 +39,14 @@ import org.springframework.core.annotation.Order;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Companion AOP aspect for Spring {@link Cacheable @Cacheable},
@@ -166,6 +167,7 @@ public class HotKeyCacheExtensionAspect {
 
     HotKeyPreload preload = resolvePreloadAnnotation(method);
     AnnotationSet ann = resolveAnnotations(method);
+
     HotKeyCacheTTL ttl = ann.ttl();
     Intercept intercept = ann.intercept();
     Fallback fallback = ann.fallback();
@@ -555,6 +557,7 @@ public class HotKeyCacheExtensionAspect {
       Fallback fallback = null;
       NullCaching nullCaching = null;
       Broadcast broadcast = null;
+
       for (Annotation a : m.getDeclaredAnnotations()) {
         if (a instanceof HotKeyCacheTTL t) {
           ttl = t;

@@ -32,6 +32,12 @@ import org.springframework.web.bind.annotation.*;
  * {@code WorkerHeartbeatProducer}).
  *
  * <p>Endpoint path: {@code /actuator/hotkey/worker/state}.
+ *
+ * <p><b>Security:</b> The {@code POST} endpoint allows callers to modify
+ * detection thresholds ({@code confirmCount}, {@code coolCount},
+ * {@code preCoolGraceCount}) at runtime. Protect it via Spring Security
+ * (e.g. {@code management.endpoint.hotkeyworkerstate.roles=ADMIN}) to
+ * prevent unauthorised configuration changes in production environments.
  */
 @Internal
 @RestController
@@ -92,13 +98,19 @@ public class StateMachineEndpoint {
   public Map<String, Object> set(@RequestBody Map<String, String> body) {
     try {
       if (body.containsKey("confirmCount")) {
-        stateMachine.setConfirmCount(Integer.parseInt(body.get("confirmCount")));
+        int v = Integer.parseInt(body.get("confirmCount"));
+        if (v < 0) return Map.of("status", "error", "message", "confirmCount must be >= 0");
+        stateMachine.setConfirmCount(v);
       }
       if (body.containsKey("coolCount")) {
-        stateMachine.setCoolCount(Integer.parseInt(body.get("coolCount")));
+        int v = Integer.parseInt(body.get("coolCount"));
+        if (v < 0) return Map.of("status", "error", "message", "coolCount must be >= 0");
+        stateMachine.setCoolCount(v);
       }
       if (body.containsKey("preCoolGraceCount")) {
-        stateMachine.setPreCoolGraceCount(Integer.parseInt(body.get("preCoolGraceCount")));
+        int v = Integer.parseInt(body.get("preCoolGraceCount"));
+        if (v < 0) return Map.of("status", "error", "message", "preCoolGraceCount must be >= 0");
+        stateMachine.setPreCoolGraceCount(v);
       }
     } catch (NumberFormatException e) {
       return Map.of("status", "error", "message", "Invalid number format: " + e.getMessage());

@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.cache.fluentAPI;
 
 import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.cache.annotationsupporter.NullValue;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.rule.Rule;
 import java.util.ArrayList;
@@ -23,7 +24,6 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
-import org.springframework.cache.support.NullValue;
 
 /**
  * Fluent read query for the HotKey cache.
@@ -57,7 +57,7 @@ public class HotKeyReadQuery<T> {
   private long softTtlMs = 0;
   private boolean isAllowNullCaching = true;
   private boolean isAllowBroadcast = false;
-  private final List<Supplier<T>> fallbacks = new ArrayList<>();
+  private List<Supplier<T>> fallbacks;
   private final AtomicBoolean executed = new AtomicBoolean(false);
 
   /**
@@ -193,11 +193,14 @@ public class HotKeyReadQuery<T> {
    * @return this query instance
    */
   public HotKeyReadQuery<T> thenExecute(Supplier<T> reader) {
+    if (fallbacks == null) {
+      fallbacks = new ArrayList<>();
+    }
     fallbacks.add(reader);
     return this;
   }
 
-  /**
+  /*
    * Execute the read query.
    *
    * <p>The execution order is:
@@ -254,7 +257,7 @@ public class HotKeyReadQuery<T> {
     }
 
     if (hotKey.evaluateRule(cacheKey) == Rule.RuleAction.BLOCK) {
-      throw new HotKeyBlockedException("Cache key is blocked by HotKey rules: ", cacheKey);
+      throw new HotKeyBlockedException("HotKeyReadQuery", cacheKey);
     }
 
     Supplier<Object> wrappedPrimary = () -> {
@@ -278,23 +281,25 @@ public class HotKeyReadQuery<T> {
       return Optional.of((T) val);
     }
 
-    for (Supplier<T> fallback : fallbacks) {
-      T val = fallback.get();
+    if (fallbacks != null) {
+      for (Supplier<T> fallback : fallbacks) {
+        T val = fallback.get();
 
-      if (val != null) {
-        if (isAllowBroadcast) {
-          hotKey.putThrough(cacheKey, val, () -> {}, hardTtlMs, softTtlMs);
-        } else {
-          hotKey.putLocal(cacheKey, val, hardTtlMs, softTtlMs);
+        if (val != null) {
+          if (isAllowBroadcast) {
+            hotKey.putThrough(cacheKey, val, () -> {}, hardTtlMs, softTtlMs);
+          } else {
+            hotKey.putLocal(cacheKey, val, hardTtlMs, softTtlMs);
+          }
+          return Optional.of(val);
         }
-        return Optional.of(val);
-      }
 
-      if (isAllowNullCaching) {
-        if (isAllowBroadcast) {
-          hotKey.putThrough(cacheKey, NullValue.INSTANCE, () -> {}, hardTtlMs, softTtlMs);
-        } else {
-          hotKey.putLocal(cacheKey, NullValue.INSTANCE, hardTtlMs, softTtlMs);
+        if (isAllowNullCaching) {
+          if (isAllowBroadcast) {
+            hotKey.putThrough(cacheKey, NullValue.INSTANCE, () -> {}, hardTtlMs, softTtlMs);
+          } else {
+            hotKey.putLocal(cacheKey, NullValue.INSTANCE, hardTtlMs, softTtlMs);
+          }
         }
       }
     }

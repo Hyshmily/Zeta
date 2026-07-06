@@ -16,21 +16,16 @@
 package io.github.hyshmily.hotkey.reporting;
 
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.ROUTING_KEY_REPORT;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
 
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-
-import java.util.Map;
-
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isA;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 
 /**
  * Tests for {@link ReportPublisher} verifying correct routing key and exchange usage.
@@ -43,7 +38,7 @@ class ReportPublisherTest {
   @BeforeEach
   void setUp() {
     rabbitTemplate = mock(RabbitTemplate.class);
-    publisher = new ReportPublisher(rabbitTemplate, "hotkey.report.exchange", "testApp");
+    publisher = new ReportPublisher(rabbitTemplate, HotKeyConstants.EXCHANGE_REPORT, "testApp");
   }
 
   /**
@@ -53,27 +48,39 @@ class ReportPublisherTest {
   void publish_shouldSendToCorrectRoutingKey() {
     ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
     publisher.publish("0", message);
-    verify(rabbitTemplate).convertAndSend(eq("hotkey.report.exchange"), eq(ROUTING_KEY_REPORT + "testApp.0"), any(ReportMessage.class));
+    verify(rabbitTemplate).convertAndSend(
+      eq(HotKeyConstants.EXCHANGE_REPORT),
+      eq(ROUTING_KEY_REPORT + "testApp.0"),
+      any(ReportMessage.class)
+    );
   }
 
   @Test
   void publish_withEmptyTarget_shouldSendCorrectly() {
     ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
     publisher.publish("", message);
-    verify(rabbitTemplate).convertAndSend(eq("hotkey.report.exchange"), eq(ROUTING_KEY_REPORT + "testApp."), any(ReportMessage.class));
+    verify(rabbitTemplate).convertAndSend(
+      eq(HotKeyConstants.EXCHANGE_REPORT),
+      eq(ROUTING_KEY_REPORT + "testApp."),
+      any(ReportMessage.class)
+    );
   }
 
   @Test
   void publish_withNullMessage_shouldThrow() {
-    org.junit.jupiter.api.Assertions.assertThrows(NullPointerException.class,
-      () -> publisher.publish("target", null));
+    org.junit.jupiter.api.Assertions.assertThrows(NullPointerException.class, () -> publisher.publish("target", null));
   }
 
   @Test
   void publish_whenAmqpException_shouldNotThrowToCaller() {
     ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
     doThrow(new AmqpException("Broker unavailable"))
-      .when(rabbitTemplate).convertAndSend(eq("hotkey.report.exchange"), eq(ROUTING_KEY_REPORT + "testApp.target"), any(ReportMessage.class));
+      .when(rabbitTemplate)
+      .convertAndSend(
+        eq(HotKeyConstants.EXCHANGE_REPORT),
+        eq(ROUTING_KEY_REPORT + "testApp.target"),
+        any(ReportMessage.class)
+      );
     publisher.publish("target", message);
   }
 }

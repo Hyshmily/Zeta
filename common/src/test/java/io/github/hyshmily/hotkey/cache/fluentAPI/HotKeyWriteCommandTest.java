@@ -15,12 +15,13 @@
  */
 package io.github.hyshmily.hotkey.cache.fluentAPI;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+
 import io.github.hyshmily.hotkey.HotKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
 
 class HotKeyWriteCommandTest {
 
@@ -72,5 +73,23 @@ class HotKeyWriteCommandTest {
   void invalidate_shouldDelegate() {
     command.invalidate();
     verify(hotKey).invalidate("test-key");
+  }
+
+  @Test
+  void putThrough_shouldThrowWhenExecutedTwice() {
+    command.putThrough("v", () -> {});
+    assertThatThrownBy(() -> command.putThrough("v", () -> {})).isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void invalidate_shouldThrowWhenAfterPutThrough() {
+    command.putThrough("v", () -> {});
+    assertThatThrownBy(command::invalidate).isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void putBeforeInvalidate_shouldThrowWhenExecutedTwice() {
+    command.putBeforeInvalidate(() -> {});
+    assertThatThrownBy(() -> command.putBeforeInvalidate(() -> {})).isInstanceOf(IllegalStateException.class);
   }
 }

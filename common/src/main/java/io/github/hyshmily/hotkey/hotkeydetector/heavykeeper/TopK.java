@@ -94,6 +94,15 @@ public interface TopK {
   void fading();
 
   /**
+   * Return the approximate number of distinct keys currently tracked (0 to k).
+   *
+   * @return estimated number of keys in the top-K set
+   */
+  default int estimatedSize() {
+    return list().size();
+  }
+
+  /**
    * Return the total number of data streams (accesses) tracked since startup.
    *
    * @return total access count

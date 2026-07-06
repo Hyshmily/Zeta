@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import org.junit.jupiter.api.Test;
 
@@ -33,7 +34,7 @@ class WorkerListenerPropertiesTest {
   void shouldHaveDefaultValues() {
     WorkerListenerProperties props = new WorkerListenerProperties();
     assertThat(props.isEnabled()).isFalse();
-    assertThat(props.getExchangeName()).isEqualTo("hotkey.broadcast.exchange");
+    assertThat(props.getExchangeName()).isEqualTo(HotKeyConstants.EXCHANGE_BROADCAST);
     assertThat(props.getQueuePrefix()).isEqualTo("hotkey.worker");
     assertThat(props.getWarmupJitterMs()).isEqualTo(50);
   }

@@ -1,19 +1,14 @@
 package io.github.hyshmily.hotkey.endpoint;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.*;
+
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
-
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
 
 class StateMachineEndpointTest {
 
@@ -112,11 +107,7 @@ class StateMachineEndpointTest {
     AtomicLong counter = new AtomicLong(5);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    Map<String, Object> result = endpoint.set(Map.of(
-      "confirmCount", "7",
-      "coolCount", "15",
-      "preCoolGraceCount", "5"
-    ));
+    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "7", "coolCount", "15", "preCoolGraceCount", "5"));
 
     assertThat(result).containsEntry("status", "ok");
     verify(stateMachine).setConfirmCount(7);
@@ -129,11 +120,7 @@ class StateMachineEndpointTest {
     AtomicLong counter = mock(AtomicLong.class);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    endpoint.set(Map.of(
-      "confirmCount", "1",
-      "coolCount", "2",
-      "preCoolGraceCount", "3"
-    ));
+    endpoint.set(Map.of("confirmCount", "1", "coolCount", "2", "preCoolGraceCount", "3"));
 
     // Counter should be incremented once (after all params are applied)
     verify(counter, times(1)).incrementAndGet();
@@ -143,6 +130,33 @@ class StateMachineEndpointTest {
   void set_withInvalidNumber_shouldReturnError() {
     Map<String, Object> result = endpoint.set(Map.of("confirmCount", "abc"));
     assertThat(result).containsEntry("status", "error");
+  }
+
+  @Test
+  void set_withNegativeConfirmCount_shouldReturnError() {
+    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "-1"));
+    assertThat(result).containsEntry("status", "error");
+  }
+
+  @Test
+  void set_withNegativeCoolCount_shouldReturnError() {
+    Map<String, Object> result = endpoint.set(Map.of("coolCount", "-5"));
+    assertThat(result).containsEntry("status", "error");
+  }
+
+  @Test
+  void set_withNegativePreCoolGraceCount_shouldReturnError() {
+    Map<String, Object> result = endpoint.set(Map.of("preCoolGraceCount", "-3"));
+    assertThat(result).containsEntry("status", "error");
+  }
+
+  @Test
+  void set_withZeroValues_shouldSucceed() {
+    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "0", "coolCount", "0", "preCoolGraceCount", "0"));
+    assertThat(result).containsEntry("status", "ok");
+    verify(stateMachine).setConfirmCount(0);
+    verify(stateMachine).setCoolCount(0);
+    verify(stateMachine).setPreCoolGraceCount(0);
   }
 
   @Test
