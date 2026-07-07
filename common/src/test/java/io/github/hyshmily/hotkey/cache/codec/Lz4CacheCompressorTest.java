@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -35,7 +36,7 @@ class Lz4CacheCompressorTest {
   void wrap_shortString_shouldStoreAsRaw() {
     byte[] result = (byte[]) compressor.wrap("hello");
     assertThat(result[0]).isZero(); // FLAG_RAW
-    assertThat(new String(result, 1, result.length - 1, java.nio.charset.StandardCharsets.UTF_8)).isEqualTo("hello");
+    assertThat(new String(result, 1, result.length - 1, StandardCharsets.UTF_8)).isEqualTo("hello");
   }
 
   @Test
@@ -43,7 +44,7 @@ class Lz4CacheCompressorTest {
     String input = "x".repeat(500);
     byte[] result = (byte[]) compressor.wrap(input);
     assertThat(result[0]).isEqualTo((byte) 1); // FLAG_LZ4
-    assertThat(result.length).isLessThan(input.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+    assertThat(result.length).isLessThan(input.getBytes(StandardCharsets.UTF_8).length);
   }
 
   @Test
@@ -56,6 +57,30 @@ class Lz4CacheCompressorTest {
   void wrap_null_shouldReturnNull() {
     Object result = compressor.wrap(null);
     assertThat(result).isNull();
+  }
+
+  @Test
+  void wrap_shortBytes_shouldStoreWithRawBytesFlag() {
+    byte[] input = "small".getBytes(StandardCharsets.UTF_8);
+    byte[] result = (byte[]) compressor.wrap(input);
+    assertThat(result[0]).isEqualTo((byte) 3); // FLAG_RAW_BYTES
+    assertThat(result).hasSize(1 + input.length);
+    assertThat(result[1]).isEqualTo((byte) 's');
+    assertThat(result[2]).isEqualTo((byte) 'm');
+    assertThat(result[3]).isEqualTo((byte) 'a');
+    assertThat(result[4]).isEqualTo((byte) 'l');
+    assertThat(result[5]).isEqualTo((byte) 'l');
+  }
+
+  @Test
+  void wrap_longBytes_shouldCompress() {
+    byte[] input = new byte[500];
+    // fill with non-repeating data to ensure actual compression
+    for (int i = 0; i < input.length; i++) input[i] = (byte) i;
+
+    byte[] result = (byte[]) compressor.wrap(input);
+    assertThat(result[0]).isEqualTo((byte) 2); // FLAG_LZ4_BYTES
+    assertThat(result.length).isLessThan(input.length);
   }
 
   @Test
@@ -83,6 +108,35 @@ class Lz4CacheCompressorTest {
   @Test
   void unwrap_truncatedData_shouldThrow() {
     assertThatThrownBy(() -> compressor.unwrap(new byte[] { 1, 0, 0 })).isInstanceOf(IOException.class);
+  }
+
+  @Test
+  void unwrap_shortBytes_shouldReturnOriginal() throws IOException {
+    byte[] input = "small".getBytes(StandardCharsets.UTF_8);
+    Object wrapped = compressor.wrap(input);
+    Object result = compressor.unwrap(wrapped);
+    assertThat(result).isEqualTo(input);
+  }
+
+  @Test
+  void wrapAndUnwrapBytes_roundTrip_shouldPreserveContent() throws IOException {
+    byte[][] inputs = {
+      new byte[0],
+      "a".getBytes(StandardCharsets.UTF_8),
+      "hello bytes".getBytes(StandardCharsets.UTF_8),
+      new byte[255],
+      new byte[256],
+      new byte[1000],
+    };
+    // fill variable-length arrays with pattern data
+    for (int i = 2; i < inputs.length; i++) {
+      for (int j = 0; j < inputs[i].length; j++) inputs[i][j] = (byte) (j % 127);
+    }
+    for (byte[] input : inputs) {
+      Object wrapped = compressor.wrap(input);
+      Object result = compressor.unwrap(wrapped);
+      assertThat(result).as("byte[] round-trip failed for length=" + input.length).isEqualTo(input);
+    }
   }
 
   @Test
