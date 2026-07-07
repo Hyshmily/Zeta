@@ -15,41 +15,62 @@
  */
 package io.github.hyshmily.hotkey.cache.codec;
 
+import static org.apache.lucene.util.RamUsageEstimator.NUM_BYTES_OBJECT_REF;
+import static org.apache.lucene.util.RamUsageEstimator.shallowSizeOf;
+
 import com.github.benmanes.caffeine.cache.Weigher;
+import io.github.hyshmily.hotkey.cache.annotationsupporter.NullValue;
 import io.github.hyshmily.hotkey.model.CacheEntry;
+import java.util.Collection;
+import java.util.Map;
 import org.jspecify.annotations.NonNull;
 
 /**
- * Rough heap-weight estimator for {@link CacheEntry} values.
+ * Heap-weight estimator for {@link CacheEntry} values backed by Lucene's {@link
+ * org.apache.lucene.util.RamUsageEstimator}.
  *
- * <p>Used when {@code hotkey.local.cache.max-weight} is set. {@code String} values
- * are weighted by {@code length() * 2} (UTF-16 byte width, bounds object overhead
- * separately). Raw {@code byte[]} values are weighted by {@code length}. All other
- * types get a flat {@code 1024} byte estimate. Object headers and Caffeine internal
- * metadata are accounted via the overhead constants.
+ * <p>Used when {@code hotkey.local.cache.max-weight} is set. Delegates object header / field /
+ * alignment calculations to Lucene's {@code RamUsageEstimator} (which auto-detects compressed
+ * OOPs, object alignment, and JVM pointer sizes), then adds conservative estimates for
+ * variable-length data and Caffeine internal metadata.
  */
 @SuppressWarnings("all")
-public final class DefaultWeigher implements Weigher<String, Object> {
+public enum DefaultWeigher implements Weigher<String, Object> {
+  INSTANCE;
 
-  public static final DefaultWeigher INSTANCE = new DefaultWeigher();
-
-  private static final int STRING_OVERHEAD = 48;      // String obj(24) + byte[] header(16) + padding
-  private static final int BYTE_ARRAY_OVERHEAD = 24;  // byte[] header(16) + padding
-  private static final int CACHE_ENTRY_OVERHEAD = 80; // ~5 long/int fields + object header + padding
-  private static final int ENTRY_OVERHEAD = 512;      // Caffeine AccessOrderNode(40) + CHM.Node(32) + refs + alignment
-
-  private DefaultWeigher() {}
+  private static final int ENTRY_OVERHEAD = 512;
+  private static final int COLLECTION_ELEMENT_WEIGHT = 200;
+  private static final int MAP_ENTRY_WEIGHT = 350;
 
   @Override
-  public int weigh(String key, @NonNull Object value) {
-    int valueWeight = valueOf(value);
-    return (key.length() << 1) + valueWeight + ENTRY_OVERHEAD;
+  public int weigh(@NonNull String key, @NonNull Object value) {
+    long keyWeight = shallowSizeOf(key) + ((long) key.length() << 1);
+    long total = keyWeight + valueOf(value) + ENTRY_OVERHEAD;
+    return (int) Math.min(total, Integer.MAX_VALUE);
   }
 
-  private static int valueOf(Object v) {
-    if (v instanceof String s) return (s.length() << 1) + STRING_OVERHEAD;
-    if (v instanceof byte[] b) return b.length + BYTE_ARRAY_OVERHEAD;
-    if (v instanceof CacheEntry ce) return valueOf(ce.getValue()) + CACHE_ENTRY_OVERHEAD;
-    return 1024;
+  private static long valueOf(Object v) {
+    if (v instanceof CacheEntry ce) {
+      return shallowSizeOf(ce) + valueOf(ce.getValue());
+    }
+    if (v instanceof NullValue) {
+      return shallowSizeOf(v);
+    }
+    if (v instanceof String s) {
+      return shallowSizeOf(s) + ((long) s.length() << 1);
+    }
+    if (v instanceof byte[] b) {
+      return shallowSizeOf(b);
+    }
+    if (v instanceof Collection<?> c) {
+      return shallowSizeOf(c) + (long) Math.max(1, c.size()) * COLLECTION_ELEMENT_WEIGHT;
+    }
+    if (v instanceof Map<?, ?> m) {
+      return shallowSizeOf(m) + (long) Math.max(1, m.size()) * MAP_ENTRY_WEIGHT;
+    }
+    if (v instanceof Object[] a) {
+      return shallowSizeOf(a) + (long) a.length * NUM_BYTES_OBJECT_REF;
+    }
+    return shallowSizeOf(v) + 1024;
   }
 }

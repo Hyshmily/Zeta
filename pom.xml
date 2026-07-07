@@ -76,6 +76,11 @@
         <artifactId>guava</artifactId>
         <version>32.1.3-jre</version>
       </dependency>
+      <dependency>
+        <groupId>org.apache.lucene</groupId>
+        <artifactId>lucene-core</artifactId>
+        <version>10.5.0</version>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
