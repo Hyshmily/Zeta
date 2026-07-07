@@ -219,7 +219,7 @@ public class HotKeyCache {
    * @param <T>      the value type
    * @return the result of {@code action}, or {@link Optional#empty()} on error
    */
-  private <T> Optional<T> withErrorHandling(String cacheKey, Supplier<Optional<T>> action) {
+  private <T> Optional<T> executeWithErrorHandling(String cacheKey, Supplier<Optional<T>> action) {
     try {
       return action.get();
     } catch (HotKeyBlockedException e) {
@@ -240,7 +240,7 @@ public class HotKeyCache {
   @SuppressWarnings("unchecked")
   public <T> Optional<T> peek(String cacheKey) {
     if (preGuard(cacheKey) == null) return Optional.empty();
-    return withErrorHandling(cacheKey, () ->
+    return executeWithErrorHandling(cacheKey, () ->
       Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).map(raw ->
         raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue()) : (T) raw
       )
@@ -280,7 +280,7 @@ public class HotKeyCache {
 
     boolean skipReport = g.isSkipReport;
 
-    return (Optional<T>) withErrorHandling(cacheKey, () ->
+    return (Optional<T>) executeWithErrorHandling(cacheKey, () ->
       Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
         .flatMap(raw -> handleCacheHit(cacheKey, raw, hardTtlMs, softTtlMs, skipReport))
         .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport))
@@ -359,7 +359,7 @@ public class HotKeyCache {
       return get(cacheKey, reader, hardTtlMs, softTtlMs);
     }
     Object raw = caffeineCache.getIfPresent(cacheKey);
-    return withErrorHandling(cacheKey, () ->
+    return executeWithErrorHandling(cacheKey, () ->
       Optional.ofNullable(raw)
         .flatMap(v -> handleSoftExpireHit(cacheKey, v, reader, hardTtlMs, softTtlMs, skipReport))
         .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport))
@@ -560,11 +560,11 @@ public class HotKeyCache {
       long hotSoft = expireManager.resolveEffectiveHotSoft(softTtlMs);
 
       storeCacheEntry(cacheKey, value, hotHard, hotSoft, KeyState.HOT, effectiveHard, effectiveSoft);
-      reportingIfAvailable(skipReport, cacheKey);
+      reportIfAvailable(skipReport, cacheKey);
       log.debug("HotKey detected, promoted to L1{}: {}", skipReport ? " (no report)" : " and reported", cacheKey);
     } else {
       storeCacheEntry(cacheKey, value, effectiveHard, effectiveSoft, KeyState.NORMAL, effectiveHard, effectiveSoft);
-      reportingIfAvailable(skipReport, cacheKey);
+      reportIfAvailable(skipReport, cacheKey);
       log.debug("Normal key, cached with configured TTL: {}", cacheKey);
     }
     return value;
@@ -608,7 +608,7 @@ public class HotKeyCache {
    * @param skipReport if {@code true}, no-op
    * @param cacheKey   the key accessed
    */
-  private void reportingIfAvailable(boolean skipReport, String cacheKey) {
+  private void reportIfAvailable(boolean skipReport, String cacheKey) {
     if (!skipReport) {
       hotKeyReporter.ifPresent(r -> r.record(cacheKey));
     }

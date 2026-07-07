@@ -89,6 +89,7 @@
 | `hotkey.local.cache.max-size`           | `100000`                 | Caffeine L1 max entry count (used when `max-weight` is 0)                                                                    |
 | `hotkey.local.cache.max-weight`         | `0`                      | Memory weight limit in bytes; 0 = disabled. When >0, replaces `max-size` and uses `DefaultWeigher` for weight estimation      |
 | `hotkey.local.cache.max-value-size`     | `0`                      | Single value byte size limit; 0 = unlimited. Values exceeding this are NOT cached                                             |
+
 | `hotkey.local.local-cache-ttl-minutes`  | `5`                      | Caffeine L1 write-based TTL (minutes)                                                                                         |
 | `hotkey.local.inflight-max-size`        | `50000`                  | In-flight dedup max entries                                                                                                   |
 | `hotkey.local.inflight-ttl-seconds`     | `5`                      | In-flight dedup entry TTL (must exceed slowest L2 response)                                                                   |

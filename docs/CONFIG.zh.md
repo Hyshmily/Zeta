@@ -85,6 +85,7 @@
 | `hotkey.local.cache.max-size`           | `100000`                 | Caffeine L1 最大条目数（`max-weight` 为 0 时生效）                                          |
 | `hotkey.local.cache.max-weight`         | `0`                      | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重       |
 | `hotkey.local.cache.max-value-size`     | `0`                      | 单值字节大小限制；0 = 不限。超过此大小的值不会被缓存                                         |
+
 | `hotkey.local.local-cache-ttl-minutes`  | `5`                      | Caffeine L1 写入 TTL（分钟）                                                                 |
 | `hotkey.local.inflight-max-size`        | `50000`                  | Inflight 去重最大条目数                                                                      |
 | `hotkey.local.inflight-ttl-seconds`     | `5`                      | Inflight 去重 TTL（必须超过最慢 L2 响应）                                                    |

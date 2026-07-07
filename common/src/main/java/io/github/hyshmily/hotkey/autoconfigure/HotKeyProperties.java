@@ -249,7 +249,7 @@ public class HotKeyProperties {
   private static final int CACHED_PROCESSORS = Runtime.getRuntime().availableProcessors();
 
   /**
-   * L1 cache sizing and compression configuration.
+   * L1 cache sizing configuration.
    */
   @Data
   public static class CacheConfig {
