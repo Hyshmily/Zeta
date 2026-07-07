@@ -68,7 +68,13 @@ public class SingleFlightImpl implements SingleFlight {
    * @param executor       async executor for supplier execution
    * @param circuitBreaker circuit breaker for protecting remote calls
    */
-  public SingleFlightImpl(int maxSize, int ttlSec, int timeoutSeconds, Executor executor, CircuitBreaker circuitBreaker) {
+  public SingleFlightImpl(
+    int maxSize,
+    int ttlSec,
+    int timeoutSeconds,
+    Executor executor,
+    CircuitBreaker circuitBreaker
+  ) {
     this.inflightLoads = Caffeine.newBuilder().maximumSize(maxSize).expireAfterWrite(ttlSec, TimeUnit.SECONDS).build();
     this.executor = executor;
     this.timeoutSeconds = timeoutSeconds;
@@ -125,7 +131,7 @@ public class SingleFlightImpl implements SingleFlight {
               Object val = reader.get();
               circuitBreaker.onSuccess();
               return val;
-            } catch (Exception | Error e) {
+            } catch (Exception e) {
               circuitBreaker.onFailure();
               throw e;
             }

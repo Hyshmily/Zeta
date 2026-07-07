@@ -49,8 +49,10 @@ public class ExpireManagerImpl implements ExpireManager {
   private final Executor executor;
   /** TTL configuration providing normal and hot-key TTL values. */
   private final HotKeyProperties ttlConfig;
+  /** Whether soft expire (stale-while-revalidate) is enabled (cached from config at construction).*/
+  private final boolean softExpireEnabled;
   /** Semaphore limiting concurrent background refresh operations (null if soft expire disabled). */
-  // null when soft expire is disabled; always guarded by isSoftExpireEnabled() check
+  // null when soft expire is disabled; always guarded by softExpireEnabled check
   private final Semaphore refreshLimiter;
   /** Per-key dedup for background refreshes — prevents concurrent refresh for the same key. */
   private final ConcurrentHashMap<String, CompletableFuture<?>> pendingRefreshes = new ConcurrentHashMap<>();
@@ -123,9 +125,8 @@ public class ExpireManagerImpl implements ExpireManager {
     this.executor = executor;
     this.ttlConfig = ttlConfig;
     this.compressor = compressor;
-    this.refreshLimiter = ttlConfig.isSoftExpireEnabled()
-      ? new Semaphore(refreshMaxPools > 0 ? refreshMaxPools : 100)
-      : null;
+    this.softExpireEnabled = ttlConfig.isSoftExpireEnabled();
+    this.refreshLimiter = initRefreshLimiter(refreshMaxPools);
     this.defaultTtlJitterRatio = ttlConfig.getTtlJitterRatio();
   }
 
@@ -144,19 +145,14 @@ public class ExpireManagerImpl implements ExpireManager {
     this.executor = executor;
     this.ttlConfig = ttlConfig;
     this.compressor = compressor;
-    this.refreshLimiter = ttlConfig.isSoftExpireEnabled()
-      ? new Semaphore(refreshMaxPools > 0 ? refreshMaxPools : 100)
-      : null;
+    this.softExpireEnabled = ttlConfig.isSoftExpireEnabled();
+    this.refreshLimiter = initRefreshLimiter(refreshMaxPools);
     this.defaultTtlJitterRatio = defaultTtlJitterRatio;
   }
 
-  /**
-   * Whether any soft TTL is configured (normal or hot).
-   *
-   * @return {@code true} if soft expire is enabled in the configuration
-   */
-  public boolean isSoftExpireEnabled() {
-    return ttlConfig.isSoftExpireEnabled();
+  private Semaphore initRefreshLimiter(int refreshMaxPools) {
+    int effectiveRefreshMaxPools = refreshMaxPools > 0 ? refreshMaxPools : 100;
+    return softExpireEnabled ? new Semaphore(effectiveRefreshMaxPools) : null;
   }
 
   /**

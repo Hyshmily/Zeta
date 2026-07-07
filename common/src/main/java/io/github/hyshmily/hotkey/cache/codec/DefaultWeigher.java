@@ -23,16 +23,20 @@ import org.jspecify.annotations.NonNull;
  * Rough heap-weight estimator for {@link CacheEntry} values.
  *
  * <p>Used when {@code hotkey.local.cache.max-weight} is set. {@code String} values
- * are weighted by their UTF‑8 byte length (estimated without allocation).
- * Raw {@code byte[]} values are weighted by their length. All other types get
- * a flat {@code 1024} byte estimate. The {@link CacheEntry} wrapper overhead
- * (~200 bytes) is added on top.
+ * are weighted by {@code length() * 2} (UTF-16 byte width, bounds object overhead
+ * separately). Raw {@code byte[]} values are weighted by {@code length}. All other
+ * types get a flat {@code 1024} byte estimate. Object headers and Caffeine internal
+ * metadata are accounted via the overhead constants.
  */
 @SuppressWarnings("all")
 public final class DefaultWeigher implements Weigher<String, Object> {
 
   public static final DefaultWeigher INSTANCE = new DefaultWeigher();
-  private static final int ENTRY_OVERHEAD = 200;
+
+  private static final int STRING_OVERHEAD = 48;      // String obj(24) + byte[] header(16) + padding
+  private static final int BYTE_ARRAY_OVERHEAD = 24;  // byte[] header(16) + padding
+  private static final int CACHE_ENTRY_OVERHEAD = 80; // ~5 long/int fields + object header + padding
+  private static final int ENTRY_OVERHEAD = 512;      // Caffeine AccessOrderNode(40) + CHM.Node(32) + refs + alignment
 
   private DefaultWeigher() {}
 
@@ -43,44 +47,9 @@ public final class DefaultWeigher implements Weigher<String, Object> {
   }
 
   private static int valueOf(Object v) {
-    if (v instanceof String s) return utf8Length(s);
-    if (v instanceof byte[] b) return b.length;
-    if (v instanceof CacheEntry ce) return valueOf(ce.getValue());
+    if (v instanceof String s) return (s.length() << 1) + STRING_OVERHEAD;
+    if (v instanceof byte[] b) return b.length + BYTE_ARRAY_OVERHEAD;
+    if (v instanceof CacheEntry ce) return valueOf(ce.getValue()) + CACHE_ENTRY_OVERHEAD;
     return 1024;
-  }
-
-  /**
-   * Estimates the number of bytes a {@link String} would occupy when
-   * encoded in UTF‑8, without actually allocating a byte array.
-   */
-  private static int utf8Length(String s) {
-    if (isAscii(s)) {
-      return s.length();
-    }
-    int length = 0;
-    final int len = s.length();
-    for (int i = 0; i < len; i++) {
-      char c = s.charAt(i);
-      if (c < 0x80) {
-        length++;
-      } else if (c < 0x800) {
-        length += 2;
-      } else if (Character.isSurrogate(c)) {
-        length += 4;
-        i++;
-      } else {
-        length += 3;
-      }
-    }
-    return length;
-  }
-
-  private static boolean isAscii(String s) {
-    for (int i = 0; i < s.length(); i++) {
-      if (s.charAt(i) > 0x7F) {
-        return false;
-      }
-    }
-    return true;
   }
 }

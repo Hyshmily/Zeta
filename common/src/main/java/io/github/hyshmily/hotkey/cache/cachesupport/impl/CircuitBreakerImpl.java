@@ -154,8 +154,8 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   }
 
   private void evaluateThreshold() {
-    long totalSuccess = 0,
-      totalFail = 0;
+    long totalSuccess = 0;
+    long totalFail = 0;
 
     for (LongAdder a : successBuckets) {
       totalSuccess += a.sum();
