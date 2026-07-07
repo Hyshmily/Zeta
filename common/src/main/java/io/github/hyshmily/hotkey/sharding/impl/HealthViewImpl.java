@@ -290,6 +290,8 @@ public class HealthViewImpl implements HealthView {
     public volatile long lastHeartbeatTime;
     public volatile boolean readyToServe;
     public volatile boolean stale;
+
+    @SuppressWarnings("NonAtomicOperationOnVolatileField")
     public volatile int verifyFailures;
 
     /**

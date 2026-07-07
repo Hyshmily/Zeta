@@ -85,7 +85,9 @@ public class TestController {
     try {
       Thread.sleep(100);
       gate.countDown();
-      latch.await(30, TimeUnit.SECONDS);
+      if (!latch.await(30, TimeUnit.SECONDS)) {
+        throw new RuntimeException("Timeout waiting for concurrent tasks");
+      }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
@@ -301,6 +303,7 @@ public class TestController {
     );
   }
 
+  @SuppressWarnings("BusyWait")
   @PostMapping("/worker-e2e/{key}")
   public ResponseEntity<Map<String, Object>> workerE2E(@PathVariable String key) throws Exception {
     String val = "e2e-" + System.currentTimeMillis();
@@ -320,7 +323,7 @@ public class TestController {
 
     long readStartTime = System.currentTimeMillis();
     for (int i = 0; i < 10000; i++) {
-      hotKey.get(key, () -> redisTemplate.opsForValue().get(key), 300000, 30000).orElse(null);
+      hotKey.get(key, () -> redisTemplate.opsForValue().get(key), 300000, 30000);
     }
     long readEndTime = System.currentTimeMillis();
     long readDurationMs = readEndTime - readStartTime;

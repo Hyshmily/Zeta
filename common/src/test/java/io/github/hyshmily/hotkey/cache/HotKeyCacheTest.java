@@ -26,6 +26,7 @@ import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.hotkey.cache.codec.CacheCompressor;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.model.CacheEntry;
@@ -33,11 +34,9 @@ import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
-import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.util.version.VersionController;
 import io.github.hyshmily.hotkey.util.version.impl.VersionControllerImpl;
 import java.util.Arrays;
 import java.util.List;
@@ -82,7 +81,8 @@ class HotKeyCacheTest {
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
       new VersionControllerImpl(Optional.empty(), 60),
       ttlConfig,
-      mock(HealthView.class)
+      mock(HealthView.class),
+      CacheCompressor.NONE
     );
   }
 
@@ -300,7 +300,8 @@ class HotKeyCacheTest {
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
       new VersionControllerImpl(Optional.empty(), 60),
       props,
-      mock(HealthView.class)
+      mock(HealthView.class),
+      CacheCompressor.NONE
     );
 
     assertThat(cache.getWithSoftExpire("key", () -> "loaded")).contains("loaded");
@@ -991,7 +992,8 @@ class HotKeyCacheTest {
         new RuleMatcherImpl(Optional.empty(), Optional.empty()),
         new VersionControllerImpl(Optional.empty(), 60),
         ttlConfig,
-        healthView
+        healthView,
+        CacheCompressor.NONE
       );
     }
 

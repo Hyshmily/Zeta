@@ -20,6 +20,13 @@ A micro-benchmark (`HeavyKeeperBenchmark`, in `common/src/test/...`) was run wit
 
 ### 2. `Node.count`: switch from `AtomicLong` to `LongAccumulator(Long::max, 0)`
 
+The constructor uses identity `0` (not the admission `count`) and immediately coerces the initial value:
+```java
+this.count = new LongAccumulator(Long::max, 0);
+this.count.accumulate(count);  // raise to the admission maxCount
+```
+This ensures `reset()` + `accumulate(halved)` in `decayMembership()` correctly sets the count to `max(0, halved) = halved`. Using `count` as identity would cause `reset()` to return to the admission count, making the membership count permanently stuck above the decay target (see ADR-0014 rationale below).
+
 | Scenario A (same-key 16-thread contention, external maxCount) | ops/ms |
 |---|---|
 | `AtomicLong` CAS max-raise loop | 380 952 |
@@ -49,12 +56,14 @@ Joined **decided unconditionally** before benchmarking:
 
 No measurable downside; no benchmark needed.
 
-### 4. TopK admission: extract `admit()` into `refreshMember()`, `findMinMember()`, `admitUnderLock()`
+### 4. TopK admission: split into fast path, `admitOrEvict()`, and `findMinMember()`
 
-The three sub-routines keep lock-acquisition responsibility cleanly isolated:
-- Fast path (`refreshMember`) never acquires any lock — single `LongAccumulator.accumulate` call on existing members
-- Admission path (`admitUnderLock`) acquires `admissionLock` only on brand-new candidates above `minCount`, and delegates minimum-scan to a single-purpose helper (`findMinMember`)
-- Lock order (`sketch stripes → admissionLock`) preserved — no new deadlock surface
+The hot path stays lock-free for existing members — a single `LongAccumulator.accumulate` call. Admission of new candidates is decomposed into:
+- **Fast path (`admit`, line 674):** lock-free `members.get()` + `accumulate()` for existing members; falls through to `admissionLock` for new candidates
+- **`admitOrEvict()`** (line 709): acquires `admissionLock` only when the key is brand new and above `minCount`; delegates minimum-scan to `findMinMember()`
+- **`findMinMember()`** (line 745): O(k) scan of the membership set, single-purpose helper
+
+Lock order (`sketch stripes → admissionLock`) preserved — no new deadlock surface.
 
 ## Considered Options
 

@@ -20,6 +20,7 @@ import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.hotkey.cache.codec.CacheCompressor;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -27,7 +28,6 @@ import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.hotkey.util.version.VersionController;
 import io.github.hyshmily.hotkey.util.version.impl.VersionControllerImpl;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -131,7 +131,8 @@ public class HotKeyRedisAutoConfiguration {
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    ObjectProvider<HealthView> healthViewProvider
+    ObjectProvider<HealthView> healthViewProvider,
+    CacheCompressor compressor
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -153,7 +154,8 @@ public class HotKeyRedisAutoConfiguration {
           properties.getHeartbeat().getTimeoutMs(),
           properties.getHeartbeat().getDegradeAfterFailures()
         )
-      )
+      ),
+      compressor
     );
   }
 }

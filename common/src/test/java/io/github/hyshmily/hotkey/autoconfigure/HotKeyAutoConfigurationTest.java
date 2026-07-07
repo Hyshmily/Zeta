@@ -23,7 +23,6 @@ import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.concurrent.Executor;
@@ -178,12 +177,12 @@ class HotKeyAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the hotLocalCache respects the localCacheMaxSize property.
+   * Verifies that the hotLocalCache respects the cache.max-size property.
    */
   @Test
   void hotLocalCache_shouldRespectMaxSizeProperty() {
     new ApplicationContextRunner()
-      .withPropertyValues("hotkey.local.topK=200", "hotkey.local.local-cache-max-size=500")
+      .withPropertyValues("hotkey.local.topK=200", "hotkey.local.cache.max-size=500")
       .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).hasSingleBean(Cache.class);

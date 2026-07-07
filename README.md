@@ -15,15 +15,13 @@
 
 [**中文版**](README.zh.md)
 
-HotKey is a highly configurable, high-performance, low-cost lightweight distributed caching and prefetching framework.
-
-**HotKey decouples business code from the entire distributed coordination infrastructure through Redis and RabbitMQ.** Your application just needs to call `hotKey.get(key, reader)` — local TopK detection, async reporting to the Worker, cluster-wide HOT/COOL decision broadcast, cross-instance cache invalidation, and stale-while-revalidate refresh all happen transparently behind the scenes.
+HotKey is a highly configurable, high-performance, low-cost lightweight distributed caching and prefetching framework. **HotKey decouples business code from the entire distributed coordination infrastructure through Redis and RabbitMQ.** Your application just needs to call `hotKey.get(key, reader)` — local TopK detection, async reporting to the Worker, cluster-wide HOT/COOL decision broadcast, cross-instance cache invalidation, and stale-while-revalidate refresh all happen transparently behind the scenes.
 
 It is designed to solve cluster-wide distributed-consistency hot-key caching problems for arbitrary, unpredictable traffic surges at minimal cost:
 
-- **Unpredictable hot keys** — A sudden burst of requests can cause certain keys to see exploding access volumes. The `HeavyKeeper` algorithm provides millisecond-level real-time detection.
-- **Hot-key synchronization** — RabbitMQ automatically pushes Worker decisions (HOT/COOL) to the entire cluster's L1 cache; manual broadcast for cross-instance sync and invalidation is also supported.
-- **Malicious hot-interface requests** — Unknown users flooding the same interface. Supports AOP aspect interception, letting the caller decide the handling strategy (block, circuit-break, return default value, etc.).
+- **Unpredictable hot keys** — Sudden traffic bursts can cause certain keys to see exploding access volumes. The `HeavyKeeper` algorithm delivers millisecond-level real-time detection.
+- **Hot-key synchronization** — RabbitMQ automatically pushes Worker decisions (HOT/COOL) to the entire cluster's L1 cache. Manual broadcast for cross-instance sync and invalidation is also supported.
+- **Malicious hot-interface requests** — Unknown users flooding the same interface. Supports AOP aspect interception, allowing the caller to decide the handling strategy (block, circuit-break, return a default value, etc.).
 
 Beyond that, HotKey also provides:
 
@@ -45,6 +43,7 @@ Beyond that, HotKey also provides:
   - `@Fallback`: SpEL expression or naming-convention fallback
   - `@NullCaching`: Null-value caching to prevent cache penetration
   - `@Broadcast`: Broadcast suppression, local writes bypass cluster sync
+- **Automatic L1 Compression** — `String` values larger than 256 bytes are transparently LZ4-compressed before storage in the Caffeine L1 cache. Compression happens automatically at the `CacheEntry` creation layer — no manual `compress`/`decompress` calls needed. Falls back to no-op when `lz4-java` is unavailable. Non-`String` types pass through unchanged.
 - **Multi-level Cache** — Fluent API for chaining N-level backup data sources. `.withPrimary(reader)` goes through the full detection pipeline (records and reports), `.thenExecute(fallback)` degrades stepwise bypassing reporting. Results are written to L1 with optional broadcast.
 - **Soft Expiry (Logical Expiration)** — Differentiated softTTL/hardTTL configuration, completely replacing traditional Redis-side logical expiry. Redis stores pure values, HotKey manages expiry at the L1 Caffeine layer — stale values are returned immediately with async background refresh, reducing P99 latency.
 - **Custom Blacklist/Whitelist Interception** — Blacklist automatically blocks matching key requests; whitelist skips reporting and Worker decisions.
@@ -179,7 +178,10 @@ hotkey:
     expelled-queue-capacity: 50000 # Capacity of the expelled hot key staging queue
 
     # ——— L1 Caffeine Cache ———
-    local-cache-max-size: 1000 # Maximum number of entries
+    cache:
+      max-size: 100000 # Max entry count (used when max-weight is 0)
+      max-weight: 0 # Memory weight limit in bytes (0=disabled)
+      max-value-size: 0 # Single value byte size limit (0=unlimited)
     local-cache-ttl-minutes: 5 # Cache expiry (minutes)
 
     # ——— SingleFlight Deduplication ———

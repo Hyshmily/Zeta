@@ -254,9 +254,9 @@ public class WorkerListener {
           }
 
           return expireManager.applyTtl(
-            ce
+            expireManager
+              .replaceEntryValue(ce, value)
               .toBuilder()
-              .value(value)
               .decisionVersion(wm.decisionVersion())
               .decisionNodeId(wm.nodeId())
               .decisionEpoch(wm.epoch())
@@ -267,18 +267,16 @@ public class WorkerListener {
           );
         }
 
-        return expireManager.applyTtl(
-          CacheEntry.builder()
-            .value(value)
-            .dataVersion(0)
-            .isVersionDegraded(false)
-            .decisionVersion(wm.decisionVersion())
-            .keyState(KeyState.HOT)
-            .normalHardTtlMs(expireManager.getEffectiveHardTtlMs())
-            .normalSoftTtlMs(expireManager.getEffectiveSoftTtlMs())
-            .build(),
+        return expireManager.createBuilder(
+          value,
+          0,
+          false,
+          wm.decisionVersion(),
           defultHotHardTtl,
-          defultHotSoftTtl
+          defultHotSoftTtl,
+          expireManager.getEffectiveHardTtlMs(),
+          expireManager.getEffectiveSoftTtlMs(),
+          KeyState.HOT
         );
       });
     log.debug("HotKey promoted by Worker: {}", wm.cacheKey());

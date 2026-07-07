@@ -287,6 +287,24 @@
       "defaultValue": 100
     },
     {
+      "name": "hotkey.local.cache.max-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum number of L1 cache entries (ignored when max-weight > 0).",
+      "defaultValue": 1000
+    },
+    {
+      "name": "hotkey.local.cache.max-weight",
+      "type": "java.lang.Long",
+      "description": "Memory weight limit for L1 cache (bytes). 0 = use max-size.",
+      "defaultValue": 0
+    },
+    {
+      "name": "hotkey.local.cache.max-value-size",
+      "type": "java.lang.Long",
+      "description": "Single value size limit (bytes). 0 = unlimited.",
+      "defaultValue": 0
+    },
+    {
       "name": "hotkey.local.reporter.bbr-cooldown-ms",
       "type": "java.lang.Long",
       "description": "Cooldown period in ms after a reporter drop before allowing again.",
@@ -323,7 +341,7 @@
       "defaultValue": 2
     },
     {
-      "name": "hotkey.local.spring-cache.enabled",
+      "name": "hotkey.spring-cache.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable Spring @Cacheable integration with HotKey dynamic TTL.",
       "defaultValue": false

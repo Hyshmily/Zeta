@@ -78,6 +78,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
    *     for explicit configuration of threshold, window, buckets, and cooldown.
    */
   @Deprecated
+  @SuppressWarnings("DeprecatedIsStillUsed")
   public BbrRateLimiterImpl(SystemLoadMonitor cpuMonitor) {
     this(cpuMonitor, DEFAULT_CPU_THRESHOLD, DEFAULT_WINDOW_MS, DEFAULT_BUCKETS, DEFAULT_COOLDOWN_MS);
   }

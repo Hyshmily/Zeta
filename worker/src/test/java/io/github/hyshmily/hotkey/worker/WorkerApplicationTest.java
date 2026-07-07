@@ -18,8 +18,8 @@ package io.github.hyshmily.hotkey.worker;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.hotkey.HotKey;
-import io.github.hyshmily.hotkey.worker.config.WorkerAutoConfiguration;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
+import io.github.hyshmily.hotkey.worker.config.WorkerAutoConfiguration;
 import io.github.hyshmily.hotkey.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.hotkey.worker.detection.ThresholdLearner;
@@ -36,11 +36,12 @@ import org.mockito.Mockito;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
-import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 
 /**
@@ -50,11 +51,11 @@ import org.springframework.data.redis.connection.RedisConnectionFactory;
   webEnvironment = SpringBootTest.WebEnvironment.NONE,
   properties = {
     "hotkey.worker.enabled=true",
-    "spring.autoconfigure.exclude="
-        + "org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration,"
-        + "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,"
-        + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration,"
-        + "org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration"
+    "spring.autoconfigure.exclude=" +
+      "org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration," +
+      "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration," +
+      "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration," +
+      "org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration",
   }
 )
 class WorkerApplicationTest {
@@ -76,8 +77,9 @@ class WorkerApplicationTest {
    */
   @Test
   void shouldBeAnnotatedWithSpringBootApplication() {
-    org.springframework.boot.autoconfigure.SpringBootApplication annotation =
-      WorkerApplication.class.getAnnotation(org.springframework.boot.autoconfigure.SpringBootApplication.class);
+    org.springframework.boot.autoconfigure.SpringBootApplication annotation = WorkerApplication.class.getAnnotation(
+      org.springframework.boot.autoconfigure.SpringBootApplication.class
+    );
     assertThat(annotation).isNotNull();
   }
 
@@ -129,7 +131,7 @@ class WorkerApplicationTest {
 
   /**
    * Verifies that {@link WorkerApplication#main(String[])} executes its body
-   * without throwing.  {@link SpringApplication#run} may fail in the test
+   * without throwing.  {@link SpringApplication #run} may fail in the test
    * environment because there is no real AMQP / Redis infrastructure, but the
    * method body must still be reachable for full coverage.
    */

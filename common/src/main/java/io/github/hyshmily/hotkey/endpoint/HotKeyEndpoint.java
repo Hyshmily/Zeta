@@ -77,8 +77,11 @@ public class HotKeyEndpoint {
   private final RuleMatcher ruleMatcher;
   /** Cache TTL manager for soft/hard expiry. */
   private final ExpireManager expireManager;
+
   /** Version tracking controller (Redis-backed, with local fallback). */
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   private final VersionController versionController;
+
   /** Cross-instance cache sync publisher (AMQP). */
   private final CacheSyncPublisher cacheSyncPublisher;
   /** Worker-side hot-key state machine. */

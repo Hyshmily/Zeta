@@ -249,6 +249,27 @@ public class HotKeyProperties {
   private static final int CACHED_PROCESSORS = Runtime.getRuntime().availableProcessors();
 
   /**
+   * L1 cache sizing and compression configuration.
+   */
+  @Data
+  public static class CacheConfig {
+
+    /** Maximum number of entries (ignored when {@link #maxWeight} > 0). */
+    private int maxSize = 100_000;
+
+    /** Memory weight limit (e.g. 268435456 for 256 MB). 0 = use {@link #maxSize}. */
+    private long maxWeight;
+
+    /** Single value size limit (bytes). 0 = unlimited. */
+    @Min(0)
+    private long maxValueSize;
+  }
+
+  /** L1 cache configuration. */
+  @Valid
+  private CacheConfig cache = new CacheConfig();
+
+  /**
    * Configuration for consistent-hashing based report routing.
    * <p>
    * When enabled, the app uses a consistent-hash ring to select the target

@@ -23,10 +23,13 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
-import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
-import io.github.hyshmily.hotkey.cache.cachesupport.impl.CircuitBreakerImpl;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.CircuitBreakerImpl;
+import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.cache.cachesupport.impl.SingleFlightImpl;
+import io.github.hyshmily.hotkey.cache.codec.CacheCompressor;
+import io.github.hyshmily.hotkey.cache.codec.DefaultWeigher;
+import io.github.hyshmily.hotkey.cache.codec.Lz4CacheCompressor;
 import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.HeavyKeeper;
@@ -118,7 +121,6 @@ public class HotKeyAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyDetector hotKeyDetector(
     HeavyKeeper heavyKeeper,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
@@ -169,9 +171,16 @@ public class HotKeyAutoConfiguration {
   public ExpireManager expireManager(
     Cache<String, Object> hotLocalCache,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
-    HotKeyProperties properties
+    HotKeyProperties properties,
+    CacheCompressor compressor
   ) {
-    return new ExpireManagerImpl(hotLocalCache, hotKeyExecutor, properties, properties.getRefreshMaxPools());
+    return new ExpireManagerImpl(
+      hotLocalCache,
+      hotKeyExecutor,
+      properties,
+      properties.getRefreshMaxPools(),
+      compressor
+    );
   }
 
   /**
@@ -264,7 +273,8 @@ public class HotKeyAutoConfiguration {
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
-    ObjectProvider<HealthView> healthViewProvider
+    ObjectProvider<HealthView> healthViewProvider,
+    CacheCompressor compressor
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -283,8 +293,20 @@ public class HotKeyAutoConfiguration {
           properties.getHeartbeat().getTimeoutMs(),
           properties.getHeartbeat().getDegradeAfterFailures()
         )
-      )
+      ),
+      compressor
     );
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public CacheCompressor cacheCompressor() {
+    try {
+      return new Lz4CacheCompressor();
+    } catch (NoClassDefFoundError e) {
+      log.warn("lz4-java not on classpath, cache compression disabled");
+      return CacheCompressor.NONE;
+    }
   }
 
   /**
@@ -298,9 +320,10 @@ public class HotKeyAutoConfiguration {
    * manual invalidation. Reads never extend the expiry duration (no read-based
    * refresh), ensuring predictable TTL behavior.
    *
-   * <p>The maximum cache size is configured via {@code hotkey.local.local-cache-max-size}
-   * (default 1000 entries). Time-based TTL for entries without an explicit hard-expire
-   * timestamp defaults to {@code hotkey.local.local-cache-ttl-minutes} (default 5 minutes).
+   * <p>Eviction strategy: {@code max-weight} (> 0) enables memory-weighted
+   * eviction with {@link DefaultWeigher}; otherwise {@code max-size} limits
+   * entry count. Time-based TTL for entries without an explicit hard-expire
+   * timestamp defaults to {@code hotkey.local.local-cache-ttl-minutes}.
    *
    * @param properties the HotKey configuration properties (never {@code null})
    * @return a configured Caffeine {@link Cache} instance
@@ -308,85 +331,90 @@ public class HotKeyAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public Cache<String, Object> hotLocalCache(HotKeyProperties properties) {
-    Caffeine<Object, Object> builder = Caffeine.newBuilder()
-      .maximumSize(properties.getLocalCacheMaxSize())
-      .expireAfter(
-        new Expiry<>() {
-          /**
-           * Compute the time-to-live for a newly created cache entry.
-           * Returns {@link Long#MAX_VALUE} for pure logical-expiry entries
-           * (where {@code hardExpireAtMs == Long.MAX_VALUE}); otherwise
-           * computes the remaining wall-clock time.
-           *
-           * @param key              the cache key
-           * @param value            the cache value (expected to be a {@link CacheEntry})
-           * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
-           * @return the expiry duration in nanoseconds, or {@link Long#MAX_VALUE} for no expiry
-           */
-          @Override
-          public long expireAfterCreate(@NonNull Object key, @NonNull Object value, long currentTimeNanos) {
-            if (value instanceof CacheEntry entry) {
-              if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
-                // Pure logical expiry: Caffeine never time-evicts this entry.
-                // See Expiry Javadoc: Long.MAX_VALUE signals "no expiration".
-                return Long.MAX_VALUE;
-              }
-              long remainingMs = entry.getHardExpireAtMs() - currentTimeMillis();
-              return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
+    var cfg = properties.getCache();
+    Caffeine<Object, Object> builder = Caffeine.newBuilder();
+    if (cfg.getMaxWeight() > 0) {
+      builder.maximumWeight(cfg.getMaxWeight()).weigher(DefaultWeigher.INSTANCE);
+    } else {
+      builder.maximumSize(cfg.getMaxSize());
+    }
+    builder.expireAfter(
+      new Expiry<>() {
+        /**
+         * Compute the time-to-live for a newly created cache entry.
+         * Returns {@link Long#MAX_VALUE} for pure logical-expiry entries
+         * (where {@code hardExpireAtMs == Long.MAX_VALUE}); otherwise
+         * computes the remaining wall-clock time.
+         *
+         * @param key              the cache key
+         * @param value            the cache value (expected to be a {@link CacheEntry})
+         * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
+         * @return the expiry duration in nanoseconds, or {@link Long#MAX_VALUE} for no expiry
+         */
+        @Override
+        public long expireAfterCreate(@NonNull Object key, @NonNull Object value, long currentTimeNanos) {
+          if (value instanceof CacheEntry entry) {
+            if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
+              // Pure logical expiry: Caffeine never time-evicts this entry.
+              // See Expiry Javadoc: Long.MAX_VALUE signals "no expiration".
+              return Long.MAX_VALUE;
             }
-            return TimeUnit.MINUTES.toNanos(properties.getLocalCacheTtlMinutes());
+            long remainingMs = entry.getHardExpireAtMs() - currentTimeMillis();
+            return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
           }
-
-          /**
-           * Re-compute the expiry duration after an entry is updated.
-           * Preserves pure logical expiry across updates; otherwise
-           * recalculates from the entry's {@code hardExpireAtMs}.
-           *
-           * @param key              the cache key
-           * @param value            the cache value (expected to be a {@link CacheEntry})
-           * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
-           * @param currentDuration  the current expiry duration in nanoseconds
-           * @return the updated expiry duration in nanoseconds, or {@link Long#MAX_VALUE} for no expiry
-           */
-          @Override
-          public long expireAfterUpdate(
-            @NonNull Object key,
-            @NonNull Object value,
-            long currentTimeNanos,
-            long currentDuration
-          ) {
-            if (value instanceof CacheEntry entry) {
-              if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
-                // Preserve pure logical expiry across updates (e.g. broadcast refresh).
-                return Long.MAX_VALUE;
-              }
-              long remainingMs = entry.getHardExpireAtMs() - currentTimeMillis();
-              return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
-            }
-            return currentDuration;
-          }
-
-          /**
-           * Preserve the current expiry duration on read — reads never
-           * extend or shorten the entry's time-to-live.
-           *
-           * @param key              the cache key
-           * @param value            the cache value
-           * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
-           * @param currentDuration  the current expiry duration in nanoseconds
-           * @return the unchanged expiry duration in nanoseconds
-           */
-          @Override
-          public long expireAfterRead(
-            @NonNull Object key,
-            @NonNull Object value,
-            long currentTimeNanos,
-            long currentDuration
-          ) {
-            return currentDuration;
-          }
+          return TimeUnit.MINUTES.toNanos(properties.getLocalCacheTtlMinutes());
         }
-      );
+
+        /**
+         * Re-compute the expiry duration after an entry is updated.
+         * Preserves pure logical expiry across updates; otherwise
+         * recalculates from the entry's {@code hardExpireAtMs}.
+         *
+         * @param key              the cache key
+         * @param value            the cache value (expected to be a {@link CacheEntry})
+         * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
+         * @param currentDuration  the current expiry duration in nanoseconds
+         * @return the updated expiry duration in nanoseconds, or {@link Long#MAX_VALUE} for no expiry
+         */
+        @Override
+        public long expireAfterUpdate(
+          @NonNull Object key,
+          @NonNull Object value,
+          long currentTimeNanos,
+          long currentDuration
+        ) {
+          if (value instanceof CacheEntry entry) {
+            if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
+              // Preserve pure logical expiry across updates (e.g. broadcast refresh).
+              return Long.MAX_VALUE;
+            }
+            long remainingMs = entry.getHardExpireAtMs() - currentTimeMillis();
+            return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
+          }
+          return currentDuration;
+        }
+
+        /**
+         * Preserve the current expiry duration on read — reads never
+         * extend or shorten the entry's time-to-live.
+         *
+         * @param key              the cache key
+         * @param value            the cache value
+         * @param currentTimeNanos the current time in nanoseconds (provided by Caffeine)
+         * @param currentDuration  the current expiry duration in nanoseconds
+         * @return the unchanged expiry duration in nanoseconds
+         */
+        @Override
+        public long expireAfterRead(
+          @NonNull Object key,
+          @NonNull Object value,
+          long currentTimeNanos,
+          long currentDuration
+        ) {
+          return currentDuration;
+        }
+      }
+    );
     return builder.build();
   }
 }

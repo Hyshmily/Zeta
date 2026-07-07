@@ -82,7 +82,9 @@
 > **设计说明：** 应用端 HeavyKeeper 使用更宽（50k）但更浅（depth 5）的 Sketch，衰减稍慢（0.92）。较宽的 Sketch 在单 key 插入时减少指纹冲突概率。较浅的深度足以满足应用端快速*启发式*本地升级判断的需要——它不做权威的 HOT/COOL 决策。参见下方 [Worker 端 HeavyKeeper](#hotkeyworkerheavy-keeper) 的对比配置。
 | `hotkey.local.min-count`                | `10`                     | 热点 key 最低计数阈值                                                                        |
 | `hotkey.local.sketch-window-count`      | `3`                      | 每 sketch slot 的滑动窗口数（环形缓冲区）。W=3 覆盖 3×衰减周期的数据，消除热点漂移。范围 1–10 |
-| `hotkey.local.local-cache-max-size`     | `1000`                   | Caffeine L1 最大条目数                                                                       |
+| `hotkey.local.cache.max-size`           | `100000`                 | Caffeine L1 最大条目数（`max-weight` 为 0 时生效）                                          |
+| `hotkey.local.cache.max-weight`         | `0`                      | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重       |
+| `hotkey.local.cache.max-value-size`     | `0`                      | 单值字节大小限制；0 = 不限。超过此大小的值不会被缓存                                         |
 | `hotkey.local.local-cache-ttl-minutes`  | `5`                      | Caffeine L1 写入 TTL（分钟）                                                                 |
 | `hotkey.local.inflight-max-size`        | `50000`                  | Inflight 去重最大条目数                                                                      |
 | `hotkey.local.inflight-ttl-seconds`     | `5`                      | Inflight 去重 TTL（必须超过最慢 L2 响应）                                                    |

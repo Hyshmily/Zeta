@@ -52,6 +52,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 @Slf4j
 @DependsOn("rabbitAdmin")
+@SuppressWarnings("SpringDependsOnUnresolvedBeanInspection")
 public class WorkerHeartbeatProducer {
 
   /** RabbitMQ template for publishing heartbeat messages. */

@@ -21,6 +21,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.hotkey.cache.codec.CacheCompressor;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.util.DelayUtil;
@@ -53,6 +54,9 @@ public class ExpireManagerImpl implements ExpireManager {
   private final Semaphore refreshLimiter;
   /** Per-key dedup for background refreshes — prevents concurrent refresh for the same key. */
   private final ConcurrentHashMap<String, CompletableFuture<?>> pendingRefreshes = new ConcurrentHashMap<>();
+  /** Compressor for L1 cache values. */
+  private final CacheCompressor compressor;
+
   /** Jitter ratio applied to TTLs to prevent cache stampedes (from config, default 0.05 = ±5%). */
   private final double defaultTtlJitterRatio;
 
@@ -95,9 +99,30 @@ public class ExpireManagerImpl implements ExpireManager {
     HotKeyProperties ttlConfig,
     int refreshMaxPools
   ) {
+    this(caffeineCache, executor, ttlConfig, refreshMaxPools, CacheCompressor.NONE);
+  }
+
+  /**
+   * Creates a ExpireManagerImpl with the given Caffeine cache, executor, TTL config,
+   * and a {@link CacheCompressor} for L1 value compression.
+   *
+   * @param caffeineCache   the underlying L1 Caffeine cache
+   * @param executor        async executor for background refresh
+   * @param ttlConfig       TTL configuration (normal and hot-key variants)
+   * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
+   * @param compressor      compressor for L1 cache values
+   */
+  public ExpireManagerImpl(
+    Cache<String, Object> caffeineCache,
+    Executor executor,
+    HotKeyProperties ttlConfig,
+    int refreshMaxPools,
+    CacheCompressor compressor
+  ) {
     this.caffeineCache = caffeineCache;
     this.executor = executor;
     this.ttlConfig = ttlConfig;
+    this.compressor = compressor;
     this.refreshLimiter = ttlConfig.isSoftExpireEnabled()
       ? new Semaphore(refreshMaxPools > 0 ? refreshMaxPools : 100)
       : null;
@@ -112,11 +137,13 @@ public class ExpireManagerImpl implements ExpireManager {
     Executor executor,
     HotKeyProperties ttlConfig,
     int refreshMaxPools,
-    double defaultTtlJitterRatio
+    double defaultTtlJitterRatio,
+    CacheCompressor compressor
   ) {
     this.caffeineCache = caffeineCache;
     this.executor = executor;
     this.ttlConfig = ttlConfig;
+    this.compressor = compressor;
     this.refreshLimiter = ttlConfig.isSoftExpireEnabled()
       ? new Semaphore(refreshMaxPools > 0 ? refreshMaxPools : 100)
       : null;
@@ -335,7 +362,7 @@ public class ExpireManagerImpl implements ExpireManager {
   ) {
     return applyNormalTtl(
       CacheEntry.builder()
-        .value(value)
+        .value(compressor.wrap(value))
         .dataVersion(dataVersion)
         .isVersionDegraded(isVersionDegraded)
         .decisionVersion(decisionVersion)
@@ -392,7 +419,7 @@ public class ExpireManagerImpl implements ExpireManager {
     return applyTtl(
       applyNormalTtl(
         CacheEntry.builder()
-          .value(value)
+          .value(compressor.wrap(value))
           .dataVersion(dataVersion)
           .isVersionDegraded(isVersionDegraded)
           .decisionVersion(decisionVersion)
@@ -447,7 +474,7 @@ public class ExpireManagerImpl implements ExpireManager {
   ) {
     return applyNormalTtl(
       CacheEntry.builder()
-        .value(value)
+        .value(compressor.wrap(value))
         .dataVersion(dataVersion)
         .isVersionDegraded(isVersionDegraded)
         .decisionVersion(decisionVersion)
@@ -496,7 +523,7 @@ public class ExpireManagerImpl implements ExpireManager {
     return applyTtl(
       applyNormalTtl(
         CacheEntry.builder()
-          .value(value)
+          .value(compressor.wrap(value))
           .dataVersion(dataVersion)
           .isVersionDegraded(isVersionDegraded)
           .decisionVersion(decisionVersion)
@@ -508,6 +535,11 @@ public class ExpireManagerImpl implements ExpireManager {
       hardTtlMs,
       softTtlMs
     );
+  }
+
+  @Override
+  public CacheEntry replaceEntryValue(CacheEntry entry, Object newValue) {
+    return entry.toBuilder().value(compressor.wrap(newValue)).build();
   }
 
   /**
@@ -646,9 +678,7 @@ public class ExpireManagerImpl implements ExpireManager {
    */
   public boolean isSoftExpired(Object cacheEntry) {
     if (!isSoftExpireEnabled()) {
-      throw new IllegalStateException(
-        "ExpireManager soft expire is disabled, isSoftExpired() should not be called"
-      );
+      throw new IllegalStateException("ExpireManager soft expire is disabled, isSoftExpired() should not be called");
     }
     if (cacheEntry instanceof CacheEntry ce) {
       long expireAt = ce.getSoftExpireAtMs();
@@ -743,7 +773,7 @@ public class ExpireManagerImpl implements ExpireManager {
                         log.debug("Async refresh discarded: newer version exists: {}", cacheKey);
                         return entry;
                       }
-                      return applySoftTtl(entry.toBuilder().value(value).build(), softTtlMs);
+                      return applySoftTtl(replaceEntryValue(entry, value), softTtlMs);
                     })
                     .orElseGet(() ->
                       createBuilder(

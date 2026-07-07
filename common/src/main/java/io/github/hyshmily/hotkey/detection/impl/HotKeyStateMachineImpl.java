@@ -15,20 +15,21 @@
  */
 package io.github.hyshmily.hotkey.detection.impl;
 
-import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
-
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
-import java.util.Collections;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.Lock;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+
+import java.util.Collections;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+
+import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -72,10 +73,19 @@ import lombok.extern.slf4j.Slf4j;
  * </ul>
  *
  * <p>Thread-safe: per-key state is guarded by a {@link Striped} lock (1024
- * stripes). Evaluations of different keys proceed in parallel; evaluations
- * of the same key are serialized, eliminating the race window between
- * {@code hotStreak++} and the state transition check caused by concurrent
- * delivery of the same key across multiple consumer threads.
+ * stripes, strong references via {@link Striped#lock}). Evaluations of
+ * different keys proceed in parallel; evaluations of the same key are
+ * serialized, eliminating the race window between {@code hotStreak++} and
+ * the state transition check caused by concurrent delivery of the same key
+ * across multiple consumer threads.
+ *
+ * <p>State and last-touch timestamp are stored together in {@link KeyState},
+ * eliminating the need for a separate timestamp map. {@link #evictStale}
+ * reads {@link KeyState#lastUpdateTime} without the per-key lock — the
+ * field is {@code volatile} for visibility.
+ *
+ * <p>{@code reset()} acquires the per-key lock to avoid races with a
+ * concurrent {@link #evaluate} for the same key.
  *
  * <p>Designed for single-shard workers; each key is owned by exactly one worker
  * thanks to consistent-hash routing on the client side.</p>
@@ -112,12 +122,6 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
   private final ConcurrentHashMap<String, KeyState> states = new ConcurrentHashMap<>();
 
   /**
-   * Last evaluation timestamp for each key.  Used by {@link #evictStale(long)}
-   * to garbage-collect keys that have not been reported for an extended period.
-   */
-  private final ConcurrentHashMap<String, Long> stateTimestamps = new ConcurrentHashMap<>();
-
-  /**
    * Per-key striped lock — serializes evaluations of the same key when
    * multiple consumer threads process overlapping messages, preventing
    * lost increments on {@code hotStreak++} / {@code coolStreak++}.
@@ -125,7 +129,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
    * <p>1024 stripes keep collision probability below 0.1% at
    * {@code concurrency=8} while adding negligible memory overhead.
    */
-  private final Striped<Lock> keyLocks = Striped.lazyWeakLock(1024);
+  private final Striped<Lock> keyLocks = Striped.lock(1024);
 
   /**
    * Evaluates the current sliding-window observation for the given key and
@@ -156,9 +160,9 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
    *         caller should take (HOT, COOL, or NONE)
    */
   public HotKeyDecision evaluate(String key, boolean isHotThisWindow) {
-    // Fast path: never-before-seen key on a cold window — no state to
-    // mutate (no accumulated hotStreak to reset), skip striped-lock
-    // acquisition entirely.
+    // Fast path: never-before-seen key on a cold window → no state to mutate.
+    // containsKey may race with concurrent insertion but the worst case is one
+    // unnecessary locked iteration — never a correctness problem.
     if (!isHotThisWindow && !states.containsKey(key)) {
       return HotKeyDecision.none(key);
     }
@@ -166,50 +170,61 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
     Lock lock = keyLocks.get(key);
     lock.lock();
     try {
-      // Touch timestamp for eviction tracking
-      stateTimestamps.put(key, System.currentTimeMillis());
+      long now = System.currentTimeMillis();
 
-      KeyState state = states.computeIfAbsent(key, k -> new KeyState());
-
-      if (isHotThisWindow) {
-        state.hotStreak++;
-        state.coolStreak = 0; // reset cold streak
-
-        // COLD → CONFIRMED_HOT transition
-        if (state.currentState == COLD && state.hotStreak >= confirmCount) {
-          state.currentState = CONFIRMED_HOT;
-          return HotKeyDecision.hot(key); // broadcast HOT
-        }
-
-        // PRE_COOLING → CONFIRMED_HOT (silent revive)
-        if (state.currentState == PRE_COOLING) {
-          state.currentState = CONFIRMED_HOT;
-          return HotKeyDecision.none(key); // no broadcast — avoid oscillation
-        }
-      } else {
-        state.coolStreak++;
-        state.hotStreak = 0; // reset hot streak
-
-        // CONFIRMED_HOT → PRE_COOLING transition (first cool phase)
-        if (state.currentState == CONFIRMED_HOT && state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
-          state.currentState = PRE_COOLING;
-          // no broadcast yet — wait for full cool-down
-        }
-
-        // PRE_COOLING → COLD transition (fully cooled)
-        if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
-          state.currentState = COLD;
-          return HotKeyDecision.cool(key); // broadcast COOL
-        }
+      KeyState state = states.get(key);
+      if (state == null) {
+        state = new KeyState();
+        states.put(key, state);
       }
+      state.lastUpdateTime = now;
 
-      return HotKeyDecision.none(key);
+      return isHotThisWindow ? evaluateHot(key, state) : evaluateCold(key, state);
     } catch (Exception e) {
       log.warn("Unexpected StateMachine Exception for key {}", key, e);
       return HotKeyDecision.none(key);
     } finally {
       lock.unlock();
     }
+  }
+
+  /** Hot-window evaluation: increment hot streak, reset cold streak, check promotions. */
+  private HotKeyDecision evaluateHot(String key, KeyState state) {
+    state.hotStreak++;
+    state.coolStreak = 0;
+
+    // COLD → CONFIRMED_HOT: consecutive hot windows crossed the confirm threshold
+    if (state.currentState == COLD && state.hotStreak >= confirmCount) {
+      state.currentState = CONFIRMED_HOT;
+      return HotKeyDecision.hot(key);
+    }
+
+    // PRE_COOLING → CONFIRMED_HOT: silent revive, no broadcast (avoid oscillation)
+    if (state.currentState == PRE_COOLING) {
+      state.currentState = CONFIRMED_HOT;
+      return HotKeyDecision.none(key);
+    }
+
+    return HotKeyDecision.none(key);
+  }
+
+  /** Cold-window evaluation: increment cold streak, reset hot streak, check demotions. */
+  private HotKeyDecision evaluateCold(String key, KeyState state) {
+    state.coolStreak++;
+    state.hotStreak = 0;
+
+    // CONFIRMED_HOT → PRE_COOLING: first cooling phase, no broadcast yet
+    if (state.currentState == CONFIRMED_HOT && state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
+      state.currentState = PRE_COOLING;
+    }
+
+    // PRE_COOLING → COLD: fully cooled, broadcast COOL
+    if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
+      state.currentState = COLD;
+      return HotKeyDecision.cool(key);
+    }
+
+    return HotKeyDecision.none(key);
   }
 
   /**
@@ -228,9 +243,13 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
    * @param key the cache key to reset
    */
   public void reset(String key) {
-    states.remove(key);
-    // stateTimestamps is cleaned up lazily by evictStale();
-    // keeping the timestamp for a while avoids immediate re-creation churn.
+    Lock lock = keyLocks.get(key);
+    lock.lock();
+    try {
+      states.remove(key);
+    } finally {
+      lock.unlock();
+    }
   }
 
   /**
@@ -255,24 +274,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
    */
   public void evictStale(long staleAfterMs) {
     long now = System.currentTimeMillis();
-    // Single pass: remove stale state and its timestamp together
-    states
-      .keySet()
-      .removeIf(key -> {
-        Long last = stateTimestamps.get(key);
-        if (last == null) {
-          return false;
-        }
-        if (now - last > staleAfterMs) {
-          stateTimestamps.remove(key);
-          return true;
-        }
-        return false;
-      });
-    // Orphaned timestamps from reset() — only scan when needed
-    if (states.size() < stateTimestamps.size()) {
-      stateTimestamps.keySet().removeIf(k -> !states.containsKey(k));
-    }
+    states.values().removeIf(state -> now - state.lastUpdateTime > staleAfterMs);
   }
 
   public Map<String, Object> getStateSnapshot(String key) {
@@ -324,12 +326,15 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
   private static class KeyState {
 
     /** Current lifecycle stage. */
-    volatile State currentState = COLD;
+    State currentState = COLD;
 
     /** Number of consecutive windows above the hot threshold. */
-    volatile int hotStreak = 0;
+    int hotStreak = 0;
 
     /** Number of consecutive windows below the hot threshold. */
-    volatile int coolStreak = 0;
+    int coolStreak = 0;
+
+    /** Last evaluation timestamp. Volatile for lock-free reads by {@link #evictStale}. */
+    volatile long lastUpdateTime;
   }
 }

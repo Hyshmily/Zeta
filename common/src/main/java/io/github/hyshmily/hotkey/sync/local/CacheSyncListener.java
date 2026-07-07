@@ -316,9 +316,9 @@ public class CacheSyncListener {
         if (existing instanceof CacheEntry cacheEntry) {
           long hardExpireAt = expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs());
           long softExpireAt = expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs());
-          return cacheEntry
+          return expireManager
+            .replaceEntryValue(cacheEntry, value)
             .toBuilder()
-            .value(value)
             .dataVersion(sm.version())
             .isVersionDegraded(sm.isVersionDegraded())
             .hardExpireAtMs(hardExpireAt)
@@ -328,18 +328,16 @@ public class CacheSyncListener {
         long defaultHardTtlMs = expireManager.getEffectiveHardTtlMs();
         long defaultSoftTtlMs = expireManager.getEffectiveSoftTtlMs();
         //Entry was evicted from L1 — create fresh CacheEntry with default metadata
-        return expireManager.applyTtl(
-          CacheEntry.builder()
-            .value(value)
-            .dataVersion(sm.version())
-            .isVersionDegraded(sm.isVersionDegraded())
-            .decisionVersion(0L)
-            .keyState(KeyState.NORMAL)
-            .normalHardTtlMs(defaultHardTtlMs)
-            .normalSoftTtlMs(defaultSoftTtlMs)
-            .build(),
+        return expireManager.createBuilder(
+          value,
+          sm.version(),
+          sm.isVersionDegraded(),
+          0L,
           defaultHardTtlMs,
-          defaultSoftTtlMs
+          defaultSoftTtlMs,
+          defaultHardTtlMs,
+          defaultSoftTtlMs,
+          KeyState.NORMAL
         );
       });
     log.debug("Refreshed by sync: {}", sm.cacheKey());

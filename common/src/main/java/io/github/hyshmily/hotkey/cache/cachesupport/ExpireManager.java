@@ -19,6 +19,7 @@ import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import java.util.concurrent.Semaphore;
 import java.util.function.Supplier;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Manages hard and soft TTL computation for {@link CacheEntry} instances.
@@ -27,7 +28,6 @@ import java.util.function.Supplier;
  * Each has a normal-key and hot-key variant, with an optional override taking precedence over the default.
  */
 public interface ExpireManager {
-
   /** Whether any soft TTL is configured (normal or hot). */
   boolean isSoftExpireEnabled();
 
@@ -141,6 +141,11 @@ public interface ExpireManager {
   CacheEntry applyHardTtl(CacheEntry original, long hardTtlMs);
 
   CacheEntry applySoftTtl(CacheEntry original, long softTtlMs);
+
+  /**
+   * Create a copy of the entry with a new (wrapped) value, preserving all other metadata.
+   */
+  CacheEntry replaceEntryValue(CacheEntry entry, @Nullable Object newValue);
 
   /** Convert a TTL duration (ms) to an absolute epoch-ms expiration timestamp using the configured default jitter ratio. */
   long toHardExpireTimestamp(long hardTtlMs);

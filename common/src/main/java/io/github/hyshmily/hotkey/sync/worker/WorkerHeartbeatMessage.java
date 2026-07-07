@@ -18,7 +18,6 @@ package io.github.hyshmily.hotkey.sync.worker;
 import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
 
 import io.github.hyshmily.hotkey.Internal;
-import io.github.hyshmily.hotkey.sharding.HealthView;
 import java.nio.charset.StandardCharsets;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -62,7 +61,7 @@ import org.springframework.amqp.core.MessageProperties;
  * @param configGraceCount   gossip: grace-period count in the state machine
  * @param configTimestamp    gossip: timestamp of the last config change
  *
- * @see ClusterHealthView
+ * @see io.github.hyshmily.hotkey.sharding.HealthView
  * @see WorkerHeartbeatVerifier
  */
 @Internal

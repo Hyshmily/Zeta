@@ -57,6 +57,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 public class VersionControllerImpl implements VersionController {
 
   /** Optional Redis template — absent when Redis is not configured. */
+  @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
   private final Optional<StringRedisTemplate> redisTemplate;
 
   /** TTL (minutes) for the per-key version keys in Redis. */

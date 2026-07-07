@@ -23,6 +23,7 @@ import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.hotkey.cache.codec.CacheCompressor;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
@@ -95,7 +96,8 @@ class HotKeyRedisAutoConfigurationTest {
       redisTemplateProvider,
       properties,
       ruleMatcher,
-      healthViewProvider
+      healthViewProvider,
+      CacheCompressor.NONE
     );
 
     assertThat(cache).isNotNull();
@@ -131,7 +133,8 @@ class HotKeyRedisAutoConfigurationTest {
       redisTemplateProvider,
       properties,
       ruleMatcher,
-      healthViewProvider
+      healthViewProvider,
+      CacheCompressor.NONE
     );
 
     assertThat(cache).isNotNull();

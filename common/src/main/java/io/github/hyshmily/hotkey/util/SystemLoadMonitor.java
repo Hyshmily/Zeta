@@ -19,7 +19,7 @@ package io.github.hyshmily.hotkey.util;
  * Monitors system CPU load and provides an exponentially weighted moving
  * average (EMA) of the recent CPU utilisation.
  *
- * <p>Uses {@link java.lang.management.OperatingSystemMXBean#getCpuLoad()} (or its
+ * <p>Uses {@code com.sun.management.OperatingSystemMXBean#getCpuLoad()} (or the
  * platform-specific equivalent) to sample the CPU load at a fixed interval
  * and smooths the raw values with an EMA filter.
  */

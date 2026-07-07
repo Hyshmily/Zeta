@@ -19,10 +19,7 @@ import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.util.HotKeyThreadFactory;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
@@ -34,11 +31,12 @@ import org.springframework.beans.factory.InitializingBean;
  * Double-buffered counter that aggregates high-frequency single-key increments
  * and flushes them in batch to a downstream consumer.
  *
- * <p><b>Design:</b> Two {@link CounterBuffer} instances (active and standby)
- * are maintained as {@code AtomicReference<CounterBuffer>}. The active buffer
- * accepts incoming {@link #count(String, long)} calls via a lock-free
- * {@code ConcurrentHashMap}. A scheduled flusher periodically swaps and drains
- * both buffers into the downstream consumer (see {@link #flushStandby()}).
+ * <p><b>Design:</b> One active {@link CounterBuffer} accepts incoming
+ * {@link #count(String, long)} calls via a lock-free {@code ConcurrentHashMap}.
+ * When the buffer is saturated the active reference is atomically swapped and
+ * the old buffer is enqueued into a {@link ConcurrentLinkedQueue}. A scheduled
+ * flusher periodically drains both the swapped-out active buffer and the queue
+ * into the downstream consumer (see {@link #flushStandby()}).
  *
  * <p><b>Eager swap:</b> When the active buffer exceeds 80 % of
  * {@link #DEFAULT_MAX_BUFFER_SIZE}, the buffers are swapped eagerly to prevent any
@@ -75,7 +73,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
   private final AtomicReference<CounterBuffer> active;
 
-  private final AtomicReference<CounterBuffer> standbyRef;
+  private final ConcurrentLinkedQueue<CounterBuffer> flushQueue;
 
   private final Consumer<Map<String, Long>> batchConsumer;
 
@@ -136,7 +134,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     this.flushIntervalMs = flushIntervalMs;
     this.eagerSwapRatio = eagerSwapRatio;
     this.active = new AtomicReference<>(new CounterBuffer());
-    this.standbyRef = new AtomicReference<>(new CounterBuffer());
+    this.flushQueue = new ConcurrentLinkedQueue<>();
     this.ownsScheduler = ownsScheduler;
     this.scheduler = ownsScheduler
       ? Executors.newSingleThreadScheduledExecutor(new HotKeyThreadFactory("hotkey-buffered-counter-flusher"))
@@ -169,7 +167,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * @return sum of distinct keys request in the active and standby buffers
    */
   public long estimatedSizeOfKeysCount() {
-    return (long) active.get().size() + (long) standbyRef.get().size();
+    return active.get().size();
   }
 
   /**
@@ -178,7 +176,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    */
   public void clear() {
     active.getAndSet(new CounterBuffer()).drain();
-    standbyRef.getAndSet(new CounterBuffer()).drain();
+    CounterBuffer buf;
+    while ((buf = flushQueue.poll()) != null) {
+      buf.drain();
+    }
   }
 
   /**
@@ -188,19 +189,19 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     CounterBuffer newBuffer = new CounterBuffer();
     CounterBuffer oldBuffer = active.getAndSet(newBuffer);
     if (oldBuffer != null) {
-      standbyRef.set(oldBuffer);
+      flushQueue.offer(oldBuffer);
     }
   }
 
   private void flushStandby() {
     try {
-      // Swap active and standby independently to avoid races between
-      // count()->trySwitch() and the scheduled flush.
       CounterBuffer flushedActive = active.getAndSet(new CounterBuffer());
-      CounterBuffer flushedStandby = standbyRef.getAndSet(new CounterBuffer());
-
       drainBuffer(flushedActive);
-      drainBuffer(flushedStandby);
+
+      CounterBuffer buf;
+      while ((buf = flushQueue.poll()) != null) {
+        drainBuffer(buf);
+      }
     } catch (Exception e) {
       log.error("Scheduled flushStandby failed", e);
     }
@@ -252,7 +253,6 @@ public class BufferedCounter implements InitializingBean, Destroyable {
         Thread.currentThread().interrupt();
       }
     }
-    // Swap any remaining active data into standby and flush both
     trySwitch();
     flushStandby();
   }

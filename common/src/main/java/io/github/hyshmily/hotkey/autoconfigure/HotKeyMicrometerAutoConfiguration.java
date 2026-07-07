@@ -169,8 +169,9 @@ public class HotKeyMicrometerAutoConfiguration {
       stateMachineProvider.ifAvailable(sm ->
         Gauge.builder("hotkey.worker.tracked.keys", sm, s -> (double) s.getTrackedKeys()).register(registry)
       );
+      //noinspection Convert2MethodRef
       cpuMonitorProvider.ifAvailable(cpu ->
-        Gauge.builder("hotkey.cpu.load", cpu, c -> c.getCpuLoadEMA()).register(registry)
+        Gauge.builder("hotkey.cpu.load", cpu, SystemLoadMonitor::getCpuLoadEMA).register(registry)
       );
     };
   }

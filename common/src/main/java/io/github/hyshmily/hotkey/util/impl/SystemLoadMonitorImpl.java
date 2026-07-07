@@ -56,6 +56,7 @@ public class SystemLoadMonitorImpl implements SystemLoadMonitor {
 
   /** @deprecated Use {@link #SystemLoadMonitorImpl(long, double)} for explicit configuration. */
   @Deprecated
+  @SuppressWarnings("DeprecatedIsStillUsed")
   public SystemLoadMonitorImpl() {
     this(DEFAULT_POLL_MS, DEFAULT_DECAY);
   }

@@ -162,10 +162,10 @@ public class HeavyKeeper implements TopK {
   private final int widthMask;
 
   /**
-   * Per-key memoisation of the Murmur3 fingerprint and pre-computed sketch
-   * bucket indices, eliminating repeated hashing on the hot path. Trades a
-   * bounded {@link ConcurrentHashMap} of small {@link SlotLoc} objects for
-   * significantly lower per-add CPU cost on repeatedly-accessed keys.
+   * Per-key fingerprint cache, sized to match the TopK membership set exactly.
+   * Entries are added on TopK admission and removed on eviction or decay drop,
+   * so the cache size never exceeds {@link #k} (default 100). Non-member keys
+   * compute their fingerprint on the fly in {@link #locate} and are never cached.
    */
   private final ConcurrentHashMap<String, SlotLoc> locCache;
 
@@ -292,7 +292,7 @@ public class HeavyKeeper implements TopK {
     }
     this.widthMask = width - 1;
 
-    this.locCache = new ConcurrentHashMap<>(4096);
+    this.locCache = new ConcurrentHashMap<>();
     this.members = new ConcurrentHashMap<>(k);
     this.admissionLock = new ReentrantLock();
     this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
@@ -309,22 +309,25 @@ public class HeavyKeeper implements TopK {
     return widthIsPow2 ? (hash & widthMask) : ((hash & 0x7FFFFFFF) % width);
   }
 
-  /**
-   * Locate (or cache) the {@link SlotLoc} for a key: its Murmur3 fingerprint
-   * and the pre-computed flat sketch indices for every row. This is the
-   * central hot-path optimisation — repeated accesses to the same key skip
-   * hashing and bucket arithmetic entirely.
-   */
-  private SlotLoc locate(String key) {
-    SlotLoc existing = locCache.get(key);
-    if (existing != null) {
-      return existing;
-    }
+  /** 64-bit Murmur3 fingerprint (lower half of 128-bit hash) for sketch slot indexing. */
+  private static long fingerprint(String key) {
+    return Hashing.murmur3_128().hashString(key, StandardCharsets.UTF_8).asLong();
+  }
 
-    long fp = Hashing.murmur3_128().hashString(key, StandardCharsets.UTF_8).asLong();
-    SlotLoc loc = new SlotLoc(fp);
-    SlotLoc prev = locCache.putIfAbsent(key, loc);
-    return prev != null ? prev : loc;
+  /** Returns cached {@link SlotLoc} for TopK members; computes on the fly for non-members. */
+  private SlotLoc locate(String key) {
+    SlotLoc cached = locCache.get(key);
+    if (cached != null) return cached;
+    return new SlotLoc(fingerprint(key));
+  }
+
+  /**
+   * Compute and cache the {@link SlotLoc} for a key that has just been
+   * admitted into the TopK membership set. Must be called under
+   * {@link #admissionLock} alongside {@link #members} mutations.
+   */
+  private void cacheLoc(String key) {
+    locCache.put(key, new SlotLoc(fingerprint(key)));
   }
 
   /**
@@ -462,7 +465,7 @@ public class HeavyKeeper implements TopK {
   @Override
   public void fading() {
     long e = epoch.incrementAndGet();
-    int aw = (int) Math.floorMod(e, windowCount);
+    int aw = Math.floorMod(e, windowCount);
 
     rotateSketchWindows(aw);
     decayMembership();
@@ -511,7 +514,7 @@ public class HeavyKeeper implements TopK {
       synchronized (lock) {
         // Re-read epoch inside the stripe lock so a concurrent fading() cannot
         // zero the window we are about to write to underneath us.
-        int active = (int) Math.floorMod(epoch.get(), windowCount);
+        int active = Math.floorMod(epoch.get(), windowCount);
 
         long cur = slotSums[index];
         if (cur == 0) {
@@ -556,7 +559,7 @@ public class HeavyKeeper implements TopK {
    * either hand the slot over to the incoming fingerprint (full reset) or
    * proportionally decay every window. Returns the running {@code maxCount}.
    */
-  @SuppressWarnings("null")
+  @SuppressWarnings({ "null", "squid:S2245" })
   private long decayCollisionSlot(
     int index,
     int active,
@@ -648,6 +651,7 @@ public class HeavyKeeper implements TopK {
       if (dropped != null) {
         for (String key : dropped) {
           members.remove(key);
+          locCache.remove(key); // decay-dropped — evict fingerprint cache
         }
       }
       minPqCount = members.isEmpty() ? 0L : findMinMember().count();
@@ -711,6 +715,7 @@ public class HeavyKeeper implements TopK {
 
     if (members.size() < k) {
       members.put(key, new Node(key, maxCount));
+      cacheLoc(key); // cache fingerprint for the new member
       if (maxCount < minPqCount || members.size() == 1) {
         minPqCount = maxCount;
       }
@@ -727,11 +732,13 @@ public class HeavyKeeper implements TopK {
     Node removed = members.remove(min.key());
     if (removed != null) {
       expelledKey = removed.key;
+      locCache.remove(expelledKey); // evicted — no longer needs cached fingerprint
       if (!expelledQueue.offer(new Item(removed.key, removed.count.get()))) {
         log.warn("Expelled queue full, dropping key: {}", removed.key);
       }
     }
     members.put(key, new Node(key, maxCount));
+    cacheLoc(key); // cache fingerprint for the replacement member
     minPqCount = findMinMember().count();
     return new AddResult(expelledKey, true, key);
   }
@@ -786,6 +793,7 @@ public class HeavyKeeper implements TopK {
    * is a {@link LongAccumulator} with {@code Long::max} merger, so writes
    * under same-key contention never serialise on a single CAS word.
    */
+  @SuppressWarnings("ClassCanBeRecord")
   private static final class Node {
 
     /** The cache key. */
@@ -795,7 +803,8 @@ public class HeavyKeeper implements TopK {
 
     Node(String key, long count) {
       this.key = key;
-      this.count = new LongAccumulator(Long::max, count);
+      this.count = new LongAccumulator(Long::max, 0);
+      this.count.accumulate(count);
     }
   }
 
@@ -848,13 +857,13 @@ public class HeavyKeeper implements TopK {
       return Math.max(0, Math.min(n, k));
     }
 
-    double L = Math.exp(-np);
+    double limit = Math.exp(-np);
     int k = 0;
     double prod = 1.0;
     do {
       k++;
       prod *= rng.nextDouble();
-    } while (prod > L);
+    } while (prod > limit);
     return Math.min(k - 1, n);
   }
 }

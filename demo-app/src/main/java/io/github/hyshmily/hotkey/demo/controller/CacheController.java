@@ -129,11 +129,12 @@ public class CacheController {
     @RequestParam String key,
     @RequestParam(defaultValue = "5000") long timeoutMs
   ) {
-    AutoReleaseLock lock = hotKey.tryLock("demo:" + key, timeoutMs, TimeUnit.MILLISECONDS);
-    if (lock != null) {
-      return ResponseEntity.ok(Map.of("acquired", true, "key", key));
+    try (AutoReleaseLock lock = hotKey.tryLock("demo:" + key, timeoutMs, TimeUnit.MILLISECONDS)) {
+      if (lock != null) {
+        return ResponseEntity.ok(Map.of("acquired", true, "key", key));
+      }
+      return ResponseEntity.status(409).body(Map.of("acquired", false, "key", key));
     }
-    return ResponseEntity.status(409).body(Map.of("acquired", false, "key", key));
   }
 
   @DeleteMapping("/lock/release")
