@@ -85,8 +85,6 @@ hotkey:
 **全部参数）**
 参考[CONFIG.zh.md](docs/CONFIG.zh.md)
 
-````
-
 </details>
 
 #### 本地模式（App 侧）— Maven 依赖
@@ -99,7 +97,7 @@ hotkey:
   <artifactId>hotkey</artifactId>
   <version>1.1.54</version>
 </dependency>
-````
+```
 
 **JitPack**：
 
