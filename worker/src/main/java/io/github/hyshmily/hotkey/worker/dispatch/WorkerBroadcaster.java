@@ -27,7 +27,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
-/**
+/*
  * Publishes HOT and COOL decisions to all application instances via the
  * configured RabbitMQ {@code broadcastExchange}.
  *
@@ -39,6 +39,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * fanout exchange ({@code hotkey.broadcast.exchange}) — the receiver
  * differentiates message type via the {@code AMQP_HEADER_TYPE} header.
  */
+/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class WorkerBroadcaster {
@@ -108,7 +109,11 @@ public class WorkerBroadcaster {
     sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
     log.debug(
       "Broadcast HOT: key={}, dv={}, source={}, nodeId={}, epoch={}",
-      cacheKey, dv, source, nodeId, epochCounter.get()
+      cacheKey,
+      dv,
+      source,
+      nodeId,
+      epochCounter.get()
     );
   }
 
@@ -130,10 +135,7 @@ public class WorkerBroadcaster {
    */
   public void broadcastCool(String cacheKey, long dv) {
     sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
-    log.debug(
-      "Broadcast COOL: key={}, dv={}, nodeId={}, epoch={}",
-      cacheKey, dv, nodeId, epochCounter.get()
-    );
+    log.debug("Broadcast COOL: key={}, dv={}, nodeId={}, epoch={}", cacheKey, dv, nodeId, epochCounter.get());
   }
 
   /**

@@ -27,18 +27,17 @@ import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.cache.cachesupport.TransactionSupport;
 import io.github.hyshmily.hotkey.cache.codec.CacheCompressor;
-import io.github.hyshmily.hotkey.constants.HotKeyConstants;
 import io.github.hyshmily.hotkey.exception.HotKeyBlockedException;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.HotKeyCacheStats;
 import io.github.hyshmily.hotkey.model.KeyState;
-import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.Rule;
 import io.github.hyshmily.hotkey.rule.Rule.RuleAction;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.hotkey.sync.local.SyncMessage;
 import io.github.hyshmily.hotkey.util.TimeSource;
 import io.github.hyshmily.hotkey.util.version.VersionController;
 import io.github.hyshmily.hotkey.util.version.VersionGuard;
@@ -82,13 +81,8 @@ public class HotKeyCache {
   /** Executor for async cache operations (promotion, soft refresh). */
   private final Executor hotKeyExecutor;
 
-  /** Optional publisher for cross-instance cache synchronization. */
-  @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
-  private final Optional<CacheSyncPublisher> cacheSyncPublisher;
-
-  /** Optional reporter for app-to-Worker hot key reporting. */
-  @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
-  private final Optional<KeyReporter> hotKeyReporter;
+  /** Central dispatcher for all external communication (report + broadcast). */
+  private final CentralDispatcher dispatcher;
 
   /** Matches cache keys against blacklist/whitelist rules. */
   private final RuleMatcher ruleMatcher;
@@ -103,9 +97,6 @@ public class HotKeyCache {
 
   /** Compressor for L1 cache values. */
   private final CacheCompressor compressor;
-
-  /** Log message constant when no sync publisher is available. */
-  private static final String NO_SYNC_PUBLISHER = HotKeyConstants.NO_SYNC_PUBLISHER;
 
   @Builder
   static class GuardReport {
@@ -177,7 +168,7 @@ public class HotKeyCache {
   /**
    * Check whether an entry in the local cache is a non-expired HOT entry.
    *
-   * @param entry the raw value from Caffeine (may be {@link CacheEntry} or {@code null})
+   * @param entry the raw value from Caffeine (maybe {@link CacheEntry} or {@code null})
    * @return {@code true} if the entry is a valid, non-expired HOT
    */
   private boolean isHotInCache(Object entry) {
@@ -425,7 +416,7 @@ public class HotKeyCache {
    * code duplication.
    *
    * @param cacheKey  the cache key
-   * @param raw       the raw value from Caffeine (may be {@link CacheEntry} or bare)
+   * @param raw       the raw value from Caffeine (maybe {@link CacheEntry} or bare)
    * @param cached    the unwrapped cached value
    * @param hardTtlMs hard TTL override
    * @param softTtlMs soft TTL override
@@ -441,10 +432,9 @@ public class HotKeyCache {
     long softTtlMs,
     boolean skipReport
   ) {
+    dispatcher.record(cacheKey, skipReport);
+
     boolean wasProcessed = processLocalHotkeyIfNeeded(cacheKey, raw, cached, hardTtlMs, softTtlMs);
-    if (!skipReport) {
-      hotKeyReporter.ifPresent(r -> r.record(cacheKey));
-    }
 
     // TOCTOU: re-read from cache after side effects (promote/record may have taken time)
     if (wasProcessed || !skipReport) {
@@ -480,7 +470,7 @@ public class HotKeyCache {
       return mapEmpty(cacheKey);
     }
     T value = result.get();
-    return Optional.of(mapLoaded(cacheKey, value, hardTtlMs, softTtlMs, skipReport));
+    return Optional.of(processLoaded(cacheKey, value, hardTtlMs, softTtlMs, skipReport));
   }
 
   /**
@@ -548,24 +538,20 @@ public class HotKeyCache {
    * @param <T>        the value type
    * @return the loaded value (unchanged)
    */
-  private <T> T mapLoaded(String cacheKey, T value, long hardTtlMs, long softTtlMs, boolean skipReport) {
+  private <T> T processLoaded(String cacheKey, T value, long hardTtlMs, long softTtlMs, boolean skipReport) {
     guardBlocked(cacheKey);
 
     long effectiveHard = expireManager.resolveEffectiveHardTtl(hardTtlMs);
     long effectiveSoft = expireManager.resolveEffectiveSoftTtl(softTtlMs);
 
-    hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
+    dispatcher.record(cacheKey, skipReport);
     if (hotKeyDetector.contains(cacheKey)) {
       long hotHard = expireManager.resolveEffectiveHotHard(hardTtlMs);
       long hotSoft = expireManager.resolveEffectiveHotSoft(softTtlMs);
 
-      storeCacheEntry(cacheKey, value, hotHard, hotSoft, KeyState.HOT, effectiveHard, effectiveSoft);
-      reportIfAvailable(skipReport, cacheKey);
-      log.debug("HotKey detected, promoted to L1{}: {}", skipReport ? " (no report)" : " and reported", cacheKey);
+      loadCacheEntry(cacheKey, value, hotHard, hotSoft, KeyState.HOT, effectiveHard, effectiveSoft);
     } else {
-      storeCacheEntry(cacheKey, value, effectiveHard, effectiveSoft, KeyState.NORMAL, effectiveHard, effectiveSoft);
-      reportIfAvailable(skipReport, cacheKey);
-      log.debug("Normal key, cached with configured TTL: {}", cacheKey);
+      loadCacheEntry(cacheKey, value, effectiveHard, effectiveSoft, KeyState.NORMAL, effectiveHard, effectiveSoft);
     }
     return value;
   }
@@ -582,7 +568,7 @@ public class HotKeyCache {
    * @param normalHardTtl the normal (non-hot) hard TTL to preserve for demotion
    * @param normalSoftTtl the normal (non-hot) soft TTL to preserve for demotion
    */
-  private void storeCacheEntry(
+  private void loadCacheEntry(
     String cacheKey,
     Object value,
     long hardTtlMs,
@@ -599,19 +585,6 @@ public class HotKeyCache {
         }
         return buildEntry(value, hardTtlMs, softTtlMs, state, normalHardTtl, normalSoftTtl);
       });
-  }
-
-  /**
-   * Record a key access to the {@link KeyReporter} unless reporting is
-   * explicitly skipped.
-   *
-   * @param skipReport if {@code true}, no-op
-   * @param cacheKey   the key accessed
-   */
-  private void reportIfAvailable(boolean skipReport, String cacheKey) {
-    if (!skipReport) {
-      hotKeyReporter.ifPresent(r -> r.record(cacheKey));
-    }
   }
 
   private <T> CacheEntry buildEntry(
@@ -690,7 +663,6 @@ public class HotKeyCache {
    * @return {@code true} if the entry was promoted
    */
   private boolean promoteIfLocalHot(String cacheKey, Object val, CacheEntry ce, long hardTtlMs, long softTtlMs) {
-    hotKeyDetector.add(cacheKey, HotKeyConstants.TOPK_INCR);
     if (!hotKeyDetector.contains(cacheKey)) {
       return false;
     }
@@ -769,10 +741,7 @@ public class HotKeyCache {
       hotKeyExecutor.execute(() -> {
         try {
           var vr = versionController.nextVersion(cacheKey);
-          cacheSyncPublisher.ifPresentOrElse(
-            p -> p.broadcastLocalInvalidate(cacheKey, vr.dataVersion(), vr.degraded()),
-            () -> log.debug("invalidate async: " + NO_SYNC_PUBLISHER)
-          );
+          dispatcher.broadcast(cacheKey, SyncMessage.TYPE_INVALIDATE, vr.dataVersion(), vr.degraded());
         } catch (Exception ex) {
           log.error("invalidate async broadcast failed for key={}", cacheKey, ex);
         }
@@ -804,10 +773,7 @@ public class HotKeyCache {
 
     TransactionSupport.runNowOrAfterCommit(() -> {
       caffeineCache.invalidateAll(validKeys);
-      cacheSyncPublisher.ifPresentOrElse(
-        p -> p.broadcastLocalInvalidateAll(validKeys),
-        () -> log.debug("No sync publisher found, skip broadcast for {} keys", validKeys.size())
-      );
+      dispatcher.broadcast(validKeys, SyncMessage.TYPE_INVALIDATE_ALL);
     });
   }
 
@@ -888,10 +854,7 @@ public class HotKeyCache {
               buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl)
             );
 
-          cacheSyncPublisher.ifPresentOrElse(
-            p -> p.broadcastRefresh(cacheKey, vr.dataVersion(), vr.degraded()),
-            () -> log.debug("putThrough: {}", NO_SYNC_PUBLISHER)
-          );
+          dispatcher.broadcast(cacheKey, SyncMessage.TYPE_REFRESH, vr.dataVersion(), vr.degraded());
         } catch (RejectedExecutionException ree) {
           // hotKeyExecutor saturated mid-body (nextVersion/Redis did run, but
           // we cannot distinguish here — VersionController.nextVersion already
@@ -916,7 +879,7 @@ public class HotKeyCache {
             .compute(cacheKey, (k, existing) ->
               buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl)
             );
-          cacheSyncPublisher.ifPresent(p -> p.broadcastRefresh(cacheKey, vr.dataVersion(), vr.degraded()));
+          dispatcher.broadcast(cacheKey, SyncMessage.TYPE_REFRESH, vr.dataVersion(), vr.degraded());
         }
       },
       hotKeyExecutor

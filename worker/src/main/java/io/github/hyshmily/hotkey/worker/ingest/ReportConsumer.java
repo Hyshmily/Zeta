@@ -42,7 +42,7 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  *
  * <p>For every key in the batch the consumer:
  * <ol>
- *   <li>Feeds the count into the {@link SlidingWindowDetector} to update the
+ *   <li>Feeds the count into the {@link io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector} to update the
  *       sliding‑window sum and obtain a binary hot‑or‑not verdict for the
  *       current window.</li>
  *   <li>Passes that verdict to the {@link HotKeyStateMachine} which tracks
@@ -63,6 +63,7 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * key always reaches the same worker, guaranteeing correct per‑key state
  * without cross‑worker coordination.
  */
+/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class ReportConsumer {

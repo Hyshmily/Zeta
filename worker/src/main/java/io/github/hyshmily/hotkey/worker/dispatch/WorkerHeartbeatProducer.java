@@ -84,6 +84,16 @@ public class WorkerHeartbeatProducer {
 
   /**
    * Creates a new heartbeat producer with a shared external scheduler.
+   *
+   * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
+   * @param heartbeatExchange      the target topic exchange for heartbeat messages
+   * @param workerId               unique identity of this Worker node
+   * @param stateMachine           the state machine providing config-gossip fields
+   * @param broadcaster            the broadcaster for reading the current decision version watermark
+   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @param redisConnectionFactory the Redis connection factory for epoch initialization
+   * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
+   * @param scheduler              the shared external scheduler for periodic heartbeat sends
    */
   public WorkerHeartbeatProducer(
     RabbitTemplate rabbitTemplate,
@@ -114,6 +124,14 @@ public class WorkerHeartbeatProducer {
   /**
    * Creates a new heartbeat producer with its own internal scheduler
    * (primarily for testing, with mocked Redis).
+   *
+   * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
+   * @param heartbeatExchange      the target topic exchange for heartbeat messages
+   * @param workerId               unique identity of this Worker node
+   * @param stateMachine           the state machine providing config-gossip fields
+   * @param broadcaster            the broadcaster for reading the current decision version watermark
+   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
    */
   public WorkerHeartbeatProducer(
     RabbitTemplate rabbitTemplate,
@@ -205,7 +223,9 @@ public class WorkerHeartbeatProducer {
       if (osBean instanceof com.sun.management.OperatingSystemMXBean sunOsBean) {
         cpuLoad = sunOsBean.getCpuLoad();
       }
-    } catch (Exception ignored) {}
+    } catch (Exception e) {
+      log.warn("Failed to compute CPU load factor; defaulting to 0.0", e);
+    }
     return Math.min(1.0, cpuLoad);
   }
 

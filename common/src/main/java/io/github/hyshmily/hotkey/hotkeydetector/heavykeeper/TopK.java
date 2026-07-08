@@ -82,6 +82,21 @@ public interface TopK {
   BlockingQueue<Item> expelled();
 
   /**
+   * Directly inject key-count pairs into the TopK set, bypassing the
+   * sketch admission path. Used for warming up from a persisted snapshot
+   * where the keys are already known to be hot.
+   * <p>
+   * Implementations must respect the capacity limit ({@code k}) and may
+   * evict the weakest members when full. The default implementation
+   * delegates to {@link #addDirect(Map)} for backward compatibility.
+   *
+   * @param keyCounts map of keys to their estimated counts
+   */
+  default void warm(Map<String, Long> keyCounts) {
+    addDirect(keyCounts);
+  }
+
+  /**
    * Decay all frequency counts to age out historical data and prevent
    * stale frequency accumulation.
    *

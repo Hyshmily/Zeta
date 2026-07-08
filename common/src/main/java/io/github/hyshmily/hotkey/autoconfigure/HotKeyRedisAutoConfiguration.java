@@ -17,12 +17,12 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.CentralDispatcher;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.cache.codec.CacheCompressor;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import io.github.hyshmily.hotkey.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.hotkey.sharding.HealthView;
@@ -107,9 +107,8 @@ public class HotKeyRedisAutoConfiguration {
    * @param hotLocalCache      the L1 Caffeine cache (shared across all keys)
    * @param singleFlight       the deduplication layer for concurrent cache-load requests
    * @param expireManager      the soft/hard expiration manager for TTL control
-   * @param syncPublisher      optional cache sync publisher for cross-instance broadcast
-   * @param hotKeyReporter     optional hot key reporter for app-to-Worker data flow
    * @param hotKeyExecutor     the dedicated HotKey async executor
+   * @param centralDispatcher  the central dispatcher for reporting and broadcasting
    * @param redisTemplateProvider optional provider for StringRedisTemplate (version tracking);
    *                              may be absent
    * @param properties         the HotKey configuration properties
@@ -125,9 +124,8 @@ public class HotKeyRedisAutoConfiguration {
     Cache<String, Object> hotLocalCache,
     SingleFlight singleFlight,
     ExpireManager expireManager,
-    Optional<CacheSyncPublisher> syncPublisher,
-    Optional<KeyReporter> hotKeyReporter,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
+    CentralDispatcher centralDispatcher,
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
@@ -140,8 +138,7 @@ public class HotKeyRedisAutoConfiguration {
       singleFlight,
       expireManager,
       hotKeyExecutor,
-      syncPublisher,
-      hotKeyReporter,
+      centralDispatcher,
       ruleMatcher,
       new VersionControllerImpl(
         Optional.ofNullable(redisTemplateProvider.getIfAvailable()),

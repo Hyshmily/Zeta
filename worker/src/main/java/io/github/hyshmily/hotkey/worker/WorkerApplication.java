@@ -30,6 +30,9 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 public class WorkerApplication {
 
+  /** Default constructor. */
+  public WorkerApplication() {}
+
   /**
    * Starts the standalone HotKey Worker server.
    *

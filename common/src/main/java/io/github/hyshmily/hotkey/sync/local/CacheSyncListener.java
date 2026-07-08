@@ -32,6 +32,7 @@ import io.github.hyshmily.hotkey.util.DelayUtil;
 import io.github.hyshmily.hotkey.util.version.VersionGuard;
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -101,6 +102,12 @@ public class CacheSyncListener {
 
   /** Hot-key rule matcher whose rule set is updated when a RULES_SYNC message arrives. */
   private final RuleMatcher ruleMatcher;
+
+  /**
+   * Tracks the highest INVALIDATE version per key, preventing stale REFRESH
+   * messages (from before the INVALIDATE) from recreating the entry.
+   */
+  private final ConcurrentHashMap<String, Long> recentInvalidated = new ConcurrentHashMap<>();
 
   /**
    * RabbitMQ message callback for incoming sync messages. Acknowledges the message
@@ -225,6 +232,7 @@ public class CacheSyncListener {
         return null;
       });
     log.debug("Invalidated by sync: {}", sm.cacheKey());
+    recordInvalidation(sm.cacheKey(), sm.version());
   }
 
   /**
@@ -292,7 +300,10 @@ public class CacheSyncListener {
    */
   private void handleRefresh(SyncMessage sm) {
     // DCL first check – cheap, outside the compute lock
-    if (VersionGuard.shouldSkipForSync(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded())) {
+    if (
+      VersionGuard.shouldSkipForSync(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded()) ||
+      isInvalidation(sm.cacheKey(), sm.version())
+    ) {
       log.debug("Stale refresh ignored: key={}, incomingVersion={}", sm.cacheKey(), sm.version());
       return;
     }
@@ -340,6 +351,7 @@ public class CacheSyncListener {
           KeyState.NORMAL
         );
       });
+    clearInvalidation(sm.cacheKey());
     log.debug("Refreshed by sync: {}", sm.cacheKey());
   }
 
@@ -361,5 +373,32 @@ public class CacheSyncListener {
       log.warn("handleRefresh: Redis load failed for key={}", sm.cacheKey(), e);
       return null;
     }
+  }
+
+  /**
+   * Record the highest INVALIDATE version for a key.
+   * Used to reject stale REFRESH messages that arrive after the INVALIDATE.
+   */
+  private void recordInvalidation(String key, long version) {
+    if (version != 0L) {
+      recentInvalidated.merge(key, version, Math::max);
+    }
+  }
+
+  /**
+   * Check whether a refresh should be skipped because the key was
+   * invalidated at a version >= the refresh version.
+   */
+  private boolean isInvalidation(String key, long refreshVersion) {
+    Long highWater = recentInvalidated.get(key);
+    return highWater != null && refreshVersion <= highWater;
+  }
+
+  /**
+   * Remove the invalidation record after a successful refresh,
+   * allowing future refreshes for this key to proceed normally.
+   */
+  private void clearInvalidation(String key) {
+    recentInvalidated.remove(key);
   }
 }

@@ -335,7 +335,6 @@ public String getFlashItem(String id) { ... }
 
 需 classpath 中包含 `spring-boot-starter-cache` 和 `spring-boot-starter-aop`。
 
----
 
 ## 缓存同步
 

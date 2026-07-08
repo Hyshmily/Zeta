@@ -16,11 +16,14 @@
 package io.github.hyshmily.hotkey.autoconfigure;
 
 import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -50,19 +53,26 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 @Internal
 @AutoConfiguration(after = HotKeyAutoConfiguration.class)
 @ConditionalOnProperty(name = "hotkey.scheduling.enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(prefix = "hotkey.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
 @ConditionalOnBean(TopK.class)
 @Slf4j
 public class HotKeySchedulingConfiguration {
 
   private final List<TopK> topKInstances;
   private final ScheduledExecutorService scheduler;
+  private final BroadcastBuffer broadcastBuffer;
+  private final Optional<CacheSyncPublisher> cacheSyncPublisher;
 
   public HotKeySchedulingConfiguration(
     List<TopK> topKInstances,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
+    BroadcastBuffer broadcastBuffer,
+    Optional<CacheSyncPublisher> cacheSyncPublisher
   ) {
     this.topKInstances = topKInstances;
     this.scheduler = scheduler;
+    this.broadcastBuffer = broadcastBuffer;
+    this.cacheSyncPublisher = cacheSyncPublisher;
   }
 
   @PostConstruct

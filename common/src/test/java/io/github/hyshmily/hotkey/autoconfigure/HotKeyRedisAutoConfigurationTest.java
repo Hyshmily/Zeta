@@ -20,7 +20,9 @@ import static org.mockito.Mockito.mock;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
+import io.github.hyshmily.hotkey.cache.CentralDispatcher;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.cache.codec.CacheCompressor;
@@ -32,6 +34,8 @@ import io.github.hyshmily.hotkey.sharding.HealthView;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -52,6 +56,8 @@ class HotKeyRedisAutoConfigurationTest {
 
   @Mock(lenient = true)
   private ObjectProvider<HealthView> healthViewProvider;
+
+  private final ScheduledExecutorService testScheduler = Executors.newSingleThreadScheduledExecutor();
 
   private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
     AutoConfigurations.of(HotKeyRedisAutoConfiguration.class)
@@ -84,15 +90,20 @@ class HotKeyRedisAutoConfigurationTest {
       Optional.<StringRedisTemplate>empty(),
       Optional.<CacheSyncPublisher>empty()
     );
+    CentralDispatcher dispatcher = new CentralDispatcher(
+      Optional.empty(),
+      Optional.empty(),
+      new BroadcastBuffer(testScheduler, Optional.empty()),
+      detector
+    );
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
       detector,
       localCache,
       singleFlight,
       expireManager,
-      Optional.<CacheSyncPublisher>empty(),
-      Optional.<KeyReporter>empty(),
       executor,
+      dispatcher,
       redisTemplateProvider,
       properties,
       ruleMatcher,
@@ -104,7 +115,7 @@ class HotKeyRedisAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the HotKeyCache bean is created when optional dependencies (CacheSyncPublisher, KeyReporter) are present.
+   * Verifies that the HotKeyCache bean is created when optional dependencies are present.
    */
   @Test
   void hotKeyCacheBeanAcceptsOptionalDependencies() {
@@ -121,15 +132,20 @@ class HotKeyRedisAutoConfigurationTest {
       Optional.<CacheSyncPublisher>empty()
     );
 
+    CentralDispatcher dispatcher = new CentralDispatcher(
+      Optional.of(reporter),
+      Optional.of(publisher),
+      new BroadcastBuffer(testScheduler, Optional.empty()),
+      detector
+    );
     HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
     HotKeyCache cache = config.hotKeyCache(
       detector,
       localCache,
       singleFlight,
       expireManager,
-      Optional.of(publisher),
-      Optional.of(reporter),
       executor,
+      dispatcher,
       redisTemplateProvider,
       properties,
       ruleMatcher,

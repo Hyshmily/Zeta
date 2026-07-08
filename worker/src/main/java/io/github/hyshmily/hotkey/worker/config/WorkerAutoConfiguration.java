@@ -64,7 +64,7 @@ import org.springframework.scheduling.annotation.Scheduled;
  * instances, applies a sliding‑window + state‑machine pipeline, and broadcasts
  * HOT / COOL decisions back to every instance.
  *
- * <h3>Provisioned beans</h3>
+ * <h2>Provisioned beans</h2>
  * <ul>
  *   <li>{@link SlidingWindowDetector} – sliding‑window counter.</li>
  *   <li>{@link HotKeyStateMachine} – per‑key lifecycle state machine.</li>
@@ -78,6 +78,8 @@ import org.springframework.scheduling.annotation.Scheduled;
  *       {@code reportQueue}, binding).</li>
  *   <li>Scheduled tasks for stale‑state eviction and Top‑K validation.</li>
  * </ul>
+ *
+ * Default constructor.
  */
 @Configuration
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
@@ -103,6 +105,11 @@ public class WorkerAutoConfiguration {
    * Redis and restores it on startup.
    *
    * <p>Only active when {@code hotkey.worker.persistence.enabled=true}.
+   *
+   * @param workerTopK  the worker-scoped HeavyKeeper sketch to persist
+   * @param redisTemplate the Redis template used for persistence
+   * @param properties  worker configuration providing persistence settings
+   * @return a new {@link TopKPersistService} instance
    */
   @Bean
   @ConditionalOnProperty(prefix = "hotkey.worker.persistence", name = "enabled", havingValue = "true")
@@ -123,6 +130,11 @@ public class WorkerAutoConfiguration {
   /**
    * Schedules periodic TopK snapshot persistence. The returned placeholder bean
    * keeps the task alive in the context.
+   *
+   * @param service    the TopK persistence service whose {@code persistToRedis} is scheduled
+   * @param properties worker configuration providing the persistence interval
+   * @param scheduler  the shared worker scheduler
+   * @return a placeholder {@link Object} bean that keeps the scheduled task alive
    */
   @Bean
   @ConditionalOnBean(TopKPersistService.class)
@@ -163,6 +175,9 @@ public class WorkerAutoConfiguration {
    * {@code hotkey.worker.hot-threshold} it is used directly; otherwise the
    * value is set to {@code Long.MAX_VALUE} and the ratio‑based threshold
    * will be calculated later by the dynamic‑threshold logic (not shown here).
+   *
+   * @param properties worker configuration providing sliding-window parameters
+   * @return a new {@link SlidingWindowDetector} instance
    */
   @Bean
   public SlidingWindowDetector slidingWindowDetector(WorkerProperties properties) {
@@ -449,6 +464,8 @@ public class WorkerAutoConfiguration {
   /**
    * Scheduled task that evicts stale keys from the sliding-window detector
    * and state machine.
+   *
+   * Default constructor.
    */
   @RequiredArgsConstructor
   public static class EvictStaleTask {
@@ -490,6 +507,8 @@ public class WorkerAutoConfiguration {
 
   /**
    * Scheduled task that inspects the Worker TopK and pre-warms stable hot keys.
+   *
+   * Default constructor.
    */
   @RequiredArgsConstructor
   public static class TopKValidationTask {
@@ -568,7 +587,7 @@ public class WorkerAutoConfiguration {
    * Fallback JSON message converter for report messages. Active only when the
    * common module's {@code reportMessageConverter} is absent (e.g. in tests).
    *
-   * @return a {@link Jackson2JsonMessageConverter} instance
+   * @return a {@link org.springframework.amqp.support.converter.Jackson2JsonMessageConverter} instance
    */
   @Bean("reportMessageConverter")
   @ConditionalOnMissingBean(name = "reportMessageConverter")
@@ -588,9 +607,9 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public SimpleRabbitListenerContainerFactory reportListenerContainerFactory(
-      ConnectionFactory connectionFactory,
-      @Qualifier("reportMessageConverter") MessageConverter reportMessageConverter,
-      WorkerProperties properties
+    ConnectionFactory connectionFactory,
+    @Qualifier("reportMessageConverter") MessageConverter reportMessageConverter,
+    WorkerProperties properties
   ) {
     SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
     factory.setConnectionFactory(connectionFactory);
@@ -649,8 +668,7 @@ public class WorkerAutoConfiguration {
         TimeUnit.MILLISECONDS
       );
     } catch (Exception e) {
-      log.error("Failed to schedule threshold learning task; dynamic threshold " +
-          "adjustment will not run.", e);
+      log.error("Failed to schedule threshold learning task; dynamic threshold " + "adjustment will not run.", e);
     }
     return new Object(); // placeholder bean
   }
@@ -709,7 +727,9 @@ public class WorkerAutoConfiguration {
    * @param properties             worker configuration providing exchange and interval settings
    * @param stateMachine           the state machine providing config gossip fields
    * @param broadcaster            the broadcaster for reading the current decision version watermark
+   * @param redisConnectionFactory the Redis connection factory for epoch initialization
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @param scheduler              the shared worker scheduler for periodic heartbeat sends
    * @return a new {@link WorkerHeartbeatProducer} instance
    */
   @Bean

@@ -25,12 +25,12 @@ package io.github.hyshmily.hotkey.reporting;
  * RabbitMQ publisher.
  */
 public interface KeyReporter {
-
   /**
    * Record one access for the given cache key.
    *
    * @param cacheKey the accessed key
    */
+  @SuppressWarnings("all")
   void record(String cacheKey);
 
   /**

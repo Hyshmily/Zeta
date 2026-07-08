@@ -185,16 +185,16 @@ Default local configuration:
 
 **Feature configuration:**
 
-| Feature               | How to Enable                                | Description                                                          |
-| -------------------- | -------------------------------------------- | -------------------------------------------------------------------- |
-| Redis L2 Cache       | Add `RedisTemplate` Bean                     | Two-level cache, L2 fallback                                         |
-| Cross-instance Sync  | `hotkey.sync.enabled=true`                   | RabbitMQ-based cache invalidation                                    |
-| Worker Listener      | `hotkey.worker-listener.enabled=true`        | Receive HOT/COOL decisions from Worker                               |
-| Worker Mode          | `hotkey.worker.enabled=true`                 | Run a dedicated Worker node                                          |
-| Worker TopK Persist  | `hotkey.worker.persistence.enabled=true`     | Warm start from Redis after restart                                  |
-| Access Reporting     | `hotkey.report.enabled=true` (default)       | Report access counts to Worker                                       |
-| Reporter Self-Protection | `hotkey.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush                              |
-| Spring Cache Integration | `hotkey.spring-cache.enabled=true`        | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with HotKey detection |
+| Feature                  | How to Enable                                  | Description                                                            |
+| ------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------- |
+| Redis L2 Cache           | Add `RedisTemplate` Bean                       | Two-level cache, L2 fallback                                           |
+| Cross-instance Sync      | `hotkey.sync.enabled=true`                     | RabbitMQ-based cache invalidation                                      |
+| Worker Listener          | `hotkey.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker                                 |
+| Worker Mode              | `hotkey.worker.enabled=true`                   | Run a dedicated Worker node                                            |
+| Worker TopK Persist      | `hotkey.worker.persistence.enabled=true`       | Warm start from Redis after restart                                    |
+| Access Reporting         | `hotkey.report.enabled=true` (default)         | Report access counts to Worker                                         |
+| Reporter Self-Protection | `hotkey.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush                                    |
+| Spring Cache Integration | `hotkey.spring-cache.enabled=true`             | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with HotKey detection |
 
 See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 
@@ -260,10 +260,10 @@ hotKey.write("user:42").invalidate();
 
 HotKey uses **differentiated TTLs**: hot keys and normal keys have independent defaults. Per-call overrides take effect on top.
 
-| Key State | Hard TTL (Caffeine eviction)    | Soft TTL (stale-while-revalidate) |
-| --------- | ------------------------------- | --------------------------------- |
+| Key State | Hard TTL (Caffeine eviction)   | Soft TTL (stale-while-revalidate) |
+| --------- | ------------------------------ | --------------------------------- |
 | Normal    | `default-hard-ttl-ms` (5min)   | `default-soft-ttl-ms` (30s)       |
-| Hot       | `default-hot-hard-ttl-ms` (1h)  | `default-hot-soft-ttl-ms` (5min)  |
+| Hot       | `default-hot-hard-ttl-ms` (1h) | `default-hot-soft-ttl-ms` (5min)  |
 
 ```java
 // 5 min hard TTL + 30s soft TTL
@@ -292,10 +292,10 @@ hotKey.putThrough("weather:" + city, weatherData,
 
 Worker mode provides cluster-wide hotspot detection via dedicated nodes. App instances periodically report access counts; the Worker runs a sliding window + state machine pipeline and broadcasts HOT/COOL decisions back to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state`.
 
-| Mode        | `worker.enabled` | Activated Beans                                                    |
-| ----------- | ---------------- | ------------------------------------------------------------------ |
-| App-only    | `false` (default)| `HotKeyCache`, TopK, reporter, actuator, sync                      |
-| Worker-only | `true`           | Worker only (no cache — `get()`/`putThrough()` throw `HotKeyModeException`) |
+| Mode        | `worker.enabled`  | Activated Beans                                                             |
+| ----------- | ----------------- | --------------------------------------------------------------------------- |
+| App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                               |
+| Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `HotKeyModeException`) |
 
 **Worker Cluster Health:** Set `hotkey.local.expected-worker-count` to the expected number of Workers in production. When set >0, `ClusterHealthView` uses majority quorum (`> expectedWorkerCount / 2`) as the healthy Worker threshold; when 0 (default), the cluster is considered unhealthy until at least one heartbeat is received. This enables precise detection of partial Worker failures and graceful degradation decisions.
 
@@ -305,14 +305,14 @@ Worker mode provides cluster-wide hotspot detection via dedicated nodes. App ins
 
 Enable `hotkey.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `@CacheEvict` are automatically routed through HotKey's hotspot detection, soft expiration, and cross-instance sync.
 
-| Annotation        | Role on `@Cacheable`                                                                                    |
-| ----------------- | ------------------------------------------------------------------------------------------------------- |
-| `@HotKeyCacheTTL` | Override hard/soft TTL                                                                                  |
-| `@HotKeyPreload`  | Pre-inflate HeavyKeeper counts so known hot keys take effect immediately                                |
+| Annotation        | Role on `@Cacheable`                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `@HotKeyCacheTTL` | Override hard/soft TTL                                                                                                           |
+| `@HotKeyPreload`  | Pre-inflate HeavyKeeper counts so known hot keys take effect immediately                                                         |
 | `@Intercept`      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`); degrades via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
-| `@Fallback`       | Provide fallback value when blocked, intercepted, or on exception                                      |
-| `@NullCaching`    | Opt into caching null return values (default `true`)                                                   |
-| `@Broadcast`      | Suppress cross-instance sync messages                                                                   |
+| `@Fallback`       | Provide fallback value when blocked, intercepted, or on exception                                                                |
+| `@NullCaching`    | Opt into caching null return values (default `true`)                                                                             |
+| `@Broadcast`      | Suppress cross-instance sync messages                                                                                            |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
@@ -335,8 +335,6 @@ public String getFlashItem(String id) { ... }
 
 Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classpath.
 
----
-
 ## Cache Sync
 
 Enable `hotkey.sync.enabled=true`.
@@ -345,21 +343,21 @@ Enable `hotkey.sync.enabled=true`.
 
 Enable `hotkey.sync.enabled=true` to enable cross-instance rule synchronization. The rule system supports two actions:
 
-| Action            | Effect on matching keys                                                     |
-| ----------------- | --------------------------------------------------------------------------- |
+| Action            | Effect on matching keys                                                              |
+| ----------------- | ------------------------------------------------------------------------------------ |
 | `BLOCK`           | `get()` / `getWithSoftExpire()` throw `HotKeyBlockedException`; `putThrough()` skips |
-| `ALLOW_NO_REPORT` | Process normally but skip Worker reporting (reduces noise from high-frequency keys) |
+| `ALLOW_NO_REPORT` | Process normally but skip Worker reporting (reduces noise from high-frequency keys)  |
 
 ### Pattern Types
 
 `RuleMatcher.of(pattern, action)` auto-detects the pattern:
 
-| Pattern               | Type       | Matches                       |
-| --------------------- | ---------- | ----------------------------- |
-| `"user:123"`          | `EXACT`    | Exact key                     |
-| `"temp:*"`            | `PREFIX`   | Keys starting with `temp:`    |
-| `"order:*-detail"`    | `WILDCARD` | Glob-style (`*` / `?`) match  |
-| `"regex:user:\\d+"`   | `REGEX`    | Java regex                    |
+| Pattern             | Type       | Matches                      |
+| ------------------- | ---------- | ---------------------------- |
+| `"user:123"`        | `EXACT`    | Exact key                    |
+| `"temp:*"`          | `PREFIX`   | Keys starting with `temp:`   |
+| `"order:*-detail"`  | `WILDCARD` | Glob-style (`*` / `?`) match |
+| `"regex:user:\\d+"` | `REGEX`    | Java regex                   |
 
 ### Persistence & Broadcast
 

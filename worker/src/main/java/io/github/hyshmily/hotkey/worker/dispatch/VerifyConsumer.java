@@ -15,19 +15,20 @@
  */
 package io.github.hyshmily.hotkey.worker.dispatch;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
+
 import lombok.AllArgsConstructor;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.*;
-
-/**
+/*
  * Worker-side verification request handler — receives PING from App, replies PONG.
  *
  * <p>Queue: hotkey.verify.ping.{workerId}
  * Uses Direct reply-to (amq.rabbitmq.reply-to) for the response.
  */
+/** Default constructor. */
 @AllArgsConstructor
 public class VerifyConsumer {
 

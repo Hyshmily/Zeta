@@ -14,15 +14,14 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.detection;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_TOPK_PRE_WARM;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
-import lombok.RequiredArgsConstructor;
-
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -30,8 +29,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
-
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_TOPK_PRE_WARM;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Validates Top-K candidates and triggers pre-warming broadcasts for stable hot keys.
@@ -42,7 +41,15 @@ import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_TOPK_PR
  *
  * <p>This hysteresis prevents flapping: a key that briefly enters and leaves the Top-K won't
  * trigger unnecessary broadcasts.
+ *
+ * <p><b>Known limitation — local‑only validation:</b> All validation is
+ * purely local to this Worker instance — cross‑checking this Worker's
+ * HeavyKeeper TopK against its own sliding‑window TopK. There is
+ * <b>no cross‑Worker consensus, quorum, or coordination</b>. A globally
+ * hot key that is split across multiple shards may never reach any single
+ * Worker's TopK list.
  */
+/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class TopKValidator {

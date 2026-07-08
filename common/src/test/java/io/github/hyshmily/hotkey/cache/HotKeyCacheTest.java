@@ -23,6 +23,7 @@ import static org.mockito.Mockito.*;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
+import io.github.hyshmily.hotkey.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
@@ -42,6 +43,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -59,6 +62,7 @@ class HotKeyCacheTest {
   private ExpireManager expireManager;
   private Executor executor;
   private HotKeyCache hotKeyCache;
+  private ScheduledExecutorService scheduler;
 
   @BeforeEach
   void setUp() {
@@ -69,6 +73,7 @@ class HotKeyCacheTest {
     executor = Runnable::run;
     HotKeyProperties ttlConfig = new HotKeyProperties();
     expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
+    scheduler = Executors.newSingleThreadScheduledExecutor();
 
     hotKeyCache = new HotKeyCache(
       hotKeyDetector,
@@ -76,8 +81,12 @@ class HotKeyCacheTest {
       singleFlight,
       expireManager,
       executor,
-      Optional.empty(),
-      Optional.empty(),
+      new CentralDispatcher(
+        Optional.empty(),
+        Optional.empty(),
+        new BroadcastBuffer(scheduler, Optional.empty()),
+        hotKeyDetector
+      ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
       new VersionControllerImpl(Optional.empty(), 60),
       ttlConfig,
@@ -295,8 +304,12 @@ class HotKeyCacheTest {
       singleFlight,
       noSoft,
       executor,
-      Optional.empty(),
-      Optional.empty(),
+      new CentralDispatcher(
+        Optional.empty(),
+        Optional.empty(),
+        new BroadcastBuffer(scheduler, Optional.empty()),
+        hotKeyDetector
+      ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
       new VersionControllerImpl(Optional.empty(), 60),
       props,
@@ -967,6 +980,7 @@ class HotKeyCacheTest {
     private Executor executor;
     private HotKeyCache hotKeyCache;
     private CacheSyncPublisher publisher;
+    private BroadcastBuffer broadcastBuffer;
     private HealthView healthView;
 
     @BeforeEach
@@ -978,17 +992,23 @@ class HotKeyCacheTest {
       HotKeyProperties ttlConfig = new HotKeyProperties();
       expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
       publisher = mock(CacheSyncPublisher.class);
+      broadcastBuffer = new BroadcastBuffer(
+        Executors.newSingleThreadScheduledExecutor(r -> {
+          Thread t = new Thread(r, "hotkey-broadcast-flusher");
+          t.setDaemon(true);
+          return t;
+        }),
+        Optional.of(publisher)
+      );
       healthView = mock(HealthView.class);
       KeyReporter reporter = mock(KeyReporter.class);
-
       hotKeyCache = new HotKeyCache(
         hotKeyDetector,
         caffeineCache,
         singleFlight,
         expireManager,
         executor,
-        Optional.of(publisher),
-        Optional.of(reporter),
+        new CentralDispatcher(Optional.of(reporter), Optional.of(publisher), broadcastBuffer, hotKeyDetector),
         new RuleMatcherImpl(Optional.empty(), Optional.empty()),
         new VersionControllerImpl(Optional.empty(), 60),
         ttlConfig,
@@ -1242,6 +1262,7 @@ class HotKeyCacheTest {
     void putThrough_shouldBroadcastWhenPublisherPresent() {
       hotKeyCache.putThrough("key1", "value", () -> {});
 
+      broadcastBuffer.flush();
       verify(publisher).broadcastRefresh(eq("key1"), anyLong(), eq(true));
     }
 

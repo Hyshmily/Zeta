@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 package io.github.hyshmily.hotkey.worker.persistence;
-import lombok.extern.slf4j.Slf4j;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,6 +24,7 @@ import jakarta.annotation.PostConstruct;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -82,8 +82,7 @@ public class TopKPersistService {
         return;
       }
 
-      topK.addDirect(items.stream().collect(Collectors.toMap(Item::key, Item::count)));
-      log.info("Restored {} hot keys from Redis for Worker [{}]", items.size(), redisKey);
+      topK.warm(items.stream().collect(Collectors.toMap(Item::key, Item::count)));
     } catch (Exception e) {
       log.error("Failed to restore TopK from Redis at key: {}", redisKey, e);
     }

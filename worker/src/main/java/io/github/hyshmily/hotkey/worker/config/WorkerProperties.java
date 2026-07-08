@@ -30,20 +30,22 @@ import org.springframework.validation.annotation.Validated;
  * <p>Groups cover routing, AMQP exchange names, sliding-window parameters,
  * threshold settings, state-machine timings, dynamic threshold adaptation,
  * TopK pre-warm validation, and HeavyKeeper algorithm tuning.
+ *
+ * Default constructor.
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "hotkey.worker")
 public class WorkerProperties {
 
-  /** Routing configuration for app-level report queue naming. */
+  /** Routing configuration for app-level report queue naming. Default constructor. */
   @Data
   public static class Routing {
 
     private String appName = "default";
   }
 
-  /** AMQP exchange names for report and broadcast messages. */
+  /** AMQP exchange names for report and broadcast messages. Default constructor. */
   @Data
   public static class Messaging {
 
@@ -52,7 +54,7 @@ public class WorkerProperties {
     private String heartbeatExchange = HotKeyConstants.EXCHANGE_HEARTBEAT;
   }
 
-  /** Container tuning for the report-message RabbitMQ listener. */
+  /** Container tuning for the report-message RabbitMQ listener. Default constructor. */
   @Data
   public static class ReportConsumer {
 
@@ -62,7 +64,7 @@ public class WorkerProperties {
     private int prefetchCount = 50;
   }
 
-  /** Sliding-window parameters for local QPS tracking. */
+  /** Sliding-window parameters for local QPS tracking. Default constructor. */
   @Data
   public static class SlidingWindow {
 
@@ -72,7 +74,7 @@ public class WorkerProperties {
     private int slices = 10;
   }
 
-  /** Absolute and ratio-based thresholds for HOT key classification. */
+  /** Absolute and ratio-based thresholds for HOT key classification. Default constructor. */
   @Data
   public static class Threshold {
 
@@ -80,7 +82,7 @@ public class WorkerProperties {
     private double hotThresholdRatio = 0.01;
   }
 
-  /** State-machine timing for HOT/COOL decision transitions. */
+  /** State-machine timing for HOT/COOL decision transitions. Default constructor. */
   @Data
   public static class StateMachine {
 
@@ -96,7 +98,7 @@ public class WorkerProperties {
     private long evictIntervalMs = 30_000;
   }
 
-  /** Dynamic threshold adaptation based on global QPS changes. */
+  /** Dynamic threshold adaptation based on global QPS changes. Default constructor. */
   @Data
   public static class GlobalQpsDynamicThreshold {
 
@@ -106,7 +108,7 @@ public class WorkerProperties {
     private long recalculateIntervalMs = 60_000;
   }
 
-  /** Pre-warm validation before emitting HOT decisions. */
+  /** Pre-warm validation before emitting HOT decisions. Default constructor. */
   @Data
   public static class TopKValidation {
 
@@ -115,7 +117,7 @@ public class WorkerProperties {
     private int preWarmMinAppearances = 2;
   }
 
-  /** HeavyKeeper TopK algorithm parameters for worker-side hot key detection. */
+  /** HeavyKeeper TopK algorithm parameters for worker-side hot key detection. Default constructor. */
   @Data
   public static class HeavyKeeper {
 
@@ -126,14 +128,14 @@ public class WorkerProperties {
     private int minCount = 10;
   }
 
-  /** Heartbeat (ping) interval configuration for worker-to-worker health signalling and config sync. */
+  /** Heartbeat (ping) interval configuration for worker-to-worker health signalling and config sync. Default constructor. */
   @Data
   public static class Heartbeat {
 
     private int pingIntervalMs = 1_000;
   }
 
-  /** TopK persistence to Redis for warm-start after Worker restart. */
+  /** TopK persistence to Redis for warm-start after Worker restart. Default constructor. */
   @Data
   public static class Persistence {
 

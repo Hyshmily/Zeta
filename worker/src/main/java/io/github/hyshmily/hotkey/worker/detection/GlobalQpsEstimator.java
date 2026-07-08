@@ -34,6 +34,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * snapshot is acceptable; the AtomicLong array guarantees individual element
  * visibility.
  *
+ *
+ * <p><b>Known limitation — per‑shard only:</b> This estimator only sees
+ * traffic routed to <em>this</em> Worker shard by the consistent‑hash ring.
+ * It does <b>not</b> reflect global cluster QPS. When the cluster scales
+ * (e.g. 5→3 Workers), per‑shard load redistributes non‑linearly, and the
+ * derived threshold will shift accordingly. Not suitable for
+ * cluster‑wide adaptive decisions without cross‑Worker coordination.
+ *
  * @see ThresholdLearner
  * @see SlidingWindowDetector
  */

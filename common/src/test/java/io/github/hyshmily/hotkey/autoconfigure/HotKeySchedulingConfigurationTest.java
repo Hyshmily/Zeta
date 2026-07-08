@@ -15,20 +15,21 @@
  */
 package io.github.hyshmily.hotkey.autoconfigure;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.*;
+
+import io.github.hyshmily.hotkey.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-
-import java.util.List;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
 
 /**
  * Tests for {@link HotKeySchedulingConfiguration}.
@@ -45,7 +46,12 @@ class HotKeySchedulingConfigurationTest {
   void cleanHotKeysCallsFadingOnAllInstances() {
     TopK topK1 = mock(TopK.class);
     TopK topK2 = mock(TopK.class);
-    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(List.of(topK1, topK2), scheduler);
+    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(
+      List.of(topK1, topK2),
+      scheduler,
+      new BroadcastBuffer(scheduler, Optional.empty()),
+      Optional.empty()
+    );
 
     config.cleanHotKeys();
 
@@ -59,7 +65,12 @@ class HotKeySchedulingConfigurationTest {
   @Test
   void cleanHotKeysHandlesSingleInstance() {
     TopK topK = mock(TopK.class);
-    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(List.of(topK), scheduler);
+    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(
+      List.of(topK),
+      scheduler,
+      new BroadcastBuffer(scheduler, Optional.empty()),
+      Optional.empty()
+    );
 
     config.cleanHotKeys();
 
@@ -71,7 +82,12 @@ class HotKeySchedulingConfigurationTest {
    */
   @Test
   void cleanHotKeysHandlesEmptyList() {
-    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(List.of(), scheduler);
+    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(
+      List.of(),
+      scheduler,
+      new BroadcastBuffer(scheduler, Optional.empty()),
+      Optional.empty()
+    );
 
     config.cleanHotKeys();
     // No exception should be thrown
@@ -92,7 +108,12 @@ class HotKeySchedulingConfigurationTest {
     when(topK1.expelled()).thenReturn(queue1);
     when(topK2.expelled()).thenReturn(queue2);
 
-    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(List.of(topK1, topK2), scheduler);
+    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(
+      List.of(topK1, topK2),
+      scheduler,
+      new BroadcastBuffer(scheduler, Optional.empty()),
+      Optional.empty()
+    );
     config.drainExpelled();
 
     assertThat(queue1).isEmpty();
@@ -107,7 +128,12 @@ class HotKeySchedulingConfigurationTest {
     TopK topK = mock(TopK.class);
     when(topK.expelled()).thenReturn(new LinkedBlockingQueue<>());
 
-    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(List.of(topK), scheduler);
+    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(
+      List.of(topK),
+      scheduler,
+      new BroadcastBuffer(scheduler, Optional.empty()),
+      Optional.empty()
+    );
     config.drainExpelled();
     // No exception should be thrown
   }
@@ -124,7 +150,12 @@ class HotKeySchedulingConfigurationTest {
     }
     when(topK.expelled()).thenReturn(queue);
 
-    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(List.of(topK), scheduler);
+    HotKeySchedulingConfiguration config = new HotKeySchedulingConfiguration(
+      List.of(topK),
+      scheduler,
+      new BroadcastBuffer(scheduler, Optional.empty()),
+      Optional.empty()
+    );
     config.drainExpelled();
 
     // drainTo(collection, 100_000) should have drained all 1500 items
@@ -139,6 +170,9 @@ class HotKeySchedulingConfigurationTest {
     new ApplicationContextRunner()
       .withBean(TopK.class, () -> mock(TopK.class))
       .withBean("hotKeyScheduler", ScheduledExecutorService.class, () -> mock(ScheduledExecutorService.class))
+      .withBean(BroadcastBuffer.class, () ->
+        new BroadcastBuffer(mock(ScheduledExecutorService.class), Optional.empty())
+      )
       .withConfiguration(AutoConfigurations.of(HotKeySchedulingConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(HotKeySchedulingConfiguration.class));
   }

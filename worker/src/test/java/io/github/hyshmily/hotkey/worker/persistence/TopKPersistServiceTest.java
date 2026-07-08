@@ -184,7 +184,7 @@ class TopKPersistServiceTest {
   void restoreFromRedis_shouldRestoreItemsWhenValidJson() {
     when(valueOps.get(REDIS_KEY)).thenReturn("[{\"key\":\"hotKey\",\"count\":100}]");
     service.restoreFromRedis();
-    verify(topK).addDirect(
+    verify(topK).warm(
         argThat((Map<String, Long> m) -> m.size() == 1 && m.get("hotKey") == 100L));
   }
 }

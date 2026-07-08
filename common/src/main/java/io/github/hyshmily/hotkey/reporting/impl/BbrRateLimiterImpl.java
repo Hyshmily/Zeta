@@ -19,6 +19,7 @@ import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
+import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.util.SystemLoadMonitor;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -34,7 +35,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * period is active.  When CPU is above threshold the limiter enforces the
  * concurrency budget strictly.
  *
- * <p><b>Application:</b> Used by {@link io.github.hyshmily.hotkey.reporting.KeyReporter} to skip flush cycles
+ * <p><b>Application:</b> Used by {@link KeyReporter} to skip flush cycles
  * when the reporting pipeline is saturated, providing back-pressure that is
  * proportional to system load.
  */

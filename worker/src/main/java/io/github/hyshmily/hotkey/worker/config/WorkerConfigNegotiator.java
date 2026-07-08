@@ -33,8 +33,9 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  *
  * <p>On startup, waits up to 3 seconds for the first heartbeat to arrive.
  * If none is received, the Worker continues with the values from
- * {@link WorkerProperties} — this can happen when all other Workers are down.
+ * {@link io.github.hyshmily.hotkey.worker.config.WorkerProperties} — this can happen when all other Workers are down.
  */
+/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class WorkerConfigNegotiator {
@@ -56,18 +57,16 @@ public class WorkerConfigNegotiator {
    */
   @PostConstruct
   void syncOnStartup() {
-    Thread waitThread = new HotKeyThreadFactory("hotkey-config-sync-startup").newThread(
-      () -> {
-        try {
-          boolean received = startupLatch.await(3000, TimeUnit.MILLISECONDS);
-          if (!received) {
-            log.warn("No config heartbeat received within 3s, using WorkerProperties defaults");
-          }
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
+    Thread waitThread = new HotKeyThreadFactory("hotkey-config-sync-startup").newThread(() -> {
+      try {
+        boolean received = startupLatch.await(3000, TimeUnit.MILLISECONDS);
+        if (!received) {
+          log.warn("No config heartbeat received within 3s, using WorkerProperties defaults");
         }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
       }
-    );
+    });
     waitThread.start();
   }
 

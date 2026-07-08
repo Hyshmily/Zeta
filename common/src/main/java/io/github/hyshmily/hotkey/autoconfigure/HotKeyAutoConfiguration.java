@@ -21,7 +21,9 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.hotkey.Internal;
+import io.github.hyshmily.hotkey.cache.CentralDispatcher;
 import io.github.hyshmily.hotkey.cache.HotKeyCache;
+import io.github.hyshmily.hotkey.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.cache.cachesupport.impl.CircuitBreakerImpl;
@@ -241,6 +243,32 @@ public class HotKeyAutoConfiguration {
   }
 
   /**
+   * Create the deferred broadcast buffer for putThrough cache-sync messages.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public BroadcastBuffer broadcastBuffer(
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
+    Optional<CacheSyncPublisher> syncPublisher
+  ) {
+    return new BroadcastBuffer(hotKeyScheduler, syncPublisher);
+  }
+
+  /**
+   * Create the {@link CentralDispatcher} that aggregates reporting and broadcasting.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public CentralDispatcher centralDispatcher(
+    Optional<KeyReporter> hotKeyReporter,
+    Optional<CacheSyncPublisher> syncPublisher,
+    BroadcastBuffer broadcastBuffer,
+    HotKeyDetector hotKeyDetector
+  ) {
+    return new CentralDispatcher(hotKeyReporter, syncPublisher, broadcastBuffer, hotKeyDetector);
+  }
+
+  /**
    * Create the {@link HotKeyCache} (non-Redis variant).
    *
    * <p>Only active when {@code RedisTemplate} is absent; otherwise
@@ -253,12 +281,12 @@ public class HotKeyAutoConfiguration {
    * @param hotLocalCache             the L1 Caffeine cache (never {@code null})
    * @param singleFlight              the deduplication layer (never {@code null})
    * @param expireManager             the soft/hard expiration manager (never {@code null})
-   * @param syncPublisher             optional cache sync publisher (may be absent)
-   * @param hotKeyReporter            optional hot key reporter (may be absent; e.g. in Worker-only mode)
    * @param hotKeyExecutor            the dedicated HotKey executor (never {@code null})
+   * @param centralDispatcher         the central dispatcher for broadcast coordination
    * @param properties                the HotKey configuration properties (never {@code null})
    * @param ruleMatcher               the rule matcher instance (never {@code null})
    * @param healthViewProvider        provider for the cluster health view (creates default if absent)
+   * @param compressor                the cache compressor for value serialization
    * @return a new HotKeyCache instance with node-local version tracking
    */
   @Bean
@@ -268,9 +296,8 @@ public class HotKeyAutoConfiguration {
     Cache<String, Object> hotLocalCache,
     SingleFlight singleFlight,
     ExpireManager expireManager,
-    Optional<CacheSyncPublisher> syncPublisher,
-    Optional<KeyReporter> hotKeyReporter,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
+    CentralDispatcher centralDispatcher,
     HotKeyProperties properties,
     RuleMatcher ruleMatcher,
     ObjectProvider<HealthView> healthViewProvider,
@@ -282,8 +309,7 @@ public class HotKeyAutoConfiguration {
       singleFlight,
       expireManager,
       hotKeyExecutor,
-      syncPublisher,
-      hotKeyReporter,
+      centralDispatcher,
       ruleMatcher,
       new VersionControllerImpl(Optional.empty(), properties.getVersionKeyTtlMinutes()),
       properties,

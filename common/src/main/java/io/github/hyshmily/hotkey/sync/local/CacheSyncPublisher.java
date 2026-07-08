@@ -211,7 +211,6 @@ public class CacheSyncPublisher {
     if (keys == null || keys.isEmpty()) {
       return;
     }
-
     List<String> keyList = new ArrayList<>(keys);
     for (int i = 0; i < keyList.size(); i += BATCH_SIZE) {
       int end = Math.min(i + BATCH_SIZE, keyList.size());

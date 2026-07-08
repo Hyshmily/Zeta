@@ -15,15 +15,16 @@
  */
 
 package io.github.hyshmily.hotkey.worker.detection;
-import lombok.extern.slf4j.Slf4j;
 
 import io.github.hyshmily.hotkey.worker.config.WorkerProperties;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Periodically recalculates the hot‑key threshold based on estimated global QPS
- * and updates the {@link SlidingWindowDetector}.
+ * and updates the {@link io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector}.
  */
+/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class ThresholdLearner implements Runnable {
@@ -80,9 +81,8 @@ public class ThresholdLearner implements Runnable {
 
       // Tolerance check: avoid small fluctuations
       if (properties.getGlobalQpsDynamicThreshold().getQpsChangeTolerance() > 0) {
-        double changeRate = oldThreshold == 0
-          ? Double.MAX_VALUE
-          : Math.abs(newThreshold - oldThreshold) / (double) oldThreshold;
+        double changeRate =
+          oldThreshold == 0 ? Double.MAX_VALUE : Math.abs(newThreshold - oldThreshold) / (double) oldThreshold;
         if (changeRate <= properties.getGlobalQpsDynamicThreshold().getQpsChangeTolerance()) {
           log.debug("Threshold change within tolerance ({}), keeping old value", changeRate);
           return;

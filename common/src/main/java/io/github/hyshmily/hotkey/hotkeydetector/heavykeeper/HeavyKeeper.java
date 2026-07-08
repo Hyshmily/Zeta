@@ -17,6 +17,9 @@ package io.github.hyshmily.hotkey.hotkeydetector.heavykeeper;
 
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.hotkey.Internal;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -27,8 +30,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAccumulator;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
@@ -369,6 +370,43 @@ public class HeavyKeeper implements TopK {
       }
     }
     return results;
+  }
+
+  /**
+   * Warm up the TopK set from a persisted snapshot, bypassing the sketch.
+   * <p>
+   * Respects the capacity limit ({@code k}) — evicts the weakest member
+   * when full. Pre-caches fingerprints and index positions for fast-path
+   * compatibility with subsequent {@link #addDirect} calls.
+   *
+   * @param keyCounts map of keys to their estimated counts
+   */
+  @Override
+  @SuppressWarnings("all")
+  public void warm(Map<String, Long> keyCounts) {
+    admissionLock.lock();
+    try {
+      for (var entry : keyCounts.entrySet()) {
+        String key = entry.getKey();
+        long count = entry.getValue();
+        if (count < minCount) continue;
+
+        if (members.size() >= k) {
+          if (count <= minPqCount) continue;
+          MemberCandidate min = findMinMember();
+          Node removed = members.remove(min.key());
+          if (removed != null) {
+            locCache.remove(min.key());
+          }
+        }
+
+        members.put(key, new Node(key, count));
+        locCache.putIfAbsent(key, new SlotLoc(fingerprint(key)));
+      }
+      minPqCount = members.isEmpty() ? 0L : findMinMember().count();
+    } finally {
+      admissionLock.unlock();
+    }
   }
 
   /**
@@ -733,8 +771,8 @@ public class HeavyKeeper implements TopK {
     if (removed != null) {
       expelledKey = removed.key;
       locCache.remove(expelledKey); // evicted — no longer needs cached fingerprint
-      if (!expelledQueue.offer(new Item(removed.key, removed.count.get()))) {
-        log.warn("Expelled queue full, dropping key: {}", removed.key);
+      if (!expelledQueue.offer(new Item(expelledKey, min.count()))) {
+        log.warn("Failed to offer expelled key: {}", expelledKey);
       }
     }
     members.put(key, new Node(key, maxCount));

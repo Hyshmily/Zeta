@@ -15,11 +15,12 @@
  */
 package io.github.hyshmily.hotkey.reporting.impl;
 
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.TOPK_INCR;
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.hotkeydetector.doublebuffer.BufferedCounter;
-import io.github.hyshmily.hotkey.reporting.impl.BbrRateLimiterImpl;
+import io.github.hyshmily.hotkey.reporting.BbrRateLimiter;
 import io.github.hyshmily.hotkey.reporting.KeyReporter;
 import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import io.github.hyshmily.hotkey.reporting.ReportPublisher;
@@ -99,6 +100,7 @@ public class KeyReporterImpl implements KeyReporter {
 
   /** Optional BBR adaptive rate limiter; null disables BBR gating. */
   @Setter
+  @SuppressWarnings("java:S3077") // BBR is thread-safe
   private volatile BbrRateLimiterImpl bbrRateLimiter;
 
   /** Guards start() idempotency. */
@@ -119,6 +121,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @param ringManager         consistent-hashing ring manager for Worker node routing
    * @param healthView          cluster health view for filtering dead Workers
    */
+  @SuppressWarnings("java:S107") // too many constructor args, but all are required for proper initialization
   public KeyReporterImpl(
     ReportPublisher reportPublisher,
     ScheduledExecutorService scheduler,
@@ -167,7 +170,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @param cacheKey the accessed key
    */
   public void record(String cacheKey) {
-    bufferedCounter.count(cacheKey, 1);
+    bufferedCounter.count(cacheKey, TOPK_INCR);
   }
 
   /**
