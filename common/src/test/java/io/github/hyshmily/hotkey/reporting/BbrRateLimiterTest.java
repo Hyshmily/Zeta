@@ -235,18 +235,24 @@ class BbrRateLimiterTest {
 
   @Test
   void maxInFlight_whenZeroPass_shouldReturnMaxValue() throws Exception {
-    Field cacheField = BbrRateLimiterImpl.class.getDeclaredField("maxPassCache");
+    Field mpmrField = BbrRateLimiterImpl.class.getDeclaredField("maxPassMinRtField");
+    mpmrField.setAccessible(true);
+    Object mpmr = mpmrField.get(limiter);
+    Field cacheField = mpmr.getClass().getSuperclass().getDeclaredField("maxPassCache");
     cacheField.setAccessible(true);
-    AtomicLong cache = (AtomicLong) cacheField.get(limiter);
+    AtomicLong cache = (AtomicLong) cacheField.get(mpmr);
     cache.set(0);
     assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(Long.MAX_VALUE);
   }
 
   @Test
   void maxInFlight_whenZeroRt_shouldReturnMaxValue() throws Exception {
-    Field cacheField = BbrRateLimiterImpl.class.getDeclaredField("minRtCache");
+    Field mpmrField = BbrRateLimiterImpl.class.getDeclaredField("maxPassMinRtField");
+    mpmrField.setAccessible(true);
+    Object mpmr = mpmrField.get(limiter);
+    Field cacheField = mpmr.getClass().getSuperclass().getDeclaredField("minRtCache");
     cacheField.setAccessible(true);
-    AtomicLong cache = (AtomicLong) cacheField.get(limiter);
+    AtomicLong cache = (AtomicLong) cacheField.get(mpmr);
     cache.set(0);
     assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(Long.MAX_VALUE);
   }
@@ -455,9 +461,12 @@ class BbrRateLimiterTest {
     assertThat(limiter.tryAcquire()).isFalse();
 
     // Simulate cooldown expiry via reflection.
-    Field dropField = BbrRateLimiterImpl.class.getDeclaredField("lastDropTime");
+    Field dtmfField = BbrRateLimiterImpl.class.getDeclaredField("dropTimeMinFlightField");
+    dtmfField.setAccessible(true);
+    Object dtmf = dtmfField.get(limiter);
+    Field dropField = dtmf.getClass().getSuperclass().getDeclaredField("lastDropTime");
     dropField.setAccessible(true);
-    dropField.set(limiter, TimeSource.currentTimeMillis() - COOLDOWN_MS - 100);
+    dropField.set(dtmf, TimeSource.currentTimeMillis() - COOLDOWN_MS - 100);
 
     assertThat(limiter.tryAcquire()).isTrue();
   }

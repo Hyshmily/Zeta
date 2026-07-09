@@ -570,6 +570,7 @@ public class KeyReporterImpl implements KeyReporter {
      *       to avoid noise during orderly shutdown</li>
      * </ul>
      */
+    @SuppressWarnings("all")
     private void consumeLoop() {
       while (running) {
         ShardBatch batch;

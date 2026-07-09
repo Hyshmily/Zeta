@@ -62,17 +62,20 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   private int currentBucket;
   private long windowStart;
 
-  private final AtomicLong inFlight = new AtomicLong(0);
+  private static final class InFlightField extends BbrPadding.InFlightRef {}
+
+  private final InFlightField inFlightField = new InFlightField();
+
+  private static final class MaxPassMinRtField extends BbrPadding.MaxPassMinRtRef {}
+
+  private final MaxPassMinRtField maxPassMinRtField = new MaxPassMinRtField();
+
+  private static final class DropTimeMinFlightField extends BbrPadding.DropTimeMinFlightRef {}
+
+  private final DropTimeMinFlightField dropTimeMinFlightField = new DropTimeMinFlightField();
+
   private final AtomicLong totalPassed = new AtomicLong(0);
   private final AtomicLong totalDropped = new AtomicLong(0);
-
-  private final AtomicLong maxPassCache = new AtomicLong(1);
-  private final AtomicLong minRtCache = new AtomicLong(1);
-  private volatile long lastDropTime = 0;
-
-  /** Minimum concurrency budget floor — prevents BBR from over-limiting in low-concurrency scenarios.
-   *  Set dynamically to the number of active Worker nodes by {@code HotKeyReporter.flush()}. */
-  private volatile int minInFlight = 1;
 
   /**
    * @deprecated Use {@link #BbrRateLimiterImpl(io.github.hyshmily.hotkey.util.SystemLoadMonitor, int, long, int, long)}
@@ -125,7 +128,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     synchronized (bucketLock) {
       tick();
 
-      long currentInFlight = inFlight.get();
+      long currentInFlight = inFlightField.value.get();
       long maxInFlight = maxInFlight();
 
       double cpuLoad = cpuMonitor.getCpuLoadEMA() * 1000.0; // convert 0-1 → 0-1000
@@ -139,7 +142,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
 
   /** Record one unit of in-flight work (batch enqueued). */
   public void onEnqueue() {
-    inFlight.incrementAndGet();
+    inFlightField.value.incrementAndGet();
   }
 
   /**
@@ -157,15 +160,15 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
       rtBuckets[currentBucket] += rtMs;
       rtCounts[currentBucket]++;
     }
-    inFlight.decrementAndGet();
+    inFlightField.value.decrementAndGet();
     totalPassed.incrementAndGet();
   }
 
   /** Record a dropped flush from the consumer (stale/failed batch — was enqueued, so decrement inFlight). */
   public void onConsumerDrop() {
-    lastDropTime = currentTimeMillis();
+    dropTimeMinFlightField.lastDropTime = currentTimeMillis();
     totalDropped.incrementAndGet();
-    inFlight.decrementAndGet();
+    inFlightField.value.decrementAndGet();
   }
 
   /** Record a dropped flush from the gate (tryAcquire failed — never enqueued, inFlight unchanged).
@@ -188,13 +191,13 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
 
   /** Current number of in-flight (enqueued but not yet published) batches. */
   public long getInFlight() {
-    return inFlight.get();
+    return inFlightField.value.get();
   }
 
   /** Dynamically adjust the min concurrency floor to match the number of active Worker nodes.
    *  Called automatically each flush cycle by {@code HotKeyReporter}. */
   public void setMinInFlight(int count) {
-    this.minInFlight = Math.max(1, count);
+    dropTimeMinFlightField.minInFlight = Math.max(1, count);
   }
 
   /** Current computed max concurrency limit. */
@@ -230,7 +233,10 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     if (mp == 0 || mr == 0) {
       return Long.MAX_VALUE;
     }
-    return Math.max(minInFlight, (long) Math.floor(((double) mp * mr * bucketPerSecond) / 1000.0 + 0.5));
+    return Math.max(
+      dropTimeMinFlightField.minInFlight,
+      (long) Math.floor(((double) mp * mr * bucketPerSecond) / 1000.0 + 0.5)
+    );
   }
 
   /** Peak pass rate per bucket in the sliding window. Caller must hold bucketLock. */
@@ -242,10 +248,10 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
       }
     }
     if (max == 0) {
-      return maxPassCache.get();
+      return maxPassMinRtField.maxPassCache.get();
     }
     final long observed = max;
-    maxPassCache.updateAndGet(c -> (c + observed) / 2);
+    maxPassMinRtField.maxPassCache.updateAndGet(c -> (c + observed) / 2);
     return max;
   }
 
@@ -261,14 +267,98 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
       }
     }
     if (min == Long.MAX_VALUE) {
-      return minRtCache.get();
+      return maxPassMinRtField.minRtCache.get();
     }
     final long observed = min;
-    minRtCache.updateAndGet(c -> (c + observed) / 2);
+    maxPassMinRtField.minRtCache.updateAndGet(c -> (c + observed) / 2);
     return min;
   }
 
   private boolean isCooldown() {
-    return currentTimeMillis() - lastDropTime < cooldownMs;
+    return currentTimeMillis() - dropTimeMinFlightField.lastDropTime < cooldownMs;
+  }
+}
+
+/** Cache-line padding namespace — adapted from Caffeine. */
+final class BbrPadding {
+
+  private BbrPadding() {}
+
+  @SuppressWarnings("all")
+  abstract static class PadInFlight {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+  }
+
+  abstract static class InFlightRef extends PadInFlight {
+
+    /** In-flight counter, isolated on its own cache line. */
+    final AtomicLong value = new AtomicLong(0);
+  }
+
+  @SuppressWarnings("all")
+  abstract static class PadMaxPassMinRt {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+  }
+
+  abstract static class MaxPassMinRtRef extends PadMaxPassMinRt {
+
+    final AtomicLong maxPassCache = new AtomicLong(1);
+    final AtomicLong minRtCache = new AtomicLong(1);
+  }
+
+  @SuppressWarnings("all")
+  abstract static class PadDropTimeMinFlight {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+  }
+
+  abstract static class DropTimeMinFlightRef extends PadDropTimeMinFlight {
+
+    volatile long lastDropTime = 0;
+    volatile int minInFlight = 1;
   }
 }

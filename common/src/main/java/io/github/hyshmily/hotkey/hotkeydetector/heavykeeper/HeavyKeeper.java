@@ -17,9 +17,6 @@ package io.github.hyshmily.hotkey.hotkeydetector.heavykeeper;
 
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.hotkey.Internal;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -30,6 +27,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAccumulator;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
@@ -108,7 +107,7 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 @Slf4j
 @Internal
-public class HeavyKeeper implements TopK {
+public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
 
   /** Pre-computed decay probability lookup table size ({@value}). */
   private static final int LOOKUP_TABLE_SIZE = 65536;
@@ -189,12 +188,8 @@ public class HeavyKeeper implements TopK {
   /** Running total of all tracked data streams since startup or last {@link #fading()}. */
   private final LongAdder total;
 
-  /**
-   * Cached minimum {@link Node#count} among all current members, used for
-   * O(1) fast rejection in {@link #admit}. Written only under
-   * {@link #admissionLock} and {@code volatile} for lock-free reads.
-   */
-  private volatile long minPqCount;
+  // Inherited from HKHeader.MinPqCountRef:
+  //   volatile long minPqCount;
 
   @Getter
   private final int minCount;
@@ -903,5 +898,58 @@ public class HeavyKeeper implements TopK {
       prod *= rng.nextDouble();
     } while (prod > limit);
     return Math.min(k - 1, n);
+  }
+}
+
+/** Namespace for field padding through inheritance — adapted from Caffeine. */
+final class HKHeader {
+
+  private HKHeader() {}
+
+  @SuppressWarnings("all")
+  abstract static class PadMinPqCount {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+  }
+
+  @SuppressWarnings("all")
+  abstract static class MinPqCountRef extends PadMinPqCount {
+
+    /**
+     * Cached minimum member count among all current TopK members, used for
+     * O(1) fast rejection during admission. Written only under the
+     * {@code admissionLock} and {@code volatile} for lock-free reads.
+     */
+    volatile long minPqCount;
+
+    byte p120, p121, p122, p123, p124, p125, p126, p127;
+    byte p128, p129, p130, p131, p132, p133, p134, p135;
+    byte p136, p137, p138, p139, p140, p141, p142, p143;
+    byte p144, p145, p146, p147, p148, p149, p150, p151;
+    byte p152, p153, p154, p155, p156, p157, p158, p159;
+    byte p160, p161, p162, p163, p164, p165, p166, p167;
+    byte p168, p169, p170, p171, p172, p173, p174, p175;
+    byte p176, p177, p178, p179, p180, p181, p182, p183;
+    byte p184, p185, p186, p187, p188, p189, p190, p191;
+    byte p192, p193, p194, p195, p196, p197, p198, p199;
+    byte p200, p201, p202, p203, p204, p205, p206, p207;
+    byte p208, p209, p210, p211, p212, p213, p214, p215;
+    byte p216, p217, p218, p219, p220, p221, p222, p223;
+    byte p224, p225, p226, p227, p228, p229, p230, p231;
+    byte p232, p233, p234, p235, p236, p237, p238, p239;
   }
 }

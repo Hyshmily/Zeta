@@ -51,8 +51,9 @@ public final class RollingWindow {
   private final int windowSize;
   private final long bucketDurationMs;
 
-  private volatile long windowStart;
-  private volatile int currentBucket;
+  private static final class WindowField extends RwPadding.WindowRef {}
+
+  private final WindowField windowField = new WindowField();
 
   /** Private lock for tick() — only acquired when bucket rotation is actually needed. */
   private final Object tickLock = new Object();
@@ -72,7 +73,7 @@ public final class RollingWindow {
     this.windowSize = windowSize;
     this.bucketDurationMs = windowDurationMs / windowSize;
     this.buckets = new AtomicLongArray(windowSize);
-    this.windowStart = currentTimeMillis();
+    windowField.windowStart = currentTimeMillis();
   }
 
   /**
@@ -87,7 +88,7 @@ public final class RollingWindow {
    */
   public void add(long value) {
     tick();
-    buckets.addAndGet(currentBucket, value);
+    buckets.addAndGet(windowField.currentBucket, value);
   }
 
   /**
@@ -165,8 +166,8 @@ public final class RollingWindow {
       for (int i = 0; i < windowSize; i++) {
         buckets.set(i, 0);
       }
-      windowStart = currentTimeMillis();
-      currentBucket = 0;
+      windowField.windowStart = currentTimeMillis();
+      windowField.currentBucket = 0;
     }
   }
 
@@ -182,23 +183,55 @@ public final class RollingWindow {
   /** Advance the window, zeroing buckets that have elapsed. */
   private void tick() {
     // Fast path (no lock) — 99.9%+ of calls hit this.
-    if (currentTimeMillis() - windowStart < bucketDurationMs) {
+    if (currentTimeMillis() - windowField.windowStart < bucketDurationMs) {
       return;
     }
 
     synchronized (tickLock) {
       long now = currentTimeMillis();
-      long elapsed = now - windowStart;
+      long elapsed = now - windowField.windowStart;
       if (elapsed < bucketDurationMs) {
         return; // double-check: another thread already rotated
       }
 
       int steps = (int) Math.min(elapsed / bucketDurationMs, windowSize);
       for (int i = 0; i < steps; i++) {
-        currentBucket = (currentBucket + 1) % windowSize;
-        buckets.set(currentBucket, 0);
+        windowField.currentBucket = (windowField.currentBucket + 1) % windowSize;
+        buckets.set(windowField.currentBucket, 0);
       }
-      windowStart += steps * bucketDurationMs;
+      windowField.windowStart += steps * bucketDurationMs;
     }
+  }
+}
+
+/** Cache-line padding namespace — adapted from Caffeine. */
+final class RwPadding {
+
+  private RwPadding() {}
+
+  @SuppressWarnings("all")
+  abstract static class PadWindow {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+  }
+
+  abstract static class WindowRef extends PadWindow {
+
+    volatile long windowStart;
+    volatile int currentBucket;
   }
 }

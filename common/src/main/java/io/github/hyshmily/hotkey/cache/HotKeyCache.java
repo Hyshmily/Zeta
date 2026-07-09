@@ -1427,6 +1427,7 @@ public class HotKeyCache {
    * @param <T>                         the value type
    * @return the cached or loaded value, or empty when the reader returned {@code null}
    */
+  @SuppressWarnings("all")
   private <T> Optional<T> computeInLock(
     String cacheKey,
     Supplier<T> reader,
