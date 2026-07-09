@@ -131,7 +131,7 @@ public class WorkerHeartbeatVerifier {
    * <p>Every {@code verifyIntervalMs} milliseconds, iterates over all Workers in
    * {@link HealthView} that have exceeded {@code heartbeatTimeoutMs} without
    * a heartbeat and sends each a PING via Direct reply-to. On PONG, the Worker's
-   * health record is restored; on timeout, the failure counter is incremented.
+   * health recordReport is restored; on timeout, the failure counter is incremented.
    * <p>
    * The verification runs on a daemon background thread. The task is idempotent:
    * subsequent calls to this method after the verifier is already running are
@@ -218,7 +218,7 @@ public class WorkerHeartbeatVerifier {
 
           int attempt = healthView.getVerifyFailures(workerId);
           if (attempt >= MAX_RETRY) {
-            log.warn("Worker {} confirmed dead ({} failures), removing record", workerId, MAX_RETRY);
+            log.warn("Worker {} confirmed dead ({} failures), removing recordReport", workerId, MAX_RETRY);
             healthView.removeRecord(workerId);
             nextVerifyTime.remove(workerId);
             continue;

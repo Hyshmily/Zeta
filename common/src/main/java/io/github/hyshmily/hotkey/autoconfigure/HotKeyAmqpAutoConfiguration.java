@@ -544,7 +544,7 @@ public class HotKeyAmqpAutoConfiguration {
     }
 
     /**
-     * Create the listener that processes HOT/COOL decisions broadcast by the Worker.
+     * Create the listener that processes HOT/COOL decisions send by the Worker.
      *
      * @param hotLocalCache          the L1 Caffeine cache
      * @param hotKeyRedisLoader      the function for loading values from Redis

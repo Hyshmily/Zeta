@@ -67,10 +67,12 @@ class HotKeyReadQueryTest {
   @Test
   void execute_shouldReturnCachedValueInSoftExpireMode() {
     when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(hotKey.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("cached"));
+    when(hotKey.getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("cached")
+    );
     Optional<String> result = query.withPrimary(() -> "db", CacheMode.GET_WITH_SOFT_EXPIRE).execute();
     assertThat(result).contains("cached");
-    verify(hotKey).getWithSoftExpire(eq("test-key"), any(), eq(0L), eq(0L));
+    verify(hotKey).getWithSoftExpire(eq("test-key"), any(), eq(0L), eq(0L), anyBoolean());
   }
 
   // ── NullValue sentinel unwrapping ──
@@ -120,7 +122,7 @@ class HotKeyReadQueryTest {
     verify(hotKey).putLocal("test-key", "fallback", 0L, 0L);
   }
 
-  // ── Cache miss, fallback with broadcast ──
+  // ── Cache miss, fallback with send ──
 
   @Test
   void execute_shouldUseFallbackWithBroadcast() {
@@ -132,7 +134,7 @@ class HotKeyReadQueryTest {
       .thenExecute(() -> "fb")
       .execute();
     assertThat(result).contains("fb");
-    verify(hotKey).putThrough(eq("test-key"), eq("fb"), any(Runnable.class), eq(0L), eq(0L));
+    verify(hotKey).putThrough(eq("test-key"), eq("fb"), any(Runnable.class), eq(0L), eq(0L), anyBoolean());
   }
 
   // ── Multiple fallbacks, first returns value ──
@@ -168,7 +170,7 @@ class HotKeyReadQueryTest {
     verify(hotKey).putLocal("test-key", NullValue.INSTANCE, 0L, 0L);
   }
 
-  // ── Fallback null, null caching + broadcast → stores NullValue via putThrough ──
+  // ── Fallback null, null caching + send → stores NullValue via putThrough ──
 
   @Test
   void execute_shouldCacheNullValueViaPutThroughWhenBroadcast() {
@@ -180,7 +182,14 @@ class HotKeyReadQueryTest {
       .thenExecute(() -> null)
       .execute();
     assertThat(result).isEmpty();
-    verify(hotKey).putThrough(eq("test-key"), eq(NullValue.INSTANCE), any(Runnable.class), eq(0L), eq(0L));
+    verify(hotKey).putThrough(
+      eq("test-key"),
+      eq(NullValue.INSTANCE),
+      any(Runnable.class),
+      eq(0L),
+      eq(0L),
+      anyBoolean()
+    );
   }
 
   // ── Fallback null, null caching disabled → no cache call ──
@@ -196,7 +205,7 @@ class HotKeyReadQueryTest {
       .execute();
     assertThat(result).isEmpty();
     verify(hotKey, never()).putLocal(anyString(), any(), anyLong(), anyLong());
-    verify(hotKey, never()).putThrough(anyString(), any(), any(), anyLong(), anyLong());
+    verify(hotKey, never()).putThrough(anyString(), any(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   // ── Default value ──
@@ -301,8 +310,8 @@ class HotKeyReadQueryTest {
   @Test
   void execute_primaryWithModeShouldRespectExplicitMode() {
     when(hotKey.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(hotKey.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    when(hotKey.getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(Optional.of("v"));
     query.withPrimary(() -> "db", CacheMode.GET_WITH_SOFT_EXPIRE).execute();
-    verify(hotKey).getWithSoftExpire(eq("test-key"), any(), eq(0L), eq(0L));
+    verify(hotKey).getWithSoftExpire(eq("test-key"), any(), eq(0L), eq(0L), anyBoolean());
   }
 }

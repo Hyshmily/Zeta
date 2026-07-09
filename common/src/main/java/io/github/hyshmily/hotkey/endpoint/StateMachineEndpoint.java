@@ -27,7 +27,7 @@ import org.springframework.web.bind.annotation.*;
  * Actuator endpoint for reading and updating the Worker's state-machine
  * configuration at runtime.
  *
- * <p>Changes are propagated to peer Workers via heartbeat broadcast
+ * <p>Changes are propagated to peer Workers via heartbeat send
  * (see {@code AMQP_HEADER_HEARTBEAT_CONFIG_FP} / {@code hbConfigFp} in
  * {@code WorkerHeartbeatProducer}).
  *
@@ -46,7 +46,7 @@ public class StateMachineEndpoint {
 
   /** Hot-key state machine whose config is being exposed/modified. */
   private final HotKeyStateMachine stateMachine;
-  /** Shared atomic counter bumped on each config change; broadcast via heartbeat. */
+  /** Shared atomic counter bumped on each config change; send via heartbeat. */
   private final ObjectProvider<AtomicLong> configTimestampCounter;
 
   /**
@@ -54,7 +54,7 @@ public class StateMachineEndpoint {
    *
    * @param stateMachine           the hot-key state machine whose config is exposed
    * @param configTimestampCounter shared atomic counter bumped on each config change;
-   *                               propagated to peer Workers via heartbeat broadcast
+   *                               propagated to peer Workers via heartbeat send
    */
   public StateMachineEndpoint(HotKeyStateMachine stateMachine, ObjectProvider<AtomicLong> configTimestampCounter) {
     this.stateMachine = stateMachine;
@@ -80,7 +80,7 @@ public class StateMachineEndpoint {
   /**
    * Updates the state-machine configuration parameters at runtime.
    * <p>Changes are propagated to peer Workers via the next heartbeat
-   * broadcast (the {@code configTimestampCounter} is bumped, causing
+   * send (the {@code configTimestampCounter} is bumped, causing
    * {@code WorkerHeartbeatProducer} to include the updated config
    * fingerprint in the next heartbeat message).</p>
    *

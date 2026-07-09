@@ -36,8 +36,8 @@ import lombok.extern.slf4j.Slf4j;
  * Validates Top-K candidates and triggers pre-warming broadcasts for stable hot keys.
  *
  * <p>A hot key must appear in the Top-K list {@code preWarmMinAppearances} consecutive times
- * before it is considered "confirmed" and broadcast for pre-warming. Once confirmed, it won't
- * be broadcast again until it drops out of the Top-K for a sustained period (auto-cooling).
+ * before it is considered "confirmed" and send for pre-warming. Once confirmed, it won't
+ * be send again until it drops out of the Top-K for a sustained period (auto-cooling).
  *
  * <p>This hysteresis prevents flapping: a key that briefly enters and leaves the Top-K won't
  * trigger unnecessary broadcasts.
@@ -67,7 +67,7 @@ public class TopKValidator {
   private final int preWarmMinAppearances;
 
   /**
-   * Keys that have already been confirmed and broadcast for pre-warming.
+   * Keys that have already been confirmed and send for pre-warming.
    * Now backed by Caffeine to provide automatic expiration and size limit.
    */
   private final Cache<String, Boolean> confirmedHotKeys = Caffeine.newBuilder()
@@ -91,7 +91,7 @@ public class TopKValidator {
    *
    * <p>Inspects the current Top-K list and increments the appearance counter for each
    * candidate key. When a key reaches the required appearance threshold, a pre-warm
-   * broadcast is sent to all worker instances.
+   * send is sent to all worker instances.
    *
    * <p>Also performs automatic cooling: confirmed keys that are no longer in the top
    * {@code preWarmTopN} are removed from the confirmed set.
@@ -147,7 +147,7 @@ public class TopKValidator {
 
   /**
    * Manually marks a key as confirmed (already pre-warmed), so it won't be
-   * broadcast again until it cools down.
+   * send again until it cools down.
    *
    * @param key the cache key to mark as confirmed
    */

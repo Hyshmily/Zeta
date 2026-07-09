@@ -44,6 +44,6 @@ hotkey:
     exchange-name: hotkey.sync.exchange
   worker-listener:
     enabled: true
-    exchange-name: hotkey.broadcast.exchange
+    exchange-name: hotkey.send.exchange
   report:
     enabled: true

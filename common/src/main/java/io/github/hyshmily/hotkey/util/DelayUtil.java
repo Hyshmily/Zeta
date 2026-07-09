@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * Utility for introducing random jitter before executing a task
  * or computing TTL-based expiration timestamps.
- * Used internally by broadcast listeners to spread Redis reads
+ * Used internally by send listeners to spread Redis reads
  * evenly across instances. Non-instantiable — private constructor.
  */
 @Internal

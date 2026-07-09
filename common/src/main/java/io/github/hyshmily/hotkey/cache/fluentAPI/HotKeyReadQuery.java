@@ -30,7 +30,7 @@ import java.util.function.Supplier;
  *
  * <p>Provides a builder-pattern API for reading from the L1 cache with an
  * optional primary data-source reader, a chain of fallback readers, and
- * fine-grained control over null caching, broadcast behaviour, and TTL
+ * fine-grained control over null caching, send behaviour, and TTL
  * overrides.
  *
  * <h3>Usage</h3>
@@ -72,10 +72,10 @@ public class HotKeyReadQuery<T> {
   }
 
   /**
-   * Enable cross-instance broadcast for fallback values.
+   * Enable cross-instance send for fallback values.
    *
    * <p>When enabled, any value resolved from a fallback reader will be
-   * broadcast to peer instances via AMQP.  When disabled (default), the
+   * send to peer instances via AMQP.  When disabled (default), the
    * value is written only to the local L1 cache via {@link HotKey#putLocal}.
    *
    * @return this query instance
@@ -86,7 +86,7 @@ public class HotKeyReadQuery<T> {
   }
 
   /**
-   * Disable cross-instance broadcast for fallback values (default).
+   * Disable cross-instance send for fallback values (default).
    *
    * @return this query instance
    */
@@ -210,7 +210,7 @@ public class HotKeyReadQuery<T> {
    *   <li>Try the L1 cache via the configured {@link CacheMode}.  On cache
    *       miss, invoke the primary reader and cache the result.</li>
    *   <li>If no value is available, iterate fallback readers in registration
-   *       order.  Each non-null result is cached (locally or with broadcast
+   *       order.  Each non-null result is cached (locally or with send
    *       depending on {@code isAllowBroadcast}) and returned.</li>
    *   <li>If all readers return {@code null}, return {@link Optional#empty()}.</li>
    * </ol>
@@ -270,7 +270,7 @@ public class HotKeyReadQuery<T> {
 
     Optional<Object> result = switch (cacheMode) {
       case GET -> hotKey.get(cacheKey, wrappedPrimary, hardTtlMs, softTtlMs);
-      case GET_WITH_SOFT_EXPIRE -> hotKey.getWithSoftExpire(cacheKey, wrappedPrimary, hardTtlMs, softTtlMs);
+      case GET_WITH_SOFT_EXPIRE -> hotKey.getWithSoftExpire(cacheKey, wrappedPrimary, hardTtlMs, softTtlMs, true);
     };
 
     if (result.isPresent()) {
@@ -287,7 +287,7 @@ public class HotKeyReadQuery<T> {
 
         if (val != null) {
           if (isAllowBroadcast) {
-            hotKey.putThrough(cacheKey, val, () -> {}, hardTtlMs, softTtlMs);
+            hotKey.putThrough(cacheKey, val, () -> {}, hardTtlMs, softTtlMs, true);
           } else {
             hotKey.putLocal(cacheKey, val, hardTtlMs, softTtlMs);
           }
@@ -296,7 +296,7 @@ public class HotKeyReadQuery<T> {
 
         if (isAllowNullCaching) {
           if (isAllowBroadcast) {
-            hotKey.putThrough(cacheKey, NullValue.INSTANCE, () -> {}, hardTtlMs, softTtlMs);
+            hotKey.putThrough(cacheKey, NullValue.INSTANCE, () -> {}, hardTtlMs, softTtlMs, true);
           } else {
             hotKey.putLocal(cacheKey, NullValue.INSTANCE, hardTtlMs, softTtlMs);
           }

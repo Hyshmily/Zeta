@@ -50,11 +50,11 @@ import org.springframework.data.redis.core.script.RedisScript;
  * to Redis on every local change (via a Lua compare-and-set script that
  * guards against stale-write races) and reloaded at startup. If Redis is
  * unavailable, rules remain purely in-memory — they survive as long as at
- * least one application node holds them and can be re-broadcast to siblings
+ * least one application node holds them and can be re-send to siblings
  * through the {@link CacheSyncPublisher}.
  *
  * <p><b>Cross-instance sync:</b> When a rule is added, removed, or cleared,
- * the change is both persisted to Redis <em>and</em> broadcast via AMQP
+ * the change is both persisted to Redis <em>and</em> send via AMQP
  * (both/and, not XOR). Incoming broadcasts from sibling instances are
  * merged via pattern-based merge (incoming overwrites same-pattern local
  * rules) and guarded by a monotonically increasing version counter.
@@ -134,7 +134,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    *
    * <p>The change is immediately visible in the local rule list (snapshot
    * semantics via {@link CopyOnWriteArrayList}), persisted to Redis via
-   * Lua compare-and-set (if available), and broadcast to sibling
+   * Lua compare-and-set (if available), and send to sibling
    * application instances via AMQP. The local version counter is
    * incremented atomically.
    *
@@ -172,7 +172,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * Remove all rules whose pattern and action both match the given values.
    *
    * <p>If at least one rule is removed, the change is persisted to Redis
-   * and broadcast to sibling instances. The version counter is incremented.
+   * and send to sibling instances. The version counter is incremented.
    *
    * <p>Matching is based on exact equality of both {@code pattern} and
    * {@code action}; rules with the same pattern but a different action
@@ -207,7 +207,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * Remove all rules and propagate the empty rule list.
    *
    * <p>After clearing, the rule list is empty, the version counter is
-   * incremented, and the empty list is persisted to Redis and broadcast
+   * incremented, and the empty list is persisted to Redis and send
    * to sibling instances. This ensures that all nodes converge to the
    * empty state.
    */
@@ -223,7 +223,7 @@ public class RuleMatcherImpl implements RuleMatcher {
   /**
    * Remove all rules whose action equals the given value.
    *
-   * <p>If any rules are removed, the change is persisted and broadcast.
+   * <p>If any rules are removed, the change is persisted and send.
    * The version counter is incremented with each batch removal.
    *
    * @param action the action to match; all rules with this action are
@@ -253,7 +253,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * Remove the rule at the given index in the current rule list.
    *
    * <p>If the index is valid (non-negative and less than the current list
-   * size), the rule is removed and the change is persisted and broadcast.
+   * size), the rule is removed and the change is persisted and send.
    * Out-of-bounds indices are silently ignored (logged at DEBUG level
    * by the caller).
    *
@@ -279,12 +279,12 @@ public class RuleMatcherImpl implements RuleMatcher {
    * Merge the incoming rule set into the local rule set, guarded by version.
    * <p>
    * If {@code incomingVersion > 0} and {@code <= localVersion}, the sync is skipped
-   * (stale broadcast). Otherwise the rules are merged by pattern (incoming overwrites
+   * (stale send). Otherwise the rules are merged by pattern (incoming overwrites
    * same-pattern entries, local-only entries are preserved), the local version is
    * bumped past the incoming version, and the result is persisted to Redis.
    * <p>
-   * This method <b>does not broadcast</b> — only updates local list and Redis,
-   * avoiding a broadcast storm.
+   * This method <b>does not send</b> — only updates local list and Redis,
+   * avoiding a send storm.
    *
    * @param json            the JSON-serialized rule list (may be old-format array or
    *                        new-format wrapper)
@@ -306,14 +306,14 @@ public class RuleMatcherImpl implements RuleMatcher {
 
       String outJson = serializeRules(merged, newVersion);
       redisTemplate.ifPresent(r -> persistToRedis(r, outJson, newVersion));
-      log.info("Rules synced from broadcast, version={}, total: {}", newVersion, merged.size());
+      log.info("Rules synced from send, version={}, total: {}", newVersion, merged.size());
     } catch (Exception e) {
-      log.error("Failed to sync rules from broadcast", e);
+      log.error("Failed to sync rules from send", e);
     }
   }
 
   /**
-   * Atomically swap the rule list.  Does <b>not</b> persist or broadcast.
+   * Atomically swap the rule list.  Does <b>not</b> persist or send.
    * <p>
    * Primarily used internally by {@link #syncRules} and for tests.
    *
@@ -379,7 +379,7 @@ public class RuleMatcherImpl implements RuleMatcher {
 
   /**
    * Serialize the current rule list to the versioned JSON format, write it to Redis
-   * (if available) via Lua compare-and-set, and broadcast it via AMQP (if available).
+   * (if available) via Lua compare-and-set, and send it via AMQP (if available).
    * <p>
    * Both channels are invoked independently — the XOR pattern has been replaced
    * by both/and. Failures are logged but never propagated.
@@ -423,7 +423,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * <pre>{@code {"rulesVersion":5,"rules":[{"pattern":"x","action":"BLOCK"}]}}</pre>
    *
    * <p>This wrapper format is used for both Redis persistence and AMQP
-   * broadcast, enabling the receiver to apply version-gated merge logic.
+   * send, enabling the receiver to apply version-gated merge logic.
    *
    * @param rules   the rule list to serialize (a snapshot, typically via
    *                {@link #getAllRules()})
@@ -450,11 +450,11 @@ public class RuleMatcherImpl implements RuleMatcher {
    * overwrite/appending at the end).
    *
    * <p>This strategy ensures that a rule removal on one node is not
-   * reintroduced by a stale broadcast from another node: if the incoming set
+   * reintroduced by a stale send from another node: if the incoming set
    * does not contain a pattern, the local version is retained.
    *
    * @param local    the current local rule list
-   * @param incoming the incoming rule list from a broadcast or Redis load
+   * @param incoming the incoming rule list from a send or Redis load
    * @return a new merged rule list combining both sources
    */
   private static List<Rule> mergeRules(List<Rule> local, List<Rule> incoming) {
@@ -507,21 +507,21 @@ public class RuleMatcherImpl implements RuleMatcher {
   }
 
   /**
-   * Explicitly reload rules from Redis and broadcast the full rule set to
+   * Explicitly reload rules from Redis and send the full rule set to
    * all sibling application instances via AMQP.
    *
    * <p>This method is useful for operational scenarios such as:
    * <ul>
    *   <li>An operator manually adjusted rules on one node and wants the
    *       entire cluster to converge immediately</li>
-   *   <li>Recovering from a missed broadcast during a temporary network
+   *   <li>Recovering from a missed send during a temporary network
    *       partition</li>
    *   <li>Initial cluster synchronization after a new node joins</li>
    * </ul>
    *
    * <p>The rule list is first reloaded from Redis (to pick up any
    * externally written changes), then serialized with the current version
-   * and broadcast. If no {@link CacheSyncPublisher} is configured, the
+   * and send. If no {@link CacheSyncPublisher} is configured, the
    * method logs a warning and returns without broadcasting.
    */
   public void broadcastAllLocalRulesManually() {
@@ -533,7 +533,7 @@ public class RuleMatcherImpl implements RuleMatcher {
         String json = serializeRules(new ArrayList<>(rulesList), version);
         cacheSyncPublisher.get().broadcastAllLocalRules(json, version);
 
-        log.info("Rules broadcast manually (version={}), total: {}", version, rulesList.size());
+        log.info("Rules send manually (version={}), total: {}", version, rulesList.size());
       } catch (Exception e) {
         log.error("Failed to serialize rules", e);
       }

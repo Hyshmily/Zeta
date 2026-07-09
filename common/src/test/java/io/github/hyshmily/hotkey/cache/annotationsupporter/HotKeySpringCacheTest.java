@@ -106,7 +106,7 @@ class HotKeySpringCacheTest {
 
   @Test
   @DisplayName("get with TTL override calls hotKey.computeIfAbsentWithSoftExpire")
-  void get_withTtlOverride_callsComputeIfAbsentWithSoftExpire() {
+  void get_withTtlOverride_callsComputeIfAbsentSoft() {
     HotKeyCacheContext.get().apply(5000L, 1000L, false, false);
     when(hotKey.computeIfAbsentWithSoftExpire(eq("test::myKey"), any(), eq(5000L), eq(1000L))).thenReturn("value");
     String result = cache.get("myKey", (Callable<String>) () -> "loaded");
@@ -189,11 +189,11 @@ class HotKeySpringCacheTest {
   }
 
   @Test
-  @DisplayName("evict with skipBroadcast calls evictLocal")
-  void evict_withSkipBroadcast_callsEvictLocal() {
+  @DisplayName("evict with skipBroadcast calls invalidateLocal")
+  void evict_withSkipBroadcast_callsInvalidateLocal() {
     HotKeyCacheContext.get().apply(0, 0, false, true);
     cache.evict("myKey");
-    verify(hotKey).evictLocal("test::myKey");
+    verify(hotKey).invalidate("test::myKey", false);
     verify(hotKey, never()).invalidate(anyString());
   }
 
@@ -236,7 +236,7 @@ class HotKeySpringCacheTest {
 
     cache.clear();
     verify(hotKey).invalidateAllLocal();
-    verify(hotKey, never()).invalidateAll();
+    verify(hotKey, never()).invalidate(anyString());
     when(hotKey.peek("test::key1")).thenReturn(Optional.empty());
     when(hotKey.peek("test::key2")).thenReturn(Optional.empty());
     assertThat(cache.lookup("key1")).isNull();

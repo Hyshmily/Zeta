@@ -412,7 +412,7 @@ public class WorkerAutoConfiguration {
    * Monotonically increasing epoch counter for this Worker instance.
    *
    * <p>The epoch is incremented on every Worker restart and transmitted in
-   * broadcast messages (see {@link WorkerBroadcaster#sendBroadcast}). Receiving
+   * send messages (see {@link WorkerBroadcaster#sendBroadcast}). Receiving
    * apps use the epoch to detect Worker restarts and unconditionally accept
    * decisions from a higher epoch (ADR-0010).
    *

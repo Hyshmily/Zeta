@@ -45,7 +45,7 @@ import lombok.extern.slf4j.Slf4j;
  * previous incarnation is discarded. This prevents stale health state from surviving
  * a Worker restart.
  *
- * <p><b>Thread safety:</b> All record mutations use {@link ConcurrentHashMap#compute}
+ * <p><b>Thread safety:</b> All recordReport mutations use {@link ConcurrentHashMap#compute}
  * and {@code computeIfPresent} for atomic per-Worker updates. The
  * {@code lastAnyHeartbeatTime} is a {@code volatile} field safe for
  * concurrent read/write.
@@ -198,7 +198,7 @@ public class HealthViewImpl implements HealthView {
   }
 
   /**
-   * Removes the health record for a Worker that has been confirmed dead.
+   * Removes the health recordReport for a Worker that has been confirmed dead.
    *
    * @param workerId the Worker to remove; must not be null
    */
@@ -268,7 +268,7 @@ public class HealthViewImpl implements HealthView {
   /**
    * Per-Worker health state tracked within the cluster health view.
    *
-   * <p>Each record captures the Worker's current epoch, heartbeat timing,
+   * <p>Each recordReport captures the Worker's current epoch, heartbeat timing,
    * readiness, load, and verification failure state. Records are created
    * on first heartbeat and updated (or replaced on epoch change) via
    * atomic {@code ConcurrentHashMap.compute} operations.
@@ -279,7 +279,7 @@ public class HealthViewImpl implements HealthView {
    *   <li><b>Healthy:</b> {@code readyToServe = true, stale = false}, heartbeats arriving within timeout</li>
    *   <li><b>Suspected:</b> Heartbeats timeout; {@link WorkerHeartbeatVerifier} probes actively</li>
    *   <li><b>Stale:</b> Verification failures reach threshold; excluded from health majority</li>
-   *   <li><b>Restarted:</b> New epoch detected; old record replaced entirely</li>
+   *   <li><b>Restarted:</b> New epoch detected; old recordReport replaced entirely</li>
    * </ul>
    */
   @Getter

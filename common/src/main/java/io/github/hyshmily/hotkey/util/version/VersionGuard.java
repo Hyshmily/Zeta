@@ -23,7 +23,7 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import java.util.Objects;
 
 /**
- * Shared version comparison logic for broadcast message guards used by both
+ * Shared version comparison logic for send message guards used by both
  * the Worker decision listener and the instance-to-instance cache sync listener.
  *
  * <p>This class provides two families of guard methods, each with a fast-path

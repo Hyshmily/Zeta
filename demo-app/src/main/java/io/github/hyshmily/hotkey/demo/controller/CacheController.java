@@ -80,7 +80,8 @@ public class CacheController {
           }
         },
         300000,
-        softTtl
+        softTtl,
+        true
       );
     } else {
       hotKey.putThrough(key, value, () -> {
@@ -109,7 +110,7 @@ public class CacheController {
 
   @DeleteMapping("/cache")
   public ResponseEntity<Void> invalidateAll(@RequestParam String keys) {
-    hotKey.invalidateAll(Arrays.asList(keys.split(",")));
+    hotKey.invalidate(Arrays.asList(keys.split(",")).toString());
     return ResponseEntity.ok().build();
   }
 

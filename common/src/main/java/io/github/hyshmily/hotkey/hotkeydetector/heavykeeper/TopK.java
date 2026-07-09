@@ -39,7 +39,7 @@ public interface TopK {
    * Record one or more accesses for the given key.
    *
    * @param key       the accessed key
-   * @param increment the number of accesses to record
+   * @param increment the number of accesses to recordReport
    * @return the  result indicating whether the key became hot and whether another key was evicted
    */
   AddResult addDirect(String key, int increment);

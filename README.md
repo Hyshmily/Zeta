@@ -203,6 +203,21 @@ See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 > [!NOTE]
 > **Serialization:** HotKey internally uses `StringRedisTemplate`. Value serialization is entirely up to the caller. **Jackson** (Spring Boot default, JSON) or **Kryo** (binary, maximum throughput) are recommended. JDK native serialization is not recommended.
 
+**Method Overview**
+
+| Category | Methods |
+|---|---|
+| Read | `get`, `getWithSoftExpire`, `computeIfAbsent`, `computeIfAbsentWithSoftExpire`, `peek`, `peekAll` |
+| Write | `putThrough`, `putLocal`, `invalidateAfterPut`, `refresh`, `refreshAll` |
+| Invalidate | `invalidate`, `invalidateAllLocal`, `compareAndInvalidate` |
+| Atomic | `compareAndSet`, `compareAndInvalidate` |
+| Fluent | `read(key)` → `HotKeyReadQuery`, `write(key)` → `HotKeyWriteCommand` |
+| Introspection | `peek`, `estimatedSize`, `stats`, `getLocalCache`, `isLocalHotKey`, `isWorkerHotKey`, `returnLocalHotKeys`, `returnWorkerHotKeys` |
+| Rule | `addBlacklist`, `removeBlacklist`, `addWhitelist`, `removeWhitelist`, `evaluateRule`, `getAllRules`, `clearAllRules` |
+| Lock | `tryLock`, `tryLockAndRun` |
+| Background | `registerRefresh`, `updateRefresh`, `unregisterRefresh` |
+| Mode | `isApp`, `isWorker`, `isAppOnly`, `isWorkerOnly` |
+
 **Read Operations**
 
 ```java
@@ -238,21 +253,18 @@ User user = hotKey
 // F. putThrough — write-through + broadcast
 hotKey.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
-// G. putBeforeInvalidate — mutate then invalidate (collection types)
-hotKey.putBeforeInvalidate(key, () -> redisTemplate.opsForSet().add(key, members));
+// G. invalidateAfterPut — mutate then invalidate (collection types)
+hotKey.invalidateAfterPut(key, () -> redisTemplate.opsForSet().add(key, members));
 
 // H. putLocal — local write only, no broadcast, no version bump
 hotKey.putLocal("user:123", cachedValue, hardTtlMs, softTtlMs); // custom TTL
 
-// I. evictLocal — evict from local cache only, no broadcast, no version bump
-hotKey.evictLocal("user:123");                          // single key
-
-// J. refresh — local evict then load and cache
+// I. refresh — local evict then load and cache
 hotKey.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // with TTL override
 
-// K. Fluent write API
+// J. Fluent write API
 hotKey.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
-hotKey.write("user:42").putBeforeInvalidate(dbMutation);
+hotKey.write("user:42").invalidateAfterPut(dbMutation);
 hotKey.write("user:42").invalidate();
 ```
 
@@ -287,6 +299,20 @@ hotKey.putThrough("weather:" + city, weatherData,
 
 > [!TIP]
 > Per-call TTL semantics: passing `0` uses the configured default for that key state. For pure logical expiration (hard TTL never evicts, soft expire only): pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` — the entry permanently resides in Caffeine. This usage is explicitly supported by Caffeine's `Expiry` JavaDoc: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
+
+**Atomic Operations**
+
+CAS-style operations for lock-free conditional updates:
+
+```java
+// compareAndSet — atomic swap if current value matches expected
+boolean ok = hotKey.compareAndSet("user:123", oldValue, newValue);
+
+// compareAndInvalidate — invalidate only if current value matches expected
+boolean ok = hotKey.compareAndInvalidate("user:123", staleValue);
+```
+
+Both operations are delegation-based: the caller is responsible for re-reading or re-writing after a successful CAS. There is no L2 lock — the guard is the L1 cache entry's current value at the time of call. Returns `true` if the condition matched and the operation was applied; `false` otherwise.
 
 **Worker Mode**
 

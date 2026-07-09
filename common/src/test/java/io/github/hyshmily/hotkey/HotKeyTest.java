@@ -59,9 +59,9 @@ class HotKeyTest {
 
   @Test
   void isLocalHotKey_shouldDelegateToCache() {
-    when(hotKeyCache.isLocalHotKey("key1")).thenReturn(true);
+    when(hotKeyCache.isHot("key1")).thenReturn(true);
     assertThat(hotKey.isLocalHotKey("key1")).isTrue();
-    verify(hotKeyCache).isLocalHotKey("key1");
+    verify(hotKeyCache).isHot("key1");
   }
 
   @Test
@@ -73,53 +73,55 @@ class HotKeyTest {
 
   @Test
   void get_shouldDelegateToCache() {
-    when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.of("value"));
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(Optional.of("value"));
     assertThat(hotKey.get("key1", () -> "loaded")).contains("value");
-    verify(hotKeyCache).get(anyString(), any());
+    verify(hotKeyCache).get(anyString(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   @Test
   void get_withTtl_shouldDelegateToCache() {
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(Optional.of("v"));
     assertThat(hotKey.get("key1", () -> "loaded", 1000L, 100L)).contains("v");
-    verify(hotKeyCache).get(anyString(), any(), anyLong(), anyLong());
+    verify(hotKeyCache).get(anyString(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   @Test
   void getWithSoftExpire_shouldDelegateToCache() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
     assertThat(hotKey.getWithSoftExpire("key1", () -> "v")).contains("v");
-    verify(hotKeyCache).getWithSoftExpire(anyString(), any());
+    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   @Test
   void invalidate_shouldDelegateToCache() {
     hotKey.invalidate("key1");
-    verify(hotKeyCache).invalidate("key1");
+    verify(hotKeyCache).invalidate("key1", true);
   }
 
   @Test
-  void invalidateAll_varargs_shouldDelegateToCache() {
-    hotKey.invalidateAll("k1", "k2");
-    verify(hotKeyCache).invalidateAll(List.of("k1", "k2"));
+  void invalidate_varargs_shouldDelegateToCache() {
+    hotKey.invalidate(List.of("k1", "k2"));
+    verify(hotKeyCache).invalidate(List.of("k1", "k2"), true);
   }
 
   @Test
   void putThrough_shouldDelegateToCache() {
     hotKey.putThrough("key1", "value", () -> {});
-    verify(hotKeyCache).putThrough(anyString(), any(), any());
+    verify(hotKeyCache).putThrough(anyString(), any(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   @Test
   void putThrough_withTtl_shouldDelegateToCache() {
-    hotKey.putThrough("key1", "value", () -> {}, 2000L, 200L);
-    verify(hotKeyCache).putThrough(anyString(), any(), any(), anyLong(), anyLong());
+    hotKey.putThrough("key1", "value", () -> {}, 2000L, 200L, true);
+    verify(hotKeyCache).putThrough(anyString(), any(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   @Test
-  void putBeforeInvalidate_shouldDelegateToCache() {
-    hotKey.putBeforeInvalidate("key1", () -> {});
-    verify(hotKeyCache).putBeforeInvalidate(anyString(), any());
+  void invalidateAfterPut_single_shouldDelegateToCache() {
+    hotKey.invalidateAfterPut("key1", () -> {});
+    verify(hotKeyCache).invalidateAfterPut(anyString(), any(), anyBoolean());
   }
 
   @Test
@@ -172,12 +174,14 @@ class HotKeyTest {
     assertThatThrownBy(() -> workerOnly.peek("k")).isInstanceOf(HotKeyModeException.class);
     assertThatThrownBy(() -> workerOnly.invalidate("k")).isInstanceOf(HotKeyModeException.class);
     assertThatThrownBy(() -> workerOnly.putThrough("k", "v", () -> {})).isInstanceOf(HotKeyModeException.class);
-    assertThatThrownBy(() -> workerOnly.putBeforeInvalidate("k", () -> {})).isInstanceOf(HotKeyModeException.class);
+    assertThatThrownBy(() -> workerOnly.invalidateAfterPut("k", () -> {})).isInstanceOf(HotKeyModeException.class);
   }
 
   @Test
   void get_shouldPropagateHotKeyBlockedException() {
-    when(hotKeyCache.get(anyString(), any())).thenThrow(new HotKeyBlockedException("HotKeyCache", "secret"));
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenThrow(
+      new HotKeyBlockedException("HotKeyCache", "secret")
+    );
     assertThatThrownBy(() -> hotKey.get("secret", () -> "v")).isInstanceOf(HotKeyBlockedException.class);
   }
 
@@ -185,16 +189,20 @@ class HotKeyTest {
 
   @Test
   void getWithSoftExpire_withSoftTtl_shouldDelegateToCache() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
     assertThat(hotKey.getWithSoftExpire("key1", () -> "v", 200L)).contains("v");
-    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), anyLong());
+    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   @Test
   void getWithSoftExpire_withHardSoftTtl_shouldDelegateToCache() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
-    assertThat(hotKey.getWithSoftExpire("key1", () -> "v", 5000L, 500L)).contains("v");
-    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), anyLong(), anyLong());
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
+    assertThat(hotKey.getWithSoftExpire("key1", () -> "v", 5000L, 500L, true)).contains("v");
+    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   // ── isWorkerHotKey ──
@@ -415,7 +423,7 @@ class HotKeyTest {
   @Test
   void read_shouldReturnHotKeyReadQuery() {
     when(hotKeyCache.evaluateRule("k")).thenReturn(RuleAction.ALLOW);
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(Optional.of("v"));
     assertThat(
       hotKey
         .read("k")
@@ -427,94 +435,89 @@ class HotKeyTest {
   @Test
   void write_shouldReturnHotKeyWriteCommand() {
     hotKey.write("k").invalidate();
-    verify(hotKeyCache).invalidate("k");
+    verify(hotKeyCache).invalidate("k", true);
   }
 
   // ── computeIfAbsent single-key ──
 
   @Test
   void computeIfAbsent_shouldReturnValue() {
-    when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
     assertThat(hotKey.computeIfAbsent("k", () -> "loaded")).isEqualTo("v");
-    verify(hotKeyCache).get(eq("k"), any());
+    verify(hotKeyCache).computeIfAbsent(eq("k"), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   @Test
   void computeIfAbsent_shouldReturnNullWhenLoaderNull() {
-    when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.empty());
+    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.empty()
+    );
     assertThat((Object) hotKey.computeIfAbsent("k", () -> null)).isNull();
   }
 
   @Test
   void computeIfAbsent_withHardTtl_shouldDelegate() {
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
     assertThat(hotKey.computeIfAbsent("k", () -> "db", 5000L)).isEqualTo("v");
-    verify(hotKeyCache).get(eq("k"), any(), eq(5000L), eq(0L));
+    verify(hotKeyCache).computeIfAbsent(eq("k"), any(), eq(5000L), eq(0L), anyBoolean());
   }
 
   @Test
   void computeIfAbsent_withHardSoftTtl_shouldDelegate() {
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
     assertThat(hotKey.computeIfAbsent("k", () -> "db", 5000L, 500L)).isEqualTo("v");
-    verify(hotKeyCache).get(eq("k"), any(), eq(5000L), eq(500L));
+    verify(hotKeyCache).computeIfAbsent(eq("k"), any(), eq(5000L), eq(500L), anyBoolean());
   }
 
   @Test
-  void computeIfAbsent_collection_shouldReturnMap() {
-    when(hotKeyCache.get(anyString(), any())).thenReturn(Optional.of("v"));
-    Map<String, String> result = hotKey.computeIfAbsent(List.of("a", "b"), k -> "v");
-    assertThat(result).containsEntry("a", "v").containsEntry("b", "v");
+  void computeIfAbsent_withNonDefaultReport_shouldDelegate() {
+    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
+    assertThat(hotKey.computeIfAbsent("k", () -> "db", 0L, 0L, false)).isEqualTo("v");
+    verify(hotKeyCache).computeIfAbsent(eq("k"), any(), eq(0L), eq(0L), eq(false));
   }
 
   @Test
-  void computeIfAbsent_collectionWithHardTtl_shouldReturnMap() {
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
-    Map<String, String> result = hotKey.computeIfAbsent(List.of("a"), k -> "v", 5000L);
-    assertThat(result).containsEntry("a", "v");
-  }
-
-  @Test
-  void computeIfAbsent_collectionWithBothTtls_shouldReturnMap() {
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
-    Map<String, String> result = hotKey.computeIfAbsent(List.of("a"), k -> "v", 5000L, 500L);
-    assertThat(result).containsEntry("a", "v");
-  }
-
-  // ── computeIfAbsentWithSoftExpire ──
-
-  @Test
-  void computeIfAbsentWithSoftExpire_collection_shouldReturnMap() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any())).thenReturn(Optional.of("v"));
-    Map<String, String> result = hotKey.computeIfAbsentWithSoftExpire(List.of("a"), k -> "v");
-    assertThat(result).containsEntry("a", "v");
-  }
-
-  @Test
-  void computeIfAbsentWithSoftExpire_withSoftTtl_shouldDelegate() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong())).thenReturn(Optional.of("v"));
+  void computeIfAbsentWithSoftExpire_SoftTtl_shouldDelegate() {
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
     assertThat(hotKey.computeIfAbsentWithSoftExpire("k", () -> "db", 500L)).isEqualTo("v");
-    verify(hotKeyCache).getWithSoftExpire(eq("k"), any(), eq(500L));
+    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(), eq(0L), eq(500L), anyBoolean());
   }
 
   @Test
-  void computeIfAbsentWithSoftExpire_collectionWithSoftTtl_shouldReturnMap() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong())).thenReturn(Optional.of("v"));
-    Map<String, String> result = hotKey.computeIfAbsentWithSoftExpire(List.of("a"), k -> "v", 500L);
-    assertThat(result).containsEntry("a", "v");
+  void computeIfAbsentWithSoftExpire_collectionSoftTtl_shouldDelegate() {
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
+    assertThat(hotKey.computeIfAbsentWithSoftExpire("k", () -> "db", 500L)).isEqualTo("v");
+    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(), eq(0L), eq(500L), anyBoolean());
   }
 
   @Test
-  void computeIfAbsentWithSoftExpire_withBothTtls_shouldDelegate() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+  void computeIfAbsentWithSoftExpire_BothTtls_shouldDelegate() {
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
     assertThat(hotKey.computeIfAbsentWithSoftExpire("k", () -> "db", 5000L, 500L)).isEqualTo("v");
-    verify(hotKeyCache).getWithSoftExpire(eq("k"), any(), eq(5000L), eq(500L));
+    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(), eq(5000L), eq(500L), anyBoolean());
   }
 
   @Test
-  void computeIfAbsentWithSoftExpire_collectionWithBothTtls_shouldReturnMap() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
-    Map<String, String> result = hotKey.computeIfAbsentWithSoftExpire(List.of("a"), k -> "v", 5000L, 500L);
-    assertThat(result).containsEntry("a", "v");
+  void computeIfAbsentWithSoftExpire_BothTtlsAndReport_shouldDelegate() {
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+      Optional.of("v")
+    );
+    assertThat(hotKey.computeIfAbsentWithSoftExpire("k", () -> "db", 5000L, 500L, true)).isEqualTo("v");
+    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(), eq(5000L), eq(500L), eq(true));
   }
 
   // ── invalidateAllLocal no-arg ──
@@ -531,12 +534,12 @@ class HotKeyTest {
     assertThatThrownBy(workerOnly::invalidateAllLocal).isInstanceOf(HotKeyModeException.class);
   }
 
-  // ── invalidateAllLocal Collection ──
+  // ── invalidate Collection ──
 
   @Test
-  void invalidateAll_collection_shouldDelegateToCache() {
-    hotKey.invalidateAll(List.of("k1", "k2"));
-    verify(hotKeyCache).invalidateAll(List.of("k1", "k2"));
+  void invalidate_collection_shouldDelegateToCache() {
+    hotKey.invalidate(List.of("k1", "k2"));
+    verify(hotKeyCache).invalidate(List.of("k1", "k2"), true);
   }
 
   // ── putLocal ──
@@ -553,11 +556,46 @@ class HotKeyTest {
     verify(hotKeyCache).putLocal("k", "v", 5000L, 500L);
   }
 
+  // ── compareAndSet / compareAndInvalidate ──
+
   @Test
-  void putLocal_map_shouldDelegateToCache() {
-    Map<String, Object> map = Map.of("k", "v");
-    hotKey.putLocal(map);
-    verify(hotKeyCache).putLocal("k", "v", 0L, 0L);
+  void compareAndSet_shouldDelegateToCache() {
+    when(hotKeyCache.compareAndSet(eq("k"), eq("old"), eq("new"))).thenReturn(true);
+    assertThat(hotKey.compareAndSet("k", "old", "new")).isTrue();
+    verify(hotKeyCache).compareAndSet("k", "old", "new");
+  }
+
+  @Test
+  void compareAndSet_shouldReturnFalseOnMismatch() {
+    when(hotKeyCache.compareAndSet(eq("k"), eq("wrong"), eq("new"))).thenReturn(false);
+    assertThat(hotKey.compareAndSet("k", "wrong", "new")).isFalse();
+    verify(hotKeyCache).compareAndSet("k", "wrong", "new");
+  }
+
+  @Test
+  void compareAndSet_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.compareAndSet("k", "old", "new")).isInstanceOf(HotKeyModeException.class);
+  }
+
+  @Test
+  void compareAndInvalidate_shouldDelegateToCache() {
+    when(hotKeyCache.compareAndInvalidate(eq("k"), eq("old"))).thenReturn(true);
+    assertThat(hotKey.compareAndInvalidate("k", "old")).isTrue();
+    verify(hotKeyCache).compareAndInvalidate("k", "old");
+  }
+
+  @Test
+  void compareAndInvalidate_shouldReturnFalseOnMismatch() {
+    when(hotKeyCache.compareAndInvalidate(eq("k"), eq("wrong"))).thenReturn(false);
+    assertThat(hotKey.compareAndInvalidate("k", "wrong")).isFalse();
+    verify(hotKeyCache).compareAndInvalidate("k", "wrong");
+  }
+
+  @Test
+  void compareAndInvalidate_shouldThrowInWorkerMode() {
+    HotKey workerOnly = new HotKey(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.compareAndInvalidate("k", "old")).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── estimatedSizeOfKeysCount ──
@@ -667,41 +705,41 @@ class HotKeyTest {
     assertThat(workerOnly.isWhitelisted("x")).isFalse();
   }
 
-  // ── peekAll ──
+  // ── peek ──
 
   @Test
-  void peekAll_shouldReturnMapOfPresentValues() {
+  void peek_shouldReturnMapOfPresentValues() {
     when(hotKeyCache.peek("k1")).thenReturn(Optional.of("v1"));
     when(hotKeyCache.peek("k2")).thenReturn(Optional.empty());
     assertThat(hotKey.peekAll(List.of("k1", "k2"))).containsEntry("k1", "v1").doesNotContainKey("k2");
   }
 
   @Test
-  void peekAll_shouldThrowInWorkerMode() {
+  void peek_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
     assertThatThrownBy(() -> workerOnly.peekAll(List.of("k"))).isInstanceOf(HotKeyModeException.class);
   }
 
-  // ── evictLocal ──
+  // ── invalidateLocal ──
 
   @Test
-  void evictLocal_shouldDelegateToCache() {
-    hotKey.evictLocal("key1");
-    verify(hotKeyCache).evictLocal(List.of("key1"));
+  void invalidateLocal_shouldDelegateToCache() {
+    hotKey.invalidate("key1", false);
+    verify(hotKeyCache).invalidate("key1", false);
   }
 
   @Test
-  void evictLocal_shouldThrowInWorkerMode() {
+  void invalidateLocal_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.evictLocal("k")).isInstanceOf(HotKeyModeException.class);
+    assertThatThrownBy(() -> workerOnly.invalidate("k", false)).isInstanceOf(HotKeyModeException.class);
   }
 
   // ── areLocalHotKeys ──
 
   @Test
   void areLocalHotKeys_shouldDelegateToCache() {
-    when(hotKeyCache.isLocalHotKey("k1")).thenReturn(true);
-    when(hotKeyCache.isLocalHotKey("k2")).thenReturn(false);
+    when(hotKeyCache.isHot("k1")).thenReturn(true);
+    when(hotKeyCache.isHot("k2")).thenReturn(false);
     assertThat(hotKey.areLocalHotKeys(List.of("k1", "k2"))).containsEntry("k1", true).containsEntry("k2", false);
   }
 
@@ -731,15 +769,15 @@ class HotKeyTest {
   @Test
   void refresh_shouldEvictAndPutThrough() {
     hotKey.refresh("k1", () -> "v");
-    verify(hotKeyCache).evictLocal(List.of("k1"));
-    verify(hotKeyCache).putThrough(eq("k1"), eq("v"), any());
+    verify(hotKeyCache).invalidate("k1", false);
+    verify(hotKeyCache).putThrough(eq("k1"), eq("v"), any(), anyLong(), anyLong(), anyBoolean());
   }
 
   @Test
   void refresh_withTtl_shouldEvictAndPutThroughWithTtl() {
     hotKey.refresh("k1", () -> "v", 5000L, 500L);
-    verify(hotKeyCache).evictLocal(List.of("k1"));
-    verify(hotKeyCache).putThrough(eq("k1"), eq("v"), any(), eq(5000L), eq(500L));
+    verify(hotKeyCache).invalidate("k1", false);
+    verify(hotKeyCache).putThrough(eq("k1"), eq("v"), any(), eq(5000L), eq(500L), anyBoolean());
   }
 
   @Test
@@ -753,22 +791,22 @@ class HotKeyTest {
   @Test
   void refreshAll_shouldRefreshEachKey() {
     hotKey.refreshAll(Map.of("k1", (Supplier<?>) () -> "v1", "k2", (Supplier<?>) () -> "v2"));
-    verify(hotKeyCache, times(2)).evictLocal(any());
-    verify(hotKeyCache, times(2)).putThrough(any(), any(), any());
+    verify(hotKeyCache, times(2)).invalidate(anyString(), eq(false));
+    verify(hotKeyCache, times(2)).putThrough(anyString(), any(), any(), anyLong(), anyLong(), anyBoolean());
   }
 
-  // ── putBeforeInvalidateAll ──
+  // ── invalidateAfterPut ──
 
   @Test
-  void putBeforeInvalidateAll_shouldDelegateToCache() {
-    hotKey.putBeforeInvalidateAll(Map.of("k1", () -> {}, "k2", () -> {}));
-    verify(hotKeyCache, times(2)).putBeforeInvalidate(anyString(), any());
+  void invalidateAfterPut_shouldDelegateToCache() {
+    hotKey.invalidateAfterPut(Map.of("k1", () -> {}, "k2", () -> {}));
+    verify(hotKeyCache).invalidateAfterPut(anyMap(), anyBoolean());
   }
 
   @Test
-  void putBeforeInvalidateAll_shouldThrowInWorkerMode() {
+  void invalidateAfterPut_shouldThrowInWorkerMode() {
     HotKey workerOnly = new HotKey(null, null, workerTopK);
-    assertThatThrownBy(() -> workerOnly.putBeforeInvalidateAll(Map.of("k", () -> {}))).isInstanceOf(
+    assertThatThrownBy(() -> workerOnly.invalidateAfterPut(Map.of("k", () -> {}))).isInstanceOf(
       HotKeyModeException.class
     );
   }
@@ -881,26 +919,30 @@ class HotKeyTest {
   @Test
   void unregisterRefresh_shouldNotThrow() throws InterruptedException {
     CountDownLatch firstCallLatch = new CountDownLatch(1);
-    when(hotKeyCache.getWithSoftExpire(eq("cancel-key"), any(), anyLong(), anyLong())).thenAnswer(invocation -> {
-      firstCallLatch.countDown();
-      return Optional.of("v");
-    });
+    when(hotKeyCache.getWithSoftExpire(eq("cancel-key"), any(), anyLong(), anyLong(), anyBoolean())).thenAnswer(
+      invocation -> {
+        firstCallLatch.countDown();
+        return Optional.of("v");
+      }
+    );
 
     hotKey.registerRefresh("cancel-key", () -> "v", 300_000L, 10L);
     assertThat(firstCallLatch.await(5, TimeUnit.SECONDS)).as("first scheduled refresh occurred").isTrue();
 
     hotKey.unregisterRefresh("cancel-key");
 
-    verify(hotKeyCache, atLeastOnce()).getWithSoftExpire(eq("cancel-key"), any(), eq(300_000L), eq(10L));
+    verify(hotKeyCache, atLeastOnce()).getWithSoftExpire(eq("cancel-key"), any(), eq(300_000L), eq(10L), anyBoolean());
   }
 
   @Test
   void registerRefresh_replacesExistingRegistration() throws InterruptedException {
     AtomicInteger callCount = new AtomicInteger(0);
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong())).thenAnswer(invocation -> {
-      callCount.incrementAndGet();
-      return Optional.of("v");
-    });
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenAnswer(
+      invocation -> {
+        callCount.incrementAndGet();
+        return Optional.of("v");
+      }
+    );
 
     hotKey.registerRefresh("dup-key", () -> "v1", 300_000L, 5L);
     Thread.sleep(20);
@@ -916,7 +958,7 @@ class HotKeyTest {
   @Test
   void registerRefresh_invokesGetWithSoftExpire() throws InterruptedException {
     CountDownLatch latch = new CountDownLatch(1);
-    when(hotKeyCache.getWithSoftExpire(eq("k1"), any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+    when(hotKeyCache.getWithSoftExpire(eq("k1"), any(), anyLong(), anyLong(), anyBoolean())).thenAnswer(invocation -> {
       latch.countDown();
       return Optional.of("v");
     });
@@ -931,6 +973,6 @@ class HotKeyTest {
   void destroy_shouldNotThrow() {
     hotKey.registerRefresh("k1", () -> "v", 300_000L, 10_000L);
     hotKey.destroy();
-    verify(hotKeyCache, never()).getWithSoftExpire(eq("k1"), any(), anyLong(), anyLong());
+    verify(hotKeyCache, never()).getWithSoftExpire(eq("k1"), any(), anyLong(), anyLong(), anyBoolean());
   }
 }

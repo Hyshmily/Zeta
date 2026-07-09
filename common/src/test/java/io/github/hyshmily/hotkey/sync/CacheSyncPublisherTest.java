@@ -29,7 +29,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
  * Tests for {@link CacheSyncPublisher} covering message sending, blank-key skipping, and
- * deduplication of broadcast refresh and invalidate messages.
+ * deduplication of send refresh and invalidate messages.
  */
 class CacheSyncPublisherTest {
 
@@ -157,8 +157,8 @@ class CacheSyncPublisherTest {
   }
 
   /**
-   * Verifies that a normal broadcast does not dedup-block a subsequent degraded
-   * broadcast for the same key+type (different compositeKey due to "D:" prefix).
+   * Verifies that a normal send does not dedup-block a subsequent degraded
+   * send for the same key+type (different compositeKey due to "D:" prefix).
    */
   @Test
   void degradedAfterNormal_shouldNotBeDeduplicated() {
@@ -168,8 +168,8 @@ class CacheSyncPublisherTest {
   }
 
   /**
-   * Verifies that a degraded broadcast does not dedup-block a subsequent normal
-   * broadcast for the same key+type (different compositeKey without "D:" prefix).
+   * Verifies that a degraded send does not dedup-block a subsequent normal
+   * send for the same key+type (different compositeKey without "D:" prefix).
    */
   @Test
   void normalAfterDegraded_shouldNotBeDeduplicated() {

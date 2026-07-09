@@ -38,35 +38,35 @@ class HotKeyWriteCommandTest {
   void putThrough_shouldDelegate() {
     Runnable writer = () -> {};
     command.putThrough("value", writer);
-    verify(hotKey).putThrough("test-key", "value", writer, 0L, 0L);
+    verify(hotKey).putThrough("test-key", "value", writer, 0L, 0L, true);
   }
 
   @Test
   void putThrough_withHardTtl_shouldDelegateWithTtl() {
     Runnable writer = () -> {};
     command.withHardTtl(5000L).putThrough("v", writer);
-    verify(hotKey).putThrough("test-key", "v", writer, 5000L, 0L);
+    verify(hotKey).putThrough("test-key", "v", writer, 5000L, 0L, true);
   }
 
   @Test
   void putThrough_withSoftTtl_shouldDelegateWithTtl() {
     Runnable writer = () -> {};
     command.withSoftTtl(500L).putThrough("v", writer);
-    verify(hotKey).putThrough("test-key", "v", writer, 0L, 500L);
+    verify(hotKey).putThrough("test-key", "v", writer, 0L, 500L, true);
   }
 
   @Test
   void putThrough_withBothTtls_shouldDelegateWithTtl() {
     Runnable writer = () -> {};
     command.withHardTtl(30000L).withSoftTtl(3000L).putThrough("v", writer);
-    verify(hotKey).putThrough("test-key", "v", writer, 30000L, 3000L);
+    verify(hotKey).putThrough("test-key", "v", writer, 30000L, 3000L, true);
   }
 
   @Test
-  void putBeforeInvalidate_shouldDelegate() {
+  void invalidateAfterPut_shouldDelegate() {
     Runnable mutation = () -> {};
     command.putBeforeInvalidate(mutation);
-    verify(hotKey).putBeforeInvalidate("test-key", mutation);
+    verify(hotKey).invalidateAfterPut("test-key", mutation);
   }
 
   @Test
@@ -88,7 +88,7 @@ class HotKeyWriteCommandTest {
   }
 
   @Test
-  void putBeforeInvalidate_shouldThrowWhenExecutedTwice() {
+  void invalidateAfterPut_shouldThrowWhenExecutedTwice() {
     command.putBeforeInvalidate(() -> {});
     assertThatThrownBy(() -> command.putBeforeInvalidate(() -> {})).isInstanceOf(IllegalStateException.class);
   }

@@ -34,8 +34,8 @@ import org.springframework.amqp.core.Message;
  * silently skipped. This version space is orthogonal to the application-level
  * {@code dataVersion} — see ADR-0008 (Dual Version Space).
  *
- * <p>Unlike {@link SyncMessage}, this record has no {@code isVersionDegraded} field.
- * The Worker simply skips broadcast entirely if {@code Redis GET} fails during a HOT
+ * <p>Unlike {@link SyncMessage}, this recordReport has no {@code isVersionDegraded} field.
+ * The Worker simply skips send entirely if {@code Redis GET} fails during a HOT
  * decision, preventing degraded decision propagation.
  *
  * @param cacheKey        the affected cache key; must not be null

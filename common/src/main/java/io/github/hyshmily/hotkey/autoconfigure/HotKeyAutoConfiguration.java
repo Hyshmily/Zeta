@@ -189,7 +189,7 @@ public class HotKeyAutoConfiguration {
    * Create the dedicated thread-pool executor for asynchronous cache operations.
    *
    * <p>This executor handles all async operations in the HotKey data path: cache loading
-   * via SingleFlight, soft-expiry refresh tasks, and cross-instance broadcast callbacks.
+   * via SingleFlight, soft-expiry refresh tasks, and cross-instance send callbacks.
    * Uses a bounded thread pool to limit concurrent AMQP channel usage (RabbitMQ's
    * {@code CachingConnectionFactory} associates channels with platform threads, so
    * unbounded virtual-thread concurrency causes channel-open timeouts). The pool is
@@ -243,7 +243,7 @@ public class HotKeyAutoConfiguration {
   }
 
   /**
-   * Create the deferred broadcast buffer for putThrough cache-sync messages.
+   * Create the deferred send buffer for putThrough cache-sync messages.
    */
   @Bean
   @ConditionalOnMissingBean
@@ -282,7 +282,7 @@ public class HotKeyAutoConfiguration {
    * @param singleFlight              the deduplication layer (never {@code null})
    * @param expireManager             the soft/hard expiration manager (never {@code null})
    * @param hotKeyExecutor            the dedicated HotKey executor (never {@code null})
-   * @param centralDispatcher         the central dispatcher for broadcast coordination
+   * @param centralDispatcher         the central dispatcher for send coordination
    * @param properties                the HotKey configuration properties (never {@code null})
    * @param ruleMatcher               the rule matcher instance (never {@code null})
    * @param healthViewProvider        provider for the cluster health view (creates default if absent)
@@ -411,7 +411,7 @@ public class HotKeyAutoConfiguration {
         ) {
           if (value instanceof CacheEntry entry) {
             if (entry.getHardExpireAtMs() == Long.MAX_VALUE) {
-              // Preserve pure logical expiry across updates (e.g. broadcast refresh).
+              // Preserve pure logical expiry across updates (e.g. send refresh).
               return Long.MAX_VALUE;
             }
             long remainingMs = entry.getHardExpireAtMs() - currentTimeMillis();

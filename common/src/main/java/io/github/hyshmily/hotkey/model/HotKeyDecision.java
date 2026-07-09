@@ -24,7 +24,7 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
  * <p>Each evaluation cycle of {@link io.github.hyshmily.hotkey.detection.HotKeyStateMachine}
  * produces at most one {@code HotKeyDecision} per key. The decision is then
  * serialized into a {@link WorkerMessage} and
- * broadcast to all application instances via RabbitMQ.
+ * send to all application instances via RabbitMQ.
  *
  * <p>Three outcomes are possible:
  * <ul>

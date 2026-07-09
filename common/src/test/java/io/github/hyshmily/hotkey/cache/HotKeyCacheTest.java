@@ -41,6 +41,7 @@ import io.github.hyshmily.hotkey.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.hotkey.util.version.impl.VersionControllerImpl;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -133,7 +134,7 @@ class HotKeyCacheTest {
    * Verifies that a cache entry with KeyState.HOT is identified as a local hot key.
    */
   @Test
-  void isLocalHotKey_shouldReturnTrueForHotEntry() {
+  void isHotKey_shouldReturnTrueForHotEntry() {
     caffeineCache.put(
       "hotKey",
       CacheEntry.builder()
@@ -151,14 +152,14 @@ class HotKeyCacheTest {
         .build()
     );
 
-    assertThat(hotKeyCache.isLocalHotKey("hotKey")).isTrue();
+    assertThat(hotKeyCache.isHot("hotKey")).isTrue();
   }
 
   /**
    * Verifies that a cache entry with KeyState.NORMAL is not identified as a local hot key.
    */
   @Test
-  void isLocalHotKey_shouldReturnFalseForNormalEntry() {
+  void isHot_shouldReturnFalseForNormalEntry() {
     caffeineCache.put(
       "normalKey",
       CacheEntry.builder()
@@ -176,23 +177,23 @@ class HotKeyCacheTest {
         .build()
     );
 
-    assertThat(hotKeyCache.isLocalHotKey("normalKey")).isFalse();
+    assertThat(hotKeyCache.isHot("normalKey")).isFalse();
   }
 
   /**
-   * Verifies that isLocalHotKey returns false for a key not present in the cache.
+   * Verifies that isHot returns false for a key not present in the cache.
    */
   @Test
-  void isLocalHotKey_shouldReturnFalseForMissingKey() {
-    assertThat(hotKeyCache.isLocalHotKey("missing")).isFalse();
+  void isHotKey_shouldReturnFalseForMissing() {
+    assertThat(hotKeyCache.isHot("missing")).isFalse();
   }
 
   /**
-   * Verifies that isLocalHotKey returns false for null keys.
+   * Verifies that isHot returns false for null keys.
    */
   @Test
-  void isLocalHotKey_shouldReturnFalseForInvalidKey() {
-    assertThat(hotKeyCache.isLocalHotKey(null)).isFalse();
+  void isHotKey_shouldReturnFalseForInvalid() {
+    assertThat(hotKeyCache.isHot(null)).isFalse();
   }
 
   /**
@@ -201,7 +202,7 @@ class HotKeyCacheTest {
   @Test
   void get_shouldReturnCachedValueOnHit() {
     caffeineCache.put("key1", "rawValue");
-    assertThat(hotKeyCache.get("key1", () -> "loaded")).contains("rawValue");
+    assertThat(hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true)).contains("rawValue");
   }
 
   /**
@@ -211,7 +212,7 @@ class HotKeyCacheTest {
   void get_shouldLoadAndCacheOnMiss() {
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loadedValue"));
 
-    Optional<String> result = hotKeyCache.get("key1", () -> "loadedValue");
+    Optional<String> result = hotKeyCache.get("key1", () -> "loadedValue", 0L, 0L, true);
     assertThat(result).contains("loadedValue");
     assertThat(caffeineCache.getIfPresent("key1")).isNotNull();
   }
@@ -221,17 +222,17 @@ class HotKeyCacheTest {
    */
   @Test
   void get_shouldReturnEmptyForInvalidKey() {
-    assertThat(hotKeyCache.get(null, () -> "v")).isEmpty();
-    assertThat(hotKeyCache.get("", () -> "v")).isEmpty();
+    assertThat(hotKeyCache.get(null, () -> "v", 0L, 0L, true)).isEmpty();
+    assertThat(hotKeyCache.get("", () -> "v", 0L, 0L, true)).isEmpty();
   }
 
   /**
    * Verifies that invalidate removes a cached entry.
    */
   @Test
-  void invalidate_shouldRemoveEntry() {
+  void invalidate_All_shouldRemoveEntry() {
     caffeineCache.put("key1", "value");
-    hotKeyCache.invalidate("key1");
+    hotKeyCache.invalidate("key1", true);
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
@@ -239,19 +240,19 @@ class HotKeyCacheTest {
    * Verifies that invalidate handles null and blank keys without throwing.
    */
   @Test
-  void invalidate_shouldHandleInvalidKey() {
-    hotKeyCache.invalidate(null);
-    hotKeyCache.invalidate("");
+  void invalidate_All_shouldHandleInvalidKey() {
+    hotKeyCache.invalidate((String) null, true);
+    hotKeyCache.invalidate("", true);
   }
 
   /**
    * Verifies that invalidateAllLocal removes multiple cached entries.
    */
   @Test
-  void invalidateAll_shouldRemoveEntries() {
+  void invalidate_All_shouldRemoveEntries() {
     caffeineCache.put("k1", "v1");
     caffeineCache.put("k2", "v2");
-    hotKeyCache.invalidateAll(List.of("k1", "k2"));
+    hotKeyCache.invalidate(List.of("k1", "k2"), true);
     assertThat(caffeineCache.getIfPresent("k1")).isNull();
     assertThat(caffeineCache.getIfPresent("k2")).isNull();
   }
@@ -260,9 +261,9 @@ class HotKeyCacheTest {
    * Verifies that invalidateAllLocal skips null and blank keys in the input list.
    */
   @Test
-  void invalidateAll_shouldSkipInvalidKeys() {
+  void invalidate_All_shouldSkipInvalidKeys() {
     caffeineCache.put("k1", "v1");
-    hotKeyCache.invalidateAll(Arrays.asList("k1", null, ""));
+    hotKeyCache.invalidate(Arrays.asList("k1", null, ""), true);
     assertThat(caffeineCache.getIfPresent("k1")).isNull();
   }
 
@@ -272,7 +273,9 @@ class HotKeyCacheTest {
   @Test
   void get_shouldThrowHotKeyBlockedExceptionForBlacklistedKey() {
     hotKeyCache.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.get("secret", () -> "db")).isInstanceOf(HotKeyBlockedException.class);
+    assertThatThrownBy(() -> hotKeyCache.get("secret", () -> "db", 0L, 0L, true)).isInstanceOf(
+      HotKeyBlockedException.class
+    );
   }
 
   /**
@@ -281,7 +284,7 @@ class HotKeyCacheTest {
   @Test
   void getWithSoftExpire_shouldThrowHotKeyBlockedExceptionForBlacklistedKey() {
     hotKeyCache.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.getWithSoftExpire("secret", () -> "db")).isInstanceOf(
+    assertThatThrownBy(() -> hotKeyCache.getWithSoftExpire("secret", () -> "db", 0L, 0L, true)).isInstanceOf(
       HotKeyBlockedException.class
     );
   }
@@ -317,7 +320,7 @@ class HotKeyCacheTest {
       CacheCompressor.NONE
     );
 
-    assertThat(cache.getWithSoftExpire("key", () -> "loaded")).contains("loaded");
+    assertThat(cache.getWithSoftExpire("key", () -> "loaded", 0L, 0L, true)).contains("loaded");
   }
 
   /**
@@ -342,7 +345,7 @@ class HotKeyCacheTest {
         .build()
     );
 
-    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "should-not-load")).contains("cached");
+    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "should-not-load", 0L, 0L, true)).contains("cached");
   }
 
   /**
@@ -369,7 +372,7 @@ class HotKeyCacheTest {
     );
 
     // Should return stale value immediately (stale-while-revalidate)
-    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh")).contains("stale");
+    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 0L, true)).contains("stale");
   }
 
   /**
@@ -391,11 +394,11 @@ class HotKeyCacheTest {
   }
 
   /**
-   * Verifies that isLocalHotKey returns false for a logically expired CacheEntry
+   * Verifies that isHot returns false for a logically expired CacheEntry
    * even when the entry is still present in the Caffeine cache.
    */
   @Test
-  void isLocalHotKey_withExpiredEntry_shouldReturnFalse() {
+  void isHot_withExpiredEntry_shouldReturnFalse() {
     caffeineCache.put(
       "expired",
       CacheEntry.builder()
@@ -413,7 +416,7 @@ class HotKeyCacheTest {
         .build()
     );
 
-    assertThat(hotKeyCache.isLocalHotKey("expired")).isFalse();
+    assertThat(hotKeyCache.isHot("expired")).isFalse();
   }
 
   /**
@@ -421,7 +424,7 @@ class HotKeyCacheTest {
    */
   @Test
   void putThrough_shouldWriteThroughAndCache() {
-    hotKeyCache.putThrough("key1", "newValue", () -> {});
+    hotKeyCache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true);
 
     assertThat(hotKeyCache.peek("key1")).contains("newValue");
   }
@@ -432,7 +435,7 @@ class HotKeyCacheTest {
   @Test
   void putThrough_withBlacklistedKey_shouldThrow() {
     hotKeyCache.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.putThrough("secret", "value", () -> {}))
+    assertThatThrownBy(() -> hotKeyCache.putThrough("secret", "value", () -> {}, 0L, 0L, true))
       .isInstanceOf(HotKeyBlockedException.class)
       .hasFieldOrPropertyWithValue("cacheKey", "secret");
   }
@@ -442,8 +445,8 @@ class HotKeyCacheTest {
    */
   @Test
   void putThrough_withInvalidKey_shouldSkip() {
-    hotKeyCache.putThrough(null, "value", () -> {});
-    hotKeyCache.putThrough("", "value", () -> {});
+    hotKeyCache.putThrough(null, "value", () -> {}, 0L, 0L, true);
+    hotKeyCache.putThrough("", "value", () -> {}, 0L, 0L, true);
     // No exception — silent skip
   }
 
@@ -453,46 +456,80 @@ class HotKeyCacheTest {
    */
   @Test
   void putThrough_withNullValue_shouldUseNullValueSentinel() {
-    hotKeyCache.putThrough("null-key", null, () -> {});
+    hotKeyCache.putThrough("null-key", null, () -> {}, 0L, 0L, true);
 
     assertThat(hotKeyCache.peek("null-key")).isEmpty();
   }
 
   /**
-   * Verifies that putBeforeInvalidate with a failed mutation does NOT invalidate
+   * Verifies that invalidateAfterPut with a failed mutation does NOT invalidate
    * the cache entry (fault mode: writer exception).
    */
   @Test
-  void putBeforeInvalidate_whenMutationFails_shouldNotInvalidate() {
+  void invalidateAfterPutAll() {
     caffeineCache.put("key1", "original");
-    hotKeyCache.putBeforeInvalidate("key1", () -> {
-      throw new RuntimeException("db-fail");
-    });
+    hotKeyCache.invalidateAfterPut(
+      "key1",
+      () -> {
+        throw new RuntimeException("db-fail");
+      },
+      true
+    );
 
     assertThat(hotKeyCache.peek("key1")).contains("original");
   }
 
   /**
-   * Verifies that putBeforeInvalidate throws HotKeyBlockedException when the key is blacklisted.
+   * Verifies that invalidateAfterPut throws HotKeyBlockedException when the key is blacklisted.
    */
   @Test
-  void putBeforeInvalidate_withBlacklistedKey_shouldThrow() {
+  void invalidateAfterPut_All_withBlacklistedKey_shouldThrow() {
     hotKeyCache.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.putBeforeInvalidate("secret", () -> {}))
+    assertThatThrownBy(() -> hotKeyCache.invalidateAfterPut("secret", () -> {}, true))
       .isInstanceOf(HotKeyBlockedException.class)
       .hasFieldOrPropertyWithValue("cacheKey", "secret");
   }
 
   /**
-   * Verifies that putBeforeInvalidate silently returns for invalid (null/blank) keys.
+   * Verifies that invalidateAfterPut silently returns for invalid (null/blank) keys.
    */
   @Test
-  void putBeforeInvalidate_withInvalidKey_shouldSkip() {
+  void invalidateAfterPut_All_withInvalidKey_shouldSkip() {
     caffeineCache.put("k", "v");
-    hotKeyCache.putBeforeInvalidate(null, () -> {});
-    hotKeyCache.putBeforeInvalidate("", () -> {});
+    hotKeyCache.invalidateAfterPut(null, () -> {}, true);
+    hotKeyCache.invalidateAfterPut("", () -> {}, true);
     // Entry untouched
     assertThat(hotKeyCache.peek("k")).contains("v");
+  }
+
+  /**
+   * Verifies that batch invalidateAfterPut runs all mutations, and a failing
+   * mutation skips only its own key.
+   */
+  @Test
+  void invalidateAfterPut_batch_shouldRunAllMutations() {
+    caffeineCache.put("k1", "v1");
+    caffeineCache.put("k2", "v2");
+    caffeineCache.put("k3", "v3");
+
+    hotKeyCache.invalidateAfterPut(
+      Map.of(
+        "k1",
+        () -> {},
+        "k2",
+        () -> {
+          throw new RuntimeException("fail");
+        },
+        "k3",
+        () -> {}
+      ),
+      true
+    );
+
+    assertThat(caffeineCache.getIfPresent("k1")).isNull();
+    assertThat(caffeineCache.getIfPresent("k3")).isNull();
+    // k2 mutation failed, entry preserved
+    assertThat(caffeineCache.getIfPresent("k2")).isEqualTo("v2");
   }
 
   /**
@@ -613,7 +650,7 @@ class HotKeyCacheTest {
    * Verifies that invalidateAllLocal (no-arg) clears all cache entries (emergency flush).
    */
   @Test
-  void invalidateAll_noArg_shouldClearAll() {
+  void invalidate_All_noArg_shouldClear() {
     caffeineCache.put("k1", "v1");
     caffeineCache.put("k2", "v2");
     assertThat(caffeineCache.estimatedSize()).isPositive();
@@ -645,7 +682,7 @@ class HotKeyCacheTest {
         .build()
     );
 
-    assertThat(hotKeyCache.getWithSoftExpire("no-report", () -> "fresh")).contains("v");
+    assertThat(hotKeyCache.getWithSoftExpire("no-report", () -> "fresh", 0L, 0L, true)).contains("v");
   }
 
   // ── get with logically expired entry ──
@@ -670,15 +707,15 @@ class HotKeyCacheTest {
     );
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
 
-    assertThat(hotKeyCache.get("expired", () -> "fresh")).contains("fresh");
+    assertThat(hotKeyCache.get("expired", () -> "fresh", 0L, 0L, true)).contains("fresh");
   }
 
   // ── getWithSoftExpire: invalid key ──
 
   @Test
   void getWithSoftExpire_withInvalidKey_shouldReturnEmpty() {
-    assertThat(hotKeyCache.getWithSoftExpire(null, () -> "v")).isEmpty();
-    assertThat(hotKeyCache.getWithSoftExpire("", () -> "v")).isEmpty();
+    assertThat(hotKeyCache.getWithSoftExpire(null, () -> "v", 0L, 0L, true)).isEmpty();
+    assertThat(hotKeyCache.getWithSoftExpire("", () -> "v", 0L, 0L, true)).isEmpty();
   }
 
   // ── getWithSoftExpire: expired entry triggers reload ──
@@ -703,7 +740,7 @@ class HotKeyCacheTest {
     );
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
 
-    assertThat(hotKeyCache.getWithSoftExpire("expired", () -> "fresh")).contains("fresh");
+    assertThat(hotKeyCache.getWithSoftExpire("expired", () -> "fresh", 0L, 0L, true)).contains("fresh");
   }
 
   // ── getWithSoftExpire: cache miss (no entry) triggers loadAndCache ──
@@ -712,7 +749,7 @@ class HotKeyCacheTest {
   void getWithSoftExpire_withCacheMiss_shouldLoad() {
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loaded"));
 
-    assertThat(hotKeyCache.getWithSoftExpire("missing", () -> "loaded")).contains("loaded");
+    assertThat(hotKeyCache.getWithSoftExpire("missing", () -> "loaded", 0L, 0L, true)).contains("loaded");
   }
 
   // ── unWhitelist with invalid key ──
@@ -730,7 +767,7 @@ class HotKeyCacheTest {
   @Test
   void getWithSoftExpire_withNonCacheEntryRawValue_returnsRaw() {
     caffeineCache.put("raw", "bare-string");
-    assertThat(hotKeyCache.getWithSoftExpire("raw", () -> "fresh")).contains("bare-string");
+    assertThat(hotKeyCache.getWithSoftExpire("raw", () -> "fresh", 0L, 0L, true)).contains("bare-string");
   }
 
   // ── getWithSoftExpire with NORMAL entry and soft expired ──
@@ -754,7 +791,7 @@ class HotKeyCacheTest {
         .build()
     );
 
-    Optional<String> result = hotKeyCache.getWithSoftExpire("normal", () -> "fresh");
+    Optional<String> result = hotKeyCache.getWithSoftExpire("normal", () -> "fresh", 0L, 0L, true);
 
     assertThat(result).contains("stale");
   }
@@ -824,28 +861,109 @@ class HotKeyCacheTest {
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
   }
 
-  // ── evictLocal ──
+  // ── compareAndSet ──
 
   @Test
-  void evictLocal_shouldRemoveEntries() {
+  void compareAndSet_shouldReplaceValueWhenMatch() {
+    caffeineCache.put("k", CacheEntry.builder().value("old").build());
+    assertThat(hotKeyCache.compareAndSet("k", "old", "new")).isTrue();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getValue()).isEqualTo("new");
+  }
+
+  @Test
+  void compareAndSet_shouldNotReplaceWhenMismatch() {
+    caffeineCache.put("k", CacheEntry.builder().value("old").build());
+    assertThat(hotKeyCache.compareAndSet("k", "wrong", "new")).isFalse();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getValue()).isEqualTo("old");
+  }
+
+  @Test
+  void compareAndSet_withAbsentKey_shouldReturnFalse() {
+    assertThat(hotKeyCache.compareAndSet("absent", "old", "new")).isFalse();
+  }
+
+  @Test
+  void compareAndSet_withBlacklistedKey_shouldThrow() {
+    hotKeyCache.addBlacklist("block:*");
+    assertThatThrownBy(() -> hotKeyCache.compareAndSet("block:k", "any", "v")).isInstanceOf(
+      HotKeyBlockedException.class
+    );
+  }
+
+  @Test
+  void compareAndSet_withInvalidKey_shouldReturnFalse() {
+    assertThat(hotKeyCache.compareAndSet("", "old", "new")).isFalse();
+    assertThat(hotKeyCache.compareAndSet(null, "old", "new")).isFalse();
+  }
+
+  @Test
+  void compareAndSet_withNullExpected_shouldMatchNullValue() {
+    caffeineCache.put("k", CacheEntry.builder().value(null).build());
+    assertThat(hotKeyCache.compareAndSet("k", null, "replaced")).isTrue();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getValue()).isEqualTo("replaced");
+  }
+
+  // ── compareAndInvalidate ──
+
+  @Test
+  void compareAndInvalidate_shouldRemoveWhenMatch() {
+    caffeineCache.put("k", CacheEntry.builder().value("old").build());
+    assertThat(hotKeyCache.compareAndInvalidate("k", "old")).isTrue();
+    assertThat(caffeineCache.getIfPresent("k")).isNull();
+  }
+
+  @Test
+  void compareAndInvalidate_shouldNotRemoveWhenMismatch() {
+    caffeineCache.put("k", CacheEntry.builder().value("old").build());
+    assertThat(hotKeyCache.compareAndInvalidate("k", "wrong")).isFalse();
+    assertThat(caffeineCache.getIfPresent("k")).isNotNull();
+  }
+
+  @Test
+  void compareAndInvalidate_withAbsentKey_shouldReturnFalse() {
+    assertThat(hotKeyCache.compareAndInvalidate("absent", "old")).isFalse();
+  }
+
+  @Test
+  void compareAndInvalidate_withBlacklistedKey_shouldThrow() {
+    hotKeyCache.addBlacklist("block:*");
+    caffeineCache.put("block:k", CacheEntry.builder().value("v").build());
+    assertThatThrownBy(() -> hotKeyCache.compareAndInvalidate("block:k", "v")).isInstanceOf(
+      HotKeyBlockedException.class
+    );
+  }
+
+  @Test
+  void compareAndInvalidate_withInvalidKey_shouldReturnFalse() {
+    assertThat(hotKeyCache.compareAndInvalidate("", "old")).isFalse();
+    assertThat(hotKeyCache.compareAndInvalidate(null, "old")).isFalse();
+  }
+
+  // ── invalidateLocal ──
+
+  @Test
+  void invalidateLocal_shouldRemoveEntries() {
     caffeineCache.put("k1", "v1");
     caffeineCache.put("k2", "v2");
-    hotKeyCache.evictLocal(List.of("k1", "k2"));
+    hotKeyCache.invalidate(List.of("k1", "k2"), true);
     assertThat(caffeineCache.getIfPresent("k1")).isNull();
     assertThat(caffeineCache.getIfPresent("k2")).isNull();
   }
 
   @Test
-  void evictLocal_withInvalidKeys_shouldSkipInvalid() {
+  void invalidateLocal_withInvalidKeys_shouldSkipInvalid() {
     caffeineCache.put("k1", "v1");
-    hotKeyCache.evictLocal(Arrays.asList("k1", null, ""));
+    hotKeyCache.invalidate(Arrays.asList("k1", null, ""), true);
     assertThat(caffeineCache.getIfPresent("k1")).isNull();
   }
 
   @Test
-  void evictLocal_withEmptyCollection_shouldSkip() {
+  void invalidateLocal_withEmptyCollection_shouldSkip() {
     caffeineCache.put("k1", "v1");
-    hotKeyCache.evictLocal(List.of());
+    hotKeyCache.invalidate(List.of(), true);
     assertThat(caffeineCache.getIfPresent("k1")).isNotNull();
   }
 
@@ -866,12 +984,12 @@ class HotKeyCacheTest {
     assertThat(hotKeyCache.getLocalCache()).isSameAs(caffeineCache);
   }
 
-  // ── putBeforeInvalidate success path ──
+  // ── invalidateAfterPut success path ──
 
   @Test
-  void putBeforeInvalidate_shouldInvalidateOnSuccess() {
+  void invalidateAfterPutAllOnSuccess() {
     caffeineCache.put("key1", "original");
-    hotKeyCache.putBeforeInvalidate("key1", () -> {});
+    hotKeyCache.invalidateAfterPut("key1", () -> {}, true);
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
@@ -881,7 +999,7 @@ class HotKeyCacheTest {
   void get_withNoReportRule_shouldReturnCached() {
     hotKeyCache.addWhitelist("no-report");
     caffeineCache.put("no-report", "v");
-    assertThat(hotKeyCache.get("no-report", () -> "fresh")).contains("v");
+    assertThat(hotKeyCache.get("no-report", () -> "fresh", 0L, 0L, true)).contains("v");
   }
 
   // ── getWithSoftExpire with TTL override ──
@@ -904,14 +1022,14 @@ class HotKeyCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 500L)).contains("cached");
+    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 500L, true)).contains("cached");
   }
 
   // ── putThrough with TTL overrides ──
 
   @Test
   void putThrough_withTtlOverrides_shouldCacheWithCustomTtl() {
-    hotKeyCache.putThrough("key1", "v", () -> {}, 50000L, 5000L);
+    hotKeyCache.putThrough("key1", "v", () -> {}, 50000L, 5000L, true);
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);
     assertThat(((CacheEntry) raw).getHardTtlMs()).isEqualTo(50000L);
@@ -921,9 +1039,9 @@ class HotKeyCacheTest {
   // ── invalidateAllLocal(Collection) with all-invalid keys ──
 
   @Test
-  void invalidateAll_collection_whenAllInvalid_shouldSkip() {
+  void invalidate_All_collection_whenInvalid_shouldSkip() {
     caffeineCache.put("k1", "v1");
-    hotKeyCache.invalidateAll(Arrays.asList(null, ""));
+    hotKeyCache.invalidate(Arrays.asList(null, ""), true);
     assertThat(caffeineCache.getIfPresent("k1")).isNotNull();
   }
 
@@ -947,7 +1065,7 @@ class HotKeyCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 10000L, 500L)).contains("cached");
+    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 10000L, 500L, true)).contains("cached");
   }
 
   // ── broadcastAllLocalRulesManually (no publisher) ──
@@ -958,12 +1076,12 @@ class HotKeyCacheTest {
     hotKeyCache.broadcastAllLocalRulesManually();
   }
 
-  // ── putBeforeInvalidate with no existing entry ──
+  // ── invalidateAfterPut with no existing entry ──
 
   @Test
-  @DisplayName("putBeforeInvalidate on clean key should not throw")
-  void putBeforeInvalidate_withNoExistingEntry_shouldWork() {
-    hotKeyCache.putBeforeInvalidate("key1", () -> {});
+  @DisplayName("invalidateAfterPut on clean key should not throw")
+  void invalidateAfterPut_All_withNoExistingEntry_shouldWork() {
+    hotKeyCache.invalidateAfterPut("key1", () -> {}, true);
     assertThat(caffeineCache.getIfPresent("key1")).isNull();
   }
 
@@ -994,7 +1112,7 @@ class HotKeyCacheTest {
       publisher = mock(CacheSyncPublisher.class);
       broadcastBuffer = new BroadcastBuffer(
         Executors.newSingleThreadScheduledExecutor(r -> {
-          Thread t = new Thread(r, "hotkey-broadcast-flusher");
+          Thread t = new Thread(r, "hotkey-send-flusher");
           t.setDaemon(true);
           return t;
         }),
@@ -1023,7 +1141,7 @@ class HotKeyCacheTest {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(singleFlight.load(eq("key1"), any())).thenReturn(Optional.of("value"));
 
-      Optional<String> result = hotKeyCache.get("key1", () -> "value");
+      Optional<String> result = hotKeyCache.get("key1", () -> "value", 0L, 0L, true);
 
       assertThat(result).contains("value");
       Object raw = caffeineCache.getIfPresent("key1");
@@ -1058,7 +1176,7 @@ class HotKeyCacheTest {
         return Optional.ofNullable(reader.get());
       });
 
-      Optional<String> result = hotKeyCache.get("key1", () -> "newValue");
+      Optional<String> result = hotKeyCache.get("key1", () -> "newValue", 0L, 0L, true);
 
       assertThat(result).contains("newValue");
       Object raw = caffeineCache.getIfPresent("key1");
@@ -1088,7 +1206,7 @@ class HotKeyCacheTest {
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire("key", () -> "fresh");
+      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 0L, true);
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -1115,7 +1233,7 @@ class HotKeyCacheTest {
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 9999L);
+      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 9999L, true);
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -1143,7 +1261,7 @@ class HotKeyCacheTest {
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded");
+      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1173,7 +1291,7 @@ class HotKeyCacheTest {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(healthView.isClusterHealthy()).thenReturn(false);
 
-      hotKeyCache.get("key1", () -> "loaded");
+      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1203,7 +1321,7 @@ class HotKeyCacheTest {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(healthView.isClusterHealthy()).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded");
+      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1231,7 +1349,7 @@ class HotKeyCacheTest {
           .build()
       );
 
-      hotKeyCache.putThrough("key1", "newValue", () -> {});
+      hotKeyCache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true);
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1242,34 +1360,34 @@ class HotKeyCacheTest {
     }
 
     @Test
-    @DisplayName("invalidate should broadcast when publisher present")
+    @DisplayName("invalidate should send when publisher present")
     void invalidate_shouldBroadcastWhenPublisherPresent() {
-      hotKeyCache.invalidate("key1");
+      hotKeyCache.invalidate("key1", true);
 
       verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));
     }
 
     @Test
-    @DisplayName("invalidateAllLocal should broadcast when publisher present")
+    @DisplayName("invalidateAllLocal should send when publisher present")
     void invalidateAll_shouldBroadcastWhenPublisherPresent() {
-      hotKeyCache.invalidateAll(List.of("key1", "key2"));
+      hotKeyCache.invalidate(List.of("key1", "key2"), true);
 
       verify(publisher).broadcastLocalInvalidateAll(eq(List.of("key1", "key2")));
     }
 
     @Test
-    @DisplayName("putThrough should broadcast refresh when publisher present")
+    @DisplayName("putThrough should send refresh when publisher present")
     void putThrough_shouldBroadcastWhenPublisherPresent() {
-      hotKeyCache.putThrough("key1", "value", () -> {});
+      hotKeyCache.putThrough("key1", "value", () -> {}, 0L, 0L, true);
 
       broadcastBuffer.flush();
       verify(publisher).broadcastRefresh(eq("key1"), anyLong(), eq(true));
     }
 
     @Test
-    @DisplayName("putBeforeInvalidate should broadcast when publisher present")
+    @DisplayName("invalidateAfterPut should send when publisher present")
     void putBeforeInvalidate_shouldBroadcastWhenPublisherPresent() {
-      hotKeyCache.putBeforeInvalidate("key1", () -> {});
+      hotKeyCache.invalidateAfterPut("key1", () -> {}, true);
 
       verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));
     }
@@ -1286,7 +1404,7 @@ class HotKeyCacheTest {
       when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("value"));
       when(hotKeyDetector.contains("key1")).thenReturn(false);
 
-      hotKeyCache.get("key1", () -> "value", 50000L, 5000L);
+      hotKeyCache.get("key1", () -> "value", 50000L, 5000L, true);
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1316,7 +1434,7 @@ class HotKeyCacheTest {
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire("key", () -> "fresh");
+      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 0L, true);
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -1344,7 +1462,7 @@ class HotKeyCacheTest {
       );
       when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
 
-      hotKeyCache.getWithSoftExpire("key", () -> "fresh");
+      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 0L, true);
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -1356,7 +1474,7 @@ class HotKeyCacheTest {
       when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("hot-value"));
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "hot-value", 80000L, 8000L);
+      hotKeyCache.get("key1", () -> "hot-value", 80000L, 8000L, true);
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1373,7 +1491,7 @@ class HotKeyCacheTest {
       when(singleFlight.load(eq("noreport-hot"), any())).thenReturn(Optional.of("value"));
       when(hotKeyDetector.contains("noreport-hot")).thenReturn(true);
 
-      hotKeyCache.get("noreport-hot", () -> "value");
+      hotKeyCache.get("noreport-hot", () -> "value", 0L, 0L, true);
 
       Object raw = caffeineCache.getIfPresent("noreport-hot");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1387,7 +1505,7 @@ class HotKeyCacheTest {
       when(singleFlight.load(eq("noreport-normal"), any())).thenReturn(Optional.of("value"));
       when(hotKeyDetector.contains("noreport-normal")).thenReturn(false);
 
-      hotKeyCache.get("noreport-normal", () -> "value");
+      hotKeyCache.get("noreport-normal", () -> "value", 0L, 0L, true);
 
       Object raw = caffeineCache.getIfPresent("noreport-normal");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1416,7 +1534,7 @@ class HotKeyCacheTest {
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded");
+      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isGreaterThan(originalExpireAt);
@@ -1444,7 +1562,7 @@ class HotKeyCacheTest {
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded");
+      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isEqualTo(futureExpireAt);
@@ -1471,7 +1589,7 @@ class HotKeyCacheTest {
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded");
+      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
@@ -1502,7 +1620,7 @@ class HotKeyCacheTest {
         return Optional.ofNullable(reader.get());
       });
 
-      Optional<String> result = hotKeyCache.get("key1", () -> "newValue");
+      Optional<String> result = hotKeyCache.get("key1", () -> "newValue", 0L, 0L, true);
 
       assertThat(result).contains("newValue");
       Object raw = caffeineCache.getIfPresent("key1");
@@ -1535,7 +1653,7 @@ class HotKeyCacheTest {
         .build()
     );
 
-    hotKeyCache.putThrough("key1", "newValue", () -> {});
+    hotKeyCache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true);
 
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1565,7 +1683,7 @@ class HotKeyCacheTest {
         .build()
     );
 
-    hotKeyCache.putThrough("key1", "newValue", () -> {}, 50000L, 5000L);
+    hotKeyCache.putThrough("key1", "newValue", () -> {}, 50000L, 5000L, true);
 
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1593,7 +1711,7 @@ class HotKeyCacheTest {
         .build()
     );
 
-    hotKeyCache.putThrough("key1", "newValue", () -> {});
+    hotKeyCache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true);
 
     Object raw = caffeineCache.getIfPresent("key1");
     assertThat(raw).isInstanceOf(CacheEntry.class);

@@ -21,12 +21,12 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Controls whether cache write/evict operations on this method broadcast
+ * Controls whether cache write/evict operations on this method send
  * sync messages to peer instances via RabbitMQ.
  * <p>
  * When {@code @Broadcast(false)} is present, the underlying
  * {@link io.github.hyshmily.hotkey.HotKey} methods use local-only variants
- * ({@code putLocal()} / {@code evictLocal()}) instead of the default
+ * ({@code putLocal()} / {@code invalidateLocal()}) instead of the default
  * {@code putThrough()} / {@code invalidate()} paths.
  * <p>
  * Applies to {@link org.springframework.cache.annotation.Cacheable @Cacheable},
@@ -36,7 +36,6 @@ import java.lang.annotation.Target;
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
 public @interface Broadcast {
-
-  /** Whether to broadcast sync messages. Default is {@code true}. */
+  /** Whether to send sync messages. Default is {@code true}. */
   boolean value() default true;
 }

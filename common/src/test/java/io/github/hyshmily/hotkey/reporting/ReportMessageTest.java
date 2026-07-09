@@ -17,12 +17,11 @@ package io.github.hyshmily.hotkey.reporting;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.hotkey.reporting.ReportMessage;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link ReportMessage} record creation and field access.
+ * Tests for {@link ReportMessage} recordReport creation and field access.
  */
 class ReportMessageTest {
 

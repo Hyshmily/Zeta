@@ -131,7 +131,7 @@ public class SlidingWindowDetector {
    * window sum is compared against the current threshold.
    *
    * @param key   the cache key; must not be {@code null}
-   * @param count the number of accesses to record (typically the batched
+   * @param count the number of accesses to recordReport (typically the batched
    *              count reported by an application instance)
    * @return {@code true} if the sum of the last {@link #windowSize} slices
    *         meets or exceeds {@link #threshold}; {@code false} otherwise

@@ -25,7 +25,6 @@ import java.util.Map;
  */
 @Internal
 public interface HotKeyStateMachine {
-
   /** Key-level lifecycle stages. */
   enum State {
     COLD,
@@ -63,6 +62,6 @@ public interface HotKeyStateMachine {
   /** Return a snapshot of the current state for a key. */
   Map<String, Object> getStateSnapshot(String key);
 
-  /** Roll back the per-key state after a broadcast failure. */
+  /** Roll back the per-key state after a send failure. */
   void rollbackToPreviousState(String key, Map<String, Object> previousState);
 }

@@ -23,6 +23,8 @@ import io.github.hyshmily.hotkey.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.cache.cachesupport.impl.CircuitBreakerImpl;
 import io.github.hyshmily.hotkey.cache.cachesupport.impl.SingleFlightImpl;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -424,5 +426,67 @@ class SingleFlightTest {
     SingleFlight sf = new SingleFlightImpl(1000, 10, 5, executor, breaker);
     assertThat(sf.load("key", () -> "val")).isEmpty();
     assertThat(sf.isBreakerOpen()).isTrue();
+  }
+
+  // ── Collection load tests ──
+
+  /**
+   * Verifies that loading multiple keys via the collection overload returns
+   * all keys with their correct values.
+   */
+  @Test
+  void loadCollection_shouldReturnAllKeys() {
+    Map<String, Optional<String>> result = singleFlight.load(List.of("a", "b", "c"), key -> "val-" + key);
+    assertThat(result)
+      .hasSize(3)
+      .containsEntry("a", Optional.of("val-a"))
+      .containsEntry("b", Optional.of("val-b"))
+      .containsEntry("c", Optional.of("val-c"));
+  }
+
+  /**
+   * Verifies that an empty collection returns an empty map immediately,
+   * without invoking the reader supplier.
+   */
+  @Test
+  void loadCollection_withEmptyInput_shouldReturnEmptyMap() {
+    Map<String, Optional<String>> result = singleFlight.load(List.of(), key -> {
+      throw new AssertionError("reader must not be called");
+    });
+    assertThat(result).isEmpty();
+  }
+
+  /**
+   * Verifies that the circuit breaker intercepts a collection load and
+   * returns all keys as empty.
+   */
+  @Test
+  void loadCollection_whenBreakerOpen_shouldReturnEmptyForAllKeys() {
+    HotKeyProperties.CircuitBreaker cfg = new HotKeyProperties.CircuitBreaker();
+    cfg.setEnabled(true);
+    cfg.setFailThreshold(0.1);
+    cfg.setRequestVolumeThreshold(1);
+    CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
+    breaker.onFailure();
+    SingleFlight sf = new SingleFlightImpl(1000, 10, 5, executor, breaker);
+
+    Map<String, Optional<String>> result = sf.load(List.of("x", "y"), key -> "val");
+    assertThat(result).hasSize(2).containsEntry("x", Optional.empty()).containsEntry("y", Optional.empty());
+    assertThat(sf.isBreakerOpen()).isTrue();
+  }
+
+  /**
+   * Verifies that a reader exception during a collection load propagates
+   * as a RuntimeException.
+   */
+  @Test
+  void loadCollection_shouldPropagateReaderException() {
+    assertThatThrownBy(() ->
+      singleFlight.load(List.of("fail-key"), key -> {
+        throw new RuntimeException("batch-fail");
+      })
+    )
+      .isInstanceOf(RuntimeException.class)
+      .hasMessageContaining("batch-fail");
   }
 }

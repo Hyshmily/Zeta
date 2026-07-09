@@ -37,7 +37,7 @@ import org.springframework.context.annotation.Bean;
  *
  * <p>Creates a {@link CacheManager} that delegates to the HotKey data path,
  * enabling {@code @Cacheable} / {@code @CachePut} / {@code @CacheEvict} annotations
- * to trigger hot-key detection, soft-expire, and cross-instance broadcast.
+ * to trigger hot-key detection, soft-expire, and cross-instance send.
  */
 @Internal
 @AutoConfiguration

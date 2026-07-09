@@ -29,7 +29,7 @@ import lombok.ToString;
  * <ul>
  *   <li><b>{@code dataVersion}</b> — monotonically increasing counter obtained
  *       from Redis INCR (normal) or a node-local fallback (degraded). Used by
- *       the cache-sync broadcast to resolve concurrent updates across instances.
+ *       the cache-sync send to resolve concurrent updates across instances.
  *       When {@code isVersionDegraded} is {@code true}, the version originated
  *       from the local fallback ({@code Long.MIN_VALUE + counter}) and carries
  *       reduced authority.</li>
@@ -60,7 +60,7 @@ public class CacheEntry {
   private final Object value;
   /**
    * Monotonically increasing version obtained from Redis INCR (normal path)
-   * or a node-local counter (degraded path). Used by the cache-sync broadcast
+   * or a node-local counter (degraded path). Used by the cache-sync send
    * to resolve concurrent write conflicts across instances.
    */
   private final long dataVersion;

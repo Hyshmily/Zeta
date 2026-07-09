@@ -15,7 +15,9 @@
  */
 package io.github.hyshmily.hotkey.cache.cachesupport;
 
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -32,7 +34,6 @@ import java.util.function.Supplier;
  * This interface is thread-safe.
  */
 public interface SingleFlight {
-
   /**
    * Whether the circuit breaker is currently open.
    * Used by {@code HotKeyCache} to decide whether to return stale cache on miss.
@@ -59,4 +60,22 @@ public interface SingleFlight {
    * @return the loaded value, or empty if the load failed or timed out
    */
   <T> Optional<T> load(String cacheKey, Supplier<T> reader);
+  /**
+   * Load multiple keys in parallel, deduplicating across all callers.
+   * <p>
+   * All reader futures are submitted to the executor in a single pass (Phase 1),
+   * then results are collected in input order (Phase 2).  This avoids the
+   * serial blocking that would occur from calling {@link #load(String, Supplier)}
+   * in a loop.
+   * <p>
+   * Thread-safe: concurrent callers for the same subset of keys share the same
+   * futures via the internal dedup cache.
+   *
+   * @param cacheKeys the keys to load
+   * @param reader    function that returns a value for each key (called on executor threads)
+   * @param <T>       the value type
+   * @return map of key to loaded value, preserving iteration order of {@code cacheKeys};
+   *         keys whose suppliers threw or timed out are absent from values
+   */
+  <T> Map<String, Optional<T>> load(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader);
 }

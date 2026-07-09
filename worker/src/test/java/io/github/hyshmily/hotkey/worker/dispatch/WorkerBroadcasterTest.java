@@ -83,7 +83,7 @@ class WorkerBroadcasterTest {
   }
 
   /**
-   * Verifies that the decision version counter increments on each successive broadcast.
+   * Verifies that the decision version counter increments on each successive send.
    */
   @Test
   void decisionVersionShouldIncrementOnEachBroadcast() {

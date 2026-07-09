@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.hotkey.cache;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.TOPK_INCR;
 import static io.github.hyshmily.hotkey.sync.local.SyncMessage.*;
 
 import io.github.hyshmily.hotkey.Internal;
@@ -66,20 +65,20 @@ public class CentralDispatcher {
    * access to the Worker via the {@link KeyReporter}.
    *
    * @param cacheKey       the accessed cache key
-   * @param isSkipBroadcast if {@code true}, skip reporting to Worker
+   * @param skipBroadcast if {@code true}, skip reporting to Worker
    */
   @SuppressWarnings("java:S6213")
-  public void record(String cacheKey, boolean isSkipBroadcast) {
-    hotKeyDetector.add(cacheKey, TOPK_INCR);
-    if (!isSkipBroadcast) {
-      hotKeyReporter.ifPresent(r -> r.record(cacheKey));
+  public void recordAccess(String cacheKey, boolean skipBroadcast) {
+    hotKeyDetector.add(cacheKey);
+    if (!skipBroadcast) {
+      hotKeyReporter.ifPresent(r -> r.recordReport(cacheKey));
     }
   }
 
   /**
    * Broadcast a sync operation to all peer instances.
    * <p>
-   * The actual broadcast method invoked on {@link CacheSyncPublisher} depends
+   * The actual send method invoked on {@link CacheSyncPublisher} depends
    * on the operation type:
    * <ul>
    *   <li>{@link SyncMessage#TYPE_INVALIDATE} — calls
@@ -95,27 +94,27 @@ public class CentralDispatcher {
    * @param degraded whether the version was obtained in degraded mode
    * @throws IllegalArgumentException if the type is unknown
    */
-  public void broadcast(String cacheKey, String type, long version, boolean degraded) {
+  public void send(String cacheKey, String type, long version, boolean degraded) {
     switch (type) {
       case TYPE_INVALIDATE -> cacheSyncPublisher.ifPresentOrElse(
         p -> p.broadcastLocalInvalidate(cacheKey, version, degraded),
-        () -> log.debug("broadcast INVALIDATE: {}", NO_SYNC_PUBLISHER)
+        () -> log.debug("send INVALIDATE: {}", NO_SYNC_PUBLISHER)
       );
       case TYPE_REFRESH -> cacheSyncPublisher.ifPresent(p -> broadcastBuffer.record(cacheKey, version, degraded));
-      default -> throw new IllegalArgumentException("Unknown broadcast type: " + type);
+      default -> throw new IllegalArgumentException("Unknown send type: " + type);
     }
   }
 
   /**
-   * Batch-broadcast a sync operation for multiple keys.
+   * Batch-send a sync operation for multiple keys.
    * <p>
    * Currently only supports {@link SyncMessage#TYPE_INVALIDATE_ALL}:
    * calls {@link CacheSyncPublisher#broadcastLocalInvalidateAll}.
    *
-   * @param cacheKeys the keys to broadcast; null or empty is silently ignored
+   * @param cacheKeys the keys to send; null or empty is silently ignored
    * @param type      the operation type ({@link SyncMessage#TYPE_INVALIDATE_ALL})
    */
-  public void broadcast(Collection<String> cacheKeys, String type) {
+  public void send(Collection<String> cacheKeys, String type) {
     if (cacheKeys == null || cacheKeys.isEmpty()) {
       return;
     }

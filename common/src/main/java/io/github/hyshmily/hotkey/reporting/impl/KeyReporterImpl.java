@@ -169,7 +169,7 @@ public class KeyReporterImpl implements KeyReporter {
    *
    * @param cacheKey the accessed key
    */
-  public void record(String cacheKey) {
+  public void recordReport(String cacheKey) {
     bufferedCounter.count(cacheKey, TOPK_INCR);
   }
 

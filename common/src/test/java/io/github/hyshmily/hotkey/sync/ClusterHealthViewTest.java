@@ -350,7 +350,7 @@ class ClusterHealthViewTest {
   }
 
   /**
-   * Verifies that an epoch change resets the record including decisionVersionHwm.
+   * Verifies that an epoch change resets the recordReport including decisionVersionHwm.
    */
   @Test
   void onHeartbeat_higherEpoch_shouldReplaceRecord() {

@@ -15,9 +15,9 @@
  */
 package io.github.hyshmily.hotkey.constants;
 
-import org.junit.jupiter.api.Test;
-
 import static org.assertj.core.api.Assertions.assertThat;
+
+import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link HotKeyConstants} verifying constant values for AMQP, threading, and routing.
@@ -50,7 +50,7 @@ class HotKeyConstantsTest {
    */
   @Test
   void shouldHaveExpectedRoutingKeys() {
-    assertThat(HotKeyConstants.ROUTING_KEY_BROADCAST).isEqualTo("broadcast.");
+    assertThat(HotKeyConstants.ROUTING_KEY_BROADCAST).isEqualTo("send.");
     assertThat(HotKeyConstants.ROUTING_KEY_REPORT).isEqualTo("report.");
   }
 
@@ -141,8 +141,7 @@ class HotKeyConstantsTest {
    */
   @Test
   void shouldHaveExpectedNoSyncPublisherMessage() {
-    assertThat(HotKeyConstants.NO_SYNC_PUBLISHER)
-      .isEqualTo("No sync publisher found, please enable hotkey.sync");
+    assertThat(HotKeyConstants.NO_SYNC_PUBLISHER).isEqualTo("No sync publisher found, please enable hotkey.sync");
   }
 
   /**

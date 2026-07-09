@@ -155,12 +155,12 @@ public class HotKeyActuatorAutoConfiguration {
    * (i.e. in Worker mode) and Spring MVC is on the classpath.
    * Exposes REST endpoints at {@code /actuator/hotkey/worker/state}
    * for GET (read config) and POST (update config) operations.
-   * Configuration changes propagate to peer Workers via heartbeat broadcast.
+   * Configuration changes propagate to peer Workers via heartbeat send.
    *
    * @param stateMachine                    the Worker state machine (never {@code null})
    * @param configTimestampCounterProvider  optional provider for the config-change timestamp
    *                                        counter; bumped on each config change to trigger
-   *                                        heartbeat broadcast (may be absent)
+   *                                        heartbeat send (may be absent)
    * @return a new {@link StateMachineEndpoint} instance
    */
   @Bean

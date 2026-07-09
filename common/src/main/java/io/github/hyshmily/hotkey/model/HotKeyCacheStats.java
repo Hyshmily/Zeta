@@ -18,7 +18,7 @@ package io.github.hyshmily.hotkey.model;
 /**
  * Immutable snapshot of L1 (Caffeine) cache performance counters and current capacity.
  *
- * <p>This record is returned by {@link io.github.hyshmily.hotkey.HotKey#stats()}
+ * <p>This recordReport is returned by {@link io.github.hyshmily.hotkey.HotKey#stats()}
  * for monitoring and observability purposes.
  *
  * <p><b>Availability:</b>

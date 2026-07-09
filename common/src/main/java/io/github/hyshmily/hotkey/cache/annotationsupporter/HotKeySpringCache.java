@@ -19,6 +19,7 @@ import io.github.hyshmily.hotkey.HotKey;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext.ContextValues;
+import io.github.hyshmily.hotkey.model.CacheEntry;
 import jakarta.annotation.Nullable;
 import java.util.Objects;
 import java.util.concurrent.Callable;
@@ -119,7 +120,20 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   @Nullable
   protected Object lookup(@NonNull Object key) {
     String prefixed = prefixedKey(key);
-    return hotKey.peek(prefixed).orElse(null);
+    Object value = hotKey.peek(prefixed).orElse(null);
+    if (value != null) {
+      return value;
+    }
+    // peek() unwraps HotKey's NullValue sentinel to null → Optional.empty().
+    // Check raw cache to distinguish "cached null" from "cache miss".
+    var localCache = hotKey.getLocalCache();
+    if (localCache != null) {
+      Object raw = localCache.getIfPresent(prefixed);
+      if (raw instanceof CacheEntry entry && entry.getValue() == NullValue.INSTANCE) {
+        return org.springframework.cache.support.NullValue.INSTANCE;
+      }
+    }
+    return null;
   }
 
   /**
@@ -131,7 +145,7 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
    *
    * <p>If a TTL override is set in {@link HotKeyCacheContext} for the current
    * thread (e.g., by {@code HotKeyCacheExtensionAspect} from a {@code @HotKeyCacheTTL}
-   * annotation), it is passed to {@link HotKey#get(String, Supplier, long, long)}.
+   * annotation), it is passed to {@link HotKey#get(String, Supplier, long, long, boolean)}.
    * Otherwise, the global default TTL is used (hardTtlMs=0).
    *
    * <p>If {@link HotKeyCacheContext#isAllowNull()} returns {@code true} (set by
@@ -149,6 +163,16 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
   @SuppressWarnings("unchecked")
   public <T> T get(@NonNull Object key, @NonNull Callable<T> valueLoader) {
     String prefixed = prefixedKey(key);
+
+    // Fast path: avoid redundant loader invocation for cached NullValue sentinel
+    // (stored by annotation path via @NullCaching or HotKeyReadQuery).
+    var localCache = hotKey.getLocalCache();
+    if (localCache != null) {
+      Object raw = localCache.getIfPresent(prefixed);
+      if (raw instanceof CacheEntry entry && entry.getValue() == NullValue.INSTANCE) {
+        return null;
+      }
+    }
 
     ContextValues cv = HotKeyCacheContext.get().getValues();
     long hardTtlMs = cv != null ? cv.hardTtlMs() : 0L;
@@ -212,7 +236,7 @@ public class HotKeySpringCache extends AbstractValueAdaptingCache {
     String prefixed = prefixedKey(key);
     ContextValues cv = HotKeyCacheContext.get().getValues();
     if (cv != null && cv.skipBroadcast()) {
-      hotKey.evictLocal(prefixed);
+      hotKey.invalidate(prefixed, false);
     } else {
       hotKey.invalidate(prefixed);
     }

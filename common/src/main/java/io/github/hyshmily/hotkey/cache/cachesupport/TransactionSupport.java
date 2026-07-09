@@ -41,7 +41,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * Callers using {@code invalidate()} inside a transaction that may
  * roll back should be aware that the invalidation will be silently
  * dropped on rollback. For critical invalidations, use
- * {@code evictLocal()} (immediate, no tx deferral) or register
+ * {@code invalidateLocal()} (immediate, no tx deferral) or register
  * an {@code afterCompletion} callback manually.
  */
 @Slf4j
@@ -83,7 +83,7 @@ public final class TransactionSupport {
   /**
    * Defer a task to after transaction commit, or execute synchronously outside a transaction.
    * Used by {@link HotKeyCache#invalidate}, {@link HotKeyCache#invalidateAllLocal},
-   * and {@link HotKeyCache#putBeforeInvalidate}.
+   * and {@link HotKeyCache#invalidateAfterPut}.
    * Exceptions propagate directly to the caller when executed outside a transaction.
    *
    * @param task the task to execute

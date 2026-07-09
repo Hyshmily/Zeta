@@ -15,21 +15,20 @@
  */
 package io.github.hyshmily.hotkey.detection.impl;
 
+import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
+
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
 import io.github.hyshmily.hotkey.model.HotKeyDecision;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
-
-import static io.github.hyshmily.hotkey.detection.HotKeyStateMachine.State.*;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -112,7 +111,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
   /**
    * The number of cold windows that mark the entry into PRE_COOLING.
    * The remaining {@code coolCount - preCoolGraceCount} windows are the
-   * grace period during which the key can revive without a broadcast.
+   * grace period during which the key can revive without a send.
    */
   @Getter
   @Setter
@@ -133,7 +132,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
 
   /**
    * Evaluates the current sliding-window observation for the given key and
-   * returns a decision instructing the caller whether to broadcast a HOT or
+   * returns a decision instructing the caller whether to send a HOT or
    * COOL message.
    *
    * <p>This method implements the state transitions described in the class
@@ -142,9 +141,9 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
    * and returns one of:
    * <ul>
    *   <li>{@link HotKeyDecision.DecisionType#HOT} — key just crossed the
-   *       promotion threshold; broadcast HOT to application instances.</li>
+   *       promotion threshold; send HOT to application instances.</li>
    *   <li>{@link HotKeyDecision.DecisionType#COOL} — key has fully cooled
-   *       down; broadcast COOL so apps revert to normal TTL.</li>
+   *       down; send COOL so apps revert to normal TTL.</li>
    *   <li>{@link HotKeyDecision.DecisionType#NONE} — no state transition
    *       occurred; no action required.</li>
    * </ul>
@@ -199,7 +198,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
       return HotKeyDecision.hot(key);
     }
 
-    // PRE_COOLING → CONFIRMED_HOT: silent revive, no broadcast (avoid oscillation)
+    // PRE_COOLING → CONFIRMED_HOT: silent revive, no send (avoid oscillation)
     if (state.currentState == PRE_COOLING) {
       state.currentState = CONFIRMED_HOT;
       return HotKeyDecision.none(key);
@@ -213,12 +212,12 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
     state.coolStreak++;
     state.hotStreak = 0;
 
-    // CONFIRMED_HOT → PRE_COOLING: first cooling phase, no broadcast yet
+    // CONFIRMED_HOT → PRE_COOLING: first cooling phase, no send yet
     if (state.currentState == CONFIRMED_HOT && state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
       state.currentState = PRE_COOLING;
     }
 
-    // PRE_COOLING → COLD: fully cooled, broadcast COOL
+    // PRE_COOLING → COLD: fully cooled, send COOL
     if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
       state.currentState = COLD;
       return HotKeyDecision.cool(key);
@@ -299,7 +298,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
   }
 
   /**
-   * Rolls back the per-key state to its previous value after a broadcast failure.
+   * Rolls back the per-key state to its previous value after a send failure.
    * This allows the next evaluation window to re-emit the decision.
    *
    * @param key the key whose state machine should be rolled back

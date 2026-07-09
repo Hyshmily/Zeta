@@ -222,7 +222,7 @@ class ReportConsumerTest {
   }
 
   /**
-   * Verifies that the NONE decision type does not trigger any broadcast or marking.
+   * Verifies that the NONE decision type does not trigger any send or marking.
    */
   @Test
   void shouldNotBroadcastWhenDecisionIsNone() {
@@ -261,7 +261,7 @@ class ReportConsumerTest {
   }
 
   /**
-   * Verifies that a successful HOT broadcast does not trigger a state machine rollback.
+   * Verifies that a successful HOT send does not trigger a state machine rollback.
    *
    * <p>Broadcast failures are fire-and-forget per ADR-0007 — no rollback occurs.
    */
@@ -278,7 +278,7 @@ class ReportConsumerTest {
   }
 
   /**
-   * Verifies that a successful COOL broadcast does not trigger a state machine rollback.
+   * Verifies that a successful COOL send does not trigger a state machine rollback.
    */
   @Test
   void broadcastCoolSuccess_shouldNotRollback() {

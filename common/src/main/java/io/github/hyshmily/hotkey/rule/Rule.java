@@ -32,7 +32,7 @@ import lombok.Data;
  *
  * <p>Each rule carries a unique identifier and a creation timestamp for
  * tracking and cross-instance synchronization. Rules are serialized to
- * JSON for Redis persistence and AMQP broadcast.
+ * JSON for Redis persistence and AMQP send.
  *
  * <p>Instances are mutable (for Jackson deserialization) but should be
  * treated as effectively immutable after construction and registration
@@ -117,9 +117,11 @@ public class Rule {
   private String pattern;
   /** Action to take when a key matches this rule. */
   private RuleAction action;
+
   /** Compiled regex for WILDCARD and REGEX types; lazily initialised. */
   @JsonIgnore
   private transient volatile Pattern compiledPattern;
+
   /** Reusable matcher per thread, avoiding allocation on every match call. */
   @JsonIgnore
   private final transient ThreadLocal<Matcher> matcherCache = new ThreadLocal<>();

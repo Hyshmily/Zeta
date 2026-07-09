@@ -15,14 +15,13 @@
  */
 package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static org.assertj.core.api.Assertions.assertThat;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 
 @DisplayName("HotKeyCacheContext tests")
 class HotKeyCacheContextTest {
@@ -169,7 +168,7 @@ class HotKeyCacheContextTest {
   }
 
   @Test
-  @DisplayName("ContextValues record accessors work correctly")
+  @DisplayName("ContextValues recordReport accessors work correctly")
   void contextValuesRecordAccessors() {
     var values = new HotKeyCacheContext.ContextValues(5000L, 1000L, true, false);
     assertThat(values.hardTtlMs()).isEqualTo(5000L);

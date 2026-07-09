@@ -89,6 +89,7 @@ public class HotKey implements DisposableBean {
   /**
    * Scheduler for timed background refresh tasks (lazily initialized).
    */
+  @SuppressWarnings("java:S3077") // ScheduledExecutorService is thread-safe; we manage its lifecycle
   private volatile ScheduledExecutorService refreshScheduler;
 
   /**
@@ -196,10 +197,12 @@ public class HotKey implements DisposableBean {
   }
 
   /**
-   * Convenience shorthand for {@link #get get(cacheKey, loader).orElse(null)}.
-   *
-   * <p>Loads the value via the supplier on cache miss, using configured default TTLs.
-   * Returns {@code null} when the loader itself returns {@code null}.
+   * Truly atomic computeIfAbsent — the check, load, and store are one
+   * indivisible operation backed by Caffeine's {@code asMap().computeIfAbsent()}.
+   * <p>
+   * Unlike the old {@link #get} path which does a TOCTOU-prone
+   * getIfPresent → load → compute chain, this method guarantees that
+   * the loader function runs at most once per key.
    *
    * @param cacheKey the key to retrieve
    * @param loader   the value supplier for cache misses
@@ -209,66 +212,26 @@ public class HotKey implements DisposableBean {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader) {
-    return get(cacheKey, loader).orElse(null);
+    return computeIfAbsent(cacheKey, loader, 0L, 0L, true);
   }
 
   /**
-   * Batch variant of {@link #computeIfAbsent(String, Supplier)}. Iterates over
-   * the given keys and loads each one via the provided function on cache miss.
+   * Truly atomic computeIfAbsent with explicit hard TTL.
    *
-   * @param cachKeys the keys to retrieve
-   * @param loader   the per-key value supplier for cache misses
-   * @param <V>      the value type
-   * @return a map of key → loaded value (only keys whose loader returned non-null are included)
-   */
-  public <V> Map<String, V> computeIfAbsent(Collection<String> cachKeys, Function<String, V> loader) {
-    Map<String, V> result = new HashMap<>();
-    cachKeys.forEach(key -> {
-      V value = computeIfAbsent(key, () -> loader.apply(key));
-      result.put(key, value);
-    });
-
-    return result;
-  }
-
-  /**
-   * Convenience shorthand with explicit hard TTL.
-   *
-   * @param cacheKey the key to retrieve
-   * @param loader   the value supplier for cache misses
+   * @param cacheKey  the key to retrieve
+   * @param loader    the value supplier for cache misses
    * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
-   * @param <V>      the value type
+   * @param <V>       the value type
    * @return the cached or loaded value, or {@code null} if the loader returned {@code null}
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws HotKeyBlockedException when the key matches a blacklist rule
-   * @see #get(String, Supplier, long, long)
    */
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs) {
-    return get(cacheKey, loader, hardTtlMs, 0).orElse(null);
+    return computeIfAbsent(cacheKey, loader, hardTtlMs, 0L, true);
   }
 
   /**
-   * Batch variant of {@link #computeIfAbsent(String, Supplier, long)}. Iterates
-   * over the given keys with an explicit hard TTL override.
-   *
-   * @param cachKeys  the keys to retrieve
-   * @param loader    the per-key value supplier for cache misses
-   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
-   * @param <V>       the value type
-   * @return a map of key → loaded value
-   */
-  public <V> Map<String, V> computeIfAbsent(Collection<String> cachKeys, Function<String, V> loader, long hardTtlMs) {
-    Map<String, V> result = new HashMap<>();
-    cachKeys.forEach(key -> {
-      V value = computeIfAbsent(key, () -> loader.apply(key), hardTtlMs);
-      result.put(key, value);
-    });
-
-    return result;
-  }
-
-  /**
-   * Convenience shorthand with explicit hard and soft TTLs.
+   * Truly atomic computeIfAbsent with explicit hard and soft TTLs.
    *
    * @param cacheKey  the key to retrieve
    * @param loader    the value supplier for cache misses
@@ -278,43 +241,40 @@ public class HotKey implements DisposableBean {
    * @return the cached or loaded value, or {@code null} if the loader returned {@code null}
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws HotKeyBlockedException when the key matches a blacklist rule
-   * @see #get(String, Supplier, long, long)
    */
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
-    return get(cacheKey, loader, hardTtlMs, softTtlMs).orElse(null);
+    return computeIfAbsent(cacheKey, loader, hardTtlMs, softTtlMs, true);
   }
 
   /**
-   * Batch variant of {@link #computeIfAbsent(String, Supplier, long, long)}.
-   * Iterates over the given keys with explicit hard and soft TTL overrides.
+   * Truly atomic computeIfAbsent with explicit hard and soft TTLs.
    *
-   * @param cachKeys  the keys to retrieve
-   * @param loader    the per-key value supplier for cache misses
+   * @param cacheKey  the key to retrieve
+   * @param loader    the value supplier for cache misses
    * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
    * @param softTtlMs soft TTL override (0 = use configured default)
    * @param <V>       the value type
-   * @return a map of key → loaded value
+   * @return the cached or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
-  public <V> Map<String, V> computeIfAbsent(
-    Collection<String> cachKeys,
-    Function<String, V> loader,
+  public <V> V computeIfAbsent(
+    String cacheKey,
+    Supplier<V> loader,
     long hardTtlMs,
-    long softTtlMs
+    long softTtlMs,
+    boolean allowReport
   ) {
-    Map<String, V> result = new HashMap<>();
-    cachKeys.forEach(key -> {
-      V value = computeIfAbsent(key, () -> loader.apply(key), hardTtlMs, softTtlMs);
-      result.put(key, value);
-    });
-
-    return result;
+    requireAppCache("computeIfAbsent");
+    requireAppDetector("computeIfAbsent");
+    return hotKeyCache.computeIfAbsent(cacheKey, loader, hardTtlMs, softTtlMs, allowReport).orElse(null);
   }
 
   /**
-   * Convenience shorthand for {@link #getWithSoftExpire getWithSoftExpire(cacheKey, loader).orElse(null)}.
-   *
-   * <p>Returns stale data immediately when the soft TTL has expired, triggering
-   * an async refresh in the background.
+   * Truly atomic computeIfAbsent with soft-expire (stale-while-revalidate).
+   * <p>
+   * Returns stale data immediately when the soft TTL has expired, triggering
+   * an async refresh in the background.  On miss, the load-and-store is atomic.
    *
    * @param cacheKey the key to retrieve
    * @param loader   the value supplier for cache misses / refreshes
@@ -324,30 +284,11 @@ public class HotKey implements DisposableBean {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader) {
-    return getWithSoftExpire(cacheKey, loader).orElse(null);
+    return computeIfAbsentWithSoftExpire(cacheKey, loader, 0L, 0L, true);
   }
 
   /**
-   * Batch variant of {@link #computeIfAbsentWithSoftExpire(String, Supplier)}.
-   * Iterates over the given keys with soft-expire semantics.
-   *
-   * @param cachKeys the keys to retrieve
-   * @param loader   the per-key value supplier for cache misses / refreshes
-   * @param <V>      the value type
-   * @return a map of key → (possibly stale) loaded value
-   */
-  public <V> Map<String, V> computeIfAbsentWithSoftExpire(Collection<String> cachKeys, Function<String, V> loader) {
-    Map<String, V> result = new HashMap<>();
-    cachKeys.forEach(key -> {
-      V value = computeIfAbsentWithSoftExpire(key, () -> loader.apply(key));
-      result.put(key, value);
-    });
-
-    return result;
-  }
-
-  /**
-   * Convenience shorthand with explicit soft TTL.
+   * Truly atomic computeIfAbsent with soft-expire and explicit soft TTL.
    *
    * @param cacheKey  the key to retrieve
    * @param loader    the value supplier for cache misses / refreshes
@@ -358,35 +299,11 @@ public class HotKey implements DisposableBean {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long softTtlMs) {
-    return getWithSoftExpire(cacheKey, loader, softTtlMs).orElse(null);
+    return computeIfAbsentWithSoftExpire(cacheKey, loader, 0L, softTtlMs, true);
   }
 
   /**
-   * Batch variant of {@link #computeIfAbsentWithSoftExpire(String, Supplier, long)}.
-   * Iterates over the given keys with explicit soft TTL override.
-   *
-   * @param cachKeys  the keys to retrieve
-   * @param loader    the per-key value supplier for cache misses / refreshes
-   * @param softTtlMs soft TTL override (0 = use configured default)
-   * @param <V>       the value type
-   * @return a map of key → (possibly stale) loaded value
-   */
-  public <V> Map<String, V> computeIfAbsentWithSoftExpire(
-    Collection<String> cachKeys,
-    Function<String, V> loader,
-    long softTtlMs
-  ) {
-    Map<String, V> result = new HashMap<>();
-    cachKeys.forEach(key -> {
-      V value = computeIfAbsentWithSoftExpire(key, () -> loader.apply(key), softTtlMs);
-      result.put(key, value);
-    });
-
-    return result;
-  }
-
-  /**
-   * Convenience shorthand with explicit hard and soft TTLs for soft-expire semantics.
+   * Truly atomic computeIfAbsent with soft-expire and explicit hard/soft TTLs.
    *
    * @param cacheKey  the key to retrieve
    * @param loader    the value supplier for cache misses / refreshes
@@ -398,33 +315,120 @@ public class HotKey implements DisposableBean {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
-    return getWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs).orElse(null);
+    return computeIfAbsentWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs, true);
   }
 
   /**
-   * Batch variant of {@link #computeIfAbsentWithSoftExpire(String, Supplier, long, long)}.
-   * Iterates over the given keys with explicit hard and soft TTL overrides.
+   * Truly atomic computeIfAbsent with soft-expire, explicit hard/soft TTLs,
+   * and reporting control.
    *
-   * @param cachKeys  the keys to retrieve
-   * @param loader    the per-key value supplier for cache misses / refreshes
-   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry)
-   * @param softTtlMs soft TTL override (0 = use configured default)
-   * @param <V>       the value type
-   * @return a map of key → (possibly stale) loaded value
+   * @param cacheKey    the key to retrieve
+   * @param loader      the value supplier for cache misses / refreshes
+   * @param hardTtlMs   hard TTL override (0 = use configured default;
+   *                    {@link Long#MAX_VALUE} for pure logical expiry)
+   * @param softTtlMs   soft TTL override (0 = use configured default)
+   * @param allowReport whether to allow reporting this access to the Worker
+   * @param <V>         the value type
+   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
-  public <V> Map<String, V> computeIfAbsentWithSoftExpire(
-    Collection<String> cachKeys,
-    Function<String, V> loader,
+  public <V> V computeIfAbsentWithSoftExpire(
+    String cacheKey,
+    Supplier<V> loader,
     long hardTtlMs,
-    long softTtlMs
+    long softTtlMs,
+    boolean allowReport
   ) {
-    Map<String, V> result = new HashMap<>();
-    cachKeys.forEach(key -> {
-      V value = computeIfAbsentWithSoftExpire(key, () -> loader.apply(key), hardTtlMs, softTtlMs);
-      result.put(key, value);
-    });
+    requireAppCache("computeIfAbsent");
+    requireAppDetector("computeIfAbsent");
+    return hotKeyCache.computeIfAbsentWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs, allowReport).orElse(null);
+  }
 
-    return result;
+  /**
+   * Atomically replace the cached value only if the current value equals
+   * the expected value.  See {@link HotKeyCache#compareAndSet} for details.
+   *
+   * @param cacheKey the key to replace
+   * @param expected the expected current value (nullable)
+   * @param newValue the new value to cache (nullable)
+   * @return {@code true} if the replacement was performed
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public boolean compareAndSet(String cacheKey, @Nullable Object expected, @Nullable Object newValue) {
+    requireAppCache("compareAndSet");
+    return hotKeyCache.compareAndSet(cacheKey, expected, newValue);
+  }
+
+  /**
+   * Atomically invalidate the cached value only if the current value equals
+   * the expected value.
+   * <p>
+   * No version bump or broadcast is performed — the invalidation is purely
+   * local.  If cross-instance invalidation is needed, pair with a subsequent
+   * call to {@link #invalidate(String, boolean)}.
+   *
+   * @param cacheKey the key to invalidate
+   * @param expected the expected value (nullable)
+   * @return {@code true} if the invalidation was performed
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public boolean compareAndInvalidate(String cacheKey, @Nullable Object expected) {
+    requireAppCache("compareAndInvalidate");
+    return hotKeyCache.compareAndInvalidate(cacheKey, expected);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #invalidateAfterPut(String, Runnable, boolean) invalidateAfterPut(cacheKey, mutation, true)}.
+   *
+   * @param cacheKey the key to invalidate after mutation
+   * @param mutation the mutation to execute before invalidation
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void invalidateAfterPut(String cacheKey, Runnable mutation) {
+    invalidateAfterPut(cacheKey, mutation, true);
+  }
+
+  /**
+   * Execute a mutation, then invalidate L1 and optionally broadcast to peers.
+   * If the mutation throws, invalidation is skipped.
+   *
+   * @param cacheKey               the key to invalidate after mutation
+   * @param mutation               the mutation to execute before invalidation
+   * @param isBroadcastByThisTime  whether to broadcast the invalidation to peer instances
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void invalidateAfterPut(String cacheKey, Runnable mutation, boolean isBroadcastByThisTime) {
+    requireAppCache("invalidateAfterPut");
+    requireAppDetector("invalidateAfterPut");
+    hotKeyCache.invalidateAfterPut(cacheKey, mutation, isBroadcastByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #invalidateAfterPut(Map, boolean) invalidateAfterPut(mutations, true)}.
+   *
+   * @param mutations a map of key → mutation pairs to execute before invalidation
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void invalidateAfterPut(Map<String, ? extends Runnable> mutations) {
+    invalidateAfterPut(mutations, true);
+  }
+
+  /**
+   * Execute mutations for multiple keys, then invalidate each from L1 and
+   * optionally broadcast. Each key gets its own mutation. If a single mutation
+   * fails, that key is skipped (invalidation and send are not performed).
+   *
+   * @param mutations              a map of key → mutation pairs
+   * @param isBroadcastByThisTime  whether to broadcast the invalidation to peer instances
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void invalidateAfterPut(Map<String, ? extends Runnable> mutations, boolean isBroadcastByThisTime) {
+    requireAppCache("invalidateAfterPut");
+    requireAppDetector("invalidateAfterPut");
+    hotKeyCache.invalidateAfterPut(mutations, isBroadcastByThisTime);
   }
 
   /**
@@ -470,9 +474,73 @@ public class HotKey implements DisposableBean {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader) {
-    requireAppCache("get");
-    requireAppDetector("get");
-    return hotKeyCache.get(cacheKey, reader);
+    return get(cacheKey, reader, 0L, 0L, true);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
+   * with explicit report control.
+   *
+   * @param cacheKey           the key to retrieve
+   * @param reader             the value supplier for cache misses
+   * @param isReportByThisTime whether to report this access to the Worker
+   * @param <T>                the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, boolean isReportByThisTime) {
+    return get(cacheKey, reader, 0L, 0L, isReportByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
+   * with explicit hard TTL.
+   *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs) {
+    return get(cacheKey, reader, hardTtlMs, 0L, true);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
+   * with explicit hard TTL and report control.
+   *
+   * @param cacheKey           the key to retrieve
+   * @param reader             the value supplier for cache misses
+   * @param hardTtlMs          hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param isReportByThisTime whether to report this access to the Worker
+   * @param <T>                the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, boolean isReportByThisTime) {
+    return get(cacheKey, reader, hardTtlMs, 0L, isReportByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
+   * with explicit hard and soft TTLs.
+   *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
+    return get(cacheKey, reader, hardTtlMs, softTtlMs, true);
   }
 
   /**
@@ -488,10 +556,141 @@ public class HotKey implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
-  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
+  public <T> Optional<T> get(
+    String cacheKey,
+    Supplier<T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean isReportByThisTime
+  ) {
     requireAppCache("get");
     requireAppDetector("get");
-    return hotKeyCache.get(cacheKey, reader, hardTtlMs, softTtlMs);
+    return hotKeyCache.get(cacheKey, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}.
+   *
+   * @param cacheKeys the keys to retrieve
+   * @param reader    the value function for cache misses
+   * @param <T>       the value type
+   * @return a map of key → loaded or cached value (never {@code null})
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> get(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader) {
+    return get(cacheKeys, reader, 0L, 0L, true);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}
+   * with explicit report control.
+   *
+   * @param cacheKeys          the keys to retrieve
+   * @param reader             the value function for cache misses
+   * @param isReportByThisTime whether to report this access to the Worker
+   * @param <T>                the value type
+   * @return a map of key → loaded or cached value (never {@code null})
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> get(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    boolean isReportByThisTime
+  ) {
+    return get(cacheKeys, reader, 0L, 0L, isReportByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}
+   * with explicit hard TTL.
+   *
+   * @param cacheKeys the keys to retrieve
+   * @param reader    the value function for cache misses
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param <T>       the value type
+   * @return a map of key → loaded or cached value (never {@code null})
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> get(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs
+  ) {
+    return get(cacheKeys, reader, hardTtlMs, 0L, true);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}
+   * with explicit hard TTL and report control.
+   *
+   * @param cacheKeys          the keys to retrieve
+   * @param reader             the value function for cache misses
+   * @param hardTtlMs          hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param isReportByThisTime whether to report this access to the Worker
+   * @param <T>                the value type
+   * @return a map of key → loaded or cached value (never {@code null})
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> get(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs,
+    boolean isReportByThisTime
+  ) {
+    return get(cacheKeys, reader, hardTtlMs, 0L, isReportByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}
+   * with explicit hard and soft TTLs.
+   *
+   * @param cacheKeys the keys to retrieve
+   * @param reader    the value function for cache misses
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return a map of key → loaded or cached value (never {@code null})
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> get(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs,
+    long softTtlMs
+  ) {
+    return get(cacheKeys, reader, hardTtlMs, softTtlMs, true);
+  }
+
+  /**
+   * Batch variant of {@link #get(String, Supplier, long, long, boolean)}.
+   * All keys share the same explicit TTL overrides.
+   *
+   * @param cacheKeys  the keys to retrieve
+   * @param reader     the value function for cache misses
+   * @param hardTtlMs  hard TTL override (0 = use configured default;
+   *                   {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs  soft TTL override (0 = use configured default)
+   * @param isReportByThisTime  whether to report this access to the Worker
+   * @param <T>        the value type
+   * @return a map of key → loaded or cached value (never {@code null})
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> get(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean isReportByThisTime
+  ) {
+    requireAppCache("get");
+    requireAppDetector("get");
+    return hotKeyCache.get(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime);
   }
 
   /**
@@ -506,9 +705,7 @@ public class HotKey implements DisposableBean {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader) {
-    requireAppCache("get");
-    requireAppDetector("get");
-    return hotKeyCache.getWithSoftExpire(cacheKey, reader);
+    return getWithSoftExpire(cacheKey, reader, 0L, 0L, true);
   }
 
   /**
@@ -523,9 +720,24 @@ public class HotKey implements DisposableBean {
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long softTtlMs) {
-    requireAppCache("get");
-    requireAppDetector("get");
-    return hotKeyCache.getWithSoftExpire(cacheKey, reader, softTtlMs);
+    return getWithSoftExpire(cacheKey, reader, 0L, softTtlMs, true);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #getWithSoftExpire(String, Supplier, long, long, boolean) getWithSoftExpire(cacheKey, reader, ...)}
+   * with explicit report control.
+   *
+   * @param cacheKey           the key to retrieve
+   * @param reader             the value supplier for cache misses / refreshes
+   * @param isReportByThisTime whether to report this access to the Worker
+   * @param <T>                the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, boolean isReportByThisTime) {
+    return getWithSoftExpire(cacheKey, reader, 0L, 0L, isReportByThisTime);
   }
 
   /**
@@ -540,70 +752,171 @@ public class HotKey implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws HotKeyBlockedException when the key matches a blacklist rule
    */
-  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
+  public <T> Optional<T> getWithSoftExpire(
+    String cacheKey,
+    Supplier<T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean isReportByThisTime
+  ) {
     requireAppCache("get");
     requireAppDetector("get");
-    return hotKeyCache.getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs);
+    return hotKeyCache.getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #getWithSoftExpire(Iterable, Function, long, long, boolean) getWithSoftExpire(cacheKeys, reader, ...)}.
+   *
+   * @param cacheKeys the keys to retrieve
+   * @param reader    the value function for cache misses / refreshes
+   * @param <T>       the value type
+   * @return a map of key → cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> getWithSoftExpire(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader
+  ) {
+    return getWithSoftExpire(cacheKeys, reader, 0L, 0L, true);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #getWithSoftExpire(Iterable, Function, long, long, boolean) getWithSoftExpire(cacheKeys, reader, ...)}
+   * with explicit report control.
+   *
+   * @param cacheKeys          the keys to retrieve
+   * @param reader             the value function for cache misses / refreshes
+   * @param isReportByThisTime whether to report this access to the Worker
+   * @param <T>                the value type
+   * @return a map of key → cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> getWithSoftExpire(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    boolean isReportByThisTime
+  ) {
+    return getWithSoftExpire(cacheKeys, reader, 0L, 0L, isReportByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #getWithSoftExpire(Iterable, Function, long, long, boolean) getWithSoftExpire(cacheKeys, reader, ...)}
+   * with explicit soft TTL.
+   *
+   * @param cacheKeys the keys to retrieve
+   * @param reader    the value function for cache misses / refreshes
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return a map of key → cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> getWithSoftExpire(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long softTtlMs
+  ) {
+    return getWithSoftExpire(cacheKeys, reader, 0L, softTtlMs, true);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #getWithSoftExpire(Iterable, Function, long, long, boolean) getWithSoftExpire(cacheKeys, reader, ...)}
+   * with explicit hard and soft TTLs.
+   *
+   * @param cacheKeys the keys to retrieve
+   * @param reader    the value function for cache misses / refreshes
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return a map of key → cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> getWithSoftExpire(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs,
+    long softTtlMs
+  ) {
+    return getWithSoftExpire(cacheKeys, reader, hardTtlMs, softTtlMs, true);
+  }
+
+  /**
+   * Batch variant of {@link #getWithSoftExpire(String, Supplier, long, long, boolean)}.
+   * All keys share the same explicit TTL overrides.
+   *
+   * @param cacheKeys  the keys to retrieve
+   * @param reader     the value function for cache misses / refreshes
+   * @param hardTtlMs  hard TTL override (0 = use configured default;
+   *                   {@link Long#MAX_VALUE} for pure logical expiry)
+   * @param softTtlMs  soft TTL override (0 = use configured default)
+   * @param isReportByThisTime  whether to report this access to the Worker
+   * @param <T>        the value type
+   * @return a map of key → cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws HotKeyBlockedException when any key matches a blacklist rule
+   */
+  public <T> Map<String, Optional<T>> getWithSoftExpire(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean isReportByThisTime
+  ) {
+    requireAppCache("get");
+    requireAppDetector("get");
+    return hotKeyCache.getWithSoftExpire(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for {@link #invalidate(String, boolean) invalidate(cacheKey, true)}.
+   *
+   * @param cacheKey the key to invalidate
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public void invalidate(String cacheKey) {
+    invalidate(cacheKey, true);
   }
 
   /**
    * Invalidate a single key from L1 and broadcast REFRESH to peers.
    * The next {@link #get} will re-fetch from the reader.
    *
-   * @param cacheKey the key to invalidate
+   * @param cacheKey               the key to invalidate
+   * @param isBroadcastByThisTime  whether to broadcast the invalidation to peer instances
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
-  public void invalidate(String cacheKey) {
+  public void invalidate(String cacheKey, boolean isBroadcastByThisTime) {
     requireAppCache("invalidate");
-    hotKeyCache.invalidate(cacheKey);
+    hotKeyCache.invalidate(cacheKey, isBroadcastByThisTime);
   }
 
   /**
-   * Invalidate one or more keys from L1 and broadcast INVALIDATE for each.
+   * Convenience shorthand for {@link #invalidate(Collection, boolean) invalidate(cacheKeys, true)}.
    *
    * @param cacheKeys the keys to invalidate
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   * @see #invalidate(String)
    */
-  public void invalidateAll(String... cacheKeys) {
-    invalidateAll(Arrays.asList(cacheKeys));
+  public void invalidate(Collection<String> cacheKeys) {
+    invalidate(cacheKeys, true);
   }
 
   /**
    * Invalidate a collection of keys from L1 and broadcast INVALIDATE for each.
    *
-   * @param cacheKeys the keys to invalidate
+   * @param cacheKeys              the keys to invalidate
+   * @param isBroadcastByThisTime  whether to broadcast the invalidation to peer instances
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
-  public void invalidateAll(Collection<String> cacheKeys) {
-    requireAppCache("invalidateAll");
-    hotKeyCache.invalidateAll(cacheKeys);
-  }
-
-  /**
-   * Convenience shorthand for {@link #evictLocal(Collection)} — evicts a single
-   * key from the local cache without broadcasting.
-   *
-   * @param cacheKeys the key to evict locally
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   */
-  public void evictLocal(String cacheKeys) {
-    evictLocal(Collections.singletonList(cacheKeys));
-  }
-
-  /**
-   * Evict keys from the local cache only, without broadcasting to other
-   * instances and without bumping version numbers.
-   *
-   * <p>Useful for emergency local cleanup, testing, or module offline
-   * scenarios where only the current node needs to be cleared.
-   *
-   * @param cacheKeys the keys to evict locally
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   */
-  public void evictLocal(Collection<String> cacheKeys) {
-    requireAppCache("evictLocal");
-    hotKeyCache.evictLocal(cacheKeys);
+  public void invalidate(Collection<String> cacheKeys, boolean isBroadcastByThisTime) {
+    requireAppCache("invalidate");
+    hotKeyCache.invalidate(cacheKeys, isBroadcastByThisTime);
   }
 
   /**
@@ -617,8 +930,73 @@ public class HotKey implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <T> void putThrough(String cacheKey, T value, Runnable writer) {
-    requireAppCache("putThrough");
-    hotKeyCache.putThrough(cacheKey, value, writer);
+    putThrough(cacheKey, value, writer, 0L, 0L, true);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #putThrough(String, Object, Runnable, long, long, boolean) putThrough(cacheKey, value, writer, ...)}
+   * with explicit broadcast control.
+   *
+   * @param cacheKey               the key to write
+   * @param value                  the value to cache
+   * @param writer                 the data-source mutation to execute before caching
+   * @param isBroadcastByThisTime  whether to broadcast the update to peer instances
+   * @param <T>                    the value type
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public <T> void putThrough(String cacheKey, T value, Runnable writer, boolean isBroadcastByThisTime) {
+    putThrough(cacheKey, value, writer, 0L, 0L, isBroadcastByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #putThrough(String, Object, Runnable, long, long, boolean) putThrough(cacheKey, value, writer, ...)}
+   * with explicit hard TTL.
+   *
+   * @param cacheKey  the key to write
+   * @param value     the value to cache
+   * @param writer    the data-source mutation to execute before caching
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param <T>       the value type
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs) {
+    putThrough(cacheKey, value, writer, hardTtlMs, 0L, true);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #putThrough(String, Object, Runnable, long, long, boolean) putThrough(cacheKey, value, writer, ...)}
+   * with explicit hard TTL and broadcast control.
+   *
+   * @param cacheKey               the key to write
+   * @param value                  the value to cache
+   * @param writer                 the data-source mutation to execute before caching
+   * @param hardTtlMs              hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param isBroadcastByThisTime  whether to broadcast the update to peer instances
+   * @param <T>                    the value type
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs, boolean isBroadcastByThisTime) {
+    putThrough(cacheKey, value, writer, hardTtlMs, 0L, isBroadcastByThisTime);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #putThrough(String, Object, Runnable, long, long, boolean) putThrough(cacheKey, value, writer, ...)}
+   * with explicit hard and soft TTLs.
+   *
+   * @param cacheKey  the key to write
+   * @param value     the value to cache
+   * @param writer    the data-source mutation to execute before caching
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   */
+  public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs, long softTtlMs) {
+    putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs, true);
   }
 
   /**
@@ -633,9 +1011,16 @@ public class HotKey implements DisposableBean {
    * @param <T>       the value type
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
-  public <T> void putThrough(String cacheKey, T value, Runnable writer, long hardTtlMs, long softTtlMs) {
+  public <T> void putThrough(
+    String cacheKey,
+    T value,
+    Runnable writer,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean isBroadcastByThisTime
+  ) {
     requireAppCache("putThrough");
-    hotKeyCache.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs);
+    hotKeyCache.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs, isBroadcastByThisTime);
   }
 
   /**
@@ -652,25 +1037,21 @@ public class HotKey implements DisposableBean {
    * @param value    the value to cache
    */
   public void putLocal(String cacheKey, Object value) {
-    if (hotKeyCache == null) {
-      return; // Worker-only mode: silently no-op (per Javadoc)
-    }
     putLocal(cacheKey, value, 0, 0);
   }
 
   /**
-   * Batch variant of {@link #putLocal(String, Object)}. Writes all entries into
-   * L1 without version bump, broadcast, hot-key detection, or reporting.
+   * Convenience shorthand for {@link #putLocal(String, Object, long, long) putLocal(cacheKey, value, hardTtlMs, ...)}
+   * with explicit hard TTL. Soft TTL uses the configured default.
    *
    * <p>In Worker-only mode this method silently no-ops.
    *
-   * @param entries a map of key → value to store locally
+   * @param cacheKey the key to store
+   * @param value    the value to cache
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
    */
-  public void putLocal(Map<String, Object> entries) {
-    if (hotKeyCache == null) {
-      return; // Worker-only mode: silently no-op
-    }
-    entries.forEach(this::putLocal);
+  public void putLocal(String cacheKey, Object value, long hardTtlMs) {
+    putLocal(cacheKey, value, hardTtlMs, 0);
   }
 
   /**
@@ -692,34 +1073,6 @@ public class HotKey implements DisposableBean {
       return; // Worker-only mode: silently no-op
     }
     hotKeyCache.putLocal(cacheKey, value, hardTtlMs, softTtlMs);
-  }
-
-  /**
-   * Execute a mutation, then invalidate L1 and broadcast.
-   * Next {@link #get} will re-fetch from the reader.
-   *
-   * @param cacheKey the key to invalidate after mutation
-   * @param mutation the mutation to execute
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   */
-  public void putBeforeInvalidate(String cacheKey, Runnable mutation) {
-    requireAppCache("putBeforeInvalidate");
-    hotKeyCache.putBeforeInvalidate(cacheKey, mutation);
-  }
-
-  /**
-   * Batch variant of {@link #putBeforeInvalidate(String, Runnable)}. Executes
-   * all mutations and invalidates the corresponding keys from L1 with broadcast.
-   *
-   * <p><b>Batch execution:</b> Iterates sequentially; for large batches
-   * consider parallelizing in caller code.
-   *
-   * @param mutations a map of key → mutation to execute
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   */
-  public void putBeforeInvalidateAll(Map<String, Runnable> mutations) {
-    requireAppCache("putBeforeInvalidateAll");
-    mutations.forEach(this::putBeforeInvalidate);
   }
 
   /**
@@ -957,7 +1310,7 @@ public class HotKey implements DisposableBean {
     ScheduledFuture<?> prev = refreshFutures.put(
       key,
       getScheduler().scheduleWithFixedDelay(
-        () -> getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs),
+        () -> getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs, true),
         intervalMs,
         intervalMs,
         TimeUnit.MILLISECONDS
@@ -1021,9 +1374,9 @@ public class HotKey implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public boolean isLocalHotKey(String cacheKey) {
-    requireAppCache("isLocalHotKey");
-    requireAppDetector("isLocalHotKey");
-    return hotKeyCache.isLocalHotKey(cacheKey);
+    requireAppCache("isHot");
+    requireAppDetector("isHot");
+    return hotKeyCache.isHot(cacheKey);
   }
 
   /**
@@ -1112,7 +1465,7 @@ public class HotKey implements DisposableBean {
    */
   public void refresh(String cacheKey, Supplier<?> loader) {
     requireAppCache("refresh");
-    evictLocal(cacheKey);
+    invalidate(cacheKey, false);
     putThrough(cacheKey, loader.get(), () -> {});
   }
 
@@ -1141,8 +1494,8 @@ public class HotKey implements DisposableBean {
    */
   public <V> void refresh(String cacheKey, Supplier<V> loader, long hotHardTtlMs, long hotSoftTtlMs) {
     requireAppCache("refresh");
-    evictLocal(cacheKey);
-    putThrough(cacheKey, loader.get(), () -> {}, hotHardTtlMs, hotSoftTtlMs);
+    invalidate(cacheKey, false);
+    putThrough(cacheKey, loader.get(), () -> {}, hotHardTtlMs, hotSoftTtlMs, true);
   }
 
   /**

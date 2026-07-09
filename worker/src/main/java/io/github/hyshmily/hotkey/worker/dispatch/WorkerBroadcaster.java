@@ -31,12 +31,12 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * Publishes HOT and COOL decisions to all application instances via the
  * configured RabbitMQ {@code broadcastExchange}.
  *
- * <p>Each broadcast message carries a monotonically increasing
+ * <p>Each send message carries a monotonically increasing
  * <b>decision version</b> (worker‑local counter) that is used by receivers to
  * discard stale or out‑of‑order messages.
  *
  * <p>Messages are delivered to every instance's dedicated queue through a
- * fanout exchange ({@code hotkey.broadcast.exchange}) — the receiver
+ * fanout exchange ({@code hotkey.send.exchange}) — the receiver
  * differentiates message type via the {@code AMQP_HEADER_TYPE} header.
  */
 /** Default constructor. */
@@ -46,23 +46,23 @@ public class WorkerBroadcaster {
 
   /** RabbitMQ template used to publish HOT/COOL decisions and heartbeats. */
   private final RabbitTemplate rabbitTemplate;
-  /** Target exchange name for all broadcast messages (typically {@code hotkey.broadcast.exchange}). */
+  /** Target exchange name for all send messages (typically {@code hotkey.send.exchange}). */
   private final String broadcastExchange;
-  /** Application name used in the broadcast routing key. */
+  /** Application name used in the send routing key. */
   private final String appName;
 
-  /** Originating Worker's node identity, set on every broadcast header for cross-Worker
+  /** Originating Worker's node identity, set on every send header for cross-Worker
    * version tracking in {@link VersionGuard}. */
   private final String nodeId;
 
   /** Monotonically increasing epoch counter for this Worker instance, incremented on every
-   * restart. Transmitted in broadcast headers so receivers detect Worker restarts and
+   * restart. Transmitted in send headers so receivers detect Worker restarts and
    * unconditionally accept decisions from a higher epoch (see ADR-0010). */
   private final AtomicLong epochCounter;
 
   /**
    * Worker‑local decision version counter.
-   * Incremented atomically for every broadcast to provide strict ordering
+   * Incremented atomically for every send to provide strict ordering
    * for this worker.  Combined with consistent‑hash sharding (one key → one
    * worker) this guarantees a total order of decisions per key.
    */
@@ -71,7 +71,7 @@ public class WorkerBroadcaster {
   /**
    * Atomically allocates the next decision version without sending.
    * Called from within {@link io.github.hyshmily.hotkey.worker.ingest.ReportConsumer#doOnReport}
-   * to pre-allocate a version before enqueuing an async broadcast.
+   * to pre-allocate a version before enqueuing an async send.
    *
    * @return the next monotonically increasing decision version
    */
@@ -155,7 +155,7 @@ public class WorkerBroadcaster {
    * <p>Builds {@link MessageProperties} with type, version, and degraded flag,
    * creates a {@link Message}, and publishes via {@link #rabbitTemplate}.
    *
-   * @param cacheKey the key being broadcast
+   * @param cacheKey the key being send
    * @param type     the message type ({@link WorkerMessage#TYPE_HOT} or {@link WorkerMessage#TYPE_COOL})
    * @param version  the monotonically increasing decision version for ordering
    */
@@ -171,7 +171,7 @@ public class WorkerBroadcaster {
       Message msg = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
       rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);
     } catch (Exception e) {
-      log.error("Failed to broadcast {} for key={}, dv={}: {}", type, cacheKey, version, e.getMessage());
+      log.error("Failed to send {} for key={}, dv={}: {}", type, cacheKey, version, e.getMessage());
       // no throw — ADR-0007 fire-and-forget
     }
   }

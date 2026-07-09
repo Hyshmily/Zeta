@@ -15,18 +15,18 @@
  */
 package io.github.hyshmily.hotkey.hotkeydetector;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import org.junit.jupiter.api.Test;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 /**
- * Tests for {@link Item}, the immutable key-count pair record used by the HeavyKeeper algorithm.
+ * Tests for {@link Item}, the immutable key-count pair recordReport used by the HeavyKeeper algorithm.
  */
 class ItemTest {
 
   /**
-   * Verifies that an Item record is created with the correct key and count fields.
+   * Verifies that an Item recordReport is created with the correct key and count fields.
    */
   @Test
   void shouldCreateItemWithKeyAndCount() {

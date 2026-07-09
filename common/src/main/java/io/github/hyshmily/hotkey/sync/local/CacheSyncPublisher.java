@@ -152,7 +152,7 @@ public class CacheSyncPublisher {
    *
    * <p>
    * Deduplicated: if a REFRESH for the same key with a higher or equal
-   * {@code dataVersion} was broadcast within the dedup window, this call is
+   * {@code dataVersion} was send within the dedup window, this call is
    * silently skipped.
    *
    * @param cacheKey the affected cache key; must not be null or empty
@@ -171,7 +171,7 @@ public class CacheSyncPublisher {
    *
    * <p>
    * Deduplicated: if an INVALIDATE for the same key with a higher or equal
-   * {@code dataVersion} was broadcast within the dedup window, this call is
+   * {@code dataVersion} was send within the dedup window, this call is
    * silently skipped.
    *
    * @param cacheKey the affected cache key; must not be null or empty
@@ -202,7 +202,7 @@ public class CacheSyncPublisher {
    *
    * <p>
    * Note: this method does <em>not</em> go through the version-based dedup
-   * cache. All keys are unconditionally broadcast.
+   * cache. All keys are unconditionally send.
    *
    * @param keys the keys to invalidate; if null or empty the call is a silent
    *             no-op
@@ -266,7 +266,7 @@ public class CacheSyncPublisher {
   }
 
   /**
-   * Core deduplicated send implementation: only publishes if no recent broadcast
+   * Core deduplicated send implementation: only publishes if no recent send
    * of the same {@code type:cacheKey} composite with a greater or equal
    * {@code dataVersion} exists in the dedup window.
    *
@@ -274,7 +274,7 @@ public class CacheSyncPublisher {
    * <b>Dedup algorithm:</b> Uses {@code Caffeine.asMap().compute()} to atomically
    * check and update the dedup cache entry:
    * <ol>
-   * <li>If an existing entry has {@code oldVersion >= newVersion}, the broadcast
+   * <li>If an existing entry has {@code oldVersion >= newVersion}, the send
    * is skipped (the stale flag is set).</li>
    * <li>Otherwise, the dedup cache is updated to the new version and the message
    * is published to the sync FanoutExchange.</li>
@@ -310,7 +310,7 @@ public class CacheSyncPublisher {
       .compute(compositeKey, (k, oldVersion) -> {
         if (oldVersion != null && oldVersion >= version) {
           log.debug(
-            "Skip sync due to recent broadcast with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
+            "Skip sync due to recent send with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
             compositeKey,
             oldVersion,
             version

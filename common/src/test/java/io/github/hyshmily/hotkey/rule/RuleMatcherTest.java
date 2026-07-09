@@ -15,10 +15,7 @@
  */
 package io.github.hyshmily.hotkey.rule;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
-import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
-import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -398,8 +395,7 @@ class RuleMatcherTest {
     rule.setType(Rule.RuleType.REGEX);
     rule.setPattern("[invalid");
     rule.setAction(RuleAction.BLOCK);
-    assertThatExceptionOfType(java.util.regex.PatternSyntaxException.class)
-      .isThrownBy(() -> ruleMatcher.addRule(rule));
+    assertThatExceptionOfType(java.util.regex.PatternSyntaxException.class).isThrownBy(() -> ruleMatcher.addRule(rule));
   }
 
   @Test
@@ -515,7 +511,7 @@ class RuleMatcherTest {
     }
 
     @Test
-    @DisplayName("broadcastAllLocalRulesManually should broadcast when publisher is present")
+    @DisplayName("broadcastAllLocalRulesManually should send when publisher is present")
     void broadcastAllLocalRulesManually_shouldBroadcastWhenPublisherPresent() {
       ruleMatcher.broadcastAllLocalRulesManually();
       verify(publisher, timeout(1000).atLeastOnce()).broadcastAllLocalRules(anyString(), anyLong());
@@ -529,7 +525,7 @@ class RuleMatcherTest {
     }
 
     @Test
-    @DisplayName("addRule should broadcast when publisher is present")
+    @DisplayName("addRule should send when publisher is present")
     void addRule_shouldBroadcast() {
       ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
       verify(publisher, timeout(1000).atLeastOnce()).broadcastAllLocalRules(anyString(), anyLong());

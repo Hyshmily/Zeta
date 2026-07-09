@@ -202,6 +202,21 @@ java -jar worker/target/hotkey-worker-1.1.54.jar
 > [!NOTE]
 > **序列化：** HotKey 内部使用 `StringRedisTemplate`，值的序列化完全由调用方决定。推荐使用 **Jackson**（Spring Boot 默认，JSON）或 **Kryo**（二进制，极致吞吐）。不建议使用 JDK 原生序列化。
 
+**方法概览**
+
+| 类别 | 方法 |
+|---|---|
+| 读 | `get`, `getWithSoftExpire`, `computeIfAbsent`, `computeIfAbsentWithSoftExpire`, `peek`, `peekAll` |
+| 写 | `putThrough`, `putLocal`, `invalidateAfterPut`, `refresh`, `refreshAll` |
+| 失效 | `invalidate`, `invalidateAllLocal`, `compareAndInvalidate` |
+| 原子 | `compareAndSet`, `compareAndInvalidate` |
+| 流式 | `read(key)` → `HotKeyReadQuery`, `write(key)` → `HotKeyWriteCommand` |
+| 内省 | `peek`, `estimatedSize`, `stats`, `getLocalCache`, `isLocalHotKey`, `isWorkerHotKey`, `returnLocalHotKeys`, `returnWorkerHotKeys` |
+| 规则 | `addBlacklist`, `removeBlacklist`, `addWhitelist`, `removeWhitelist`, `evaluateRule`, `getAllRules`, `clearAllRules` |
+| 锁 | `tryLock`, `tryLockAndRun` |
+| 后台 | `registerRefresh`, `updateRefresh`, `unregisterRefresh` |
+| 模式 | `isApp`, `isWorker`, `isAppOnly`, `isWorkerOnly` |
+
 **读操作**
 
 ```java
@@ -237,21 +252,18 @@ User user = hotKey
 // F. putThrough — 写穿透 + 广播
 hotKey.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
-// G. putBeforeInvalidate — 变异后失效（集合类型）
-hotKey.putBeforeInvalidate(key, () -> redisTemplate.opsForSet().add(key, members));
+// G. invalidateAfterPut — 变异后失效（集合类型）
+hotKey.invalidateAfterPut(key, () -> redisTemplate.opsForSet().add(key, members));
 
 // H. putLocal — 仅本地写，不广播、不 bump 版本
 hotKey.putLocal("user:123", cachedValue, hardTtlMs, softTtlMs); // 指定 TTL
 
-// I. evictLocal — 仅从本地缓存驱逐，不广播、不 bump 版本号
-hotKey.evictLocal("user:123");                          // 单个 key
-
-// J. refresh — 本地驱逐后加载并缓存
+// I. refresh — 本地驱逐后加载并缓存
 hotKey.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // 带 TTL 覆盖
 
-// K. 流式写 API
+// J. 流式写 API
 hotKey.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
-hotKey.write("user:42").putBeforeInvalidate(dbMutation);
+hotKey.write("user:42").invalidateAfterPut(dbMutation);
 hotKey.write("user:42").invalidate();
 ```
 
@@ -287,6 +299,20 @@ hotKey.putThrough("weather:" + city, weatherData,
 
 > [!TIP]
 > per-call TTL 语义：传入 `0` 表示使用该 key 状态的配置默认值。彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：向 `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` 传入 `hardTtlMs = Long.MAX_VALUE`，entry 永久驻留 Caffeine。此用法受 Caffeine `Expiry` JavaDoc 明确支持：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
+
+**原子操作**
+
+基于 CAS 风格的无锁条件更新：
+
+```java
+// compareAndSet — 当前值匹配时原子替换
+boolean ok = hotKey.compareAndSet("user:123", oldValue, newValue);
+
+// compareAndInvalidate — 当前值匹配时失效
+boolean ok = hotKey.compareAndInvalidate("user:123", staleValue);
+```
+
+两个操作均为委托模式：调用方负责在 CAS 成功后重新读取或写入。无 L2 锁——守卫条件是调用时刻 L1 缓存 entry 的当前值。条件匹配且操作应用时返回 `true`，否则返回 `false`。
 
 **Worker 模式**
 

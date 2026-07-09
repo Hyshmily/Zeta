@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       .putThrough(newValue, dbWriter);
  *
  *   hotKey.write("user:42")
- *       .putBeforeInvalidate(dbMutation);
+ *       .invalidateAfterPut(dbMutation);
  *
  *   hotKey.write("user:42")
  *       .invalidate();
@@ -81,7 +81,7 @@ public class HotKeyWriteCommand<T> {
   }
 
   /**
-   * Write-through: execute the writer, then update L1 and broadcast.
+   * Write-through: execute the writer, then update L1 and send.
    *
    * @param value  the value to cache
    * @param writer the data-source mutation to execute before caching
@@ -90,11 +90,11 @@ public class HotKeyWriteCommand<T> {
     if (!executed.compareAndSet(false, true)) {
       throw new IllegalStateException("HotKeyWriteCommand can only be executed once");
     }
-    hotKey.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs);
+    hotKey.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs, true);
   }
 
   /**
-   * Execute a mutation, then invalidate L1 and broadcast.
+   * Execute a mutation, then invalidate L1 and send.
    * Next {@code get()} will re-fetch from the reader.
    *
    * @param mutation the mutation to execute
@@ -103,11 +103,11 @@ public class HotKeyWriteCommand<T> {
     if (!executed.compareAndSet(false, true)) {
       throw new IllegalStateException("HotKeyWriteCommand can only be executed once");
     }
-    hotKey.putBeforeInvalidate(cacheKey, mutation);
+    hotKey.invalidateAfterPut(cacheKey, mutation);
   }
 
   /**
-   * Invalidate L1 and broadcast an invalidation to peers.
+   * Invalidate L1 and send an invalidation to peers.
    * Next {@code get()} will re-fetch from the reader.
    */
   public void invalidate() {

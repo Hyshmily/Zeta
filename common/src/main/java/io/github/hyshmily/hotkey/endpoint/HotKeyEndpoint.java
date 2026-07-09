@@ -46,7 +46,7 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>The response includes both app-side and Worker-side TopK rankings, L1
  * cache metrics, SingleFlight in-flight sizes, recently expelled keys,
- * algorithm configuration, TTL settings, version tracking state, broadcast
+ * algorithm configuration, TTL settings, version tracking state, send
  * dedup, identity, and instance-level health. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
  *
@@ -94,7 +94,7 @@ public class HotKeyEndpoint {
    * <ul>
    *   <li><b>local</b> — app-side detection, cache, reporting, rules, TTLs, version
    *   <li><b>worker</b> — worker-side TopK, health, state machine
-   *   <li><b>sync</b> — broadcast dedup cache
+   *   <li><b>sync</b> — send dedup cache
    * </ul>
    * Each section is populated only when the required components are available.
    *

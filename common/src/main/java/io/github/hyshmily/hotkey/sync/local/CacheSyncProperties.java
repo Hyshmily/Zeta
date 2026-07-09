@@ -58,7 +58,7 @@ public class CacheSyncProperties {
   private boolean autoStartup = true;
 
   /** Time window (seconds) for deduplicating repeated broadcasts of the same
-   * type+key combination. Within this window, a broadcast with a stale version
+   * type+key combination. Within this window, a send with a stale version
    * is silently dropped. */
   private int dedupWindowSeconds = 10;
 

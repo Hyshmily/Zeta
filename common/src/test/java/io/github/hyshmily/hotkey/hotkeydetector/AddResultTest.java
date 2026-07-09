@@ -21,7 +21,7 @@ import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.AddResult;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link AddResult}, the result record returned by HeavyKeeper.addDirect() covering hot-key,
+ * Tests for {@link AddResult}, the result recordReport returned by HeavyKeeper.addDirect() covering hot-key,
  * non-hot, and expelled-key scenarios.
  */
 class AddResultTest {

@@ -31,7 +31,7 @@ public interface KeyReporter {
    * @param cacheKey the accessed key
    */
   @SuppressWarnings("all")
-  void record(String cacheKey);
+  void recordReport(String cacheKey);
 
   /**
    * Start the periodic flush scheduler and the report dispatcher.

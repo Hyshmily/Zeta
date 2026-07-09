@@ -28,10 +28,10 @@ package io.github.hyshmily.hotkey.model;
  *
  * <p>Transition sequence:
  * <pre>
- *              HOT broadcast
+ *              HOT send
  *   NORMAL ──────────────────► HOT
  *     ◄─────────────────────────┘
- *              COOL broadcast
+ *              COOL send
  *
  *   NORMAL ◄─── entry expires / evicted, reload as NORMAL ──── COOL
  * </pre>
@@ -55,5 +55,5 @@ public enum KeyState {
    * All keys start in this state and return to it after the cool-down
    * sequence completes.
    */
-  NORMAL
+  NORMAL,
 }

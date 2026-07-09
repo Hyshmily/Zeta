@@ -29,7 +29,7 @@ import org.springframework.validation.annotation.Validated;
  * <p>Binds to the {@code hotkey.worker-listener} prefix in Spring configuration sources.
  * Each application instance creates an anonymous queue named
  * {@code hotkey.worker:{instanceId}} bound to the configured FanoutExchange. The
- * exchange name must match the Worker-side {@code hotkey.worker.messaging.broadcast-exchange}
+ * exchange name must match the Worker-side {@code hotkey.worker.messaging.send-exchange}
  * property.
  *
  * <p>Includes an inner {@link Sre} configuration for adaptive rate limiting of HOT
@@ -49,7 +49,7 @@ public class WorkerListenerProperties {
   private boolean enabled = false;
 
   /** FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats.
-   * Must match the {@code hotkey.worker.messaging.broadcast-exchange} on the Worker side. */
+   * Must match the {@code hotkey.worker.messaging.send-exchange} on the Worker side. */
   private String exchangeName = HotKeyConstants.EXCHANGE_BROADCAST;
 
   /** Prefix for the per-instance queue name, suffixed with the instance ID

@@ -22,6 +22,13 @@ import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
 import io.github.hyshmily.hotkey.cache.annotationsupporter.HotKeyCacheContext;
 import io.github.hyshmily.hotkey.util.window.RollingWindow;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -40,21 +47,13 @@ import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 
-import java.lang.annotation.Annotation;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-
 /**
  * Companion AOP aspect for Spring {@link Cacheable @Cacheable},
  * {@link CachePut @CachePut}, and {@link CacheEvict @CacheEvict} methods.
  *
  * <p>Runs at {@link Ordered#HIGHEST_PRECEDENCE} — before Spring's own
  * {@code CacheInterceptor} — to set up thread-bound TTL overrides,
- * null-caching mode, broadcast suppression, and apply
+ * null-caching mode, send suppression, and apply
  * {@link Intercept @Intercept} / {@link Fallback @Fallback} semantics.
  *
  * <p>For each {@code @Cacheable} invocation:
@@ -63,7 +62,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>If {@code @Intercept} is present and the key is a local hot key,
  *       skips the method and returns the cached value or fallback</li>
  *   <li>Applies TTL from {@code @HotKeyCacheTTL}, null-caching from
- *       {@code @NullCaching}, and broadcast suppression from
+ *       {@code @NullCaching}, and send suppression from
  *       {@link Broadcast @Broadcast} into {@link HotKeyCacheContext}</li>
  *   <li>Proceeds to the Spring {@code CacheInterceptor}</li>
  *   <li>Restores the context snapshot in a {@code finally} block</li>
@@ -71,7 +70,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * </ol>
  *
  * <p>For {@code @CachePut} and {@code @CacheEvict}, the aspect only reads
- * {@link Broadcast @Broadcast} to set the broadcast suppression flag. All other
+ * {@link Broadcast @Broadcast} to set the send suppression flag. All other
  * companion annotations ({@code @HotKeyCacheTTL}, {@code @Intercept},
  * {@code @Fallback}, {@code @NullCaching}) are ignored on these methods.
  */
@@ -300,7 +299,7 @@ public class HotKeyCacheExtensionAspect {
 
   /**
    * Intercepts both {@link CachePut @CachePut} and {@link CacheEvict @CacheEvict}
-   * methods to set the broadcast suppression flag from {@link Broadcast @Broadcast}
+   * methods to set the send suppression flag from {@link Broadcast @Broadcast}
    * before the method reaches Spring's {@code CacheInterceptor}.
    *
    * <p>Only the {@code @Broadcast} annotation is read here. Other companion

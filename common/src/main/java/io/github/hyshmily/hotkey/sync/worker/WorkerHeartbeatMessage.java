@@ -23,7 +23,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
 /**
- * Structured heartbeat message broadcast periodically by the Worker to all
+ * Structured heartbeat message send periodically by the Worker to all
  * application instances for cluster health monitoring and gossip-based config
  * synchronization.
  *
@@ -80,7 +80,7 @@ public record WorkerHeartbeatMessage(
   public static final String TYPE = "WORKER_HB";
 
   /**
-   * Converts this heartbeat record to an AMQP {@link Message} with all fields
+   * Converts this heartbeat recordReport to an AMQP {@link Message} with all fields
    * set as message headers.
    *
    * <p>The body carries the {@code workerId} as UTF-8 bytes. Headers include

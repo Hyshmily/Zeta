@@ -44,7 +44,7 @@ public final class HotKeyCacheContext {
    * Immutable snapshot of all thread-bound cache parameters captured at a
    * specific point in time by {@link #snapshot()}.
    * <p>
-   * This record carries the complete set of per-invocation overrides that
+   * This recordReport carries the complete set of per-invocation overrides that
    * companion aspects (e.g., {@code @HotKeyCacheTTL}, {@code @NullCaching},
    * {@code @Broadcast}) apply before the Spring cache interceptor executes.
    * <p>
@@ -158,14 +158,14 @@ public final class HotKeyCacheContext {
   }
 
   /**
-   * Returns whether broadcast of sync messages is suppressed for the current
+   * Returns whether send of sync messages is suppressed for the current
    * thread's cache operation.
    * <p>
    * When {@code true}, cache write/evict operations use local-only variants
-   * ({@code putLocal()} / {@code evictLocal()}) and do not send sync messages
+   * ({@code putLocal()} / {@code invalidateLocal()}) and do not send sync messages
    * to peer instances via RabbitMQ.
    *
-   * @return {@code true} if broadcast is suppressed for this thread
+   * @return {@code true} if send is suppressed for this thread
    */
   public boolean isSkipBroadcast() {
     ContextValues v = getValues();

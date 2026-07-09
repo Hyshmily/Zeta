@@ -45,7 +45,7 @@ public class WorkerProperties {
     private String appName = "default";
   }
 
-  /** AMQP exchange names for report and broadcast messages. Default constructor. */
+  /** AMQP exchange names for report and send messages. Default constructor. */
   @Data
   public static class Messaging {
 

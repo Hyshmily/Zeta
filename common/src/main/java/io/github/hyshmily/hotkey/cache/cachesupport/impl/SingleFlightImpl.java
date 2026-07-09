@@ -20,14 +20,14 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
-
 
 /**
  * Deduplicates concurrent in-flight loads for the same key.
@@ -54,7 +54,6 @@ public class SingleFlightImpl implements SingleFlight {
   private final int timeoutSeconds;
   /** Maximum number of in-flight keys tracked simultaneously. */
   private final int inflightMaxSize;
-
   /** Circuit breaker for protecting remote calls from cascading failures. */
   private final CircuitBreaker circuitBreaker;
 
@@ -88,6 +87,7 @@ public class SingleFlightImpl implements SingleFlight {
    *
    * @return {@code true} if the breaker is open
    */
+  @Override
   public boolean isBreakerOpen() {
     return circuitBreaker.isOpen();
   }
@@ -98,6 +98,7 @@ public class SingleFlightImpl implements SingleFlight {
    *
    * @return the estimated number of in-flight keys
    */
+  @Override
   public long estimatedInflightSize() {
     return inflightLoads.estimatedSize();
   }
@@ -112,56 +113,126 @@ public class SingleFlightImpl implements SingleFlight {
    * @return the loaded value, or empty if the load failed or timed out
    */
   @SuppressWarnings("unchecked")
+  @Override
   public <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
-    if (!circuitBreaker.allowRequest()) {
+    if (intercept()) {
       log.debug("CB open, skip load for key={}", cacheKey);
       return Optional.empty();
     }
 
-    if (estimatedInflightSize() > inflightMaxSize * 0.8) {
-      log.warn("SingleFlight inflight queue is high: {}/{}", estimatedInflightSize(), inflightMaxSize);
-    }
-
-    CompletableFuture<Object> future = inflightLoads
-      .asMap()
-      .computeIfAbsent(cacheKey, k ->
-        CompletableFuture.supplyAsync(
-          () -> {
-            try {
-              Object val = reader.get();
-              circuitBreaker.onSuccess();
-              return val;
-            } catch (Exception e) {
-              circuitBreaker.onFailure();
-              throw e;
-            }
-          },
-          executor
-        ).orTimeout(timeoutSeconds, TimeUnit.SECONDS)
-      );
+    CompletableFuture<Object> future = inflightLoads.asMap().computeIfAbsent(cacheKey, k -> submitReader(reader::get));
 
     try {
       return Optional.ofNullable((T) future.join());
     } catch (CompletionException e) {
-      log.warn("singleflight join failed: key={}", cacheKey, e);
-      inflightLoads.invalidate(cacheKey);
-
-      Throwable cause = e.getCause();
-
-      if (cause instanceof InterruptedException) {
-        Thread.currentThread().interrupt();
-        throw new RuntimeException("Thread interrupted during load for key: " + cacheKey, cause);
-      }
-
-      if (cause instanceof RuntimeException re) {
-        throw re;
-      }
-
-      if (cause instanceof Error err) {
-        throw err;
-      }
-
-      throw new RuntimeException("Loader failed for key: " + cacheKey, cause);
+      handleFailure(cacheKey, e);
+      // handleFailure always throws; this return is unreachable
+      return Optional.empty();
     }
+  }
+
+  /**
+   * {@inheritDoc}
+   * <p>
+   * Implementation note: submits all reader suppliers to the executor in a single
+   * pass via {@code computeIfAbsent}, then collects results.  This avoids nested
+   * thread blocking — the calling thread only blocks during Phase 2 (collect),
+   * while all readers execute concurrently on executor threads.
+   */
+  @SuppressWarnings("all")
+  @Override
+  public <T> Map<String, Optional<T>> load(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader) {
+    List<String> keys = new ArrayList<>();
+    cacheKeys.forEach(keys::add);
+    if (keys.isEmpty()) {
+      return Collections.emptyMap();
+    }
+
+    if (intercept()) {
+      Map<String, Optional<T>> empty = new LinkedHashMap<>();
+      for (String key : keys) empty.put(key, Optional.empty());
+      return empty;
+    }
+
+    for (String key : keys) {
+      inflightLoads.asMap().computeIfAbsent(key, ignored -> submitReader(() -> reader.apply(key)));
+    }
+
+    Map<String, Optional<T>> results = new LinkedHashMap<>();
+    for (String key : keys) {
+      CompletableFuture<Object> future = inflightLoads.asMap().get(key);
+      // May be null if another thread invalidated the future due to a load failure
+      if (future == null) {
+        results.put(key, Optional.empty());
+        continue;
+      }
+      try {
+        results.put(key, Optional.ofNullable((T) future.join()));
+      } catch (CompletionException e) {
+        handleFailure(key, e);
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Check the circuit breaker and log a warning if the inflight queue is high.
+   *
+   * @return {@code true} if the request can proceed, {@code false} if the breaker is open
+   */
+  private boolean intercept() {
+    if (!circuitBreaker.allowRequest()) {
+      return true;
+    }
+    if (estimatedInflightSize() > inflightMaxSize * 0.8) {
+      log.warn("SingleFlight inflight queue is high: {}/{}", estimatedInflightSize(), inflightMaxSize);
+    }
+    return false;
+  }
+
+  /**
+   * Submit a reader supplier to the async executor, automatically wrapping
+   * circuit breaker callbacks around the execution.
+   *
+   * @param reader the supplier to execute asynchronously
+   * @return a {@link CompletableFuture} that will complete with the result or timeout
+   */
+  private CompletableFuture<Object> submitReader(Supplier<Object> reader) {
+    return CompletableFuture.supplyAsync(
+      () -> {
+        try {
+          Object val = reader.get();
+          circuitBreaker.onSuccess();
+          return val;
+        } catch (Exception e) {
+          circuitBreaker.onFailure();
+          throw e;
+        }
+      },
+      executor
+    ).orTimeout(timeoutSeconds, TimeUnit.SECONDS);
+  }
+
+  /**
+   * Handle a {@link CompletionException} from a future join by logging,
+   * invalidating the cache entry, and rethrowing an appropriate exception.
+   *
+   * @param cacheKey the key whose load failed
+   * @param e        the caught {@link CompletionException}
+   * @throws RuntimeException wrapping the actual cause
+   * @throws Error          if the cause is an {@link Error}
+   */
+  private void handleFailure(String cacheKey, CompletionException e) {
+    log.warn("singleflight join failed: key={}", cacheKey, e);
+    inflightLoads.invalidate(cacheKey);
+
+    Throwable cause = e.getCause();
+    if (cause instanceof InterruptedException) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException("Thread interrupted during load for key: " + cacheKey, cause);
+    }
+    if (cause instanceof RuntimeException re) throw re;
+    if (cause instanceof Error err) throw err;
+    throw new RuntimeException("Loader failed for key: " + cacheKey, cause);
   }
 }

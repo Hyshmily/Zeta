@@ -15,22 +15,21 @@
  */
 package io.github.hyshmily.hotkey.worker.detection;
 
-import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
-import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.util.List;
-
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
+
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.hotkey.worker.dispatch.WorkerBroadcaster;
+import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
 /**
  * Tests for {@link TopKValidator}.
@@ -52,7 +51,7 @@ class TopKValidatorTest {
   }
 
   /**
-   * Verifies that a key is broadcast as hot after it appears in the TopK list the minimum required number of times.
+   * Verifies that a key is send as hot after it appears in the TopK list the minimum required number of times.
    */
   @Test
   void shouldBroadcastWhenKeyAppearsMinRequiredTimes() {
@@ -64,7 +63,7 @@ class TopKValidatorTest {
   }
 
   /**
-   * Verifies that keys already marked as confirmed are skipped during validation and not re-broadcast.
+   * Verifies that keys already marked as confirmed are skipped during validation and not re-send.
    */
   @Test
   void shouldSkipAlreadyConfirmedKeys() {
@@ -100,7 +99,7 @@ class TopKValidatorTest {
   @Test
   void markConfirmedAndMarkCooledShouldToggleState() {
     validator.markConfirmed("key1");
-    // verify through validate — confirmed key should not trigger broadcast
+    // verify through validate — confirmed key should not trigger send
     when(topK.listTopN(5)).thenReturn(List.of(new Item("key1", 100)));
     validator.validate();
     verify(broadcaster, never()).broadcastHot(any(), any());
@@ -124,7 +123,7 @@ class TopKValidatorTest {
   }
 
   /**
-   * Verifies that when {@code preWarmMinAppearances = 1}, a key is broadcast immediately
+   * Verifies that when {@code preWarmMinAppearances = 1}, a key is send immediately
    * on the first validation cycle it appears.
    */
   @Test
@@ -150,12 +149,12 @@ class TopKValidatorTest {
     when(topK.listTopN(5)).thenReturn(List.of(new Item("key", 100)));
     validator.validate(); // appearance = 1 (reset), not enough
     verify(broadcaster, never()).broadcastHot(any(), any());
-    validator.validate(); // appearance = 2, now should broadcast
+    validator.validate(); // appearance = 2, now should send
     verify(broadcaster).broadcastHot(eq("key"), any());
   }
 
   /**
-   * Verifies that multiple keys reaching min appearances simultaneously are all broadcast.
+   * Verifies that multiple keys reaching min appearances simultaneously are all send.
    */
   @Test
   void shouldBroadcastMultipleKeysSimultaneously() {
@@ -168,7 +167,7 @@ class TopKValidatorTest {
 
   /**
    * Verifies that a key with zero count in the TopK list is still tracked and can be
-   * broadcast if it appears the minimum number of times.
+   * send if it appears the minimum number of times.
    */
   @Test
   void shouldHandleKeyWithZeroCount() {

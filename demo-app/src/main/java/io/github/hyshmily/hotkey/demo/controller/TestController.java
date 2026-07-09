@@ -162,7 +162,7 @@ public class TestController {
     }
 
     Map<String, Object> result = new LinkedHashMap<>();
-    result.put("scenario", "worker-broadcast");
+    result.put("scenario", "worker-send");
     result.put("key", key);
     result.put("decisionType", "HOT");
     result.put("decisionVersion", dv);
@@ -358,7 +358,7 @@ public class TestController {
   public ResponseEntity<Map<String, Object>> preload(@PathVariable String key) {
     hotKey.notifyLocalDetectorDirect(key, Integer.MAX_VALUE);
     boolean isHot = hotKey.isLocalHotKey(key);
-    return ResponseEntity.ok(Map.of("scenario", "preload", "key", key, "isLocalHotKey", isHot));
+    return ResponseEntity.ok(Map.of("scenario", "preload", "key", key, "isHot", isHot));
   }
 
   @PostMapping("/all")

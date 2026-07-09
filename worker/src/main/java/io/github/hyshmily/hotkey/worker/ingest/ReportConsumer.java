@@ -45,7 +45,7 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  *   <li>Feeds the count into the {@link io.github.hyshmily.hotkey.worker.detection.SlidingWindowDetector} to update the
  *       sliding‑window sum and obtain a binary hot‑or‑not verdict for the
  *       current window.</li>
- *   <li>Passes that verdict to the {@link HotKeyStateMachine} which tracks
+ *   <li>Passes that verdict to the {@link io.github.hyshmily.hotkey.detection.HotKeyStateMachine} which tracks
  *       consecutive hot/cold windows and decides whether a state transition
  *       (COLD → CONFIRMED_HOT → PRE_COOLING → COLD) has occurred.</li>
  *   <li>If the state machine returns a {@code HOT} decision, the consumer
@@ -87,7 +87,7 @@ public class ReportConsumer {
   /** Max keys per chunk for parallel processing. Beyond this, keys are split into chunks. */
   private static final int CHUNK_SIZE = 1000;
 
-  /** Log a drain-progress summary when the pending broadcast queue exceeds this threshold. */
+  /** Log a drain-progress summary when the pending send queue exceeds this threshold. */
   private static final int BATCH_DRAIN_WARN_THRESHOLD = 5000;
 
   /**
@@ -164,7 +164,7 @@ public class ReportConsumer {
             switch (decision.type()) {
               case HOT -> {
                 // A new hot key has been confirmed. Pre-allocate a decision
-                // version and enqueue the broadcast; actual AMQP send happens
+                // version and enqueue the send; actual AMQP send happens
                 // on the consumer thread after parallelStream completes.
                 long dv = broadcaster.nextDecisionVersion();
                 pendingBroadcasts.add(() -> broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW, dv));

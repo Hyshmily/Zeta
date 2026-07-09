@@ -117,7 +117,7 @@ public class CacheSyncListener {
    * <p>On success, the message is acknowledged via {@link Channel#basicAck}. On any
    * processing exception (parse failure, routing failure), the message is negatively
    * acknowledged with {@code requeue=false} to prevent poison-message loops. The next
-   * application-level write will re-broadcast the operation.
+   * application-level write will re-send the operation.
    *
    * @param channel the AMQP channel used for ack/nack operations
    * @param msg     the raw AMQP message whose body and headers carry the sync payload;
@@ -139,7 +139,7 @@ public class CacheSyncListener {
    * Decodes the raw AMQP message into a {@link SyncMessage} and schedules the
    * appropriate handler to run after a random delay within
    * {@link CacheSyncProperties#getWarmupJitterMs()}. The jitter spreads Redis
-   * reads when multiple peers process the same sync broadcast simultaneously.
+   * reads when multiple peers process the same sync send simultaneously.
    *
    * @param msg the raw AMQP message; if the body is null, empty, or cannot be
    *            parsed into a valid {@link SyncMessage}, the message is silently
@@ -395,7 +395,7 @@ public class CacheSyncListener {
   }
 
   /**
-   * Remove the invalidation record after a successful refresh,
+   * Remove the invalidation recordReport after a successful refresh,
    * allowing future refreshes for this key to proceed normally.
    */
   private void clearInvalidation(String key) {

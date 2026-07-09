@@ -65,7 +65,7 @@ import org.springframework.amqp.core.Message;
  *
  * <p><b>Backpressure:</b> HOT promotions can be throttled by an optional
  * {@link SreRateLimiter}. When the limiter drops a request, the entry retains its current
- * state; the next Worker heartbeat or a subsequent HOT broadcast will re-attempt the
+ * state; the next Worker heartbeat or a subsequent HOT send will re-attempt the
  * promotion.
  *
  * @see WorkerMessage

@@ -21,7 +21,7 @@ import io.github.hyshmily.hotkey.model.HotKeyDecision.DecisionType;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link HotKeyDecision} record covering factory methods and decision type enum.
+ * Tests for {@link HotKeyDecision} recordReport covering factory methods and decision type enum.
  */
 class HotKeyDecisionTest {
 

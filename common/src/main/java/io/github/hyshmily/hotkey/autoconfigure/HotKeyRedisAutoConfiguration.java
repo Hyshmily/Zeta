@@ -69,17 +69,17 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 public class HotKeyRedisAutoConfiguration {
 
   /**
-   * Create the {@link RuleMatcher} with optional Redis persistence and broadcast support.
+   * Create the {@link RuleMatcher} with optional Redis persistence and send support.
    *
    * <p>When a {@link StringRedisTemplate} is available, rules (blacklist/whitelist)
    * are persisted in Redis under the key {@code hotkey:rules}, surviving app restarts.
-   * When a {@link CacheSyncPublisher} is available, rule changes are broadcast to
+   * When a {@link CacheSyncPublisher} is available, rule changes are send to
    * peer instances for cluster-wide consistency.
    *
    * @param redisTemplateProvider optional provider for StringRedisTemplate (Redis persistence);
    *                              may be absent
    * @param publisherProvider     optional provider for the cache sync publisher (cross-instance
-   *                              broadcast); may be absent
+   *                              send); may be absent
    * @return a new RuleMatcher instance with optional Redis-backed persistence
    */
   @Bean

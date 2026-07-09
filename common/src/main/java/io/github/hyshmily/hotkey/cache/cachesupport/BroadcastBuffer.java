@@ -24,21 +24,21 @@ import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Lossy deferred broadcast buffer for cache-sync messages.
+ * Lossy deferred send buffer for cache-sync messages.
  *
  * <p>Records the latest version for each key; on {@link #flush()} sends the
  * most recent entry per key via the {@link CacheSyncPublisher}. Only the
  * last-writer-wins version is retained per key, so intermediate versions
- * may be lost — this is acceptable because the next flush will broadcast
+ * may be lost — this is acceptable because the next flush will send
  * the latest known state.
  *
  * <p>Uses a lazy delayed flush strategy: the first {@link #record} after a
  * quiet period schedules a one-shot flush after a configurable delay
  * (default 500ms). Subsequent records within that window reset the timer,
- * combining multiple writes into a single broadcast cycle.
+ * combining multiple writes into a single send cycle.
  *
  * <p>The internal {@code pending} map is lazily initialized on first
- * {@code record()} call to avoid allocating maps that are never used.
+ * {@code recordReport()} call to avoid allocating maps that are never used.
  */
 @Slf4j
 @Internal
@@ -94,7 +94,7 @@ public class BroadcastBuffer {
    * Resets the deferred flush timer on each call.
    *
    * @param key      the cache key
-   * @param version  the data version to broadcast
+   * @param version  the data version to send
    * @param degraded whether the version is degraded
    */
   @SuppressWarnings("java:S6213")
@@ -121,7 +121,7 @@ public class BroadcastBuffer {
         try {
           pub.broadcastRefresh(key, vi.version, vi.degraded);
         } catch (Exception e) {
-          log.warn("Failed to broadcast refresh for key {}", key, e);
+          log.warn("Failed to send refresh for key {}", key, e);
         }
       });
     });

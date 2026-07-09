@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.hotkeydetector;
 
 import static io.github.hyshmily.hotkey.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.TOPK_INCR;
 
 import io.github.hyshmily.hotkey.Internal;
 import io.github.hyshmily.hotkey.hotkeydetector.doublebuffer.BufferedCounter;
@@ -134,7 +135,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
     if (invalidCacheKey(key)) {
       return;
     }
-    bufferedCounter.count(key, 1);
+    bufferedCounter.count(key, TOPK_INCR);
   }
 
   /**

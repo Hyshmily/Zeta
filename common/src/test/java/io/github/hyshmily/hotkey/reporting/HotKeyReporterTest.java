@@ -109,16 +109,16 @@ class HotKeyReporterTest {
   }
 
   @Test
-  void record_shouldIncrementPendingCount() {
-    reporter.record("key1");
-    reporter.record("key1");
-    reporter.record("key2");
+  void record_Report_shouldIncrementPendingCount() {
+    reporter.recordReport("key1");
+    reporter.recordReport("key1");
+    reporter.recordReport("key2");
     assertThat(reporter.getPendingKeyCount()).isPositive();
   }
 
   @Test
-  void record_withNullKey_shouldThrow() {
-    assertThatThrownBy(() -> reporter.record(null)).isInstanceOf(NullPointerException.class);
+  void record_Report_withNullKey_shouldThrow() {
+    assertThatThrownBy(() -> reporter.recordReport(null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
@@ -132,11 +132,11 @@ class HotKeyReporterTest {
   void stop_shouldPreventFurtherPublishing() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.record("key-b");
+    reporter.recordReport("key-b");
     awaitPublish(1);
     int beforeStop = testPublisher.publishCount;
     reporter.stop();
-    reporter.record("key-c");
+    reporter.recordReport("key-c");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 200);
     assertThat(testPublisher.publishCount).isEqualTo(beforeStop);
   }
@@ -160,10 +160,10 @@ class HotKeyReporterTest {
   }
 
   @Test
-  void record_shouldPublishAfterFlush() throws Exception {
+  void record_Report_shouldPublishAfterFlush() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.record("key-a");
+    reporter.recordReport("key-a");
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
@@ -172,9 +172,9 @@ class HotKeyReporterTest {
   void multipleRecordsForSameKey_shouldPublishAggregatedCount() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.record("agg-key");
-    reporter.record("agg-key");
-    reporter.record("agg-key");
+    reporter.recordReport("agg-key");
+    reporter.recordReport("agg-key");
+    reporter.recordReport("agg-key");
     awaitPublish(1);
     long total = testPublisher.messages
       .stream()
@@ -189,8 +189,8 @@ class HotKeyReporterTest {
   void recordsForDifferentKeys_shouldPublishAsBatch() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.record("key-x");
-    reporter.record("key-y");
+    reporter.recordReport("key-x");
+    reporter.recordReport("key-y");
     awaitPublish(1);
     assertThat(testPublisher.messages).isNotEmpty();
     ReportMessage first = testPublisher.messages.get(0);
@@ -200,7 +200,7 @@ class HotKeyReporterTest {
   @Test
   void gracefulDegradation_shouldDropRecordsWhenClusterUnhealthy() throws Exception {
     reporter.start();
-    reporter.record("ghost-key");
+    reporter.recordReport("ghost-key");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 500);
     assertThat(testPublisher.publishCount).isZero();
   }
@@ -227,19 +227,19 @@ class HotKeyReporterTest {
   }
 
   @Test
-  void record_withEmptyKey_shouldWork() throws Exception {
+  void record_Report_withEmptyKey_shouldWork() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.record("");
+    reporter.recordReport("");
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
 
   @Test
-  void record_withVeryLongKey_shouldWork() throws Exception {
+  void record_Report_withVeryLongKey_shouldWork() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.record("k".repeat(10_000));
+    reporter.recordReport("k".repeat(10_000));
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
@@ -269,7 +269,7 @@ class HotKeyReporterTest {
     registerWorker(healthView, "worker-1");
     reporter.start();
     for (int i = 0; i < 100; i++) {
-      reporter.record("bulk-key-" + i);
+      reporter.recordReport("bulk-key-" + i);
     }
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
@@ -301,7 +301,7 @@ class HotKeyReporterTest {
     reporter.setBbrRateLimiter(bbr);
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.record("bbr-key");
+    reporter.recordReport("bbr-key");
     awaitPublish(1);
     assertThat(reporter.bbrPassed()).isPositive();
   }
@@ -314,7 +314,7 @@ class HotKeyReporterTest {
     reporter.setBbrRateLimiter(bbr);
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.record("high-cpu-key");
+    reporter.recordReport("high-cpu-key");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 500);
     assertThat(reporter.bbrDropped()).isNotNegative();
   }

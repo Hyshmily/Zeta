@@ -60,7 +60,7 @@ hotkey:
     ## Messaging
     messaging:
       report-exchange: hotkey.report.exchange
-      broadcast-exchange: hotkey.broadcast.exchange
+      broadcast-exchange: hotkey.send.exchange
 
     ## Sliding Window (each slice = 1000/10 = 100ms)
     sliding-window:

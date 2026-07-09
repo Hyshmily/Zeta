@@ -84,8 +84,8 @@ public final class HotKeyConstants {
   /** Thread name prefix for the shared scheduler pool. */
   public static final String THREAD_PREFIX_SCHEDULER = "hotkey-scheduler";
 
-  /** Routing key prefix for broadcast decisions (HOT/COOL) sent from worker to apps. */
-  public static final String ROUTING_KEY_BROADCAST = "broadcast.";
+  /** Routing key prefix for send decisions (HOT/COOL) sent from worker to apps. */
+  public static final String ROUTING_KEY_BROADCAST = "send.";
   /** Routing key prefix for report messages from apps to worker. */
   public static final String ROUTING_KEY_REPORT = "report.";
   /** Routing key prefix for heartbeat messages from workers to apps. */
@@ -125,7 +125,7 @@ public final class HotKeyConstants {
   public static final String EXCHANGE_HEARTBEAT = "hotkey.heartbeat.exchange";
 
   /** Exchange name for Worker HOT/COOL decision broadcasts (fanout). */
-  public static final String EXCHANGE_BROADCAST = "hotkey.broadcast.exchange";
+  public static final String EXCHANGE_BROADCAST = "hotkey.send.exchange";
 
   /** Exchange name for cross-instance cache sync broadcasts (fanout). */
   public static final String EXCHANGE_SYNC = "hotkey.sync.exchange";
