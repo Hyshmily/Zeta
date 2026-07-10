@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.AddResult;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.TopK;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -31,25 +32,37 @@ class TopKDefaultMethodTest {
   void contains_shouldReturnTrueWhenKeyIsInList() {
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) { throw new UnsupportedOperationException(); }
+      public AddResult addDirect(String key, int increment) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public List<AddResult> addDirect(Map<String, Long> keyCounts) { throw new UnsupportedOperationException(); }
+      public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public List<Item> list() { return List.of(new Item("a", 10), new Item("b", 5)); }
+      public List<Item> list() {
+        return List.of(new Item("a", 10), new Item("b", 5));
+      }
 
       @Override
-      public List<Item> listTopN(int n) { throw new UnsupportedOperationException(); }
+      public List<Item> listTopN(int n) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public BlockingQueue<Item> expelled() { throw new UnsupportedOperationException(); }
+      public BlockingQueue<Item> expelled() {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
       public void fading() {}
 
       @Override
-      public long total() { return 0; }
+      public long total() {
+        return 0;
+      }
     };
     assertThat(topK.contains("a")).isTrue();
     assertThat(topK.contains("b")).isTrue();
@@ -59,52 +72,202 @@ class TopKDefaultMethodTest {
   void contains_shouldReturnFalseWhenKeyIsNotInList() {
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) { throw new UnsupportedOperationException(); }
+      public AddResult addDirect(String key, int increment) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public List<AddResult> addDirect(Map<String, Long> keyCounts) { throw new UnsupportedOperationException(); }
+      public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public List<Item> list() { return List.of(new Item("a", 10)); }
+      public List<Item> list() {
+        return List.of(new Item("a", 10));
+      }
 
       @Override
-      public List<Item> listTopN(int n) { throw new UnsupportedOperationException(); }
+      public List<Item> listTopN(int n) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public BlockingQueue<Item> expelled() { throw new UnsupportedOperationException(); }
+      public BlockingQueue<Item> expelled() {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
       public void fading() {}
 
       @Override
-      public long total() { return 0; }
+      public long total() {
+        return 0;
+      }
     };
     assertThat(topK.contains("c")).isFalse();
+  }
+
+  @Test
+  void warm_shouldDelegateToAddDirect() {
+    List<AddResult> results = new ArrayList<>();
+    TopK topK = new TopK() {
+      @Override
+      public AddResult addDirect(String key, int increment) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+        results.addAll(
+          keyCounts
+            .entrySet()
+            .stream()
+            .map(e -> new AddResult(null, true, e.getKey()))
+            .toList()
+        );
+        return results;
+      }
+
+      @Override
+      public List<Item> list() {
+        return List.of();
+      }
+
+      @Override
+      public List<Item> listTopN(int n) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public BlockingQueue<Item> expelled() {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public void fading() {}
+
+      @Override
+      public long total() {
+        return 0;
+      }
+    };
+    topK.warm(Map.of("a", 10L, "b", 20L));
+    assertThat(results).hasSize(2);
+  }
+
+  @Test
+  void estimatedSize_shouldReturnListSize() {
+    TopK topK = new TopK() {
+      @Override
+      public AddResult addDirect(String key, int increment) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public List<Item> list() {
+        return List.of(new Item("a", 10), new Item("b", 5));
+      }
+
+      @Override
+      public List<Item> listTopN(int n) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public BlockingQueue<Item> expelled() {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public void fading() {}
+
+      @Override
+      public long total() {
+        return 0;
+      }
+    };
+    assertThat(topK.estimatedSize()).isEqualTo(2);
+  }
+
+  @Test
+  void estimatedSize_whenEmpty_shouldReturnZero() {
+    TopK topK = new TopK() {
+      @Override
+      public AddResult addDirect(String key, int increment) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public List<Item> list() {
+        return List.of();
+      }
+
+      @Override
+      public List<Item> listTopN(int n) {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public BlockingQueue<Item> expelled() {
+        throw new UnsupportedOperationException();
+      }
+
+      @Override
+      public void fading() {}
+
+      @Override
+      public long total() {
+        return 0;
+      }
+    };
+    assertThat(topK.estimatedSize()).isZero();
   }
 
   @Test
   void contains_shouldReturnFalseWhenListIsEmpty() {
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) { throw new UnsupportedOperationException(); }
+      public AddResult addDirect(String key, int increment) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public List<AddResult> addDirect(Map<String, Long> keyCounts) { throw new UnsupportedOperationException(); }
+      public List<AddResult> addDirect(Map<String, Long> keyCounts) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public List<Item> list() { return List.of(); }
+      public List<Item> list() {
+        return List.of();
+      }
 
       @Override
-      public List<Item> listTopN(int n) { throw new UnsupportedOperationException(); }
+      public List<Item> listTopN(int n) {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
-      public BlockingQueue<Item> expelled() { throw new UnsupportedOperationException(); }
+      public BlockingQueue<Item> expelled() {
+        throw new UnsupportedOperationException();
+      }
 
       @Override
       public void fading() {}
 
       @Override
-      public long total() { return 0; }
+      public long total() {
+        return 0;
+      }
     };
     assertThat(topK.contains("x")).isFalse();
   }

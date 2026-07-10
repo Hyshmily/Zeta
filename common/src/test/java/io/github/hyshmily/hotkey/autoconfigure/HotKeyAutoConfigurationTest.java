@@ -24,6 +24,7 @@ import io.github.hyshmily.hotkey.cache.HotKeyCache;
 import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.hotkey.hotkeydetector.HotKeyDetector;
+import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
 import java.util.concurrent.Executor;
 import org.junit.jupiter.api.Test;
@@ -204,5 +205,65 @@ class HotKeyAutoConfigurationTest {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(RuleMatcher.class);
     });
+  }
+
+  /**
+   * Verifies that the cache uses weight-based eviction when max-weight is configured.
+   */
+  @Test
+  void hotLocalCache_shouldUseWeightBasedEvictionWhenMaxWeightSet() {
+    new ApplicationContextRunner()
+      .withPropertyValues(
+        "hotkey.local.topK=200",
+        "hotkey.local.cache.max-weight=1000000",
+        "hotkey.local.cache.max-size=10"
+      )
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx).hasSingleBean(Cache.class);
+        Cache<String, Object> cache = ctx.getBean(Cache.class);
+        // Put a string value; weight should be computed by DefaultWeigher
+        cache.put("test", "value");
+        cache.cleanUp();
+        assertThat(cache.estimatedSize()).isOne();
+      });
+  }
+
+  /**
+   * Verifies that a CacheEntry with Long.MAX_VALUE hardExpireAtMs stays in cache
+   * (pure logical expiry — Caffeine never evicts by time).
+   */
+  @Test
+  void localCache_shouldKeepEntryWithMaxValueHardExpire() {
+    new ApplicationContextRunner()
+      .withPropertyValues("hotkey.local.topK=200")
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
+      .run(ctx -> {
+        Cache<String, Object> cache = ctx.getBean(Cache.class);
+        CacheEntry entry = CacheEntry.builder()
+          .value("logical-expiry-value")
+          .hardExpireAtMs(Long.MAX_VALUE)
+          .dataVersion(1)
+          .build();
+        cache.put("logical", entry);
+        cache.cleanUp();
+        assertThat(cache.getIfPresent("logical")).isNotNull();
+      });
+  }
+
+  /**
+   * Verifies that a non-CacheEntry value is accepted (falls through to default TTL).
+   */
+  @Test
+  void localCache_shouldAcceptNonCacheEntryValue() {
+    new ApplicationContextRunner()
+      .withPropertyValues("hotkey.local.topK=200")
+      .withConfiguration(AutoConfigurations.of(HotKeyFacadeAutoConfiguration.class, HotKeyAutoConfiguration.class))
+      .run(ctx -> {
+        Cache<String, Object> cache = ctx.getBean(Cache.class);
+        cache.put("plain", "plain-string-value");
+        cache.cleanUp();
+        assertThat(cache.getIfPresent("plain")).isEqualTo("plain-string-value");
+      });
   }
 }

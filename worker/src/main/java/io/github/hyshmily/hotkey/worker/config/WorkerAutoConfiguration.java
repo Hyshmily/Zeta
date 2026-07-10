@@ -507,7 +507,6 @@ public class WorkerAutoConfiguration {
 
   /**
    * Scheduled task that inspects the Worker TopK and pre-warms stable hot keys.
-   *
    * Default constructor.
    */
   @RequiredArgsConstructor

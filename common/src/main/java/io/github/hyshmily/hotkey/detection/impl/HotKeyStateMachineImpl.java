@@ -163,7 +163,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
     // containsKey may race with concurrent insertion but the worst case is one
     // unnecessary locked iteration — never a correctness problem.
     if (!isHotThisWindow && !states.containsKey(key)) {
-      return HotKeyDecision.none(key);
+      return HotKeyDecision.none(key, null);
     }
 
     Lock lock = keyLocks.get(key);
@@ -178,37 +178,40 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
       }
       state.lastUpdateTime = now;
 
-      return isHotThisWindow ? evaluateHot(key, state) : evaluateCold(key, state);
+      Map<String, Object> previousState = getStateSnapshot(key);
+      return isHotThisWindow ? evaluateHot(key, state, previousState) : evaluateCold(key, state, previousState);
     } catch (Exception e) {
       log.warn("Unexpected StateMachine Exception for key {}", key, e);
-      return HotKeyDecision.none(key);
+      return HotKeyDecision.none(key, null);
     } finally {
       lock.unlock();
     }
   }
 
   /** Hot-window evaluation: increment hot streak, reset cold streak, check promotions. */
-  private HotKeyDecision evaluateHot(String key, KeyState state) {
+  // modified: added previousState param for failure rollback
+  private HotKeyDecision evaluateHot(String key, KeyState state, Map<String, Object> previousState) {
     state.hotStreak++;
     state.coolStreak = 0;
 
     // COLD → CONFIRMED_HOT: consecutive hot windows crossed the confirm threshold
     if (state.currentState == COLD && state.hotStreak >= confirmCount) {
       state.currentState = CONFIRMED_HOT;
-      return HotKeyDecision.hot(key);
+      return HotKeyDecision.hot(key, previousState);
     }
 
     // PRE_COOLING → CONFIRMED_HOT: silent revive, no send (avoid oscillation)
     if (state.currentState == PRE_COOLING) {
       state.currentState = CONFIRMED_HOT;
-      return HotKeyDecision.none(key);
+      return HotKeyDecision.none(key, previousState);
     }
 
-    return HotKeyDecision.none(key);
+    return HotKeyDecision.none(key, previousState);
   }
 
   /** Cold-window evaluation: increment cold streak, reset hot streak, check demotions. */
-  private HotKeyDecision evaluateCold(String key, KeyState state) {
+  // modified: added previousState param for failure rollback
+  private HotKeyDecision evaluateCold(String key, KeyState state, Map<String, Object> previousState) {
     state.coolStreak++;
     state.hotStreak = 0;
 
@@ -220,10 +223,10 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
     // PRE_COOLING → COLD: fully cooled, send COOL
     if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
       state.currentState = COLD;
-      return HotKeyDecision.cool(key);
+      return HotKeyDecision.cool(key, previousState);
     }
 
-    return HotKeyDecision.none(key);
+    return HotKeyDecision.none(key, previousState);
   }
 
   /**
@@ -276,6 +279,7 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
     states.values().removeIf(state -> now - state.lastUpdateTime > staleAfterMs);
   }
 
+  // modified: added "key" entry to the returned map for key-less rollback
   public Map<String, Object> getStateSnapshot(String key) {
     Lock lock = keyLocks.get(key);
     lock.lock();
@@ -285,6 +289,8 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
         return Collections.emptyMap();
       }
       return Map.of(
+        "key",
+        key,
         "currentState",
         keyState.currentState.name(),
         "hotStreak",
@@ -303,6 +309,8 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
    *
    * @param key the key whose state machine should be rolled back
    */
+  // modified: added @Override
+  @Override
   public void rollbackToPreviousState(String key, Map<String, Object> previousState) {
     Lock lock = keyLocks.get(key);
     lock.lock();
@@ -320,6 +328,13 @@ public class HotKeyStateMachineImpl implements HotKeyStateMachine {
     } finally {
       lock.unlock();
     }
+  }
+
+  // modified: key-less overload that extracts key from snapShot
+  @Override
+  public void rollbackToPreviousState(Map<String, Object> previousState) {
+    String key = (String) previousState.get("key");
+    rollbackToPreviousState(key, previousState);
   }
 
   private static class KeyState {

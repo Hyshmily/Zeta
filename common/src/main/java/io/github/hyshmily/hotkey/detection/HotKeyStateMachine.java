@@ -64,4 +64,7 @@ public interface HotKeyStateMachine {
 
   /** Roll back the per-key state after a send failure. */
   void rollbackToPreviousState(String key, Map<String, Object> previousState);
+
+  // modified: added key-less overload that extracts key from snapShot
+  void rollbackToPreviousState(Map<String, Object> previousState);
 }

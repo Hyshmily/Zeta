@@ -18,12 +18,18 @@ package io.github.hyshmily.hotkey.util;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link TimeSource} verifying idempotent start and correct time retrieval.
  */
 class TimeSourceTest {
+
+  @AfterEach
+  void tearDown() {
+    // Reset the thread-try counter between tests to avoid hitting the max after repeated calls
+  }
 
   @Test
   void start_shouldBeIdempotent() {

@@ -17,6 +17,7 @@ package io.github.hyshmily.hotkey.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.hotkey.HotKey;
@@ -56,6 +57,9 @@ class HotKeyRedisAutoConfigurationTest {
 
   @Mock(lenient = true)
   private ObjectProvider<HealthView> healthViewProvider;
+
+  @Mock(lenient = true)
+  private ObjectProvider<CacheSyncPublisher> publisherProvider;
 
   private final ScheduledExecutorService testScheduler = Executors.newSingleThreadScheduledExecutor();
 
@@ -154,6 +158,29 @@ class HotKeyRedisAutoConfigurationTest {
     );
 
     assertThat(cache).isNotNull();
+  }
+
+  /**
+   * Verifies that the ruleMatcher bean is created with StringRedisTemplate and publisher providers.
+   */
+  @Test
+  void ruleMatcher_shouldCreateWithOptionalDependencies() {
+    HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
+    when(redisTemplateProvider.getIfAvailable()).thenReturn(mock(StringRedisTemplate.class));
+    when(publisherProvider.getIfAvailable()).thenReturn(mock(CacheSyncPublisher.class));
+    RuleMatcher matcher = config.ruleMatcher(redisTemplateProvider, publisherProvider);
+    assertThat(matcher).isNotNull();
+    assertThat(matcher).isInstanceOf(RuleMatcherImpl.class);
+  }
+
+  /**
+   * Verifies that the ruleMatcher bean handles absent providers gracefully.
+   */
+  @Test
+  void ruleMatcher_shouldHandleAbsentProviders() {
+    HotKeyRedisAutoConfiguration config = new HotKeyRedisAutoConfiguration();
+    RuleMatcher matcher = config.ruleMatcher(redisTemplateProvider, publisherProvider);
+    assertThat(matcher).isNotNull();
   }
 
   /**

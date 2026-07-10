@@ -27,7 +27,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
-/*
+/**
  * Publishes HOT and COOL decisions to all application instances via the
  * configured RabbitMQ {@code broadcastExchange}.
  *
@@ -39,7 +39,6 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * fanout exchange ({@code hotkey.send.exchange}) — the receiver
  * differentiates message type via the {@code AMQP_HEADER_TYPE} header.
  */
-/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class WorkerBroadcaster {
@@ -83,38 +82,16 @@ public class WorkerBroadcaster {
    * Broadcasts a HOT decision for the given key.
    *
    * @param cacheKey the key that has been confirmed as hot
-   * @param source   a label describing the detection source (e.g. "sliding_window")
    */
-  public void broadcastHot(String cacheKey, String source) {
-    long dv = decisionVersionCounter.incrementAndGet();
-    sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
-    log.debug(
-      "Broadcast HOT: key={}, dv={}, source={}, nodeId={}, epoch={}",
-      cacheKey,
-      dv,
-      source,
-      nodeId,
-      epochCounter.get()
-    );
-  }
-
-  /**
-   * Broadcasts a HOT decision with a pre-allocated version number.
-   *
-   * @param cacheKey the key that has been confirmed as hot
-   * @param source   a label describing the detection source
-   * @param dv       pre-allocated decision version (from {@link #nextDecisionVersion()})
-   */
-  public void broadcastHot(String cacheKey, String source, long dv) {
-    sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
-    log.debug(
-      "Broadcast HOT: key={}, dv={}, source={}, nodeId={}, epoch={}",
-      cacheKey,
-      dv,
-      source,
-      nodeId,
-      epochCounter.get()
-    );
+  public boolean broadcastHot(String cacheKey) {
+    long dv = nextDecisionVersion();
+    try {
+      sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
+    } catch (Exception e) {
+      log.error("Failed to broadcast HOT decision for key {}: {}", cacheKey, e.getMessage());
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -122,20 +99,16 @@ public class WorkerBroadcaster {
    *
    * @param cacheKey the key that has been confirmed as fully cooled
    */
-  public void broadcastCool(String cacheKey) {
-    long dv = decisionVersionCounter.incrementAndGet();
-    sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
-  }
-
-  /**
-   * Broadcasts a COOL decision with a pre-allocated version number.
-   *
-   * @param cacheKey the key that has been confirmed as fully cooled
-   * @param dv       pre-allocated decision version (from {@link #nextDecisionVersion()})
-   */
-  public void broadcastCool(String cacheKey, long dv) {
-    sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
-    log.debug("Broadcast COOL: key={}, dv={}, nodeId={}, epoch={}", cacheKey, dv, nodeId, epochCounter.get());
+  public boolean broadcastCool(String cacheKey) {
+    long dv = nextDecisionVersion();
+    try {
+      sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
+    } catch (Exception e) {
+      log.error("Failed to broadcast COOL decision for key {}: {}", cacheKey, e.getMessage());
+      return false;
+      // no throw — ADR-0007 fire-and-forget
+    }
+    return true;
   }
 
   /**
@@ -160,19 +133,14 @@ public class WorkerBroadcaster {
    * @param version  the monotonically increasing decision version for ordering
    */
   private void sendBroadcast(String cacheKey, String type, long version) {
-    try {
-      MessageProperties props = new MessageProperties();
-      props.setHeader(AMQP_HEADER_TYPE, type);
-      props.setHeader(AMQP_HEADER_VERSION, version);
-      props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, false);
-      props.setHeader(AMQP_HEADER_NODE_ID, nodeId);
-      props.setHeader(AMQP_HEADER_EPOCH, epochCounter.get());
+    MessageProperties props = new MessageProperties();
+    props.setHeader(AMQP_HEADER_TYPE, type);
+    props.setHeader(AMQP_HEADER_VERSION, version);
+    props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, false);
+    props.setHeader(AMQP_HEADER_NODE_ID, nodeId);
+    props.setHeader(AMQP_HEADER_EPOCH, epochCounter.get());
 
-      Message msg = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
-      rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);
-    } catch (Exception e) {
-      log.error("Failed to send {} for key={}, dv={}: {}", type, cacheKey, version, e.getMessage());
-      // no throw — ADR-0007 fire-and-forget
-    }
+    Message msg = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
+    rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);
   }
 }

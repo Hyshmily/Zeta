@@ -58,7 +58,7 @@ class TopKValidatorTest {
     when(topK.listTopN(5)).thenReturn(List.of(new Item("hotKey", 100)));
     validator.validate();
     validator.validate();
-    verify(broadcaster).broadcastHot(eq("hotKey"), any());
+    verify(broadcaster).broadcastHot(eq("hotKey"));
     assertThat(validator).isNotNull();
   }
 
@@ -70,7 +70,7 @@ class TopKValidatorTest {
     validator.markConfirmed("hotKey");
     when(topK.listTopN(5)).thenReturn(List.of(new Item("hotKey", 100)));
     validator.validate();
-    verify(broadcaster, never()).broadcastHot(any(), any());
+    verify(broadcaster, never()).broadcastHot(any());
   }
 
   /**
@@ -81,7 +81,7 @@ class TopKValidatorTest {
     when(topK.listTopN(5)).thenReturn(List.of(new Item("hotKey", 100)));
     validator.validate();
     validator.validate();
-    verify(broadcaster).broadcastHot(eq("hotKey"), any());
+    verify(broadcaster).broadcastHot(eq("hotKey"));
 
     when(topK.listTopN(5)).thenReturn(List.of());
     validator.validate();
@@ -90,7 +90,7 @@ class TopKValidatorTest {
     when(topK.listTopN(5)).thenReturn(List.of(new Item("hotKey", 100)));
     validator.validate();
     // should need to re-meet preWarmMinAppearances before broadcasting
-    verify(broadcaster).broadcastHot(eq("hotKey"), any());
+    verify(broadcaster).broadcastHot(eq("hotKey"));
   }
 
   /**
@@ -102,14 +102,14 @@ class TopKValidatorTest {
     // verify through validate — confirmed key should not trigger send
     when(topK.listTopN(5)).thenReturn(List.of(new Item("key1", 100)));
     validator.validate();
-    verify(broadcaster, never()).broadcastHot(any(), any());
+    verify(broadcaster, never()).broadcastHot(any());
 
     validator.markCooled("key1");
     // after cool, should need appearances again
     when(topK.listTopN(5)).thenReturn(List.of(new Item("key1", 100)));
     validator.validate();
     validator.validate();
-    verify(broadcaster).broadcastHot(eq("key1"), any());
+    verify(broadcaster).broadcastHot(eq("key1"));
   }
 
   /**
@@ -131,7 +131,7 @@ class TopKValidatorTest {
     validator = new TopKValidator(topK, broadcaster, 5, 1);
     when(topK.listTopN(5)).thenReturn(List.of(new Item("fastKey", 50)));
     validator.validate();
-    verify(broadcaster).broadcastHot(eq("fastKey"), any());
+    verify(broadcaster).broadcastHot(eq("fastKey"));
   }
 
   /**
@@ -148,9 +148,9 @@ class TopKValidatorTest {
     // key reappears
     when(topK.listTopN(5)).thenReturn(List.of(new Item("key", 100)));
     validator.validate(); // appearance = 1 (reset), not enough
-    verify(broadcaster, never()).broadcastHot(any(), any());
+    verify(broadcaster, never()).broadcastHot(any());
     validator.validate(); // appearance = 2, now should send
-    verify(broadcaster).broadcastHot(eq("key"), any());
+    verify(broadcaster).broadcastHot(eq("key"));
   }
 
   /**
@@ -161,8 +161,8 @@ class TopKValidatorTest {
     when(topK.listTopN(5)).thenReturn(List.of(new Item("k1", 100), new Item("k2", 200)));
     validator.validate();
     validator.validate(); // both reach min appearances
-    verify(broadcaster).broadcastHot(eq("k1"), any());
-    verify(broadcaster).broadcastHot(eq("k2"), any());
+    verify(broadcaster).broadcastHot(eq("k1"));
+    verify(broadcaster).broadcastHot(eq("k2"));
   }
 
   /**
@@ -174,7 +174,7 @@ class TopKValidatorTest {
     when(topK.listTopN(5)).thenReturn(List.of(new Item("zeroKey", 0)));
     validator.validate();
     validator.validate();
-    verify(broadcaster).broadcastHot(eq("zeroKey"), any());
+    verify(broadcaster).broadcastHot(eq("zeroKey"));
   }
 
   /**

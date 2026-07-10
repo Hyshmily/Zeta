@@ -59,7 +59,7 @@ class WorkerBroadcasterTest {
    */
   @Test
   void shouldSendHotWithCorrectRoutingKeyAndHeaders() {
-    broadcaster.broadcastHot("myKey", "test_source");
+    broadcaster.broadcastHot("myKey");
     verify(rabbitTemplate).send(eq(EXCHANGE_BROADCAST), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
@@ -88,9 +88,9 @@ class WorkerBroadcasterTest {
   @Test
   void decisionVersionShouldIncrementOnEachBroadcast() {
     broadcaster.broadcastCool("k0");
-    broadcaster.broadcastHot("k1", "s1");
-    broadcaster.broadcastHot("k2", "s1");
-    broadcaster.broadcastHot("k3", "s1");
+    broadcaster.broadcastHot("k1");
+    broadcaster.broadcastHot("k2");
+    broadcaster.broadcastHot("k3");
 
     verify(rabbitTemplate, times(4)).send(any(), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
     long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
@@ -103,7 +103,7 @@ class WorkerBroadcasterTest {
    */
   @Test
   void shouldHandleEmptyKey() {
-    broadcaster.broadcastHot("", "source");
+    broadcaster.broadcastHot("");
     verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
     assertThat(new String(messageCaptor.getValue().getBody())).isEmpty();
   }
@@ -124,9 +124,9 @@ class WorkerBroadcasterTest {
    */
   @Test
   void bothHotAndCoolShouldIncrementDecisionVersion() {
-    broadcaster.broadcastHot("k1", "s1");
+    broadcaster.broadcastHot("k1");
     broadcaster.broadcastCool("k2");
-    broadcaster.broadcastHot("k3", "s1");
+    broadcaster.broadcastHot("k3");
 
     verify(rabbitTemplate, times(3)).send(any(), any(), messageCaptor.capture());
     long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
@@ -142,7 +142,7 @@ class WorkerBroadcasterTest {
    */
   @Test
   void sendBroadcast_shouldIncludeNodeIdHeader() {
-    broadcaster.broadcastHot("key", "source");
+    broadcaster.broadcastHot("key");
     verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
       AMQP_HEADER_NODE_ID,
@@ -156,9 +156,9 @@ class WorkerBroadcasterTest {
    */
   @Test
   void sendBroadcast_shouldIncludeEpochHeader() {
-    broadcaster.broadcastHot("key", "source");
+    broadcaster.broadcastHot("key");
     epochCounter.incrementAndGet();
-    broadcaster.broadcastHot("key2", "source");
+    broadcaster.broadcastHot("key2");
 
     verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getAllValues()).hasSize(2);
@@ -181,7 +181,7 @@ class WorkerBroadcasterTest {
       .send(any(String.class), any(String.class), any(Message.class));
 
     // Should not throw — ADR-0007 fire-and-forget
-    broadcaster.broadcastHot("key", "source");
+    broadcaster.broadcastHot("key");
   }
 
   /**

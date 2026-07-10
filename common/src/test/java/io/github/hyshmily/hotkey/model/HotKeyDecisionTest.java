@@ -30,7 +30,7 @@ class HotKeyDecisionTest {
    */
   @Test
   void hot_shouldCreateHotDecision() {
-    HotKeyDecision decision = HotKeyDecision.hot("key1");
+    HotKeyDecision decision = HotKeyDecision.hot("key1", null);
     assertThat(decision.type()).isEqualTo(DecisionType.HOT);
     assertThat(decision.cacheKey()).isEqualTo("key1");
   }
@@ -40,7 +40,7 @@ class HotKeyDecisionTest {
    */
   @Test
   void cool_shouldCreateCoolDecision() {
-    HotKeyDecision decision = HotKeyDecision.cool("key1");
+    HotKeyDecision decision = HotKeyDecision.cool("key1", null);
     assertThat(decision.type()).isEqualTo(DecisionType.COOL);
   }
 
@@ -49,7 +49,7 @@ class HotKeyDecisionTest {
    */
   @Test
   void none_shouldCreateNoneDecision() {
-    HotKeyDecision decision = HotKeyDecision.none("key1");
+    HotKeyDecision decision = HotKeyDecision.none("key1", null);
     assertThat(decision.type()).isEqualTo(DecisionType.NONE);
   }
 
@@ -63,35 +63,35 @@ class HotKeyDecisionTest {
 
   @Test
   void hot_shouldAcceptNullKey() {
-    HotKeyDecision decision = HotKeyDecision.hot(null);
+    HotKeyDecision decision = HotKeyDecision.hot(null, null);
     assertThat(decision.type()).isEqualTo(DecisionType.HOT);
     assertThat(decision.cacheKey()).isNull();
   }
 
   @Test
   void cool_shouldAcceptNullKey() {
-    HotKeyDecision decision = HotKeyDecision.cool(null);
+    HotKeyDecision decision = HotKeyDecision.cool(null, null);
     assertThat(decision.type()).isEqualTo(DecisionType.COOL);
     assertThat(decision.cacheKey()).isNull();
   }
 
   @Test
   void none_shouldAcceptNullKey() {
-    HotKeyDecision decision = HotKeyDecision.none(null);
+    HotKeyDecision decision = HotKeyDecision.none(null, null);
     assertThat(decision.type()).isEqualTo(DecisionType.NONE);
     assertThat(decision.cacheKey()).isNull();
   }
 
   @Test
   void hot_shouldAcceptEmptyKey() {
-    HotKeyDecision decision = HotKeyDecision.hot("");
+    HotKeyDecision decision = HotKeyDecision.hot("", null);
     assertThat(decision.type()).isEqualTo(DecisionType.HOT);
     assertThat(decision.cacheKey()).isEmpty();
   }
 
   @Test
   void decisionWithNullCacheKey_shouldCreateCorrectly() {
-    HotKeyDecision decision = new HotKeyDecision(DecisionType.HOT, null);
+    HotKeyDecision decision = new HotKeyDecision(DecisionType.HOT, null, null);
     assertThat(decision.type()).isEqualTo(DecisionType.HOT);
     assertThat(decision.cacheKey()).isNull();
   }
@@ -128,29 +128,29 @@ class HotKeyDecisionTest {
 
   @Test
   void toString_shouldNotBeNull() {
-    HotKeyDecision decision = HotKeyDecision.hot("testKey");
+    HotKeyDecision decision = HotKeyDecision.hot("testKey", null);
     assertThat(decision.toString()).isNotNull();
   }
 
   @Test
   void veryLongKey_shouldBeAccepted() {
     String longKey = "k".repeat(10_000);
-    HotKeyDecision decision = HotKeyDecision.hot(longKey);
+    HotKeyDecision decision = HotKeyDecision.hot(longKey, null);
     assertThat(decision.cacheKey()).isEqualTo(longKey);
   }
 
   @Test
   void specialCharactersInKey_shouldBeAccepted() {
     String specials = "key:\n\t\r\u0000\u00E9\u4E2D\u6587";
-    HotKeyDecision decision = HotKeyDecision.hot(specials);
+    HotKeyDecision decision = HotKeyDecision.hot(specials, null);
     assertThat(decision.cacheKey()).isEqualTo(specials);
   }
 
   @Test
   void equalsAndHashCode_shouldWorkForRecords() {
-    HotKeyDecision a = HotKeyDecision.hot("k");
-    HotKeyDecision b = HotKeyDecision.hot("k");
-    HotKeyDecision c = HotKeyDecision.cool("k");
+    HotKeyDecision a = HotKeyDecision.hot("k", null);
+    HotKeyDecision b = HotKeyDecision.hot("k", null);
+    HotKeyDecision c = HotKeyDecision.cool("k", null);
     assertThat(a).isEqualTo(b);
     assertThat(a).hasSameHashCodeAs(b);
     assertThat(a).isNotEqualTo(c);
@@ -158,9 +158,9 @@ class HotKeyDecisionTest {
 
   @Test
   void record_shouldBeSerializableViaToString() {
-    HotKeyDecision hot = HotKeyDecision.hot("test");
-    HotKeyDecision cool = HotKeyDecision.cool("test");
-    HotKeyDecision none = HotKeyDecision.none("test");
+    HotKeyDecision hot = HotKeyDecision.hot("test", null);
+    HotKeyDecision cool = HotKeyDecision.cool("test", null);
+    HotKeyDecision none = HotKeyDecision.none("test", null);
     assertThat(hot.toString()).contains("HOT").contains("test");
     assertThat(cool.toString()).contains("COOL").contains("test");
     assertThat(none.toString()).contains("NONE").contains("test");

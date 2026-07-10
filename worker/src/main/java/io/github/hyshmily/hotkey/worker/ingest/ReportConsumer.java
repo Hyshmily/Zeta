@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.hotkey.worker.ingest;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_SLIDING_WINDOW;
 import static io.github.hyshmily.hotkey.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.hotkey.detection.HotKeyStateMachine;
@@ -32,6 +31,8 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Supplier;
+import lombok.Builder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -50,7 +51,7 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  *       (COLD → CONFIRMED_HOT → PRE_COOLING → COLD) has occurred.</li>
  *   <li>If the state machine returns a {@code HOT} decision, the consumer
  *       broadcasts a {@code HOT} message to all application instances and
- *       records the confirmation in the {@link TopKValidator}.</li>
+ *       records the confirmation in the {@link io.github.hyshmily.hotkey.worker.detection.TopKValidator}.</li>
  *   <li>If the state machine returns a {@code COOL} decision, it broadcasts
  *       a {@code COOL} message and marks the key as cooled in the
  *       {@link TopKValidator}.</li>
@@ -63,7 +64,6 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * key always reaches the same worker, guaranteeing correct per‑key state
  * without cross‑worker coordination.
  */
-/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class ReportConsumer {
@@ -108,6 +108,7 @@ public class ReportConsumer {
     }
   }
 
+  @SuppressWarnings("all")
   private void doOnReport(ReportMessage message) {
     long now = currentTimeMillis();
     LongAdder totalQps = new LongAdder();
@@ -140,7 +141,7 @@ public class ReportConsumer {
       // Accumulate broadcasts during parallel processing; drain serially
       // after the stream completes to avoid ForkJoin threads blocking on
       // AMQP channel write locks.
-      Queue<Runnable> pendingBroadcasts = new ConcurrentLinkedQueue<>();
+      Queue<Report> pendingBroadcasts = new ConcurrentLinkedQueue<>();
 
       // Process each key independently
       chunk
@@ -160,20 +161,41 @@ public class ReportConsumer {
             // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
             // and PRE_COOLING.
             HotKeyDecision decision = stateMachine.evaluate(key, isHot);
+            Map<String, Object> previousState = decision.snapShot();
 
             switch (decision.type()) {
               case HOT -> {
                 // A new hot key has been confirmed. Pre-allocate a decision
-                // version and enqueue the send; actual AMQP send happens
+                // version and enqueue to send; actual AMQP send happens
                 // on the consumer thread after parallelStream completes.
-                long dv = broadcaster.nextDecisionVersion();
-                pendingBroadcasts.add(() -> broadcaster.broadcastHot(key, SOURCE_SLIDING_WINDOW, dv));
-                topKValidator.markConfirmed(key);
+                if (
+                  pendingBroadcasts.add(
+                    Report.builder()
+                      .task(() -> broadcaster.broadcastHot(key))
+                      .snapShot(decision.snapShot())
+                      .build()
+                  )
+                ) {
+                  topKValidator.markConfirmed(key);
+                } else {
+                  stateMachine.rollbackToPreviousState(key, previousState);
+                  log.warn("Failed to enqueue HOT broadcast for key={}, rolling back state to {}", key, previousState);
+                }
               }
               case COOL -> {
-                long dv = broadcaster.nextDecisionVersion();
-                pendingBroadcasts.add(() -> broadcaster.broadcastCool(key, dv));
-                topKValidator.markCooled(key);
+                if (
+                  pendingBroadcasts.add(
+                    Report.builder()
+                      .task(() -> broadcaster.broadcastCool(key))
+                      .snapShot(decision.snapShot())
+                      .build()
+                  )
+                ) {
+                  topKValidator.markCooled(key);
+                } else {
+                  stateMachine.rollbackToPreviousState(key, previousState);
+                  log.warn("Failed to enqueue COOL broadcast for key={}, rolling back state to {}", key, previousState);
+                }
               }
               case NONE -> {
                 // No state transition occurred – the key remains in its
@@ -190,31 +212,40 @@ public class ReportConsumer {
             );
           }
         });
-
-      // Drain pending broadcasts serially on the consumer thread.
-      // This avoids ForkJoinPool threads blocking on AMQP channel write
-      // locks under high concurrency (8 concurrent consumers).
-      // Per ADR-0007, lost messages are tolerated by the next periodic cycle.
-      // sendBroadcast no longer throws — errors are logged and swallowed.
-      int drainedCount = 0;
-      Runnable task;
-      while ((task = pendingBroadcasts.poll()) != null) {
-        task.run();
-        drainedCount++;
-      }
-
-      if (drainedCount >= BATCH_DRAIN_WARN_THRESHOLD) {
-        log.info(
-          "ReportConsumer drained {} broadcasts for chunk {}/{} of {} keys from app={}",
-          drainedCount,
-          (chunkStart / CHUNK_SIZE) + 1,
-          (totalKeys + CHUNK_SIZE - 1) / CHUNK_SIZE,
-          totalKeys,
-          message.appName()
-        );
-      }
+      processReport(pendingBroadcasts, message, chunkStart, totalKeys);
     }
 
     globalQpsEstimator.addTotal(totalQps.sum());
   }
+
+  private void processReport(Queue<Report> pendingBroadcasts, ReportMessage message, int chunkStart, int totalKeys) {
+    // Drain pending broadcasts serially on the consumer thread.
+    // This avoids ForkJoinPool threads blocking on AMQP channel write
+    // locks under high concurrency (8 concurrent consumers).
+    // Per ADR-0007, lost messages are tolerated by the next periodic cycle.
+    // sendBroadcast no longer throws — errors are logged and swallowed.
+    int drainedCount = 0;
+    Report r;
+    while ((r = pendingBroadcasts.poll()) != null) {
+      if (Boolean.TRUE.equals(r.task().get())) {
+        drainedCount++;
+      } else {
+        stateMachine.rollbackToPreviousState(r.snapShot());
+      }
+    }
+
+    if (drainedCount >= BATCH_DRAIN_WARN_THRESHOLD) {
+      log.info(
+        "ReportConsumer drained {} broadcasts for chunk {}/{} of {} keys from app={}",
+        drainedCount,
+        (chunkStart / CHUNK_SIZE) + 1,
+        (totalKeys + CHUNK_SIZE - 1) / CHUNK_SIZE,
+        totalKeys,
+        message.appName()
+      );
+    }
+  }
+
+  @Builder
+  record Report(Supplier<Boolean> task, Map<String, Object> snapShot) {}
 }

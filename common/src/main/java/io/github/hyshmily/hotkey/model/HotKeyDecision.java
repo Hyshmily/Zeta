@@ -16,6 +16,7 @@
 package io.github.hyshmily.hotkey.model;
 
 import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
+import java.util.Map;
 
 /**
  * A decision emitted by the Worker's sliding-window / state-machine pipeline,
@@ -39,7 +40,8 @@ import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
  * @param type     the decision type (never {@code null})
  * @param cacheKey the affected cache key (never {@code null})
  */
-public record HotKeyDecision(DecisionType type, String cacheKey) {
+// modified: added snapShot field for failure rollback
+public record HotKeyDecision(DecisionType type, String cacheKey, Map<String, Object> snapShot) {
   /**
    * Possible decision outcomes for a hot-key evaluation.
    * <ul>
@@ -63,8 +65,8 @@ public record HotKeyDecision(DecisionType type, String cacheKey) {
    * @param cacheKey the affected cache key
    * @return a new {@code HotKeyDecision} with type {@link DecisionType#HOT}
    */
-  public static HotKeyDecision hot(String cacheKey) {
-    return new HotKeyDecision(DecisionType.HOT, cacheKey);
+  public static HotKeyDecision hot(String cacheKey, Map<String, Object> snapShot) {
+    return new HotKeyDecision(DecisionType.HOT, cacheKey, snapShot);
   }
 
   /**
@@ -73,8 +75,8 @@ public record HotKeyDecision(DecisionType type, String cacheKey) {
    * @param cacheKey the affected cache key
    * @return a new {@code HotKeyDecision} with type {@link DecisionType#COOL}
    */
-  public static HotKeyDecision cool(String cacheKey) {
-    return new HotKeyDecision(DecisionType.COOL, cacheKey);
+  public static HotKeyDecision cool(String cacheKey, Map<String, Object> snapShot) {
+    return new HotKeyDecision(DecisionType.COOL, cacheKey, snapShot);
   }
 
   /**
@@ -83,7 +85,7 @@ public record HotKeyDecision(DecisionType type, String cacheKey) {
    * @param cacheKey the affected cache key
    * @return a new {@code HotKeyDecision} with type {@link DecisionType#NONE}
    */
-  public static HotKeyDecision none(String cacheKey) {
-    return new HotKeyDecision(DecisionType.NONE, cacheKey);
+  public static HotKeyDecision none(String cacheKey, Map<String, Object> snapShot) {
+    return new HotKeyDecision(DecisionType.NONE, cacheKey, snapShot);
   }
 }

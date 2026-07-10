@@ -15,13 +15,16 @@
  */
 package io.github.hyshmily.hotkey.cache.annotationsupporter;
 
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
+import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
-
-import static org.assertj.core.api.Assertions.assertThat;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
 
 @DisplayName("NullValue sentinel tests")
 class NullValueTest {
@@ -52,5 +55,20 @@ class NullValueTest {
   @DisplayName("cannot instantiate via reflection")
   void cannotInstantiateViaReflection() {
     assertThat(NullValue.class.getDeclaredConstructors()[0].canAccess(null)).isFalse();
+  }
+
+  @Test
+  @DisplayName("readResolve returns INSTANCE singleton after deserialization")
+  void readResolve_shouldReturnSingleton() throws Exception {
+    NullValue original = NullValue.INSTANCE;
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    try (ObjectOutputStream oos = new ObjectOutputStream(bos)) {
+      oos.writeObject(original);
+    }
+    ByteArrayInputStream bis = new ByteArrayInputStream(bos.toByteArray());
+    try (ObjectInputStream ois = new ObjectInputStream(bis)) {
+      NullValue deserialized = (NullValue) ois.readObject();
+      assertThat(deserialized).isSameAs(NullValue.INSTANCE);
+    }
   }
 }

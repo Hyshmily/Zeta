@@ -71,7 +71,7 @@ class ReportConsumerTest {
   void shouldProcessEntriesAndFeedAllComponents() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("key1", 5L, "key2", 3L));
     when(detector.addCount(anyString(), anyLong())).thenReturn(false);
-    when(stateMachine.evaluate(anyString(), anyBoolean())).thenReturn(HotKeyDecision.none("key"));
+    when(stateMachine.evaluate(anyString(), anyBoolean())).thenReturn(HotKeyDecision.none("key", null));
 
     consumer.onReport(message);
 
@@ -88,11 +88,11 @@ class ReportConsumerTest {
   void shouldBroadcastHotWhenStateMachineReturnsHot() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
     when(detector.addCount("hotKey", 100L)).thenReturn(true);
-    when(stateMachine.evaluate("hotKey", true)).thenReturn(HotKeyDecision.hot("hotKey"));
+    when(stateMachine.evaluate("hotKey", true)).thenReturn(HotKeyDecision.hot("hotKey", null));
 
     consumer.onReport(message);
 
-    verify(broadcaster).broadcastHot(eq("hotKey"), eq("sliding_window"), anyLong());
+    verify(broadcaster).broadcastHot(eq("hotKey"));
     verify(topKValidator).markConfirmed("hotKey");
   }
 
@@ -103,11 +103,11 @@ class ReportConsumerTest {
   void shouldBroadcastCoolWhenStateMachineReturnsCool() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
     when(detector.addCount("coolKey", 1L)).thenReturn(false);
-    when(stateMachine.evaluate("coolKey", false)).thenReturn(HotKeyDecision.cool("coolKey"));
+    when(stateMachine.evaluate("coolKey", false)).thenReturn(HotKeyDecision.cool("coolKey", null));
 
     consumer.onReport(message);
 
-    verify(broadcaster).broadcastCool(eq("coolKey"), anyLong());
+    verify(broadcaster).broadcastCool(eq("coolKey"));
     verify(topKValidator).markCooled("coolKey");
   }
 
@@ -162,7 +162,7 @@ class ReportConsumerTest {
       Map.of("bigKey", (long) Integer.MAX_VALUE)
     );
     when(detector.addCount("bigKey", Integer.MAX_VALUE)).thenReturn(false);
-    when(stateMachine.evaluate("bigKey", false)).thenReturn(HotKeyDecision.none("bigKey"));
+    when(stateMachine.evaluate("bigKey", false)).thenReturn(HotKeyDecision.none("bigKey", null));
 
     consumer.onReport(message);
 
@@ -182,7 +182,7 @@ class ReportConsumerTest {
       Map.of("hugeKey", (long) Integer.MAX_VALUE + 1)
     );
     when(detector.addCount("hugeKey", (long) Integer.MAX_VALUE + 1)).thenReturn(false);
-    when(stateMachine.evaluate("hugeKey", false)).thenReturn(HotKeyDecision.none("hugeKey"));
+    when(stateMachine.evaluate("hugeKey", false)).thenReturn(HotKeyDecision.none("hugeKey", null));
 
     consumer.onReport(message);
 
@@ -196,7 +196,7 @@ class ReportConsumerTest {
   void shouldHandleNegativeCounts() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("negKey", -5L));
     when(detector.addCount("negKey", -5L)).thenReturn(false);
-    when(stateMachine.evaluate("negKey", false)).thenReturn(HotKeyDecision.none("negKey"));
+    when(stateMachine.evaluate("negKey", false)).thenReturn(HotKeyDecision.none("negKey", null));
 
     consumer.onReport(message);
 
@@ -214,7 +214,7 @@ class ReportConsumerTest {
     long now = System.currentTimeMillis();
     ReportMessage message = new ReportMessage("testApp", now - 1, Map.of("key", 1L));
     when(detector.addCount("key", 1L)).thenReturn(false);
-    when(stateMachine.evaluate("key", false)).thenReturn(HotKeyDecision.none("key"));
+    when(stateMachine.evaluate("key", false)).thenReturn(HotKeyDecision.none("key", null));
 
     consumer.onReport(message);
 
@@ -228,12 +228,12 @@ class ReportConsumerTest {
   void shouldNotBroadcastWhenDecisionIsNone() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("key", 1L));
     when(detector.addCount("key", 1L)).thenReturn(false);
-    when(stateMachine.evaluate("key", false)).thenReturn(HotKeyDecision.none("key"));
+    when(stateMachine.evaluate("key", false)).thenReturn(HotKeyDecision.none("key", null));
 
     consumer.onReport(message);
 
-    verify(broadcaster, never()).broadcastHot(anyString(), anyString(), anyLong());
-    verify(broadcaster, never()).broadcastCool(anyString(), anyLong());
+    verify(broadcaster, never()).broadcastHot(anyString());
+    verify(broadcaster, never()).broadcastCool(anyString());
     verify(topKValidator, never()).markConfirmed(anyString());
     verify(topKValidator, never()).markCooled(anyString());
   }
@@ -250,7 +250,7 @@ class ReportConsumerTest {
     );
     when(detector.addCount("goodKey", 1L)).thenReturn(false);
     when(detector.addCount("badKey", 2L)).thenReturn(true);
-    when(stateMachine.evaluate("goodKey", false)).thenReturn(HotKeyDecision.none("goodKey"));
+    when(stateMachine.evaluate("goodKey", false)).thenReturn(HotKeyDecision.none("goodKey", null));
     when(stateMachine.evaluate("badKey", true)).thenThrow(new RuntimeException("state machine error"));
 
     consumer.onReport(message);
@@ -269,11 +269,11 @@ class ReportConsumerTest {
   void broadcastHotSuccess_shouldNotRollback() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
     when(detector.addCount("hotKey", 100L)).thenReturn(true);
-    when(stateMachine.evaluate("hotKey", true)).thenReturn(HotKeyDecision.hot("hotKey"));
+    when(stateMachine.evaluate("hotKey", true)).thenReturn(HotKeyDecision.hot("hotKey", null));
 
     consumer.onReport(message);
 
-    verify(broadcaster).broadcastHot(eq("hotKey"), eq("sliding_window"), anyLong());
+    verify(broadcaster).broadcastHot(eq("hotKey"));
     verify(topKValidator).markConfirmed("hotKey");
   }
 
@@ -284,11 +284,11 @@ class ReportConsumerTest {
   void broadcastCoolSuccess_shouldNotRollback() {
     ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
     when(detector.addCount("coolKey", 1L)).thenReturn(false);
-    when(stateMachine.evaluate("coolKey", false)).thenReturn(HotKeyDecision.cool("coolKey"));
+    when(stateMachine.evaluate("coolKey", false)).thenReturn(HotKeyDecision.cool("coolKey", null));
 
     consumer.onReport(message);
 
-    verify(broadcaster).broadcastCool(eq("coolKey"), anyLong());
+    verify(broadcaster).broadcastCool(eq("coolKey"));
     verify(topKValidator).markCooled("coolKey");
     verify(stateMachine, never()).rollbackToPreviousState(anyString(), anyMap());
   }

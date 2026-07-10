@@ -22,13 +22,12 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
-/*
+/**
  * Worker-side verification request handler — receives PING from App, replies PONG.
  *
  * <p>Queue: hotkey.verify.ping.{workerId}
  * Uses Direct reply-to (amq.rabbitmq.reply-to) for the response.
  */
-/** Default constructor. */
 @AllArgsConstructor
 public class VerifyConsumer {
 

@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.hotkey.worker.detection;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.SOURCE_TOPK_PRE_WARM;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.hotkeydetector.heavykeeper.Item;
@@ -49,7 +47,6 @@ import lombok.extern.slf4j.Slf4j;
  * hot key that is split across multiple shards may never reach any single
  * Worker's TopK list.
  */
-/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class TopKValidator {
@@ -110,7 +107,7 @@ public class TopKValidator {
       AtomicInteger appearances = topKAppearances.computeIfAbsent(item.key(), k -> new AtomicInteger(0));
 
       if (appearances.incrementAndGet() >= preWarmMinAppearances) {
-        broadcaster.broadcastHot(item.key(), SOURCE_TOPK_PRE_WARM);
+        broadcaster.broadcastHot(item.key());
 
         confirmedHotKeys.put(item.key(), Boolean.TRUE);
         topKAppearances.remove(item.key());
