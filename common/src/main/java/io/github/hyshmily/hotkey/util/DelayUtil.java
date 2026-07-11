@@ -58,7 +58,21 @@ public final class DelayUtil {
    * @return random jitter offset in milliseconds (maybe negative, zero, or positive)
    */
   public static long computeTtlJitter(long ttlMs, double ttlJitterRatio) {
-    return (long) (ttlMs * ttlJitterRatio * ThreadLocalRandom.current().nextDouble(-1.0, 1.0));
+    if (ttlMs <= 0 || ttlJitterRatio <= 0) {
+      return 0;
+    }
+
+    long baseJitter = (long) (ttlMs * ttlJitterRatio);
+    if (baseJitter <= 0) {
+      return 0;
+    }
+
+    if (baseJitter > Long.MAX_VALUE / 2) {
+      baseJitter = Long.MAX_VALUE / 2;
+    }
+
+    long randomOffset = ThreadLocalRandom.current().nextLong(0, 2 * baseJitter + 1);
+    return randomOffset - baseJitter;
   }
 
   /** Private constructor to prevent instantiation of this utility class. */

@@ -25,7 +25,6 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.hotkey.autoconfigure.HotKeyProperties;
-import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
@@ -33,7 +32,6 @@ import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.hotkey.sync.worker.WorkerMessage;
-import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.hotkey.util.ratelimit.impl.SreRateLimiterImpl;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -67,13 +65,17 @@ class WorkerListenerTest {
     HotKeyProperties ttlConfig = new HotKeyProperties();
     ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     listener = new WorkerListener(cache, redisLoader, properties, scheduler, expireManager, null);
+    listener.init();
     channel = mock(Channel.class);
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
-    CountDownLatch latch = new CountDownLatch(1);
-    scheduler.schedule(latch::countDown, 0, TimeUnit.MILLISECONDS);
-    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    CountDownLatch phase1 = new CountDownLatch(1);
+    CountDownLatch phase2 = new CountDownLatch(1);
+    scheduler.execute(() -> phase1.countDown());
+    assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
+    scheduler.execute(() -> phase2.countDown());
+    assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
   }
 
   /**
@@ -135,14 +137,18 @@ class WorkerListenerTest {
     HotKeyProperties ttlConfig = new HotKeyProperties();
     ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     WorkerListener throttled = new WorkerListener(cache, k -> "v", props, sched, expireManager, limiter);
+    throttled.init();
 
     cache.put("key1", hotEntry());
     throttled.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     {
-      CountDownLatch latch = new CountDownLatch(1);
-      sched.schedule(latch::countDown, 0, TimeUnit.MILLISECONDS);
-      assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+      CountDownLatch phase1 = new CountDownLatch(1);
+      CountDownLatch phase2 = new CountDownLatch(1);
+      sched.execute(() -> phase1.countDown());
+      assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
+      sched.execute(() -> phase2.countDown());
+      assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
       sched.shutdown();
     }
     verify(limiter).onFailed();
@@ -160,6 +166,7 @@ class WorkerListenerTest {
     HotKeyProperties ttlConfig = new HotKeyProperties();
     ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     WorkerListener nullLoader = new WorkerListener(cache, k -> null, props, sched, expireManager, null);
+    nullLoader.init();
 
     nullLoader.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
@@ -204,13 +211,17 @@ class WorkerListenerTest {
       expireManager,
       null
     );
+    failingLoader.init();
 
     failingLoader.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     {
-      CountDownLatch latch = new CountDownLatch(1);
-      sched.schedule(latch::countDown, 0, TimeUnit.MILLISECONDS);
-      assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+      CountDownLatch phase1 = new CountDownLatch(1);
+      CountDownLatch phase2 = new CountDownLatch(1);
+      sched.execute(() -> phase1.countDown());
+      assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
+      sched.execute(() -> phase2.countDown());
+      assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
       sched.shutdown();
     }
     assertThat(cache.getIfPresent("key1")).satisfies(o -> {
@@ -224,10 +235,11 @@ class WorkerListenerTest {
    * Verifies that a HOT decision with stale decision version is skipped via version guard.
    */
   @Test
-  void handleWorkerMessage_hot_withStaleDecisionVersion_shouldSkip() throws IOException {
+  void handleWorkerMessage_hot_withStaleDecisionVersion_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
     listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
+    awaitWorkerTasks();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(1);
   }
 
@@ -235,9 +247,10 @@ class WorkerListenerTest {
    * Verifies that a COOL decision with no existing entry is a no-op.
    */
   @Test
-  void handleWorkerMessage_cool_withNoExistingEntry_shouldBeNoOp() throws IOException {
+  void handleWorkerMessage_cool_withNoExistingEntry_shouldBeNoOp() throws IOException, InterruptedException {
     listener.handleWorkerMessage(channel, workerMessage("nonexistent", WorkerMessage.TYPE_COOL, 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
+    awaitWorkerTasks();
     assertThat(cache.getIfPresent("nonexistent")).isNull();
   }
 
@@ -245,10 +258,11 @@ class WorkerListenerTest {
    * Verifies that a COOL decision with stale decision version is skipped.
    */
   @Test
-  void handleWorkerMessage_cool_withStaleDecisionVersion_shouldSkip() throws IOException {
+  void handleWorkerMessage_cool_withStaleDecisionVersion_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", hotEntry());
     listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 0L));
     verify(channel).basicAck(anyLong(), anyBoolean());
+    awaitWorkerTasks();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
   }
 
@@ -323,14 +337,18 @@ class WorkerListenerTest {
     HotKeyProperties ttlConfig = new HotKeyProperties();
     ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     WorkerListener throttled = new WorkerListener(cache, k -> "fresh", props, sched, expireManager, limiter);
+    throttled.init();
 
     cache.put("key1", entry(1, false, 0));
     throttled.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
     verify(channel).basicAck(anyLong(), anyBoolean());
     {
-      CountDownLatch latch = new CountDownLatch(1);
-      sched.schedule(latch::countDown, 0, TimeUnit.MILLISECONDS);
-      assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+      CountDownLatch phase1 = new CountDownLatch(1);
+      CountDownLatch phase2 = new CountDownLatch(1);
+      sched.execute(() -> phase1.countDown());
+      assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
+      sched.execute(() -> phase2.countDown());
+      assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
       sched.shutdown();
     }
     verify(limiter).onSuccess();

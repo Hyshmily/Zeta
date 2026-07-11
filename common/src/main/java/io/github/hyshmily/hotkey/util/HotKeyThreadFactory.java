@@ -31,7 +31,6 @@ import org.jspecify.annotations.NonNull;
 @Internal
 public class HotKeyThreadFactory implements ThreadFactory {
 
-  private final ThreadGroup group;
   private final AtomicInteger threadNumber = new AtomicInteger(1);
   private final String namePrefix;
 
@@ -42,13 +41,12 @@ public class HotKeyThreadFactory implements ThreadFactory {
    *                   (e.g. {@code "hotkey-scheduler-"})
    */
   public HotKeyThreadFactory(String namePrefix) {
-    this.group = Thread.currentThread().getThreadGroup();
     this.namePrefix = namePrefix;
   }
 
   @Override
   public Thread newThread(@NonNull Runnable r) {
-    Thread t = new Thread(group, r, namePrefix + threadNumber.getAndIncrement(), 0);
+    Thread t = new Thread(r, namePrefix + threadNumber.getAndIncrement());
     t.setDaemon(true);
     if (t.getPriority() != Thread.NORM_PRIORITY) {
       t.setPriority(Thread.NORM_PRIORITY);

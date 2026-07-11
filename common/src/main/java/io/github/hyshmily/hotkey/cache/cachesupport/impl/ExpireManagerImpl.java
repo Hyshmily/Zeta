@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.hotkey.cache.cachesupport.impl;
 
-import static io.github.hyshmily.hotkey.constants.HotKeyConstants.VERSION_DEFAULT;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.hotkey.Internal;
@@ -27,11 +25,14 @@ import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import io.github.hyshmily.hotkey.util.TimeSource;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.Optional;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.hotkey.constants.HotKeyConstants.VERSION_DEFAULT;
 
 /**
  * Manages hard and soft TTL computation for {@link CacheEntry} instances.
@@ -872,23 +873,24 @@ public class ExpireManagerImpl implements ExpireManager {
             }
             return applySoftTtl(replaceEntryValue(entry, value), softTtlMs);
           })
-          .orElseGet(() ->
-            createBuilder(
+          .orElseGet(() -> {
+            long effectiveHardTtl = getEffectiveHardTtlMs();
+            return createBuilder(
               value,
               VERSION_DEFAULT,
               false,
               refreshStartDecisionVersion,
               refreshStartDecisionNodeId,
               refreshStartDecisionEpoch,
-              0L,
+              effectiveHardTtl,
               softTtlMs,
-              Long.MAX_VALUE,
+              toHardExpireTimestamp(effectiveHardTtl),
               computeSoftExpireAt(softTtlMs),
-              0L,
-              0L,
+              getEffectiveHardTtlMs(),
+              getEffectiveSoftTtlMs(),
               refreshStartKeyState
-            )
-          )
+            );
+          })
       );
   }
 

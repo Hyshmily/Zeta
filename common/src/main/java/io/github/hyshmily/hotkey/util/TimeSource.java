@@ -57,6 +57,7 @@ public final class TimeSource {
           try {
             Thread.sleep(5);
           } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
             threadRunning.set(false);
           }
         }
@@ -66,7 +67,9 @@ public final class TimeSource {
         threadRunning.set(false);
         try {
           Thread.sleep(1000);
-        } catch (InterruptedException ignored) {}
+        } catch (InterruptedException ignored) {
+          Thread.currentThread().interrupt();
+        }
         start();
       });
       t.start();

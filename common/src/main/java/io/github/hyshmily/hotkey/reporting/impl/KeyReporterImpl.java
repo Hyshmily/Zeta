@@ -243,6 +243,7 @@ public class KeyReporterImpl implements KeyReporter {
    *
    * <p>If no Workers are alive, the batch is silently discarded.
    */
+  @SuppressWarnings("all")
   private void onFlush(Map<String, Long> keyCounts) {
     if (keyCounts.isEmpty()) {
       return;

@@ -27,9 +27,12 @@ import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
 import io.github.hyshmily.hotkey.rule.RuleMatcher;
+import io.github.hyshmily.hotkey.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.hotkey.sync.worker.WorkerListener;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import io.github.hyshmily.hotkey.util.version.VersionGuard;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -103,11 +106,26 @@ public class CacheSyncListener {
   /** Hot-key rule matcher whose rule set is updated when a RULES_SYNC message arrives. */
   private final RuleMatcher ruleMatcher;
 
+  /** Per-key FIFO dispatcher for ordered cache mutation execution. */
+  private PerKeyOrderedDispatcher dispatcher;
+
   /**
    * Tracks the highest INVALIDATE version per key, preventing stale REFRESH
    * messages (from before the INVALIDATE) from recreating the entry.
    */
   private final ConcurrentHashMap<String, Long> recentInvalidated = new ConcurrentHashMap<>();
+
+  @PostConstruct
+  public void init() {
+    this.dispatcher = new PerKeyOrderedDispatcher(scheduler, "cache-sync");
+  }
+
+  @PreDestroy
+  public void destroy() {
+    if (dispatcher != null) {
+      dispatcher.close();
+    }
+  }
 
   /**
    * RabbitMQ message callback for incoming sync messages. Acknowledges the message
@@ -160,8 +178,9 @@ public class CacheSyncListener {
       }
     };
 
-    // Random jitter spreads out Redis fetches, reducing hotspot load during batch sync.
-    DelayUtil.floatTimeDelay(task, properties.getWarmupJitterMs(), scheduler);
+    // Outer jitter spreads Redis reads across instances.
+    // Inner per-key FIFO ensures same-key ordering on this instance.
+    DelayUtil.floatTimeDelay(() -> dispatcher.submit(sm.cacheKey(), task), properties.getWarmupJitterMs(), scheduler);
   }
 
   /**

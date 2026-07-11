@@ -192,6 +192,7 @@ public class WorkerHeartbeatVerifier {
    * <p>This method is called periodically by the scheduled task and is also
    * safe to invoke manually for testing.
    */
+  @SuppressWarnings("all")
   public void verifySuspectedWorkers() {
     try {
       Set<String> suspected = healthView

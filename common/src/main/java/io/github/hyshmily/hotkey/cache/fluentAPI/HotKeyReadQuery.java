@@ -250,7 +250,7 @@ public class HotKeyReadQuery<T> {
     return execute().orElse(defaultValue);
   }
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public Optional<T> execute() {
     if (!executed.compareAndSet(false, true)) {
       throw new IllegalStateException("HotKeyReadQuery can only be executed once");

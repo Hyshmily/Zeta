@@ -156,7 +156,9 @@ public class SystemLoadMonitorImpl implements SystemLoadMonitor {
       if (osBean instanceof com.sun.management.OperatingSystemMXBean sunOsBean) {
         return Math.min(1.0, Math.max(0.0, sunOsBean.getCpuLoad()));
       }
-    } catch (Exception ignored) {}
+    } catch (Exception e) {
+      log.warn("Failed to read CPU load from MXBean; returning 0.0", e);
+    }
     return 0.0;
   }
 

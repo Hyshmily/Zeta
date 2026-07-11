@@ -25,11 +25,14 @@ import io.github.hyshmily.hotkey.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.hotkey.cache.loader.CacheLoader;
 import io.github.hyshmily.hotkey.model.CacheEntry;
 import io.github.hyshmily.hotkey.model.KeyState;
+import io.github.hyshmily.hotkey.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.hotkey.sync.local.CacheSyncListener;
 import io.github.hyshmily.hotkey.util.DelayUtil;
 import io.github.hyshmily.hotkey.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.hotkey.util.ratelimit.impl.SreRateLimiterImpl;
 import io.github.hyshmily.hotkey.util.version.VersionGuard;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
@@ -100,6 +103,9 @@ public class WorkerListener {
    * {@code null} disables rate limiting. */
   private final SreRateLimiterImpl sreRateLimiter;
 
+  /** Per-key FIFO dispatcher for ordered cache mutation execution. */
+  private PerKeyOrderedDispatcher dispatcher;
+
   /** Fallback hard TTL (seconds) for COOL entries when no normal TTL is configured on the existing entry. */
   private static final long COOL_DEFAULT_PROTECTION_HARDTTL_TIME = 120;
   /** Fallback soft TTL (seconds) for COOL entries when no normal TTL is configured on the existing entry. */
@@ -108,6 +114,18 @@ public class WorkerListener {
   private static final double COOL_DEFAULT_PROTECTION_HARDTTL_TIME_RATIO = 0.2;
   /** Jitter ratio for COOL fallback soft TTL (±20%). */
   private static final double COOL_DEFAULT_PROTECTION_SOFTTTL_TIME_RATIO = 0.2;
+
+  @PostConstruct
+  public void init() {
+    this.dispatcher = new PerKeyOrderedDispatcher(scheduler, "worker-listener");
+  }
+
+  @PreDestroy
+  public void destroy() {
+    if (dispatcher != null) {
+      dispatcher.close();
+    }
+  }
 
   /**
    * RabbitMQ message callback for incoming Worker decisions. Acknowledges the message
@@ -165,9 +183,9 @@ public class WorkerListener {
       }
     };
 
-    // Random jitter spreads Redis reads across a small time window,
-    // preventing all nodes from fetching the same key simultaneously.
-    DelayUtil.floatTimeDelay(task, properties.getWarmupJitterMs(), scheduler);
+    // Outer jitter spreads Redis reads across instances.
+    // Inner per-key FIFO ensures same-key ordering on this instance.
+    DelayUtil.floatTimeDelay(() -> dispatcher.submit(wm.cacheKey(), task), properties.getWarmupJitterMs(), scheduler);
   }
 
   /**

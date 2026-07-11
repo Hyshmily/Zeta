@@ -130,6 +130,7 @@ public class RedisLockProvider implements LockProvider {
    * @param unlockCount   DEL retries on release
    * @return a handle if acquired, or {@code null} on failure
    */
+  @SuppressWarnings("all")
   private AutoReleaseLock acquireLock(
     String key,
     long expire,
@@ -209,6 +210,7 @@ public class RedisLockProvider implements LockProvider {
      * already expired (Redis TTL handles cleanup).
      */
     @Override
+    @SuppressWarnings("all")
     public void close() {
       for (int i = 0; i < unlockCount; i++) {
         if (System.currentTimeMillis() < expireTimestamp) {

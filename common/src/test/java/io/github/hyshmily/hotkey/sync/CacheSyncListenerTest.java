@@ -68,13 +68,17 @@ class CacheSyncListenerTest {
     ruleMatcher = mock(RuleMatcher.class);
 
     listener = new CacheSyncListener(cache, redisLoader, properties, scheduler, expireManager, ruleMatcher);
+    listener.init();
     channel = mock(Channel.class);
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
-    CountDownLatch latch = new CountDownLatch(1);
-    scheduler.schedule(latch::countDown, 0, TimeUnit.MILLISECONDS);
-    assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    CountDownLatch phase1 = new CountDownLatch(1);
+    CountDownLatch phase2 = new CountDownLatch(1);
+    scheduler.execute(() -> phase1.countDown());
+    assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
+    scheduler.execute(() -> phase2.countDown());
+    assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
   }
 
   /**
@@ -162,6 +166,7 @@ class CacheSyncListenerTest {
       expireManager,
       ruleMatcher
     );
+    nullListener.init();
 
     nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
@@ -271,6 +276,7 @@ class CacheSyncListenerTest {
       expireManager,
       ruleMatcher
     );
+    failingListener.init();
 
     cache.put("key1", entry(1, false, 0));
     failingListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
@@ -281,10 +287,11 @@ class CacheSyncListenerTest {
    * Verifies that a refresh with stale incoming degraded version is skipped (existing normal wins).
    */
   @Test
-  void handleSyncMessage_withRefreshStaleDegradedIncoming_shouldSkip() throws IOException {
+  void handleSyncMessage_withRefreshStaleDegradedIncoming_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", entry(5, false, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 10L, true));
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(5);
   }
 
@@ -321,7 +328,8 @@ class CacheSyncListenerTest {
    * Verifies that a refresh with null loader return on a plain string value preserves it.
    */
   @Test
-  void handleSyncMessage_withRefreshOnStringValueAndNullLoaderReturn_shouldPreserve() throws IOException {
+  void handleSyncMessage_withRefreshOnStringValueAndNullLoaderReturn_shouldPreserve()
+    throws IOException, InterruptedException {
     CacheLoader nullLoader = k -> null;
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
@@ -335,10 +343,12 @@ class CacheSyncListenerTest {
       expireManager,
       ruleMatcher
     );
+    nullListener.init();
 
     cache.put("key1", entry(5, false, 0));
     nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 6L, false));
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(5);
   }
 
@@ -346,10 +356,11 @@ class CacheSyncListenerTest {
    * Verifies that an invalidate with degraded incoming on normal existing entry is skipped.
    */
   @Test
-  void handleSyncMessage_withInvalidateDegradedIncomingOnNormal_shouldSkip() throws IOException {
+  void handleSyncMessage_withInvalidateDegradedIncomingOnNormal_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", entry(5, false, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 3L, true));
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).isNotNull();
   }
 
@@ -357,10 +368,11 @@ class CacheSyncListenerTest {
    * Verifies that both-degraded refresh with equal version is skipped.
    */
   @Test
-  void handleSyncMessage_withRefreshBothDegradedEqualVersion_shouldSkip() throws IOException {
+  void handleSyncMessage_withRefreshBothDegradedEqualVersion_shouldSkip() throws IOException, InterruptedException {
     cache.put("key1", entry(5, true, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, true));
     verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).isNotNull();
   }
 
