@@ -14,12 +14,12 @@
   </parent>
 
   <groupId>io.github.hyshmily</groupId>
-  <artifactId>hotkey-worker</artifactId>
-  <version>1.1.54</version>
+  <artifactId>zeta-worker</artifactId>
+  <version>1.1.55</version>
   <packaging>jar</packaging>
 
-  <name>HotKey Worker Server</name>
-  <description>Standalone Worker server for HotKey cluster-wide hot key detection</description>
+  <name>Zeta Worker Server</name>
+  <description>Standalone Worker server for Zeta cluster-wide hot key detection</description>
 
   <properties>
     <java.version>17</java.version>
@@ -31,7 +31,7 @@
   <dependencies>
     <dependency>
       <groupId>io.github.hyshmily</groupId>
-      <artifactId>hotkey</artifactId>
+      <artifactId>zeta</artifactId>
       <version>${project.version}</version>
     </dependency>
 
@@ -88,7 +88,7 @@
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
         <configuration>
-          <mainClass>io.github.hyshmily.hotkey.worker.WorkerApplication</mainClass>
+          <mainClass>io.github.hyshmily.zeta.worker.WorkerApplication</mainClass>
         </configuration>
         <executions>
           <execution>

@@ -1,6 +1,6 @@
 # Local Promotion with Worker-Aware Fallback
 
-`processLocalHotkeyIfNeeded` upgrades NORMAL entries to HOT on every L1 hit (both `get` and `getWithSoftExpire`), and also upgrades COOL entries only when `ClusterHealthView.isClusterHealthy()` returns `false`.
+`processLocalHotkeyIfNeeded` upgrades NORMAL entries to HOT on every L1 hit (both `get` and `getWithSoftExpire`), and upgrades COOL entries only when `ClusterHealthView.isClusterHealthy()` returns `false`.
 
 ## Decision
 

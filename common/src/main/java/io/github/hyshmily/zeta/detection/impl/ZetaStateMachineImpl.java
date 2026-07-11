@@ -1,0 +1,354 @@
+/*
+ * Copyright 2026 Hyshmily. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.github.hyshmily.zeta.detection.impl;
+
+import static io.github.hyshmily.zeta.detection.ZetaStateMachine.State.*;
+
+import com.google.common.util.concurrent.Striped;
+import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.model.ZetaDecision;
+import java.util.Collections;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * Per-key state machine that governs hot-key lifecycle transitions on the
+ * Worker side.
+ *
+ * <p>Each Worker shard owns a subset of keys (determined by
+ * {@link io.github.hyshmily.zeta.sharding.ConsistentHashRing} routing)
+ * and runs one {@code ZetaStateMachine} instance per owned shard. The
+ * state machine converts per-key sliding-window frequency observations
+ * into lifecycle transitions — promoting COLD keys to CONFIRMED_HOT when
+ * sustained traffic is detected, and demoting them back to COLD after a
+ * prolonged cool-down.
+ *
+ * <h3>State diagram</h3>
+ * <pre>
+ *   COLD
+ *    │  hotStreak >= confirmCount  (consecutive hot windows)
+ *    ▼
+ *   CONFIRMED_HOT   ─────────────────────────────┐
+ *    │                                           │
+ *    │  coolStreak >= (coolCount - grace)        │ hotStreak > 0 (revive during pre-cool)
+ *    ▼                                           │
+ *   PRE_COOLING ─────────────────────────────────┘
+ *    │
+ *    │  coolStreak >= coolCount  (fully cooled)
+ *    ▼
+ *   COLD
+ * </pre>
+ *
+ * <h3>Design rationale</h3>
+ * <ul>
+ *   <li><b>Fast detection:</b> only {@code confirmCount} consecutive hot windows are
+ *       needed to promote a key to {@code CONFIRMED_HOT}.</li>
+ *   <li><b>Slow cool-down:</b> cooling requires many more consecutive cold windows,
+ *       with an intermediate {@code PRE_COOLING} grace period.  If traffic resumes
+ *       during this period the key silently returns to {@code CONFIRMED_HOT} without
+ *       broadcasting (no COOL → HOT oscillation).</li>
+ *   <li><b>Asymmetric thresholds:</b> protect aggressively, recover cautiously.
+ *       This prevents flapping when traffic is bursty or when the cluster briefly
+ *       stops reporting a key.</li>
+ * </ul>
+ *
+ * <p>Thread-safe: per-key state is guarded by a {@link Striped} lock (1024
+ * stripes, strong references via {@link Striped#lock}). Evaluations of
+ * different keys proceed in parallel; evaluations of the same key are
+ * serialized, eliminating the race window between {@code hotStreak++} and
+ * the state transition check caused by concurrent delivery of the same key
+ * across multiple consumer threads.
+ *
+ * <p>State and last-touch timestamp are stored together in {@link KeyState},
+ * eliminating the need for a separate timestamp map. {@link #evictStale}
+ * reads {@link KeyState#lastUpdateTime} without the per-key lock — the
+ * field is {@code volatile} for visibility.
+ *
+ * <p>{@code reset()} acquires the per-key lock to avoid races with a
+ * concurrent {@link #evaluate} for the same key.
+ *
+ * <p>Designed for single-shard workers; each key is owned by exactly one worker
+ * thanks to consistent-hash routing on the client side.</p>
+ */
+@Internal
+@Slf4j
+@AllArgsConstructor
+public class ZetaStateMachineImpl implements ZetaStateMachine {
+
+  /** Number of consecutive hot windows required to promote COLD → CONFIRMED_HOT. */
+  @Getter
+  @Setter
+  private volatile int confirmCount;
+
+  /**
+   * Total number of consecutive cold windows required for a full cool-down
+   * (CONFIRMED_HOT → PRE_COOLING → COLD).  Must be greater than
+   * {@code preCoolGraceCount}.
+   */
+  @Getter
+  @Setter
+  private volatile int coolCount;
+
+  /**
+   * The number of cold windows that mark the entry into PRE_COOLING.
+   * The remaining {@code coolCount - preCoolGraceCount} windows are the
+   * grace period during which the key can revive without a send.
+   */
+  @Getter
+  @Setter
+  private volatile int preCoolGraceCount;
+
+  /** Current state + streak counters, keyed by cache key. */
+  private final ConcurrentHashMap<String, KeyState> states = new ConcurrentHashMap<>();
+
+  /**
+   * Per-key striped lock — serializes evaluations of the same key when
+   * multiple consumer threads process overlapping messages, preventing
+   * lost increments on {@code hotStreak++} / {@code coolStreak++}.
+   *
+   * <p>1024 stripes keep collision probability below 0.1% at
+   * {@code concurrency=8} while adding negligible memory overhead.
+   */
+  private final Striped<Lock> keyLocks = Striped.lock(1024);
+
+  /**
+   * Evaluates the current sliding-window observation for the given key and
+   * returns a decision instructing the caller whether to send a HOT or
+   * COOL message.
+   *
+   * <p>This method implements the state transitions described in the class
+   * Javadoc. It updates the per-key streak counters ({@code hotStreak} /
+   * {@code coolStreak}) atomically (via {@link ConcurrentHashMap#computeIfAbsent})
+   * and returns one of:
+   * <ul>
+   *   <li>{@link ZetaDecision.DecisionType#HOT} — key just crossed the
+   *       promotion threshold; send HOT to application instances.</li>
+   *   <li>{@link ZetaDecision.DecisionType#COOL} — key has fully cooled
+   *       down; send COOL so apps revert to normal TTL.</li>
+   *   <li>{@link ZetaDecision.DecisionType#NONE} — no state transition
+   *       occurred; no action required.</li>
+   * </ul>
+   *
+   * <p>Silent revive (PRE_COOLING → CONFIRMED_HOT) returns NONE to
+   * suppress unnecessary broadcasts and prevent HOT/COOL oscillation.
+   *
+   * @param key             the cache key (must not be {@code null})
+   * @param isHotThisWindow {@code true} if the sliding-window frequency sum
+   *                        exceeds the hot threshold during this evaluation
+   *                        cycle; {@code false} otherwise
+   * @return a non-null {@link ZetaDecision} indicating what action the
+   *         caller should take (HOT, COOL, or NONE)
+   */
+  public ZetaDecision evaluate(String key, boolean isHotThisWindow) {
+    // Fast path: never-before-seen key on a cold window → no state to mutate.
+    // containsKey may race with concurrent insertion but the worst case is one
+    // unnecessary locked iteration — never a correctness problem.
+    if (!isHotThisWindow && !states.containsKey(key)) {
+      return ZetaDecision.none(key, null);
+    }
+
+    Lock lock = keyLocks.get(key);
+    lock.lock();
+    try {
+      long now = System.currentTimeMillis();
+
+      KeyState state = states.get(key);
+      if (state == null) {
+        state = new KeyState();
+        states.put(key, state);
+      }
+      state.lastUpdateTime = now;
+
+      Map<String, Object> previousState = getStateSnapshot(key);
+      return isHotThisWindow ? evaluateHot(key, state, previousState) : evaluateCold(key, state, previousState);
+    } catch (Exception e) {
+      log.warn("Unexpected StateMachine Exception for key {}", key, e);
+      return ZetaDecision.none(key, null);
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /** Hot-window evaluation: increment hot streak, reset cold streak, check promotions. */
+  // modified: added previousState param for failure rollback
+  private ZetaDecision evaluateHot(String key, KeyState state, Map<String, Object> previousState) {
+    state.hotStreak++;
+    state.coolStreak = 0;
+
+    // COLD → CONFIRMED_HOT: consecutive hot windows crossed the confirm threshold
+    if (state.currentState == COLD && state.hotStreak >= confirmCount) {
+      state.currentState = CONFIRMED_HOT;
+      return ZetaDecision.hot(key, previousState);
+    }
+
+    // PRE_COOLING → CONFIRMED_HOT: silent revive, no send (avoid oscillation)
+    if (state.currentState == PRE_COOLING) {
+      state.currentState = CONFIRMED_HOT;
+      return ZetaDecision.none(key, previousState);
+    }
+
+    return ZetaDecision.none(key, previousState);
+  }
+
+  /** Cold-window evaluation: increment cold streak, reset hot streak, check demotions. */
+  // modified: added previousState param for failure rollback
+  private ZetaDecision evaluateCold(String key, KeyState state, Map<String, Object> previousState) {
+    state.coolStreak++;
+    state.hotStreak = 0;
+
+    // CONFIRMED_HOT → PRE_COOLING: first cooling phase, no send yet
+    if (state.currentState == CONFIRMED_HOT && state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
+      state.currentState = PRE_COOLING;
+    }
+
+    // PRE_COOLING → COLD: fully cooled, send COOL
+    if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
+      state.currentState = COLD;
+      return ZetaDecision.cool(key, previousState);
+    }
+
+    return ZetaDecision.none(key, previousState);
+  }
+
+  /**
+   * Immediately removes all tracked state for the given key, effectively
+   * resetting it to {@link State#COLD}.
+   *
+   * <p>Called when the Worker fails to obtain a version from Redis and must
+   * abort the current HOT decision (e.g. Redis is unreachable or the key
+   * was not found in Redis). After reset, the next {@link #evaluate} call
+   * for this key will start from scratch with fresh streak counters.
+   *
+   * <p>The last-touch timestamp is intentionally not removed to prevent
+   * immediate re-creation churn in {@link #evictStale} — it will be cleaned
+   * up lazily on the next eviction cycle.
+   *
+   * @param key the cache key to reset
+   */
+  public void reset(String key) {
+    Lock lock = keyLocks.get(key);
+    lock.lock();
+    try {
+      states.remove(key);
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * Approximate number of keys currently tracked by the state machine.
+   * <p>The returned value is approximate due to the underlying
+   * {@link java.util.concurrent.ConcurrentHashMap#size()} semantics
+   * — it reflects a snapshot and may not account for concurrent
+   * insertions or removals at the exact moment of the call.</p>
+   *
+   * @return approximate count of keys currently tracked
+   */
+  public int getTrackedKeys() {
+    return states.size();
+  }
+
+  /**
+   * Garbage-collects state for keys that have not been evaluated within
+   * {@code staleAfterMs} milliseconds.  Should be invoked periodically
+   * (e.g. every 5 seconds) from a scheduled task.
+   *
+   * @param staleAfterMs maximum idle time in milliseconds before a key is evicted
+   */
+  public void evictStale(long staleAfterMs) {
+    long now = System.currentTimeMillis();
+    states.values().removeIf(state -> now - state.lastUpdateTime > staleAfterMs);
+  }
+
+  // modified: added "key" entry to the returned map for key-less rollback
+  public Map<String, Object> getStateSnapshot(String key) {
+    Lock lock = keyLocks.get(key);
+    lock.lock();
+    try {
+      KeyState keyState = states.get(key);
+      if (keyState == null) {
+        return Collections.emptyMap();
+      }
+      return Map.of(
+        "key",
+        key,
+        "currentState",
+        keyState.currentState.name(),
+        "hotStreak",
+        keyState.hotStreak,
+        "coolStreak",
+        keyState.coolStreak
+      );
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
+   * Rolls back the per-key state to its previous value after a send failure.
+   * This allows the next evaluation window to re-emit the decision.
+   *
+   * @param key the key whose state machine should be rolled back
+   */
+  // modified: added @Override
+  @Override
+  public void rollbackToPreviousState(String key, Map<String, Object> previousState) {
+    Lock lock = keyLocks.get(key);
+    lock.lock();
+    try {
+      if (previousState == null) {
+        // No previous state; treat as reset
+        reset(key);
+        return;
+      }
+
+      KeyState keyState = states.computeIfAbsent(key, k -> new KeyState());
+      keyState.currentState = State.valueOf((String) previousState.get("currentState"));
+      keyState.hotStreak = (int) previousState.get("hotStreak");
+      keyState.coolStreak = (int) previousState.get("coolStreak");
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  // modified: key-less overload that extracts key from snapShot
+  @Override
+  public void rollbackToPreviousState(Map<String, Object> previousState) {
+    String key = (String) previousState.get("key");
+    rollbackToPreviousState(key, previousState);
+  }
+
+  private static class KeyState {
+
+    /** Current lifecycle stage. */
+    State currentState = COLD;
+
+    /** Number of consecutive windows above the hot threshold. */
+    int hotStreak = 0;
+
+    /** Number of consecutive windows below the hot threshold. */
+    int coolStreak = 0;
+
+    /** Last evaluation timestamp. Volatile for lock-free reads by {@link #evictStale}. */
+    volatile long lastUpdateTime;
+  }
+}

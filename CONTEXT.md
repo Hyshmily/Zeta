@@ -1,4 +1,4 @@
-# HotKey Domain Glossary
+# Zeta Domain Glossary
 
 ## Core Concepts
 
@@ -16,10 +16,10 @@
 
 ## Components
 
-- **App** — The user's Spring Boot application that pulls `hotkey` as a dependency. Runs local L1 (Caffeine), optional L2 (Redis), local TopK, and the Reporter-to-Worker AMQP link.
+- **App** — The user's Spring Boot application that pulls `zeta` as a dependency. Runs local L1 (Caffeine), optional L2 (Redis), local TopK, and the Reporter-to-Worker AMQP link.
 - **CacheCompressor** — Pluggable interface for L1 cache value compression. `Lz4CacheCompressor` (default when `lz4-java` is on classpath) compresses `String` and `byte[]` values above 256 bytes using LZ4. Falls back to `CacheCompressor.NONE` (no-op) when the library is absent. Non-`byte[]` non-`String` types pass through unchanged.
 - **Compression Format** — `Lz4CacheCompressor` stores a 1-byte flag prefix: `0x00` = uncompressed String (UTF-8), `0x01` = LZ4 compressed String with 4-byte little-endian original length header, `0x02` = LZ4 compressed `byte[]`, `0x03` = uncompressed `byte[]`. Compression is transparent: `ExpireManagerImpl.createBuilder()` wraps automatically; `HotKeyCache.unwrapValue()` decompresses on read.
-- **Worker** — Standalone Spring Boot application (`hotkey-worker`). Consumes App reports via AMQP, runs its own TopK, emits HOT/COOL decisions back to Apps via broadcast. Published as a separate module, never deployed to Maven Central.
+- **Worker** — Standalone Spring Boot application (`zeta-worker`). Consumes App reports via AMQP, runs its own TopK, emits HOT/COOL decisions back to Apps via broadcast. Published as a separate module, never deployed to Maven Central.
 - **TopK** — Interface for the hot key detection algorithm. Implemented by `HeavyKeeper` (Count-Min Sketch variant). Tracks the `K` most frequent keys. The app-side facade is **HotKeyDetector** which wraps HeavyKeeper and adds a buffered `add` path for batched frequency updates.
 - **SingleFlight** — Deduplication mechanism that coalesces concurrent loads for the same key into a single execution. Prevents thundering herd.
 - **Rule** — A cache access rule with a `pattern`, `action` (`BLOCK`/`ALLOW_NO_REPORT`/`ALLOW`), and `type` (`EXACT`/`PREFIX`/`WILDCARD`/`REGEX`). Rules are serialized to JSON for Redis persistence and AMQP broadcast. **JSON should include `"type"`** — the Java field initializer defaults to `RuleType.EXACT`, and `match()` defensively returns `false` if `type` is `null` (e.g. from manual `setType(null)`). Managed by `RuleMatcher`.
@@ -35,9 +35,9 @@
 
 - **Graceful Degradation** — When the Worker cluster fails majority quorum (`ClusterHealthView.isClusterHealthy()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
 - **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `processLocalHotkeyIfNeeded`) or by Worker broadcast (in `handleHot`).
-- **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `CacheExpireManager` to prevent cache stampedes. Controlled by `hotkey.local.ttl-jitter-ratio` (default 0.05 = ±5%). Always enabled.
+- **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `CacheExpireManager` to prevent cache stampedes. Controlled by `zeta.local.ttl-jitter-ratio` (default 0.05 = ±5%). Always enabled.
 - **Expire** — Two-tier: **soft expire** (stale-while-revalidate, returns stale data + async refresh) and **hard expire** (absolute TTL, entry invalidated). Soft expire only applies to HOT and COOL entries.
-- **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `HotKeyCacheManager` (implements `CacheManager`) and `HotKeySpringCache` (implements `Cache`). Enabled via `hotkey.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
+- **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `HotKeyCacheManager` (implements `CacheManager`) and `HotKeySpringCache` (implements `Cache`). Enabled via `zeta.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
 - **HotKeyCacheContext** — ThreadLocal singleton holding TTL (`hardTtlMs`, `softTtlMs`) and `allowNull` context for the current cache operation. `HotKeyCacheExtensionAspect` snapshots/restores these values around each `@Cacheable` invocation. `HotKeySpringCache.get(Object, Callable)` reads them from context.
 - **HotKeyCacheExtensionAspect** — Companion aspect at `@Order(HIGHEST_PRECEDENCE)` that intercepts `@Cacheable` methods, resolves SpEL key, applies `@Intercept`/`@Fallback`/`@HotKeyCacheTTL`/`@NullCaching`, and sets `HotKeyCacheContext` before delegating to Spring's `CacheInterceptor`.
 - **@NullCaching** — Opt-in annotation for caching `null` return values. When enabled, `null` is stored as internal `NullValue` sentinel inside `CacheEntry`. `HotKeySpringCache` tracks null-cached keys in a `nullCachedKeys` set to distinguish "cached null" from "cache miss".

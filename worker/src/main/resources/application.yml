@@ -17,7 +17,7 @@ spring:
       host: localhost
       port: 6379
 
-hotkey:
+zeta:
   # ── App-side Detection ──
   annotation:
     enabled: true
@@ -44,7 +44,7 @@ hotkey:
 
     ## App-to-Worker Reporting
     app-name: default
-    report-exchange: hotkey.report.exchange
+    report-exchange: zeta.report.exchange
     report-interval-ms: 100
     shard-count: 1
 
@@ -59,8 +59,8 @@ hotkey:
 
     ## Messaging
     messaging:
-      report-exchange: hotkey.report.exchange
-      broadcast-exchange: hotkey.send.exchange
+      report-exchange: zeta.report.exchange
+      broadcast-exchange: zeta.send.exchange
 
     ## Sliding Window (each slice = 1000/10 = 100ms)
     sliding-window:
@@ -109,7 +109,7 @@ hotkey:
       enabled: false
       persist-interval-ms: 30000
       topk-count: 100
-      redis-key-prefix: "hotkey:topk:worker:"
+      redis-key-prefix: "zeta:topk:worker:"
       ttl-days: 3
 
 logging:

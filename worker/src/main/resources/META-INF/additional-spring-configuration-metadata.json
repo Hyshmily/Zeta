@@ -1,187 +1,187 @@
 {
   "properties": [
     {
-      "name": "hotkey.worker.enabled",
+      "name": "zeta.worker.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable standalone Worker mode for cluster-wide hot key detection.",
       "defaultValue": false
     },
     {
-      "name": "hotkey.worker.routing.app-name",
+      "name": "zeta.worker.routing.app-name",
       "type": "java.lang.String",
       "description": "Application name for Worker-side report queue routing.",
       "defaultValue": "default"
     },
     {
-      "name": "hotkey.worker.messaging.report-exchange",
+      "name": "zeta.worker.messaging.report-exchange",
       "type": "java.lang.String",
       "description": "Name of the DirectExchange for receiving app-to-Worker report messages.",
-      "defaultValue": "hotkey.report.exchange"
+      "defaultValue": "zeta.report.exchange"
     },
     {
-      "name": "hotkey.worker.messaging.broadcast-exchange",
+      "name": "zeta.worker.messaging.broadcast-exchange",
       "type": "java.lang.String",
       "description": "Name of the FanoutExchange for broadcasting HOT/COOL decisions.",
-      "defaultValue": "hotkey.broadcast.exchange"
+      "defaultValue": "zeta.broadcast.exchange"
     },
     {
-      "name": "hotkey.worker.messaging.heartbeat-exchange",
+      "name": "zeta.worker.messaging.heartbeat-exchange",
       "type": "java.lang.String",
       "description": "Name of the TopicExchange for epoch-driven structured worker heartbeats.",
-      "defaultValue": "hotkey.heartbeat.exchange"
+      "defaultValue": "zeta.heartbeat.exchange"
     },
     {
-      "name": "hotkey.worker.sliding-window.duration-ms",
+      "name": "zeta.worker.sliding-window.duration-ms",
       "type": "java.lang.Long",
       "description": "Total duration in milliseconds of the sliding window for QPS tracking.",
       "defaultValue": 1000
     },
     {
-      "name": "hotkey.worker.sliding-window.slices",
+      "name": "zeta.worker.sliding-window.slices",
       "type": "java.lang.Integer",
       "description": "Number of time slices within the sliding window.",
       "defaultValue": 10
     },
     {
-      "name": "hotkey.worker.threshold.hot-threshold",
+      "name": "zeta.worker.threshold.hot-threshold",
       "type": "java.lang.Long",
       "description": "Absolute QPS threshold for HOT key classification. A value of -1 disables absolute threshold.",
       "defaultValue": 1000
     },
     {
-      "name": "hotkey.worker.threshold.hot-threshold-ratio",
+      "name": "zeta.worker.threshold.hot-threshold-ratio",
       "type": "java.lang.Double",
       "description": "Ratio-based threshold for HOT key classification (fraction of total QPS).",
       "defaultValue": 0.01
     },
     {
-      "name": "hotkey.worker.state-machine.confirm-duration-ms",
+      "name": "zeta.worker.state-machine.confirm-duration-ms",
       "type": "java.lang.Long",
       "description": "Duration in milliseconds a key must remain hot before emitting a HOT decision.",
       "defaultValue": 300
     },
     {
-      "name": "hotkey.worker.state-machine.cool-duration-ms",
+      "name": "zeta.worker.state-machine.cool-duration-ms",
       "type": "java.lang.Long",
       "description": "Duration in milliseconds a key must remain cool before emitting a COOL decision.",
       "defaultValue": 15000
     },
     {
-      "name": "hotkey.worker.state-machine.pre-cool-grace-ms",
+      "name": "zeta.worker.state-machine.pre-cool-grace-ms",
       "type": "java.lang.Long",
       "description": "Grace period in milliseconds in the pre-cooling state before confirming cool.",
       "defaultValue": 5000
     },
     {
-      "name": "hotkey.worker.state-machine.evict-interval-ms",
+      "name": "zeta.worker.state-machine.evict-interval-ms",
       "type": "java.lang.Long",
       "description": "Interval in ms for evicting stale sliding-window and state-machine state.",
       "defaultValue": 30000
     },
     {
-      "name": "hotkey.worker.global-qps-dynamic-threshold.qps-change-tolerance",
+      "name": "zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance",
       "type": "java.lang.Double",
       "description": "Tolerance factor for QPS change before recalculating dynamic thresholds.",
       "defaultValue": 0.5
     },
     {
-      "name": "hotkey.worker.global-qps-dynamic-threshold.learning-period-ms",
+      "name": "zeta.worker.global-qps-dynamic-threshold.learning-period-ms",
       "type": "java.lang.Long",
       "description": "Learning period in milliseconds for baseline QPS estimation.",
       "defaultValue": 30000
     },
     {
-      "name": "hotkey.worker.global-qps-dynamic-threshold.hot-threshold-ratio",
+      "name": "zeta.worker.global-qps-dynamic-threshold.hot-threshold-ratio",
       "type": "java.lang.Double",
       "description": "Dynamic hot threshold ratio relative to baseline QPS.",
       "defaultValue": 0.01
     },
     {
-      "name": "hotkey.worker.global-qps-dynamic-threshold.recalculate-interval-ms",
+      "name": "zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms",
       "type": "java.lang.Long",
       "description": "Interval in milliseconds between dynamic threshold recalculations.",
       "defaultValue": 60000
     },
     {
-      "name": "hotkey.worker.topk-validation.validate-interval-ms",
+      "name": "zeta.worker.topk-validation.validate-interval-ms",
       "type": "java.lang.Long",
       "description": "Interval in milliseconds for TopK pre-warm validation cycles.",
       "defaultValue": 60000
     },
     {
-      "name": "hotkey.worker.topk-validation.pre-warm-count",
+      "name": "zeta.worker.topk-validation.pre-warm-count",
       "type": "java.lang.Integer",
       "description": "Number of top-K entries to pre-warm validate before broadcasting HOT.",
       "defaultValue": 5
     },
     {
-      "name": "hotkey.worker.topk-validation.pre-warm-min-appearances",
+      "name": "zeta.worker.topk-validation.pre-warm-min-appearances",
       "type": "java.lang.Integer",
       "description": "Minimum appearances in consecutive validation cycles to confirm a pre-warm HOT.",
       "defaultValue": 2
     },
     {
-      "name": "hotkey.worker.heavy-keeper.top-k",
+      "name": "zeta.worker.heavy-keeper.top-k",
       "type": "java.lang.Integer",
       "description": "Worker-scoped HeavyKeeper top-K capacity.",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.worker.heavy-keeper.width",
+      "name": "zeta.worker.heavy-keeper.width",
       "type": "java.lang.Integer",
       "description": "Worker-scoped HeavyKeeper sketch width.",
       "defaultValue": 20000
     },
     {
-      "name": "hotkey.worker.heavy-keeper.depth",
+      "name": "zeta.worker.heavy-keeper.depth",
       "type": "java.lang.Integer",
       "description": "Worker-scoped HeavyKeeper sketch depth.",
       "defaultValue": 10
     },
     {
-      "name": "hotkey.worker.heavy-keeper.decay",
+      "name": "zeta.worker.heavy-keeper.decay",
       "type": "java.lang.Double",
       "description": "Worker-scoped HeavyKeeper decay factor.",
       "defaultValue": 0.9
     },
     {
-      "name": "hotkey.worker.heavy-keeper.min-count",
+      "name": "zeta.worker.heavy-keeper.min-count",
       "type": "java.lang.Integer",
       "description": "Worker-scoped HeavyKeeper minimum frequency count.",
       "defaultValue": 10
     },
     {
-      "name": "hotkey.worker.heartbeat.ping-interval-ms",
+      "name": "zeta.worker.heartbeat.ping-interval-ms",
       "type": "java.lang.Integer",
       "description": "Interval in milliseconds between structured heartbeat sends (epoch, loadFactor, decisionVersionHwm, config gossip).",
       "defaultValue": 1000
     },
     {
-      "name": "hotkey.worker.persistence.enabled",
+      "name": "zeta.worker.persistence.enabled",
       "type": "java.lang.Boolean",
       "description": "Whether TopK persistence to Redis is enabled for warm-start after Worker restart.",
       "defaultValue": false
     },
     {
-      "name": "hotkey.worker.persistence.persist-interval-ms",
+      "name": "zeta.worker.persistence.persist-interval-ms",
       "type": "java.lang.Long",
       "description": "Interval in milliseconds between periodic TopK snapshots.",
       "defaultValue": 30000
     },
     {
-      "name": "hotkey.worker.persistence.top-k-count",
+      "name": "zeta.worker.persistence.top-k-count",
       "type": "java.lang.Integer",
       "description": "Number of top keys to persist per snapshot.",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.worker.persistence.redis-key-prefix",
+      "name": "zeta.worker.persistence.redis-key-prefix",
       "type": "java.lang.String",
       "description": "Redis key prefix for persisted TopK data (final key = prefix + appName + ':' + nodeId).",
-      "defaultValue": "hotkey:topk:worker:"
+      "defaultValue": "zeta:topk:worker:"
     },
     {
-      "name": "hotkey.worker.persistence.ttl-days",
+      "name": "zeta.worker.persistence.ttl-days",
       "type": "java.lang.Integer",
       "description": "TTL in days for persisted TopK data in Redis.",
       "defaultValue": 3

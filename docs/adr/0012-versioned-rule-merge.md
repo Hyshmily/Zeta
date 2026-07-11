@@ -1,6 +1,6 @@
 # Versioned Rule Merge for Cross-Instance Consistency
 
-`RuleMatcher.persistAndBroadcastRules()` used an XOR pattern (`ifPresentOrElse`) — either persisted the full rule set to Redis OR broadcast via AMQP, never both. With multiple App instances independently modifying rules, a last-writer-wins race on the shared Redis key `hotkey:rules` caused concurrent rule additions from different instances to silently overwrite each other.
+Zeta's `RuleMatcher.persistAndBroadcastRules()` used an XOR pattern (`ifPresentOrElse`) — either persisted the full rule set to Redis OR broadcast via AMQP, never both. With multiple App instances independently modifying rules, a last-writer-wins race on the shared Redis key `hotkey:rules` caused concurrent rule additions from different instances to silently overwrite each other.
 
 ## Decision
 

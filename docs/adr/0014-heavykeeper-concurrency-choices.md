@@ -45,7 +45,7 @@ This ensures `reset()` + `accumulate(halved)` in `decayMembership()` correctly s
 3. **2.63× throughput win on the worst-case same-key path** — TopK's defining workload is *concentrated hot keys*, so the worst case matters more than the average case.
 4. **Statistically tied with `AtomicLong` in mixed workloads** — 0.93× in scenario C falls within run-to-run noise envelope; no persistent regression.
 
-Memory cost: each `LongAccumulator` carries a `Striped64` with one cell per CPU; per-Node memory rises ~16× compared to a single `long`. The cost is bounded by `k` (Top-K set size, typically 100), so this is a tiny, deliberate, memory-for-performance trade that AGENTS.md explicitly authorises.
+Memory cost: each `LongAccumulator` carries a `Striped64` with one cell per CPU; per-Node memory rises ~16× compared to a single `long`. The cost is bounded by `k` (Top-K set size, typically 100), so this is a tiny, deliberate, memory-for-performance trade-off that AGENTS.md explicitly authorises.
 
 ### 3. Window ring buffer: flatten `long[][] windows` to `long[] windows`
 

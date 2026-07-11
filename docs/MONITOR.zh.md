@@ -1,6 +1,6 @@
 # 监控
 
-HotKey 提供两种互补的监控机制。
+Zeta 提供两种互补的监控机制。
 
 ---
 
@@ -13,10 +13,10 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,hotkey
+        include: health,info,zeta
 ```
 
-当 classpath 中存在 `spring-boot-starter-actuator` 时，HotKey 端点将自动注册到 `/actuator/hotkey`。
+当 classpath 中存在 `spring-boot-starter-actuator` 时，Zeta 端点将自动注册到 `/actuator/hotkey`。
 
 通过 `management.endpoints.web.exposure.include=health,info,hotkey` 启用。
 
@@ -101,57 +101,57 @@ management:
 
 当 classpath 中存在 `io.micrometer:micrometer-core` 时，`HotKeyMicrometerAutoConfiguration` 自动注册 MeterBinder Bean，暴露以下指标。
 
-### Caffeine L1 缓存指标（`hotkey.l1.*`）
+### Caffeine L1 缓存指标（`zeta.l1.*`）
 
 通过 `CaffeineCacheMetrics.monitor()` 提供的标准 Caffeine 缓存指标：
 
 | 指标                               | 类型    | 说明                                              |
 | ---------------------------------- | ------- | ------------------------------------------------- |
-| `hotkey.l1.cache.gets`             | Counter | 缓存读取次数（标签 `result=hit` / `result=miss`） |
-| `hotkey.l1.cache.puts`             | Counter | 缓存写入次数                                      |
-| `hotkey.l1.cache.evictions`        | Counter | 缓存驱逐次数（标签 `cause=...`）                  |
-| `hotkey.l1.cache.evictions.weight` | Counter | 驱逐条目权重                                      |
-| `hotkey.l1.cache.hit.ratio`        | Gauge   | 当前命中率                                        |
-| `hotkey.l1.cache.miss.ratio`       | Gauge   | 当前未命中率                                      |
-| `hotkey.l1.cache.size`             | Gauge   | 缓存预估大小                                      |
-| `hotkey.l1.cache.max`              | Gauge   | 缓存最大大小                                      |
+| `zeta.l1.cache.gets`             | Counter | 缓存读取次数（标签 `result=hit` / `result=miss`） |
+| `zeta.l1.cache.puts`             | Counter | 缓存写入次数                                      |
+| `zeta.l1.cache.evictions`        | Counter | 缓存驱逐次数（标签 `cause=...`）                  |
+| `zeta.l1.cache.evictions.weight` | Counter | 驱逐条目权重                                      |
+| `zeta.l1.cache.hit.ratio`        | Gauge   | 当前命中率                                        |
+| `zeta.l1.cache.miss.ratio`       | Gauge   | 当前未命中率                                      |
+| `zeta.l1.cache.size`             | Gauge   | 缓存预估大小                                      |
+| `zeta.l1.cache.max`              | Gauge   | 缓存最大大小                                      |
 
-### 自定义 HotKey 业务指标
+### 自定义 Zeta 业务指标
 
 | 指标                                  | 类型  | 标签                 | 说明                             |
 | ------------------------------------- | ----- | -------------------- | -------------------------------- |
-| `hotkey.topk.size`                    | Gauge | `type=local\|worker` | TopK 当前排名数                  |
-| `hotkey.topk.total`                   | Gauge | `type=local\|worker` | TopK 追踪的总请求数              |
-| `hotkey.expelled.queue.size`          | Gauge | —                    | 驱逐队列积压量                   |
-| `hotkey.expelled.queue.remaining`     | Gauge | —                    | 驱逐队列剩余容量                 |
-| `hotkey.singleflight.inflight`        | Gauge | —                    | SingleFlight 进行中的去重数      |
-| `hotkey.reporter.queue.depth`         | Gauge | —                    | Reporter 队列积压量              |
-| `hotkey.reporter.queue.dropped.total` | Gauge | —                    | 累计丢弃批次（队列满）           |
-| `hotkey.reporter.queue.expired.total` | Gauge | —                    | 累计过期批次                     |
-| `hotkey.reporter.pending.keys`        | Gauge | —                    | Reporter 计数缓存中缓冲的 key 数 |
-| `hotkey.expire.refresh.available`     | Gauge | —                    | 刷新信号量可用许可数             |
-| `hotkey.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
-| `hotkey.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
-| `hotkey.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
-| `hotkey.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数              |
+| `zeta.topk.size`                    | Gauge | `type=local\|worker` | TopK 当前排名数                  |
+| `zeta.topk.total`                   | Gauge | `type=local\|worker` | TopK 追踪的总请求数              |
+| `zeta.expelled.queue.size`          | Gauge | —                    | 驱逐队列积压量                   |
+| `zeta.expelled.queue.remaining`     | Gauge | —                    | 驱逐队列剩余容量                 |
+| `zeta.singleflight.inflight`        | Gauge | —                    | SingleFlight 进行中的去重数      |
+| `zeta.reporter.queue.depth`         | Gauge | —                    | Reporter 队列积压量              |
+| `zeta.reporter.queue.dropped.total` | Gauge | —                    | 累计丢弃批次（队列满）           |
+| `zeta.reporter.queue.expired.total` | Gauge | —                    | 累计过期批次                     |
+| `zeta.reporter.pending.keys`        | Gauge | —                    | Reporter 计数缓存中缓冲的 key 数 |
+| `zeta.expire.refresh.available`     | Gauge | —                    | 刷新信号量可用许可数             |
+| `zeta.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
+| `zeta.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
+| `zeta.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
+| `zeta.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数              |
 
 ## 3. 一致性哈希环管理
 
-当启用一致性哈希（`hotkey.local.consistent-hashing.enabled=true`）且 classpath 中包含 `spring-boot-starter-web` 时，会在 `/actuator/hotkeyring` 注册一个 REST 控制器（`RingEndpoint.java`），用于环查询。
+当启用一致性哈希（`zeta.local.consistent-hashing.enabled=true`）且 classpath 中包含 `spring-boot-starter-web` 时，会在 `/actuator/hotkeyring` 注册一个 REST 控制器（`RingEndpoint.java`），用于环查询。
 
-| 方法  | 路径                                | 说明                      |
-| ----- | ----------------------------------- | ------------------------- |
-| `GET` | `/actuator/hotkeyring`              | 环拓扑和节点数量            |
-| `GET` | `/actuator/hotkeyring/{key}`        | 查询指定 key 由哪个节点处理 |
+| 方法  | 路径                         | 说明                        |
+| ----- | ---------------------------- | --------------------------- |
+| `GET` | `/actuator/hotkeyring`       | 环拓扑和节点数量            |
+| `GET` | `/actuator/hotkeyring/{key}` | 查询指定 key 由哪个节点处理 |
 
 ## 4. Worker 状态机运行时配置
 
-当启用 Worker 模式（`hotkey.worker.enabled=true`）且 classpath 中包含 `spring-boot-starter-web` 时，会在 `/actuator/hotkey/worker/state` 注册一个 REST 控制器（`StateMachineEndpoint.java`），用于运行时读取和更新状态机配置。
+当启用 Worker 模式（`zeta.worker.enabled=true`）且 classpath 中包含 `spring-boot-starter-web` 时，会在 `/actuator/hotkey/worker/state` 注册一个 REST 控制器（`StateMachineEndpoint.java`），用于运行时读取和更新状态机配置。
 
-| 方法   | 路径                                  | 说明                                                         |
-| ------ | ------------------------------------- | ------------------------------------------------------------ |
-| `GET`  | `/actuator/hotkey/worker/state`       | 返回当前 `confirmCount`、`coolCount`、`preCoolGraceCount`、`trackedKeys` |
-| `POST` | `/actuator/hotkey/worker/state`       | 更新一个或多个参数（请求体：`{"confirmCount":"5"}`）           |
+| 方法   | 路径                            | 说明                                                                     |
+| ------ | ------------------------------- | ------------------------------------------------------------------------ |
+| `GET`  | `/actuator/hotkey/worker/state` | 返回当前 `confirmCount`、`coolCount`、`preCoolGraceCount`、`trackedKeys` |
+| `POST` | `/actuator/hotkey/worker/state` | 更新一个或多个参数（请求体：`{"confirmCount":"5"}`）                     |
 
 **读取当前状态：**
 

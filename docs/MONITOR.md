@@ -1,6 +1,6 @@
 # Monitoring
 
-HotKey provides two complementary monitoring mechanisms.
+Zeta provides two complementary monitoring mechanisms.
 
 ---
 
@@ -13,10 +13,10 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,hotkey
+        include: health,info,zeta
 ```
 
-When `spring-boot-starter-actuator` is on the classpath, the HotKey endpoint is automatically registered at `/actuator/hotkey`.
+When `spring-boot-starter-actuator` is on the classpath, the Zeta endpoint is automatically registered at `/actuator/hotkey`.
 
 Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
 
@@ -101,57 +101,57 @@ Supports an optional `?limit=N` query parameter to cap the number of TopK entrie
 
 When `io.micrometer:micrometer-core` is on the classpath, `HotKeyMicrometerAutoConfiguration` automatically registers MeterBinder beans exposing the following metrics.
 
-### Caffeine L1 Cache Metrics (`hotkey.l1.*`)
+### Caffeine L1 Cache Metrics (`zeta.l1.*`)
 
 Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 
 | Metric                             | Type    | Description                                                |
 | ---------------------------------- | ------- | ---------------------------------------------------------- |
-| `hotkey.l1.cache.gets`             | Counter | Cache get operations (tagged `result=hit` / `result=miss`) |
-| `hotkey.l1.cache.puts`             | Counter | Cache put operations                                       |
-| `hotkey.l1.cache.evictions`        | Counter | Cache evictions (tagged `cause=...`)                       |
-| `hotkey.l1.cache.evictions.weight` | Counter | Evicted entry weight                                       |
-| `hotkey.l1.cache.hit.ratio`        | Gauge   | Current hit ratio                                          |
-| `hotkey.l1.cache.miss.ratio`       | Gauge   | Current miss ratio                                         |
-| `hotkey.l1.cache.size`             | Gauge   | Estimated current cache size                               |
-| `hotkey.l1.cache.max`              | Gauge   | Maximum cache size                                         |
+| `zeta.l1.cache.gets`             | Counter | Cache get operations (tagged `result=hit` / `result=miss`) |
+| `zeta.l1.cache.puts`             | Counter | Cache put operations                                       |
+| `zeta.l1.cache.evictions`        | Counter | Cache evictions (tagged `cause=...`)                       |
+| `zeta.l1.cache.evictions.weight` | Counter | Evicted entry weight                                       |
+| `zeta.l1.cache.hit.ratio`        | Gauge   | Current hit ratio                                          |
+| `zeta.l1.cache.miss.ratio`       | Gauge   | Current miss ratio                                         |
+| `zeta.l1.cache.size`             | Gauge   | Estimated current cache size                               |
+| `zeta.l1.cache.max`              | Gauge   | Maximum cache size                                         |
 
-### Custom HotKey Business Metrics
+### Custom Zeta Business Metrics
 
 | Metric                                | Type  | Tags                 | Description                             |
 | ------------------------------------- | ----- | -------------------- | --------------------------------------- |
-| `hotkey.topk.size`                    | Gauge | `type=local\|worker` | TopK current ranking count              |
-| `hotkey.topk.total`                   | Gauge | `type=local\|worker` | TopK total requests tracked             |
-| `hotkey.expelled.queue.size`          | Gauge | —                    | Expelled queue backlog                  |
-| `hotkey.expelled.queue.remaining`     | Gauge | —                    | Expelled queue remaining capacity       |
-| `hotkey.singleflight.inflight`        | Gauge | —                    | SingleFlight in-flight dedup count      |
-| `hotkey.reporter.queue.depth`         | Gauge | —                    | Reporter queue backlog                  |
-| `hotkey.reporter.queue.dropped.total` | Gauge | —                    | Cumulative dropped batches (queue full) |
-| `hotkey.reporter.queue.expired.total` | Gauge | —                    | Cumulative expired batches              |
-| `hotkey.reporter.pending.keys`        | Gauge | —                    | Keys buffered in reporter counter cache |
-| `hotkey.expire.refresh.available`     | Gauge | —                    | Available refresh limiter permits       |
-| `hotkey.version.degraded.total`       | Gauge | —                    | Cumulative version fallback count       |
-| `hotkey.sync.dedup.size`              | Gauge | —                    | Broadcast dedup cache size              |
-| `hotkey.worker.alive`                 | Gauge | —                    | Whether any worker shard is alive (0/1) |
-| `hotkey.worker.tracked.keys`          | Gauge | —                    | Keys tracked by state machine           |
+| `zeta.topk.size`                    | Gauge | `type=local\|worker` | TopK current ranking count              |
+| `zeta.topk.total`                   | Gauge | `type=local\|worker` | TopK total requests tracked             |
+| `zeta.expelled.queue.size`          | Gauge | —                    | Expelled queue backlog                  |
+| `zeta.expelled.queue.remaining`     | Gauge | —                    | Expelled queue remaining capacity       |
+| `zeta.singleflight.inflight`        | Gauge | —                    | SingleFlight in-flight dedup count      |
+| `zeta.reporter.queue.depth`         | Gauge | —                    | Reporter queue backlog                  |
+| `zeta.reporter.queue.dropped.total` | Gauge | —                    | Cumulative dropped batches (queue full) |
+| `zeta.reporter.queue.expired.total` | Gauge | —                    | Cumulative expired batches              |
+| `zeta.reporter.pending.keys`        | Gauge | —                    | Keys buffered in reporter counter cache |
+| `zeta.expire.refresh.available`     | Gauge | —                    | Available refresh limiter permits       |
+| `zeta.version.degraded.total`       | Gauge | —                    | Cumulative version fallback count       |
+| `zeta.sync.dedup.size`              | Gauge | —                    | Broadcast dedup cache size              |
+| `zeta.worker.alive`                 | Gauge | —                    | Whether any worker shard is alive (0/1) |
+| `zeta.worker.tracked.keys`          | Gauge | —                    | Keys tracked by state machine           |
 
 ## 3. Consistent Hash Ring Management
 
-When consistent hashing is enabled (`hotkey.local.consistent-hashing.enabled=true`) and `spring-boot-starter-web` is on the classpath, a REST controller (`RingEndpoint.java`) is registered at `/actuator/hotkeyring` for ring inspection.
+When consistent hashing is enabled (`zeta.local.consistent-hashing.enabled=true`) and `spring-boot-starter-web` is on the classpath, a REST controller (`RingEndpoint.java`) is registered at `/actuator/hotkeyring` for ring inspection.
 
-| Method | Path                                | Description                           |
-| ------ | ----------------------------------- | ------------------------------------- |
-| `GET`  | `/actuator/hotkeyring`              | Ring topology and node count          |
-| `GET`  | `/actuator/hotkeyring/{key}`        | Query which node handles a given key  |
+| Method | Path                         | Description                          |
+| ------ | ---------------------------- | ------------------------------------ |
+| `GET`  | `/actuator/hotkeyring`       | Ring topology and node count         |
+| `GET`  | `/actuator/hotkeyring/{key}` | Query which node handles a given key |
 
 ## 4. Worker State Machine Runtime Configuration
 
-When Worker mode is active (`hotkey.worker.enabled=true`) and `spring-boot-starter-web` is on the classpath, a REST controller (`StateMachineEndpoint.java`) is registered at `/actuator/hotkey/worker/state` for reading and updating the state-machine configuration at runtime.
+When Worker mode is active (`zeta.worker.enabled=true`) and `spring-boot-starter-web` is on the classpath, a REST controller (`StateMachineEndpoint.java`) is registered at `/actuator/hotkey/worker/state` for reading and updating the state-machine configuration at runtime.
 
-| Method | Path                                  | Description                                                   |
-| ------ | ------------------------------------- | ------------------------------------------------------------- |
-| `GET`  | `/actuator/hotkey/worker/state`       | Return current `confirmCount`, `coolCount`, `preCoolGraceCount`, `trackedKeys` |
-| `POST` | `/actuator/hotkey/worker/state`       | Update one or more parameters (body: `{"confirmCount":"5"}`)  |
+| Method | Path                            | Description                                                                    |
+| ------ | ------------------------------- | ------------------------------------------------------------------------------ |
+| `GET`  | `/actuator/hotkey/worker/state` | Return current `confirmCount`, `coolCount`, `preCoolGraceCount`, `trackedKeys` |
+| `POST` | `/actuator/hotkey/worker/state` | Update one or more parameters (body: `{"confirmCount":"5"}`)                   |
 
 **Read current state:**
 

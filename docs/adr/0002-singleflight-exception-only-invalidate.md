@@ -1,6 +1,6 @@
 # SingleFlight: Exception-Only Invalidate
 
-SingleFlight invalidates completed futures **only on exception** (catch block), not on success. This differs from a naive try-finally approach that would always remove the future after completion.
+Zeta's SingleFlight invalidates completed futures **only on exception** (catch block), not on success. This differs from a naive try-finally approach that would always remove the future after completion.
 
 ## Decision
 

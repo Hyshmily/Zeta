@@ -14,7 +14,7 @@ spring:
     username: guest
     password: guest
 
-hotkey:
+zeta:
   instance-id: ${INSTANCE_ID:demo-unknown}
   annotation:
     enabled: true
@@ -33,7 +33,7 @@ hotkey:
     default-hot-soft-ttl-ms: 300000
     executor-queue-capacity: 50000
     report-interval-ms: 50
-    report-exchange: hotkey.report.exchange
+    report-exchange: zeta.report.exchange
     consistent-hashing:
       enabled: true
       virtual-nodes: 500
@@ -41,9 +41,9 @@ hotkey:
     enabled: true
   sync:
     enabled: true
-    exchange-name: hotkey.sync.exchange
+    exchange-name: zeta.sync.exchange
   worker-listener:
     enabled: true
-    exchange-name: hotkey.send.exchange
+    exchange-name: zeta.send.exchange
   report:
     enabled: true

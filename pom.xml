@@ -7,12 +7,12 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>io.github.hyshmily</groupId>
-  <artifactId>hotkey-parent</artifactId>
-  <version>1.1.54</version>
+  <artifactId>zeta-parent</artifactId>
+  <version>1.1.55</version>
   <packaging>pom</packaging>
 
-  <name>HotKey Parent</name>
-  <description>HotKey detection and cache warming Spring Boot Starter (HeavyKeeper + Caffeine + Redis)</description>
+  <name>Zeta Parent</name>
+  <description>Zeta detection and cache warming Spring Boot Starter (HeavyKeeper + Caffeine + Redis)</description>
   <url>https://github.com/hyshmily/hotkey</url>
 
   <licenses>
@@ -177,10 +177,10 @@
                 </rule>
               </rules>
               <excludes>
-                <exclude>io/github/hyshmily/hotkey/autoconfigure/**</exclude>
-                <exclude>io/github/hyshmily/hotkey/constants/**</exclude>
-                <exclude>io/github/hyshmily/hotkey/exception/**</exclude>
-                <exclude>io/github/hyshmily/hotkey/model/**</exclude>
+                <exclude>io/github/hyshmily/zeta/autoconfigure/**</exclude>
+                <exclude>io/github/hyshmily/zeta/constants/**</exclude>
+                <exclude>io/github/hyshmily/zeta/exception/**</exclude>
+                <exclude>io/github/hyshmily/zeta/model/**</exclude>
               </excludes>
             </configuration>
           </execution>

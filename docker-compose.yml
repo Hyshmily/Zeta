@@ -1,4 +1,4 @@
-name: hotkey-cluster
+name: zeta-cluster
 
 services:
 
@@ -14,7 +14,7 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
-    networks: [hotkey-net]
+    networks: [zeta-net]
 
   rabbitmq:
     image: rabbitmq:4.0-alpine
@@ -28,16 +28,16 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-    networks: [hotkey-net]
+    networks: [zeta-net]
 
 
   worker-1: &worker-base
     build: ./worker
     environment:
       INSTANCE_ID: worker-1
-      APP_NAME: hotkey-demo
-      HOTKEY_WORKER_ENABLED: "true"
-      HOTKEY_WORKER_ROUTING_APP_NAME: hotkey-demo
+      APP_NAME: zeta-demo
+      ZETA_WORKER_ENABLED: "true"
+      ZETA_WORKER_ROUTING_APP_NAME: zeta-demo
       SPRING_DATA_REDIS_HOST: redis
       SPRING_RABBITMQ_HOST: rabbitmq
     depends_on:
@@ -45,7 +45,7 @@ services:
       rabbitmq: { condition: service_healthy }
       app-1: { condition: service_started }
     restart: unless-stopped
-    networks: [hotkey-net]
+    networks: [zeta-net]
 
   worker-2:
     <<: *worker-base
@@ -55,9 +55,9 @@ services:
       app-1: { condition: service_started }
     environment:
       INSTANCE_ID: worker-2
-      APP_NAME: hotkey-demo
-      HOTKEY_WORKER_ENABLED: "true"
-      HOTKEY_WORKER_ROUTING_APP_NAME: hotkey-demo
+      APP_NAME: zeta-demo
+      ZETA_WORKER_ENABLED: "true"
+      ZETA_WORKER_ROUTING_APP_NAME: zeta-demo
       SPRING_DATA_REDIS_HOST: redis
       SPRING_RABBITMQ_HOST: rabbitmq
 
@@ -67,58 +67,58 @@ services:
       - "9090:8080"
     environment:
       INSTANCE_ID: app-1
-      APP_NAME: hotkey-demo
+      APP_NAME: zeta-demo
       SPRING_DATA_REDIS_HOST: redis
       SPRING_RABBITMQ_HOST: rabbitmq
-      HOTKEY_LOCAL_EXECUTOR_QUEUE_CAPACITY: "50000"
-      HOTKEY_WORKER_LISTENER_ENABLED: "true"
-      HOTKEY_LOCAL_REPORTER_LIMITER_ENABLED: "false"
-      HOTKEY_HEARTBEAT_TIMEOUT_MS: "30000"
+      ZETA_LOCAL_EXECUTOR_QUEUE_CAPACITY: "50000"
+      ZETA_WORKER_LISTENER_ENABLED: "true"
+      ZETA_LOCAL_REPORTER_LIMITER_ENABLED: "false"
+      ZETA_HEARTBEAT_TIMEOUT_MS: "30000"
     depends_on:
       redis: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
     restart: unless-stopped
-    networks: [hotkey-net]
+    networks: [zeta-net]
 
   app-2:
     <<: *app-base
     ports: []
     environment:
       INSTANCE_ID: app-2
-      APP_NAME: hotkey-demo
+      APP_NAME: zeta-demo
       SPRING_DATA_REDIS_HOST: redis
       SPRING_RABBITMQ_HOST: rabbitmq
-      HOTKEY_WORKER_LISTENER_ENABLED: "true"
+      ZETA_WORKER_LISTENER_ENABLED: "true"
 
   app-3:
     <<: *app-base
     ports: []
     environment:
       INSTANCE_ID: app-3
-      APP_NAME: hotkey-demo
+      APP_NAME: zeta-demo
       SPRING_DATA_REDIS_HOST: redis
       SPRING_RABBITMQ_HOST: rabbitmq
-      HOTKEY_WORKER_LISTENER_ENABLED: "true"
+      ZETA_WORKER_LISTENER_ENABLED: "true"
 
   app-4:
     <<: *app-base
     ports: []
     environment:
       INSTANCE_ID: app-4
-      APP_NAME: hotkey-demo
+      APP_NAME: zeta-demo
       SPRING_DATA_REDIS_HOST: redis
       SPRING_RABBITMQ_HOST: rabbitmq
-      HOTKEY_WORKER_LISTENER_ENABLED: "true"
+      ZETA_WORKER_LISTENER_ENABLED: "true"
 
   app-5:
     <<: *app-base
     ports: []
     environment:
       INSTANCE_ID: app-5
-      APP_NAME: hotkey-demo
+      APP_NAME: zeta-demo
       SPRING_DATA_REDIS_HOST: redis
       SPRING_RABBITMQ_HOST: rabbitmq
-      HOTKEY_WORKER_LISTENER_ENABLED: "true"
+      ZETA_WORKER_LISTENER_ENABLED: "true"
 
 
   k6:
@@ -131,10 +131,10 @@ services:
       TARGET_URL: http://app-1:8080
     depends_on:
       - app-1
-    networks: [hotkey-net]
+    networks: [zeta-net]
 
 networks:
-  hotkey-net:
+  zeta-net:
     driver: bridge
 
 volumes:

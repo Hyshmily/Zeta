@@ -1,121 +1,121 @@
 {
   "properties": [
     {
-      "name": "hotkey.annotation.enabled",
+      "name": "zeta.annotation.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable @HotKey annotation AOP support.",
       "defaultValue": false
     },
     {
-      "name": "hotkey.instance-id",
+      "name": "zeta.instance-id",
       "type": "java.lang.String",
       "description": "Explicit instance ID for queue naming. Falls back to <server.port>-<HOSTNAME> (or <server.port>-<UUID> if HOSTNAME is unset) if empty.",
       "defaultValue": ""
     },
     {
-      "name": "hotkey.scheduling.enabled",
+      "name": "zeta.scheduling.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable periodic TopK decay and expelled-key drain scheduling.",
       "defaultValue": true
     },
     {
-      "name": "hotkey.report.enabled",
+      "name": "zeta.report.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable app-to-Worker report aggregation and publishing via AMQP.",
       "defaultValue": true
     },
     {
-      "name": "hotkey.local.top-k",
+      "name": "zeta.local.top-k",
       "type": "java.lang.Integer",
       "description": "HeavyKeeper top-K capacity (maximum number of tracked hot keys).",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.local.width",
+      "name": "zeta.local.width",
       "type": "java.lang.Integer",
       "description": "HeavyKeeper sketch width (number of columns in the Count-Min Sketch matrix).",
       "defaultValue": 50000
     },
     {
-      "name": "hotkey.local.depth",
+      "name": "zeta.local.depth",
       "type": "java.lang.Integer",
       "description": "HeavyKeeper sketch depth (number of hash rows).",
       "defaultValue": 5
     },
     {
-      "name": "hotkey.local.decay",
+      "name": "zeta.local.decay",
       "type": "java.lang.Double",
       "description": "HeavyKeeper decay factor applied during periodic decay.",
       "defaultValue": 0.92
     },
     {
-      "name": "hotkey.local.min-count",
+      "name": "zeta.local.min-count",
       "type": "java.lang.Integer",
       "description": "Minimum frequency count before a key is considered for the top-K ranking.",
       "defaultValue": 10
     },
     {
-      "name": "hotkey.local.local-cache-max-size",
+      "name": "zeta.local.local-cache-max-size",
       "type": "java.lang.Integer",
       "description": "Maximum size of the L1 Caffeine cache (number of entries).",
       "defaultValue": 1000
     },
     {
-      "name": "hotkey.local.local-cache-ttl-minutes",
+      "name": "zeta.local.local-cache-ttl-minutes",
       "type": "java.lang.Integer",
       "description": "Time-to-live in minutes for L1 cache entries (hard expiry).",
       "defaultValue": 5
     },
     {
-      "name": "hotkey.local.inflight-max-size",
+      "name": "zeta.local.inflight-max-size",
       "type": "java.lang.Integer",
       "description": "Maximum number of in-flight (pending) SingleFlight requests.",
       "defaultValue": 50000
     },
     {
-      "name": "hotkey.local.inflight-ttl-seconds",
+      "name": "zeta.local.inflight-ttl-seconds",
       "type": "java.lang.Integer",
       "description": "Time-to-live in seconds for in-flight SingleFlight entries.",
       "defaultValue": 5
     },
     {
-      "name": "hotkey.local.inflight-timeout-seconds",
+      "name": "zeta.local.inflight-timeout-seconds",
       "type": "java.lang.Integer",
       "description": "Timeout in seconds before an in-flight SingleFlight request is considered failed.",
       "defaultValue": 3
     },
     {
-      "name": "hotkey.local.executor-core-pool-size",
+      "name": "zeta.local.executor-core-pool-size",
       "type": "java.lang.Integer",
       "description": "Core pool size for the async cache-loading executor.",
       "defaultValue": 8
     },
     {
-      "name": "hotkey.local.executor-max-pool-size",
+      "name": "zeta.local.executor-max-pool-size",
       "type": "java.lang.Integer",
       "description": "Maximum pool size for the async cache-loading executor.",
       "defaultValue": 32
     },
     {
-      "name": "hotkey.local.executor-queue-capacity",
+      "name": "zeta.local.executor-queue-capacity",
       "type": "java.lang.Integer",
       "description": "Queue capacity for the async cache-loading executor.",
       "defaultValue": 2000
     },
     {
-      "name": "hotkey.local.scheduler-pool-size",
+      "name": "zeta.local.scheduler-pool-size",
       "type": "java.lang.Integer",
       "description": "Pool size for the shared HotKey scheduler (periodic tasks).",
       "defaultValue": 8
     },
     {
-      "name": "hotkey.local.expelled-queue-capacity",
+      "name": "zeta.local.expelled-queue-capacity",
       "type": "java.lang.Integer",
       "description": "Capacity of the expelled-key queue (for keys evicted from the top-K ranking).",
       "defaultValue": 50000
     },
     {
-      "name": "hotkey.local.decay-period",
+      "name": "zeta.local.decay-period",
       "type": "java.lang.Integer",
       "description": "Deprecated: decay period in seconds (no longer used).",
       "defaultValue": 20,
@@ -125,367 +125,367 @@
       }
     },
     {
-      "name": "hotkey.local.default-hard-ttl-ms",
+      "name": "zeta.local.default-hard-ttl-ms",
       "type": "java.lang.Long",
       "description": "Default hard TTL in milliseconds for normal (non-hot) cache entries.",
       "defaultValue": 300000
     },
     {
-      "name": "hotkey.local.hard-ttl-ms",
+      "name": "zeta.local.hard-ttl-ms",
       "type": "java.lang.Long",
       "description": "Override hard TTL in milliseconds for normal keys (0 = use default-hard-ttl-ms).",
       "defaultValue": 0
     },
     {
-      "name": "hotkey.local.default-hot-hard-ttl-ms",
+      "name": "zeta.local.default-hot-hard-ttl-ms",
       "type": "java.lang.Long",
       "description": "Default hard TTL in milliseconds for hot cache entries.",
       "defaultValue": 3600000
     },
     {
-      "name": "hotkey.local.hot-hard-ttl-ms",
+      "name": "zeta.local.hot-hard-ttl-ms",
       "type": "java.lang.Long",
       "description": "Override hard TTL in milliseconds for hot keys (0 = use default-hot-hard-ttl-ms).",
       "defaultValue": 0
     },
     {
-      "name": "hotkey.local.default-soft-ttl-ms",
+      "name": "zeta.local.default-soft-ttl-ms",
       "type": "java.lang.Long",
       "description": "Default soft TTL in milliseconds for normal (non-hot) cache entries.",
       "defaultValue": 30000
     },
     {
-      "name": "hotkey.local.soft-ttl-ms",
+      "name": "zeta.local.soft-ttl-ms",
       "type": "java.lang.Long",
       "description": "Override soft TTL in milliseconds for normal keys (0 = use default-soft-ttl-ms).",
       "defaultValue": 0
     },
     {
-      "name": "hotkey.local.default-hot-soft-ttl-ms",
+      "name": "zeta.local.default-hot-soft-ttl-ms",
       "type": "java.lang.Long",
       "description": "Default soft TTL in milliseconds for hot cache entries.",
       "defaultValue": 300000
     },
     {
-      "name": "hotkey.local.hot-soft-ttl-ms",
+      "name": "zeta.local.hot-soft-ttl-ms",
       "type": "java.lang.Long",
       "description": "Override soft TTL in milliseconds for hot keys (0 = use default-hot-soft-ttl-ms).",
       "defaultValue": 0
     },
     {
-      "name": "hotkey.local.ttl-jitter-ratio",
+      "name": "zeta.local.ttl-jitter-ratio",
       "type": "java.lang.Double",
       "description": "Jitter ratio (0.0-1.0) applied to TTLs e.g. 0.05 means +/- 5% random offset.",
       "defaultValue": 0.05
     },
     {
-      "name": "hotkey.local.refresh-max-pools",
+      "name": "zeta.local.refresh-max-pools",
       "type": "java.lang.Integer",
       "description": "Maximum number of async refresh pools for soft-expired cache entries.",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.local.version-key-ttl-minutes",
+      "name": "zeta.local.version-key-ttl-minutes",
       "type": "java.lang.Integer",
       "description": "TTL in minutes for Redis version tracking keys.",
       "defaultValue": 60
     },
     {
-      "name": "hotkey.local.app-name",
+      "name": "zeta.local.app-name",
       "type": "java.lang.String",
       "description": "Application name used for report routing and queue naming.",
       "defaultValue": "default"
     },
     {
-      "name": "hotkey.local.report-exchange",
+      "name": "zeta.local.report-exchange",
       "type": "java.lang.String",
       "description": "Name of the DirectExchange for app-to-Worker report messages.",
-      "defaultValue": "hotkey.report.exchange"
+      "defaultValue": "zeta.report.exchange"
     },
     {
-      "name": "hotkey.local.report-interval-ms",
+      "name": "zeta.local.report-interval-ms",
       "type": "java.lang.Long",
       "description": "Interval in milliseconds between periodic report flushes.",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.local.shard-count",
+      "name": "zeta.local.shard-count",
       "type": "java.lang.Integer",
       "description": "Thread count divisor for auto consumer calculation (max(4, availableProcessors/2) when 0).",
       "defaultValue": 1
     },
     {
-      "name": "hotkey.local.queue-capacity",
+      "name": "zeta.local.queue-capacity",
       "type": "java.lang.Integer",
       "description": "Capacity of the internal report batch queue.",
       "defaultValue": 10000
     },
     {
-      "name": "hotkey.local.queue-offer-timeout-ms",
+      "name": "zeta.local.queue-offer-timeout-ms",
       "type": "java.lang.Integer",
       "description": "Timeout in milliseconds for offering a batch to the report queue.",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.local.consumer-count",
+      "name": "zeta.local.consumer-count",
       "type": "java.lang.Integer",
       "description": "Number of report queue consumer threads (0 = auto: max(4, availableProcessors/2)).",
       "defaultValue": 0
     },
     {
-      "name": "hotkey.local.consistent-hashing.enabled",
+      "name": "zeta.local.consistent-hashing.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable consistent-hashing mode for report routing to dynamic Worker instances.",
       "defaultValue": true
     },
     {
-      "name": "hotkey.local.consistent-hashing.virtual-nodes",
+      "name": "zeta.local.consistent-hashing.virtual-nodes",
       "type": "java.lang.Integer",
       "description": "Number of virtual nodes per physical Worker in the consistent-hash ring.",
       "defaultValue": 500
     },
     {
-      "name": "hotkey.local.instance-id",
+      "name": "zeta.local.instance-id",
       "type": "java.lang.String",
       "description": "Per-instance identifier for queue naming. Overrides auto-detected instance-id.",
       "defaultValue": ""
     },
     {
-      "name": "hotkey.local.reporter.enabled",
+      "name": "zeta.local.reporter.enabled",
       "type": "java.lang.Boolean",
       "description": "Whether BBR adaptive rate-limiting is enabled for the reporter.",
       "defaultValue": true
     },
     {
-      "name": "hotkey.local.reporter.cpu-threshold",
+      "name": "zeta.local.reporter.cpu-threshold",
       "type": "java.lang.Integer",
       "description": "CPU threshold (0-1000, default 800 = 80%) for reporter backpressure.",
       "defaultValue": 800
     },
     {
-      "name": "hotkey.local.reporter.cpu-poll-interval-ms",
+      "name": "zeta.local.reporter.cpu-poll-interval-ms",
       "type": "java.lang.Long",
       "description": "CPU polling interval in milliseconds for reporter backpressure.",
       "defaultValue": 500
     },
     {
-      "name": "hotkey.local.reporter.cpu-decay",
+      "name": "zeta.local.reporter.cpu-decay",
       "type": "java.lang.Double",
       "description": "EMA decay factor for CPU smoothing (0.0-1.0).",
       "defaultValue": 0.95
     },
     {
-      "name": "hotkey.local.reporter.bbr-window-ms",
+      "name": "zeta.local.reporter.bbr-window-ms",
       "type": "java.lang.Long",
       "description": "BBR sliding window size in milliseconds.",
       "defaultValue": 10000
     },
     {
-      "name": "hotkey.local.reporter.bbr-window-buckets",
+      "name": "zeta.local.reporter.bbr-window-buckets",
       "type": "java.lang.Integer",
       "description": "Number of buckets in the BBR sliding window.",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.local.cache.max-size",
+      "name": "zeta.local.cache.max-size",
       "type": "java.lang.Integer",
       "description": "Maximum number of L1 cache entries (ignored when max-weight > 0).",
       "defaultValue": 1000
     },
     {
-      "name": "hotkey.local.cache.max-weight",
+      "name": "zeta.local.cache.max-weight",
       "type": "java.lang.Long",
       "description": "Memory weight limit for L1 cache (bytes). 0 = use max-size.",
       "defaultValue": 0
     },
     {
-      "name": "hotkey.local.cache.max-value-size",
+      "name": "zeta.local.cache.max-value-size",
       "type": "java.lang.Long",
       "description": "Single value size limit (bytes). 0 = unlimited.",
       "defaultValue": 0
     },
     {
-      "name": "hotkey.local.reporter.bbr-cooldown-ms",
+      "name": "zeta.local.reporter.bbr-cooldown-ms",
       "type": "java.lang.Long",
       "description": "Cooldown period in ms after a reporter drop before allowing again.",
       "defaultValue": 1000
     },
     {
-      "name": "hotkey.local.heartbeat.exchange-name",
+      "name": "zeta.local.heartbeat.exchange-name",
       "type": "java.lang.String",
       "description": "Heartbeat exchange name for worker liveliness detection.",
-      "defaultValue": "hotkey.heartbeat.exchange"
+      "defaultValue": "zeta.heartbeat.exchange"
     },
     {
-      "name": "hotkey.local.heartbeat.timeout-ms",
+      "name": "zeta.local.heartbeat.timeout-ms",
       "type": "java.lang.Long",
       "description": "Heartbeat timeout in milliseconds.",
       "defaultValue": 3000
     },
     {
-      "name": "hotkey.local.heartbeat.verify-interval-ms",
+      "name": "zeta.local.heartbeat.verify-interval-ms",
       "type": "java.lang.Long",
       "description": "Verify interval in milliseconds for worker liveliness checks.",
       "defaultValue": 1500
     },
     {
-      "name": "hotkey.local.heartbeat.ping-timeout-ms",
+      "name": "zeta.local.heartbeat.ping-timeout-ms",
       "type": "java.lang.Long",
       "description": "PING timeout in milliseconds for worker verification.",
       "defaultValue": 2000
     },
     {
-      "name": "hotkey.local.heartbeat.degrade-after-failures",
+      "name": "zeta.local.heartbeat.degrade-after-failures",
       "type": "java.lang.Integer",
       "description": "Number of consecutive heartbeat failures before graceful degradation.",
       "defaultValue": 2
     },
     {
-      "name": "hotkey.spring-cache.enabled",
+      "name": "zeta.spring-cache.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable Spring @Cacheable integration with HotKey dynamic TTL.",
       "defaultValue": false
     },
     {
-      "name": "hotkey.local.spring-cache.key-separator",
+      "name": "zeta.local.spring-cache.key-separator",
       "type": "java.lang.String",
       "description": "Separator between cache name and key in internal cache key string.",
       "defaultValue": "::"
     },
     {
-      "name": "hotkey.sync.enabled",
+      "name": "zeta.sync.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable cross-instance cache synchronization (INVALIDATE/REFRESH). Requires Redis.",
       "defaultValue": false
     },
     {
-      "name": "hotkey.sync.exchange-name",
+      "name": "zeta.sync.exchange-name",
       "type": "java.lang.String",
       "description": "Name of the FanoutExchange for cache sync messages.",
-      "defaultValue": "hotkey.sync.exchange"
+      "defaultValue": "zeta.sync.exchange"
     },
     {
-      "name": "hotkey.sync.queue-prefix",
+      "name": "zeta.sync.queue-prefix",
       "type": "java.lang.String",
       "description": "Prefix for the per-instance sync queue name.",
-      "defaultValue": "hotkey.sync"
+      "defaultValue": "zeta.sync"
     },
     {
-      "name": "hotkey.sync.auto-startup",
+      "name": "zeta.sync.auto-startup",
       "type": "java.lang.Boolean",
       "description": "Whether the sync listener container starts automatically.",
       "defaultValue": true
     },
     {
-      "name": "hotkey.sync.dedup-window-seconds",
+      "name": "zeta.sync.dedup-window-seconds",
       "type": "java.lang.Integer",
       "description": "Time window in seconds for deduplicating duplicate sync messages.",
       "defaultValue": 10
     },
     {
-      "name": "hotkey.sync.dedup-max-size",
+      "name": "zeta.sync.dedup-max-size",
       "type": "java.lang.Integer",
       "description": "Maximum number of entries in the sync deduplication cache.",
       "defaultValue": 10000
     },
     {
-      "name": "hotkey.sync.warmup-jitter-ms",
+      "name": "zeta.sync.warmup-jitter-ms",
       "type": "java.lang.Integer",
       "description": "Maximum random jitter in milliseconds applied to sync listener startup.",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.sync.concurrent-consumers",
+      "name": "zeta.sync.concurrent-consumers",
       "type": "java.lang.Integer",
       "description": "Number of concurrent consumers for the sync listener.",
       "defaultValue": 3
     },
     {
-      "name": "hotkey.sync.scheduler-pool-size",
+      "name": "zeta.sync.scheduler-pool-size",
       "type": "java.lang.Integer",
       "description": "Pool size for the sync scheduler (deferred Redis reads).",
       "defaultValue": 4
     },
     {
-      "name": "hotkey.sync.prefetch-count",
+      "name": "zeta.sync.prefetch-count",
       "type": "java.lang.Integer",
       "description": "AMQP prefetch count for the sync listener.",
       "defaultValue": 5
     },
     {
-      "name": "hotkey.worker-listener.enabled",
+      "name": "zeta.worker-listener.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable listening for Worker HOT/COOL decisions. Requires Redis.",
       "defaultValue": false
     },
     {
-      "name": "hotkey.worker-listener.exchange-name",
+      "name": "zeta.worker-listener.exchange-name",
       "type": "java.lang.String",
       "description": "Name of the FanoutExchange for Worker decision broadcasts. Must match hotkey.worker.messaging.broadcast-exchange.",
-      "defaultValue": "hotkey.broadcast.exchange"
+      "defaultValue": "zeta.broadcast.exchange"
     },
     {
-      "name": "hotkey.worker-listener.queue-prefix",
+      "name": "zeta.worker-listener.queue-prefix",
       "type": "java.lang.String",
       "description": "Prefix for the per-instance Worker decision queue name.",
-      "defaultValue": "hotkey.worker"
+      "defaultValue": "zeta.worker"
     },
     {
-      "name": "hotkey.worker-listener.auto-startup",
+      "name": "zeta.worker-listener.auto-startup",
       "type": "java.lang.Boolean",
       "description": "Whether the Worker listener container starts automatically.",
       "defaultValue": true
     },
     {
-      "name": "hotkey.worker-listener.warmup-jitter-ms",
+      "name": "zeta.worker-listener.warmup-jitter-ms",
       "type": "java.lang.Integer",
       "description": "Maximum random jitter in milliseconds applied to Worker listener startup.",
       "defaultValue": 100
     },
     {
-      "name": "hotkey.worker-listener.concurrent-consumers",
+      "name": "zeta.worker-listener.concurrent-consumers",
       "type": "java.lang.Integer",
       "description": "Number of concurrent consumers for the Worker decision listener.",
       "defaultValue": 2
     },
     {
-      "name": "hotkey.worker-listener.scheduler-pool-size",
+      "name": "zeta.worker-listener.scheduler-pool-size",
       "type": "java.lang.Integer",
       "description": "Pool size for the Worker listener scheduler (deferred Redis reads).",
       "defaultValue": 2
     },
     {
-      "name": "hotkey.worker-listener.prefetch-count",
+      "name": "zeta.worker-listener.prefetch-count",
       "type": "java.lang.Integer",
       "description": "AMQP prefetch count for the Worker listener.",
       "defaultValue": 5
     },
     {
-      "name": "hotkey.worker-listener.sre.enabled",
+      "name": "zeta.worker-listener.sre.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable SRE adaptive rate limiter for HOT decision processing.",
       "defaultValue": true
     },
     {
-      "name": "hotkey.worker-listener.sre.window-ms",
+      "name": "zeta.worker-listener.sre.window-ms",
       "type": "java.lang.Long",
       "description": "Sliding window duration in milliseconds for SRE rate limiter tracking.",
       "defaultValue": 3000
     },
     {
-      "name": "hotkey.worker-listener.sre.buckets",
+      "name": "zeta.worker-listener.sre.buckets",
       "type": "java.lang.Integer",
       "description": "Number of time buckets within the SRE rate limiter sliding window.",
       "defaultValue": 10
     },
     {
-      "name": "hotkey.worker-listener.sre.min-samples",
+      "name": "zeta.worker-listener.sre.min-samples",
       "type": "java.lang.Integer",
       "description": "Minimum total samples before SRE rate limiter begins active throttling.",
       "defaultValue": 20
     },
     {
-      "name": "hotkey.worker-listener.sre.success-threshold",
+      "name": "zeta.worker-listener.sre.success-threshold",
       "type": "java.lang.Double",
       "description": "Success ratio threshold (0.0-1.0) for SRE rate limiter backpressure.",
       "defaultValue": 0.6

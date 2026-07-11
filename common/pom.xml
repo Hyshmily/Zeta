@@ -8,16 +8,16 @@
 
   <parent>
     <groupId>io.github.hyshmily</groupId>
-    <artifactId>hotkey-parent</artifactId>
-    <version>1.1.54</version>
+    <artifactId>zeta-parent</artifactId>
+    <version>1.1.55</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <artifactId>hotkey</artifactId>
+  <artifactId>zeta</artifactId>
   <packaging>jar</packaging>
 
-  <name>HotKey</name>
-  <description>HotKey detection and cache warming Spring Boot Starter</description>
+  <name>Zeta</name>
+  <description>Zeta detection and cache warming Spring Boot Starter</description>
 
   <dependencies>
     <dependency>

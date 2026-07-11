@@ -1,10 +1,10 @@
-io.github.hyshmily.hotkey.autoconfigure.HotKeyFacadeAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeyAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeyRedisAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeyActuatorAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeyAmqpAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeySchedulingConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeyMicrometerAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeySpringCacheAutoConfiguration
-io.github.hyshmily.hotkey.autoconfigure.HotKeyLockAutoConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaFacadeAutoConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaAutoConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaRedisAutoConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaActuatorAutoConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaAmqpAutoConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaSchedulingConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaMicrometerAutoConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaSpringCacheAutoConfiguration
+io.github.hyshmily.zeta.autoconfigure.ZetaLockAutoConfiguration
 
