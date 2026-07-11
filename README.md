@@ -32,6 +32,9 @@ Inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) p
 
 ### 1. Add Dependency
 
+> [!CAUTION]
+> Starting from **v1.1.55**, this project has been renamed to **Zeta** (formerly HotKey). Older versions (≤ v1.1.54) remain available but contain unfixed security vulnerabilities.
+
 Configuration reference:
 
 <details>
@@ -185,16 +188,16 @@ Default local configuration:
 
 **Feature configuration:**
 
-| Feature                  | How to Enable                                  | Description                                                            |
-| ------------------------ | ---------------------------------------------- | ---------------------------------------------------------------------- |
-| Redis L2 Cache           | Add `RedisTemplate` Bean                       | Two-level cache, L2 fallback                                           |
-| Cross-instance Sync      | `zeta.sync.enabled=true`                      | RabbitMQ-based cache invalidation                                      |
-| Worker Listener          | `zeta.worker-listener.enabled=true`           | Receive HOT/COOL decisions from Worker                                 |
-| Worker Mode              | `zeta.worker.enabled=true`                    | Run a dedicated Worker node                                            |
-| Worker TopK Persist      | `zeta.worker.persistence.enabled=true`        | Warm start from Redis after restart                                    |
-| Access Reporting         | `zeta.report.enabled=true` (default)          | Report access counts to Worker                                         |
-| Reporter Self-Protection | `zeta.local.reporter.enabled=true` (default)  | BBR backpressure for Reporter flush                                    |
-| Spring Cache Integration | `zeta.spring-cache.enabled=true`              | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with Zeta detection |
+| Feature                  | How to Enable                                | Description                                                          |
+| ------------------------ | -------------------------------------------- | -------------------------------------------------------------------- |
+| Redis L2 Cache           | Add `RedisTemplate` Bean                     | Two-level cache, L2 fallback                                         |
+| Cross-instance Sync      | `zeta.sync.enabled=true`                     | RabbitMQ-based cache invalidation                                    |
+| Worker Listener          | `zeta.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker                               |
+| Worker Mode              | `zeta.worker.enabled=true`                   | Run a dedicated Worker node                                          |
+| Worker TopK Persist      | `zeta.worker.persistence.enabled=true`       | Warm start from Redis after restart                                  |
+| Access Reporting         | `zeta.report.enabled=true` (default)         | Report access counts to Worker                                       |
+| Reporter Self-Protection | `zeta.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush                                  |
+| Spring Cache Integration | `zeta.spring-cache.enabled=true`             | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with Zeta detection |
 
 See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 
