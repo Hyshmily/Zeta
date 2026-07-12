@@ -58,6 +58,7 @@ public class ReportPublisher {
         message.counts().size(),
         e.getMessage()
       );
+      throw e;
     }
     log.debug("Published report: target={}, keys={}", target, message.counts().size());
   }

@@ -799,7 +799,7 @@ public class HotKeyCache {
         return extendHotKeyExpiryIfNeeded(cacheKey, ce, hardTtlMs, softTtlMs);
       }
       if (isPromotableState(ce)) {
-        return promoteIfLocalHot(cacheKey, val, ce, hardTtlMs, softTtlMs);
+        return promoteIfLocalHot(cacheKey, ce, hardTtlMs, softTtlMs);
       }
     }
     return false;
@@ -826,15 +826,11 @@ public class HotKeyCache {
    *
    * @return {@code true} if the entry was promoted
    */
-  private boolean promoteIfLocalHot(String cacheKey, Object val, CacheEntry ce, long hardTtlMs, long softTtlMs) {
-    if (!hotKeyDetector.contains(cacheKey)) {
-      return false;
-    }
+  private boolean promoteIfLocalHot(String cacheKey, CacheEntry ce, long hardTtlMs, long softTtlMs) {
     long hotHard = expireManager.resolveEffectiveHotHard(hardTtlMs);
     long hotSoft = expireManager.resolveEffectiveHotSoft(softTtlMs);
 
-    promote(cacheKey, val, ce, hotHard, hotSoft);
-    return true;
+    return promote(cacheKey, ce, hotHard, hotSoft);
   }
 
   /**
@@ -843,36 +839,27 @@ public class HotKeyCache {
    * left untouched).
    *
    * @param cacheKey the key to promote
-   * @param val      the underlying cached value
    * @param ce       the existing {@link CacheEntry} from which metadata
    *                 (version, normal TTLs) is preserved
    * @param hotHard  the hot-entry hard TTL
    * @param hotSoft  the hot-entry soft TTL
    */
-  private void promote(String cacheKey, Object val, CacheEntry ce, long hotHard, long hotSoft) {
+  private boolean promote(String cacheKey, CacheEntry ce, long hotHard, long hotSoft) {
+    boolean[] promoted = { false };
     caffeineCache
       .asMap()
       .compute(cacheKey, (k, existing) -> {
         if (existing instanceof CacheEntry entry) {
-          if (!isPromotableState(entry)) {
+          if (!isPromotableState(entry) || !hotKeyDetector.contains(k)) {
             return existing;
           }
 
+          promoted[0] = true;
           return expireManager.applyTtl(entry, hotHard, hotSoft).toBuilder().keyState(KeyState.HOT).build();
         }
-
-        return expireManager.createBuilder(
-          val,
-          ce.getDataVersion(),
-          ce.isVersionDegraded(),
-          ce.getDecisionVersion(),
-          hotHard,
-          hotSoft,
-          ce.getNormalHardTtlMs(),
-          ce.getNormalSoftTtlMs(),
-          KeyState.HOT
-        );
+        return null;
       });
+    return promoted[0];
   }
 
   /**

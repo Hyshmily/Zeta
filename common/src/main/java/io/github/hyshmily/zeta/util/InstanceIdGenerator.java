@@ -36,17 +36,17 @@ public final class InstanceIdGenerator {
   private InstanceIdGenerator() {}
 
   /**
-   * JVM-local node identifier derived from the upper 31 bits of a random UUID.
+   * JVM-local node identifier derived from the upper 64 bits of a random UUID.
    * Initialized once at class load, stable for the JVM lifetime.
    *
-   * <p>Used by {@link VersionGuard} as the upper 32 bits of the
+   * <p>Used by {@link VersionGuard} as the upper 64 bits of the
    * fallback version when Redis INCR is unavailable, ensuring that degraded
    * versions from different JVMs occupy non-overlapping ranges.
    */
-  private static final int NODE_ID;
+  private static final long NODE_ID;
 
   static {
-    NODE_ID = (int) (UUID.randomUUID().getMostSignificantBits() & Integer.MAX_VALUE);
+    NODE_ID = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
   }
 
   /**
@@ -54,7 +54,7 @@ public final class InstanceIdGenerator {
    *
    * @return a non-negative integer unique with high probability per JVM process
    */
-  public static int getNodeId() {
+  public static long getNodeId() {
     return NODE_ID;
   }
 

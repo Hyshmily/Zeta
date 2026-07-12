@@ -473,17 +473,34 @@ class SingleFlightTest {
   }
 
   /**
-   * Verifies that a reader exception during a collection load propagates
-   * as a RuntimeException.
+   * Verifies that a reader exception during a collection load is caught and
+   * the failing key returns {@link Optional#empty()} without propagating
+   * the exception.
    */
   @Test
-  void loadCollection_shouldPropagateReaderException() {
-    assertThatThrownBy(() ->
-      singleFlight.load(List.of("fail-key"), key -> {
-        throw new RuntimeException("batch-fail");
-      })
-    )
-      .isInstanceOf(RuntimeException.class)
-      .hasMessageContaining("batch-fail");
+  void loadCollection_onReaderException_shouldReturnEmptyForKey() {
+    Map<String, Optional<String>> result = singleFlight.load(List.of("fail-key"), key -> {
+      throw new RuntimeException("batch-fail");
+    });
+    assertThat(result).hasSize(1).containsEntry("fail-key", Optional.empty());
+  }
+
+  /**
+   * Verifies that when one key in a batch load fails, the remaining keys are
+   * still processed successfully and the failing key returns empty.
+   */
+  @Test
+  void loadCollection_withOneKeyFailing_shouldReturnAllKeys() {
+    Map<String, Optional<String>> result = singleFlight.load(List.of("a", "fail", "c"), key -> {
+      if ("fail".equals(key)) {
+        throw new RuntimeException("intentional failure");
+      }
+      return "val-" + key;
+    });
+    assertThat(result)
+      .hasSize(3)
+      .containsEntry("a", Optional.of("val-a"))
+      .containsEntry("fail", Optional.empty())
+      .containsEntry("c", Optional.of("val-c"));
   }
 }

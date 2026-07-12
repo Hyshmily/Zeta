@@ -210,7 +210,10 @@ public class HotKeyCacheExtensionAspect {
           if (maxThreads > 0) {
             AtomicInteger counter = concurrentCounters.computeIfAbsent(prefixedKey, k -> new AtomicInteger(0));
             if (counter.incrementAndGet() > maxThreads) {
-              counter.decrementAndGet();
+              concurrentCounters.computeIfPresent(prefixedKey, (k, v) -> {
+                int after = v.decrementAndGet();
+                return after == 0 ? null : v;
+              });
               return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
             }
             needsDecrement = true;
@@ -237,10 +240,10 @@ public class HotKeyCacheExtensionAspect {
       throw e;
     } finally {
       if (needsDecrement) {
-        AtomicInteger counter = concurrentCounters.get(prefixedKey);
-        if (counter != null) {
-          counter.decrementAndGet();
-        }
+        concurrentCounters.computeIfPresent(prefixedKey, (k, v) -> {
+          int after = v.decrementAndGet();
+          return after == 0 ? null : v;
+        });
       }
       ZetaCacheContext.get().restore(prev);
     }

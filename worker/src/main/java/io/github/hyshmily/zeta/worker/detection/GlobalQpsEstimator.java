@@ -27,12 +27,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * per-key buffers.  This provides a lightweight, global throughput estimate
  * that drives dynamic threshold adaptation via {@link ThresholdLearner}.
  *
- * <p>The estimator is <b>not thread-safe</b> — callers must ensure that
- * {@link #addTotal} is called from a single thread (the report consumer
- * thread in practice).  The read-only methods ({@link #getWindowTotal},
- * {@link #getQps}) may be called concurrently if a stale-but-consistent
- * snapshot is acceptable; the AtomicLong array guarantees individual element
- * visibility.
+ * <p>The write method ({@link #addTotal}) is {@code synchronized} and safe
+ * to call from multiple consumer threads concurrently.  The read-only methods
+ * ({@link #getWindowTotal}, {@link #getQps}) may be called concurrently
+ * without blocking; a stale-but-consistent snapshot is acceptable — the
+ * {@code AtomicLong} array guarantees individual element visibility.
  *
  *
  * <p><b>Known limitation — per‑shard only:</b> This estimator only sees
@@ -81,14 +80,15 @@ public class GlobalQpsEstimator {
    * Adds the sum of all per-key counts in a batch to the current time slice.
    *
    * <p>Also clears stale slices that have fallen out of the window, keeping
-   * the circular buffer consistent.  The clear-before-add sequence is
-   * <b>not atomic</b>; this method must be called from a single consumer
-   * thread (or externally synchronised) to avoid races.
+   * the circular buffer consistent.  This method is {@code synchronized} to
+   * protect the clear-before-add sequence against concurrent calls from
+   * multiple {@link io.github.hyshmily.zeta.worker.ingest.ReportConsumer}
+   * threads.
    *
    * @param totalCount the total number of access counts across all keys in
    *                   the batch; must be non-negative
    */
-  public void addTotal(long totalCount) {
+  public synchronized void addTotal(long totalCount) {
     long now = System.currentTimeMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) % slices.length);
 

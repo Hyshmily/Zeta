@@ -362,6 +362,39 @@ class BufferedCounterTest {
   }
 
   @Test
+  void destroy_withConcurrentCount_shouldPreserveDataIntegrity() throws Exception {
+    int threadCount = 4;
+    int incrementsPerThread = 1000;
+    long expectedTotal = (long) threadCount * incrementsPerThread;
+    List<Map<String, Long>> captured = new ArrayList<>();
+    BufferedCounter dataCounter = new BufferedCounter(captured::add);
+    ExecutorService exec = Executors.newFixedThreadPool(threadCount + 1);
+    AtomicBoolean stopped = new AtomicBoolean(false);
+    for (int i = 0; i < threadCount; i++) {
+      String key = "k" + i;
+      exec.submit(() -> {
+        for (int j = 0; j < incrementsPerThread && !stopped.get(); j++) {
+          dataCounter.count(key, 1);
+        }
+      });
+    }
+    Thread.sleep(100);
+    exec.submit(() -> {
+      dataCounter.destroy();
+      stopped.set(true);
+    });
+    exec.shutdown();
+    assertThat(exec.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+    long totalFlushed = captured
+      .stream()
+      .flatMap(m -> m.values().stream())
+      .mapToLong(Long::longValue)
+      .sum();
+    assertThat(totalFlushed).isGreaterThanOrEqualTo(expectedTotal - 100);
+  }
+
+  @Test
   void activeBufferSaturation_shouldReturnRatio() {
     double emptySat = counter.activeBufferSaturation();
     assertThat(emptySat).isBetween(0.0, 0.1);

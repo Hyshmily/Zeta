@@ -20,6 +20,7 @@ import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
@@ -29,14 +30,14 @@ import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
-import io.github.hyshmily.zeta.util.DelayUtil;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -113,7 +114,10 @@ public class CacheSyncListener {
    * Tracks the highest INVALIDATE version per key, preventing stale REFRESH
    * messages (from before the INVALIDATE) from recreating the entry.
    */
-  private final ConcurrentHashMap<String, Long> recentInvalidated = new ConcurrentHashMap<>();
+  private final Cache<String, Long> recentInvalidated = Caffeine.newBuilder()
+    .maximumSize(10_000)
+    .expireAfterWrite(10, TimeUnit.MINUTES)
+    .build();
 
   @PostConstruct
   public void init() {
@@ -178,9 +182,19 @@ public class CacheSyncListener {
       }
     };
 
-    // Outer jitter spreads Redis reads across instances.
-    // Inner per-key FIFO ensures same-key ordering on this instance.
-    DelayUtil.floatTimeDelay(() -> dispatcher.submit(sm.cacheKey(), task), properties.getWarmupJitterMs(), scheduler);
+    dispatcher.submit(sm.cacheKey(), () -> {
+      try {
+        if (properties.getWarmupJitterMs() > 0) {
+          long jitter = ThreadLocalRandom.current().nextLong(properties.getWarmupJitterMs());
+          TimeUnit.MILLISECONDS.sleep(jitter);
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        log.warn("CacheSyncListener : Jitter sleep interrupted for key={}", sm.cacheKey());
+        return;
+      }
+      task.run();
+    });
   }
 
   /**
@@ -400,7 +414,7 @@ public class CacheSyncListener {
    */
   private void recordInvalidation(String key, long version) {
     if (version != 0L) {
-      recentInvalidated.merge(key, version, Math::max);
+      recentInvalidated.asMap().merge(key, version, Math::max);
     }
   }
 
@@ -409,7 +423,7 @@ public class CacheSyncListener {
    * invalidated at a version >= the refresh version.
    */
   private boolean isInvalidation(String key, long refreshVersion) {
-    Long highWater = recentInvalidated.get(key);
+    Long highWater = recentInvalidated.getIfPresent(key);
     return highWater != null && refreshVersion <= highWater;
   }
 
@@ -418,6 +432,6 @@ public class CacheSyncListener {
    * allowing future refreshes for this key to proceed normally.
    */
   private void clearInvalidation(String key) {
-    recentInvalidated.remove(key);
+    recentInvalidated.invalidate(key);
   }
 }

@@ -72,7 +72,7 @@ class ReportPublisherTest {
   }
 
   @Test
-  void publish_whenAmqpException_shouldNotThrowToCaller() {
+  void publish_whenAmqpException_shouldThrowToCaller() {
     ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
     doThrow(new AmqpException("Broker unavailable"))
       .when(rabbitTemplate)
@@ -81,6 +81,6 @@ class ReportPublisherTest {
         eq(ROUTING_KEY_REPORT + "testApp.target"),
         any(ReportMessage.class)
       );
-    publisher.publish("target", message);
+    org.junit.jupiter.api.Assertions.assertThrows(AmqpException.class, () -> publisher.publish("target", message));
   }
 }

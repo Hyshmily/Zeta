@@ -81,6 +81,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
   private final boolean ownsScheduler;
 
+  private static final int MAX_STANDBY_BUFFERS = 3;
+
+  private volatile boolean shutdown;
+
   /**
    * Creates a buffered counter that flushes aggregated counts to the given consumer.
    * Creates its own single-thread scheduler with default parameters ({@value DEFAULT_MAX_BUFFER_SIZE}
@@ -153,6 +157,9 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * @param delta the number of accesses to recordReport (must be positive)
    */
   public void count(String key, long delta) {
+    if (shutdown) {
+      return;
+    }
     CounterBuffer buffer = active.get();
     buffer.add(key, delta);
 
@@ -189,6 +196,13 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     CounterBuffer newBuffer = new CounterBuffer();
     CounterBuffer oldBuffer = active.getAndSet(newBuffer);
     if (oldBuffer != null) {
+      if (flushQueue.size() >= MAX_STANDBY_BUFFERS) {
+        CounterBuffer victim = flushQueue.poll();
+        if (victim != null) {
+          victim.drain();
+          log.warn("Flush queue is full, dropping buffer with {} keys", victim.size());
+        }
+      }
       flushQueue.offer(oldBuffer);
     }
   }
@@ -242,6 +256,8 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    */
   @Override
   public void destroy() {
+    shutdown = true;
+
     if (ownsScheduler) {
       scheduler.shutdown();
       try {
@@ -253,8 +269,14 @@ public class BufferedCounter implements InitializingBean, Destroyable {
         Thread.currentThread().interrupt();
       }
     }
-    trySwitch();
-    flushStandby();
+
+    for (int i = 0; i < 3; i++) {
+      trySwitch();
+      flushStandby();
+      if (active.get().isEmpty() && flushQueue.isEmpty()) {
+        break;
+      }
+    }
   }
 
   /**

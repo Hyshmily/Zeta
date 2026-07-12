@@ -204,8 +204,9 @@ public class ZetaAutoConfiguration {
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
   public Executor hotKeyExecutor(ZetaProperties properties) {
     ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-    executor.setCorePoolSize(0);
+    executor.setCorePoolSize(properties.getExecutorCorePoolSize());
     executor.setMaxPoolSize(properties.getExecutorMaxPoolSize());
+    executor.setAllowCoreThreadTimeOut(true);
     executor.setQueueCapacity(properties.getExecutorQueueCapacity());
     executor.setAllowCoreThreadTimeOut(true);
     executor.setThreadNamePrefix(ZetaConstants.THREAD_PREFIX_HOTKEY);

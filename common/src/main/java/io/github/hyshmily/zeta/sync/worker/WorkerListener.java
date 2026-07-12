@@ -27,7 +27,6 @@ import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
-import io.github.hyshmily.zeta.util.DelayUtil;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
@@ -36,6 +35,8 @@ import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -183,9 +184,19 @@ public class WorkerListener {
       }
     };
 
-    // Outer jitter spreads Redis reads across instances.
-    // Inner per-key FIFO ensures same-key ordering on this instance.
-    DelayUtil.floatTimeDelay(() -> dispatcher.submit(wm.cacheKey(), task), properties.getWarmupJitterMs(), scheduler);
+    dispatcher.submit(wm.cacheKey(), () -> {
+      try {
+        if (properties.getWarmupJitterMs() > 0) {
+          long jitter = ThreadLocalRandom.current().nextLong(properties.getWarmupJitterMs());
+          TimeUnit.MILLISECONDS.sleep(jitter);
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        log.warn("WorkerListener : Jitter sleep interrupted for key={}", wm.cacheKey());
+        return;
+      }
+      task.run();
+    });
   }
 
   /**

@@ -24,7 +24,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAccumulator;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import lombok.Getter;
@@ -60,18 +59,18 @@ import lombok.extern.slf4j.Slf4j;
  *       here (synchronized 1.35×–1.7× faster than StampedLock write path).
  *       No lock-striping replacement yields a measurable win, so the simpler
  *       monitor was kept.</li>
- *   <li>Striped accumulator TopK membership updates: existing hot keys are
- *       refreshed via a {@link LongAccumulator} {@code (Long::max, 0)} on
- *       {@link Node#count}. The {@code LongAccumulator} uses per-CPU-cell
- *       striping (the same {@code Striped64} engine behind {@link LongAdder}),
- *       so concurrent reporters of the <i>same</i> hot key — exactly the
- *       worst-case stress pattern for top-K detection — do not contend on a
- *       single CAS word. The merger {@code Long::max} preserves the original
- *       AtomicLong monotonic-max semantics: the membership count never goes
- *       backward even if the sketch's {@code slotSums} fluctuates on
- *       collisions. Under same-key 16-thread contention this is ~2.6×
- *       faster than {@link java.util.concurrent.atomic.AtomicLong#getAndSet}
- *       CAS spin; in mixed workloads it is statistically indistinguishable.</li>
+ *   <li>Lock-free TopK membership updates: existing hot keys are refreshed
+ *       via {@link AtomicLong#accumulateAndGet(long, java.util.function.LongBinaryOperator)}
+ *       with {@link Math#max} on {@link Node#count}. Under no contention (the
+ *       common case for most keys) this is a single CAS. Under 16-thread
+ *       same-key contention this is <b>not</b> as fast as the previous
+ *       {@link java.util.concurrent.atomic.LongAccumulator} implementation
+ *       (which used {@code Striped64} cells), but it is the simplest
+ *       primitive that supports both atomic max-raise <i>and</i> atomic
+ *       halving during periodic decay — the {@code LongAccumulator} had no
+ *       {@link java.util.concurrent.atomic.AtomicLong#compareAndSet compareAndSet}
+ *       equivalent, making the {@code reset()+accumulate()} pattern in
+ *       {@link #decayMembership} vulnerable to concurrent-count loss.</li>
  *   <li>A short, non-fair {@link ReentrantLock} ({@link #admissionLock}) guards
  *       only the relatively rare <i>admission</i> path — when a brand-new key
  *       crosses the {@link #minCount} threshold and may enter or evict from the
@@ -98,16 +97,16 @@ import lombok.extern.slf4j.Slf4j;
  *       1D {@code long[] windows} (indexed {@code slot * windowCount + w}).
  *       One allocation, contiguous cache lines, no per-slot array header
  *       pointer-chasing.</li>
- *   <li>{@link LongAccumulator} adapter on {@link Node#count} — see "Concurrency
- *       model" above. Uses ~16× more memory per Node than a bare long but
- *       eliminates single-word CAS contention on same-key writes.</li>
+ *   <li>{@link AtomicLong} for {@link Node#count} — see "Concurrency model"
+ *       above. Supports both atomic max-raise on the hot path and atomic
+ *       halving during decay via CAS.</li>
  * </ul>
  *
  * @see <a href="../../../../../../../docs/adr/0014-heavykeeper-concurrency-choices.md">ADR-0014: HeavyKeeper concurrency data-structure choices</a>
  */
 @Slf4j
 @Internal
-public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
+public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
   /** Pre-computed decay probability lookup table size ({@value}). */
   private static final int LOOKUP_TABLE_SIZE = 65536;
@@ -120,6 +119,9 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
 
   @Getter
   private final int depth;
+
+  @Getter
+  private final int minCount;
 
   /** Pre-computed decay probabilities: {@code decay^i} for {@code i in [0, LOOKUP_TABLE_SIZE)}. */
   private final double[] lookupTable;
@@ -145,13 +147,6 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
   @Getter
   private final int windowCount;
 
-  /**
-   * Epoch counter, incremented each {@link #fading()}. Atomic so that concurrent
-   * {@link #fading()} calls never lose an increment. The read is performed
-   * <i>inside</i> the per-stripe lock to guarantee a writing thread never
-   * targets a stale window that {@link #fading()} has just zeroed.
-   */
-  private final AtomicLong epoch = new AtomicLong(0);
   /** Striped lock objects for fine-grained concurrency on sketch slot updates. */
   private final Object[] lockStripes;
   /** Bitmask for mapping bucket index to lock stripe (stripe count must be power of two). */
@@ -170,11 +165,11 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
   private final ConcurrentHashMap<String, SlotLoc> locCache;
 
   /**
-   * Authoritative TopK membership map. Key → {@link Node} whose count is a
-   * {@link LongAccumulator} with {@code Long::max} merger. Size is bounded by
-   * {@link #k} and enforced by {@link #admissionLock}. Reads and writes of
-   * the count on existing members are lock-free — the accumulator stripes
-   * writes across CPU cells.
+   * Authoritative TopK membership map. Key → {@link Node} with an
+   * {@link AtomicLong} count supporting atomic max-raise on the hot path
+   * and atomic halving during decay. Size is bounded by {@link #k} and
+   * enforced by {@link #admissionLock}. Reads and writes of the count on
+   * existing members are lock-free.
    */
   private final ConcurrentHashMap<String, Node> members;
   /**
@@ -185,14 +180,6 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
   private final ReentrantLock admissionLock;
   /** Bounded blocking queue receiving expelled (evicted) key-count items for downstream consumption. */
   private final BlockingQueue<Item> expelledQueue;
-  /** Running total of all tracked data streams since startup or last {@link #fading()}. */
-  private final LongAdder total;
-
-  // Inherited from HKHeader.MinPqCountRef:
-  //   volatile long minPqCount;
-
-  @Getter
-  private final int minCount;
 
   /**
    * Construct a HeavyKeeper instance.
@@ -292,7 +279,6 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
     this.members = new ConcurrentHashMap<>(k);
     this.admissionLock = new ReentrantLock();
     this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
-    this.total = new LongAdder();
   }
 
   /**
@@ -658,23 +644,30 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
 
   /**
    * Halve every TopK membership count under {@link #admissionLock} and drop
-   * members whose halved count falls to zero. Each {@link Node#count} is a
-   * {@link LongAccumulator} with {@code Long::max} merger, so lowering the
-   * stored value requires a {@code reset()} followed by {@code accumulate()}
-   * (this is safe because the {@code admissionLock} blocks all concurrent
-   * writes). Reads outside fading are not affected since the read path
-   * uses {@code get()}, which combines with {@code Long::max}.
+   * members whose halved count falls to zero. Each {@link Node#count} is an
+   * {@link AtomicLong}, so halving uses a CAS retry loop that preserves any
+   * concurrent {@link AtomicLong#accumulateAndGet} from the lock-free fast
+   * path in {@link #admit}. Unlike the previous {@code reset()+accumulate()}
+   * pattern on {@link java.util.concurrent.atomic.LongAccumulator}, this
+   * approach never loses concurrent writes — if a concurrent accumulate
+   * raises the count between {@code get()} and {@code compareAndSet}, the
+   * CAS fails and the loop retries with the now-higher value.
    */
   private void decayMembership() {
     admissionLock.lock();
     try {
       List<String> dropped = null;
       for (Node n : members.values()) {
-        long halved = n.count.get() >> 1;
-        if (halved > 0) {
-          n.count.reset();
-          n.count.accumulate(halved);
-        } else {
+        // CAS retry loop: atomically halve without losing concurrent accumulates.
+        // If a concurrent accumulate raises the count between get() and CAS,
+        // the CAS fails and we retry with the higher value.
+        long prev;
+        long halved;
+        do {
+          prev = n.count.get();
+          halved = prev >> 1;
+        } while (halved > 0 && !n.count.compareAndSet(prev, halved));
+        if (halved == 0) {
           if (dropped == null) {
             dropped = new ArrayList<>();
           }
@@ -697,9 +690,10 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
    * Apply the TopK membership decision for a key whose sketch estimate is
    * {@code maxCount}.
    *
-   * <p>Hot path (key already a member): a lock-free {@link LongAccumulator#accumulate}
-   * raises the member's observed count to {@code maxCount} via the {@code Long::max}
-   * merger — no monitor is taken. Cold path (key not a member and
+   * <p>Hot path (key already a member): a lock-free
+   * {@link AtomicLong#accumulateAndGet(long, java.util.function.LongBinaryOperator)}
+   * raises the member's observed count to {@code maxCount} via {@link Math#max}
+   * — no monitor is taken. Cold path (key not a member and
    * {@code maxCount < minCount}): returns {@link AddResult#cold()} without
    * locking. Admission path (key not yet a member but {@code maxCount >= minCount}):
    * takes {@link #admissionLock}, scans {@link #members} via {@link #findMinMember()}
@@ -712,10 +706,10 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
     if (maxCount < minCount) {
       return AddResult.cold();
     }
-    // Fast path: existing member — accumulator.max lift, no lock.
+    // Fast path: existing member — atomic max-raise, no lock.
     Node member = members.get(key);
     if (member != null) {
-      member.count.accumulate(maxCount);
+      member.count.accumulateAndGet(maxCount, Math::max);
       return new AddResult(null, true, key);
     }
     // Admission path: brand-new candidate, may enter or evict.
@@ -724,7 +718,7 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
       // Double-check under lock — another thread may have admitted this key.
       Node existing = members.get(key);
       if (existing != null) {
-        existing.count.accumulate(maxCount);
+        existing.count.accumulateAndGet(maxCount, Math::max);
         return new AddResult(null, true, key);
       }
       // O(1) fast reject: can't beat the current minimum member.
@@ -822,22 +816,23 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
   private record SlotLoc(long fp) {}
 
   /**
-   * A key-count pair used as an entry in the TopK membership set. The count
-   * is a {@link LongAccumulator} with {@code Long::max} merger, so writes
-   * under same-key contention never serialise on a single CAS word.
+   * A key-count pair used as an entry in the TopK membership set.
+   * {@link #count} is an {@link AtomicLong} supporting atomic max-raise
+   * via {@link AtomicLong#accumulateAndGet(long, java.util.function.LongBinaryOperator)}
+   * on the hot path and atomic halving via {@link AtomicLong#compareAndSet}
+   * during periodic decay.
    */
   @SuppressWarnings("ClassCanBeRecord")
   private static final class Node {
 
     /** The cache key. */
     final String key;
-    /** Current estimated count — striped accumulator with {@code Long::max} merger. */
-    final LongAccumulator count;
+    /** Current estimated count — supports atomic read-modify-write for both raise and decay. */
+    final AtomicLong count;
 
     Node(String key, long count) {
       this.key = key;
-      this.count = new LongAccumulator(Long::max, 0);
-      this.count.accumulate(count);
+      this.count = new AtomicLong(count);
     }
   }
 
@@ -901,13 +896,21 @@ public class HeavyKeeper extends HKHeader.MinPqCountRef implements TopK {
   }
 }
 
-/** Namespace for field padding through inheritance — adapted from Caffeine. */
+/**
+ * Namespace for field padding through inheritance — adapted from Caffeine.
+ * <p>
+ * Only two padding layers are used: one for the leading pad (120 bytes),
+ * and one for the three hot fields with inter-field and trailing pads (56 bytes each).
+ * Each hot field occupies its own cache line, preventing false sharing between
+ * the heavily updated {@code minPqCount}, {@code epoch}, and {@code total}.
+ */
 final class HKHeader {
 
   private HKHeader() {}
 
+  /** 120-byte leading pad to isolate the first hot field from object header and other instance fields. */
   @SuppressWarnings("all")
-  abstract static class PadMinPqCount {
+  abstract static class PadState {
 
     byte p000, p001, p002, p003, p004, p005, p006, p007;
     byte p008, p009, p010, p011, p012, p013, p014, p015;
@@ -926,30 +929,50 @@ final class HKHeader {
     byte p112, p113, p114, p115, p116, p117, p118, p119;
   }
 
+  /**
+   * Holds the three heavily contended fields with inter-field padding.
+   * <ul>
+   *   <li>{@code minPqCount} – volatile long, guarded by 56-byte trailing pad</li>
+   *   <li>{@code epoch} – AtomicLong, guarded by 56-byte trailing pad</li>
+   *   <li>{@code total} – LongAdder, guarded by 56-byte trailing pad</li>
+   * </ul>
+   * All fields are isolated on distinct cache lines, preventing false sharing
+   * without deep inheritance.
+   */
   @SuppressWarnings("all")
-  abstract static class MinPqCountRef extends PadMinPqCount {
+  abstract static class StateRef extends PadState {
 
-    /**
-     * Cached minimum member count among all current TopK members, used for
-     * O(1) fast rejection during admission. Written only under the
-     * {@code admissionLock} and {@code volatile} for lock-free reads.
-     */
     volatile long minPqCount;
 
-    byte p120, p121, p122, p123, p124, p125, p126, p127;
-    byte p128, p129, p130, p131, p132, p133, p134, p135;
-    byte p136, p137, p138, p139, p140, p141, p142, p143;
-    byte p144, p145, p146, p147, p148, p149, p150, p151;
-    byte p152, p153, p154, p155, p156, p157, p158, p159;
-    byte p160, p161, p162, p163, p164, p165, p166, p167;
-    byte p168, p169, p170, p171, p172, p173, p174, p175;
-    byte p176, p177, p178, p179, p180, p181, p182, p183;
-    byte p184, p185, p186, p187, p188, p189, p190, p191;
-    byte p192, p193, p194, p195, p196, p197, p198, p199;
-    byte p200, p201, p202, p203, p204, p205, p206, p207;
-    byte p208, p209, p210, p211, p212, p213, p214, p215;
-    byte p216, p217, p218, p219, p220, p221, p222, p223;
-    byte p224, p225, p226, p227, p228, p229, p230, p231;
-    byte p232, p233, p234, p235, p236, p237, p238, p239;
+    // 56-byte pad between minPqCount and epoch
+    byte a0, a1, a2, a3, a4, a5, a6, a7;
+    byte a8, a9, a10, a11, a12, a13, a14, a15;
+    byte a16, a17, a18, a19, a20, a21, a22, a23;
+    byte a24, a25, a26, a27, a28, a29, a30, a31;
+    byte a32, a33, a34, a35, a36, a37, a38, a39;
+    byte a40, a41, a42, a43, a44, a45, a46, a47;
+    byte a48, a49, a50, a51, a52, a53, a54, a55;
+
+    final AtomicLong epoch = new AtomicLong(0);
+
+    // 56-byte pad between epoch and total
+    byte b0, b1, b2, b3, b4, b5, b6, b7;
+    byte b8, b9, b10, b11, b12, b13, b14, b15;
+    byte b16, b17, b18, b19, b20, b21, b22, b23;
+    byte b24, b25, b26, b27, b28, b29, b30, b31;
+    byte b32, b33, b34, b35, b36, b37, b38, b39;
+    byte b40, b41, b42, b43, b44, b45, b46, b47;
+    byte b48, b49, b50, b51, b52, b53, b54, b55;
+
+    final LongAdder total = new LongAdder();
+
+    // 56-byte trailing pad to isolate total from subclass fields
+    byte c0, c1, c2, c3, c4, c5, c6, c7;
+    byte c8, c9, c10, c11, c12, c13, c14, c15;
+    byte c16, c17, c18, c19, c20, c21, c22, c23;
+    byte c24, c25, c26, c27, c28, c29, c30, c31;
+    byte c32, c33, c34, c35, c36, c37, c38, c39;
+    byte c40, c41, c42, c43, c44, c45, c46, c47;
+    byte c48, c49, c50, c51, c52, c53, c54, c55;
   }
 }

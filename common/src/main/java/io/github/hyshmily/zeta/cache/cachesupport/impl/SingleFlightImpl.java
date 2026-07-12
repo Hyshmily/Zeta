@@ -20,6 +20,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -27,7 +29,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * Deduplicates concurrent in-flight loads for the same key.
@@ -169,7 +170,15 @@ public class SingleFlightImpl implements SingleFlight {
       try {
         results.put(key, Optional.ofNullable((T) future.join()));
       } catch (CompletionException e) {
-        handleFailure(key, e);
+        log.warn("singleflight join failed: key={}", key, e);
+
+        inflightLoads.invalidate(key);
+        results.put(key, Optional.empty());
+
+        Throwable cause = e.getCause();
+        if (cause instanceof InterruptedException) {
+          Thread.currentThread().interrupt();
+        }
       }
     }
     return results;

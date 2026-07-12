@@ -71,7 +71,7 @@ public final class DelayUtil {
       baseJitter = Long.MAX_VALUE / 2;
     }
 
-    long randomOffset = ThreadLocalRandom.current().nextLong(0, 2 * baseJitter + 1);
+    long randomOffset = ThreadLocalRandom.current().nextLong(0, 2 * baseJitter);
     return randomOffset - baseJitter;
   }
 

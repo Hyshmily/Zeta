@@ -640,4 +640,61 @@ class HeavyKeeperTest {
     assertThat(exec.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
     assertThat(preloaded.list()).isNotNull();
   }
+
+  @Test
+  void fading_withConcurrentAccumulate_shouldPreserveCount() throws InterruptedException {
+    // Regression test: decayMembership() previously used reset()+accumulate() on LongAccumulator,
+    // which lost concurrent accumulate() writes that arrived between get() and reset().
+    // The fix uses AtomicLong with a CAS retry loop that preserves concurrent accumulates.
+    HeavyKeeper hk = new HeavyKeeper(10, 1000, 4, 0.9, 1, 50000, 3);
+    hk.addDirect("hotkey", 1000);
+
+    CountDownLatch latch = new CountDownLatch(1);
+    ExecutorService exec = Executors.newFixedThreadPool(2);
+    AtomicBoolean stopped = new AtomicBoolean(false);
+
+    // Accumulator thread — continuously raises the count via lock-free fast path
+    exec.submit(() -> {
+      try {
+        latch.await();
+      } catch (Exception e) {
+        Thread.currentThread().interrupt();
+      }
+      while (!stopped.get()) {
+        hk.addDirect("hotkey", 50);
+      }
+    });
+
+    // Decay thread — runs fading (which calls decayMembership)
+    exec.submit(() -> {
+      try {
+        latch.await();
+      } catch (Exception e) {
+        Thread.currentThread().interrupt();
+      }
+      for (int i = 0; i < 50; i++) {
+        hk.fading();
+      }
+      stopped.set(true);
+    });
+
+    latch.countDown();
+    exec.shutdown();
+    assertThat(exec.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+
+    // Key should still be tracked (concurrent accumulates kept it above zero)
+    assertThat(hk.contains("hotkey")).isTrue();
+
+    // Count should be positive — in the old buggy code, concurrent accumulates
+    // were lost on every decay cycle, causing the count to drop to 0 rapidly.
+    List<Item> items = hk.listTopN(10);
+    long hotkeyCount = -1;
+    for (Item item : items) {
+      if (item.key().equals("hotkey")) {
+        hotkeyCount = item.count();
+        break;
+      }
+    }
+    assertThat(hotkeyCount).as("concurrent accumulates during decay should keep count > 0").isPositive();
+  }
 }

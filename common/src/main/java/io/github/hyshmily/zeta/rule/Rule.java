@@ -125,7 +125,14 @@ public class Rule {
 
   /** Reusable matcher per thread, avoiding allocation on every match call. */
   @JsonIgnore
-  private final transient ThreadLocal<Matcher> matcherCache = new ThreadLocal<>();
+  private final transient ThreadLocal<MatcherCacheEntry> matcherCache = new ThreadLocal<>();
+
+  private record MatcherCacheEntry(Matcher matcher, int version) {}
+
+  /** Monotonic version counter for pattern changes; used to invalidate cached Matchers. */
+  @JsonIgnore
+  private final transient java.util.concurrent.atomic.AtomicInteger patternVersion =
+    new java.util.concurrent.atomic.AtomicInteger(0);
 
   /**
    * No-arg constructor for frameworks (e.g. Jackson deserialisation).
@@ -187,35 +194,33 @@ public class Rule {
    *         and compilation fails
    */
   public boolean match(String key) {
-    if (type == null) {
+    if (type == null || pattern == null) {
       return false;
     }
     return switch (type) {
       case EXACT -> key.equals(pattern);
       case PREFIX -> key.startsWith(pattern);
       case WILDCARD -> {
-        if (compiledPattern == null) {
-          prepare();
-        }
-        Matcher m = matcherCache.get();
-        if (m == null) {
-          m = compiledPattern.matcher("");
-          matcherCache.set(m);
-        }
-        yield m.reset(key).matches();
+        MatcherCacheEntry entry = rebuiltIfNeeded();
+        yield entry.matcher.reset(key).matches();
       }
       case REGEX -> {
-        if (compiledPattern == null) {
-          prepare();
-        }
-        Matcher m = matcherCache.get();
-        if (m == null) {
-          m = compiledPattern.matcher("");
-          matcherCache.set(m);
-        }
-        yield m.reset(key).find();
+        MatcherCacheEntry entry = rebuiltIfNeeded();
+        yield entry.matcher.reset(key).find();
       }
     };
+  }
+
+  private MatcherCacheEntry rebuiltIfNeeded() {
+    if (compiledPattern == null) prepare();
+    int curVersion = patternVersion.get();
+    MatcherCacheEntry entry = matcherCache.get();
+    if (entry == null || entry.version != curVersion) {
+      Matcher m = compiledPattern.matcher("");
+      entry = new MatcherCacheEntry(m, curVersion);
+      matcherCache.set(entry);
+    }
+    return entry;
   }
 
   /**
@@ -240,14 +245,13 @@ public class Rule {
    *         pattern cannot be compiled into a valid regular expression
    */
   public void prepare() {
-    if (type == null) {
-      return;
-    }
+    if (type == null) return;
     if (type == RuleType.REGEX) {
       compiledPattern = Pattern.compile(pattern);
     } else if (type == RuleType.WILDCARD) {
       String regex = pattern.replaceAll("([.+^$\\[\\]\\\\(){}|])", "\\\\$1").replace("*", ".*").replace("?", ".");
       compiledPattern = Pattern.compile(regex);
     }
+    patternVersion.incrementAndGet();
   }
 }

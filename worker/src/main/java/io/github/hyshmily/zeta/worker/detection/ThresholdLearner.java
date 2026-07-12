@@ -97,9 +97,7 @@ public class ThresholdLearner implements Runnable {
       detector.setThreshold(newThreshold);
       log.debug("Threshold updated: {} -> {} (QPS: {})", oldThreshold, newThreshold, currentQps);
     } catch (Exception e) {
-      Thread.currentThread().setUncaughtExceptionHandler((t, ex) ->
-        log.error("Uncaught exception in ThresholdLearner thread", ex)
-      );
+      log.error("Error during threshold learning: {}", e.getMessage(), e);
     }
   }
 }
