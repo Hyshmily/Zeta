@@ -158,6 +158,7 @@ public class HotKeyCacheExtensionAspect {
    * @return the cached or method return value
    */
   @Around("@annotation(cacheable)")
+  @SuppressWarnings("all")
   public Object aroundCacheable(ProceedingJoinPoint pjp, Cacheable cacheable) throws Throwable {
     Method method = resolveMethod(pjp);
     String cacheName = resolveCacheName(cacheable);

@@ -234,7 +234,7 @@ public class HotKeyCache {
    * {@link KeyState#HOT} entries are never eligible — they already have the
    * longest TTLs.
    *
-   * @param state the current key state of the cache entry
+   * @param cacheEntry the cache entry to inspect
    * @return {@code true} if the entry may be promoted by local TopK
    */
   private boolean isPromotableState(CacheEntry cacheEntry) {
@@ -779,7 +779,7 @@ public class HotKeyCache {
 
   /**
    * Process a cache hit for local hot-key management: if the entry is already
-   * HOT and more than half its TTL has elapsed, extend its expiry window;
+   * HOT and more than 20% of its TTL has elapsed, extend its expiry window;
    * otherwise promote eligible non-hot entries (NORMAL or COOL-when-all-dead)
    * to HOT if the local TopK now considers them hot.
    * <p>
@@ -806,7 +806,7 @@ public class HotKeyCache {
   }
 
   /**
-   * Extend the expiry of a HOT entry if more than half its TTL has elapsed.
+   * Extend the expiry of a HOT entry if more than 20% of its TTL has elapsed.
    *
    * @return {@code true} if the entry was extended
    */
@@ -814,7 +814,7 @@ public class HotKeyCache {
     long remainingTtl = ce.getHardExpireAtMs() - TimeSource.currentTimeMillis();
     long totalTtl = ce.getHardTtlMs();
 
-    if (totalTtl > 0 && remainingTtl < totalTtl / 2) {
+    if (totalTtl > 0 && remainingTtl < totalTtl * 0.8) {
       expireManager.extendExpiry(cacheKey, hardTtlMs, softTtlMs);
       return true;
     }
@@ -1412,7 +1412,7 @@ public class HotKeyCache {
    * <p>
    * On a fresh miss: loads via {@code reader}, promotes to HOT if
    * the local TopK detects the key, otherwise stores as NORMAL.
-   * On a hit: extends expiry when the entry is already HOT (half-life
+   * On a hit: extends expiry when the entry is already HOT (20% threshold
    * refresh) or when the key is in TopK and eligible for promotion.
    * When {@code triggerRefreshOnSoftExpire} is set and the entry is
    * soft-expired, a background refresh is triggered and the stale

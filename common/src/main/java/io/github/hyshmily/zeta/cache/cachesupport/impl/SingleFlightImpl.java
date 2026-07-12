@@ -229,10 +229,8 @@ public class SingleFlightImpl implements SingleFlight {
     Throwable cause = e.getCause();
     if (cause instanceof InterruptedException) {
       Thread.currentThread().interrupt();
-      throw new RuntimeException("Thread interrupted during load for key: " + cacheKey, cause);
     }
     if (cause instanceof RuntimeException re) throw re;
     if (cause instanceof Error err) throw err;
-    throw new RuntimeException("Loader failed for key: " + cacheKey, cause);
   }
 }

@@ -262,23 +262,20 @@ class SingleFlightTest {
   }
 
   /**
-   * Verifies that a supplier that times out throws a RuntimeException (timeout boundary).
+   * Verifies that a supplier that times out returns empty (graceful degradation).
    */
   @Test
-  void load_withTimeout_shouldThrow() {
+  void load_withTimeout_shouldReturnEmpty() {
     SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, executor, disabledBreaker);
-    assertThatThrownBy(() ->
-      shortTimeout.load("timeout-key", () -> {
-        try {
-          Thread.sleep(5000);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-        }
-        return "too-late";
-      })
-    )
-      .isInstanceOf(RuntimeException.class)
-      .hasMessageContaining("timeout-key");
+    Optional<String> result = shortTimeout.load("timeout-key", () -> {
+      try {
+        Thread.sleep(5000);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      return "too-late";
+    });
+    assertThat(result).isEmpty();
   }
 
   /**

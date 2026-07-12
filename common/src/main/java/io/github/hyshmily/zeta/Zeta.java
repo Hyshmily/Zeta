@@ -724,6 +724,23 @@ public class Zeta implements DisposableBean {
   }
 
   /**
+   * Get with soft-expire and explicit hard/soft TTL overrides.
+   *
+   * @param cacheKey  the key to retrieve
+   * @param reader    the value supplier for cache misses / refreshes
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for pure logical expiry — entry never hard-evicted, only soft-expire or Caffeine {@code maximumSize})
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @param <T>       the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+
+  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
+    return getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, true);
+  }
+
+  /**
    * Convenience shorthand for
    * {@link #getWithSoftExpire(String, Supplier, long, long, boolean) getWithSoftExpire(cacheKey, reader, ...)}
    * with explicit report control.

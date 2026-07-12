@@ -24,7 +24,6 @@ import lombok.extern.slf4j.Slf4j;
  * Periodically recalculates the hot‑key threshold based on estimated global QPS
  * and updates the {@link io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector}.
  */
-/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class ThresholdLearner implements Runnable {
@@ -38,6 +37,10 @@ public class ThresholdLearner implements Runnable {
 
   /** Worker startup time (when this bean is constructed). */
   private final long workerStartTime = System.currentTimeMillis();
+
+  private volatile double smoothedQps = 0.0;
+
+  private static final double ALPHA = 0.1;
 
   /**
    * Executes one threshold recalculation cycle.
@@ -56,24 +59,27 @@ public class ThresholdLearner implements Runnable {
    * </ul>
    */
   @Override
+  @SuppressWarnings("all")
   public void run() {
     try {
       // Learning period: skip updates
       if (
         System.currentTimeMillis() - workerStartTime < properties.getGlobalQpsDynamicThreshold().getLearningPeriodMs()
       ) {
-        log.debug("Still in learning period, using fixed threshold: {}", detector.getThreshold());
         return;
       }
 
       double currentQps = qpsEstimator.getQps();
       if (currentQps <= 0) {
-        log.debug("Current QPS is zero, skipping threshold update");
         return;
       }
 
-      // New threshold = global QPS * ratio
-      long newThreshold = (long) (currentQps * properties.getGlobalQpsDynamicThreshold().getHotThresholdRatio());
+      if (smoothedQps == 0.0) {
+        smoothedQps = currentQps;
+      } else {
+        smoothedQps = ALPHA * currentQps + (1 - ALPHA) * smoothedQps;
+      }
+      long newThreshold = (long) (smoothedQps * properties.getGlobalQpsDynamicThreshold().getHotThresholdRatio());
       // Clamp: never below the configured fixed hot threshold (only tighten, never loosen)
       newThreshold = Math.max(properties.getThreshold().getHotThreshold(), newThreshold);
 
@@ -84,7 +90,6 @@ public class ThresholdLearner implements Runnable {
         double changeRate =
           oldThreshold == 0 ? Double.MAX_VALUE : Math.abs(newThreshold - oldThreshold) / (double) oldThreshold;
         if (changeRate <= properties.getGlobalQpsDynamicThreshold().getQpsChangeTolerance()) {
-          log.debug("Threshold change within tolerance ({}), keeping old value", changeRate);
           return;
         }
       }
@@ -92,7 +97,9 @@ public class ThresholdLearner implements Runnable {
       detector.setThreshold(newThreshold);
       log.debug("Threshold updated: {} -> {} (QPS: {})", oldThreshold, newThreshold, currentQps);
     } catch (Exception e) {
-      log.error("Failed to recalculate threshold", e);
+      Thread.currentThread().setUncaughtExceptionHandler((t, ex) ->
+        log.error("Uncaught exception in ThresholdLearner thread", ex)
+      );
     }
   }
 }
