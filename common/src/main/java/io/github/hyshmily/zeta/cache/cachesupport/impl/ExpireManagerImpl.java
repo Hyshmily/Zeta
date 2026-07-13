@@ -32,6 +32,7 @@ import java.util.concurrent.*;
 import java.util.function.Supplier;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Manages hard and soft TTL computation for {@link CacheEntry} instances.
@@ -536,7 +537,12 @@ public class ExpireManagerImpl implements ExpireManager {
 
   @Override
   public CacheEntry replaceEntryValue(CacheEntry entry, Object newValue) {
-    return entry.toBuilder().value(compressor.wrap(newValue)).build();
+    return entry.withValue(compressor.wrap(newValue));
+  }
+
+  @Override
+  public Object wrapValue(@Nullable Object rawValue) {
+    return compressor.wrap(rawValue);
   }
 
   /**
@@ -554,7 +560,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @return a new {@link CacheEntry} with the normal TTL fields updated
    */
   public CacheEntry applyNormalTtl(CacheEntry original, long hardTtlMs, long softTtlMs) {
-    return original.toBuilder().normalHardTtlMs(hardTtlMs).normalSoftTtlMs(softTtlMs).build();
+    return original.withNormalTtl(hardTtlMs, softTtlMs);
   }
 
   /**
@@ -573,13 +579,7 @@ public class ExpireManagerImpl implements ExpireManager {
    *         while keeping all version, state, and normal TTL fields unchanged
    */
   public CacheEntry applyTtl(CacheEntry original, long hardTtlMs, long softTtlMs) {
-    return original
-      .toBuilder()
-      .hardTtlMs(hardTtlMs)
-      .softTtlMs(softTtlMs)
-      .hardExpireAtMs(computeHardExpireAt(hardTtlMs))
-      .softExpireAtMs(computeSoftExpireAt(softTtlMs))
-      .build();
+    return original.withTtl(hardTtlMs, softTtlMs, computeHardExpireAt(hardTtlMs), computeSoftExpireAt(softTtlMs));
   }
 
   /**
@@ -591,7 +591,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @return a new {@link CacheEntry} with the updated hard TTL and expiration
    */
   public CacheEntry applyHardTtl(CacheEntry original, long hardTtlMs) {
-    return original.toBuilder().hardTtlMs(hardTtlMs).hardExpireAtMs(computeHardExpireAt(hardTtlMs)).build();
+    return original.withHardTtl(hardTtlMs, computeHardExpireAt(hardTtlMs));
   }
 
   /**
@@ -603,7 +603,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @return a new {@link CacheEntry} with the updated soft TTL and expiration
    */
   public CacheEntry applySoftTtl(CacheEntry original, long softTtlMs) {
-    return original.toBuilder().softTtlMs(softTtlMs).softExpireAtMs(computeSoftExpireAt(softTtlMs)).build();
+    return original.withSoftTtl(softTtlMs, computeSoftExpireAt(softTtlMs));
   }
 
   /**
@@ -870,7 +870,7 @@ public class ExpireManagerImpl implements ExpireManager {
               log.debug("Async refresh discarded: newer version exists: {}", cacheKey);
               return entry;
             }
-            return applySoftTtl(replaceEntryValue(entry, value), softTtlMs);
+            return entry.withValueAndSoftTtl(compressor.wrap(value), softTtlMs, computeSoftExpireAt(softTtlMs));
           })
           .orElseGet(() -> {
             long effectiveHardTtl = getEffectiveHardTtlMs();

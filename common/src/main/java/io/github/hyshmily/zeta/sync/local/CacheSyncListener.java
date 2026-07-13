@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.zeta.sync.local;
 
-import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
-
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
@@ -33,14 +31,16 @@ import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import java.io.IOException;
-import java.util.List;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
 
 /**
  * Listens for cache synchronization messages (INVALIDATE / REFRESH / RULES_SYNC) from
@@ -182,19 +182,8 @@ public class CacheSyncListener {
       }
     };
 
-    dispatcher.submit(sm.cacheKey(), () -> {
-      try {
-        if (properties.getWarmupJitterMs() > 0) {
-          long jitter = ThreadLocalRandom.current().nextLong(properties.getWarmupJitterMs());
-          TimeUnit.MILLISECONDS.sleep(jitter);
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        log.warn("CacheSyncListener : Jitter sleep interrupted for key={}", sm.cacheKey());
-        return;
-      }
-      task.run();
-    });
+    long jitterMs = properties.getWarmupJitterMs();
+    dispatcher.submit(sm.cacheKey(), task, jitterMs);
   }
 
   /**
@@ -333,10 +322,7 @@ public class CacheSyncListener {
    */
   private void handleRefresh(SyncMessage sm) {
     // DCL first check – cheap, outside the compute lock
-    if (
-      VersionGuard.shouldSkipForSync(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded()) ||
-      isInvalidation(sm.cacheKey(), sm.version())
-    ) {
+    if (VersionGuard.shouldSkipForSync(caffeineCache, sm.cacheKey(), sm.version(), sm.isVersionDegraded())) {
       log.debug("Stale refresh ignored: key={}, incomingVersion={}", sm.cacheKey(), sm.version());
       return;
     }
@@ -356,22 +342,25 @@ public class CacheSyncListener {
         ) {
           return existing;
         }
+        // Atomically check invalidation record to prevent stale refresh after invalidate
+        if (isInvalidation(key, sm.version())) {
+          log.debug("Refresh skipped due to recent invalidation: key={}", key);
+          return existing; // preserve whatever is currently in cache (may be null)
+        }
 
         if (existing instanceof CacheEntry cacheEntry) {
           long hardExpireAt = expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs());
           long softExpireAt = expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs());
-          return expireManager
-            .replaceEntryValue(cacheEntry, value)
-            .toBuilder()
-            .dataVersion(sm.version())
-            .isVersionDegraded(sm.isVersionDegraded())
-            .hardExpireAtMs(hardExpireAt)
-            .softExpireAtMs(softExpireAt)
-            .build();
+          return cacheEntry.withValueAndRefreshMeta(
+            expireManager.wrapValue(value),
+            sm.version(),
+            sm.isVersionDegraded(),
+            hardExpireAt,
+            softExpireAt
+          );
         }
         long defaultHardTtlMs = expireManager.getEffectiveHardTtlMs();
         long defaultSoftTtlMs = expireManager.getEffectiveSoftTtlMs();
-        //Entry was evicted from L1 — create fresh CacheEntry with default metadata
         return expireManager.createBuilder(
           value,
           sm.version(),

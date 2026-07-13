@@ -31,7 +31,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.AmqpException;
@@ -304,7 +303,6 @@ public class CacheSyncPublisher {
     }
     String compositeKey = degraded ? "D:" + type + ":" + cacheKey : type + ":" + cacheKey;
 
-    AtomicBoolean skipped = new AtomicBoolean(false);
     recentBroadcasts
       .asMap()
       .compute(compositeKey, (k, oldVersion) -> {
@@ -315,26 +313,26 @@ public class CacheSyncPublisher {
             oldVersion,
             version
           );
-          skipped.set(true);
           return oldVersion;
         }
+        doSend(cacheKey, type, version, degraded);
         return version;
       });
+  }
 
-    if (!skipped.get()) {
-      try {
-        MessageProperties props = new MessageProperties();
+  private void doSend(String cacheKey, String type, long version, boolean degraded) {
+    try {
+      MessageProperties props = new MessageProperties();
 
-        props.setHeader(AMQP_HEADER_TYPE, type);
-        props.setHeader(AMQP_HEADER_VERSION, version);
-        props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, degraded);
+      props.setHeader(AMQP_HEADER_TYPE, type);
+      props.setHeader(AMQP_HEADER_VERSION, version);
+      props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, degraded);
 
-        Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
+      Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
 
-        rabbitTemplate.send(properties.getExchangeName(), "", message);
-      } catch (AmqpException e) {
-        log.error("Failed to send sync message", e);
-      }
+      rabbitTemplate.send(properties.getExchangeName(), "", message);
+    } catch (AmqpException e) {
+      log.error("Failed to send sync message", e);
     }
   }
 }

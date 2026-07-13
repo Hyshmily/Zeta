@@ -1351,7 +1351,8 @@ class ZetaCacheTest {
       assertThat(raw).isInstanceOf(CacheEntry.class);
       CacheEntry entry = (CacheEntry) raw;
       assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
-      // putThrough with degraded version (no Redis) does not overwrite healthy Worker-managed entry
+      // Normal path (non-Redis fallback within nextVersion) still respects version guard;
+      // only the Exception catch block bypasses it via forceUpdate=true.
       assertThat(entry.getValue()).isEqualTo("old");
     }
 

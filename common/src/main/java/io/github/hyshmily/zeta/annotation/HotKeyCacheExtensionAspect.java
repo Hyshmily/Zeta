@@ -488,6 +488,7 @@ public class HotKeyCacheExtensionAspect {
    *         no fallback method was found
    * @throws Throwable the unwrapped cause if the fallback method throws
    */
+  @SuppressWarnings("all")
   private Object invokeFallbackMethod(ProceedingJoinPoint pjp) throws Throwable {
     MethodSignature sig = (MethodSignature) pjp.getSignature();
     Method originalMethod = sig.getMethod();

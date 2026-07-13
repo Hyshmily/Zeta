@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.model;
 
 import io.github.hyshmily.zeta.util.version.VersionGuard;
+import jakarta.annotation.Nullable;
 import lombok.Builder;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
@@ -43,9 +44,11 @@ import lombok.ToString;
  * extends TTL, COOL reverts to normal). This ensures the original expiry baseline
  * is never lost when the key's state changes.
  *
- * <p>Uses Lombok {@code @Builder(toBuilder = true)} — create new entries with
- * {@code CacheEntry.builder()} and produce modified copies via
- * {@code entry.toBuilder().field(newValue).build()}.
+ * <p>Uses Lombok {@code @Builder(toBuilder = true)} for initial construction.
+ * For modified copies, prefer the {@code withXxx()} family of methods
+ * (e.g. {@link #withValue}, {@link #withTtl}) which allocate a single new
+ * instance directly — avoiding the intermediate Builder object created by
+ * {@code toBuilder().field(v).build()}.
  */
 @Getter
 @ToString
@@ -133,4 +136,430 @@ public class CacheEntry {
    * is always recoverable when the key returns to NORMAL state.
    */
   private final long normalSoftTtlMs;
+
+  /** Return a copy with a different {@link #value}. */
+  public CacheEntry withValue(@Nullable Object value) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #dataVersion}. */
+  public CacheEntry withDataVersion(long dataVersion) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #isVersionDegraded}. */
+  public CacheEntry withIsVersionDegraded(boolean isVersionDegraded) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #decisionVersion}. */
+  public CacheEntry withDecisionVersion(long decisionVersion) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #decisionNodeId}. */
+  public CacheEntry withDecisionNodeId(@Nullable String decisionNodeId) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #decisionEpoch}. */
+  public CacheEntry withDecisionEpoch(long decisionEpoch) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #hardTtlMs}. */
+  public CacheEntry withHardTtlMs(long hardTtlMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #hardExpireAtMs}. */
+  public CacheEntry withHardExpireAtMs(long hardExpireAtMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #softTtlMs}. */
+  public CacheEntry withSoftTtlMs(long softTtlMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #softExpireAtMs}. */
+  public CacheEntry withSoftExpireAtMs(long softExpireAtMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #keyState}. */
+  public CacheEntry withKeyState(KeyState keyState) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #normalHardTtlMs}. */
+  public CacheEntry withNormalHardTtlMs(long normalHardTtlMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with a different {@link #normalSoftTtlMs}. */
+  public CacheEntry withNormalSoftTtlMs(long normalSoftTtlMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with all four TTL fields updated at once. */
+  public CacheEntry withTtl(long hardTtlMs, long softTtlMs, long hardExpireAtMs, long softExpireAtMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with hard TTL and hard expire-at updated together. */
+  public CacheEntry withHardTtl(long hardTtlMs, long hardExpireAtMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with soft TTL and soft expire-at updated together. */
+  public CacheEntry withSoftTtl(long softTtlMs, long softExpireAtMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with both normal TTL fields updated together. */
+  public CacheEntry withNormalTtl(long normalHardTtlMs, long normalSoftTtlMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with all four TTL fields and keyState updated at once. */
+  public CacheEntry withTtlAndKeyState(
+    long hardTtlMs,
+    long softTtlMs,
+    long hardExpireAtMs,
+    long softExpireAtMs,
+    KeyState keyState
+  ) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /**
+   * Return a copy with decision metadata, TTL fields, and keyState updated
+   * at once — the Worker COOL-decision pattern.
+   */
+  public CacheEntry withDecisionAndTtlAndState(
+    long decisionVersion,
+    String decisionNodeId,
+    long decisionEpoch,
+    long hardTtlMs,
+    long softTtlMs,
+    long hardExpireAtMs,
+    long softExpireAtMs,
+    KeyState keyState
+  ) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /**
+   * Return a copy with value, version metadata, and expire-at timestamps
+   * updated at once — the cache-sync refresh pattern.
+   */
+  public CacheEntry withValueAndRefreshMeta(
+    Object value,
+    long dataVersion,
+    boolean isVersionDegraded,
+    long hardExpireAtMs,
+    long softExpireAtMs
+  ) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
+
+  /** Return a copy with value and soft TTL fields updated at once — the refresh-task pattern. */
+  public CacheEntry withValueAndSoftTtl(Object value, long softTtlMs, long softExpireAtMs) {
+    return new CacheEntry(
+      value,
+      dataVersion,
+      isVersionDegraded,
+      decisionVersion,
+      decisionNodeId,
+      decisionEpoch,
+      hardTtlMs,
+      hardExpireAtMs,
+      softTtlMs,
+      softExpireAtMs,
+      keyState,
+      normalHardTtlMs,
+      normalSoftTtlMs
+    );
+  }
 }

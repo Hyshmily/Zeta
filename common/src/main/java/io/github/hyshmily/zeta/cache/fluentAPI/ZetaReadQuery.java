@@ -200,24 +200,6 @@ public class ZetaReadQuery<T> {
     return this;
   }
 
-  /*
-   * Execute the read query.
-   *
-   * <p>The execution order is:
-   * <ol>
-   *   <li>Check the blocklist ({@link Rule} evaluation) — throws
-   *       {@link ZetaBlockedException} if the key is blocked.</li>
-   *   <li>Try the L1 cache via the configured {@link CacheMode}.  On cache
-   *       miss, invoke the primary reader and cache the result.</li>
-   *   <li>If no value is available, iterate fallback readers in registration
-   *       order.  Each non-null result is cached (locally or with send
-   *       depending on {@code isAllowBroadcast}) and returned.</li>
-   *   <li>If all readers return {@code null}, return {@link Optional#empty()}.</li>
-   * </ol>
-   *
-   * @return an {@link Optional} containing the resolved value, or empty
-   * @throws ZetaBlockedException if the key matches a block rule
-   */
   /**
    * Execute the read query and return the resolved value, or {@code null} if no
    * value is available.

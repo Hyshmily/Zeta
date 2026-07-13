@@ -147,6 +147,12 @@ public interface ExpireManager {
    */
   CacheEntry replaceEntryValue(CacheEntry entry, @Nullable Object newValue);
 
+  /**
+   * Wrap a raw value using the configured compressor, without allocating a new CacheEntry.
+   * Used by callers that need the compressed value for direct CacheEntry construction.
+   */
+  Object wrapValue(@Nullable Object rawValue);
+
   /** Convert a TTL duration (ms) to an absolute epoch-ms expiration timestamp using the configured default jitter ratio. */
   long toHardExpireTimestamp(long hardTtlMs);
 

@@ -15,9 +15,6 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
-import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_COOL;
-import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_HOT;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.Internal;
@@ -32,14 +29,16 @@ import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import java.io.IOException;
-import java.util.Optional;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
+
+import java.io.IOException;
+import java.util.Optional;
+import java.util.concurrent.ScheduledExecutorService;
+
+import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_COOL;
+import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_HOT;
 
 /**
  * Listens for Worker hot/cool decisions via the {@code zeta.worker.exchange}
@@ -184,19 +183,8 @@ public class WorkerListener {
       }
     };
 
-    dispatcher.submit(wm.cacheKey(), () -> {
-      try {
-        if (properties.getWarmupJitterMs() > 0) {
-          long jitter = ThreadLocalRandom.current().nextLong(properties.getWarmupJitterMs());
-          TimeUnit.MILLISECONDS.sleep(jitter);
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        log.warn("WorkerListener : Jitter sleep interrupted for key={}", wm.cacheKey());
-        return;
-      }
-      task.run();
-    });
+    long jitterMs = properties.getWarmupJitterMs();
+    dispatcher.submit(wm.cacheKey(), task, jitterMs);
   }
 
   /**
@@ -285,12 +273,10 @@ public class WorkerListener {
           return expireManager.applyTtl(
             expireManager
               .replaceEntryValue(ce, value)
-              .toBuilder()
-              .decisionVersion(wm.decisionVersion())
-              .decisionNodeId(wm.nodeId())
-              .decisionEpoch(wm.epoch())
-              .keyState(KeyState.HOT)
-              .build(),
+              .withDecisionVersion(wm.decisionVersion())
+              .withDecisionNodeId(wm.nodeId())
+              .withDecisionEpoch(wm.epoch())
+              .withKeyState(KeyState.HOT),
             defultHotHardTtl,
             defultHotSoftTtl
           );
@@ -362,19 +348,16 @@ public class WorkerListener {
             COOL_DEFAULT_PROTECTION_SOFTTTL_TIME_RATIO
           );
 
-          return cacheEntry
-            .toBuilder()
-            .value(cacheEntry.getValue())
-            .dataVersion(cacheEntry.getDataVersion())
-            .decisionVersion(wm.decisionVersion())
-            .decisionNodeId(wm.nodeId())
-            .decisionEpoch(wm.epoch())
-            .hardTtlMs(hardTtlMsIfZero)
-            .hardExpireAtMs(hardTtlExpireAtMs)
-            .softTtlMs(softTtlMsIfZero)
-            .softExpireAtMs(softTtlExpireAtMs)
-            .keyState(KeyState.COOL)
-            .build();
+          return cacheEntry.withDecisionAndTtlAndState(
+            wm.decisionVersion(),
+            wm.nodeId(),
+            wm.epoch(),
+            hardTtlMsIfZero,
+            softTtlMsIfZero,
+            hardTtlExpireAtMs,
+            softTtlExpireAtMs,
+            KeyState.COOL
+          );
         }
 
         // No existing entry – nothing to cool

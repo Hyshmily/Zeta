@@ -15,12 +15,11 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport.impl;
 
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
-
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
-import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -28,7 +27,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 /**
  * Sliding-window circuit breaker for protecting remote calls from cascading failures.
@@ -48,7 +48,11 @@ public class CircuitBreakerImpl implements CircuitBreaker {
 
   private static final ScheduledExecutorService SCHEDULER = new ScheduledThreadPoolExecutor(
     Runtime.getRuntime().availableProcessors(),
-    new ZetaThreadFactory("zeta-cb")
+    r -> {
+      Thread t = new Thread(r, "zeta-cb");
+      t.setDaemon(true);
+      return t;
+    }
   );
 
   private final ZetaProperties.CircuitBreaker config;

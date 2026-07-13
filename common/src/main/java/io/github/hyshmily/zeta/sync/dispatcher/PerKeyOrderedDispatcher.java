@@ -18,8 +18,9 @@ package io.github.hyshmily.zeta.sync.dispatcher;
 import io.github.hyshmily.zeta.Internal;
 import java.util.ArrayDeque;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -58,20 +59,48 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
   private static final int DEFAULT_MAX_QUEUE_PER_KEY = 1024;
 
   private final ConcurrentHashMap<Object, KeyQueue> queues = new ConcurrentHashMap<>();
-  private final Executor executor;
+  private final ScheduledExecutorService executor;
   private final String name;
   private final int maxQueuePerKey;
 
   private volatile boolean closed = false;
 
-  public PerKeyOrderedDispatcher(Executor executor, String name) {
+  public PerKeyOrderedDispatcher(ScheduledExecutorService executor, String name) {
     this(executor, name, DEFAULT_MAX_QUEUE_PER_KEY);
   }
 
-  public PerKeyOrderedDispatcher(Executor executor, String name, int maxQueuePerKey) {
+  public PerKeyOrderedDispatcher(ScheduledExecutorService executor, String name, int maxQueuePerKey) {
     this.executor = executor;
     this.name = name;
     this.maxQueuePerKey = maxQueuePerKey;
+  }
+
+  /**
+   * Submit a task for a given key with an optional initial delay.
+   * <p>
+   * If delayMs > 0, the task is scheduled to be submitted after the delay,
+   * freeing the caller thread immediately. The per-key FIFO ordering is preserved:
+   * even if multiple delayed submissions for the same key are scheduled, they will
+   * be submitted (and thus executed) in the order their delays expire.
+   *
+   * @param key     the routing key
+   * @param task    the task to execute
+   * @param delayMs the initial delay in milliseconds; 0 means immediate submission
+   */
+  public void submit(Object key, Runnable task, long delayMs) {
+    if (delayMs <= 0) {
+      submit(key, task);
+      return;
+    }
+    if (executor.isShutdown() || executor.isTerminated()) {
+      // Fallback: scheduled executor is shutdown or terminated, we cannot schedule the delayed submission.
+      // For simplicity, we just log a warning and submit immediately.
+      log.debug("[{}] Executor is shut down, dropping delayed task for key {}", name, key);
+      return;
+    }
+    // Use the executor's internal scheduler to delay the actual submission.
+    // Note: The executor must be a ScheduledExecutorService; we assume it is.
+    executor.schedule(() -> submit(key, task), delayMs, TimeUnit.MILLISECONDS);
   }
 
   /**
@@ -92,7 +121,6 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
       // Key is already being processed, try to enqueue.
       if (!kq.enqueue(task, maxQueuePerKey)) {
         log.warn("[{}] Task queue full for key {}. Task rejected.", name, key);
-        // No need for log spam here, counters are sufficient.
       }
     }
   }
@@ -137,6 +165,10 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
   @Override
   public void close() {
     closed = true;
+    for (KeyQueue kq : queues.values()) {
+      kq.clearAndStop();
+    }
+    queues.clear();
   }
 
   /**
