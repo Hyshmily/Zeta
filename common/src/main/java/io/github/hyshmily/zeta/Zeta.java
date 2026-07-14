@@ -1381,8 +1381,7 @@ public class Zeta implements DisposableBean {
     Objects.requireNonNull(supplier, "supplier must not be null");
     Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
     Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
-    // floor to 1s to prevent accidentally aggressive refresh cycles
-    long intervalMs = Math.max(hotKeyCache.resolveEffectiveSoftTtl(softTtlMs), 1_000L);
+    long intervalMs = Math.max(1, hotKeyCache.resolveEffectiveSoftTtl(softTtlMs));
     ScheduledFuture<?> prev = refreshFutures.put(
       key,
       getScheduler().scheduleWithFixedDelay(

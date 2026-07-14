@@ -47,7 +47,7 @@ public class BroadcastBuffer {
   private static final long DEFAULT_FLUSH_DELAY_MS = 500;
 
   @SuppressWarnings("java:S3077")
-  private volatile ConcurrentHashMap<String, VersionInfo> pending;
+  private volatile ConcurrentHashMap<String, VersionInfo> pending = new ConcurrentHashMap<>();
 
   private final ScheduledExecutorService scheduler;
 
@@ -99,9 +99,6 @@ public class BroadcastBuffer {
    */
   @SuppressWarnings("java:S6213")
   public void record(String key, long version, boolean degraded) {
-    if (pending == null) {
-      pending = new ConcurrentHashMap<>();
-    }
     pending.merge(key, new VersionInfo(version, degraded), (old, cur) -> cur);
     rescheduleFlush();
   }
@@ -115,7 +112,7 @@ public class BroadcastBuffer {
     ConcurrentHashMap<String, VersionInfo> toFlush;
     synchronized (scheduleLock) {
       ConcurrentHashMap<String, VersionInfo> current = pending;
-      if (current == null || current.isEmpty()) {
+      if (current.isEmpty()) {
         cancelScheduledFlush();
         return;
       }
