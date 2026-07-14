@@ -1336,6 +1336,19 @@ public class HotKeyCache {
   public Cache<String, Object> getLocalCache() {
     return caffeineCache;
   }
+  /**
+   * Resolve the effective soft TTL in milliseconds.
+   * <p>
+   * When the given value is {@code 0} (meaning "use configured default"),
+   * returns the default soft TTL from the {@link ExpireManager}.
+   * Otherwise returns the value as-is.
+   *
+   * @param softTtlMs the soft TTL value to resolve (0 = use configured default)
+   * @return the effective soft TTL in milliseconds, always positive
+   */
+  public long resolveEffectiveSoftTtl(long softTtlMs) {
+    return expireManager.resolveEffectiveSoftTtl(softTtlMs);
+  }
 
   /**
    * Atomically load or compute a value, avoiding TOCTOU between the

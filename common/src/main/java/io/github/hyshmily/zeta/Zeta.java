@@ -1373,7 +1373,7 @@ public class Zeta implements DisposableBean {
    * @param key       the cache key to refresh
    * @param supplier  the value supplier for refresh
    * @param hardTtlMs hard TTL override (0 = use configured default)
-   * @param softTtlMs soft TTL override (also used as the base interval)
+   * @param softTtlMs soft TTL override in milliseconds (also used as the base interval); 0 = use configured default
    * @param <T>       the value type
    */
   public <T> void registerRefresh(String key, Supplier<T> supplier, long hardTtlMs, long softTtlMs) {
@@ -1381,10 +1381,8 @@ public class Zeta implements DisposableBean {
     Objects.requireNonNull(supplier, "supplier must not be null");
     Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
     Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
-    long intervalMs = (long) (softTtlMs * 1.1);
-    if (intervalMs < 1) {
-      intervalMs = 1;
-    }
+    // floor to 1s to prevent accidentally aggressive refresh cycles
+    long intervalMs = Math.max(hotKeyCache.resolveEffectiveSoftTtl(softTtlMs), 1_000L);
     ScheduledFuture<?> prev = refreshFutures.put(
       key,
       getScheduler().scheduleWithFixedDelay(
@@ -1409,7 +1407,7 @@ public class Zeta implements DisposableBean {
    * @param key       the cache key
    * @param supplier  the value supplier for refresh
    * @param hardTtlMs new hard TTL override
-   * @param softTtlMs new soft TTL override (also used as the base interval)
+   * @param softTtlMs new soft TTL override in milliseconds (also used as the base interval); 0 = use configured default
    * @param <T>       the value type
    */
   public <T> void updateRefresh(String key, Supplier<T> supplier, long hardTtlMs, long softTtlMs) {
