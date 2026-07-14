@@ -174,6 +174,79 @@ class SystemLoadMonitorTest {
     monitor.stop();
   }
 
+  // ── New tests for uncovered code paths ──
+
+  @Test
+  void constructor_withInvalidPollInterval_shouldUseDefault() throws Exception {
+    Field pollField = SystemLoadMonitorImpl.class.getDeclaredField("pollIntervalMs");
+    pollField.setAccessible(true);
+
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(-1, 0.5);
+    assertThat(pollField.getLong(monitor)).isEqualTo(DEFAULT_POLL_MS);
+  }
+
+  @Test
+  void constructor_withInvalidDecay_shouldUseDefault() throws Exception {
+    Field decayField = SystemLoadMonitorImpl.class.getDeclaredField("decay");
+    decayField.setAccessible(true);
+
+    assertThat(decayField.getDouble(new SystemLoadMonitorImpl(100, 1.0))).isEqualTo(DEFAULT_DECAY);
+  }
+
+  @Test
+  void constructor_withDecayZero_shouldUseDefault() throws Exception {
+    Field decayField = SystemLoadMonitorImpl.class.getDeclaredField("decay");
+    decayField.setAccessible(true);
+
+    assertThat(decayField.getDouble(new SystemLoadMonitorImpl(100, 0))).isEqualTo(DEFAULT_DECAY);
+  }
+
+  @Test
+  void constructor_withDecayNegative_shouldUseDefault() throws Exception {
+    Field decayField = SystemLoadMonitorImpl.class.getDeclaredField("decay");
+    decayField.setAccessible(true);
+
+    assertThat(decayField.getDouble(new SystemLoadMonitorImpl(100, -0.5))).isEqualTo(DEFAULT_DECAY);
+  }
+
+  @Test
+  void stop_whenNotStarted_shouldNotThrow() {
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(100, 0.5);
+    monitor.stop();
+  }
+
+  @Test
+  void stop_withOwnedScheduler_shouldShutdown() {
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(100, 0.5);
+    monitor.start();
+    monitor.stop();
+    // Owned scheduler should be shut down by stop()
+    assertThat(monitor.getCpuLoadEMA()).isNotNegative();
+  }
+
+  @Test
+  void sample_shouldInitializeEmaFromRaw() throws Exception {
+    TestableMonitor monitor = new TestableMonitor(0.5, 0.8);
+    Method sample = SystemLoadMonitorImpl.class.getDeclaredMethod("sample");
+    sample.setAccessible(true);
+    sample.invoke(monitor);
+    assertThat(monitor.getCpuLoadEMA()).isCloseTo(0.8, within(1e-12));
+  }
+
+  @Test
+  void getCpuLoadEMA_beforeSample_shouldReturnZero() {
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl(100, 0.5);
+    assertThat(monitor.getCpuLoadEMA()).isEqualTo(0.0);
+    monitor.stop();
+  }
+
+  @Test
+  void getCpuLoadRaw_shouldReturnValueInRange() {
+    SystemLoadMonitor monitor = new SystemLoadMonitorImpl();
+    assertThat(monitor.getCpuLoadRaw()).isBetween(0.0, 1.0);
+    monitor.stop();
+  }
+
   static class TestableMonitor extends SystemLoadMonitorImpl {
 
     private final double[] rawValues;

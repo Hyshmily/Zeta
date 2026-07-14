@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.cache.cachesupport;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
+import java.util.Collection;
 
 /**
  * Static utility for validating cache key inputs across the library.
@@ -36,6 +37,10 @@ public final class CacheKeysPolicy {
    */
   public static boolean invalidCacheKey(String cacheKey) {
     return cacheKey == null || cacheKey.isBlank();
+  }
+
+  public static boolean invalidCacheKey(Collection<String> cacheKeys) {
+    return cacheKeys == null || cacheKeys.isEmpty();
   }
 
   /**

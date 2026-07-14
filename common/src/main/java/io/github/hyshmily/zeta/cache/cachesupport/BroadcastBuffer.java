@@ -112,20 +112,26 @@ public class BroadcastBuffer {
    * so concurrent {@link #record} calls see a fresh map.
    */
   public void flush() {
-    publisher.ifPresent(pub -> {
-      ConcurrentHashMap<String, VersionInfo> old = pending;
-      if (old == null || old.isEmpty()) return;
-
+    ConcurrentHashMap<String, VersionInfo> toFlush;
+    synchronized (scheduleLock) {
+      ConcurrentHashMap<String, VersionInfo> current = pending;
+      if (current == null || current.isEmpty()) {
+        cancelScheduledFlush();
+        return;
+      }
       pending = new ConcurrentHashMap<>();
-      old.forEach((key, vi) -> {
+      toFlush = current;
+      cancelScheduledFlush();
+    }
+    publisher.ifPresent(pub ->
+      toFlush.forEach((key, vi) -> {
         try {
           pub.broadcastRefresh(key, vi.version, vi.degraded);
         } catch (Exception e) {
           log.warn("Failed to send refresh for key {}", key, e);
         }
-      });
-    });
-    cancelScheduledFlush();
+      })
+    );
   }
 
   private void rescheduleFlush() {

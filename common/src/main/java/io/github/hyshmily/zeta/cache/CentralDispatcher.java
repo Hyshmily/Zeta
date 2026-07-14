@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
 
 import io.github.hyshmily.zeta.Internal;
@@ -95,12 +96,18 @@ public class CentralDispatcher {
    * @throws IllegalArgumentException if the type is unknown
    */
   public void send(String cacheKey, String type, long version, boolean degraded) {
+    if (invalidCacheKey(cacheKey)) {
+      return;
+    }
     switch (type) {
       case TYPE_INVALIDATE -> cacheSyncPublisher.ifPresentOrElse(
         p -> p.broadcastLocalInvalidate(cacheKey, version, degraded),
         () -> log.debug("send INVALIDATE: {}", NO_SYNC_PUBLISHER)
       );
-      case TYPE_REFRESH -> cacheSyncPublisher.ifPresent(p -> broadcastBuffer.record(cacheKey, version, degraded));
+      case TYPE_REFRESH -> cacheSyncPublisher.ifPresentOrElse(
+        p -> broadcastBuffer.record(cacheKey, version, degraded),
+        () -> log.debug("send REFRESH: {}", NO_SYNC_PUBLISHER)
+      );
       default -> throw new IllegalArgumentException("Unknown send type: " + type);
     }
   }
@@ -115,11 +122,14 @@ public class CentralDispatcher {
    * @param type      the operation type ({@link SyncMessage#TYPE_INVALIDATE_ALL})
    */
   public void send(Collection<String> cacheKeys, String type) {
-    if (cacheKeys == null || cacheKeys.isEmpty()) {
+    if (invalidCacheKey(cacheKeys)) {
       return;
     }
     if (type.equals(TYPE_INVALIDATE_ALL)) {
-      cacheSyncPublisher.ifPresent(p -> p.broadcastLocalInvalidateAll(cacheKeys));
+      cacheSyncPublisher.ifPresentOrElse(
+        p -> p.broadcastLocalInvalidateAll(cacheKeys),
+        () -> log.debug("send INVALIDATE_ALL: {}", NO_SYNC_PUBLISHER)
+      );
     }
   }
 }

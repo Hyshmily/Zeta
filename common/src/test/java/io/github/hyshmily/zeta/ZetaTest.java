@@ -30,6 +30,7 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.rule.Rule;
 import io.github.hyshmily.zeta.rule.Rule.RuleAction;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -974,5 +975,243 @@ class ZetaTest {
     zeta.registerRefresh("k1", () -> "v", 300_000L, 10_000L);
     zeta.destroy();
     verify(hotKeyCache, never()).getWithSoftExpire(eq("k1"), any(), anyLong(), anyLong(), anyBoolean());
+  }
+
+  // ── Parameter validation ──
+
+  @Test
+  void read_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.read(null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void read_shouldRejectEmptyKey() {
+    assertThatThrownBy(() -> zeta.read("")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void write_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.write(null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void computeIfAbsent_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.computeIfAbsent(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void computeIfAbsent_shouldRejectNullLoader() {
+    assertThatThrownBy(() -> zeta.computeIfAbsent("k", null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void computeIfAbsent_shouldRejectNegativeHardTtl() {
+    assertThatThrownBy(() -> zeta.computeIfAbsent("k", () -> "v", -1L, 0L, true)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+  }
+
+  @Test
+  void computeIfAbsent_shouldRejectNegativeSoftTtl() {
+    assertThatThrownBy(() -> zeta.computeIfAbsent("k", () -> "v", 0L, -1L, true)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+  }
+
+  @Test
+  void computeIfAbsentWithSoftExpire_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.computeIfAbsentWithSoftExpire(null, () -> "v", 0L, 0L, true)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+  }
+
+  @Test
+  void get_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.get(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void get_shouldRejectNullReader() {
+    assertThatThrownBy(() -> zeta.get("k", null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void getWithSoftExpire_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.getWithSoftExpire(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void batchGet_shouldRejectNullKeys() {
+    assertThatThrownBy(() -> zeta.get((Iterable<String>) null, k -> "v")).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void putThrough_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.putThrough(null, "v", () -> {})).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void putThrough_shouldRejectNullValue() {
+    assertThatThrownBy(() -> zeta.putThrough("k", null, () -> {})).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void putThrough_shouldRejectNullWriter() {
+    assertThatThrownBy(() -> zeta.putThrough("k", "v", null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void putLocal_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.putLocal(null, "v")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void putLocal_shouldRejectNullValue() {
+    assertThatThrownBy(() -> zeta.putLocal("k", null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void invalidate_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.invalidate((String) null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void invalidate_shouldRejectEmptyKey() {
+    assertThatThrownBy(() -> zeta.invalidate("")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void batchInvalidate_shouldRejectNullKeys() {
+    assertThatThrownBy(() -> zeta.invalidate((Collection<String>) null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void invalidateAfterPut_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.invalidateAfterPut(null, () -> {})).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void invalidateAfterPut_shouldRejectNullMutation() {
+    assertThatThrownBy(() -> zeta.invalidateAfterPut("k", null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void peek_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.peek(null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void peekAll_shouldRejectNullKeys() {
+    assertThatThrownBy(() -> zeta.peekAll(null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void compareAndSet_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.compareAndSet(null, "old", "new")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void compareAndInvalidate_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.compareAndInvalidate(null, "old")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void tryLock_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.tryLock(null, 10, TimeUnit.SECONDS)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void tryLock_shouldRejectNullUnit() {
+    assertThatThrownBy(() -> zeta.tryLock("k", 10, null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void tryLock_shouldRejectNegativeExpire() {
+    assertThatThrownBy(() -> zeta.tryLock("k", -1, TimeUnit.SECONDS)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void isLocalHotKey_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.isLocalHotKey(null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void registerRefresh_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.registerRefresh(null, () -> "v", 1000L, 100L)).isInstanceOf(
+      IllegalArgumentException.class
+    );
+  }
+
+  @Test
+  void registerRefresh_shouldRejectNullSupplier() {
+    assertThatThrownBy(() -> zeta.registerRefresh("k", null, 1000L, 100L)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void unregisterRefresh_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.unregisterRefresh(null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void refresh_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.refresh(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void refresh_shouldRejectNullLoader() {
+    assertThatThrownBy(() -> zeta.refresh("k", null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void addBlacklist_shouldRejectNullPattern() {
+    assertThatThrownBy(() -> zeta.addBlacklist((String) null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void addBlacklist_shouldRejectEmptyPattern() {
+    assertThatThrownBy(() -> zeta.addBlacklist("")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void evaluateRule_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.evaluateRule(null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void isBlacklisted_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.isBlacklisted((String) null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void isWhitelisted_shouldRejectNullKey() {
+    assertThatThrownBy(() -> zeta.isWhitelisted((String) null)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void areLocalHotKeys_shouldRejectNullKeys() {
+    assertThatThrownBy(() -> zeta.areLocalHotKeys(null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void areWorkerHotKeys_shouldRejectNullKeys() {
+    assertThatThrownBy(() -> zeta.areWorkerHotKeys(null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void workerMode_shouldStillRejectNullKey() {
+    Zeta workerOnly = new Zeta(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.get(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void putLocal_shouldRejectNegativeHardTtl() {
+    assertThatThrownBy(() -> zeta.putLocal("k", "v", -1L, 0L)).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void putThrough_shouldRejectNegativeHardTtl() {
+    assertThatThrownBy(() -> zeta.putThrough("k", "v", () -> {}, -1L, 0L, true)).isInstanceOf(
+      IllegalArgumentException.class
+    );
   }
 }

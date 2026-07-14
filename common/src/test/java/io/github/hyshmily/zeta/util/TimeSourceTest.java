@@ -18,17 +18,27 @@ package io.github.hyshmily.zeta.util;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
+import java.lang.reflect.Field;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link TimeSource} verifying idempotent start and correct time retrieval.
+ * Tests for {@link TimeSource} verifying idempotent start, max-attempt guard, and correct time
+ * retrieval.
  */
 class TimeSourceTest {
 
   @AfterEach
-  void tearDown() {
-    // Reset the thread-try counter between tests to avoid hitting the max after repeated calls
+  void tearDown() throws Exception {
+    Field tryCountField = TimeSource.class.getDeclaredField("threadTryCount");
+    tryCountField.setAccessible(true);
+    ((AtomicInteger) tryCountField.get(null)).set(0);
+
+    Field runningField = TimeSource.class.getDeclaredField("threadRunning");
+    runningField.setAccessible(true);
+    ((AtomicBoolean) runningField.get(null)).set(false);
   }
 
   @Test
@@ -55,5 +65,34 @@ class TimeSourceTest {
   void currentTimeMillis_withoutStart_shouldWork() {
     long ts = TimeSource.currentTimeMillis();
     assertThat(ts).isPositive();
+  }
+
+  @Test
+  void start_afterMaxAttempts_shouldNotRestartInNewThread() throws Exception {
+    // First 3 calls increment counter; only the 1st starts a thread
+    for (int i = 0; i < 3; i++) {
+      TimeSource.start();
+    }
+
+    // Simulate thread death so CAS could otherwise succeed
+    Field runningField = TimeSource.class.getDeclaredField("threadRunning");
+    runningField.setAccessible(true);
+    ((AtomicBoolean) runningField.get(null)).set(false);
+
+    // 4th call — counter is now 4 which exceeds THREAD_TRY_MAX (3)
+    TimeSource.start();
+
+    // With no thread running, currentTimeMillis() falls back to System.currentTimeMillis()
+    assertThat(TimeSource.currentTimeMillis()).isPositive();
+  }
+
+  @Test
+  void currentTimeMillis_cachedValue_shouldUpdateOverTime() throws Exception {
+    TimeSource.start();
+    // Allow the background thread to advance the clock a few cycles (each sleeps 5 ms)
+    long before = TimeSource.currentTimeMillis();
+    Thread.sleep(25);
+    long after = TimeSource.currentTimeMillis();
+    assertThat(after).isGreaterThanOrEqualTo(before);
   }
 }

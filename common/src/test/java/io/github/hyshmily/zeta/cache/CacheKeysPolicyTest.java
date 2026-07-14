@@ -31,7 +31,7 @@ class CacheKeysPolicyTest {
    */
   @Test
   void invalidCacheKey_null_shouldReturnTrue() {
-    assertThat(CacheKeysPolicy.invalidCacheKey(null)).isTrue();
+    assertThat(CacheKeysPolicy.invalidCacheKey((String) null)).isTrue();
   }
 
   /**

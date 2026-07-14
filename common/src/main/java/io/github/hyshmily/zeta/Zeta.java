@@ -36,6 +36,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.util.Assert;
 
 /**
  * Public facade for the HotKey library — the sole public API entry point.
@@ -171,6 +172,7 @@ public class Zeta implements DisposableBean {
    * @return a new {@link ZetaReadQuery} instance (single-use)
    */
   public <T> ZetaReadQuery<T> read(String cacheKey) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     return new ZetaReadQuery<>(this, cacheKey);
   }
 
@@ -193,6 +195,7 @@ public class Zeta implements DisposableBean {
    * @return a new {@link ZetaWriteCommand} instance (single-use)
    */
   public <T> ZetaWriteCommand<T> write(String cacheKey) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     return new ZetaWriteCommand<>(this, cacheKey);
   }
 
@@ -265,6 +268,10 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean allowReport
   ) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(loader, "loader must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     requireAppCache("computeIfAbsent");
     requireAppDetector("computeIfAbsent");
     return hotKeyCache.computeIfAbsent(cacheKey, loader, hardTtlMs, softTtlMs, allowReport).orElse(null);
@@ -340,6 +347,10 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean allowReport
   ) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(loader, "loader must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     requireAppCache("computeIfAbsent");
     requireAppDetector("computeIfAbsent");
     return hotKeyCache.computeIfAbsentWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs, allowReport).orElse(null);
@@ -356,6 +367,7 @@ public class Zeta implements DisposableBean {
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
   public boolean compareAndSet(String cacheKey, @Nullable Object expected, @Nullable Object newValue) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     requireAppCache("compareAndSet");
     return hotKeyCache.compareAndSet(cacheKey, expected, newValue);
   }
@@ -374,6 +386,7 @@ public class Zeta implements DisposableBean {
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
   public boolean compareAndInvalidate(String cacheKey, @Nullable Object expected) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     requireAppCache("compareAndInvalidate");
     return hotKeyCache.compareAndInvalidate(cacheKey, expected);
   }
@@ -400,6 +413,8 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void invalidateAfterPut(String cacheKey, Runnable mutation, boolean isBroadcastByThisTime) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(mutation, "mutation must not be null");
     requireAppCache("invalidateAfterPut");
     requireAppDetector("invalidateAfterPut");
     hotKeyCache.invalidateAfterPut(cacheKey, mutation, isBroadcastByThisTime);
@@ -426,6 +441,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void invalidateAfterPut(Map<String, ? extends Runnable> mutations, boolean isBroadcastByThisTime) {
+    Objects.requireNonNull(mutations, "mutations must not be null");
     requireAppCache("invalidateAfterPut");
     requireAppDetector("invalidateAfterPut");
     hotKeyCache.invalidateAfterPut(mutations, isBroadcastByThisTime);
@@ -440,6 +456,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <T> Optional<T> peek(String cacheKey) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     requireAppCache("peek");
     return hotKeyCache.peek(cacheKey);
   }
@@ -453,6 +470,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public Map<String, Object> peekAll(Collection<String> cacheKeys) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Map<String, Object> result = new HashMap<>();
     cacheKeys.forEach(key -> {
       Optional<Object> value = peek(key);
@@ -563,6 +581,10 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(reader, "reader must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     requireAppCache("get");
     requireAppDetector("get");
     return hotKeyCache.get(cacheKey, reader, hardTtlMs, softTtlMs, isReportByThisTime);
@@ -688,6 +710,10 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
+    Objects.requireNonNull(reader, "reader must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     requireAppCache("get");
     requireAppDetector("get");
     return hotKeyCache.get(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime);
@@ -776,8 +802,12 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
-    requireAppCache("get");
-    requireAppDetector("get");
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(reader, "reader must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
+    requireAppCache("getWithSoftExpire");
+    requireAppDetector("getWithSoftExpire");
     return hotKeyCache.getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, isReportByThisTime);
   }
 
@@ -886,8 +916,12 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
-    requireAppCache("get");
-    requireAppDetector("get");
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
+    Objects.requireNonNull(reader, "reader must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
+    requireAppCache("getWithSoftExpire");
+    requireAppDetector("getWithSoftExpire");
     return hotKeyCache.getWithSoftExpire(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime);
   }
 
@@ -910,6 +944,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void invalidate(String cacheKey, boolean isBroadcastByThisTime) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     requireAppCache("invalidate");
     hotKeyCache.invalidate(cacheKey, isBroadcastByThisTime);
   }
@@ -932,6 +967,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void invalidate(Collection<String> cacheKeys, boolean isBroadcastByThisTime) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     requireAppCache("invalidate");
     hotKeyCache.invalidate(cacheKeys, isBroadcastByThisTime);
   }
@@ -1036,6 +1072,11 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean isBroadcastByThisTime
   ) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(value, "value must not be null");
+    Objects.requireNonNull(writer, "writer must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     requireAppCache("putThrough");
     hotKeyCache.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs, isBroadcastByThisTime);
   }
@@ -1086,6 +1127,10 @@ public class Zeta implements DisposableBean {
    * @param softTtlMs soft TTL override (0 = use configured default)
    */
   public void putLocal(String cacheKey, Object value, long hardTtlMs, long softTtlMs) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(value, "value must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     if (hotKeyCache == null) {
       return; // Worker-only mode: silently no-op
     }
@@ -1179,6 +1224,9 @@ public class Zeta implements DisposableBean {
    */
   @Nullable
   public AutoReleaseLock tryLock(String key, long expire, TimeUnit unit) {
+    Assert.hasText(key, "key must not be empty");
+    Assert.isTrue(expire >= 0, "expire must not be negative");
+    Objects.requireNonNull(unit, "unit must not be null");
     return lockProvider != null ? lockProvider.tryLock(key, expire, unit) : null;
   }
 
@@ -1196,6 +1244,9 @@ public class Zeta implements DisposableBean {
    *         {@code false} otherwise
    */
   public boolean tryLockAndRun(String key, long expire, TimeUnit unit, Runnable action) {
+    Assert.hasText(key, "key must not be empty");
+    Assert.isTrue(expire >= 0, "expire must not be negative");
+    Objects.requireNonNull(unit, "unit must not be null");
     Objects.requireNonNull(action, "action must not be null");
     if (lockProvider == null) {
       return false;
@@ -1237,6 +1288,9 @@ public class Zeta implements DisposableBean {
     int tryLockInquiryCount,
     int tryLockUnlockCount
   ) {
+    Assert.hasText(key, "key must not be empty");
+    Assert.isTrue(expire >= 0, "expire must not be negative");
+    Objects.requireNonNull(unit, "unit must not be null");
     return lockProvider != null
       ? lockProvider.tryLock(key, expire, unit, tryLockLockCount, tryLockInquiryCount, tryLockUnlockCount)
       : null;
@@ -1270,6 +1324,9 @@ public class Zeta implements DisposableBean {
     int tryLockInquiryCount,
     int tryLockUnlockCount
   ) {
+    Assert.hasText(key, "key must not be empty");
+    Assert.isTrue(expire >= 0, "expire must not be negative");
+    Objects.requireNonNull(unit, "unit must not be null");
     Objects.requireNonNull(action, "action must not be null");
     try (AutoReleaseLock lock = tryLock(key, expire, unit, tryLockLockCount, tryLockInquiryCount, tryLockUnlockCount)) {
       if (lock != null) {
@@ -1320,6 +1377,10 @@ public class Zeta implements DisposableBean {
    * @param <T>       the value type
    */
   public <T> void registerRefresh(String key, Supplier<T> supplier, long hardTtlMs, long softTtlMs) {
+    Assert.hasText(key, "key must not be empty");
+    Objects.requireNonNull(supplier, "supplier must not be null");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     long intervalMs = (long) (softTtlMs * 1.1);
     if (intervalMs < 1) {
       intervalMs = 1;
@@ -1361,6 +1422,7 @@ public class Zeta implements DisposableBean {
    * @param key the cache key to stop refreshing
    */
   public void unregisterRefresh(String key) {
+    Assert.hasText(key, "key must not be empty");
     ScheduledFuture<?> f = refreshFutures.remove(key);
     if (f != null) {
       f.cancel(false);
@@ -1391,6 +1453,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public boolean isLocalHotKey(String cacheKey) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     requireAppCache("isHot");
     requireAppDetector("isHot");
     return hotKeyCache.isHot(cacheKey);
@@ -1408,6 +1471,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public Map<String, Boolean> areLocalHotKeys(Collection<String> cacheKeys) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Map<String, Boolean> result = new HashMap<>();
     cacheKeys.forEach(key -> result.put(key, isLocalHotKey(key)));
     return result;
@@ -1481,6 +1545,8 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void refresh(String cacheKey, Supplier<?> loader) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(loader, "loader must not be null");
     requireAppCache("refresh");
     invalidate(cacheKey, false);
     putThrough(cacheKey, loader.get(), () -> {});
@@ -1494,6 +1560,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void refreshAll(Map<String, Supplier<?>> loaders) {
+    Objects.requireNonNull(loaders, "loaders must not be null");
     requireAppCache("refreshAll");
     loaders.forEach(this::refresh);
   }
@@ -1510,6 +1577,10 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public <V> void refresh(String cacheKey, Supplier<V> loader, long hotHardTtlMs, long hotSoftTtlMs) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(loader, "loader must not be null");
+    Assert.isTrue(hotHardTtlMs >= 0, "hotHardTtlMs must not be negative");
+    Assert.isTrue(hotSoftTtlMs >= 0, "hotSoftTtlMs must not be negative");
     requireAppCache("refresh");
     invalidate(cacheKey, false);
     putThrough(cacheKey, loader.get(), () -> {}, hotHardTtlMs, hotSoftTtlMs, true);
@@ -1539,6 +1610,7 @@ public class Zeta implements DisposableBean {
    *         all entries are {@code false} when no Worker is active
    */
   public Map<String, Boolean> areWorkerHotKeys(Collection<String> cacheKeys) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Map<String, Boolean> result = new HashMap<>();
     cacheKeys.forEach(key -> result.put(key, isWorkerHotKey(key)));
     return result;
@@ -1631,6 +1703,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addBlacklist(String keyPattern) {
+    Assert.hasText(keyPattern, "keyPattern must not be empty");
     requireAppCache("addBlacklist");
     hotKeyCache.addBlacklist(keyPattern);
   }
@@ -1643,6 +1716,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addBlacklist(Collection<String> keyPatterns) {
+    Objects.requireNonNull(keyPatterns, "keyPatterns must not be null");
     requireAppCache("addBlacklist");
     keyPatterns.forEach(hotKeyCache::addBlacklist);
   }
@@ -1654,6 +1728,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeBlacklist(String keyPattern) {
+    Assert.hasText(keyPattern, "keyPattern must not be empty");
     requireAppCache("removeBlacklist");
     hotKeyCache.unBlacklist(keyPattern);
   }
@@ -1666,6 +1741,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeBlacklist(Collection<String> keyPatterns) {
+    Objects.requireNonNull(keyPatterns, "keyPatterns must not be null");
     requireAppCache("removeBlacklist");
     keyPatterns.forEach(hotKeyCache::unBlacklist);
   }
@@ -1680,6 +1756,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addWhitelist(String keyPattern) {
+    Assert.hasText(keyPattern, "keyPattern must not be empty");
     requireAppCache("addWhitelist");
     hotKeyCache.addWhitelist(keyPattern);
   }
@@ -1692,6 +1769,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void addWhitelist(Collection<String> keyPatterns) {
+    Objects.requireNonNull(keyPatterns, "keyPatterns must not be null");
     requireAppCache("addWhitelist");
     keyPatterns.forEach(hotKeyCache::addWhitelist);
   }
@@ -1703,6 +1781,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeWhitelist(String keyPattern) {
+    Assert.hasText(keyPattern, "keyPattern must not be empty");
     requireAppCache("removeWhitelist");
     hotKeyCache.unWhitelist(keyPattern);
   }
@@ -1715,6 +1794,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
   public void removeWhitelist(Collection<String> keyPatterns) {
+    Objects.requireNonNull(keyPatterns, "keyPatterns must not be null");
     requireAppCache("removeWhitelist");
     keyPatterns.forEach(hotKeyCache::unWhitelist);
   }
@@ -1727,6 +1807,7 @@ public class Zeta implements DisposableBean {
    *         or no cache is available (Worker-only mode)
    */
   public Rule.RuleAction evaluateRule(String cacheKey) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     if (hotKeyCache == null) {
       return Rule.RuleAction.ALLOW;
     }
@@ -1741,6 +1822,7 @@ public class Zeta implements DisposableBean {
    * @return a map of key → matching {@link Rule.RuleAction} (or {@code ALLOW} if no rule matches)
    */
   public Map<String, Rule.RuleAction> evaluateRules(Collection<String> cacheKeys) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Map<String, Rule.RuleAction> result = new HashMap<>();
     cacheKeys.forEach(key -> {
       Rule.RuleAction action = evaluateRule(key);
@@ -1761,6 +1843,7 @@ public class Zeta implements DisposableBean {
    *         rule matches or no cache is available (Worker-only mode)
    */
   public boolean isBlacklisted(String cacheKey) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     if (hotKeyCache == null) {
       return false;
     }
@@ -1775,6 +1858,7 @@ public class Zeta implements DisposableBean {
    * @return a map of key → whether it is blocked by a blacklist rule
    */
   public Map<String, Boolean> isBlacklisted(Collection<String> cacheKeys) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Map<String, Boolean> result = new HashMap<>();
     cacheKeys.forEach(key -> {
       boolean isBlacklisted = isBlacklisted(key);
@@ -1795,6 +1879,7 @@ public class Zeta implements DisposableBean {
    *         rule matches or no cache is available (Worker-only mode)
    */
   public boolean isWhitelisted(String cacheKey) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
     if (hotKeyCache == null) {
       return false;
     }
@@ -1809,6 +1894,7 @@ public class Zeta implements DisposableBean {
    * @return a map of key → whether it is whitelisted (skips Worker reporting)
    */
   public Map<String, Boolean> isWhitelisted(Collection<String> cacheKeys) {
+    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Map<String, Boolean> result = new HashMap<>();
     cacheKeys.forEach(key -> {
       boolean isWhitelisted = isWhitelisted(key);
