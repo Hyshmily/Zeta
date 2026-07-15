@@ -35,7 +35,6 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * If none is received, the Worker continues with the values from
  * {@link io.github.hyshmily.zeta.worker.config.WorkerProperties} — this can happen when all other Workers are down.
  */
-/** Default constructor. */
 @RequiredArgsConstructor
 @Slf4j
 public class WorkerConfigNegotiator {

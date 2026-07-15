@@ -89,6 +89,7 @@
 | `zeta.local.cache.max-size`           | `100000`                 | Caffeine L1 max entry count (used when `max-weight` is 0)                                                                    |
 | `zeta.local.cache.max-weight`         | `0`                      | Memory weight limit in bytes; 0 = disabled. When >0, replaces `max-size` and uses `DefaultWeigher` for weight estimation      |
 | `zeta.local.cache.max-value-size`     | `0`                      | Single value byte size limit; 0 = unlimited. Values exceeding this are NOT cached                                             |
+| `zeta.local.cache-key.strip-query`    | `false`                  | Strip query parameters (`?key=val`) from cache keys before cache operations, preventing the same business data from being fragmented across multiple Caffeine entries and diluting HeavyKeeper hot-key detection. Disabled by default — zero cost when not used |
 
 | `zeta.local.local-cache-ttl-minutes`  | `5`                      | Caffeine L1 write-based TTL (minutes)                                                                                         |
 | `zeta.local.inflight-max-size`        | `50000`                  | In-flight dedup max entries                                                                                                   |

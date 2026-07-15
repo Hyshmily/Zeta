@@ -85,6 +85,7 @@
 | `zeta.local.cache.max-size`           | `100000`                 | Caffeine L1 最大条目数（`max-weight` 为 0 时生效）                                          |
 | `zeta.local.cache.max-weight`         | `0`                      | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重       |
 | `zeta.local.cache.max-value-size`     | `0`                      | 单值字节大小限制；0 = 不限。超过此大小的值不会被缓存                                         |
+| `zeta.local.cache-key.strip-query`    | `false`                  | 在缓存操作前从缓存键中剥离查询参数（`?key=val`），避免相同业务数据因 URL 参数不同而分裂到多个 Caffeine 条目中，从而稀释 HeavyKeeper 热点检测。默认关闭——未启用时零开销 |
 
 | `zeta.local.local-cache-ttl-minutes`  | `5`                      | Caffeine L1 写入 TTL（分钟）                                                                 |
 | `zeta.local.inflight-max-size`        | `50000`                  | Inflight 去重最大条目数                                                                      |
