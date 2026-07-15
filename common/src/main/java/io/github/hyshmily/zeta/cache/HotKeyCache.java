@@ -15,11 +15,15 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.VERSION_DEFAULT;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.annotationsupporter.NullValue;
+import io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.TransactionSupport;
@@ -39,10 +43,6 @@ import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.Nullable;
-import lombok.Builder;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.Executor;
@@ -51,9 +51,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
-
-import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.VERSION_DEFAULT;
+import lombok.Builder;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -128,6 +128,18 @@ public class HotKeyCache {
   }
 
   /**
+   * Normalize a cache key if query-param stripping is enabled.
+   * Delegates to {@link CacheKeysPolicy#normalizeKey} only when the
+   * feature is configured; otherwise returns the key unchanged (zero overhead).
+   */
+  private String normalize(String cacheKey) {
+    if (cacheKey != null && zetaProperties.getCacheKey().isStripQuery()) {
+      return CacheKeysPolicy.normalizeKey(cacheKey);
+    }
+    return cacheKey;
+  }
+
+  /**
    * Guard against invalid cache keys and blocked keys.
    *
    * @param cacheKey the cache key to check
@@ -179,6 +191,7 @@ public class HotKeyCache {
    * @return {@code true} if the key exists in L1 with {@link KeyState#HOT}
    */
   public boolean isHot(String cacheKey) {
+    cacheKey = normalize(cacheKey);
     return isHot(cacheKey, null);
   }
 
@@ -272,9 +285,10 @@ public class HotKeyCache {
    */
   @SuppressWarnings("unchecked")
   public <T> Optional<T> peek(String cacheKey) {
-    if (preGuard(cacheKey) == null) return Optional.empty();
-    return execute(cacheKey, () ->
-      Optional.ofNullable(caffeineCache.getIfPresent(cacheKey)).map(raw ->
+    String nk = normalize(cacheKey);
+    if (preGuard(nk) == null) return Optional.empty();
+    return execute(nk, () ->
+      Optional.ofNullable(caffeineCache.getIfPresent(nk)).map(raw ->
         raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue()) : (T) raw
       )
     );
@@ -300,15 +314,16 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
-    GuardReport g = preGuard(cacheKey);
+    String nk = normalize(cacheKey);
+    GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
 
-    return (Optional<T>) execute(cacheKey, () ->
-      Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
-        .flatMap(raw -> handleCacheHit(cacheKey, raw, hardTtlMs, softTtlMs, skipReport))
-        .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport))
+    return (Optional<T>) execute(nk, () ->
+      Optional.ofNullable(caffeineCache.getIfPresent(nk))
+        .flatMap(raw -> handleCacheHit(nk, raw, hardTtlMs, softTtlMs, skipReport))
+        .or(() -> loadAndCache(nk, reader, hardTtlMs, softTtlMs, skipReport))
     );
   }
 
@@ -400,20 +415,21 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
-    GuardReport g = preGuard(cacheKey);
+    String nk = normalize(cacheKey);
+    GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
 
     if (isSoftExpireUnenabled()) {
       log.debug("getWithSoftExpire: soft expire not enabled, fallback to get()");
-      return get(cacheKey, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+      return get(nk, reader, hardTtlMs, softTtlMs, isReportByThisTime);
     }
-    Object raw = caffeineCache.getIfPresent(cacheKey);
-    return execute(cacheKey, () ->
+    Object raw = caffeineCache.getIfPresent(nk);
+    return execute(nk, () ->
       Optional.ofNullable(raw)
-        .flatMap(v -> handleSoftExpire(cacheKey, v, reader, hardTtlMs, softTtlMs, skipReport))
-        .or(() -> loadAndCache(cacheKey, reader, hardTtlMs, softTtlMs, skipReport))
+        .flatMap(v -> handleSoftExpire(nk, v, reader, hardTtlMs, softTtlMs, skipReport))
+        .or(() -> loadAndCache(nk, reader, hardTtlMs, softTtlMs, skipReport))
     );
   }
 
@@ -855,7 +871,8 @@ public class HotKeyCache {
 
           promoted[0] = true;
           return entry.withTtlAndKeyState(
-            hotHard, hotSoft,
+            hotHard,
+            hotSoft,
             expireManager.computeHardExpireAt(hotHard),
             expireManager.computeSoftExpireAt(hotSoft),
             KeyState.HOT
@@ -874,15 +891,16 @@ public class HotKeyCache {
    * @param cacheKey the key to invalidate
    */
   public void invalidate(String cacheKey, boolean isBroadcastByThisTime) {
-    if (invalidCacheKey(cacheKey)) {
+    String nk = normalize(cacheKey);
+    if (invalidCacheKey(nk)) {
       log.debug("invalidate: invalid cacheKey");
       return;
     }
 
     TransactionSupport.runNowOrAfterCommit(() -> {
-      caffeineCache.invalidate(cacheKey);
+      caffeineCache.invalidate(nk);
       if (isBroadcastByThisTime) {
-        bumpAndInvalidate(cacheKey);
+        bumpAndInvalidate(nk);
       }
     });
   }
@@ -922,7 +940,8 @@ public class HotKeyCache {
   public void invalidate(Iterable<String> cacheKeys, boolean isBroadcastByThisTime) {
     List<String> validKeys = new ArrayList<>();
     for (String key : cacheKeys) {
-      if (!invalidCacheKey(key)) validKeys.add(key);
+      String normalized = normalize(key);
+      if (!invalidCacheKey(normalized)) validKeys.add(normalized);
     }
     if (validKeys.isEmpty()) {
       log.debug("invalidate: all cacheKeys are invalid");
@@ -956,7 +975,8 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isBroadcastByThisTime
   ) {
-    if (preGuard(cacheKey) == null) {
+    String nk = normalize(cacheKey);
+    if (preGuard(nk) == null) {
       return;
     }
 
@@ -969,7 +989,7 @@ public class HotKeyCache {
           writerOk.compareAndSet(false, true);
         } catch (Exception e) {
           // Writer failed — do NOT cache, do NOT send, do NOT bump version.
-          log.error("putThrough writer failed for key={}, cache update skipped: {}", cacheKey, e.getMessage(), e);
+          log.error("putThrough writer failed for key={}, cache update skipped: {}", nk, e.getMessage(), e);
           return;
         }
 
@@ -977,16 +997,16 @@ public class HotKeyCache {
         long effectiveSoftTtl = expireManager.resolveEffectiveSoftTtl(softTtlMs);
 
         try {
-          var vr = versionController.nextVersion(cacheKey);
+          var vr = versionController.nextVersion(nk);
 
           caffeineCache
             .asMap()
-            .compute(cacheKey, (k, existing) ->
+            .compute(nk, (k, existing) ->
               buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl, false)
             );
 
           if (isBroadcastByThisTime) {
-            dispatcher.send(cacheKey, SyncMessage.TYPE_REFRESH, vr.dataVersion(), vr.degraded());
+            dispatcher.send(nk, SyncMessage.TYPE_REFRESH, vr.dataVersion(), vr.degraded());
           }
         } catch (RejectedExecutionException ree) {
           // hotKeyExecutor saturated mid-body (nextVersion/Redis did run, but
@@ -996,7 +1016,7 @@ public class HotKeyCache {
           // reconcile. Logged at ERROR so operators can detect silent drops.
           log.error(
             "putThrough executor rejected mid-flight for key={} (local cache NOT updated, send NOT sent)",
-            cacheKey,
+            nk,
             ree
           );
           throw ree; // CompletableFuture.exceptionally downstream decides policy
@@ -1004,15 +1024,15 @@ public class HotKeyCache {
           // Redis-relayed exception or unexpected error. The local L1 is still
           // updated using a degraded version so the cache remains coherent with
           // the mutation that already succeeded on the writer.
-          log.error("putThrough cache/send failed for key={} (applying degraded local update)", cacheKey, e);
+          log.error("putThrough cache/send failed for key={} (applying degraded local update)", nk, e);
           var vr = versionController.fallbackVersion();
 
           caffeineCache
             .asMap()
-            .compute(cacheKey, (k, existing) ->
+            .compute(nk, (k, existing) ->
               buildPutThroughEntry(existing, value, vr, effectiveHardTtl, effectiveSoftTtl, true)
             );
-          dispatcher.send(cacheKey, SyncMessage.TYPE_REFRESH, vr.dataVersion(), vr.degraded());
+          dispatcher.send(nk, SyncMessage.TYPE_REFRESH, vr.dataVersion(), vr.degraded());
         }
       },
       hotKeyExecutor
@@ -1041,9 +1061,11 @@ public class HotKeyCache {
     boolean forceUpdate
   ) {
     KeyState state = (existing instanceof CacheEntry entry) ? entry.getKeyState() : KeyState.NORMAL;
-    if (!forceUpdate
-        && existing instanceof CacheEntry ce
-        && VersionGuard.shouldSkipForSync(ce, vr.dataVersion(), vr.degraded())) {
+    if (
+      !forceUpdate &&
+      existing instanceof CacheEntry ce &&
+      VersionGuard.shouldSkipForSync(ce, vr.dataVersion(), vr.degraded())
+    ) {
       return ce;
     }
 
@@ -1103,6 +1125,7 @@ public class HotKeyCache {
    * @param softTtlMs soft TTL override (0 = use configured default)
    */
   public void putLocal(String cacheKey, Object value, long hardTtlMs, long softTtlMs) {
+    cacheKey = normalize(cacheKey);
     if (preGuard(cacheKey) == null) return;
 
     long hardTtl = expireManager.resolveEffectiveHardTtl(hardTtlMs);
@@ -1136,18 +1159,19 @@ public class HotKeyCache {
    * @param mutation the mutation to execute
    */
   public void invalidateAfterPut(String cacheKey, Runnable mutation, boolean isBroadcastByThisTime) {
-    if (preGuard(cacheKey) == null) return;
+    String nk = normalize(cacheKey);
+    if (preGuard(nk) == null) return;
 
     TransactionSupport.runNowOrAfterCommit(() -> {
       try {
         mutation.run();
       } catch (Exception e) {
-        log.error("invalidateAfterPut mutation failed, skip invalidate and send: {}", cacheKey, e);
+        log.error("invalidateAfterPut mutation failed, skip invalidate and send: {}", nk, e);
         return;
       }
-      caffeineCache.invalidate(cacheKey);
+      caffeineCache.invalidate(nk);
       if (isBroadcastByThisTime) {
-        bumpAndInvalidate(cacheKey);
+        bumpAndInvalidate(nk);
       }
     });
   }
@@ -1165,7 +1189,7 @@ public class HotKeyCache {
     List<Runnable> validMutations = new ArrayList<>();
 
     for (var entry : mutations.entrySet()) {
-      String key = entry.getKey();
+      String key = normalize(entry.getKey());
       if (preGuard(key) != null) {
         validKeys.add(key);
         validMutations.add(entry.getValue());
@@ -1201,13 +1225,14 @@ public class HotKeyCache {
    * @param add {@code true} to add the rule, {@code false} to remove it
    */
   private void modifyRule(String cacheKey, RuleAction action, boolean add) {
-    if (invalidCacheKey(cacheKey)) {
-      log.debug("modifyRule: invalid cacheKey '{}'", cacheKey);
+    String nk = normalize(cacheKey);
+    if (invalidCacheKey(nk)) {
+      log.debug("modifyRule: invalid cacheKey '{}'", nk);
       return;
     }
     TransactionSupport.runNowOrAfterCommit(() -> {
-      if (add) ruleMatcher.addRule(RuleMatcher.of(cacheKey, action));
-      else ruleMatcher.removeRule(cacheKey, action);
+      if (add) ruleMatcher.addRule(RuleMatcher.of(nk, action));
+      else ruleMatcher.removeRule(nk, action);
       log.info("{} {}", add ? "Added" : "Removed", action);
     });
   }
@@ -1235,7 +1260,7 @@ public class HotKeyCache {
    * @return the matching {@link RuleAction}, or {@code ALLOW} if no rule matches
    */
   public RuleAction evaluateRule(String cacheKey) {
-    return ruleMatcher.evaluateRule(cacheKey);
+    return ruleMatcher.evaluateRule(normalize(cacheKey));
   }
 
   /**
@@ -1300,7 +1325,7 @@ public class HotKeyCache {
    */
 
   public boolean isBlacklisted(String cacheKey) {
-    return ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK;
+    return ruleMatcher.evaluateRule(normalize(cacheKey)) == RuleAction.BLOCK;
   }
 
   /**
@@ -1310,7 +1335,7 @@ public class HotKeyCache {
    * @return {@code true} if a whitelist rule matches the key
    */
   public boolean isWhitelisted(String cacheKey) {
-    return ruleMatcher.evaluateRule(cacheKey) == RuleAction.ALLOW_NO_REPORT;
+    return ruleMatcher.evaluateRule(normalize(cacheKey)) == RuleAction.ALLOW_NO_REPORT;
   }
 
   /**
@@ -1336,6 +1361,7 @@ public class HotKeyCache {
   public Cache<String, Object> getLocalCache() {
     return caffeineCache;
   }
+
   /**
    * Resolve the effective soft TTL in milliseconds.
    * <p>
@@ -1388,11 +1414,12 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
-    GuardReport g = preGuard(cacheKey);
+    String nk = normalize(cacheKey);
+    GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
-    return execute(cacheKey, () -> computeInLock(cacheKey, reader, hardTtlMs, softTtlMs, skipReport, false));
+    return execute(nk, () -> computeInLock(nk, reader, hardTtlMs, softTtlMs, skipReport, false));
   }
 
   /**
@@ -1421,12 +1448,13 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
-    GuardReport g = preGuard(cacheKey);
+    String nk = normalize(cacheKey);
+    GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
-    if (isSoftExpireUnenabled()) return computeIfAbsent(cacheKey, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+    if (isSoftExpireUnenabled()) return computeIfAbsent(nk, reader, hardTtlMs, softTtlMs, isReportByThisTime);
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
-    return execute(cacheKey, () -> computeInLock(cacheKey, reader, hardTtlMs, softTtlMs, skipReport, true));
+    return execute(nk, () -> computeInLock(nk, reader, hardTtlMs, softTtlMs, skipReport, true));
   }
 
   /**
@@ -1490,7 +1518,8 @@ public class HotKeyCache {
               }
             } else if (isPromotableState(ce) && hotKeyDetector.contains(k)) {
               return ce.withTtlAndKeyState(
-                hotHardTtl, hotSoftTtl,
+                hotHardTtl,
+                hotSoftTtl,
                 expireManager.computeHardExpireAt(hotHardTtl),
                 expireManager.computeSoftExpireAt(hotSoftTtl),
                 KeyState.HOT
@@ -1536,7 +1565,11 @@ public class HotKeyCache {
       });
 
     if (errorRef[0] != null) {
-      log.error("computeInLock reader failed for key={}, returning empty to keep caller operational", cacheKey, errorRef[0]);
+      log.error(
+        "computeInLock reader failed for key={}, returning empty to keep caller operational",
+        cacheKey,
+        errorRef[0]
+      );
       return Optional.empty();
     }
 
@@ -1575,14 +1608,15 @@ public class HotKeyCache {
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
   public boolean compareAndSet(String cacheKey, @Nullable Object expected, @Nullable Object newValue) {
-    GuardReport g = preGuard(cacheKey);
+    String nk = normalize(cacheKey);
+    GuardReport g = preGuard(nk);
     if (g == null) return false;
 
-    return execute(cacheKey, () -> {
+    return execute(nk, () -> {
       boolean[] replaced = { false };
       caffeineCache
         .asMap()
-        .compute(cacheKey, (k, existing) -> {
+        .compute(nk, (k, existing) -> {
           if (!Objects.equals(extractComparable(existing), expected)) {
             return existing;
           }
@@ -1610,14 +1644,15 @@ public class HotKeyCache {
    * @return {@code true} if the invalidation was performed
    */
   public boolean compareAndInvalidate(String cacheKey, @Nullable Object expected) {
-    GuardReport g = preGuard(cacheKey);
+    String nk = normalize(cacheKey);
+    GuardReport g = preGuard(nk);
     if (g == null) return false;
 
-    return execute(cacheKey, () -> {
+    return execute(nk, () -> {
       boolean[] invalidated = { false };
       caffeineCache
         .asMap()
-        .computeIfPresent(cacheKey, (k, existing) -> {
+        .computeIfPresent(nk, (k, existing) -> {
           if (!Objects.equals(extractComparable(existing), expected)) {
             return existing;
           }

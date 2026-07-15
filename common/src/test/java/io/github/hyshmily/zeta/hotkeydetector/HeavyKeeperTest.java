@@ -641,6 +641,31 @@ class HeavyKeeperTest {
     assertThat(preloaded.list()).isNotNull();
   }
 
+  // ── Soft heavy protection in decayCollisionSlot ──
+
+  @Test
+  void decayCollision_withHotSlot_shouldLimitDecay() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100);
+    for (int i = 0; i < 100; i++) {
+      hk.addDirect("hot", 1);
+    }
+    for (int i = 0; i < 50; i++) {
+      hk.addDirect("cold", 1);
+    }
+    assertThat(hk.contains("hot")).isTrue();
+  }
+
+  // ── Batch decay fast path ──
+
+  @Test
+  void decayCollision_withLargeIncrement_shouldUseFastPath() {
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100);
+    hk.addDirect("key1", 1);
+    AddResult result = hk.addDirect("key2", 200);
+    assertThat(result).isNotNull();
+    assertThat(hk.total()).isEqualTo(201);
+  }
+
   @Test
   void fading_withConcurrentAccumulate_shouldPreserveCount() throws InterruptedException {
     // Regression test: decayMembership() previously used reset()+accumulate() on LongAccumulator,

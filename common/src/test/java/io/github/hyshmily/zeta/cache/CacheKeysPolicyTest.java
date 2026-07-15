@@ -92,6 +92,34 @@ class CacheKeysPolicyTest {
     assertThat(CacheKeysPolicy.invalidCacheKey("user:123:profile:")).isFalse();
   }
 
+  @Test
+  void normalizeKey_null_shouldReturnNull() {
+    assertThat(CacheKeysPolicy.normalizeKey(null)).isNull();
+  }
+
+  @Test
+  void normalizeKey_noQuery_shouldReturnSame() {
+    assertThat(CacheKeysPolicy.normalizeKey("user:42")).isEqualTo("user:42");
+    assertThat(CacheKeysPolicy.normalizeKey("")).isEqualTo("");
+    assertThat(CacheKeysPolicy.normalizeKey("   ")).isEqualTo("   ");
+  }
+
+  @Test
+  void normalizeKey_withQuery_shouldStripAfterQuestion() {
+    assertThat(CacheKeysPolicy.normalizeKey("user:42?ts=123")).isEqualTo("user:42");
+    assertThat(CacheKeysPolicy.normalizeKey("user:42?ts=123&token=abc")).isEqualTo("user:42");
+  }
+
+  @Test
+  void normalizeKey_trailingQuery_shouldStrip() {
+    assertThat(CacheKeysPolicy.normalizeKey("user:42?")).isEqualTo("user:42");
+  }
+
+  @Test
+  void normalizeKey_multipleQuestion_shouldOnlyStripFirst() {
+    assertThat(CacheKeysPolicy.normalizeKey("user:42?a=1?b=2")).isEqualTo("user:42");
+  }
+
   /**
    * Verifies that the constructor is private and cannot be instantiated.
    */

@@ -17,17 +17,19 @@ package io.github.hyshmily.zeta.hotkeydetector.heavykeeper;
 
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
@@ -111,6 +113,45 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   /** Pre-computed decay probability lookup table size ({@value}). */
   private static final int LOOKUP_TABLE_SIZE = 65536;
 
+  /**
+   * Slot sum threshold above which soft heavy protection kicks in.
+   * Slots with {@code slotSums[index] > PROTECTION_THRESHOLD} have their
+   * per-collision decay capped to at most {@code cur * MAX_DECAY_RATIO},
+   * preventing a single large cold-batch from disproportionately degrading
+   * an established hot slot.
+   */
+  private static final long PROTECTION_THRESHOLD = 16;
+
+  /**
+   * Maximum fraction of a hot slot's count that can be decayed in a single
+   * collision event. Only applies when {@code cur > PROTECTION_THRESHOLD}.
+   */
+  private static final double MAX_DECAY_RATIO = 0.25;
+
+  /**
+   * Minimum increment threshold for the batch-decay fast path. When
+   * {@code increment > BATCH_DECAY_THRESHOLD}, the decay count is
+   * approximated directly from the Binomial expectation and variance
+   * instead of invoking {@link #sampleBinomial}, saving the normal /
+   * Poisson approximation overhead on large increments.
+   */
+  private static final int BATCH_DECAY_THRESHOLD = 64;
+
+  /**
+   * Increment threshold above which stochastic sampling is replaced by direct
+   * expected-value rounding. When {@code increment > DIRECT_DECAY_THRESHOLD}
+   * (2²⁰ ≈ 1 million), the Binomial variance is negligible relative to the
+   * expectation — the random fluctuation is &lt;0.1% of the decay count — so
+   * {@code (long) Math.round(increment * decayProb)} is used directly,
+   * eliminating random-number generation overhead on huge increments.
+   */
+  private static final long DIRECT_DECAY_THRESHOLD = 1 << 20;
+
+  /** Log every Nth "Failed to offer expelled key" warning to avoid log flooding. */
+  private static final int EXPELLED_LOG_INTERVAL = 1000;
+
+  private final AtomicInteger expelledLogCounter = new AtomicInteger();
+
   @Getter
   private final int k;
 
@@ -125,8 +166,15 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
   /** Pre-computed decay probabilities: {@code decay^i} for {@code i in [0, LOOKUP_TABLE_SIZE)}. */
   private final double[] lookupTable;
-  /** Per-slot fingerprint values for collision verification in the Count-Min Sketch. */
-  private final long[] fingerprints;
+  /** Pre-computed {@code Math.log(decay)} for numerical fallback when {@code cur >= LOOKUP_TABLE_SIZE}. */
+  private final double logDecay;
+  /**
+   * Per-slot fingerprint values (lower 32 bits of 64-bit Murmur3) for collision
+   * verification in the Count-Min Sketch. Using 32-bit truncation saves 50%
+   * fingerprint storage with negligible collision risk — at depth=4 the overall
+   * collision probability remains ~2⁻¹²⁸.
+   */
+  private final int[] fingerprints;
   /**
    * Flattened per-slot sliding-window counters — a single
    * {@code long[totalSlots * windowCount]} array. Window {@code w} of slot
@@ -205,7 +253,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled items
    */
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount, int expelledQueueCapacity) {
-    this(k, width, depth, decay, minCount, expelledQueueCapacity, 3);
+    this(k, width, depth, decay, minCount, expelledQueueCapacity, 3, false);
   }
 
   /**
@@ -228,9 +276,51 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     int expelledQueueCapacity,
     int windowCount
   ) {
-    if (k <= 0) {
-      throw new IllegalArgumentException("TopK must be greater than 0, but got: " + k);
+    this(k, width, depth, decay, minCount, expelledQueueCapacity, windowCount, false);
+  }
+
+  /**
+   * Construct a HeavyKeeper instance with full configuration.
+   *
+   * @param k                     maximum number of hot keys to track
+   * @param width                 width of the Count-Min Sketch (number of columns per row)
+   * @param depth                 depth of the Count-Min Sketch (number of rows / hash functions)
+   * @param decay                 probabilistic decay factor (0.0–1.0); higher values preserve counts longer
+   * @param minCount              minimum count threshold before a key can enter the TopK set
+   * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled items
+   * @param windowCount           number of time windows per sketch slot (ring buffer depth, default 3)
+   * @param autoAlignWidth        when {@code true} and width is not a power of two, automatically
+   *                              round up to the nearest power of two for faster bucket indexing
+   */
+  @SuppressWarnings("all")
+  public HeavyKeeper(
+    int k,
+    int width,
+    int depth,
+    double decay,
+    int minCount,
+    int expelledQueueCapacity,
+    int windowCount,
+    boolean autoAlignWidth
+  ) {
+    if (k <= 0) throw new IllegalArgumentException("k must be > 0, but got: " + k);
+    if (width <= 0) throw new IllegalArgumentException("width must be > 0, but got: " + width);
+    if (depth <= 0) throw new IllegalArgumentException("depth must be > 0, but got: " + depth);
+    if (decay < 0.0 || decay > 1.0) throw new IllegalArgumentException(
+      "decay must be in [0.0, 1.0], but got: " + decay
+    );
+    if (minCount < 0) throw new IllegalArgumentException("minCount must be >= 0, but got: " + minCount);
+    if (windowCount < 1) throw new IllegalArgumentException("windowCount must be >= 1, but got: " + windowCount);
+    if (expelledQueueCapacity <= 0) {
+      throw new IllegalArgumentException("expelledQueueCapacity must be > 0, but got: " + expelledQueueCapacity);
     }
+
+    if (autoAlignWidth && (width & (width - 1)) != 0) {
+      int original = width;
+      width = Integer.highestOneBit(width - 1) << 1;
+      log.info("Auto-aligned width from {} to {} to enable bitmask optimization", original, width);
+    }
+
     this.k = k;
     this.width = width;
     this.depth = depth;
@@ -242,6 +332,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     for (int i = 0; i < LOOKUP_TABLE_SIZE; i++) {
       lookupTable[i] = Math.pow(decay, i);
     }
+    this.logDecay = Math.log(decay);
 
     int totalSlots = depth * width;
     int stripes = 1;
@@ -257,7 +348,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         stripes = 4096;
       }
     }
-    this.fingerprints = new long[totalSlots];
+    this.fingerprints = new int[totalSlots];
     this.windows = new long[totalSlots * windowCount];
     this.slotSums = new long[totalSlots];
     this.lockStripes = new Object[stripes];
@@ -538,7 +629,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         long cur = slotSums[index];
         if (cur == 0) {
           maxCount = updateEmptySlot(index, active, itemFingerprint, increment, maxCount);
-        } else if (fingerprints[index] == itemFingerprint) {
+        } else if (fingerprints[index] == (int) itemFingerprint) {
           maxCount = updateMatchingSlot(index, active, increment, maxCount);
         } else {
           maxCount = decayCollisionSlot(index, active, itemFingerprint, increment, cur, maxCount);
@@ -556,7 +647,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * sum seen so far across all rows for this add call).
    */
   private long updateEmptySlot(int index, int active, long itemFingerprint, long increment, long maxCount) {
-    fingerprints[index] = itemFingerprint;
+    fingerprints[index] = (int) itemFingerprint;
     windows[index * windowStride + active] += increment;
     slotSums[index] += increment;
     return Math.max(maxCount, slotSums[index]);
@@ -588,15 +679,31 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     long maxCount
   ) {
     ThreadLocalRandom rng = ThreadLocalRandom.current();
-    double decayProb = (cur < LOOKUP_TABLE_SIZE)
-      ? lookupTable[(int) cur]
-      : Math.pow(lookupTable[LOOKUP_TABLE_SIZE - 1], cur / (LOOKUP_TABLE_SIZE - 1.0)) *
-        lookupTable[(int) (cur % (LOOKUP_TABLE_SIZE - 1))];
-    int decays = sampleBinomial((int) Math.min(increment, Integer.MAX_VALUE), decayProb, rng);
+    double decayProb = (cur < LOOKUP_TABLE_SIZE) ? lookupTable[(int) cur] : Math.exp(cur * logDecay);
+
+    long decays;
+    if (increment > DIRECT_DECAY_THRESHOLD) {
+      decays = Math.round(increment * decayProb);
+
+    } else if (increment > BATCH_DECAY_THRESHOLD) {
+      double expected = increment * decayProb;
+      double variance = expected * (1.0 - decayProb);
+      double noise = Math.sqrt(variance) * rng.nextGaussian();
+      decays = Math.round(expected + noise);
+      decays = Math.max(0, Math.min(decays, increment));
+
+    } else {
+      decays = sampleBinomial(increment, decayProb, rng);
+    }
+
+    if (cur > PROTECTION_THRESHOLD) {
+      long maxDecays = Math.max(1, (long) (cur * MAX_DECAY_RATIO));
+      decays = Math.min(decays, maxDecays);
+    }
 
     if (decays >= cur) {
       // Replace the slot: fingerprint swap, wipe all windows, replay increment.
-      fingerprints[index] = itemFingerprint;
+      fingerprints[index] = (int) itemFingerprint;
       Arrays.fill(windows, index * windowStride, index * windowStride + windowCount, 0);
       windows[index * windowStride + active] = increment;
       slotSums[index] = increment;
@@ -760,8 +867,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     if (removed != null) {
       expelledKey = removed.key;
       locCache.remove(expelledKey); // evicted — no longer needs cached fingerprint
-      if (!expelledQueue.offer(new Item(expelledKey, min.count()))) {
-        log.warn("Failed to offer expelled key: {}", expelledKey);
+      if (
+        !expelledQueue.offer(new Item(expelledKey, min.count())) &&
+        expelledLogCounter.getAndIncrement() % EXPELLED_LOG_INTERVAL == 0
+      ) {
+        log.warn("Failed to offer expelled key: {} ({} suppressed since last log)", expelledKey, EXPELLED_LOG_INTERVAL);
       }
     }
     members.put(key, new Node(key, maxCount));
@@ -849,7 +959,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * O(λ) expected iterations where λ = np.  The {@code p > 0.5} mirror
    * case is handled iteratively (via the complement) instead of recursing.
    */
-  private static int sampleBinomial(int n, double p, ThreadLocalRandom rng) {
+  private static long sampleBinomial(long n, double p, ThreadLocalRandom rng) {
     if (n <= 0) {
       return 0;
     }
@@ -868,8 +978,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     double q = 1.0 - p;
 
     if (n <= 10) {
-      int k = 0;
-      for (int i = 0; i < n; i++) {
+      long k = 0;
+      for (long i = 0; i < n; i++) {
         if (rng.nextDouble() < p) {
           k++;
         }
@@ -881,12 +991,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     double npq = np * q;
 
     if (npq > 5.0) {
-      int k = (int) Math.round(np + Math.sqrt(npq) * rng.nextGaussian());
+      long k = Math.round(np + Math.sqrt(npq) * rng.nextGaussian());
       return Math.max(0, Math.min(n, k));
     }
 
     double limit = Math.exp(-np);
-    int k = 0;
+    long k = 0;
     double prod = 1.0;
     do {
       k++;

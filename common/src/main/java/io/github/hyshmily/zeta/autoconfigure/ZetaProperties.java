@@ -421,6 +421,16 @@ public class ZetaProperties {
     private String keySeparator = "::";
   }
 
+  @Data
+  public static class CacheKey {
+    /** Strip query parameters (?...) from cache keys for normalization. */
+    private boolean stripQuery = false;
+  }
+
+  /** Cache key normalization configuration. */
+  @Valid
+  private CacheKey cacheKey = new CacheKey();
+
   /** Spring Cache integration configuration. */
   @Valid
   private SpringCache springCache = new SpringCache();

@@ -15,22 +15,23 @@
  */
 package io.github.hyshmily.zeta.sync.distributedlock.impl;
 
-import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
-
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
-import java.time.Duration;
-import java.util.List;
-import java.util.Objects;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+
+import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
 
 /**
  * Redis-backed {@link LockProvider} using {@code SET NX PX} with UUID-based
@@ -170,6 +171,14 @@ public class RedisLockProvider implements LockProvider {
 
         if (acquired == null) {
           for (int j = 0; j < inquiryCount; j++) {
+            if (j > 0) {
+              try {
+                Thread.sleep(Math.min(2L * (1L << j), 10L));
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+              }
+            }
             String value = redisTemplate.opsForValue().get(lockKey);
 
             if (uuid.equals(value)) {
