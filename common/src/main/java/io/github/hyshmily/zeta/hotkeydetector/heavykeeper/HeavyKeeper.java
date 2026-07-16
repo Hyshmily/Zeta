@@ -772,14 +772,15 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       List<String> dropped = null;
       for (Node n : members.values()) {
         // CAS retry loop: atomically halve without losing concurrent accumulates.
-        // If a concurrent accumulate raises the count between get() and CAS,
-        // the CAS fails and we retry with the higher value.
+        // Always attempt the CAS (even when halved==0) so that a concurrent
+        // accumulateAndGet() that raises the count between get() and CAS causes
+        // the CAS to fail and the loop retries with the updated value.
         long prev;
         long halved;
         do {
           prev = n.count.get();
           halved = prev >> 1;
-        } while (halved > 0 && !n.count.compareAndSet(prev, halved));
+        } while (!n.count.compareAndSet(prev, halved));
         if (halved == 0) {
           if (dropped == null) {
             dropped = new ArrayList<>();
