@@ -213,7 +213,7 @@ java -jar worker/target/zeta-worker-1.1.55.jar
 | 写   | `putThrough`, `putLocal`, `invalidateAfterPut`, `refresh`, `refreshAll`                                                           |
 | 失效 | `invalidate`, `invalidateAllLocal`, `compareAndInvalidate`                                                                        |
 | 原子 | `compareAndSet`, `compareAndInvalidate`                                                                                           |
-| 流式 | `read(key)` → `HotKeyReadQuery`, `write(key)` → `HotKeyWriteCommand`                                                              |
+| 流式 | `read(key)` → `ZetaReadQuery`, `write(key)` → `ZetaWriteCommand`                                                              |
 | 内省 | `peek`, `estimatedSize`, `stats`, `getLocalCache`, `isLocalHotKey`, `isWorkerHotKey`, `returnLocalHotKeys`, `returnWorkerHotKeys` |
 | 规则 | `addBlacklist`, `removeBlacklist`, `addWhitelist`, `removeWhitelist`, `evaluateRule`, `getAllRules`, `clearAllRules`              |
 | 锁   | `tryLock`, `tryLockAndRun`                                                                                                        |
@@ -324,7 +324,7 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 | 模式        | `worker.enabled` | 激活的 Bean                                                            |
 | ----------- | ---------------- | ---------------------------------------------------------------------- |
 | App-only    | `false`（默认）  | `HotKeyCache`、TopK、reporter、actuator、sync                          |
-| Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `HotKeyModeException`） |
+| Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `ZetaModeException`） |
 
 **Worker 集群健康：** 设置 `zeta.local.expected-worker-count` 为生产环境期望的 Worker 数量。当设置 >0 时，`ClusterHealthView` 使用多数仲裁（`> expectedWorkerCount / 2`）作为健康 Worker 数量的阈值；当为 0（默认）时，集群在收到至少一个心跳之前始终被视为不健康。这实现了对部分 Worker 故障的精确检测和优雅降级决策。
 
@@ -374,7 +374,7 @@ public String getFlashItem(String id) { ... }
 
 | 操作              | 对匹配 key 的效果                                                                  |
 | ----------------- | ---------------------------------------------------------------------------------- |
-| `BLOCK`           | `get()` / `getWithSoftExpire()` 抛出 `HotKeyBlockedException`；`putThrough()` 跳过 |
+| `BLOCK`           | `get()` / `getWithSoftExpire()` 抛出 `ZetaBlockedException`；`putThrough()` 跳过 |
 | `ALLOW_NO_REPORT` | 正常处理但跳过 Worker 上报（减少频繁访问 key 的噪音）                              |
 
 ### 模式类型
@@ -390,7 +390,7 @@ public String getFlashItem(String id) { ... }
 
 ### 持久化与广播
 
-- **有 Redis：** 每次 `addRule()`/`removeRule()`/`clearRules()` 将规则列表序列化到 `HotKeyConstants.REDIS_KEY_RULES`（`"hotkey:rules"`）。启动时 `RuleMatcher.initRules()` 从 Redis 加载。变更也通过 `TYPE_RULES_SYNC` 广播——对端通过 `RuleMatcher.syncRules()` 原子替换，不触发二次广播（避免风暴）。
+- **有 Redis：** 每次 `addRule()`/`removeRule()`/`clearRules()` 将规则列表序列化到 `ZetaConstants.REDIS_KEY_RULES`（`"zeta:rules"`）。启动时 `RuleMatcher.initRules()` 从 Redis 加载。变更也通过 `TYPE_RULES_SYNC` 广播——对端通过 `RuleMatcher.syncRules()` 原子替换，不触发二次广播（避免风暴）。
 - **无 Redis：** 相同操作通过 `CacheSyncPublisher` fanout 交换机广播到所有对端。每个对端在内存中持有完整规则集。
 - **手动广播：** `zeta.broadcastAllLocalRulesManually()` 从 Redis（如可用）加载并重新广播当前规则集到所有对端。
 

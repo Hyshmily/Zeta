@@ -135,4 +135,15 @@ public interface TopK {
       .stream()
       .anyMatch(item -> item.key().equals(key));
   }
+
+  /**
+   * Return the estimated frequency count for the given key from the sketch,
+   * or {@code 0} if the key is not tracked.
+   *
+   * @param key the key to query
+   * @return estimated access count, or {@code 0} if unknown
+   */
+  default long estimatedCount(String key) {
+    return 0L;
+  }
 }

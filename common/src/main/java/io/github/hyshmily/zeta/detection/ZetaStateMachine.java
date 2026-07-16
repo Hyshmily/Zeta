@@ -16,19 +16,76 @@
 package io.github.hyshmily.zeta.detection;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.confidence.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import java.util.Map;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
  * Worker side.
+ *
+ * <p>The state machine converts per-key sliding-window frequency observations
+ * into lifecycle transitions — promoting COLD keys to CONFIRMED_HOT when
+ * sustained traffic is detected, and demoting them back to COLD after a
+ * prolonged cool-down. Every state transition is gated by a Bayesian
+ * confidence assessment that suppresses false-positive broadcasts when
+ * the accumulated evidence is weak.
+ *
+ * <p>{@code confirmCount} serves as a minimum data-sufficiency floor
+ * (default 1 window ≈ 50 ms). It is <em>not</em> the primary evidence gate
+ * — Bayesian confidence is. The streak check exists only to ensure at least
+ * one observation before consulting the Bayesian posterior.
+ *
+ * <h3>States</h3>
+ * <pre>
+ *   COLD ──hotStreak >= confirmCount──► CANDIDATE_HOT ──HIGH confidence──► CONFIRMED_HOT
+ *                           + LOW/MEDIUM ────────────────► COLD (reset)
+ *    ▲                                                                        │
+ *    │                                  PRE_COOLING ◄──────coolStreak >= grace─┤
+ *    │                                   │                                   │
+   *    │                                   └──coolStreak >= coolCount──► COLD──┘
+   *    │                                        (MEDIUM/LOW confidence)
+ *    └──── hotStreak > 0 ───────────────────────────┘
+ *                              (silent revive, no broadcast)
+ * </pre>
+ *
+ * <p>Key design properties:
+ * <ul>
+ *   <li><b>Bayesian-primary gating:</b> {@code confirmCount} is a minimal
+ *       floor (1 window by default). Bayesian confidence is the sole
+ *       authority for promotion decisions — HOT leverages the full posterior
+ *       from the first hot window, COOL broadcasts require MEDIUM or LOW confidence.</li>
+ *   <li><b>CANDIDATE_HOT:</b> a holding state for keys that have crossed the
+ *       hot-streak threshold but have only MEDIUM Bayesian confidence. These
+ *       keys are tracked internally but never broadcast until confidence
+ *       reaches HIGH. A single cold window drops them back to COLD.</li>
+ *   <li><b>Asymmetric promotion/demotion:</b> promotion is fast (Bayesian
+ *       decides from window 1); demotion requires many cold windows
+ *       ({@code coolCount}) with an intermediate grace period, providing
+ *       hysteresis against oscillation.</li>
+ *   <li><b>Silent revive:</b> during PRE_COOLING, a single hot window silently
+ *       returns the key to CONFIRMED_HOT without broadcasting, preventing
+ *       HOT/COOL oscillation.</li>
+ * </ul>
  */
 @Internal
 public interface ZetaStateMachine {
+
   /** Key-level lifecycle stages. */
   enum State {
+    /** Default state — key is not hot, no tracking state exists. */
     COLD,
+    /**
+     * Hot-streak threshold met but Bayesian confidence was only MEDIUM.
+     *
+     * <p>Keys in this state are tracked internally but never broadcast.
+     * They upgrade to {@link #CONFIRMED_HOT} on the next hot window with
+     * HIGH confidence, or drop back to {@link #COLD} on a cold window.
+     */
+    CANDIDATE_HOT,
+    /** Actively hot — HOT message has been broadcast to application instances. */
     CONFIRMED_HOT,
+    /** Cooling down — traffic has dropped below threshold for the grace period. */
     PRE_COOLING,
   }
 
@@ -47,8 +104,25 @@ public interface ZetaStateMachine {
 
   void setPreCoolGraceCount(int preCoolGraceCount);
 
-  /** Evaluate the current sliding-window observation and return a decision. */
-  ZetaDecision evaluate(String key, boolean isHotThisWindow);
+  /**
+   * Evaluate the current sliding-window observation with Bayesian confidence
+   * context and return a decision.
+   *
+   * <p>This is the sole evaluation entry point. It combines the binary
+   * hot/cold verdict from the sliding window with the multi-dimensional
+   * evidence in {@code ctx} (HeavyKeeper sketch count, window sum,
+   * threshold, CV) to produce a confidence-gated decision.
+   *
+   * @param key             the cache key (must not be {@code null})
+   * @param isHotThisWindow {@code true} if the sliding-window frequency sum
+   *                        exceeds the hot threshold during this evaluation
+   *                        cycle; {@code false} otherwise
+   * @param ctx             aggregated observation data for Bayesian evaluation
+   *                        (must not be {@code null})
+   * @return a non-null {@link ZetaDecision} indicating what action the
+   *         caller should take (HOT, COOL, or NONE)
+   */
+  ZetaDecision evaluate(String key, boolean isHotThisWindow, EvaluationContext ctx);
 
   /** Remove all tracked state for the given key, resetting it to COLD. */
   void reset(String key);
@@ -65,6 +139,6 @@ public interface ZetaStateMachine {
   /** Roll back the per-key state after a send failure. */
   void rollbackToPreviousState(String key, Map<String, Object> previousState);
 
-  // modified: added key-less overload that extracts key from snapShot
+  /** Key-less overload that extracts the key from {@code previousState}. */
   void rollbackToPreviousState(Map<String, Object> previousState);
 }

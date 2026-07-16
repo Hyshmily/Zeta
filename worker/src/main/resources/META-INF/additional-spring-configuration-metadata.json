@@ -151,6 +151,24 @@
       "defaultValue": 10
     },
     {
+      "name": "zeta.worker.bayesian.prior-mean",
+      "type": "java.lang.Double",
+      "description": "Prior mean of the log-frequency distribution for Normal-Normal conjugate Bayesian confidence estimation. The default ln(10) makes a key with 10 observed accesses per window neutral (posterior mean = prior mean).",
+      "defaultValue": 2.3026
+    },
+    {
+      "name": "zeta.worker.bayesian.prior-std",
+      "type": "java.lang.Double",
+      "description": "Prior standard deviation of the log-frequency distribution. Larger values make the estimator rely more on observed data; smaller values anchor more to the prior.",
+      "defaultValue": 2.0
+    },
+    {
+      "name": "zeta.worker.bayesian.likelihood-std",
+      "type": "java.lang.Double",
+      "description": "Base likelihood standard deviation of the observed log-count. Adjusted dynamically by the coefficient of variation (CV) of sliding-window sums to account for traffic variability.",
+      "defaultValue": 0.8
+    },
+    {
       "name": "zeta.worker.heartbeat.ping-interval-ms",
       "type": "java.lang.Integer",
       "description": "Interval in milliseconds between structured heartbeat sends (epoch, loadFactor, decisionVersionHwm, config gossip).",

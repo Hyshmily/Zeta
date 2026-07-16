@@ -15,20 +15,24 @@
  */
 package io.github.hyshmily.zeta.detection.impl;
 
-import static io.github.hyshmily.zeta.detection.ZetaStateMachine.State.*;
-
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.confidence.ConfidenceEvaluator;
+import io.github.hyshmily.zeta.confidence.ConfidenceLevel;
+import io.github.hyshmily.zeta.confidence.EvaluationContext;
+import io.github.hyshmily.zeta.confidence.ProbabilityResult;
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.model.ZetaDecision;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.zeta.detection.ZetaStateMachine.State.*;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -36,63 +40,85 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p>Each Worker shard owns a subset of keys (determined by
  * {@link io.github.hyshmily.zeta.sharding.ConsistentHashRing} routing)
- * and runs one {@code ZetaStateMachine} instance per owned shard. The
- * state machine converts per-key sliding-window frequency observations
- * into lifecycle transitions — promoting COLD keys to CONFIRMED_HOT when
- * sustained traffic is detected, and demoting them back to COLD after a
- * prolonged cool-down.
+ * and runs one {@code ZetaStateMachineImpl} per shard. The state machine
+ * converts per-key sliding-window frequency observations into lifecycle
+ * transitions, with every decision gated by Bayesian confidence scoring
+ * to suppress false-positive broadcasts.
  *
- * <h3>State diagram</h3>
+ * <p>{@code confirmCount} is the minimum data-sufficiency floor (default 1
+ * window, i.e. 50 ms). It is <em>not</em> the primary evidence gate —
+ * Bayesian confidence is. The moment {@code hotStreak >= confirmCount},
+ * the Bayesian posterior determines the outcome: HIGH → promote, MEDIUM →
+ * hold at CANDIDATE_HOT, LOW → reset streak.
+ *
+ * <h3>Bayesian-gated state diagram (simplified)</h3>
  * <pre>
- *   COLD
- *    │  hotStreak >= confirmCount  (consecutive hot windows)
- *    ▼
- *   CONFIRMED_HOT   ─────────────────────────────┐
- *    │                                           │
- *    │  coolStreak >= (coolCount - grace)        │ hotStreak > 0 (revive during pre-cool)
- *    ▼                                           │
- *   PRE_COOLING ─────────────────────────────────┘
- *    │
- *    │  coolStreak >= coolCount  (fully cooled)
- *    ▼
- *   COLD
+ *   COLD ──hotStreak >= confirm──► CANDIDATE_HOT ──HIGH confidence──► CONFIRMED_HOT
+ *                           + MEDIUM stay / LOW reset
+ *    ▲                                                                        │
+ *    │                                  PRE_COOLING ◄──── coolStreak >= grace ─┤
+ *    │                                   │                                   │
+   *    │                                   └── coolStreak >= cool ──► COLD ────┘
+   *    │                                         (MEDIUM/LOW confidence)
+ *    └──── hotStreak > 0 ───────────────────────────┘
+ *                              (silent revive)
  * </pre>
  *
- * <h3>Design rationale</h3>
+ * <h3>Bayesian gating rules</h3>
  * <ul>
- *   <li><b>Fast detection:</b> only {@code confirmCount} consecutive hot windows are
- *       needed to promote a key to {@code CONFIRMED_HOT}.</li>
- *   <li><b>Slow cool-down:</b> cooling requires many more consecutive cold windows,
- *       with an intermediate {@code PRE_COOLING} grace period.  If traffic resumes
- *       during this period the key silently returns to {@code CONFIRMED_HOT} without
- *       broadcasting (no COOL → HOT oscillation).</li>
- *   <li><b>Asymmetric thresholds:</b> protect aggressively, recover cautiously.
- *       This prevents flapping when traffic is bursty or when the cluster briefly
- *       stops reporting a key.</li>
+ *   <li><b>HOT promotion (COLD → CANDIDATE_HOT → CONFIRMED_HOT):</b>
+ *       When {@code hotStreak >= confirmCount}, the confidence level
+ *       determines the transition:
+ *       <ul>
+ *         <li>HIGH → promote to CONFIRMED_HOT and broadcast HOT</li>
+ *         <li>MEDIUM → promote to CANDIDATE_HOT, defer broadcast</li>
+ *         <li>LOW → decrement hotStreak (stay in COLD next window)</li>
+ *       </ul></li>
+ *   <li><b>CANDIDATE_HOT hot window:</b> HIGH confidence → CONFIRMED_HOT
+ *       + HOT broadcast; MEDIUM/LOW → stay in CANDIDATE_HOT</li>
+   *   <li><b>COOL broadcast:</b> Sent when Bayesian confidence is MEDIUM or LOW;
+   *       HIGH confidence decrements the coolStreak so the key stays
+   *       in PRE_COOLING for another window</li>
+ *   <li><b>Silent revive:</b> PRE_COOLING + hot window → CONFIRMED_HOT
+ *       with no broadcast (regardless of confidence)</li>
  * </ul>
  *
- * <p>Thread-safe: per-key state is guarded by a {@link Striped} lock (1024
- * stripes, strong references via {@link Striped#lock}). Evaluations of
- * different keys proceed in parallel; evaluations of the same key are
- * serialized, eliminating the race window between {@code hotStreak++} and
- * the state transition check caused by concurrent delivery of the same key
- * across multiple consumer threads.
+ * <h3>Thread safety</h3>
+ * Per-key state is guarded by a {@link Striped} lock (1024 stripes).
+ * Evaluations of the same key are serialized, eliminating the race window
+ * between {@code hotStreak++} and the state transition check caused by
+ * concurrent delivery of the same key across multiple consumer threads.
+ * Evaluations of different keys proceed in parallel.
  *
- * <p>State and last-touch timestamp are stored together in {@link KeyState},
- * eliminating the need for a separate timestamp map. {@link #evictStale}
- * reads {@link KeyState#lastUpdateTime} without the per-key lock — the
- * field is {@code volatile} for visibility.
- *
- * <p>{@code reset()} acquires the per-key lock to avoid races with a
- * concurrent {@link #evaluate} for the same key.
- *
- * <p>Designed for single-shard workers; each key is owned by exactly one worker
- * thanks to consistent-hash routing on the client side.</p>
+ * <p>{@link #evictStale} reads {@link KeyState#lastUpdateTime} without
+ * the per-key lock — the field is {@code volatile} for lock-free visibility.
+ * {@link #reset} acquires the per-key lock to avoid races with a concurrent
+ * {@link #evaluate} for the same key.
  */
 @Internal
 @Slf4j
-@AllArgsConstructor
 public class ZetaStateMachineImpl implements ZetaStateMachine {
+
+  /**
+   * Constructs the state machine with the given lifecycle thresholds and
+   * the Bayesian confidence evaluator that gates every state transition.
+   *
+   * @param confirmCount        consecutive hot windows to promote COLD → CONFIRMED_HOT
+   * @param coolCount           total consecutive cold windows for full cool-down
+   * @param preCoolGraceCount   cold windows before entering PRE_COOLING
+   * @param confidenceEvaluator the Bayesian confidence evaluator (must not be {@code null})
+   */
+  public ZetaStateMachineImpl(
+    int confirmCount,
+    int coolCount,
+    int preCoolGraceCount,
+    ConfidenceEvaluator confidenceEvaluator
+  ) {
+    this.confirmCount = confirmCount;
+    this.coolCount = coolCount;
+    this.preCoolGraceCount = preCoolGraceCount;
+    this.confidenceEvaluator = confidenceEvaluator;
+  }
 
   /** Number of consecutive hot windows required to promote COLD → CONFIRMED_HOT. */
   @Getter
@@ -111,7 +137,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
   /**
    * The number of cold windows that mark the entry into PRE_COOLING.
    * The remaining {@code coolCount - preCoolGraceCount} windows are the
-   * grace period during which the key can revive without a send.
+   * grace period during which the key can revive without broadcasting.
    */
   @Getter
   @Setter
@@ -130,35 +156,35 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
    */
   private final Striped<Lock> keyLocks = Striped.lock(1024);
 
+  /** The Bayesian confidence evaluator that gates every state transition. */
+  private final ConfidenceEvaluator confidenceEvaluator;
+
   /**
-   * Evaluates the current sliding-window observation for the given key and
-   * returns a decision instructing the caller whether to send a HOT or
-   * COOL message.
+   * Evaluates the current sliding-window observation with Bayesian confidence
+   * context and returns a decision.
    *
-   * <p>This method implements the state transitions described in the class
-   * Javadoc. It updates the per-key streak counters ({@code hotStreak} /
-   * {@code coolStreak}) atomically (via {@link ConcurrentHashMap#computeIfAbsent})
-   * and returns one of:
+   * <p>This method is the sole evaluation entry point. It updates the per-key
+   * streak counters atomically via the striped lock and gates every state
+   * transition through {@link #confidenceEvaluator}.
+   *
+   * <p>Return values:
    * <ul>
    *   <li>{@link ZetaDecision.DecisionType#HOT} — key just crossed the
-   *       promotion threshold; send HOT to application instances.</li>
+   *       promotion threshold with HIGH confidence; send HOT to apps</li>
    *   <li>{@link ZetaDecision.DecisionType#COOL} — key has fully cooled
-   *       down; send COOL so apps revert to normal TTL.</li>
+   *       down with MEDIUM or LOW confidence; send COOL so apps revert to normal TTL</li>
    *   <li>{@link ZetaDecision.DecisionType#NONE} — no state transition
-   *       occurred; no action required.</li>
+   *       occurred; no action required</li>
    * </ul>
    *
-   * <p>Silent revive (PRE_COOLING → CONFIRMED_HOT) returns NONE to
-   * suppress unnecessary broadcasts and prevent HOT/COOL oscillation.
-   *
    * @param key             the cache key (must not be {@code null})
-   * @param isHotThisWindow {@code true} if the sliding-window frequency sum
-   *                        exceeds the hot threshold during this evaluation
-   *                        cycle; {@code false} otherwise
-   * @return a non-null {@link ZetaDecision} indicating what action the
-   *         caller should take (HOT, COOL, or NONE)
+   * @param isHotThisWindow {@code true} if the sliding-window sum exceeds threshold
+   * @param ctx             aggregated observation data for Bayesian evaluation
+   *                        (must not be {@code null})
+   * @return a non-null {@link ZetaDecision}
    */
-  public ZetaDecision evaluate(String key, boolean isHotThisWindow) {
+  @Override
+  public ZetaDecision evaluate(String key, boolean isHotThisWindow, EvaluationContext ctx) {
     // Fast path: never-before-seen key on a cold window → no state to mutate.
     // containsKey may race with concurrent insertion but the worst case is one
     // unnecessary locked iteration — never a correctness problem.
@@ -178,8 +204,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
       }
       state.lastUpdateTime = now;
 
-      Map<String, Object> previousState = getStateSnapshot(key);
-      return isHotThisWindow ? evaluateHot(key, state, previousState) : evaluateCold(key, state, previousState);
+      return isHotThisWindow ? evaluateHot(key, state, ctx) : evaluateCold(key, state, ctx);
     } catch (Exception e) {
       log.warn("Unexpected StateMachine Exception for key {}", key, e);
       return ZetaDecision.none(key, null);
@@ -188,45 +213,168 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
     }
   }
 
-  /** Hot-window evaluation: increment hot streak, reset cold streak, check promotions. */
-  // modified: added previousState param for failure rollback
-  private ZetaDecision evaluateHot(String key, KeyState state, Map<String, Object> previousState) {
+  /**
+   * Processes a hot-window observation (window sum &ge; threshold).
+   *
+   * <p>Increments the hot streak, resets the cold streak, then evaluates
+   * a Bayesian confidence result. The action taken depends on the current
+   * state and the confidence level:
+   *
+   * <table>
+   *   <caption>Hot-window transition matrix</caption>
+   *   <tr><th>Current state</th><th>Confidence</th><th>Next state</th><th>Decision</th></tr>
+   *   <tr><td>COLD / hotStreak &ge; confirmCount</td><td>HIGH</td><td>CONFIRMED_HOT</td><td>HOT</td></tr>
+   *   <tr><td>COLD / hotStreak &ge; confirmCount</td><td>MEDIUM</td><td>CANDIDATE_HOT</td><td>NONE</td></tr>
+   *   <tr><td>COLD / hotStreak &ge; confirmCount</td><td>LOW</td><td>COLD (stay, streak decremented)</td><td>NONE</td></tr>
+   *   <tr><td>CANDIDATE_HOT</td><td>HIGH</td><td>CONFIRMED_HOT</td><td>HOT</td></tr>
+   *   <tr><td>CANDIDATE_HOT</td><td>MEDIUM/LOW</td><td>CANDIDATE_HOT (stay)</td><td>NONE</td></tr>
+   *   <tr><td>PRE_COOLING</td><td><em>any</em></td><td>CONFIRMED_HOT</td><td>NONE (silent revive)</td></tr>
+   *   <tr><td>CONFIRMED_HOT</td><td><em>any</em></td><td>CONFIRMED_HOT (stay)</td><td>NONE</td></tr>
+   * </table>
+   *
+   * @param key   the cache key
+   * @param state the per-key state (mutated in place)
+   * @param ctx   the Bayesian evaluation context
+   * @return a non-null {@link ZetaDecision}
+   */
+  private ZetaDecision evaluateHot(String key, KeyState state, EvaluationContext ctx) {
     state.hotStreak++;
     state.coolStreak = 0;
 
-    // COLD → CONFIRMED_HOT: consecutive hot windows crossed the confirm threshold
-    if (state.currentState == COLD && state.hotStreak >= confirmCount) {
-      state.currentState = CONFIRMED_HOT;
-      return ZetaDecision.hot(key, previousState);
-    }
+    long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
+    ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.threshold(), ctx.cv());
 
-    // PRE_COOLING → CONFIRMED_HOT: silent revive, no send (avoid oscillation)
-    if (state.currentState == PRE_COOLING) {
-      state.currentState = CONFIRMED_HOT;
-      return ZetaDecision.none(key, previousState);
+    switch (state.currentState) {
+      case COLD -> {
+        // Not yet enough hot windows → NONE regardless of confidence
+        if (state.hotStreak < confirmCount) {
+          return ZetaDecision.none(key, null);
+        }
+        // Sufficient hot windows — confidence decides the outcome
+        if (pr.level() == ConfidenceLevel.HIGH) {
+          // Strong evidence: promote and broadcast
+          state.currentState = CONFIRMED_HOT;
+          return ZetaDecision.hot(key, null);
+        }
+        if (pr.level() == ConfidenceLevel.MEDIUM) {
+          // Moderate evidence: promote internally but defer broadcast
+          state.currentState = CANDIDATE_HOT;
+          return ZetaDecision.none(key, null);
+        }
+        // Weak evidence: keep in COLD, decrement streak so the key needs
+        // another confirmCount hot windows to re-qualify
+        state.hotStreak = confirmCount - 1;
+        return ZetaDecision.none(key, null);
+      }
+      case CANDIDATE_HOT -> {
+        if (pr.level() == ConfidenceLevel.HIGH) {
+          // Evidence strengthened: upgrade and broadcast
+          state.currentState = CONFIRMED_HOT;
+          return ZetaDecision.hot(key, null);
+        }
+        // Still insufficient evidence: stay in candidate state
+        return ZetaDecision.none(key, null);
+      }
+      case PRE_COOLING -> {
+        // Silent revive: traffic resumed during grace period
+        state.currentState = CONFIRMED_HOT;
+        return ZetaDecision.none(key, null);
+      }
+      default -> {
+        // CONFIRMED_HOT or unknown state: no transition needed
+        return ZetaDecision.none(key, null);
+      }
     }
-
-    return ZetaDecision.none(key, previousState);
   }
 
-  /** Cold-window evaluation: increment cold streak, reset hot streak, check demotions. */
-  // modified: added previousState param for failure rollback
-  private ZetaDecision evaluateCold(String key, KeyState state, Map<String, Object> previousState) {
+  /**
+   * Processes a cold-window observation (window sum &lt; threshold).
+   *
+   * <p>Increments the cold streak and resets the hot streak. The action
+   * depends on the current state:
+   *
+   * <table>
+   *   <caption>Cold-window transition matrix</caption>
+   *   <tr><th>Current state</th><th>Condition</th><th>Next state</th><th>Decision</th></tr>
+   *   <tr><td>CANDIDATE_HOT</td><td><em>any</em></td><td>COLD</td><td>NONE</td></tr>
+   *   <tr><td>CONFIRMED_HOT</td><td>coolStreak &ge; graceCount</td><td>PRE_COOLING</td><td>NONE</td></tr>
+   *   <tr><td>CONFIRMED_HOT</td><td>coolStreak &lt; graceCount</td><td>CONFIRMED_HOT (stay)</td><td>NONE</td></tr>
+   *   <tr><td>PRE_COOLING</td><td>coolStreak &ge; coolCount + MEDIUM/LOW</td><td>COLD</td><td>COOL</td></tr>
+   *   <tr><td>PRE_COOLING</td><td>coolStreak &ge; coolCount + HIGH</td><td>PRE_COOLING (streak decremented)</td><td>NONE</td></tr>
+   *   <tr><td>PRE_COOLING</td><td>coolStreak &lt; coolCount</td><td>PRE_COOLING (stay)</td><td>NONE</td></tr>
+   *   <tr><td>COLD</td><td><em>any</em></td><td>COLD (stay)</td><td>NONE</td></tr>
+   * </table>
+   *
+   * @param key   the cache key
+   * @param state the per-key state (mutated in place)
+   * @param ctx   the Bayesian evaluation context
+   * @return a non-null {@link ZetaDecision}
+   */
+  private ZetaDecision evaluateCold(String key, KeyState state, EvaluationContext ctx) {
     state.coolStreak++;
     state.hotStreak = 0;
 
-    // CONFIRMED_HOT → PRE_COOLING: first cooling phase, no send yet
-    if (state.currentState == CONFIRMED_HOT && state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
-      state.currentState = PRE_COOLING;
+    switch (state.currentState) {
+      case CANDIDATE_HOT -> {
+        // Single cold window while in CANDIDATE_HOT: reset, never broadcast
+        state.currentState = COLD;
+        return ZetaDecision.none(key, null);
+      }
+      case CONFIRMED_HOT -> {
+        // Enter pre-cooling after the grace window count is exhausted.
+        // If the same window also satisfies the full cool-down, evaluate
+        // the PRE_COOLING transition immediately (single-window cool-down).
+        if (state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
+          state.currentState = PRE_COOLING;
+          // Check immediate PRE_COOLING → COLD transition
+          return evaluatePreCooling(key, state, ctx);
+        }
+        return ZetaDecision.none(key, null);
+      }
+      case PRE_COOLING -> {
+        return evaluatePreCooling(key, state, ctx);
+      }
+      default -> {
+        return ZetaDecision.none(key, null);
+      }
     }
+  }
 
-    // PRE_COOLING → COLD: fully cooled, send COOL
-    if (state.currentState == PRE_COOLING && state.coolStreak >= coolCount) {
-      state.currentState = COLD;
-      return ZetaDecision.cool(key, previousState);
+  /**
+   * Evaluates a key that is currently in the {@code PRE_COOLING} stage.
+   *
+   * <p>If the cool streak has reached the configured full cool-down
+   * threshold ({@code coolCount}) the method consults the
+   * {@link ConfidenceEvaluator} to decide whether the key has actually
+   * cooled down. When the evaluator reports {@link ConfidenceLevel#HIGH}
+   * the key is considered still confidently hot: the method will not
+   * emit a COOL decision, instead it decrements {@code coolStreak} and
+   * remains in {@code PRE_COOLING} for another window. For
+   * {@code MEDIUM} or {@code LOW} confidence the key is transitioned to
+   * {@code COLD} and a COOL decision is returned so callers can broadcast
+   * the cool event.
+   *
+   * @param key the cache key being evaluated
+   * @param state the per-key mutable state (mutated in-place)
+   * @param ctx the Bayesian evaluation context used to compute confidence
+   * @return a non-null {@link ZetaDecision} indicating whether a COOL
+   *         decision should be emitted or no action is required
+   */
+  private ZetaDecision evaluatePreCooling(String key, KeyState state, EvaluationContext ctx) {
+    if (state.coolStreak >= coolCount) {
+      // Full cool-down reached — check confidence before broadcasting
+      long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
+      ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.threshold(), ctx.cv());
+      if (pr.level() != ConfidenceLevel.HIGH) {
+        state.currentState = COLD;
+        return ZetaDecision.cool(key, null);
+      }
+      // Still confidently hot (HIGH): don't broadcast COOL, decrement
+      // streak and stay in PRE_COOLING for another evaluation window
+      state.coolStreak--;
+      return ZetaDecision.none(key, null);
     }
-
-    return ZetaDecision.none(key, previousState);
+    return ZetaDecision.none(key, null);
   }
 
   /**
@@ -244,6 +392,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
    *
    * @param key the cache key to reset
    */
+  @Override
   public void reset(String key) {
     Lock lock = keyLocks.get(key);
     lock.lock();
@@ -256,30 +405,47 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
 
   /**
    * Approximate number of keys currently tracked by the state machine.
+   *
    * <p>The returned value is approximate due to the underlying
-   * {@link java.util.concurrent.ConcurrentHashMap#size()} semantics
-   * — it reflects a snapshot and may not account for concurrent
-   * insertions or removals at the exact moment of the call.</p>
+   * {@link ConcurrentHashMap#size()} semantics — it reflects a snapshot
+   * and may not account for concurrent insertions or removals at the
+   * exact moment of the call.
    *
    * @return approximate count of keys currently tracked
    */
+  @Override
   public int getTrackedKeys() {
     return states.size();
   }
 
   /**
    * Garbage-collects state for keys that have not been evaluated within
-   * {@code staleAfterMs} milliseconds.  Should be invoked periodically
-   * (e.g. every 5 seconds) from a scheduled task.
+   * {@code staleAfterMs} milliseconds.
+   *
+   * <p>Should be invoked periodically (e.g. every 5 seconds) from a
+   * scheduled task. Reads {@link KeyState#lastUpdateTime} without the
+   * per-key lock — the field is {@code volatile} for visibility.
    *
    * @param staleAfterMs maximum idle time in milliseconds before a key is evicted
    */
+  @Override
   public void evictStale(long staleAfterMs) {
     long now = System.currentTimeMillis();
     states.values().removeIf(state -> now - state.lastUpdateTime > staleAfterMs);
   }
 
-  // modified: added "key" entry to the returned map for key-less rollback
+  /**
+   * Returns a snapshot of the current state for a key, including the
+   * key name itself for key-less rollback support.
+   *
+   * <p>The returned map contains: {@code key}, {@code currentState},
+   * {@code hotStreak}, {@code coolStreak}.
+   *
+   * @param key the cache key
+   * @return an immutable map with the state snapshot, or an empty map if
+   *         the key has no tracked state
+   */
+  @Override
   public Map<String, Object> getStateSnapshot(String key) {
     Lock lock = keyLocks.get(key);
     lock.lock();
@@ -304,19 +470,20 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
   }
 
   /**
-   * Rolls back the per-key state to its previous value after a send failure.
-   * This allows the next evaluation window to re-emit the decision.
+   * Rolls back the per-key state to its previous value after a send
+   * failure, allowing the next evaluation window to re-emit the decision.
    *
-   * @param key the key whose state machine should be rolled back
+   * @param key           the key whose state machine should be rolled back
+   * @param previousState the snapshot returned by an earlier
+   *                      {@link #getStateSnapshot} call; if {@code null},
+   *                      the key is reset entirely
    */
-  // modified: added @Override
   @Override
   public void rollbackToPreviousState(String key, Map<String, Object> previousState) {
     Lock lock = keyLocks.get(key);
     lock.lock();
     try {
       if (previousState == null) {
-        // No previous state; treat as reset
         reset(key);
         return;
       }
@@ -330,16 +497,29 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
     }
   }
 
-  // modified: key-less overload that extracts key from snapShot
+  /**
+   * Key-less overload that extracts the key from the snapshot map.
+   *
+   * @param previousState a snapshot previously returned by
+   *                      {@link #getStateSnapshot} (must contain a {@code key} entry)
+   */
   @Override
   public void rollbackToPreviousState(Map<String, Object> previousState) {
     String key = (String) previousState.get("key");
     rollbackToPreviousState(key, previousState);
   }
 
+  /**
+   * Per-key mutable state tracked by the state machine.
+   *
+   * <p>Each live key has exactly one {@code KeyState} instance in
+   * {@link #states}. Updates are guarded by the per-key striped lock;
+   * reads of {@link #lastUpdateTime} by {@link #evictStale} are lock-free
+   * and rely on {@code volatile} semantics.
+   */
   private static class KeyState {
 
-    /** Current lifecycle stage. */
+    /** Current lifecycle stage. Initialised to {@link State#COLD}. */
     State currentState = COLD;
 
     /** Number of consecutive windows above the hot threshold. */
@@ -348,7 +528,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
     /** Number of consecutive windows below the hot threshold. */
     int coolStreak = 0;
 
-    /** Last evaluation timestamp. Volatile for lock-free reads by {@link #evictStale}. */
+    /** Last evaluation timestamp (epoch millis). Volatile for lock-free reads. */
     volatile long lastUpdateTime;
   }
 }

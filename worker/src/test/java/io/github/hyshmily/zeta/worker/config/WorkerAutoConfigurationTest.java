@@ -19,10 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
-import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
-import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
-import io.github.hyshmily.zeta.worker.detection.ThresholdLearner;
-import io.github.hyshmily.zeta.worker.detection.TopKValidator;
+import io.github.hyshmily.zeta.worker.detection.*;
 import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
@@ -291,11 +288,13 @@ class WorkerAutoConfigurationTest {
   void evictStaleTaskShouldCallEvictStaleOnDetectorAndStateMachine() {
     SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
     ZetaStateMachine stateMachine = Mockito.mock(ZetaStateMachine.class);
+    KeyEvaluator keyEvaluator = Mockito.mock(KeyEvaluator.class);
     WorkerProperties properties = new WorkerProperties();
 
     WorkerAutoConfiguration.EvictStaleTask task = new WorkerAutoConfiguration.EvictStaleTask(
       detector,
       stateMachine,
+      keyEvaluator,
       properties
     );
     task.evictStale();
@@ -411,12 +410,14 @@ class WorkerAutoConfigurationTest {
   void evictStaleTaskShouldCatchExceptionsFromDetector() {
     SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
     ZetaStateMachine stateMachine = Mockito.mock(ZetaStateMachine.class);
+    KeyEvaluator keyEvaluator = Mockito.mock(KeyEvaluator.class);
     WorkerProperties properties = new WorkerProperties();
     Mockito.doThrow(new RuntimeException("eviction failed")).when(detector).evictStale(Mockito.anyLong());
 
     WorkerAutoConfiguration.EvictStaleTask task = new WorkerAutoConfiguration.EvictStaleTask(
       detector,
       stateMachine,
+      keyEvaluator,
       properties
     );
     assertThatCode(task::evictStale).doesNotThrowAnyException();

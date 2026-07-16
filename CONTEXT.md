@@ -37,25 +37,25 @@
 - **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `processLocalHotkeyIfNeeded`) or by Worker broadcast (in `handleHot`).
 - **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `CacheExpireManager` to prevent cache stampedes. Controlled by `zeta.local.ttl-jitter-ratio` (default 0.05 = ±5%). Always enabled.
 - **Expire** — Two-tier: **soft expire** (stale-while-revalidate, returns stale data + async refresh) and **hard expire** (absolute TTL, entry invalidated). Soft expire only applies to HOT and COOL entries.
-- **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `HotKeyCacheManager` (implements `CacheManager`) and `HotKeySpringCache` (implements `Cache`). Enabled via `zeta.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
-- **HotKeyCacheContext** — ThreadLocal singleton holding TTL (`hardTtlMs`, `softTtlMs`) and `allowNull` context for the current cache operation. `HotKeyCacheExtensionAspect` snapshots/restores these values around each `@Cacheable` invocation. `HotKeySpringCache.get(Object, Callable)` reads them from context.
-- **HotKeyCacheExtensionAspect** — Companion aspect at `@Order(HIGHEST_PRECEDENCE)` that intercepts `@Cacheable` methods, resolves SpEL key, applies `@Intercept`/`@Fallback`/`@HotKeyCacheTTL`/`@NullCaching`, and sets `HotKeyCacheContext` before delegating to Spring's `CacheInterceptor`.
-- **@NullCaching** — Opt-in annotation for caching `null` return values. When enabled, `null` is stored as internal `NullValue` sentinel inside `CacheEntry`. `HotKeySpringCache` tracks null-cached keys in a `nullCachedKeys` set to distinguish "cached null" from "cache miss".
+- **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `ZetaCacheManager` (implements `CacheManager`) and `ZetaSpringCache` (implements `Cache`). Enabled via `zeta.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
+- **ZetaCacheContext** — ThreadLocal singleton holding TTL (`hardTtlMs`, `softTtlMs`) and `allowNull` context for the current cache operation. `HotKeyCacheExtensionAspect` snapshots/restores these values around each `@Cacheable` invocation. `ZetaSpringCache.get(Object, Callable)` reads them from context.
+- **HotKeyCacheExtensionAspect** — Companion aspect at `@Order(HIGHEST_PRECEDENCE)` that intercepts `@Cacheable` methods, resolves SpEL key, applies `@Intercept`/`@Fallback`/`@HotKeyCacheTTL`/`@NullCaching`, and sets `ZetaCacheContext` before delegating to Spring's `CacheInterceptor`.
+- **@NullCaching** — Opt-in annotation for caching `null` return values. When enabled, `null` is stored as internal `NullValue` sentinel inside `CacheEntry`. `ZetaSpringCache` tracks null-cached keys in a `nullCachedKeys` set to distinguish "cached null" from "cache miss".
 
 ## Operations
 
 - **L1** — Caffeine cache, App-local. First lookup target.
 - **L2** — Optional Redis cache (or any backend via the `Supplier<T>` reader). Async fallback on L1 miss.
 - **Report** — Per-key frequency count sent from App to Worker via AMQP. Aggregated locally (Caffeine, 30s, 100k max) before batching.
-- **Broadcast** — AMQP exchange `hotkey.broadcast.exchange` for cross-instance sync (cache values, HOT/COOL decisions) and Worker-to-App decision delivery.
+- **Broadcast** — AMQP exchange `zeta.send.exchange` for cross-instance sync (cache values, HOT/COOL decisions) and Worker-to-App decision delivery.
 - **putLocal** — Local-only L1 write without version bump, broadcast, hot-key detection, or reporting. Preserves existing entry metadata. Useful for fallback caching and cache pre-warming.
-- **Fluent Read API** — `HotKeyReadQuery` returned by `hotKey.read(key)`. Builder
+- **Fluent Read API** — `ZetaReadQuery` returned by `hotKey.read(key)`. Builder
   pattern: `.withPrimary(reader)`, `.thenExecute(fallback)`, `.withTtl(hard, soft)`,
   `.allowBroadcast()`, `.allowNull()`. Terminal: `.execute()` returns `Optional<T>`;
   `.executeOrNull()` returns `T` directly. Eliminates manual fallback chain
   orchestration.
-- **Fluent Write API** — `HotKeyWriteCommand` returned by `hotKey.write(key)`. Builder pattern: `.withHardTtl()`, `.withSoftTtl()`, `.putThrough(value, writer)`, `.putBeforeInvalidate(mutation)`, `.invalidate()`.
-- **CacheMode** — Enum: `GET` (standard cache-aside) or `GET_WITH_SOFT_EXPIRE` (stale-while-revalidate). Used by `HotKeyReadQuery.withPrimary(reader, mode)`.
+- **Fluent Write API** — `ZetaWriteCommand` returned by `hotKey.write(key)`. Builder pattern: `.withHardTtl()`, `.withSoftTtl()`, `.putThrough(value, writer)`, `.invalidateAfterPut(mutation)`, `.invalidate()`.
+- **CacheMode** — Enum: `GET` (standard cache-aside) or `GET_WITH_SOFT_EXPIRE` (stale-while-revalidate). Used by `ZetaReadQuery.withPrimary(reader, mode)`.
 - **@Intercept** — AOP annotation for read-side interception. Calls `hotKeyDetector.add()` (keeps TopK accurate) but skips `reporter.record()` (avoids flooding Worker). Does NOT trigger Worker report flow. Applied via `HotKeyCacheExtensionAspect` on `@Cacheable` methods.
 - **@HotKeyCacheTTL** — Per-key TTL override annotation for read operations. Applied via `HotKeyCacheExtensionAspect` on `@Cacheable` methods.
 

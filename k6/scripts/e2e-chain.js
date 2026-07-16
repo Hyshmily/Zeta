@@ -37,29 +37,35 @@ export function runFullChainE2E() {
 export function handleSummary(data) {
   const m = data.metrics.e2e_latency;
   return {
-    "/result/e2e-result.json": JSON.stringify({
-      timestamp: new Date().toISOString(),
-      config: {
-        reportIntervalMs: 50,
-        confirmDurationMs: 100,
-        warmupJitterMs: 50,
-        windowDurationMs: 1000,
-        windowSlices: 10,
-        hotThreshold: 1000,
-        testIterations: ITERATIONS,
+    "/result/e2e-result.json": JSON.stringify(
+      {
+        timestamp: new Date().toISOString(),
+        config: {
+          reportIntervalMs: 50,
+          confirmDurationMs: 50,
+          warmupJitterMs: 50,
+          windowDurationMs: 1000,
+          windowSlices: 10,
+          hotThreshold: 1000,
+          testIterations: ITERATIONS,
+        },
+        testCount: m ? m.values.count : 0,
+        latencyMs: m
+          ? {
+              min: Math.round(m.values.min * 100) / 100,
+              max: Math.round(m.values.max * 100) / 100,
+              avg: Math.round(m.values.avg * 100) / 100,
+              med: Math.round(m.values.med * 100) / 100,
+              p50: Math.round(m.values["p(50)"] * 100) / 100,
+              p75: Math.round(m.values["p(75)"] * 100) / 100,
+              p90: Math.round(m.values["p(90)"] * 100) / 100,
+              p95: Math.round(m.values["p(95)"] * 100) / 100,
+              p99: Math.round(m.values["p(99)"] * 100) / 100,
+            }
+          : null,
       },
-      testCount: m ? m.values.count : 0,
-      latencyMs: m ? {
-        min: Math.round(m.values.min * 100) / 100,
-        max: Math.round(m.values.max * 100) / 100,
-        avg: Math.round(m.values.avg * 100) / 100,
-        med: Math.round(m.values.med * 100) / 100,
-        p50: Math.round(m.values["p(50)"] * 100) / 100,
-        p75: Math.round(m.values["p(75)"] * 100) / 100,
-        p90: Math.round(m.values["p(90)"] * 100) / 100,
-        p95: Math.round(m.values["p(95)"] * 100) / 100,
-        p99: Math.round(m.values["p(99)"] * 100) / 100,
-      } : null,
-    }, null, 2),
+      null,
+      2,
+    ),
   };
 }

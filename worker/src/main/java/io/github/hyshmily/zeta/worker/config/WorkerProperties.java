@@ -91,7 +91,8 @@ public class WorkerProperties {
     @Min(1)
     private int smSlices = 10;
 
-    private long confirmDurationMs = 100;
+    private long confirmDurationMs = 50;
+
     private long coolDurationMs = 600_000;
     private long preCoolGraceMs = 60_000;
     /** Interval for evicting stale sliding-window and state-machine state. */
@@ -133,6 +134,15 @@ public class WorkerProperties {
   public static class Heartbeat {
 
     private int pingIntervalMs = 1_000;
+  }
+
+  /** Bayesian confidence estimation for hot-key decisions. Default constructor. */
+  @Data
+  public static class Bayesian {
+
+    private double priorMean = 2.3026;
+    private double priorStd = 2.0;
+    private double likelihoodStd = 0.8;
   }
 
   /** TopK persistence to Redis for warm-start after Worker restart. Default constructor. */
@@ -186,6 +196,9 @@ public class WorkerProperties {
 
   @Valid
   private Heartbeat heartbeat = new Heartbeat();
+
+  @Valid
+  private Bayesian bayesian = new Bayesian();
 
   @Valid
   private Persistence persistence = new Persistence();

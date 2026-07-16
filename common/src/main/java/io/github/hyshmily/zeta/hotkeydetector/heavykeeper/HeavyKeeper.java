@@ -602,6 +602,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     return total.sum();
   }
 
+  @Override
+  public long estimatedCount(String key) {
+    Node node = members.get(key);
+    return node != null ? node.count.get() : 0L;
+  }
+
   /**
    * Apply {@code increment} to the sketch for {@code key} and return the
    * maximum cross-row slot sum observed. The top-level loop dispatches to

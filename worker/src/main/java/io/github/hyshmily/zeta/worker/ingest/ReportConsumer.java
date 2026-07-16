@@ -22,7 +22,7 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
-import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
+import io.github.hyshmily.zeta.worker.detection.KeyEvaluator;
 import io.github.hyshmily.zeta.worker.detection.TopKValidator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import java.util.ArrayList;
@@ -33,7 +33,6 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 import lombok.Builder;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 
@@ -64,14 +63,11 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * key always reaches the same worker, guaranteeing correct per‑key state
  * without cross‑worker coordination.
  */
-@RequiredArgsConstructor
 @Slf4j
 public class ReportConsumer {
 
-  /** Sliding-window detector that tracks per-key access counts and returns hot/cold verdicts. */
-  private final SlidingWindowDetector detector;
-  /** Per-key lifecycle state machine managing COLD / CONFIRMED_HOT / PRE_COOLING transitions. */
-  private final ZetaStateMachine stateMachine;
+  /** Unified evaluator combining sliding-window detection + Bayesian confidence. */
+  private final KeyEvaluator keyEvaluator;
   /** Publishes HOT and COOL decisions back to all application instances. */
   private final WorkerBroadcaster broadcaster;
   /** TopK pre-warm validator for cross-instance frequency-based confirmation. */
@@ -80,6 +76,8 @@ public class ReportConsumer {
   private final TopK workerTopK;
   /** Global QPS estimator tracking overall throughput for dynamic threshold learning. */
   private final GlobalQpsEstimator globalQpsEstimator;
+  /** Per-key lifecycle state machine (retained for TopKValidator integration). */
+  private final ZetaStateMachine stateMachine;
 
   /** Staleness threshold in milliseconds. Package-visible for testing. */
   long stalenessThresholdMs = 5000L;
@@ -89,6 +87,22 @@ public class ReportConsumer {
 
   /** Log a drain-progress summary when the pending send queue exceeds this threshold. */
   private static final int BATCH_DRAIN_WARN_THRESHOLD = 5000;
+
+  public ReportConsumer(
+    KeyEvaluator keyEvaluator,
+    WorkerBroadcaster broadcaster,
+    TopKValidator topKValidator,
+    TopK workerTopK,
+    GlobalQpsEstimator globalQpsEstimator,
+    ZetaStateMachine stateMachine
+  ) {
+    this.keyEvaluator = keyEvaluator;
+    this.broadcaster = broadcaster;
+    this.topKValidator = topKValidator;
+    this.workerTopK = workerTopK;
+    this.globalQpsEstimator = globalQpsEstimator;
+    this.stateMachine = stateMachine;
+  }
 
   /**
    * Main entry point for batched report messages.
@@ -153,14 +167,9 @@ public class ReportConsumer {
 
             totalQps.add(count);
 
-            // addCount atomically increments the current time slice and returns
-            // true if the sum of the last windowSize slices exceeds the threshold.
-            boolean isHot = detector.addCount(key, count);
-
-            // The state machine tracks consecutive hot/cold windows and applies
-            // hysteresis to decide when to transition between COLD, CONFIRMED_HOT
-            // and PRE_COOLING.
-            ZetaDecision decision = stateMachine.evaluate(key, isHot);
+            // Unified evaluation: sliding-window detection + HeavyKeeper frequency
+            // + Bayesian confidence scoring, all in a single call.
+            ZetaDecision decision = keyEvaluator.evaluate(key, count);
             Map<String, Object> previousState = decision.snapShot();
 
             switch (decision.type()) {

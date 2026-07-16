@@ -99,7 +99,7 @@ management:
 
 ## 2. Micrometer 指标
 
-当 classpath 中存在 `io.micrometer:micrometer-core` 时，`HotKeyMicrometerAutoConfiguration` 自动注册 MeterBinder Bean，暴露以下指标。
+当 classpath 中存在 `io.micrometer:micrometer-core` 时，`ZetaMicrometerAutoConfiguration` 自动注册 MeterBinder Bean，暴露以下指标。
 
 ### Caffeine L1 缓存指标（`zeta.l1.*`）
 
@@ -163,7 +163,7 @@ curl http://localhost:8080/actuator/hotkey/worker/state
 
 ```json
 {
-  "confirmCount": 3,
+  "confirmCount": 1,
   "coolCount": 10,
   "preCoolGraceCount": 3,
   "trackedKeys": 42

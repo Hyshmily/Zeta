@@ -214,7 +214,7 @@ See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 | Write         | `putThrough`, `putLocal`, `invalidateAfterPut`, `refresh`, `refreshAll`                                                           |
 | Invalidate    | `invalidate`, `invalidateAllLocal`, `compareAndInvalidate`                                                                        |
 | Atomic        | `compareAndSet`, `compareAndInvalidate`                                                                                           |
-| Fluent        | `read(key)` → `HotKeyReadQuery`, `write(key)` → `HotKeyWriteCommand`                                                              |
+| Fluent        | `read(key)` → `ZetaReadQuery`, `write(key)` → `ZetaWriteCommand`                                                              |
 | Introspection | `peek`, `estimatedSize`, `stats`, `getLocalCache`, `isLocalHotKey`, `isWorkerHotKey`, `returnLocalHotKeys`, `returnWorkerHotKeys` |
 | Rule          | `addBlacklist`, `removeBlacklist`, `addWhitelist`, `removeWhitelist`, `evaluateRule`, `getAllRules`, `clearAllRules`              |
 | Lock          | `tryLock`, `tryLockAndRun`                                                                                                        |
@@ -324,7 +324,7 @@ Worker mode provides cluster-wide hotspot detection via dedicated nodes. App ins
 | Mode        | `worker.enabled`  | Activated Beans                                                             |
 | ----------- | ----------------- | --------------------------------------------------------------------------- |
 | App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                               |
-| Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `HotKeyModeException`) |
+| Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `ZetaModeException`) |
 
 **Worker Cluster Health:** Set `zeta.local.expected-worker-count` to the expected number of Workers in production. When set >0, `ClusterHealthView` uses majority quorum (`> expectedWorkerCount / 2`) as the healthy Worker threshold; when 0 (default), the cluster is considered unhealthy until at least one heartbeat is received. This enables precise detection of partial Worker failures and graceful degradation decisions.
 
@@ -374,7 +374,7 @@ Enable `zeta.sync.enabled=true` to enable cross-instance rule synchronization. T
 
 | Action            | Effect on matching keys                                                              |
 | ----------------- | ------------------------------------------------------------------------------------ |
-| `BLOCK`           | `get()` / `getWithSoftExpire()` throw `HotKeyBlockedException`; `putThrough()` skips |
+| `BLOCK`           | `get()` / `getWithSoftExpire()` throw `ZetaBlockedException`; `putThrough()` skips |
 | `ALLOW_NO_REPORT` | Process normally but skip Worker reporting (reduces noise from high-frequency keys)  |
 
 ### Pattern Types
@@ -390,7 +390,7 @@ Enable `zeta.sync.enabled=true` to enable cross-instance rule synchronization. T
 
 ### Persistence & Broadcast
 
-- **With Redis:** Each `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `HotKeyConstants.REDIS_KEY_RULES` (`"hotkey:rules"`). On startup, `RuleMatcher.initRules()` loads from Redis. Changes are also broadcast via `TYPE_RULES_SYNC` — peers call `RuleMatcher.syncRules()` for atomic replacement without triggering secondary broadcasts (loop-free).
+- **With Redis:** Each `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `ZetaConstants.REDIS_KEY_RULES` (`"zeta:rules"`). On startup, `RuleMatcher.initRules()` loads from Redis. Changes are also broadcast via `TYPE_RULES_SYNC` — peers call `RuleMatcher.syncRules()` for atomic replacement without triggering secondary broadcasts (loop-free).
 - **Without Redis:** Same operations are broadcast to all peers via the `CacheSyncPublisher` fanout exchange. Each peer holds the full rule set in memory.
 - **Manual broadcast:** `zeta.broadcastAllLocalRulesManually()` loads from Redis (if available) and re-broadcasts the current rule set to all peers.
 

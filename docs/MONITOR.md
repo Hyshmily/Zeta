@@ -99,7 +99,7 @@ Supports an optional `?limit=N` query parameter to cap the number of TopK entrie
 
 ## 2. Micrometer Metrics
 
-When `io.micrometer:micrometer-core` is on the classpath, `HotKeyMicrometerAutoConfiguration` automatically registers MeterBinder beans exposing the following metrics.
+When `io.micrometer:micrometer-core` is on the classpath, `ZetaMicrometerAutoConfiguration` automatically registers MeterBinder beans exposing the following metrics.
 
 ### Caffeine L1 Cache Metrics (`zeta.l1.*`)
 
@@ -163,7 +163,7 @@ curl http://localhost:8080/actuator/hotkey/worker/state
 
 ```json
 {
-  "confirmCount": 3,
+  "confirmCount": 1,
   "coolCount": 10,
   "preCoolGraceCount": 3,
   "trackedKeys": 42

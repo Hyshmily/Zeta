@@ -15,16 +15,15 @@
  */
 package io.github.hyshmily.zeta.worker.config;
 
+import io.github.hyshmily.zeta.confidence.BayesianConfidenceEstimator;
+import io.github.hyshmily.zeta.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.detection.impl.ZetaStateMachineImpl;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
-import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
-import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
-import io.github.hyshmily.zeta.worker.detection.ThresholdLearner;
-import io.github.hyshmily.zeta.worker.detection.TopKValidator;
+import io.github.hyshmily.zeta.worker.detection.*;
 import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
@@ -193,21 +192,43 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Creates the per‑key lifecycle state machine.
+   * Bayesian confidence estimator using Normal-Normal conjugate model.
    *
-   * @param properties worker configuration properties providing confirm, cool, and
-   *                   pre-cool grace window counts (converted from durations via
-   *                   {@link WorkerProperties#getConfirmWindows()},
-   *                   {@link WorkerProperties#getCoolWindows()}, and
-   *                   {@link WorkerProperties#getPreCoolGraceWindows()})
+   * @param properties worker configuration providing Bayesian prior and likelihood parameters
+   * @return a new {@link BayesianConfidenceEstimator} instance
+   */
+  @Bean
+  public BayesianConfidenceEstimator bayesianConfidenceEstimator(WorkerProperties properties) {
+    WorkerProperties.Bayesian cfg = properties.getBayesian();
+    return new BayesianConfidenceEstimator(cfg.getPriorMean(), cfg.getPriorStd(), cfg.getLikelihoodStd());
+  }
+
+  /**
+   * Confidence evaluator facade that wraps the Bayesian estimator.
+   *
+   * @param estimator the Bayesian confidence estimator
+   * @return a new {@link ConfidenceEvaluator} instance
+   */
+  @Bean
+  public ConfidenceEvaluator confidenceEvaluator(BayesianConfidenceEstimator estimator) {
+    return new ConfidenceEvaluator(estimator);
+  }
+
+  /**
+   * Creates the per‑key lifecycle state machine with optional Bayesian confidence integration.
+   *
+   * @param properties        worker configuration properties providing confirm, cool, and
+   *                          pre-cool grace window counts
+   * @param confidenceEvaluator the Bayesian confidence evaluator injected into the state machine
    * @return a new {@link ZetaStateMachine} instance
    */
   @Bean
-  public ZetaStateMachine hotKeyStateMachine(WorkerProperties properties) {
+  public ZetaStateMachine hotKeyStateMachine(WorkerProperties properties, ConfidenceEvaluator confidenceEvaluator) {
     return new ZetaStateMachineImpl(
       properties.getConfirmWindows(),
       properties.getCoolWindows(),
-      properties.getPreCoolGraceWindows()
+      properties.getPreCoolGraceWindows(),
+      confidenceEvaluator
     );
   }
 
@@ -259,29 +280,47 @@ public class WorkerAutoConfiguration {
   }
 
   /**
+   * Unified key evaluator that combines sliding-window detection, HeavyKeeper
+   * frequency estimation, and Bayesian confidence evaluation into a single call.
+   *
+   * @param detector     the sliding-window detector
+   * @param stateMachine the per-key lifecycle state machine with Bayesian integration
+   * @param workerTopK   the worker-scoped HeavyKeeper sketch
+   * @return a new {@link KeyEvaluator} instance
+   */
+  @Bean
+  public KeyEvaluator keyEvaluator(
+    SlidingWindowDetector detector,
+    ZetaStateMachine stateMachine,
+    @Qualifier("workerTopK") TopK workerTopK
+  ) {
+    return new KeyEvaluator(detector, stateMachine, workerTopK);
+  }
+
+  /**
    * Report consumer – the main AMQP entry point.
    *
    * <p>Injects the worker‑scoped Top‑K so that every consumed report also
    * feeds the frequency estimator.
    *
-   * @param detector           the sliding-window detector for per-key access tracking
-   * @param stateMachine       the per-key lifecycle state machine for HOT/COOL transitions
+   * @param keyEvaluator       the unified key evaluator (sliding window + Bayesian)
    * @param broadcaster        publishes HOT and COOL decisions to all application instances
    * @param topKValidator      pre-warm validator for cross-instance frequency-based confirmation
    * @param workerTopK         the worker-scoped HeavyKeeper sketch for frequency estimation
    * @param globalQpsEstimator the global QPS estimator tracking overall throughput
+   * @param stateMachine       the per-key lifecycle state machine (retained for TopKValidator integration)
    * @return a new {@link ReportConsumer} instance
    */
   @Bean
   public ReportConsumer reportConsumer(
-    SlidingWindowDetector detector,
-    ZetaStateMachine stateMachine,
+    KeyEvaluator keyEvaluator,
     WorkerBroadcaster broadcaster,
     TopKValidator topKValidator,
     @Qualifier("workerTopK") TopK workerTopK,
-    GlobalQpsEstimator globalQpsEstimator
+    GlobalQpsEstimator globalQpsEstimator,
+    ZetaStateMachine stateMachine
   ) {
-    return new ReportConsumer(detector, stateMachine, broadcaster, topKValidator, workerTopK, globalQpsEstimator);
+    return new ReportConsumer(keyEvaluator, broadcaster, topKValidator, workerTopK, globalQpsEstimator, stateMachine);
   }
 
   /**
@@ -438,8 +477,8 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Periodically evicts stale keys from the sliding‑window detector and
-   * the state machine.
+   * Periodically evicts stale keys from the sliding‑window detector,
+   * state machine, and CV history.
    *
    * <p>The eviction threshold is set to {@code 2 * coolDurationMs},
    * giving keys a generous grace period after their last access before
@@ -447,6 +486,7 @@ public class WorkerAutoConfiguration {
    *
    * @param detector     the sliding-window detector whose idle keys will be evicted
    * @param stateMachine the state machine whose idle entries will be evicted
+   * @param keyEvaluator the key evaluator whose CV history will be evicted
    * @param properties   worker configuration providing the cool duration for stale threshold
    * @return a new {@link EvictStaleTask} instance
    */
@@ -454,22 +494,22 @@ public class WorkerAutoConfiguration {
   public EvictStaleTask evictStaleTask(
     SlidingWindowDetector detector,
     ZetaStateMachine stateMachine,
+    KeyEvaluator keyEvaluator,
     WorkerProperties properties
   ) {
-    return new EvictStaleTask(detector, stateMachine, properties);
+    return new EvictStaleTask(detector, stateMachine, keyEvaluator, properties);
   }
 
   /**
-   * Scheduled task that evicts stale keys from the sliding-window detector
-   * and state machine.
-   *
-   * Default constructor.
+   * Scheduled task that evicts stale keys from the sliding-window detector,
+   * state machine, and CV history.
    */
   @RequiredArgsConstructor
   public static class EvictStaleTask {
 
     private final SlidingWindowDetector detector;
     private final ZetaStateMachine stateMachine;
+    private final KeyEvaluator keyEvaluator;
     private final WorkerProperties properties;
 
     /**
@@ -481,6 +521,7 @@ public class WorkerAutoConfiguration {
         long staleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
         detector.evictStale(staleAfterMs);
         stateMachine.evictStale(staleAfterMs);
+        keyEvaluator.evictStale(staleAfterMs);
         log.debug("EvictStale tick: staleAfterMs={}", staleAfterMs);
       } catch (Exception e) {
         log.error("Scheduled evictStale failed", e);

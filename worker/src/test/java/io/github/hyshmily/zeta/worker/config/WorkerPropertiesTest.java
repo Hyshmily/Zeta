@@ -83,7 +83,7 @@ class WorkerPropertiesTest {
   void shouldHaveDefaultStateMachineValues() {
     assertThat(properties.getStateMachine().getSmDurationMs()).isEqualTo(500);
     assertThat(properties.getStateMachine().getSmSlices()).isEqualTo(10);
-    assertThat(properties.getStateMachine().getConfirmDurationMs()).isEqualTo(100);
+    assertThat(properties.getStateMachine().getConfirmDurationMs()).isEqualTo(50);
     assertThat(properties.getStateMachine().getCoolDurationMs()).isEqualTo(600000);
     assertThat(properties.getStateMachine().getPreCoolGraceMs()).isEqualTo(60000);
   }
@@ -105,8 +105,8 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldComputeConfirmWindows() {
-    // confirmDurationMs=100, sliceMs=500/10=50 => 100/50 = 2
-    assertThat(properties.getConfirmWindows()).isEqualTo(2);
+    // confirmDurationMs=50, sliceMs=500/10=50 => 50/50 = 1
+    assertThat(properties.getConfirmWindows()).isEqualTo(1);
   }
 
   /**
