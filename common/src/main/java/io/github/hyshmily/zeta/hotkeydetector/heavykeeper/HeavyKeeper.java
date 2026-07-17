@@ -17,9 +17,6 @@ package io.github.hyshmily.zeta.hotkeydetector.heavykeeper;
 
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -30,6 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
@@ -335,18 +334,9 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     this.logDecay = Math.log(decay);
 
     int totalSlots = depth * width;
-    int stripes = 1;
-    if (totalSlots <= 4096) {
-      while (stripes < totalSlots) {
-        stripes <<= 1;
-      }
-    } else {
-      while (stripes < totalSlots / 2) {
-        stripes <<= 1;
-      }
-      if (stripes > 4096) {
-        stripes = 4096;
-      }
+    int stripes = Math.min(2048, Math.max(64, totalSlots >> 4));
+    if ((stripes & (stripes - 1)) != 0) {
+      stripes = Integer.highestOneBit(stripes) << 1;
     }
     this.fingerprints = new int[totalSlots];
     this.windows = new long[totalSlots * windowCount];
@@ -389,9 +379,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
   /** Returns cached {@link SlotLoc} for TopK members; computes on the fly for non-members. */
   private SlotLoc locate(String key) {
-    SlotLoc cached = locCache.get(key);
-    if (cached != null) return cached;
-    return new SlotLoc(fingerprint(key));
+    return locCache.computeIfAbsent(key, m -> new SlotLoc(fingerprint(m)));
   }
 
   /**
@@ -476,6 +464,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         locCache.putIfAbsent(key, new SlotLoc(fingerprint(key)));
       }
       minPqCount = members.isEmpty() ? 0L : findMinMember().count();
+      this.minPqCount = members.isEmpty() ? 0L : findMinMember().count();
     } finally {
       admissionLock.unlock();
     }
@@ -690,14 +679,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     long decays;
     if (increment > DIRECT_DECAY_THRESHOLD) {
       decays = Math.round(increment * decayProb);
-
     } else if (increment > BATCH_DECAY_THRESHOLD) {
       double expected = increment * decayProb;
       double variance = expected * (1.0 - decayProb);
       double noise = Math.sqrt(variance) * rng.nextGaussian();
       decays = Math.round(expected + noise);
       decays = Math.max(0, Math.min(decays, increment));
-
     } else {
       decays = sampleBinomial(increment, decayProb, rng);
     }
