@@ -19,6 +19,7 @@ import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
@@ -170,7 +171,7 @@ public class ReportConsumer {
             // Unified evaluation: sliding-window detection + HeavyKeeper frequency
             // + Bayesian confidence scoring, all in a single call.
             ZetaDecision decision = keyEvaluator.evaluate(key, count);
-            Map<String, Object> previousState = decision.snapShot();
+            StateSnapshot previousState = decision.snapShot();
 
             switch (decision.type()) {
               case HOT -> {
@@ -256,5 +257,5 @@ public class ReportConsumer {
   }
 
   @Builder
-  record Report(Supplier<Boolean> task, Map<String, Object> snapShot) {}
+  record Report(Supplier<Boolean> task, StateSnapshot snapShot) {}
 }

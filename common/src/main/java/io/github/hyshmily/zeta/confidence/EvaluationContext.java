@@ -36,4 +36,8 @@ package io.github.hyshmily.zeta.confidence;
  * @param cv         coefficient of variation of the per-key sliding-window sums
  *                   over recent windows (may be {@code null} if not enough data)
  */
-public record EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv) {}
+public record EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv, double logThreshold) {
+  public EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv) {
+    this(cmsCount, windowSum, threshold, cv, Math.log(Math.max(threshold, 1.0)));
+  }
+}

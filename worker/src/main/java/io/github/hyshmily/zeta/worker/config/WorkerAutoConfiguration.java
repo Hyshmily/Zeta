@@ -330,7 +330,6 @@ public class WorkerAutoConfiguration {
    * @param properties             worker configuration providing exchange and routing settings
    * @param nodeId                 the Worker's node identity, injected via {@code @Qualifier("workerNodeId")}
    * @param epochCounter           the Worker's epoch counter, injected via {@code @Qualifier("workerEpochCounter")}
-   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @return a new {@link WorkerBroadcaster} instance
    */
   @Bean
@@ -338,8 +337,7 @@ public class WorkerAutoConfiguration {
     RabbitTemplate rabbitTemplate,
     WorkerProperties properties,
     @Qualifier("workerNodeId") String nodeId,
-    @Qualifier("workerEpochCounter") AtomicLong epochCounter,
-    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter
+    @Qualifier("workerEpochCounter") AtomicLong epochCounter
   ) {
     return new WorkerBroadcaster(
       rabbitTemplate,
@@ -440,7 +438,6 @@ public class WorkerAutoConfiguration {
    * @return the unique node identifier for this Worker instance
    */
   @Bean
-  @Qualifier("workerNodeId")
   public String workerNodeId() {
     return nodeId;
   }
@@ -448,17 +445,23 @@ public class WorkerAutoConfiguration {
   /**
    * Monotonically increasing epoch counter for this Worker instance.
    *
-   * <p>The epoch is incremented on every Worker restart and transmitted in
-   * send messages (see {@link WorkerBroadcaster#sendBroadcast}). Receiving
-   * apps use the epoch to detect Worker restarts and unconditionally accept
-   * decisions from a higher epoch (ADR-0010).
+   * <p>The epoch is incremented on every Worker restart via Redis {@code INCR}
+   * and transmitted in both heartbeat and send messages.  Receiving apps use
+   * the epoch to detect Worker restarts and unconditionally accept decisions
+   * from a higher epoch (ADR-0010).
    *
-   * @return a new {@link AtomicLong} initialised to {@code 0}
+   * <p>Both {@link WorkerHeartbeatProducer} and {@link WorkerBroadcaster}
+   * share this single bean so that heartbeat epoch and broadcast epoch are
+   * guaranteed identical.
+   *
+   * @param workerId the unique node identifier for this Worker instance
+   * @param redis    the Redis connection factory for epoch initialization
+   * @return a new {@link AtomicLong} initialised to the current epoch value
    */
   @Bean
-  @Qualifier("workerEpochCounter")
-  public AtomicLong workerEpochCounter() {
-    return new AtomicLong(0);
+  public AtomicLong workerEpochCounter(@Qualifier("workerNodeId") String workerId, RedisConnectionFactory redis) {
+    long epoch = WorkerHeartbeatProducer.initEpoch(workerId, redis);
+    return new AtomicLong(epoch);
   }
 
   /**
@@ -471,7 +474,6 @@ public class WorkerAutoConfiguration {
    * @return a new {@link AtomicLong} initialised to {@code 0}
    */
   @Bean
-  @Qualifier("configTimestampCounter")
   public AtomicLong configTimestampCounter() {
     return new AtomicLong(0);
   }
@@ -759,13 +761,15 @@ public class WorkerAutoConfiguration {
    * Enhanced heartbeat producer that sends structured heartbeats with epoch,
    * load factor, decision-version watermark, and state-machine config gossip.
    *
-   * <p>Replaces the old ping-only heartbeat approach. Uses its own internal scheduler.
+   * <p>Shares the same epoch counter bean with {@link WorkerBroadcaster}
+   * so that epoch values in heartbeat messages and send messages are
+   * guaranteed identical.
    *
    * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
    * @param properties             worker configuration providing exchange and interval settings
    * @param stateMachine           the state machine providing config gossip fields
    * @param broadcaster            the broadcaster for reading the current decision version watermark
-   * @param redisConnectionFactory the Redis connection factory for epoch initialization
+   * @param epochCounter           the shared epoch counter (initialised via Redis INCR)
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @param scheduler              the shared worker scheduler for periodic heartbeat sends
    * @return a new {@link WorkerHeartbeatProducer} instance
@@ -776,7 +780,7 @@ public class WorkerAutoConfiguration {
     WorkerProperties properties,
     ZetaStateMachine stateMachine,
     WorkerBroadcaster broadcaster,
-    RedisConnectionFactory redisConnectionFactory,
+    @Qualifier("workerEpochCounter") AtomicLong epochCounter,
     @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
@@ -787,7 +791,7 @@ public class WorkerAutoConfiguration {
       stateMachine,
       broadcaster,
       configTimestampCounter,
-      redisConnectionFactory,
+      epochCounter.get(),
       properties.getHeartbeat().getPingIntervalMs(),
       scheduler
     );

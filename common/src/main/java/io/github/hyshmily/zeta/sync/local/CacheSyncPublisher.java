@@ -270,14 +270,20 @@ public class CacheSyncPublisher {
    * {@code dataVersion} exists in the dedup window.
    *
    * <p>
-   * <b>Dedup algorithm:</b> Uses {@code Caffeine.asMap().compute()} to atomically
-   * check and update the dedup cache entry:
+   * <b>Dedup algorithm:</b>
    * <ol>
-   * <li>If an existing entry has {@code oldVersion >= newVersion}, the send
-   * is skipped (the stale flag is set).</li>
-   * <li>Otherwise, the dedup cache is updated to the new version and the message
-   * is published to the sync FanoutExchange.</li>
+   * <li>Check the dedup cache for an existing entry with a version &ge; the
+   * incoming version. If found, the send is skipped.</li>
+   * <li>Otherwise, the message is published <em>outside</em> the cache lock
+   * and the dedup cache is updated to the new version <em>only on
+   * success</em>. A publish failure does not advance the dedup state, so a
+   * retry within the same window is still possible.</li>
    * </ol>
+   *
+   * <p>
+   * Concurrent callers with the same key may briefly race past the check and
+   * produce duplicate broadcasts. This is acceptable: the system uses
+   * at-most-once delivery and self-healing via periodic cycles.
    *
    * <p>
    * The dedup cache entry expires after
@@ -303,24 +309,23 @@ public class CacheSyncPublisher {
     }
     String compositeKey = degraded ? "D:" + type + ":" + cacheKey : type + ":" + cacheKey;
 
-    recentBroadcasts
-      .asMap()
-      .compute(compositeKey, (k, oldVersion) -> {
-        if (oldVersion != null && oldVersion >= version) {
-          log.debug(
-            "Skip sync due to recent send with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
-            compositeKey,
-            oldVersion,
-            version
-          );
-          return oldVersion;
-        }
-        doSend(cacheKey, type, version, degraded);
-        return version;
-      });
+    Long current = recentBroadcasts.getIfPresent(compositeKey);
+    if (current != null && current >= version) {
+      log.debug(
+        "Skip sync due to recent send with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
+        compositeKey,
+        current,
+        version
+      );
+      return;
+    }
+
+    if (doSend(cacheKey, type, version, degraded)) {
+      recentBroadcasts.put(compositeKey, version);
+    }
   }
 
-  private void doSend(String cacheKey, String type, long version, boolean degraded) {
+  private boolean doSend(String cacheKey, String type, long version, boolean degraded) {
     try {
       MessageProperties props = new MessageProperties();
 
@@ -331,8 +336,10 @@ public class CacheSyncPublisher {
       Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
 
       rabbitTemplate.send(properties.getExchangeName(), "", message);
+      return true;
     } catch (AmqpException e) {
       log.error("Failed to send sync message", e);
+      return false;
     }
   }
 }

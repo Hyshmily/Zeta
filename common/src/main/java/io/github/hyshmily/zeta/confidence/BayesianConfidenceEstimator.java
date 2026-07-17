@@ -93,13 +93,13 @@ public class BayesianConfidenceEstimator {
    *
    * @param observedCount the raw count observed for this key in the
    *                      current sliding window
-   * @param threshold     the hot threshold (raw count scale)
+   * @param logThreshold  the hot threshold in log space (natural log of raw count)
    * @param cv            coefficient of variation of the per-key
    *                      sliding-window sums (may be {@code null})
    * @return a {@link ProbabilityResult} with the posterior probability,
    *         confidence level, and distribution parameters
    */
-  public ProbabilityResult evaluate(long observedCount, long threshold, Double cv) {
+  public ProbabilityResult evaluate(long observedCount, double logThreshold, Double cv) {
     // Natural-log transform: map count to log-space for Normality
     double y = Math.log(Math.max(observedCount, 1.0));
     double sigma = (cv != null) ? adjustLikelihoodStd(likelihoodStd, cv) : likelihoodStd;
@@ -114,7 +114,6 @@ public class BayesianConfidenceEstimator {
     double posteriorStd = Math.sqrt(1.0 / posteriorPrecision);
 
     // Z-score: how many posterior std the threshold is above the posterior mean
-    double logThreshold = Math.log(Math.max(threshold, 1.0));
     double z = (logThreshold - posteriorMean) / posteriorStd;
     double hotProbability = 1.0 - NormalCdfTable.phi(z);
 

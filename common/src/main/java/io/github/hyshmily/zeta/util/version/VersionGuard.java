@@ -72,9 +72,11 @@ public final class VersionGuard {
    *   <li>Incoming epoch &gt; existing epoch → accept unconditionally
    *       (Worker restart detected — ADR-0010)</li>
    *   <li>Incoming epoch &lt; existing epoch → skip (stale incarnation message)</li>
-   *   <li>Same epoch, same nodeId → normal ordering (skip if existing dv &gt;= incoming dv)</li>
-   *   <li>Different nodeId, same epoch → cross-Worker ownership transfer;
-   *       accept (return false) to allow new owner to assert authority</li>
+   *   <li>Same epoch, same nodeId → compare {@code decisionVersion}: skip if
+   *       existing dv &gt;= incoming dv (same counter, directly comparable)</li>
+   *   <li>Same epoch, different nodeId → accept unconditionally (different
+   *       counters are not comparable; last-writer-wins converges via next
+   *       epoch or subsequent broadcasts)</li>
    * </ol>
    *
    * @param existing              the existing cache entry; may be null
@@ -107,6 +109,9 @@ public final class VersionGuard {
       return existing.getDecisionVersion() >= incomingDecisionVersion;
     }
 
+    // Different nodeId at the same epoch — cross-Worker ownership transfer;
+    // accept unconditionally.  Counter values are not comparable across
+    // Workers; convergence happens via the next epoch.
     return false;
   }
 

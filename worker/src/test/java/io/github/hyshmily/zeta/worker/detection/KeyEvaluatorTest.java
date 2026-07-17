@@ -9,7 +9,6 @@ import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
-import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -51,7 +50,7 @@ class KeyEvaluatorTest {
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(42L);
       when(stateMachine.evaluate(eq("key"), eq(true), any())).thenReturn(
-        new ZetaDecision(DecisionType.HOT, "key", Map.of())
+        new ZetaDecision(DecisionType.HOT, "key", null)
       );
 
       ZetaDecision result = evaluator.evaluate("key", 5L);
@@ -66,7 +65,7 @@ class KeyEvaluatorTest {
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(42L);
       when(stateMachine.evaluate(eq("key"), eq(false), ctxCaptor.capture())).thenReturn(
-        new ZetaDecision(DecisionType.NONE, "key", Map.of())
+        new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
       evaluator.evaluate("key", 5L);
@@ -84,7 +83,7 @@ class KeyEvaluatorTest {
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(0L);
       when(stateMachine.evaluate(eq("key"), eq(false), ctxCaptor.capture())).thenReturn(
-        new ZetaDecision(DecisionType.NONE, "key", Map.of())
+        new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
       evaluator.evaluate("key", 5L);
@@ -105,7 +104,7 @@ class KeyEvaluatorTest {
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount(any())).thenReturn(0L);
       when(stateMachine.evaluate(any(), anyBoolean(), any())).thenReturn(
-        new ZetaDecision(DecisionType.NONE, "key", Map.of())
+        new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
       evaluator.evaluate("key", 1L);
@@ -121,7 +120,7 @@ class KeyEvaluatorTest {
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount(any())).thenReturn(0L);
       when(stateMachine.evaluate(any(), anyBoolean(), any())).thenReturn(
-        new ZetaDecision(DecisionType.NONE, "key", Map.of())
+        new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
       evaluator.evaluate("key", 1L);
@@ -142,7 +141,7 @@ class KeyEvaluatorTest {
     when(detector.getThreshold()).thenReturn(10L);
     when(workerTopK.estimatedCount(any())).thenReturn(0L);
     when(stateMachine.evaluate(any(), anyBoolean(), ctxCaptor.capture())).thenReturn(
-      new ZetaDecision(DecisionType.NONE, "key", Map.of())
+      new ZetaDecision(DecisionType.NONE, "key", null)
     );
 
     for (int i = 0; i < 10; i++) {

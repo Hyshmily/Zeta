@@ -55,6 +55,12 @@ class ZetaStateMachineTest {
   /** Evaluation context calibrated for MEDIUM confidence (~0.91) with optimistic likelihood std (0.5). */
   private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null);
 
+  /**
+   * Cold context with windowSum below threshold (so the hot re-check inside
+   * the lock does NOT fire) but MEDIUM confidence.
+   */
+  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null);
+
   private ZetaStateMachine machine;
 
   @BeforeEach
@@ -86,14 +92,15 @@ class ZetaStateMachineTest {
 
     // coolCount = 10, preCoolGraceCount = 4
     // PRE_COOLING at coolStreak >= 6 (coolCount - grace), COOL at coolStreak >= 10
+    // Use COLD_CTX (windowSum=1 < threshold=10) so the hot re-check does not fire.
     for (int i = 0; i < 5; i++) {
-      assertThat(machine.evaluate("key", false, CTX).type()).isEqualTo(DecisionType.NONE);
+      assertThat(machine.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     }
-    assertThat(machine.evaluate("key", false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
 
     // coolStreak >= 6 → enters PRE_COOLING
     for (int i = 0; i < 3; i++) {
-      assertThat(machine.evaluate("key", false, CTX).type()).isEqualTo(DecisionType.NONE);
+      assertThat(machine.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     }
     // coolStreak >= 10 → COOL
     assertThat(machine.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
@@ -146,9 +153,9 @@ class ZetaStateMachineTest {
     assertThat(last.type()).isEqualTo(DecisionType.HOT);
 
     for (int i = 0; i < 9; i++) {
-      machine.evaluate("key", false, CTX);
+      machine.evaluate("key", false, COLD_CTX);
     }
-    assertThat(machine.evaluate("key", false, MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(machine.evaluate("key", false, COLD_MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
   /**

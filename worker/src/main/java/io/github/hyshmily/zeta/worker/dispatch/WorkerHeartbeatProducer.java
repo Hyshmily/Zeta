@@ -26,10 +26,7 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
@@ -95,6 +92,7 @@ public class WorkerHeartbeatProducer {
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
    * @param scheduler              the shared external scheduler for periodic heartbeat sends
    */
+  @SuppressWarnings("all")
   public WorkerHeartbeatProducer(
     RabbitTemplate rabbitTemplate,
     String heartbeatExchange,
@@ -122,8 +120,50 @@ public class WorkerHeartbeatProducer {
   }
 
   /**
-   * Creates a new heartbeat producer with its own internal scheduler
-   * (primarily for testing, with mocked Redis).
+   * Creates a new heartbeat producer with an externally-computed epoch.
+   * Used when the config layer already computed the epoch via {@link #initEpoch}.
+   *
+   * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
+   * @param heartbeatExchange      the target topic exchange for heartbeat messages
+   * @param workerId               unique identity of this Worker node
+   * @param stateMachine           the state machine providing config-gossip fields
+   * @param broadcaster            the broadcaster for reading the current decision version watermark
+   * @param configTimestampCounter the shared monotonic counter for config-change timestamps
+   * @param epoch                  the externally-computed epoch value
+   * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
+   * @param scheduler              the shared external scheduler for periodic heartbeat sends
+   */
+  @SuppressWarnings("all")
+  public WorkerHeartbeatProducer(
+    RabbitTemplate rabbitTemplate,
+    String heartbeatExchange,
+    String workerId,
+    ZetaStateMachine stateMachine,
+    WorkerBroadcaster broadcaster,
+    AtomicLong configTimestampCounter,
+    long epoch,
+    long pingIntervalMs,
+    ScheduledExecutorService scheduler
+  ) {
+    this(
+      rabbitTemplate,
+      heartbeatExchange,
+      workerId,
+      stateMachine,
+      broadcaster,
+      epoch,
+      System.currentTimeMillis(),
+      scheduler,
+      false,
+      configTimestampCounter,
+      pingIntervalMs
+    );
+  }
+
+  /**
+   * Factory method for tests: creates a heartbeat producer with an internally-owned
+   * scheduler and initialises the epoch from the local file fallback (no Redis
+   * dependency).
    *
    * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
    * @param heartbeatExchange      the target topic exchange for heartbeat messages
@@ -132,8 +172,9 @@ public class WorkerHeartbeatProducer {
    * @param broadcaster            the broadcaster for reading the current decision version watermark
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
+   * @return a new heartbeat producer ready for testing
    */
-  public WorkerHeartbeatProducer(
+  static WorkerHeartbeatProducer forTesting(
     RabbitTemplate rabbitTemplate,
     String heartbeatExchange,
     String workerId,
@@ -142,42 +183,50 @@ public class WorkerHeartbeatProducer {
     AtomicLong configTimestampCounter,
     long pingIntervalMs
   ) {
-    this(
+    long epoch = initEpochFromLocalFile(workerId);
+    var scheduler = Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-producer"));
+    return new WorkerHeartbeatProducer(
       rabbitTemplate,
       heartbeatExchange,
       workerId,
       stateMachine,
       broadcaster,
-      initEpoch(workerId, null),
+      epoch,
       System.currentTimeMillis(),
-      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-producer")),
+      scheduler,
       true,
       configTimestampCounter,
       pingIntervalMs
     );
   }
 
-  private static long initEpoch(String workerId, RedisConnectionFactory redisConnectionFactory) {
+  public static long initEpoch(String workerId, RedisConnectionFactory redisConnectionFactory) {
+    if (redisConnectionFactory == null) {
+      log.info("RedisConnectionFactory is null, using local file fallback for epoch initialisation");
+      return initEpochFromLocalFile(workerId);
+    }
     StringRedisTemplate template = new StringRedisTemplate(redisConnectionFactory);
     template.afterPropertiesSet();
     return doInitEpoch(template, workerId);
   }
 
   /**
-   * Initializes the epoch by atomically incrementing a Redis counter.
-   * Falls back to a local file if Redis is unavailable.
+   * Initializes the epoch by atomically incrementing a Redis counter via
+   * {@code INCR}.  Uses a single atomic Redis command (no read-modify-write
+   * race) so concurrent Workers with the same {@code workerId} always
+   * receive distinct epoch values.
+   *
+   * <p>Falls back to a local file if Redis is unavailable.
    *
    * @param redis the Redis template (created ad-hoc for this one-time operation)
    * @return the new epoch value for this Worker incarnation
    */
-  private static long doInitEpoch(StringRedisTemplate redis, String workerId) {
+  public static long doInitEpoch(StringRedisTemplate redis, String workerId) {
     try {
       String key = EPOCH_REDIS_KEY_PREFIX + workerId;
-      String val = redis.opsForValue().get(key);
-      long next = (val != null) ? Long.parseLong(val) + 1 : 1;
-      redis.opsForValue().set(key, String.valueOf(next));
+      Long next = redis.opsForValue().increment(key);
       log.info("Epoch initialized via Redis: workerId={}, epoch={}", workerId, next);
-      return next;
+      return next != null ? next : initEpochFromLocalFile(workerId);
     } catch (Exception e) {
       log.warn("Redis unavailable for epoch, using local file fallback", e);
       return initEpochFromLocalFile(workerId);
@@ -189,12 +238,14 @@ public class WorkerHeartbeatProducer {
    * unavailable.  Reads the previous value, increments, and writes back.
    *
    * <p>If both Redis and local file fallback fail, falls back to
-   * {@code System.currentTimeMillis()} as a last resort epoch value
-   * (non-monotonic risk across restarts is logged at error level).
+   * {@code System.currentTimeMillis()} combined with a random jitter as a
+   * last resort epoch value (cross-machine collision risk is minimised by
+   * the jitter).  The combined value is monotonically increasing across
+   * calls within the same JVM.
    *
-   * @return the new epoch value, or {@code System.currentTimeMillis()} on complete failure
+   * @return the new epoch value, or a timestamp-based value on complete failure
    */
-  private static long initEpochFromLocalFile(String workerId) {
+  public static long initEpochFromLocalFile(String workerId) {
     try {
       Path path = Path.of(System.getProperty("java.io.tmpdir"), "zeta-epoch-" + workerId);
       long next = 1;
@@ -203,11 +254,11 @@ public class WorkerHeartbeatProducer {
         next = Long.parseLong(content.trim()) + 1;
       }
       Files.writeString(path, String.valueOf(next));
-      log.info("Epoch initialized via local file: workerId={}, epoch={}", workerId, next);
       return next;
     } catch (Exception e) {
-      log.error("Epoch local file fallback failed, using System.currentTimeMillis()", e);
-      return System.currentTimeMillis();
+      long epoch = System.currentTimeMillis() * 1000L + ThreadLocalRandom.current().nextInt(1000);
+      log.error("Epoch local file fallback failed, using timestamp with jitter: epoch={}", epoch, e);
+      return epoch;
     }
   }
 

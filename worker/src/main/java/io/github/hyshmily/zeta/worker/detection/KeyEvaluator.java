@@ -111,6 +111,7 @@ public class KeyEvaluator {
   private static final class WindowSumHistory {
 
     private final double[] buffer = new double[CV_HISTORY_SIZE];
+    private int writeIndex = 0;
     private int count = 0;
     volatile long lastAccessTime;
 
@@ -121,8 +122,8 @@ public class KeyEvaluator {
     @SuppressWarnings("all")
     synchronized Double addAndGetCv(long windowSum) {
       lastAccessTime = System.currentTimeMillis();
-      System.arraycopy(buffer, 0, buffer, 1, Math.min(count, CV_HISTORY_SIZE - 1));
-      buffer[0] = windowSum;
+      buffer[writeIndex] = windowSum;
+      writeIndex = (writeIndex + 1) % CV_HISTORY_SIZE;
       if (count < CV_HISTORY_SIZE) {
         count++;
       }

@@ -15,17 +15,13 @@
  */
 package io.github.hyshmily.zeta.model;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
-import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
-import java.util.Map;
-
 /**
  * A decision emitted by the Worker's sliding-window / state-machine pipeline,
  * instructing application instances how to treat a specific cache key.
  *
- * <p>Each evaluation cycle of {@link ZetaStateMachine}
+ * <p>Each evaluation cycle of {@link io.github.hyshmily.zeta.detection.ZetaStateMachine}
  * produces at most one {@code ZetaDecision} per key. The decision is then
- * serialized into a {@link WorkerMessage} and
+ * serialized into a {@link io.github.hyshmily.zeta.sync.worker.WorkerMessage} and
  * send to all application instances via RabbitMQ.
  *
  * <p>Three outcomes are possible:
@@ -41,8 +37,12 @@ import java.util.Map;
  * @param type     the decision type (never {@code null})
  * @param cacheKey the affected cache key (never {@code null})
  */
-// modified: added snapShot field for failure rollback
-public record ZetaDecision(DecisionType type, String cacheKey, Map<String, Object> snapShot) {
+/**
+ * @param type     the decision type (never {@code null})
+ * @param cacheKey the affected cache key (never {@code null})
+ * @param snapShot pre-mutation state snapshot for failure rollback (may be {@code null})
+ */
+public record ZetaDecision(DecisionType type, String cacheKey, StateSnapshot snapShot) {
   /**
    * Possible decision outcomes for a hot-key evaluation.
    * <ul>
@@ -64,9 +64,10 @@ public record ZetaDecision(DecisionType type, String cacheKey, Map<String, Objec
    * Create a HOT decision for the given key.
    *
    * @param cacheKey the affected cache key
+   * @param snapShot pre-mutation state snapshot for failure rollback (may be {@code null})
    * @return a new {@code ZetaDecision} with type {@link DecisionType#HOT}
    */
-  public static ZetaDecision hot(String cacheKey, Map<String, Object> snapShot) {
+  public static ZetaDecision hot(String cacheKey, StateSnapshot snapShot) {
     return new ZetaDecision(DecisionType.HOT, cacheKey, snapShot);
   }
 
@@ -74,19 +75,25 @@ public record ZetaDecision(DecisionType type, String cacheKey, Map<String, Objec
    * Create a COOL decision for the given key.
    *
    * @param cacheKey the affected cache key
+   * @param snapShot pre-mutation state snapshot for failure rollback (may be {@code null})
    * @return a new {@code ZetaDecision} with type {@link DecisionType#COOL}
    */
-  public static ZetaDecision cool(String cacheKey, Map<String, Object> snapShot) {
+  public static ZetaDecision cool(String cacheKey, StateSnapshot snapShot) {
     return new ZetaDecision(DecisionType.COOL, cacheKey, snapShot);
   }
+
+  /** Shared singleton for NONE decisions with no key payload (cacheKey="" and snapShot=null). */
+  public static final ZetaDecision NONE = new ZetaDecision(DecisionType.NONE, "", null);
 
   /**
    * Create a no-op decision for the given key.
    *
    * @param cacheKey the affected cache key
+   * @param snapShot optional pre-mutation state snapshot for rollback
    * @return a new {@code ZetaDecision} with type {@link DecisionType#NONE}
    */
-  public static ZetaDecision none(String cacheKey, Map<String, Object> snapShot) {
+  @SuppressWarnings("all")
+  public static ZetaDecision none(String cacheKey, StateSnapshot snapShot) {
     return new ZetaDecision(DecisionType.NONE, cacheKey, snapShot);
   }
 }

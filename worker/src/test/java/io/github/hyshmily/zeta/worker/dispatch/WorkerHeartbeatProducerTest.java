@@ -31,6 +31,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -80,28 +81,46 @@ class WorkerHeartbeatProducerTest {
   @TempDir
   private Path tempDir;
 
-  // ── Epoch initialisation ──
-
-  /** First start with Redis available and no prior epoch → epoch = 1. */
-  @Test
-  void constructor_shouldDoInitEpochFromRedis_whenFirstStart() {
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
-      var producer = newProducer();
-      producer.sendHeartbeat();
-
-      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-        AMQP_HEADER_HEARTBEAT_EPOCH,
-        1L
-      );
+  @BeforeEach
+  void cleanEpochFile() {
+    try {
+      Files.deleteIfExists(epochFilePath());
+    } catch (Exception e) {
+      // ignore
     }
   }
 
-  /** Subsequent start: Redis returns previous epoch "5" → epoch = 6. */
+  // ── Epoch initialisation ──
+
+  /** First start with Redis available and no prior epoch → INCR returns 1 → epoch = 1. */
+  @Test
+  void constructor_shouldDoInitEpochFromRedis_whenFirstStart() {
+    var producer = newProducer();
+    producer.sendHeartbeat();
+
+    verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+      AMQP_HEADER_HEARTBEAT_EPOCH,
+      1L
+    );
+  }
+
+  /** Subsequent start: Redis INCR returns 6 (previous epoch was 5) → epoch = 6. */
   @Test
   void constructor_shouldDoInitEpochFromRedis_whenRestart() {
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning("5"))) {
-      var producer = newProducer();
+    var redisFactoryMock = mock(RedisConnectionFactory.class);
+    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(6L))) {
+      var producer = new WorkerHeartbeatProducer(
+        rabbitTemplate,
+        HB_EXCHANGE,
+        WORKER_ID,
+        stateMachine,
+        broadcaster,
+        configTimestampCounter,
+        redisFactoryMock,
+        PING_INTERVAL_MS,
+        mock(ScheduledExecutorService.class)
+      );
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
@@ -119,7 +138,7 @@ class WorkerHeartbeatProducerTest {
   @Test
   void constructor_shouldFallbackToLocalFile_whenRedisFails() throws Exception {
     var origTmpdir = System.setProperty("java.io.tmpdir", tempDir.toString());
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisThrowing())) {
+    try {
       var producer = newProducer();
       producer.sendHeartbeat();
 
@@ -144,7 +163,7 @@ class WorkerHeartbeatProducerTest {
   @Test
   void constructor_shouldIncrementLocalFileEpochOnRestart() throws Exception {
     var origTmpdir = System.setProperty("java.io.tmpdir", tempDir.toString());
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisThrowing())) {
+    try {
       Files.writeString(epochFilePath(), "3");
       var producer = newProducer();
       producer.sendHeartbeat();
@@ -168,13 +187,13 @@ class WorkerHeartbeatProducerTest {
   @Test
   void constructor_shouldFallbackToCurrentTimeMillis_whenAllFallbacksFail() {
     var origTmpdir = System.setProperty("java.io.tmpdir", "C:\\nonexistent_hotkey_test_xyz");
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisThrowing())) {
+    try {
       var producer = newProducer();
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
       var epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_HEARTBEAT_EPOCH);
-      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000L);
+      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L);
     } finally {
       System.setProperty("java.io.tmpdir", origTmpdir);
     }
@@ -185,65 +204,59 @@ class WorkerHeartbeatProducerTest {
   /** Verifies exchange, routing key, and every heartbeat header. */
   @Test
   void sendHeartbeat_shouldDeliverAllFields() {
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
-      long dv = 123L;
-      long configTs = 456L;
-      when(broadcaster.getCurrentDecisionVersion()).thenReturn(dv);
-      when(stateMachine.getConfirmCount()).thenReturn(3);
-      when(stateMachine.getCoolCount()).thenReturn(10);
-      when(stateMachine.getPreCoolGraceCount()).thenReturn(3);
-      when(configTimestampCounter.get()).thenReturn(configTs);
-      when(stateMachine.getTrackedKeys()).thenReturn(1);
+    long dv = 123L;
+    long configTs = 456L;
+    when(broadcaster.getCurrentDecisionVersion()).thenReturn(dv);
+    when(stateMachine.getConfirmCount()).thenReturn(3);
+    when(stateMachine.getCoolCount()).thenReturn(10);
+    when(stateMachine.getPreCoolGraceCount()).thenReturn(3);
+    when(configTimestampCounter.get()).thenReturn(configTs);
+    when(stateMachine.getTrackedKeys()).thenReturn(1);
 
-      var producer = newProducer();
-      producer.sendHeartbeat();
+    var producer = newProducer();
+    producer.sendHeartbeat();
 
-      verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-      var headers = messageCaptor.getValue().getMessageProperties().getHeaders();
+    verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(ROUTING_KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
+    var headers = messageCaptor.getValue().getMessageProperties().getHeaders();
 
-      assertThat(headers).containsEntry(AMQP_HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
-      assertThat(headers).containsEntry(AMQP_HEADER_NODE_ID, WORKER_ID);
-      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_EPOCH, 1L);
-      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_DV_HWM, dv);
-      assertThat(headers.get(AMQP_HEADER_HEARTBEAT_LOAD)).isInstanceOf(Double.class);
-      assertThat((Double) headers.get(AMQP_HEADER_HEARTBEAT_LOAD)).isBetween(0.0, 1.0);
-      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_READY, true);
-      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, 3);
-      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, 10);
-      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, 3);
-      assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTs);
-    }
+    assertThat(headers).containsEntry(AMQP_HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
+    assertThat(headers).containsEntry(AMQP_HEADER_NODE_ID, WORKER_ID);
+    assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_EPOCH, 1L);
+    assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_DV_HWM, dv);
+    assertThat(headers.get(AMQP_HEADER_HEARTBEAT_LOAD)).isInstanceOf(Double.class);
+    assertThat((Double) headers.get(AMQP_HEADER_HEARTBEAT_LOAD)).isBetween(0.0, 1.0);
+    assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_READY, true);
+    assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, 3);
+    assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, 10);
+    assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, 3);
+    assertThat(headers).containsEntry(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTs);
   }
 
   /** Uptime < 3s AND no tracked keys → readyToServe = false. */
   @Test
   void sendHeartbeat_shouldReportNotReady_whenColdStartAndNoTrackedKeys() {
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
-      var producer = newProducer();
-      producer.sendHeartbeat();
+    var producer = newProducer();
+    producer.sendHeartbeat();
 
-      verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-        AMQP_HEADER_HEARTBEAT_READY,
-        false
-      );
-    }
+    verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+      AMQP_HEADER_HEARTBEAT_READY,
+      false
+    );
   }
 
   /** Tracked keys > 0 → readyToServe = true (regardless of uptime). */
   @Test
   void sendHeartbeat_shouldReportReady_whenTrackedKeysPresent() {
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
-      when(stateMachine.getTrackedKeys()).thenReturn(5);
-      var producer = newProducer();
-      producer.sendHeartbeat();
+    when(stateMachine.getTrackedKeys()).thenReturn(5);
+    var producer = newProducer();
+    producer.sendHeartbeat();
 
-      verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-        AMQP_HEADER_HEARTBEAT_READY,
-        true
-      );
-    }
+    verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
+      AMQP_HEADER_HEARTBEAT_READY,
+      true
+    );
   }
 
   // ── Lifecycle ──
@@ -252,10 +265,7 @@ class WorkerHeartbeatProducerTest {
   @Test
   void start_shouldScheduleHeartbeatAtFixedRate() {
     var schedulerMock = mock(ScheduledExecutorService.class);
-    try (
-      var executorsMock = mockStatic(Executors.class);
-      var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))
-    ) {
+    try (var executorsMock = mockStatic(Executors.class)) {
       executorsMock.when(() -> Executors.newSingleThreadScheduledExecutor(any())).thenReturn(schedulerMock);
 
       var producer = newProducer();
@@ -273,14 +283,12 @@ class WorkerHeartbeatProducerTest {
   /** {@code stop()} shuts down the internal scheduler. */
   @Test
   void stop_shouldShutdownScheduler() {
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
-      var producer = newProducer();
-      producer.stop();
+    var producer = newProducer();
+    producer.stop();
 
-      var scheduler = (ScheduledExecutorService) ReflectionTestUtils.getField(producer, "scheduler");
-      assertThat(scheduler).isNotNull();
-      assertThat(scheduler.isShutdown()).isTrue();
-    }
+    var scheduler = (ScheduledExecutorService) ReflectionTestUtils.getField(producer, "scheduler");
+    assertThat(scheduler).isNotNull();
+    assertThat(scheduler.isShutdown()).isTrue();
   }
 
   /**
@@ -294,10 +302,7 @@ class WorkerHeartbeatProducerTest {
       mock(ScheduledFuture.class)
     );
 
-    try (
-      var executorsMock = mockStatic(Executors.class);
-      var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))
-    ) {
+    try (var executorsMock = mockStatic(Executors.class)) {
       executorsMock.when(() -> Executors.newSingleThreadScheduledExecutor(any())).thenReturn(schedulerMock);
 
       var producer = newProducer();
@@ -346,12 +351,10 @@ class WorkerHeartbeatProducerTest {
    */
   @Test
   void start_shouldInvokeThreadFactoryViaRealExecutor() {
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
-      var producer = newProducer();
-      producer.start();
-      verify(rabbitTemplate, timeout(2000)).send(anyString(), anyString(), any());
-      producer.stop();
-    }
+    var producer = newProducer();
+    producer.start();
+    verify(rabbitTemplate, timeout(2000)).send(anyString(), anyString(), any());
+    producer.stop();
   }
 
   // ── Fault tolerance ──
@@ -362,15 +365,13 @@ class WorkerHeartbeatProducerTest {
    */
   @Test
   void sendHeartbeat_shouldCatchRabbitMqException() {
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisReturning(null))) {
-      when(broadcaster.getCurrentDecisionVersion()).thenReturn(0L);
-      when(configTimestampCounter.get()).thenReturn(0L);
-      doThrow(new RuntimeException("RabbitMQ unavailable")).when(rabbitTemplate).send(anyString(), anyString(), any());
+    when(broadcaster.getCurrentDecisionVersion()).thenReturn(0L);
+    when(configTimestampCounter.get()).thenReturn(0L);
+    doThrow(new RuntimeException("RabbitMQ unavailable")).when(rabbitTemplate).send(anyString(), anyString(), any());
 
-      var producer = newProducer();
-      producer.sendHeartbeat();
-      // must not throw — exception caught in catch block
-    }
+    var producer = newProducer();
+    producer.sendHeartbeat();
+    // must not throw — exception caught in catch block
   }
 
   /**
@@ -380,13 +381,13 @@ class WorkerHeartbeatProducerTest {
   @Test
   void constructor_shouldFallbackToCurrentTimeMillisForCorruptedEpochFile() throws Exception {
     var origTmpdir = System.setProperty("java.io.tmpdir", tempDir.toString());
-    try (var ignored = mockConstruction(StringRedisTemplate.class, redisThrowing())) {
+    try {
       Files.writeString(epochFilePath(), "not-a-number");
       var producer = newProducer();
       producer.sendHeartbeat();
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
       var epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_HEARTBEAT_EPOCH);
-      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000L);
+      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L);
     } finally {
       System.setProperty("java.io.tmpdir", origTmpdir);
     }
@@ -395,7 +396,7 @@ class WorkerHeartbeatProducerTest {
   // ── Helpers ──
 
   private WorkerHeartbeatProducer newProducer() {
-    return new WorkerHeartbeatProducer(
+    return WorkerHeartbeatProducer.forTesting(
       rabbitTemplate,
       HB_EXCHANGE,
       WORKER_ID,
@@ -407,11 +408,11 @@ class WorkerHeartbeatProducerTest {
   }
 
   @SuppressWarnings("unchecked")
-  private static MockedConstruction.MockInitializer<StringRedisTemplate> redisReturning(String value) {
+  private static MockedConstruction.MockInitializer<StringRedisTemplate> redisReturning(Long value) {
     return (mock, ctx) -> {
       var ops = (ValueOperations<String, String>) mock(ValueOperations.class);
       when(mock.opsForValue()).thenReturn(ops);
-      when(ops.get(anyString())).thenReturn(value);
+      when(ops.increment(anyString())).thenReturn(value);
     };
   }
 

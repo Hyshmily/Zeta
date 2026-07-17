@@ -10,7 +10,7 @@ Two asymmetric promotion rules:
 
 - **COOL → HOT only when majority quorum fails** (`alive < known / 2 + 1`, or `alive == 0` when no Workers are configured). COOL means a Worker deliberately decided to cool this key down. While the Worker cluster is healthy (majority quorum satisfied), the local App defers to Worker authority. Only when the Worker cluster fails majority quorum (graceful degradation) does the local TopK assume authority and promote COOL entries. Worker recovery overrides all local promotions via `decisionVersion` comparison within one broadcast cycle.
 
-Implementation in `Zeta.java` (delegates to `promoteLocalHotkeyIfNeeded`):
+Implementation in `HotKeyCache.java`: <!-- called by `processLocalHotkeyIfNeeded` -->
 
 ```java
 private boolean isPromotableState(KeyState state) {

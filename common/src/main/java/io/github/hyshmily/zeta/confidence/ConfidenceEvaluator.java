@@ -48,13 +48,13 @@ public class ConfidenceEvaluator {
   /**
    * Evaluates the Bayesian posterior probability that this key is hot.
    *
-   * @param cmsCount  HeavyKeeper frequency estimate for the key
-   * @param threshold the hot threshold (raw count)
+   * @param cmsCount     HeavyKeeper frequency estimate for the key
+   * @param logThreshold the hot threshold in log space (natural log of raw count)
    * @param cv        coefficient of variation (may be {@code null})
    * @return a {@link ProbabilityResult} with the posterior probability
    *         and confidence level
    */
-  public ProbabilityResult evaluate(long cmsCount, long threshold, Double cv) {
-    return estimator.evaluate(cmsCount, threshold, cv);
+  public ProbabilityResult evaluate(long cmsCount, double logThreshold, Double cv) {
+    return estimator.evaluate(cmsCount, logThreshold, cv);
   }
 }

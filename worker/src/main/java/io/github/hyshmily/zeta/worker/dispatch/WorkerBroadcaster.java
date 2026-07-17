@@ -17,9 +17,12 @@ package io.github.hyshmily.zeta.worker.dispatch;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -64,8 +67,22 @@ public class WorkerBroadcaster {
    * Incremented atomically for every send to provide strict ordering
    * for this worker.  Combined with consistent‑hash sharding (one key → one
    * worker) this guarantees a total order of decisions per key.
+   *
+   * <p>Initialised at zero — the epoch counter handles cross‑restart ordering,
+   * so we neither need nor want a wall‑clock seed (see ADR-0010).
    */
-  private final AtomicLong decisionVersionCounter = new AtomicLong(System.currentTimeMillis());
+  private final AtomicLong decisionVersionCounter = new AtomicLong(0L);
+
+  /**
+   * Short‑lived deduplication cache that prevents redundant AMQP broadcasts
+   * when two Workers transiently evaluate the same key during ring convergence
+   * (see ADR-0013). A (key + type) pair is retained for 100 ms so the second
+   * Worker's broadcast is silently elided.
+   */
+  private final Cache<String, Boolean> broadcastDedupCache = Caffeine.newBuilder()
+    .expireAfterWrite(100, TimeUnit.MILLISECONDS)
+    .maximumSize(1_000)
+    .build();
 
   /**
    * Atomically allocates the next decision version without sending.
@@ -84,9 +101,14 @@ public class WorkerBroadcaster {
    * @param cacheKey the key that has been confirmed as hot
    */
   public boolean broadcastHot(String cacheKey) {
+    String dedupKey = cacheKey + ":" + WorkerMessage.TYPE_HOT;
+    if (broadcastDedupCache.getIfPresent(dedupKey) != null) {
+      return true;
+    }
     long dv = nextDecisionVersion();
     try {
       sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
+      broadcastDedupCache.put(dedupKey, Boolean.TRUE);
     } catch (Exception e) {
       log.error("Failed to broadcast HOT decision for key {}: {}", cacheKey, e.getMessage());
       return false;
@@ -100,9 +122,14 @@ public class WorkerBroadcaster {
    * @param cacheKey the key that has been confirmed as fully cooled
    */
   public boolean broadcastCool(String cacheKey) {
+    String dedupKey = cacheKey + ":" + WorkerMessage.TYPE_COOL;
+    if (broadcastDedupCache.getIfPresent(dedupKey) != null) {
+      return true;
+    }
     long dv = nextDecisionVersion();
     try {
       sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
+      broadcastDedupCache.put(dedupKey, Boolean.TRUE);
     } catch (Exception e) {
       log.error("Failed to broadcast COOL decision for key {}: {}", cacheKey, e.getMessage());
       return false;

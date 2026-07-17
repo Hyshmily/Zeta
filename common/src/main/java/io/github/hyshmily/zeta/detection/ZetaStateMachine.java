@@ -17,8 +17,8 @@ package io.github.hyshmily.zeta.detection;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.confidence.EvaluationContext;
+import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
-import java.util.Map;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -133,12 +133,26 @@ public interface ZetaStateMachine {
   /** Garbage-collect stale keys. */
   void evictStale(long staleAfterMs);
 
-  /** Return a snapshot of the current state for a key. */
-  Map<String, Object> getStateSnapshot(String key);
+  /**
+   * Return a snapshot of the current state for a key.
+   *
+   * @param key the cache key
+   * @return the state snapshot, or {@code null} if the key has no tracked state
+   */
+  StateSnapshot getStateSnapshot(String key);
 
-  /** Roll back the per-key state after a send failure. */
-  void rollbackToPreviousState(String key, Map<String, Object> previousState);
+  /**
+   * Roll back the per-key state to a previous snapshot after a send failure.
+   *
+   * @param key           the cache key
+   * @param previousState the snapshot to restore; if {@code null}, the key is reset
+   */
+  void rollbackToPreviousState(String key, StateSnapshot previousState);
 
-  /** Key-less overload that extracts the key from {@code previousState}. */
-  void rollbackToPreviousState(Map<String, Object> previousState);
+  /**
+   * Roll back the per-key state using a snapshot that carries its own key.
+   *
+   * @param previousState the snapshot to restore (must not be {@code null})
+   */
+  void rollbackToPreviousState(StateSnapshot previousState);
 }
