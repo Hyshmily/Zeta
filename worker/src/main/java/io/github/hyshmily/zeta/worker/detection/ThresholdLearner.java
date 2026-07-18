@@ -21,14 +21,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Periodically recalculates the hot‑key threshold based on estimated global QPS
+ * Periodically recalculates the hot‑key threshold based on estimated global qps
  * and updates the {@link io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector}.
  */
 @RequiredArgsConstructor
 @Slf4j
 public class ThresholdLearner implements Runnable {
 
-  /** Global QPS estimator providing the overall throughput baseline. */
+  /** Global qps estimator providing the overall throughput baseline. */
   private final GlobalQpsEstimator qpsEstimator;
   /** Sliding-window detector whose hot-key threshold will be dynamically adjusted. */
   private final SlidingWindowDetector detector;
@@ -46,13 +46,13 @@ public class ThresholdLearner implements Runnable {
    * Executes one threshold recalculation cycle.
    *
    * <p>During the learning period the update is skipped and the fixed
-   * threshold is retained.  After the learning period the current QPS is
+   * threshold is retained.  After the learning period the current qps is
    * multiplied by the configured ratio to derive a new threshold value;
    * small fluctuations within the tolerance window are ignored.
    *
    * <p>Edge cases handled internally:
    * <ul>
-   *   <li>Zero or negative QPS → update is skipped (logged at debug).</li>
+   *   <li>Zero or negative qps → update is skipped (logged at debug).</li>
    *   <li>Computed threshold below 10 → clamped to 10 to prevent noise.</li>
    *   <li>Non-positive tolerance → all changes are applied unconditionally.</li>
    *   <li>Any exception during calculation → logged as error without crashing the scheduler.</li>
@@ -95,7 +95,7 @@ public class ThresholdLearner implements Runnable {
       }
 
       detector.setThreshold(newThreshold);
-      log.debug("Threshold updated: {} -> {} (QPS: {})", oldThreshold, newThreshold, currentQps);
+      log.debug("Threshold updated: {} -> {} (qps: {})", oldThreshold, newThreshold, currentQps);
     } catch (Exception e) {
       log.error("Error during threshold learning: {}", e.getMessage(), e);
     }

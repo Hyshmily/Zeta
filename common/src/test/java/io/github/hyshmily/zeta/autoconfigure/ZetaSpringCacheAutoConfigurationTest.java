@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.annotation.HotKeyCacheExtensionAspect;
+import io.github.hyshmily.zeta.annotation.CacheExtensionAspect;
 import io.github.hyshmily.zeta.cache.annotationsupporter.ZetaCacheManager;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -39,7 +39,7 @@ class ZetaSpringCacheAutoConfigurationTest {
   void configShouldCreateBothBeansWhenAllConditionsMet() {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(ZetaCacheManager.class);
-      assertThat(ctx).hasSingleBean(HotKeyCacheExtensionAspect.class);
+      assertThat(ctx).hasSingleBean(CacheExtensionAspect.class);
     });
   }
 
@@ -51,7 +51,7 @@ class ZetaSpringCacheAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(ZetaSpringCacheAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(ZetaCacheManager.class);
-        assertThat(ctx).doesNotHaveBean(HotKeyCacheExtensionAspect.class);
+        assertThat(ctx).doesNotHaveBean(CacheExtensionAspect.class);
       });
   }
 
@@ -71,9 +71,9 @@ class ZetaSpringCacheAutoConfigurationTest {
     Zeta zeta = mock(Zeta.class);
     ZetaProperties properties = new ZetaProperties();
     ZetaSpringCacheAutoConfiguration config = new ZetaSpringCacheAutoConfiguration();
-    HotKeyCacheExtensionAspect aspect = config.hotKeyCacheExtensionAspect(zeta, properties);
+    CacheExtensionAspect aspect = config.hotKeyCacheExtensionAspect(zeta, properties);
     assertThat(aspect).isNotNull();
-    assertThat(aspect).isInstanceOf(HotKeyCacheExtensionAspect.class);
+    assertThat(aspect).isInstanceOf(CacheExtensionAspect.class);
   }
 
   @Test
@@ -85,7 +85,7 @@ class ZetaSpringCacheAutoConfigurationTest {
       .withClassLoader(new FilteredClassLoader(AbstractValueAdaptingCache.class))
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(ZetaCacheManager.class);
-        assertThat(ctx).doesNotHaveBean(HotKeyCacheExtensionAspect.class);
+        assertThat(ctx).doesNotHaveBean(CacheExtensionAspect.class);
       });
   }
 
@@ -96,7 +96,7 @@ class ZetaSpringCacheAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(ZetaSpringCacheAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(ZetaCacheManager.class);
-        assertThat(ctx).doesNotHaveBean(HotKeyCacheExtensionAspect.class);
+        assertThat(ctx).doesNotHaveBean(CacheExtensionAspect.class);
       });
   }
 }

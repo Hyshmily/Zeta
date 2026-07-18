@@ -30,6 +30,8 @@ import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Function;
@@ -455,7 +457,7 @@ public class Zeta implements DisposableBean {
    * @return an {@link Optional} containing the raw value if present
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    */
-  public <T> Optional<T> peek(String cacheKey) {
+  public <T> Optional<T> peek(@NotNull @NotBlank String cacheKey) {
     Assert.hasText(cacheKey, "cacheKey must not be empty");
     requireAppCache("peek");
     return hotKeyCache.peek(cacheKey);
@@ -497,11 +499,11 @@ public class Zeta implements DisposableBean {
 
   /**
    * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
-   * with explicit report control.
+   * with explicit reportToWorker control.
    *
    * @param cacheKey           the key to retrieve
    * @param reader             the value supplier for cache misses
-   * @param isReportByThisTime whether to report this access to the Worker
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
    * @param <T>                the value type
    * @return an {@link Optional} containing the cached or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -529,12 +531,12 @@ public class Zeta implements DisposableBean {
 
   /**
    * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
-   * with explicit hard TTL and report control.
+   * with explicit hard TTL and reportToWorker control.
    *
    * @param cacheKey           the key to retrieve
    * @param reader             the value supplier for cache misses
    * @param hardTtlMs          hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
-   * @param isReportByThisTime whether to report this access to the Worker
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
    * @param <T>                the value type
    * @return an {@link Optional} containing the cached or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -606,11 +608,11 @@ public class Zeta implements DisposableBean {
 
   /**
    * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}
-   * with explicit report control.
+   * with explicit reportToWorker control.
    *
    * @param cacheKeys          the keys to retrieve
    * @param reader             the value function for cache misses
-   * @param isReportByThisTime whether to report this access to the Worker
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
    * @param <T>                the value type
    * @return a map of key → loaded or cached value (never {@code null})
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -646,12 +648,12 @@ public class Zeta implements DisposableBean {
 
   /**
    * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}
-   * with explicit hard TTL and report control.
+   * with explicit hard TTL and reportToWorker control.
    *
    * @param cacheKeys          the keys to retrieve
    * @param reader             the value function for cache misses
    * @param hardTtlMs          hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
-   * @param isReportByThisTime whether to report this access to the Worker
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
    * @param <T>                the value type
    * @return a map of key → loaded or cached value (never {@code null})
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -697,7 +699,7 @@ public class Zeta implements DisposableBean {
    * @param hardTtlMs  hard TTL override (0 = use configured default;
    *                   {@link Long#MAX_VALUE} for permanent entry)
    * @param softTtlMs  soft TTL override (0 = use configured default)
-   * @param isReportByThisTime  whether to report this access to the Worker
+   * @param isReportByThisTime  whether to reportToWorker this access to the Worker
    * @param <T>        the value type
    * @return a map of key → loaded or cached value (never {@code null})
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -769,11 +771,11 @@ public class Zeta implements DisposableBean {
   /**
    * Convenience shorthand for
    * {@link #getWithSoftExpire(String, Supplier, long, long, boolean) getWithSoftExpire(cacheKey, reader, ...)}
-   * with explicit report control.
+   * with explicit reportToWorker control.
    *
    * @param cacheKey           the key to retrieve
    * @param reader             the value supplier for cache misses / refreshes
-   * @param isReportByThisTime whether to report this access to the Worker
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
    * @param <T>                the value type
    * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -832,11 +834,11 @@ public class Zeta implements DisposableBean {
   /**
    * Convenience shorthand for
    * {@link #getWithSoftExpire(Iterable, Function, long, long, boolean) getWithSoftExpire(cacheKeys, reader, ...)}
-   * with explicit report control.
+   * with explicit reportToWorker control.
    *
    * @param cacheKeys          the keys to retrieve
    * @param reader             the value function for cache misses / refreshes
-   * @param isReportByThisTime whether to report this access to the Worker
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
    * @param <T>                the value type
    * @return a map of key → cached (possibly stale) or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -903,7 +905,7 @@ public class Zeta implements DisposableBean {
    * @param hardTtlMs  hard TTL override (0 = use configured default;
    *                   {@link Long#MAX_VALUE} for pure logical expiry)
    * @param softTtlMs  soft TTL override (0 = use configured default)
-   * @param isReportByThisTime  whether to report this access to the Worker
+   * @param isReportByThisTime  whether to reportToWorker this access to the Worker
    * @param <T>        the value type
    * @return a map of key → cached (possibly stale) or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -1476,7 +1478,7 @@ public class Zeta implements DisposableBean {
 
   /**
    * Increment the local TopK detector directly, bypassing the buffer and the
-   * report-to-Worker path. Useful for bulk-loading historical access patterns
+   * reportToWorker-to-Worker path. Useful for bulk-loading historical access patterns
    * or correcting frequency counts.
    *
    * @param cacheKey the key to record
@@ -1499,7 +1501,7 @@ public class Zeta implements DisposableBean {
 
   /**
    * Notify the local TopK detector that a key was accessed, without triggering
-   * a report to the Worker. Used by {@code @Intercept} path to keep the local
+   * a reportToWorker to the Worker. Used by {@code @Intercept} path to keep the local
    * frequency sketch accurate without flooding the Worker with reports.
    * Null keys are silently ignored.
    *
@@ -1745,7 +1747,7 @@ public class Zeta implements DisposableBean {
 
   /**
    * Add a key pattern to the whitelist. Keys matching this pattern will
-   * skip report recording (no Worker report sent) but still participate in
+   * skip reportToWorker recording (no Worker reportToWorker sent) but still participate in
    * normal cache get/put and local hot-key detection.
    * <p>The pattern is auto-detected by {@link RuleMatcher#of}.
    *

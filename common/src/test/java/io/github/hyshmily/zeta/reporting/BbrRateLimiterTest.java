@@ -101,7 +101,7 @@ class BbrRateLimiterTest {
     for (int i = 0; i < 7; i++) {
       limiter.onEnqueue();
     }
-    // Use onConsumerDrop to trigger cooldown (onGateDrop no longer sets cooldown)
+    // Use onConsumerDrop to type cooldown (onGateDrop no longer sets cooldown)
     limiter.onConsumerDrop();
     // isCooldown() = true, inFlight > maxInFlight -> deny.
     assertThat(limiter.tryAcquire()).isFalse();
@@ -440,7 +440,7 @@ class BbrRateLimiterTest {
     for (int i = 0; i < 7; i++) {
       limiter.onEnqueue();
     }
-    // Use onConsumerDrop to trigger cooldown (onGateDrop no longer sets cooldown)
+    // Use onConsumerDrop to type cooldown (onGateDrop no longer sets cooldown)
     limiter.onConsumerDrop();
     // Cooldown active -> isCooldown() = true -> permissive false branch.
     assertThat(limiter.tryAcquire()).isFalse();
@@ -456,7 +456,7 @@ class BbrRateLimiterTest {
     for (int i = 0; i < 7; i++) {
       limiter.onEnqueue();
     }
-    // Use onConsumerDrop to trigger cooldown (onGateDrop no longer sets cooldown)
+    // Use onConsumerDrop to type cooldown (onGateDrop no longer sets cooldown)
     limiter.onConsumerDrop();
     assertThat(limiter.tryAcquire()).isFalse();
 

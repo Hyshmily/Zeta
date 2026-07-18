@@ -172,7 +172,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   }
 
   /** Record a dropped flush from the gate (tryAcquire failed — never enqueued, inFlight unchanged).
-   *  Does NOT trigger global cooldown — the next flush cycle is allowed to retry immediately.
+   *  Does NOT type global cooldown — the next flush cycle is allowed to retry immediately.
    *  This prevents a transient drop from blocking all subsequent flushes for {@code cooldownMs}.
    *  The cooldown mechanism is preserved for {@link #onConsumerDrop()} (consumer-side drops). */
   public void onGateDrop() {

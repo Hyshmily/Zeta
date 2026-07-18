@@ -24,27 +24,27 @@ import java.lang.annotation.Target;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-@DisplayName("HotKeyCacheTTL annotation tests")
+@DisplayName("CacheTTL annotation tests")
 class ZetaCacheTTLTest {
 
   @Test
   @DisplayName("default hardTtlMs is 0")
   void defaultHardTtlMsIsZero() {
-    HotKeyCacheTTL annotation = FakeClass.class.getAnnotation(HotKeyCacheTTL.class);
+    CacheTTL annotation = FakeClass.class.getAnnotation(CacheTTL.class);
     assertThat(annotation.hardTtlMs()).isZero();
   }
 
   @Test
   @DisplayName("default softTtlMs is 0")
   void defaultSoftTtlMsIsZero() {
-    HotKeyCacheTTL annotation = FakeClass.class.getAnnotation(HotKeyCacheTTL.class);
+    CacheTTL annotation = FakeClass.class.getAnnotation(CacheTTL.class);
     assertThat(annotation.softTtlMs()).isZero();
   }
 
   @Test
   @DisplayName("target is METHOD and TYPE")
   void targetIsMethod() {
-    Target target = HotKeyCacheTTL.class.getAnnotation(Target.class);
+    Target target = CacheTTL.class.getAnnotation(Target.class);
     assertThat(target).isNotNull();
     assertThat(target.value()).contains(ElementType.METHOD, ElementType.TYPE);
   }
@@ -52,11 +52,11 @@ class ZetaCacheTTLTest {
   @Test
   @DisplayName("retention is RUNTIME")
   void retentionIsRuntime() {
-    Retention retention = HotKeyCacheTTL.class.getAnnotation(Retention.class);
+    Retention retention = CacheTTL.class.getAnnotation(Retention.class);
     assertThat(retention).isNotNull();
     assertThat(retention.value()).isEqualTo(RetentionPolicy.RUNTIME);
   }
 
-  @HotKeyCacheTTL
+  @CacheTTL
   private static class FakeClass {}
 }

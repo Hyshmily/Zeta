@@ -230,7 +230,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
 
       // Re-check isHot inside the lock to close the cross-component gap:
       // isHotThisWindow was determined before the lock was acquired, and
-      // a concurrent report for the same key may have pushed the window
+      // a concurrent reportToWorker for the same key may have pushed the window
       // over the threshold in the intervening microseconds.
       // See isHotRecheckInsideLock_shouldRouteToHotWhenCallerSaysCold.
       boolean hot = isHotThisWindow || (ctx.windowSum() >= ctx.threshold());

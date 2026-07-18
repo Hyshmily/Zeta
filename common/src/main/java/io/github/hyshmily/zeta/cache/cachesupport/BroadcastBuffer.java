@@ -38,7 +38,7 @@ import lombok.extern.slf4j.Slf4j;
  * combining multiple writes into a single send cycle.
  *
  * <p>The internal {@code pending} map is lazily initialized on first
- * {@code recordReport()} call to avoid allocating maps that are never used.
+ * {@code reportToWorker()} call to avoid allocating maps that are never used.
  */
 @Slf4j
 @Internal

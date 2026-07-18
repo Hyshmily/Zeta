@@ -74,7 +74,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * <p>Conditionally activates when {@link RabbitTemplate} is on the classpath.
  * Sub-groups for cache sync and Worker listener additionally require Redis.
  *
- * <p><b>Report</b> ({@code zeta.report.enabled}, default {@code true}):
+ * <p><b>Report</b> ({@code zeta.reportToWorker.enabled}, default {@code true}):
  * app instance aggregates access counts and sends them to the Worker via
  * {@link DirectExchange}. No Redis dependency.
  *
@@ -100,8 +100,8 @@ public class ZetaAmqpAutoConfiguration {
   private ZetaAmqpAutoConfiguration() {}
 
   /**
-   * Inner configuration for app-to-Worker report routing via DirectExchange.
-   * Creates the exchange, publisher, ring manager (optional), reporter, and report scheduler.
+   * Inner configuration for app-to-Worker reportToWorker routing via DirectExchange.
+   * Creates the exchange, publisher, ring manager (optional), reporter, and reportToWorker scheduler.
    * Active by default when a {@link RabbitTemplate} bean is present.
    */
   @Configuration
@@ -110,8 +110,8 @@ public class ZetaAmqpAutoConfiguration {
   static class ReportConfiguration {
 
     /**
-     * Declare the DirectExchange for report routing (app → Worker).
-     * Routing keys ({@code report.<appName>.<nodeId>}) ensure each key's
+     * Declare the DirectExchange for reportToWorker routing (app → Worker).
+     * Routing keys ({@code reportToWorker.<appName>.<nodeId>}) ensure each key's
      * messages land on the correct worker queue.
      *
      * @param properties the HotKey configuration properties
@@ -123,7 +123,7 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Create the {@link MessageConverter} for serializing report messages to JSON.
+     * Create the {@link MessageConverter} for serializing reportToWorker messages to JSON.
      * <p>
      * Uses Jackson JSON serialization (not Java serialization) for efficiency and cross-version
      * compatibility.
@@ -150,7 +150,7 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Create the {@link RingManager} for consistent-hashing report routing.
+     * Create the {@link RingManager} for consistent-hashing reportToWorker routing.
      *
      * @param properties the HotKey configuration properties
      * @return a new {@link RingManager} instance
@@ -182,7 +182,7 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Create the BBR adaptive rate limiter for the report publisher.
+     * Create the BBR adaptive rate limiter for the reportToWorker publisher.
      * <p>
      * Uses the CPU monitor and the configured BBR parameters. When disabled
      * (or when the CPU monitor itself hasn't been fully initialized yet),
@@ -215,7 +215,7 @@ public class ZetaAmqpAutoConfiguration {
      * Create the {@link KeyReporter} that aggregates per-key counts and flushes them
      * at the configured interval.
      *
-     * @param reportPublisher       the report publisher for sending batches
+     * @param reportPublisher       the reportToWorker publisher for sending batches
      * @param properties            the HotKey configuration properties
      * @param ringManager           the consistent-hash ring manager
      * @param healthViewProvider    optional provider for the cluster health view

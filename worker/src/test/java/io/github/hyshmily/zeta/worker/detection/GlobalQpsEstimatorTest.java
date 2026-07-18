@@ -25,7 +25,7 @@ import org.junit.jupiter.api.Test;
 class GlobalQpsEstimatorTest {
 
   /**
-   * Verifies a new {@link GlobalQpsEstimator} starts with zero window total and zero QPS.
+   * Verifies a new {@link GlobalQpsEstimator} starts with zero window total and zero qps.
    */
   @Test
   void shouldConstructWithInitializedSlices() {
@@ -47,7 +47,7 @@ class GlobalQpsEstimatorTest {
   }
 
   /**
-   * Verifies that QPS is correctly derived from the total count and the configured window duration.
+   * Verifies that qps is correctly derived from the total count and the configured window duration.
    */
   @Test
   void shouldComputeQpsCorrectly() {
@@ -106,7 +106,7 @@ class GlobalQpsEstimatorTest {
   }
 
   /**
-   * Verifies that a very large total does not overflow and QPS is computed correctly.
+   * Verifies that a very large total does not overflow and qps is computed correctly.
    */
   @Test
   void shouldHandleLargeTotalCount() {

@@ -21,7 +21,7 @@ import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link ZetaDecision} recordReport covering factory methods and decision type enum.
+ * Tests for {@link ZetaDecision} reportToWorker covering factory methods and decision type enum.
  */
 class ZetaDecisionTest {
 

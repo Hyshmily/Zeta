@@ -57,7 +57,7 @@ import org.springframework.beans.factory.InitializingBean;
 public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
 
   private final HeavyKeeper heavyKeeper;
-  private final BufferedCounter bufferedCounter;
+  private final BufferedCounter cacheBufferedCounter;
 
   /**
    * Creates a detector that wraps the given HeavyKeeper instance.
@@ -67,7 +67,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   public HotKeyDetector(HeavyKeeper heavyKeeper) {
     this.heavyKeeper = heavyKeeper;
-    this.bufferedCounter = new BufferedCounter(heavyKeeper::addDirect);
+    this.cacheBufferedCounter = new BufferedCounter(heavyKeeper::addDirect);
   }
 
   /**
@@ -78,7 +78,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   public HotKeyDetector(HeavyKeeper heavyKeeper, ScheduledExecutorService scheduler) {
     this.heavyKeeper = heavyKeeper;
-    this.bufferedCounter = new BufferedCounter(heavyKeeper::addDirect, scheduler);
+    this.cacheBufferedCounter = new BufferedCounter(heavyKeeper::addDirect, scheduler);
   }
 
   /**
@@ -87,7 +87,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   @Override
   public void afterPropertiesSet() {
-    bufferedCounter.afterPropertiesSet();
+    cacheBufferedCounter.afterPropertiesSet();
   }
 
   /**
@@ -96,7 +96,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   @Override
   public void destroy() {
-    bufferedCounter.destroy();
+    cacheBufferedCounter.destroy();
   }
 
   /**
@@ -135,7 +135,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
     if (invalidCacheKey(key)) {
       return;
     }
-    bufferedCounter.count(key, TOPK_INCR);
+    cacheBufferedCounter.count(key, TOPK_INCR);
   }
 
   /**
@@ -148,7 +148,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
     if (invalidCacheKey(key)) {
       return;
     }
-    bufferedCounter.count(key, delta);
+    cacheBufferedCounter.count(key, delta);
   }
 
   /**
@@ -161,7 +161,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
       if (invalidCacheKey(entry.getKey())) {
         continue;
       }
-      bufferedCounter.count(entry.getKey(), entry.getValue());
+      cacheBufferedCounter.count(entry.getKey(), entry.getValue());
     }
   }
 

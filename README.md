@@ -214,7 +214,7 @@ See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 | Write         | `putThrough`, `putLocal`, `invalidateAfterPut`, `refresh`, `refreshAll`                                                           |
 | Invalidate    | `invalidate`, `invalidateAllLocal`, `compareAndInvalidate`                                                                        |
 | Atomic        | `compareAndSet`, `compareAndInvalidate`                                                                                           |
-| Fluent        | `read(key)` → `ZetaReadQuery`, `write(key)` → `ZetaWriteCommand`                                                              |
+| Fluent        | `read(key)` → `ZetaReadQuery`, `write(key)` → `ZetaWriteCommand`                                                                  |
 | Introspection | `peek`, `estimatedSize`, `stats`, `getLocalCache`, `isLocalHotKey`, `isWorkerHotKey`, `returnLocalHotKeys`, `returnWorkerHotKeys` |
 | Rule          | `addBlacklist`, `removeBlacklist`, `addWhitelist`, `removeWhitelist`, `evaluateRule`, `getAllRules`, `clearAllRules`              |
 | Lock          | `tryLock`, `tryLockAndRun`                                                                                                        |
@@ -321,9 +321,9 @@ Both operations are delegation-based: the caller is responsible for re-reading o
 
 Worker mode provides cluster-wide hotspot detection via dedicated nodes. App instances periodically report access counts; the Worker runs a sliding window + state machine pipeline and broadcasts HOT/COOL decisions back to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state`.
 
-| Mode        | `worker.enabled`  | Activated Beans                                                             |
-| ----------- | ----------------- | --------------------------------------------------------------------------- |
-| App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                               |
+| Mode        | `worker.enabled`  | Activated Beans                                                           |
+| ----------- | ----------------- | ------------------------------------------------------------------------- |
+| App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                             |
 | Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `ZetaModeException`) |
 
 **Worker Cluster Health:** Set `zeta.local.expected-worker-count` to the expected number of Workers in production. When set >0, `ClusterHealthView` uses majority quorum (`> expectedWorkerCount / 2`) as the healthy Worker threshold; when 0 (default), the cluster is considered unhealthy until at least one heartbeat is received. This enables precise detection of partial Worker failures and graceful degradation decisions.
@@ -349,7 +349,7 @@ Enable `zeta.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `
 @Intercept @Fallback
 public User getUser(Long id) { ... }
 
-// QPS rate-limit interception
+// qps rate-limit interception
 @Cacheable(cacheNames = "products", key = "#id")
 @Intercept(trigger = InterceptTrigger.QPS, QPS = 500, fallback = "'throttled'")
 @Fallback
@@ -372,10 +372,10 @@ Enable `zeta.sync.enabled=true`.
 
 Enable `zeta.sync.enabled=true` to enable cross-instance rule synchronization. The rule system supports two actions:
 
-| Action            | Effect on matching keys                                                              |
-| ----------------- | ------------------------------------------------------------------------------------ |
-| `BLOCK`           | `get()` / `getWithSoftExpire()` throw `ZetaBlockedException`; `putThrough()` skips |
-| `ALLOW_NO_REPORT` | Process normally but skip Worker reporting (reduces noise from high-frequency keys)  |
+| Action            | Effect on matching keys                                                             |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| `BLOCK`           | `get()` / `getWithSoftExpire()` throw `ZetaBlockedException`; `putThrough()` skips  |
+| `ALLOW_NO_REPORT` | Process normally but skip Worker reporting (reduces noise from high-frequency keys) |
 
 ### Pattern Types
 

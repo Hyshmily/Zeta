@@ -86,13 +86,13 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   /**
-   * Verifies that ReportConfiguration is skipped when zeta.report.enabled is false.
+   * Verifies that ReportConfiguration is skipped when zeta.reportToWorker.enabled is false.
    */
   @Test
   void reportConfigIsSkippedWhenPropertyIsDisabled() {
     new ApplicationContextRunner()
       .withConfiguration(AutoConfigurations.of(ZetaAmqpAutoConfiguration.class))
-      .withPropertyValues("zeta.report.enabled=false")
+      .withPropertyValues("zeta.reportToWorker.enabled=false")
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(ReportPublisher.class);
         assertThat(ctx).doesNotHaveBean(KeyReporterImpl.class);
@@ -114,7 +114,7 @@ class ZetaAmqpAutoConfigurationTest {
   void reportPublisherIsCreatedWithCorrectProperties() {
     RabbitTemplate rabbitTemplate = mock(RabbitTemplate.class);
     ZetaProperties properties = new ZetaProperties();
-    properties.setReportExchange("test.report.exchange");
+    properties.setReportExchange("test.reportToWorker.exchange");
     properties.setAppName("test-app");
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
@@ -391,13 +391,13 @@ class ZetaAmqpAutoConfigurationTest {
   @Test
   void hotkeyReportExchangeIsCreatedWithCorrectProperties() {
     ZetaProperties properties = new ZetaProperties();
-    properties.setReportExchange("test.report.exchange");
+    properties.setReportExchange("test.reportToWorker.exchange");
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
     DirectExchange exchange = config.hotkeyReportExchange(properties);
 
     assertThat(exchange).isNotNull();
-    assertThat(exchange.getName()).isEqualTo("test.report.exchange");
+    assertThat(exchange.getName()).isEqualTo("test.reportToWorker.exchange");
     assertThat(exchange.isDurable()).isTrue();
     assertThat(exchange.isAutoDelete()).isFalse();
   }

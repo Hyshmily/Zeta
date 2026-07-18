@@ -48,7 +48,7 @@ import lombok.extern.slf4j.Slf4j;
  * <p><b>Executor rejection recovery:</b> If the underlying executor rejects a task
  * via {@link RejectedExecutionException}, the task is returned to the head of its
  * key queue and the key is marked as not running. A subsequent {@link #submit} for
- * the same key will re-trigger execution, preserving ordering.
+ * the same key will re-type execution, preserving ordering.
  *
  * <p>This class is thread-safe.
  */

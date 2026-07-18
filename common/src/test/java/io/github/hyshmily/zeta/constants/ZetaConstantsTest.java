@@ -36,18 +36,18 @@ class ZetaConstantsTest {
     assertThat(ZetaConstants.Thread.PREFIX_HOTKEY).isEqualTo("zeta-");
     assertThat(ZetaConstants.Thread.PREFIX_SYNC).isEqualTo("zeta-sync");
     assertThat(ZetaConstants.Thread.PREFIX_WORKER).isEqualTo("zeta-worker");
-    assertThat(ZetaConstants.Thread.PREFIX_REPORT).isEqualTo("zeta-report");
+    assertThat(ZetaConstants.Thread.PREFIX_REPORT).isEqualTo("zeta-reportToWorker");
   }
 
   @Test
   void shouldHaveExpectedRoutingKeys() {
     assertThat(ZetaConstants.Routing.KEY_BROADCAST).isEqualTo("send.");
-    assertThat(ZetaConstants.Routing.KEY_REPORT).isEqualTo("report.");
+    assertThat(ZetaConstants.Routing.KEY_REPORT).isEqualTo("reportToWorker.");
   }
 
   @Test
   void shouldHaveExpectedQueuePrefix() {
-    assertThat(ZetaConstants.Routing.QUEUE_PREFIX_REPORT).isEqualTo("zeta.report.");
+    assertThat(ZetaConstants.Routing.QUEUE_PREFIX_REPORT).isEqualTo("zeta.reportToWorker.");
   }
 
   @Test
@@ -117,7 +117,7 @@ class ZetaConstantsTest {
 
   @Test
   void shouldHaveExpectedExchangeNames() {
-    assertThat(ZetaConstants.Exchange.REPORT).isEqualTo("zeta.report.exchange");
+    assertThat(ZetaConstants.Exchange.REPORT).isEqualTo("zeta.reportToWorker.exchange");
     assertThat(ZetaConstants.Exchange.HEARTBEAT).isEqualTo("zeta.heartbeat.exchange");
     assertThat(ZetaConstants.Exchange.BROADCAST).isEqualTo("zeta.send.exchange");
     assertThat(ZetaConstants.Exchange.SYNC).isEqualTo("zeta.sync.exchange");

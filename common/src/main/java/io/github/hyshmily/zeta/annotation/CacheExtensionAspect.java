@@ -63,7 +63,7 @@ import org.springframework.expression.spel.standard.SpelExpressionParser;
  *   <li>Resolves the cache key from SpEL</li>
  *   <li>If {@code @Intercept} is present and the key is a local hot key,
  *       skips the method and returns the cached value or fallback</li>
- *   <li>Applies TTL from {@code @HotKeyCacheTTL}, null-caching from
+ *   <li>Applies TTL from {@code @CacheTTL}, null-caching from
  *       {@code @NullCaching}, and send suppression from
  *       {@link Broadcast @Broadcast} into {@link ZetaCacheContext}</li>
  *   <li>Proceeds to the Spring {@code CacheInterceptor}</li>
@@ -73,14 +73,14 @@ import org.springframework.expression.spel.standard.SpelExpressionParser;
  *
  * <p>For {@code @CachePut} and {@code @CacheEvict}, the aspect only reads
  * {@link Broadcast @Broadcast} to set the send suppression flag. All other
- * companion annotations ({@code @HotKeyCacheTTL}, {@code @Intercept},
+ * companion annotations ({@code @CacheTTL}, {@code @Intercept},
  * {@code @Fallback}, {@code @NullCaching}) are ignored on these methods.
  */
 @Internal
 @Aspect
 @Order(Ordered.HIGHEST_PRECEDENCE)
 @Slf4j
-public class HotKeyCacheExtensionAspect {
+public class CacheExtensionAspect {
 
   /** The HotKey facade for cache introspection. */
   private final Zeta zeta;
@@ -111,10 +111,10 @@ public class HotKeyCacheExtensionAspect {
     .build();
 
   /** Cache of resolved companion annotations keyed by Method. */
-  private final Map<Method, HotKeyPreload> preloadCache = new ConcurrentHashMap<>();
+  private final Map<Method, Preload> preloadCache = new ConcurrentHashMap<>();
 
   private record AnnotationSet(
-    HotKeyCacheTTL ttl,
+    CacheTTL ttl,
     Intercept intercept,
     Fallback fallback,
     NullCaching nullCaching,
@@ -124,25 +124,25 @@ public class HotKeyCacheExtensionAspect {
   private final Map<Method, AnnotationSet> annotationCache = new ConcurrentHashMap<>();
 
   /**
-   * Per-key QPS rate-limit buckets for {@link InterceptTrigger#QPS} interception.
-   * Each key gets a bucket that refills at the configured QPS rate.
+   * Per-key qps rate-limit buckets for {@link InterceptType#QPS} interception.
+   * Each key gets a bucket that refills at the configured qps rate.
    * Bounded at 100k entries; idle buckets are evicted by Caffeine.
    */
   private final Cache<String, Bucket> qpsBuckets = Caffeine.newBuilder().maximumSize(100_000).build();
 
   /**
-   * Per-key concurrent thread counters for {@link InterceptTrigger#CONCURRENT_THREADS} interception.
+   * Per-key concurrent thread counters for {@link InterceptType#CONCURRENT_THREADS} interception.
    * Incremented before method execution, decremented in {@code finally}.
    */
   private final ConcurrentHashMap<String, AtomicInteger> concurrentCounters = new ConcurrentHashMap<>();
 
   /**
-   * Creates a new {@code HotKeyCacheExtensionAspect}.
+   * Creates a new {@code CacheExtensionAspect}.
    *
    * @param zeta     the HotKey facade
    * @param properties configuration properties
    */
-  public HotKeyCacheExtensionAspect(Zeta zeta, ZetaProperties properties) {
+  public CacheExtensionAspect(Zeta zeta, ZetaProperties properties) {
     this.zeta = zeta;
     this.properties = properties;
   }
@@ -167,16 +167,16 @@ public class HotKeyCacheExtensionAspect {
     String key = resolveKey(pjp, cacheable.key(), method);
     String prefixedKey = cacheName + properties.getSpringCache().getKeySeparator() + key;
 
-    HotKeyPreload preload = resolvePreloadAnnotation(method);
+    Preload preload = resolvePreloadAnnotation(method);
     AnnotationSet ann = resolveAnnotations(method);
 
-    HotKeyCacheTTL ttl = ann.ttl();
+    CacheTTL ttl = ann.ttl();
     Intercept intercept = ann.intercept();
     Fallback fallback = ann.fallback();
     NullCaching nullCaching = ann.nullCaching();
     Broadcast broadcast = ann.broadcast();
 
-    // @HotKeyPreload: inflate detection counts after @Intercept (so first call loads normally)
+    // @Preload: inflate detection counts after @Intercept (so first call loads normally)
     // but before context setup (so pjp.proceed() → CacheInterceptor sees inflated counts)
     if (preload != null) {
       handlePreload(preload, pjp, cacheName, method);
@@ -187,7 +187,7 @@ public class HotKeyCacheExtensionAspect {
     if (intercept != null) {
       String interceptFallback = intercept.fallback();
 
-      switch (intercept.trigger()) {
+      switch (intercept.type()) {
         case FORCE -> {
           return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
         }
@@ -197,7 +197,7 @@ public class HotKeyCacheExtensionAspect {
           }
         }
         case QPS -> {
-          int qpsThreshold = intercept.QPS();
+          int qpsThreshold = intercept.qps();
 
           if (qpsThreshold > 0) {
             Bucket bucket = qpsBuckets.get(prefixedKey, k ->
@@ -257,7 +257,7 @@ public class HotKeyCacheExtensionAspect {
   }
 
   /**
-   * Handle {@link HotKeyPreload @HotKeyPreload} by inflating HeavyKeeper counts
+   * Handle {@link Preload @Preload} by inflating HeavyKeeper counts
    * for static and/or dynamic cache keys.
    *
    * <p>Each key is inflated at most once, tracked by the bounded Caffeine cache
@@ -265,15 +265,15 @@ public class HotKeyCacheExtensionAspect {
    * unbounded growth from dynamic key expressions while ensuring automatic
    * re-inflation if a key needs to be preloaded again after a long idle period.
    *
-   * <p>Static keys ({@link HotKeyPreload#keys}) are inflated immediately.
-   * Dynamic keys ({@link HotKeyPreload#keyExpr}) are evaluated via SpEL against
+   * <p>Static keys ({@link Preload#keys}) are inflated immediately.
+   * Dynamic keys ({@link Preload#keyExpr}) are evaluated via SpEL against
    * the current method parameters.
    *
    * @param preload   the annotation instance
    * @param pjp       the join point providing method arguments and target
    * @param cacheName the resolved cache name from {@code @Cacheable}
    */
-  private void handlePreload(HotKeyPreload preload, ProceedingJoinPoint pjp, String cacheName, Method method) {
+  private void handlePreload(Preload preload, ProceedingJoinPoint pjp, String cacheName, Method method) {
     String separator = properties.getSpringCache().getKeySeparator();
     int preloadCount = preload.count() > 0 ? preload.count() : Integer.MAX_VALUE;
 
@@ -303,7 +303,7 @@ public class HotKeyCacheExtensionAspect {
           }
         }
       } catch (Exception e) {
-        log.warn("Failed to evaluate @HotKeyPreload keyExpr '{}': {}", keyExpr, e.toString());
+        log.warn("Failed to evaluate @Preload keyExpr '{}': {}", keyExpr, e.toString());
       }
     }
   }
@@ -314,7 +314,7 @@ public class HotKeyCacheExtensionAspect {
    * before the method reaches Spring's {@code CacheInterceptor}.
    *
    * <p>Only the {@code @Broadcast} annotation is read here. Other companion
-   * annotations ({@code @HotKeyCacheTTL}, {@code @Intercept}, {@code @Fallback},
+   * annotations ({@code @CacheTTL}, {@code @Intercept}, {@code @Fallback},
    * {@code @NullCaching}) are ignored on write/evict methods.
    *
    * @param pjp the join point for the intercepted method
@@ -551,26 +551,26 @@ public class HotKeyCacheExtensionAspect {
   }
 
   /**
-   * Resolve {@link HotKeyPreload @HotKeyPreload} from the given method,
+   * Resolve {@link Preload @Preload} from the given method,
    * using a local cache to avoid repeated reflection lookups.
    *
    * @param method the candidate method
-   * @return the {@code @HotKeyPreload} annotation if present, or {@code null}
+   * @return the {@code @Preload} annotation if present, or {@code null}
    */
-  private HotKeyPreload resolvePreloadAnnotation(Method method) {
-    return preloadCache.computeIfAbsent(method, m -> m.getAnnotation(HotKeyPreload.class));
+  private Preload resolvePreloadAnnotation(Method method) {
+    return preloadCache.computeIfAbsent(method, m -> m.getAnnotation(Preload.class));
   }
 
   private AnnotationSet resolveAnnotations(Method method) {
     return annotationCache.computeIfAbsent(method, m -> {
-      HotKeyCacheTTL ttl = null;
+      CacheTTL ttl = null;
       Intercept intercept = null;
       Fallback fallback = null;
       NullCaching nullCaching = null;
       Broadcast broadcast = null;
 
       for (Annotation a : m.getDeclaredAnnotations()) {
-        if (a instanceof HotKeyCacheTTL t) {
+        if (a instanceof CacheTTL t) {
           ttl = t;
         } else if (a instanceof Intercept i) {
           intercept = i;

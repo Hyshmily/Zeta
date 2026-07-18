@@ -20,7 +20,7 @@ import io.github.hyshmily.zeta.Zeta;
 /**
  * Immutable snapshot of L1 (Caffeine) cache performance counters and current capacity.
  *
- * <p>This recordReport is returned by {@link Zeta#stats()}
+ * <p>This reportToWorker is returned by {@link Zeta#stats()}
  * for monitoring and observability purposes.
  *
  * <p><b>Availability:</b>
@@ -29,7 +29,7 @@ import io.github.hyshmily.zeta.Zeta;
  *       {@code evictionCount} are populated <em>only</em> when Caffeine's
  *       {@code recordStats()} is enabled (automatic when Micrometer is on
  *       the classpath). When stats recording is disabled, all four fields
- *       report {@code 0}.</li>
+ *       reportToWorker {@code 0}.</li>
  *   <li>{@code estimatedSizeOfKeysCount} is always available — it reflects the
  *       underlying Caffeine estimate and does not require stats recording.</li>
  * </ul>

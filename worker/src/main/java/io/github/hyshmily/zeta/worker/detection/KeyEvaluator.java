@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;
 
 /**
- * Unified entry point for the Worker's per-report evaluation pipeline.
+ * Unified entry point for the Worker's per-reportToWorker evaluation pipeline.
  *
  * <p>Orchestrates the three-stage evaluation in a single call:
  * <ol>
@@ -65,7 +65,7 @@ public class KeyEvaluator {
   private final ConcurrentHashMap<String, WindowSumHistory> windowSumHistories = new ConcurrentHashMap<>();
 
   /**
-   * Evaluates a single key report and returns a decision.
+   * Evaluates a single key reportToWorker and returns a decision.
    *
    * <p>Updates the sliding window, queries the HeavyKeeper sketch,
    * computes the per-key coefficient of variation from recent window
@@ -75,7 +75,7 @@ public class KeyEvaluator {
    * broadcast, or none).
    *
    * @param key   the cache key
-   * @param count the raw access count from the batch report
+   * @param count the raw access count from the batch reportToWorker
    * @return a non-null {@link ZetaDecision} with the action to take
    */
   public ZetaDecision evaluate(String key, long count) {

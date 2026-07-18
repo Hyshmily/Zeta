@@ -110,15 +110,15 @@ class ZetaReporterTest {
 
   @Test
   void record_Report_shouldIncrementPendingCount() {
-    reporter.recordReport("key1");
-    reporter.recordReport("key1");
-    reporter.recordReport("key2");
+    reporter.reportToWorker("key1");
+    reporter.reportToWorker("key1");
+    reporter.reportToWorker("key2");
     assertThat(reporter.getPendingKeyCount()).isPositive();
   }
 
   @Test
   void record_Report_withNullKey_shouldThrow() {
-    assertThatThrownBy(() -> reporter.recordReport(null)).isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> reporter.reportToWorker(null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
@@ -132,11 +132,11 @@ class ZetaReporterTest {
   void stop_shouldPreventFurtherPublishing() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.recordReport("key-b");
+    reporter.reportToWorker("key-b");
     awaitPublish(1);
     int beforeStop = testPublisher.publishCount;
     reporter.stop();
-    reporter.recordReport("key-c");
+    reporter.reportToWorker("key-c");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 200);
     assertThat(testPublisher.publishCount).isEqualTo(beforeStop);
   }
@@ -163,7 +163,7 @@ class ZetaReporterTest {
   void record_Report_shouldPublishAfterFlush() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.recordReport("key-a");
+    reporter.reportToWorker("key-a");
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
@@ -172,9 +172,9 @@ class ZetaReporterTest {
   void multipleRecordsForSameKey_shouldPublishAggregatedCount() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.recordReport("agg-key");
-    reporter.recordReport("agg-key");
-    reporter.recordReport("agg-key");
+    reporter.reportToWorker("agg-key");
+    reporter.reportToWorker("agg-key");
+    reporter.reportToWorker("agg-key");
     awaitPublish(1);
     long total = testPublisher.messages
       .stream()
@@ -189,8 +189,8 @@ class ZetaReporterTest {
   void recordsForDifferentKeys_shouldPublishAsBatch() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.recordReport("key-x");
-    reporter.recordReport("key-y");
+    reporter.reportToWorker("key-x");
+    reporter.reportToWorker("key-y");
     awaitPublish(1);
     assertThat(testPublisher.messages).isNotEmpty();
     ReportMessage first = testPublisher.messages.get(0);
@@ -200,7 +200,7 @@ class ZetaReporterTest {
   @Test
   void gracefulDegradation_shouldDropRecordsWhenClusterUnhealthy() throws Exception {
     reporter.start();
-    reporter.recordReport("ghost-key");
+    reporter.reportToWorker("ghost-key");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 500);
     assertThat(testPublisher.publishCount).isZero();
   }
@@ -230,7 +230,7 @@ class ZetaReporterTest {
   void record_Report_withEmptyKey_shouldWork() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.recordReport("");
+    reporter.reportToWorker("");
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
@@ -239,7 +239,7 @@ class ZetaReporterTest {
   void record_Report_withVeryLongKey_shouldWork() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.recordReport("k".repeat(10_000));
+    reporter.reportToWorker("k".repeat(10_000));
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
   }
@@ -269,7 +269,7 @@ class ZetaReporterTest {
     registerWorker(healthView, "worker-1");
     reporter.start();
     for (int i = 0; i < 100; i++) {
-      reporter.recordReport("bulk-key-" + i);
+      reporter.reportToWorker("bulk-key-" + i);
     }
     awaitPublish(1);
     assertThat(testPublisher.publishCount).isPositive();
@@ -301,7 +301,7 @@ class ZetaReporterTest {
     reporter.setBbrRateLimiter(bbr);
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.recordReport("bbr-key");
+    reporter.reportToWorker("bbr-key");
     awaitPublish(1);
     assertThat(reporter.bbrPassed()).isPositive();
   }
@@ -314,7 +314,7 @@ class ZetaReporterTest {
     reporter.setBbrRateLimiter(bbr);
     registerWorker(healthView, "worker-1");
     reporter.start();
-    reporter.recordReport("high-cpu-key");
+    reporter.reportToWorker("high-cpu-key");
     Thread.sleep(REPORT_INTERVAL_MS * 3 + 500);
     assertThat(reporter.bbrDropped()).isNotNegative();
   }

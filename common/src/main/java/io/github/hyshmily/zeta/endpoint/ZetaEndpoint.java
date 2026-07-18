@@ -71,7 +71,7 @@ public class ZetaEndpoint {
   private final SingleFlight singleFlight;
   /** HotKey configuration properties. */
   private final ZetaProperties properties;
-  /** App-to-Worker report aggregator. */
+  /** App-to-Worker reportToWorker aggregator. */
   private final KeyReporter hotKeyReporter;
   /** Blacklist/whitelist rule evaluator. */
   private final RuleMatcher ruleMatcher;

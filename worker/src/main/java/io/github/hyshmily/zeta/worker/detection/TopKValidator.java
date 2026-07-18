@@ -38,7 +38,7 @@ import lombok.extern.slf4j.Slf4j;
  * be send again until it drops out of the Top-K for a sustained period (auto-cooling).
  *
  * <p>This hysteresis prevents flapping: a key that briefly enters and leaves the Top-K won't
- * trigger unnecessary broadcasts.
+ * type unnecessary broadcasts.
  *
  * <p><b>Known limitation — local‑only validation:</b> All validation is
  * purely local to this Worker instance — cross‑checking this Worker's

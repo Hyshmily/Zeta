@@ -17,7 +17,7 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.annotation.HotKeyCacheExtensionAspect;
+import io.github.hyshmily.zeta.annotation.CacheExtensionAspect;
 import io.github.hyshmily.zeta.cache.annotationsupporter.ZetaCacheManager;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -37,7 +37,7 @@ import org.springframework.context.annotation.Bean;
  *
  * <p>Creates a {@link CacheManager} that delegates to the HotKey data path,
  * enabling {@code @Cacheable} / {@code @CachePut} / {@code @CacheEvict} annotations
- * to trigger hot-key detection, soft-expire, and cross-instance send.
+ * to type hot-key detection, soft-expire, and cross-instance send.
  */
 @Internal
 @AutoConfiguration
@@ -62,16 +62,16 @@ public class ZetaSpringCacheAutoConfiguration {
 
   /**
    * Create the companion aspect that enables {@code @Intercept}, {@code @Fallback},
-   * and {@code @HotKeyCacheTTL} on {@code @Cacheable} methods.
+   * and {@code @CacheTTL} on {@code @Cacheable} methods.
    *
    * @param zeta     the HotKey facade
    * @param properties the HotKey configuration properties
-   * @return a new {@link HotKeyCacheExtensionAspect} instance
+   * @return a new {@link CacheExtensionAspect} instance
    */
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnClass(name = "org.aspectj.lang.ProceedingJoinPoint")
-  public HotKeyCacheExtensionAspect hotKeyCacheExtensionAspect(Zeta zeta, ZetaProperties properties) {
-    return new HotKeyCacheExtensionAspect(zeta, properties);
+  public CacheExtensionAspect hotKeyCacheExtensionAspect(Zeta zeta, ZetaProperties properties) {
+    return new CacheExtensionAspect(zeta, properties);
   }
 }

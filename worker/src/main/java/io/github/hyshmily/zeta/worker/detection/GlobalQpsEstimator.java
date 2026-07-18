@@ -19,7 +19,7 @@ package io.github.hyshmily.zeta.worker.detection;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * A sliding‑window based estimator of the overall QPS (queries per second)
+ * A sliding‑window based estimator of the overall qps (queries per second)
  * across all keys in the current shard.
  *
  * <p>Uses the same circular‑buffer algorithm as {@link SlidingWindowDetector}
@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p><b>Known limitation — per‑shard only:</b> This estimator only sees
  * traffic routed to <em>this</em> Worker shard by the consistent‑hash ring.
- * It does <b>not</b> reflect global cluster QPS. When the cluster scales
+ * It does <b>not</b> reflect global cluster qps. When the cluster scales
  * (e.g. 5→3 Workers), per‑shard load redistributes non‑linearly, and the
  * derived threshold will shift accordingly. Not suitable for
  * cluster‑wide adaptive decisions without cross‑Worker coordination.
@@ -57,7 +57,7 @@ public class GlobalQpsEstimator {
   private final AtomicLong[] slices;
 
   /**
-   * Creates a global QPS estimator with a sliding window partitioned into the
+   * Creates a global qps estimator with a sliding window partitioned into the
    * given number of slices.
    *
    * <p>The window duration must be evenly divisible by the number of slices,
@@ -134,7 +134,7 @@ public class GlobalQpsEstimator {
    * <p>Consumed by {@link ThresholdLearner} to dynamically adjust the hot-key
    * threshold in response to overall traffic changes.
    *
-   * @return the estimated QPS value (may be {@code 0.0}; never negative)
+   * @return the estimated qps value (may be {@code 0.0}; never negative)
    */
   public double getQps() {
     long total = getWindowTotal();

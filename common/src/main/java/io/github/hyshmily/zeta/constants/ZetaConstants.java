@@ -82,7 +82,7 @@ public interface ZetaConstants {
     /** Worker-mode tasks. */
     String PREFIX_WORKER = "zeta-worker";
     /** Report submission tasks. */
-    String PREFIX_REPORT = "zeta-report";
+    String PREFIX_REPORT = "zeta-reportToWorker";
     /** Shared scheduler pool. */
     String PREFIX_SCHEDULER = "zeta-scheduler";
   }
@@ -92,12 +92,12 @@ public interface ZetaConstants {
   interface Routing {
     /** Prefix for send decisions (HOT/COOL) from worker to apps. */
     String KEY_BROADCAST = "send.";
-    /** Prefix for report messages from apps to worker. */
-    String KEY_REPORT = "report.";
+    /** Prefix for reportToWorker messages from apps to worker. */
+    String KEY_REPORT = "reportToWorker.";
     /** Prefix for heartbeat messages from workers to apps. */
     String KEY_HEARTBEAT = "heartbeat.";
-    /** Queue name prefix for report queues (appended with app name). */
-    String QUEUE_PREFIX_REPORT = "zeta.report.";
+    /** Queue name prefix for reportToWorker queues (appended with app name). */
+    String QUEUE_PREFIX_REPORT = "zeta.reportToWorker.";
   }
 
   /** Source identifiers for decision origins. */
@@ -123,8 +123,8 @@ public interface ZetaConstants {
   /** Exchange names for AMQP routing. */
   @Internal
   interface Exchange {
-    /** App-to-Worker report routing (topic). */
-    String REPORT = "zeta.report.exchange";
+    /** App-to-Worker reportToWorker routing (topic). */
+    String REPORT = "zeta.reportToWorker.exchange";
     /** Worker heartbeat broadcasts (topic). */
     String HEARTBEAT = "zeta.heartbeat.exchange";
     /** Worker HOT/COOL decision broadcasts (fanout). */

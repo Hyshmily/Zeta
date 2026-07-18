@@ -72,7 +72,7 @@ public class KeyReporterImpl implements KeyReporter {
   private static final double EAGER_SWAP_RATIO = 0.8;
 
   /** Double-buffered counter aggregating per-key access counts between flushes. */
-  private final BufferedCounter bufferedCounter;
+  private final BufferedCounter reportBufferedCounter;
 
   /** Publishes aggregated reports to RabbitMQ. */
   private final ReportPublisher reportPublisher;
@@ -81,9 +81,9 @@ public class KeyReporterImpl implements KeyReporter {
   @Getter
   private final ScheduledExecutorService scheduler;
 
-  /** Fixed delay between report flushes in milliseconds. */
+  /** Fixed delay between reportToWorker flushes in milliseconds. */
   private final long reportIntervalMs;
-  /** Name of this application instance, included in report messages. */
+  /** Name of this application instance, included in reportToWorker messages. */
   private final String appName;
   /** Maximum capacity of the dispatcher work queue. */
   private final int queueCapacity;
@@ -105,16 +105,16 @@ public class KeyReporterImpl implements KeyReporter {
 
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
-  /** The report dispatcher instance; created on start(). */
+  /** The reportToWorker dispatcher instance; created on start(). */
   private ReportDispatcher dispatcher;
 
   /**
    * Creates a new reporter that periodically flushes access counts to RabbitMQ.
    *
-   * @param reportPublisher     the publisher used to send report messages to RabbitMQ
+   * @param reportPublisher     the publisher used to send reportToWorker messages to RabbitMQ
    * @param scheduler           the scheduler for periodic flush cycles
    * @param reportIntervalMs    fixed delay between consecutive flushes in milliseconds
-   * @param appName             name of this application instance, included in report messages
+   * @param appName             name of this application instance, included in reportToWorker messages
    * @param queueCapacity       maximum capacity of the dispatcher work queue
    * @param queueOfferTimeoutMs timeout for offering a batch to the dispatcher queue before dropping
    * @param consumerCount       number of consumer threads draining the dispatcher queue
@@ -142,7 +142,7 @@ public class KeyReporterImpl implements KeyReporter {
     this.consumerCount = consumerCount;
     this.ringManager = ringManager;
     this.healthView = healthView;
-    this.bufferedCounter = new BufferedCounter(
+    this.reportBufferedCounter = new BufferedCounter(
       this::onFlush,
       MAX_BUFFER_SIZE,
       reportIntervalMs,
@@ -169,12 +169,12 @@ public class KeyReporterImpl implements KeyReporter {
    *
    * @param cacheKey the accessed key
    */
-  public void recordReport(String cacheKey) {
-    bufferedCounter.count(cacheKey, TOPK_INCR);
+  public void reportToWorker(String cacheKey) {
+    reportBufferedCounter.count(cacheKey, TOPK_INCR);
   }
 
   /**
-   * Start the periodic flush scheduler and the report dispatcher.
+   * Start the periodic flush scheduler and the reportToWorker dispatcher.
    * Idempotent — subsequent calls are silently ignored.
    *
    * <p>The flush callback drains the {@link BufferedCounter}, groups entries by
@@ -191,7 +191,7 @@ public class KeyReporterImpl implements KeyReporter {
       dispatcher = new ReportDispatcher();
       dispatcher.start();
 
-      bufferedCounter.afterPropertiesSet();
+      reportBufferedCounter.afterPropertiesSet();
 
       log.info(
         "KeyReporterImpl started: appName={}, intervalMs={}, queueCapacity={}, consumers={}",
@@ -210,7 +210,7 @@ public class KeyReporterImpl implements KeyReporter {
   }
 
   /**
-   * Gracefully shut down the report dispatcher.
+   * Gracefully shut down the reportToWorker dispatcher.
    *
    * <p>Interrupts all consumer threads and waits for them to finish
    * (with a 2-second timeout per thread). Any batches remaining in the
@@ -224,7 +224,7 @@ public class KeyReporterImpl implements KeyReporter {
    * <p>Idempotent — safe to call multiple times.
    */
   public void stop() {
-    bufferedCounter.destroy();
+    reportBufferedCounter.destroy();
     if (dispatcher != null) {
       dispatcher.shutdown();
     }
@@ -288,7 +288,7 @@ public class KeyReporterImpl implements KeyReporter {
           long dropped = dispatcher.dropped();
           if (dropped % 100 == 0 || dropped == 1) {
             log.warn(
-              "report queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
+              "reportToWorker queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
               target,
               counts.size(),
               dispatcher.depth(),
@@ -357,7 +357,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @return estimated number of unique keys with pending access counts
    */
   public long getPendingKeyCount() {
-    return bufferedCounter.estimatedSizeOfKeysCount();
+    return reportBufferedCounter.estimatedSizeOfKeysCount();
   }
 
   /**
@@ -433,14 +433,14 @@ public class KeyReporterImpl implements KeyReporter {
      * queue and publish them via {@link ReportPublisher}.
      *
      * <p>Each consumer runs in a named daemon thread
-     * ({@code "report-consumer-N"}) so they do not prevent JVM shutdown.
+     * ({@code "reportToWorker-consumer-N"}) so they do not prevent JVM shutdown.
      * The number of consumer threads is determined by the
      * {@code consumerCount} configuration.
      */
     void start() {
       running = true;
       for (int i = 0; i < consumerCount; i++) {
-        Thread t = new Thread(this::consumeLoop, "zeta-report-consumer-" + i);
+        Thread t = new Thread(this::consumeLoop, "zeta-reportToWorker-consumer-" + i);
         t.setDaemon(true);
         t.start();
         consumers.add(t);
@@ -565,7 +565,7 @@ public class KeyReporterImpl implements KeyReporter {
      * <p>When BBR rate limiting is active:
      * <ul>
      *   <li>Successful publish records round-trip time via {@link BbrRateLimiter#onSuccess(long)}</li>
-     *   <li>Stale batches (5s+ wait) or publish failures trigger ,
+     *   <li>Stale batches (5s+ wait) or publish failures type ,
      *       allowing BBR to back off the send rate and prevent cascading overload</li>
      *   <li>InterruptedException is handled separately (break, not logged as error)
      *       to avoid noise during orderly shutdown</li>
@@ -598,7 +598,12 @@ public class KeyReporterImpl implements KeyReporter {
             bbrRateLimiter.onSuccess(currentTimeMillis() - batch.timestamp());
           }
         } catch (Exception e) {
-          log.error("Failed to publish report batch for target={}, keys={}", batch.target(), batch.counts().size(), e);
+          log.error(
+            "Failed to publish reportToWorker batch for target={}, keys={}",
+            batch.target(),
+            batch.counts().size(),
+            e
+          );
           if (bbrRateLimiter != null) {
             bbrRateLimiter.onConsumerDrop();
           }

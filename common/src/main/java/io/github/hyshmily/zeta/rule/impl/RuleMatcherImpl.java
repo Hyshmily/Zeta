@@ -76,6 +76,7 @@ public class RuleMatcherImpl implements RuleMatcher {
 
   /** Lua compare-and-set script holder: lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
   private static class CasScriptHolder {
+
     static final DefaultRedisScript<Long> SCRIPT = create();
 
     private static DefaultRedisScript<Long> create() {
@@ -343,7 +344,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * <ul>
    *   <li>{@code Optional.empty()} – {@code BLOCK}: reject the access immediately.</li>
    *   <li>{@code Optional.of(true)} – {@code ALLOW_NO_REPORT}: allow the access
-   *       but suppress the hot‑key report.</li>
+   *       but suppress the hot‑key reportToWorker.</li>
    *   <li>{@code Optional.of(false)} – no matching rule or {@code ALLOW}:
    *       proceed normally with reporting.</li>
    * </ul>

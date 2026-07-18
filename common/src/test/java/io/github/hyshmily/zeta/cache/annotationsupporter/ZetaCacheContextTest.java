@@ -168,7 +168,7 @@ class ZetaCacheContextTest {
   }
 
   @Test
-  @DisplayName("ContextValues recordReport accessors work correctly")
+  @DisplayName("ContextValues reportToWorker accessors work correctly")
   void contextValuesRecordAccessors() {
     var values = new ZetaCacheContext.ContextValues(5000L, 1000L, true, false);
     assertThat(values.hardTtlMs()).isEqualTo(5000L);

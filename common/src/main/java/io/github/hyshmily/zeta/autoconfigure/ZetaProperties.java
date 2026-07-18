@@ -213,24 +213,24 @@ public class ZetaProperties {
   /** Application name used for queue naming and routing keys. */
   private String appName = "default";
 
-  /** Exchange name for app-to-Worker report routing. */
+  /** Exchange name for app-to-Worker reportToWorker routing. */
   private String reportExchange = ZetaConstants.Exchange.REPORT;
 
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
   private long reportIntervalMs = 50;
 
-  /** Number of shards for report partitioning (only used when consistent-hashing is disabled). */
+  /** Number of shards for reportToWorker partitioning (only used when consistent-hashing is disabled). */
   private int shardCount = 1;
 
-  /** Capacity of the per-shard report queue. */
+  /** Capacity of the per-shard reportToWorker queue. */
   @Min(1)
   private int queueCapacity = 10_000;
 
-  /** Timeout in ms for offering new entries to the report queue. */
+  /** Timeout in ms for offering new entries to the reportToWorker queue. */
   @Min(1)
   private int queueOfferTimeoutMs = 100;
 
-  /** Number of consumer threads for report processing. 0 means auto-compute. */
+  /** Number of consumer threads for reportToWorker processing. 0 means auto-compute. */
   @Min(0)
   private int consumerCount = 0;
 
@@ -238,7 +238,7 @@ public class ZetaProperties {
    * Effective consumer thread count: configured value, or max(4, availableProcessors/2).
    * Uses available CPU cores as a baseline — scales with machine capacity without
    * requiring static shard configuration in a dynamic topology.
-   * A floor of 4 ensures adequate parallelism for report dispatch even on small instances.
+   * A floor of 4 ensures adequate parallelism for reportToWorker dispatch even on small instances.
    *
    * @return the effective number of consumer threads
    */
@@ -270,7 +270,7 @@ public class ZetaProperties {
   private CacheConfig cache = new CacheConfig();
 
   /**
-   * Configuration for consistent-hashing based report routing.
+   * Configuration for consistent-hashing based reportToWorker routing.
    * <p>
    * When enabled, the app uses a consistent-hash ring to select the target
    * shard for each key, ensuring the same key always maps to the same Worker
@@ -287,7 +287,7 @@ public class ZetaProperties {
     private int virtualNodes = 500;
   }
 
-  /** Consistent-hashing configuration for report routing. */
+  /** Consistent-hashing configuration for reportToWorker routing. */
   @Valid
   private ConsistentHashing consistentHashing = new ConsistentHashing();
 
@@ -423,6 +423,7 @@ public class ZetaProperties {
 
   @Data
   public static class CacheKey {
+
     /** Strip query parameters (?...) from cache keys for normalization. */
     private boolean stripQuery = false;
   }

@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.sync.local;
 
+import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
+
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
@@ -31,16 +33,13 @@ import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.core.Message;
-
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-
-import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.core.Message;
 
 /**
  * Listens for cache synchronization messages (INVALIDATE / REFRESH / RULES_SYNC) from
@@ -417,7 +416,7 @@ public class CacheSyncListener {
   }
 
   /**
-   * Remove the invalidation recordReport after a successful refresh,
+   * Remove the invalidation reportToWorker after a successful refresh,
    * allowing future refreshes for this key to proceed normally.
    */
   private void clearInvalidation(String key) {

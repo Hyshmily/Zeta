@@ -59,11 +59,11 @@ import java.lang.annotation.Target;
  * }</pre>
  *
  * @see Intercept
- * @see HotKeyCacheExtensionAspect
+ * @see CacheExtensionAspect
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
-public @interface HotKeyPreload {
+public @interface Preload {
   /**
    * Static cache keys to pre-load as hot. Registered on first method
    * invocation and deduplicated — each key is inflated exactly once.

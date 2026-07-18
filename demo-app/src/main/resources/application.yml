@@ -33,7 +33,7 @@ zeta:
     default-hot-soft-ttl-ms: 300000
     executor-queue-capacity: 50000
     report-interval-ms: 50
-    report-exchange: zeta.report.exchange
+    report-exchange: zeta.reportToWorker.exchange
     consistent-hashing:
       enabled: true
       virtual-nodes: 500

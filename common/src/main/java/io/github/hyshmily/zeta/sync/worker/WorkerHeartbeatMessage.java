@@ -80,7 +80,7 @@ public record WorkerHeartbeatMessage(
   public static final String TYPE = "WORKER_HB";
 
   /**
-   * Converts this heartbeat recordReport to an AMQP {@link Message} with all fields
+   * Converts this heartbeat reportToWorker to an AMQP {@link Message} with all fields
    * set as message headers.
    *
    * <p>The body carries the {@code workerId} as UTF-8 bytes. Headers include

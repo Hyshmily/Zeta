@@ -235,7 +235,7 @@ class PerKeyOrderedDispatcherTest {
     // Submit task1 — will be rejected and returned to front
     rejectingDispatcher.submit("key", task1Ran::countDown);
 
-    // Submit task2 — should trigger execution (tryMarkRunning succeeds after rejection reset)
+    // Submit task2 — should type execution (tryMarkRunning succeeds after rejection reset)
     rejectingDispatcher.submit("key", task2Ran::countDown);
 
     // Both tasks should eventually complete

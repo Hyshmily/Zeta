@@ -659,14 +659,14 @@ class ZetaCacheTest {
   }
 
   /**
-   * Verifies that getWithSoftExpire with an ALLOW_NO_REPORT rule does not report
+   * Verifies that getWithSoftExpire with an ALLOW_NO_REPORT rule does not reportToWorker
    * and returns the cached value normally.
    */
   @Test
   void getWithSoftExpire_withNoReportRule_shouldReturnCached() {
-    hotKeyCache.addWhitelist("no-report");
+    hotKeyCache.addWhitelist("no-reportToWorker");
     caffeineCache.put(
-      "no-report",
+      "no-reportToWorker",
       CacheEntry.builder()
         .value("v")
         .dataVersion(1)
@@ -682,7 +682,7 @@ class ZetaCacheTest {
         .build()
     );
 
-    assertThat(hotKeyCache.getWithSoftExpire("no-report", () -> "fresh", 0L, 0L, true)).contains("v");
+    assertThat(hotKeyCache.getWithSoftExpire("no-reportToWorker", () -> "fresh", 0L, 0L, true)).contains("v");
   }
 
   // ── get with logically expired entry ──
@@ -993,9 +993,9 @@ class ZetaCacheTest {
 
   @Test
   void get_withNoReportRule_shouldReturnCached() {
-    hotKeyCache.addWhitelist("no-report");
-    caffeineCache.put("no-report", "v");
-    assertThat(hotKeyCache.get("no-report", () -> "fresh", 0L, 0L, true)).contains("v");
+    hotKeyCache.addWhitelist("no-reportToWorker");
+    caffeineCache.put("no-reportToWorker", "v");
+    assertThat(hotKeyCache.get("no-reportToWorker", () -> "fresh", 0L, 0L, true)).contains("v");
   }
 
   // ── getWithSoftExpire with TTL override ──
@@ -1482,7 +1482,7 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("get with ALLOW_NO_REPORT and hot detection skips report")
+    @DisplayName("get with ALLOW_NO_REPORT and hot detection skips reportToWorker")
     void get_withAllowNoReportAndHotDetection_skipsReport() {
       hotKeyCache.addWhitelist("noreport-hot");
       when(singleFlight.load(eq("noreport-hot"), any())).thenReturn(Optional.of("value"));
@@ -1496,7 +1496,7 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("get with ALLOW_NO_REPORT and no hot detection skips report")
+    @DisplayName("get with ALLOW_NO_REPORT and no hot detection skips reportToWorker")
     void get_withAllowNoReportAndNoHotDetection_skipsReport() {
       hotKeyCache.addWhitelist("noreport-normal");
       when(singleFlight.load(eq("noreport-normal"), any())).thenReturn(Optional.of("value"));

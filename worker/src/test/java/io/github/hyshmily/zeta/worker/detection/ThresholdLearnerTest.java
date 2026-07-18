@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.zeta.worker.detection;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -63,7 +62,7 @@ class ThresholdLearnerTest {
   }
 
   /**
-   * Verifies that the learner skips threshold update when the current QPS is zero.
+   * Verifies that the learner skips threshold update when the current qps is zero.
    */
   @Test
   void shouldSkipWhenQpsIsZero() {
@@ -74,7 +73,7 @@ class ThresholdLearnerTest {
   }
 
   /**
-   * Verifies that the learner updates the detector threshold when QPS exceeds the change tolerance.
+   * Verifies that the learner updates the detector threshold when qps exceeds the change tolerance.
    */
   @Test
   void shouldUpdateThresholdWhenQpsExceedsTolerance() {
@@ -87,7 +86,7 @@ class ThresholdLearnerTest {
   }
 
   /**
-   * Verifies that the learner skips threshold update when the QPS change is within the configured tolerance.
+   * Verifies that the learner skips threshold update when the qps change is within the configured tolerance.
    */
   @Test
   void shouldSkipThresholdUpdateWhenChangeWithinTolerance() {
@@ -114,7 +113,7 @@ class ThresholdLearnerTest {
   }
 
   /**
-   * Verifies that exceptions thrown by the QPS estimator are caught and do not propagate.
+   * Verifies that exceptions thrown by the qps estimator are caught and do not propagate.
    */
   @Test
   void shouldCatchExceptionsGracefully() {
@@ -141,7 +140,7 @@ class ThresholdLearnerTest {
   }
 
   /**
-   * Verifies that negative QPS is treated the same as zero — the update
+   * Verifies that negative qps is treated the same as zero — the update
    * is skipped.
    */
   @Test
@@ -167,7 +166,7 @@ class ThresholdLearnerTest {
   }
 
   /**
-   * Verifies that an extremely high QPS value produces Long.MAX_VALUE after casting,
+   * Verifies that an extremely high qps value produces Long.MAX_VALUE after casting,
    * and does not cause negative or erroneous values.
    */
   @Test

@@ -322,13 +322,13 @@ class WorkerAutoConfigurationTest {
   void shouldCreateReportQueueBean() {
     runner.run(ctx -> {
       Queue queue = ctx.getBean("reportQueue", Queue.class);
-      assertThat(queue.getName()).startsWith("zeta.report.");
+      assertThat(queue.getName()).startsWith("zeta.reportToWorker.");
     });
   }
 
   /**
-   * Verifies that the {@code reportBinding} bean binds the report queue to the
-   * report exchange.
+   * Verifies that the {@code reportBinding} bean binds the reportToWorker queue to the
+   * reportToWorker exchange.
    */
   @Test
   @DisplayName("should create reportBinding bean")

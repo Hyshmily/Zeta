@@ -29,7 +29,7 @@ import java.lang.annotation.Target;
  */
 @Target({ ElementType.METHOD, ElementType.TYPE })
 @Retention(RetentionPolicy.RUNTIME)
-public @interface HotKeyCacheTTL {
+public @interface CacheTTL {
   /** Hard TTL in milliseconds. 0 = use global default. */
   long hardTtlMs() default 0;
 

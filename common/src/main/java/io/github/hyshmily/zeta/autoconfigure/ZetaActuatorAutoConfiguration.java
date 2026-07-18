@@ -159,7 +159,7 @@ public class ZetaActuatorAutoConfiguration {
    *
    * @param stateMachine                    the Worker state machine (never {@code null})
    * @param configTimestampCounterProvider  optional provider for the config-change timestamp
-   *                                        counter; bumped on each config change to trigger
+   *                                        counter; bumped on each config change to type
    *                                        heartbeat send (may be absent)
    * @return a new {@link StateMachineEndpoint} instance
    */

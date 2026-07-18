@@ -60,7 +60,7 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * <p>Messages older than 5 seconds are silently discarded to prevent stale
  * data from distorting the sliding‑window view.
  *
- * <p>Because clients use consistent‑hash routing, every report for a given
+ * <p>Because clients use consistent‑hash routing, every reportToWorker for a given
  * key always reaches the same worker, guaranteeing correct per‑key state
  * without cross‑worker coordination.
  */
@@ -75,7 +75,7 @@ public class ReportConsumer {
   private final TopKValidator topKValidator;
   /** Worker-scoped HeavyKeeper sketch for cross-instance frequency estimation. */
   private final TopK workerTopK;
-  /** Global QPS estimator tracking overall throughput for dynamic threshold learning. */
+  /** Global qps estimator tracking overall throughput for dynamic threshold learning. */
   private final GlobalQpsEstimator globalQpsEstimator;
   /** Per-key lifecycle state machine (retained for TopKValidator integration). */
   private final ZetaStateMachine stateMachine;
@@ -106,7 +106,7 @@ public class ReportConsumer {
   }
 
   /**
-   * Main entry point for batched report messages.
+   * Main entry point for batched reportToWorker messages.
    *
    * @param message the deserialized message containing counts for multiple keys
    */
@@ -132,7 +132,11 @@ public class ReportConsumer {
     // Guards against delayed or re‑delivered messages that would
     // feed outdated counts into the sliding window.
     if (now - message.timestamp() > stalenessThresholdMs) {
-      log.debug("Stale report message, skip: appName={}, age={}ms", message.appName(), now - message.timestamp());
+      log.debug(
+        "Stale reportToWorker message, skip: appName={}, age={}ms",
+        message.appName(),
+        now - message.timestamp()
+      );
       return;
     }
 
@@ -214,7 +218,7 @@ public class ReportConsumer {
             }
           } catch (Exception e) {
             log.error(
-              "Error processing report entry: appName={}, key={}, count={}",
+              "Error processing reportToWorker entry: appName={}, key={}, count={}",
               message.appName(),
               entry.getKey(),
               entry.getValue(),

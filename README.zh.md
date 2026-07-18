@@ -213,7 +213,7 @@ java -jar worker/target/zeta-worker-1.1.55.jar
 | 写   | `putThrough`, `putLocal`, `invalidateAfterPut`, `refresh`, `refreshAll`                                                           |
 | 失效 | `invalidate`, `invalidateAllLocal`, `compareAndInvalidate`                                                                        |
 | 原子 | `compareAndSet`, `compareAndInvalidate`                                                                                           |
-| 流式 | `read(key)` → `ZetaReadQuery`, `write(key)` → `ZetaWriteCommand`                                                              |
+| 流式 | `read(key)` → `ZetaReadQuery`, `write(key)` → `ZetaWriteCommand`                                                                  |
 | 内省 | `peek`, `estimatedSize`, `stats`, `getLocalCache`, `isLocalHotKey`, `isWorkerHotKey`, `returnLocalHotKeys`, `returnWorkerHotKeys` |
 | 规则 | `addBlacklist`, `removeBlacklist`, `addWhitelist`, `removeWhitelist`, `evaluateRule`, `getAllRules`, `clearAllRules`              |
 | 锁   | `tryLock`, `tryLockAndRun`                                                                                                        |
@@ -321,9 +321,9 @@ boolean ok = zeta.compareAndInvalidate("user:123", staleValue);
 
 Worker 模式通过专用节点提供集群维度热点检测。App 实例定期报告访问计数，Worker 运行滑动窗口+状态机管道，将 HOT/COOL 决策广播回所有实例。状态机参数（`confirmCount`、`coolCount`、`preCoolGraceCount`）可通过 `/actuator/hotkey/worker/state` 运行时调整。
 
-| 模式        | `worker.enabled` | 激活的 Bean                                                            |
-| ----------- | ---------------- | ---------------------------------------------------------------------- |
-| App-only    | `false`（默认）  | `HotKeyCache`、TopK、reporter、actuator、sync                          |
+| 模式        | `worker.enabled` | 激活的 Bean                                                          |
+| ----------- | ---------------- | -------------------------------------------------------------------- |
+| App-only    | `false`（默认）  | `HotKeyCache`、TopK、reporter、actuator、sync                        |
 | Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `ZetaModeException`） |
 
 **Worker 集群健康：** 设置 `zeta.local.expected-worker-count` 为生产环境期望的 Worker 数量。当设置 >0 时，`ClusterHealthView` 使用多数仲裁（`> expectedWorkerCount / 2`）作为健康 Worker 数量的阈值；当为 0（默认）时，集群在收到至少一个心跳之前始终被视为不健康。这实现了对部分 Worker 故障的精确检测和优雅降级决策。
@@ -349,7 +349,7 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 @Intercept @Fallback
 public User getUser(Long id) { ... }
 
-// QPS 限流拦截
+// qps 限流拦截
 @Cacheable(cacheNames = "products", key = "#id")
 @Intercept(trigger = InterceptTrigger.QPS, QPS = 500, fallback = "'throttled'")
 @Fallback
@@ -372,10 +372,10 @@ public String getFlashItem(String id) { ... }
 
 启用 `zeta.sync.enabled=true` 以启用跨实例规则同步。规则系统提供两种操作：
 
-| 操作              | 对匹配 key 的效果                                                                  |
-| ----------------- | ---------------------------------------------------------------------------------- |
+| 操作              | 对匹配 key 的效果                                                                |
+| ----------------- | -------------------------------------------------------------------------------- |
 | `BLOCK`           | `get()` / `getWithSoftExpire()` 抛出 `ZetaBlockedException`；`putThrough()` 跳过 |
-| `ALLOW_NO_REPORT` | 正常处理但跳过 Worker 上报（减少频繁访问 key 的噪音）                              |
+| `ALLOW_NO_REPORT` | 正常处理但跳过 Worker 上报（减少频繁访问 key 的噪音）                            |
 
 ### 模式类型
 

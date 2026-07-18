@@ -44,8 +44,8 @@ public final class ZetaCacheContext {
    * Immutable snapshot of all thread-bound cache parameters captured at a
    * specific point in time by {@link #snapshot()}.
    * <p>
-   * This recordReport carries the complete set of per-invocation overrides that
-   * companion aspects (e.g., {@code @HotKeyCacheTTL}, {@code @NullCaching},
+   * This reportToWorker carries the complete set of per-invocation overrides that
+   * companion aspects (e.g., {@code @CacheTTL}, {@code @NullCaching},
    * {@code @Broadcast}) apply before the Spring cache interceptor executes.
    * <p>
    * A value of {@code 0} for {@code hardTtlMs} or {@code softTtlMs} means
@@ -79,7 +79,7 @@ public final class ZetaCacheContext {
   /**
    * Sets all cache parameters for the current thread's cache operation.
    * <p>
-   * Typically called by companion aspects (e.g., {@code @HotKeyCacheTTL},
+   * Typically called by companion aspects (e.g., {@code @CacheTTL},
    * {@code @NullCaching}) before proceeding to the Spring cache interceptor.
    * Values of {@code 0} for TTL parameters mean "use the global default".
    * <p>

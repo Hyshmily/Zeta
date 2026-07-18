@@ -113,7 +113,7 @@ public class HeavyKeeperBenchmark {
     CounterAtomicLong node = new CounterAtomicLong();
     map.put("hot", node);
     // maxCount is sketch-derived (external counter), so we pass an incrementing
-    // value per report — no pre-read of Node.count on the hot path.
+    // value per reportToWorker — no pre-read of Node.count on the hot path.
     return runWorkload(threads, opsPerThread, i -> {
       CounterAtomicLong n = map.get("hot");
       n.report(i + 1);
@@ -215,7 +215,7 @@ public class HeavyKeeperBenchmark {
     }
     // Per the realistic admit() pattern: maxCount is sketch-derived (externally grown),
     // not read from Node.count. Each thread tracks its own pseudo-counter to drive maxCount
-    // but the report simply passes that growing value to the Node.
+    // but the reportToWorker simply passes that growing value to the Node.
     return runWorkload(threads, opsPerThread, i -> {
       String key = pickKey(i);
       CounterAtomicLong n = map.get(key);
@@ -230,7 +230,7 @@ public class HeavyKeeperBenchmark {
     for (int i = 0; i < TOTAL_KEYS; i++) {
       map.put("key" + i, new CounterLongAdder());
     }
-    // LongAdder accumulates the delta. Pass delta=1 each report — the canonical
+    // LongAdder accumulates the delta. Pass delta=1 each reportToWorker — the canonical
     // accumulation semantic that exercises LongAdder's per-cell increment fast path.
     return runWorkload(threads, opsPerThread, i -> {
       String key = pickKey(i);

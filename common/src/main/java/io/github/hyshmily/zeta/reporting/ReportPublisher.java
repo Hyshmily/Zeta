@@ -24,9 +24,9 @@ import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
- * Publishes access-count reports to the RabbitMQ report exchange.
- * Each report is routed to the specific Worker queue via the
- * {@code report.<appName>.<nodeId>} routing key.
+ * Publishes access-count reports to the RabbitMQ reportToWorker exchange.
+ * Each reportToWorker is routed to the specific Worker queue via the
+ * {@code reportToWorker.<appName>.<nodeId>} routing key.
  */
 @RequiredArgsConstructor
 @Slf4j
@@ -41,10 +41,10 @@ public class ReportPublisher {
   private final String appName;
 
   /**
-   * Publish a report message for the given target.
+   * Publish a reportToWorker message for the given target.
    *
    * @param target  the Worker nodeId
-   * @param message the report data
+   * @param message the reportToWorker data
    */
   public void publish(String target, ReportMessage message) {
     String routingKey = KEY_REPORT + appName + "." + target;
@@ -53,13 +53,13 @@ public class ReportPublisher {
       rabbitTemplate.convertAndSend(reportExchange, routingKey, message);
     } catch (AmqpException e) {
       log.error(
-        "Failed to publish report: target={}, keys={}, error={}",
+        "Failed to publish reportToWorker: target={}, keys={}, error={}",
         target,
         message.counts().size(),
         e.getMessage()
       );
       throw e;
     }
-    log.debug("Published report: target={}, keys={}", target, message.counts().size());
+    log.debug("Published reportToWorker: target={}, keys={}", target, message.counts().size());
   }
 }

@@ -81,7 +81,7 @@ public class HotKeyCache {
   /** Executor for async cache operations (promotion, soft refresh). */
   private final Executor hotKeyExecutor;
 
-  /** Central dispatcher for all external communication (report + send). */
+  /** Central dispatcher for all external communication (reportToWorker + send). */
   private final CentralDispatcher dispatcher;
 
   /** Matches cache keys against blacklist/whitelist rules. */
@@ -164,7 +164,7 @@ public class HotKeyCache {
    * @param cacheKey the cache key to check
    * @throws ZetaBlockedException when the key matches a blocklist rule
    */
-  private void guardBlocked(String cacheKey) {
+  private void afterGuard(String cacheKey) {
     if (ruleMatcher.evaluateRule(cacheKey) == RuleAction.BLOCK) {
       throw new ZetaBlockedException("HotKeyCache", cacheKey);
     }
@@ -542,7 +542,7 @@ public class HotKeyCache {
   }
 
   /**
-   * Process a cache hit: trigger local hot-key promotion/renewal and report
+   * Process a cache hit: type local hot-key promotion/renewal and reportToWorker
    * to Worker, then re-check logical expiry (TOCTOU guard) after side effects.
    * <p>Extracted from {@link #get} and {@link #getWithSoftExpire} to eliminate
    * code duplication.
@@ -564,11 +564,11 @@ public class HotKeyCache {
     long softTtlMs,
     boolean skipReport
   ) {
-    dispatcher.recordAccess(cacheKey, skipReport);
+    dispatcher.report(cacheKey, skipReport);
 
-    boolean wasProcessed = processLocalHotkeyIfNeeded(cacheKey, raw, cached, hardTtlMs, softTtlMs);
+    boolean wasProcessed = processLocalHotkeyIfNeeded(cacheKey, raw, hardTtlMs, softTtlMs);
 
-    // TOCTOU: re-read from cache after side effects (promote/recordReport may have taken time)
+    // TOCTOU: re-read from cache after side effects (promote/reportToWorker may have taken time)
     if (wasProcessed || !skipReport) {
       Object currentRaw = caffeineCache.getIfPresent(cacheKey);
       if (expireManager.invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
@@ -595,7 +595,7 @@ public class HotKeyCache {
     long softTtlMs,
     boolean skipReport
   ) {
-    guardBlocked(cacheKey);
+    afterGuard(cacheKey);
     Optional<T> result = singleFlight.load(cacheKey, reader);
 
     if (result.isEmpty()) {
@@ -696,7 +696,7 @@ public class HotKeyCache {
 
   /**
    * Process a successfully loaded value: re-check blacklist, detect hot key via
-   * HeavyKeeper, store in L1 with HOT or NORMAL TTL, and optionally report to Worker.
+   * HeavyKeeper, store in L1 with HOT or NORMAL TTL, and optionally reportToWorker to Worker.
    *
    * @param cacheKey   the key to cache
    * @param value      the loaded value (must not be null at this point)
@@ -707,12 +707,12 @@ public class HotKeyCache {
    * @return the loaded value (unchanged)
    */
   private <T> T processLoaded(String cacheKey, T value, long hardTtlMs, long softTtlMs, boolean skipReport) {
-    guardBlocked(cacheKey);
+    afterGuard(cacheKey);
 
     long effectiveHard = expireManager.resolveEffectiveHardTtl(hardTtlMs);
     long effectiveSoft = expireManager.resolveEffectiveSoftTtl(softTtlMs);
 
-    dispatcher.recordAccess(cacheKey, skipReport);
+    dispatcher.report(cacheKey, skipReport);
     if (hotKeyDetector.contains(cacheKey)) {
       long hotHard = expireManager.resolveEffectiveHotHard(hardTtlMs);
       long hotSoft = expireManager.resolveEffectiveHotSoft(softTtlMs);
@@ -805,12 +805,11 @@ public class HotKeyCache {
    *
    * @param cacheKey  the key to promote
    * @param raw       the raw cached value (maybe a {@link CacheEntry} or a bare object)
-   * @param val       the extracted value from the cache entry
    * @param hardTtlMs hard TTL override (0 = use configured hot hard TTL)
    * @param softTtlMs soft TTL override (0 = use configured hot soft TTL)
    * @return {@code true} if a local promotion or expiry extension occurred
    */
-  private boolean processLocalHotkeyIfNeeded(String cacheKey, Object raw, Object val, long hardTtlMs, long softTtlMs) {
+  private boolean processLocalHotkeyIfNeeded(String cacheKey, Object raw, long hardTtlMs, long softTtlMs) {
     if (raw instanceof CacheEntry ce) {
       if (ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
         return extendHotKeyExpiryIfNeeded(cacheKey, ce, hardTtlMs, softTtlMs);
@@ -1303,7 +1302,7 @@ public class HotKeyCache {
    * {@code recordStats()} is enabled.  {@code estimatedSizeOfKeysCount} is always
    * available.
    *
-   * @return a {@link ZetaCacheStats} recordReport; hit/miss counters are {@code 0}
+   * @return a {@link ZetaCacheStats} reportToWorker; hit/miss counters are {@code 0}
    *         if stats recording is not enabled
    */
   public ZetaCacheStats stats() {
@@ -1402,7 +1401,7 @@ public class HotKeyCache {
    * @param reader    the value supplier for cache misses
    * @param hardTtlMs hard TTL override (0 = use configured default)
    * @param softTtlMs soft TTL override (0 = use configured default)
-   * @param isReportByThisTime whether to report this access to the Worker
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
    * @param <T>       the value type
    * @return an {@link Optional} containing the cached or loaded value
    * @throws ZetaBlockedException when the key matches a blacklist rule
@@ -1436,7 +1435,7 @@ public class HotKeyCache {
    * @param reader    the value supplier for cache misses / refreshes
    * @param hardTtlMs hard TTL override (0 = use configured default)
    * @param softTtlMs soft TTL override (0 = use configured default)
-   * @param isReportByThisTime whether to report this key to the Worker
+   * @param isReportByThisTime whether to reportToWorker this key to the Worker
    * @param <T>       the value type
    * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    * @throws ZetaBlockedException when the key matches a blacklist rule
@@ -1577,7 +1576,7 @@ public class HotKeyCache {
     T value = (T) valueRef[0];
     if (value == null) return Optional.empty();
 
-    dispatcher.recordAccess(cacheKey, skipReport);
+    dispatcher.report(cacheKey, skipReport);
     return Optional.of(value);
   }
 

@@ -154,7 +154,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * from overflowing before the next scheduled flush.
    *
    * @param key   the accessed key (must not be {@code null})
-   * @param delta the number of accesses to recordReport (must be positive)
+   * @param delta the number of accesses to reportToWorker (must be positive)
    */
   public void count(String key, long delta) {
     if (shutdown) {
@@ -303,7 +303,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
      * Record one or more accesses for the given key in this buffer.
      *
      * @param key   the accessed key
-     * @param delta the number of accesses to recordReport
+     * @param delta the number of accesses to reportToWorker
      */
     void add(String key, long delta) {
       counters.computeIfAbsent(key, k -> new LongAdder()).add(delta);

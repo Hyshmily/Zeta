@@ -92,7 +92,7 @@ public class Rule {
     BLOCK,
     /**
      * Allow the cache access but <em>suppress</em> the app-to-Worker
-     * hot-key report for this key. Useful for keys that should not
+     * hot-key reportToWorker for this key. Useful for keys that should not
      * contribute to hot-key detection (e.g., health-check endpoints,
      * high-frequency operational keys).
      */

@@ -35,7 +35,7 @@ import org.springframework.amqp.core.Message;
  * silently skipped. This version space is orthogonal to the application-level
  * {@code dataVersion} — see ADR-0008 (Dual Version Space).
  *
- * <p>Unlike {@link SyncMessage}, this recordReport has no {@code isVersionDegraded} field.
+ * <p>Unlike {@link SyncMessage}, this reportToWorker has no {@code isVersionDegraded} field.
  * The Worker simply skips send entirely if {@code Redis GET} fails during a HOT
  * decision, preventing degraded decision propagation.
  *
@@ -86,8 +86,7 @@ public record WorkerMessage(
 
     long decisionVersion =
       msg.getMessageProperties().getHeader(HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
-    long timestamp =
-      msg.getMessageProperties().getHeader(HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
+    long timestamp = msg.getMessageProperties().getHeader(HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
     String nodeId = msg.getMessageProperties().getHeader(HEADER_NODE_ID) instanceof String s ? s : null;
     long epoch = msg.getMessageProperties().getHeader(HEADER_EPOCH) instanceof Number n ? n.longValue() : 0L;
     return new WorkerMessage(cacheKey, type, decisionVersion, timestamp, nodeId, epoch);

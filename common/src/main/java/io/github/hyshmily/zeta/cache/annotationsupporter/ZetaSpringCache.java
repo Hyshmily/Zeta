@@ -143,7 +143,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
    * is wrapped in a {@link ValueRetrievalException}.
    *
    * <p>If a TTL override is set in {@link ZetaCacheContext} for the current
-   * thread (e.g., by {@code HotKeyCacheExtensionAspect} from a {@code @HotKeyCacheTTL}
+   * thread (e.g., by {@code CacheExtensionAspect} from a {@code @CacheTTL}
    * annotation), it is passed to {@link Zeta#get(String, Supplier, long, long, boolean)}.
    * Otherwise, the global default TTL is used (hardTtlMs=0).
    *

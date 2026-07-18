@@ -21,7 +21,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link ReportMessage} recordReport creation and field access.
+ * Tests for {@link ReportMessage} reportToWorker creation and field access.
  */
 class ReportMessageTest {
 

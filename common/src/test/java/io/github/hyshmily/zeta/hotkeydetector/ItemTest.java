@@ -21,12 +21,12 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link Item}, the immutable key-count pair recordReport used by the HeavyKeeper algorithm.
+ * Tests for {@link Item}, the immutable key-count pair reportToWorker used by the HeavyKeeper algorithm.
  */
 class ItemTest {
 
   /**
-   * Verifies that an Item recordReport is created with the correct key and count fields.
+   * Verifies that an Item reportToWorker is created with the correct key and count fields.
    */
   @Test
   void shouldCreateItemWithKeyAndCount() {

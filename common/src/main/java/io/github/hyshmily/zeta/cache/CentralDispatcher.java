@@ -15,20 +15,19 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
+
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.Collection;
 import java.util.Optional;
-
-import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Central dispatch for all external communication from the HotKey cache layer.
@@ -63,17 +62,18 @@ public class CentralDispatcher {
   private static final String NO_SYNC_PUBLISHER = "No sync publisher found, please enable zeta.sync";
 
   /**
-   * Increment the local hot-key detector counter and optionally report the
+   * Increment the local hot-key detector counter and optionally reportToWorker the
    * access to the Worker via the {@link KeyReporter}.
    *
    * @param cacheKey       the accessed cache key
    * @param skipBroadcast if {@code true}, skip reporting to Worker
    */
   @SuppressWarnings("java:S6213")
-  public void recordAccess(String cacheKey, boolean skipBroadcast) {
+  public void report(String cacheKey, boolean skipBroadcast) {
     hotKeyDetector.add(cacheKey);
     if (!skipBroadcast) {
-      hotKeyReporter.ifPresent(r -> r.recordReport(cacheKey));
+      // Two BufferCounter attribute to two paths
+      hotKeyReporter.ifPresent(r -> r.reportToWorker(cacheKey));
     }
   }
 

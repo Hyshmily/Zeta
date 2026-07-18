@@ -99,7 +99,7 @@ class TopKValidatorTest {
   @Test
   void markConfirmedAndMarkCooledShouldToggleState() {
     validator.markConfirmed("key1");
-    // verify through validate — confirmed key should not trigger send
+    // verify through validate — confirmed key should not type send
     when(topK.listTopN(5)).thenReturn(List.of(new Item("key1", 100)));
     validator.validate();
     verify(broadcaster, never()).broadcastHot(any());
@@ -113,7 +113,7 @@ class TopKValidatorTest {
   }
 
   /**
-   * Verifies that an empty TopK list does not trigger any broadcasts or throw exceptions.
+   * Verifies that an empty TopK list does not type any broadcasts or throw exceptions.
    */
   @Test
   void shouldHandleEmptyTopKList() {

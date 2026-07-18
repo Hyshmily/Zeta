@@ -44,7 +44,7 @@ zeta:
 
     ## App-to-Worker Reporting
     app-name: default
-    report-exchange: zeta.report.exchange
+    report-exchange: zeta.reportToWorker.exchange
     report-interval-ms: 100
     shard-count: 1
 
@@ -59,7 +59,7 @@ zeta:
 
     ## Messaging
     messaging:
-      report-exchange: zeta.report.exchange
+      report-exchange: zeta.reportToWorker.exchange
       broadcast-exchange: zeta.send.exchange
 
     ## Sliding Window (each slice = 1000/10 = 100ms)

@@ -24,7 +24,7 @@ package io.github.hyshmily.zeta.annotation;
  *
  * @see Intercept
  */
-public enum InterceptTrigger {
+public enum InterceptType {
   /**
    * Intercept when the cache key is recognised as a local hot key by the
    * HeavyKeeper TopK detector in L1.
@@ -39,7 +39,7 @@ public enum InterceptTrigger {
 
   /**
    * Intercept when the per-key request rate exceeds the configured
-   * {@link Intercept#QPS()} threshold. Uses a sliding-window counter
+   * {@link Intercept#qps()} threshold. Uses a sliding-window counter
    * (10 buckets, 1-second window) per unique key.
    */
   QPS,

@@ -31,16 +31,16 @@ public interface KeyReporter {
    * @param cacheKey the accessed key
    */
   @SuppressWarnings("all")
-  void recordReport(String cacheKey);
+  void reportToWorker(String cacheKey);
 
   /**
-   * Start the periodic flush scheduler and the report dispatcher.
+   * Start the periodic flush scheduler and the reportToWorker dispatcher.
    * Idempotent — subsequent calls are silently ignored.
    */
   void start();
 
   /**
-   * Gracefully shut down the report dispatcher.
+   * Gracefully shut down the reportToWorker dispatcher.
    * Idempotent — safe to call multiple times.
    */
   void stop();

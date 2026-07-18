@@ -300,14 +300,14 @@ public class WorkerAutoConfiguration {
   /**
    * Report consumer – the main AMQP entry point.
    *
-   * <p>Injects the worker‑scoped Top‑K so that every consumed report also
+   * <p>Injects the worker‑scoped Top‑K so that every consumed reportToWorker also
    * feeds the frequency estimator.
    *
    * @param keyEvaluator       the unified key evaluator (sliding window + Bayesian)
    * @param broadcaster        publishes HOT and COOL decisions to all application instances
    * @param topKValidator      pre-warm validator for cross-instance frequency-based confirmation
    * @param workerTopK         the worker-scoped HeavyKeeper sketch for frequency estimation
-   * @param globalQpsEstimator the global QPS estimator tracking overall throughput
+   * @param globalQpsEstimator the global qps estimator tracking overall throughput
    * @param stateMachine       the per-key lifecycle state machine (retained for TopKValidator integration)
    * @return a new {@link ReportConsumer} instance
    */
@@ -349,10 +349,10 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Direct exchange to which clients publish report messages.
-   * Routing keys follow the pattern {@code report.<appName>.<nodeId>}.
+   * Direct exchange to which clients publish reportToWorker messages.
+   * Routing keys follow the pattern {@code reportToWorker.<appName>.<nodeId>}.
    *
-   * @param properties worker configuration providing the report exchange name
+   * @param properties worker configuration providing the reportToWorker exchange name
    * @return a durable, non-auto-delete {@link DirectExchange}
    */
   @Bean
@@ -362,7 +362,7 @@ public class WorkerAutoConfiguration {
 
   /**
    * Queue that this Worker binds to.
-   * Queue name is {@code zeta.report.<appName>.<nodeId>},
+   * Queue name is {@code zeta.reportToWorker.<appName>.<nodeId>},
    * guaranteeing that a key always lands on the same Worker.
    *
    * <p>The queue has a 7-day idle expiry ({@code x-expires}) since shard queues
@@ -378,11 +378,11 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Binds the report queue to the report exchange using the shard-specific
-   * routing key {@code report.<appName>.<nodeId>}.
+   * Binds the reportToWorker queue to the reportToWorker exchange using the shard-specific
+   * routing key {@code reportToWorker.<appName>.<nodeId>}.
    *
-   * @param reportQueue    the shard-specific report queue
-   * @param reportExchange the report exchange
+   * @param reportQueue    the shard-specific reportToWorker queue
+   * @param reportExchange the reportToWorker exchange
    * @param properties     worker configuration providing the routing app name
    * @return a {@link Binding} connecting the queue to the exchange
    */
@@ -570,7 +570,7 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Global QPS estimator that tracks overall throughput across all keys in the
+   * Global qps estimator that tracks overall throughput across all keys in the
    * current shard using a sliding window.
    *
    * @param properties worker configuration properties (sliding-window duration
@@ -587,9 +587,9 @@ public class WorkerAutoConfiguration {
 
   /**
    * Threshold learner that periodically recalculates the hot-key threshold
-   * based on estimated global QPS and updates the sliding-window detector.
+   * based on estimated global qps and updates the sliding-window detector.
    *
-   * @param estimator the global QPS estimator
+   * @param estimator the global qps estimator
    * @param detector  the sliding-window detector whose threshold will be
    *                  dynamically adjusted
    * @param properties worker configuration properties for threshold tuning
@@ -624,7 +624,7 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Fallback JSON message converter for report messages. Active only when the
+   * Fallback JSON message converter for reportToWorker messages. Active only when the
    * common module's {@code reportMessageConverter} is absent (e.g. in tests).
    *
    * @return a {@link org.springframework.amqp.support.converter.Jackson2JsonMessageConverter} instance
@@ -638,10 +638,10 @@ public class WorkerAutoConfiguration {
   /**
    * Container factory for the {@link ReportConsumer}'s {@code @RabbitListener}.
    * Lifts throughput above Spring Boot's default (concurrency=1) by exposing
-   * concurrent-consumers and prefetch via {@code zeta.worker.report-consumer.*}.
+   * concurrent-consumers and prefetch via {@code zeta.worker.reportToWorker-consumer.*}.
    *
    * @param connectionFactory the RabbitMQ connection factory
-   * @param reportMessageConverter the JSON message converter for report messages
+   * @param reportMessageConverter the JSON message converter for reportToWorker messages
    * @param properties worker configuration properties
    * @return a configured {@link SimpleRabbitListenerContainerFactory} instance
    */

@@ -38,13 +38,13 @@ import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.CachePut;
 import org.springframework.cache.annotation.Cacheable;
 
-@DisplayName("HotKeyCacheExtensionAspect tests")
+@DisplayName("CacheExtensionAspect tests")
 class ZetaCacheExtensionAspectTest {
 
   private Zeta zeta;
   private ZetaProperties properties;
   private ZetaProperties.SpringCache springCache;
-  private HotKeyCacheExtensionAspect aspect;
+  private CacheExtensionAspect aspect;
 
   @BeforeEach
   void setUp() {
@@ -53,7 +53,7 @@ class ZetaCacheExtensionAspectTest {
     springCache = new ZetaProperties.SpringCache();
     springCache.setKeySeparator("::");
     when(properties.getSpringCache()).thenReturn(springCache);
-    aspect = new HotKeyCacheExtensionAspect(zeta, properties);
+    aspect = new CacheExtensionAspect(zeta, properties);
   }
 
   @AfterEach
@@ -104,13 +104,13 @@ class ZetaCacheExtensionAspectTest {
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Intercept(trigger = InterceptTrigger.FORCE)
+    @Intercept(type = InterceptType.FORCE)
     public String findInterceptedForceTrueNoFallback(String id) {
       return "result-" + id;
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Intercept(trigger = InterceptTrigger.FORCE)
+    @Intercept(type = InterceptType.FORCE)
     @Fallback
     public String findInterceptedForceTrueWithFallback(String id) {
       return "result-" + id;
@@ -121,7 +121,7 @@ class ZetaCacheExtensionAspectTest {
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @HotKeyCacheTTL(hardTtlMs = 5000)
+    @CacheTTL(hardTtlMs = 5000)
     public String findWithTtl(String id) {
       return "result-" + id;
     }
@@ -186,31 +186,31 @@ class ZetaCacheExtensionAspectTest {
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Intercept(trigger = InterceptTrigger.QPS, QPS = 5)
+    @Intercept(type = InterceptType.QPS, qps = 5)
     public String findQpsIntercepted(String id) {
       return "result-" + id;
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Intercept(trigger = InterceptTrigger.QPS, QPS = 5, fallback = "'qps-fallback'")
+    @Intercept(type = InterceptType.QPS, qps = 5, fallback = "'qps-fallback'")
     public String findQpsInterceptedWithSpelFallback(String id) {
       return "result-" + id;
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Intercept(trigger = InterceptTrigger.CONCURRENT_THREADS, concurrentThreads = 2)
+    @Intercept(type = InterceptType.CONCURRENT_THREADS, concurrentThreads = 2)
     public String findConcurrentThreadsIntercepted(String id) {
       return "result-" + id;
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @HotKeyPreload(keys = { "preload-key-a", "preload-key-b" })
+    @Preload(keys = { "preload-key-a", "preload-key-b" })
     public String findWithStaticPreload(String id) {
       return "result-" + id;
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @HotKeyPreload(keyExpr = "#id")
+    @Preload(keyExpr = "#id")
     public String findWithDynamicPreload(String id) {
       return "result-" + id;
     }
@@ -622,7 +622,7 @@ class ZetaCacheExtensionAspectTest {
   // ── TTL override tests ──
 
   @Test
-  @DisplayName("@HotKeyCacheTTL applies hardTtlMs override to context")
+  @DisplayName("@CacheTTL applies hardTtlMs override to context")
   void ttlOverride_appliesToContext() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
@@ -976,10 +976,10 @@ class ZetaCacheExtensionAspectTest {
       .hasMessage("fallback-threw");
   }
 
-  // ── @Intercept(trigger = QPS) tests ──
+  // ── @Intercept(type = qps) tests ──
 
   @Test
-  @DisplayName("@Intercept(QPS=5) below threshold proceeds normally")
+  @DisplayName("@Intercept(qps=5) below threshold proceeds normally")
   void qpsBelowThreshold_proceedsNormally() throws Throwable {
     Method method = TestService.class.getMethod("findQpsIntercepted", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -1001,7 +1001,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@Intercept(QPS=5) above threshold returns null (no fallback, no @Fallback)")
+  @DisplayName("@Intercept(qps=5) above threshold returns null (no fallback, no @Fallback)")
   void qpsAboveThresholdNoFallback_returnsNull() throws Throwable {
     Method method = TestService.class.getMethod("findQpsIntercepted", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -1018,7 +1018,7 @@ class ZetaCacheExtensionAspectTest {
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
     when(zeta.peek(anyString())).thenReturn(Optional.empty());
 
-    // Exceed QPS by calling 6 times (threshold = 5)
+    // Exceed qps by calling 6 times (threshold = 5)
     Object ignored;
     for (int i = 0; i < 5; i++) {
       ignored = aspect.aroundCacheable(pjp, cacheable);
@@ -1029,7 +1029,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@Intercept(QPS=5) above threshold with SpEL fallback returns fallback")
+  @DisplayName("@Intercept(qps=5) above threshold with SpEL fallback returns fallback")
   void qpsAboveThresholdWithSpelFallback_returnsFallback() throws Throwable {
     Method method = TestService.class.getMethod("findQpsInterceptedWithSpelFallback", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -1045,7 +1045,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    // Exceed QPS by calling 6 times (threshold = 5)
+    // Exceed qps by calling 6 times (threshold = 5)
     Object ignored;
     for (int i = 0; i < 5; i++) {
       ignored = aspect.aroundCacheable(pjp, cacheable);
@@ -1107,10 +1107,10 @@ class ZetaCacheExtensionAspectTest {
     verify(pjp, times(2)).proceed();
   }
 
-  // ── @HotKeyPreload tests ──
+  // ── @Preload tests ──
 
   @Test
-  @DisplayName("@HotKeyPreload(keys={...}) calls notifyLocalDetectorDirect for static keys")
+  @DisplayName("@Preload(keys={...}) calls notifyLocalDetectorDirect for static keys")
   void staticPreload_inflatesDetector() throws Throwable {
     Method method = TestService.class.getMethod("findWithStaticPreload", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -1133,7 +1133,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@HotKeyPreload(keyExpr=\"#id\") calls notifyLocalDetectorDirect for dynamic key")
+  @DisplayName("@Preload(keyExpr=\"#id\") calls notifyLocalDetectorDirect for dynamic key")
   void dynamicPreload_inflatesDetector() throws Throwable {
     Method method = TestService.class.getMethod("findWithDynamicPreload", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -1155,7 +1155,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@HotKeyPreload static keys are inflated only once")
+  @DisplayName("@Preload static keys are inflated only once")
   void staticPreload_inflatesOnce() throws Throwable {
     Method method = TestService.class.getMethod("findWithStaticPreload", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);

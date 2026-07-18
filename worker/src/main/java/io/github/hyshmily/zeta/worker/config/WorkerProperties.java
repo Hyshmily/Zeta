@@ -38,14 +38,14 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties(prefix = "zeta.worker")
 public class WorkerProperties {
 
-  /** Routing configuration for app-level report queue naming. Default constructor. */
+  /** Routing configuration for app-level reportToWorker queue naming. Default constructor. */
   @Data
   public static class Routing {
 
     private String appName = "default";
   }
 
-  /** AMQP exchange names for report and send messages. Default constructor. */
+  /** AMQP exchange names for reportToWorker and send messages. Default constructor. */
   @Data
   public static class Messaging {
 
@@ -54,7 +54,7 @@ public class WorkerProperties {
     private String heartbeatExchange = ZetaConstants.Exchange.HEARTBEAT;
   }
 
-  /** Container tuning for the report-message RabbitMQ listener. Default constructor. */
+  /** Container tuning for the reportToWorker-message RabbitMQ listener. Default constructor. */
   @Data
   public static class ReportConsumer {
 
@@ -64,7 +64,7 @@ public class WorkerProperties {
     private int prefetchCount = 50;
   }
 
-  /** Sliding-window parameters for local QPS tracking. Default constructor. */
+  /** Sliding-window parameters for local qps tracking. Default constructor. */
   @Data
   public static class SlidingWindow {
 
@@ -99,7 +99,7 @@ public class WorkerProperties {
     private long evictIntervalMs = 30_000;
   }
 
-  /** Dynamic threshold adaptation based on global QPS changes. Default constructor. */
+  /** Dynamic threshold adaptation based on global qps changes. Default constructor. */
   @Data
   public static class GlobalQpsDynamicThreshold {
 
