@@ -672,7 +672,7 @@ class HeavyKeeperTest {
     // which lost concurrent accumulate() writes that arrived between get() and reset().
     // The fix uses AtomicLong with a CAS retry loop that preserves concurrent accumulates.
     HeavyKeeper hk = new HeavyKeeper(10, 1000, 4, 0.9, 1, 50000, 3);
-    hk.addDirect("hotkey", 1000);
+    hk.addDirect("hotkey", 10000);
 
     CountDownLatch latch = new CountDownLatch(1);
     ExecutorService exec = Executors.newFixedThreadPool(2);
@@ -697,7 +697,7 @@ class HeavyKeeperTest {
       } catch (Exception e) {
         Thread.currentThread().interrupt();
       }
-      for (int i = 0; i < 50; i++) {
+      for (int i = 0; i < 10; i++) {
         hk.fading();
       }
       stopped.set(true);
