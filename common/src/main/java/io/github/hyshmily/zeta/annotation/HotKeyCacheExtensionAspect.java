@@ -17,14 +17,16 @@ package io.github.hyshmily.zeta.annotation;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.bucket4j.Bandwidth;
+import io.github.bucket4j.Bucket;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.annotationsupporter.ZetaCacheContext;
-import io.github.hyshmily.zeta.util.window.RollingWindow;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -122,11 +124,11 @@ public class HotKeyCacheExtensionAspect {
   private final Map<Method, AnnotationSet> annotationCache = new ConcurrentHashMap<>();
 
   /**
-   * Per-key QPS sliding windows for {@link InterceptTrigger#QPS} interception.
-   * Each key gets a 10-bucket / 1-second window.
-   * Bounded at 100k entries; idle windows are evicted by Caffeine.
+   * Per-key QPS rate-limit buckets for {@link InterceptTrigger#QPS} interception.
+   * Each key gets a bucket that refills at the configured QPS rate.
+   * Bounded at 100k entries; idle buckets are evicted by Caffeine.
    */
-  private final Cache<String, RollingWindow> qpsWindows = Caffeine.newBuilder().maximumSize(100_000).build();
+  private final Cache<String, Bucket> qpsBuckets = Caffeine.newBuilder().maximumSize(100_000).build();
 
   /**
    * Per-key concurrent thread counters for {@link InterceptTrigger#CONCURRENT_THREADS} interception.
@@ -198,9 +200,14 @@ public class HotKeyCacheExtensionAspect {
           int qpsThreshold = intercept.QPS();
 
           if (qpsThreshold > 0) {
-            RollingWindow window = qpsWindows.get(prefixedKey, k -> new RollingWindow(10, 1000));
-            window.add(1);
-            if (window.sum() > qpsThreshold) {
+            Bucket bucket = qpsBuckets.get(prefixedKey, k ->
+              Bucket.builder()
+                .addLimit(
+                  Bandwidth.builder().capacity(qpsThreshold).refillGreedy(qpsThreshold, Duration.ofSeconds(1)).build()
+                )
+                .build()
+            );
+            if (!bucket.tryConsume(1)) {
               return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
             }
           }

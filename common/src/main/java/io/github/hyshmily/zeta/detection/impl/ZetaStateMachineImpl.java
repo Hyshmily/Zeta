@@ -90,6 +90,24 @@ import lombok.extern.slf4j.Slf4j;
  * concurrent delivery of the same key across multiple consumer threads.
  * Evaluations of different keys proceed in parallel.
  *
+ * <h4>Cross-domain lock ordering</h4>
+ *
+ * This class issues per-key locks ({@link #keyLocks}) that sit at the
+ * <b>top</b> of the global lock hierarchy (see ADR-0017):
+ * <ol>
+ *   <li><b>State machine per-key ({@code keyLocks})</b> — held for the
+ *       duration of {@link #evaluate}.</li>
+ *   <li>HeavyKeeper sketch stripes — never held inside this class.</li>
+ *   <li>HeavyKeeper admission — never held inside this class.</li>
+ * </ol>
+ *
+ * <p>{@link #confidenceEvaluator} performs only reads of pre-computed
+ * HeavyKeeper sketch data (carried in {@link EvaluationContext#cmsCount})
+ * and never acquires any HeavyKeeper lock. This invariant is critical:
+ * acquiring a HeavyKeeper lock while holding a {@code keyLocks} would
+ * invert the hierarchy and create a deadlock path with
+ * {@code HeavyKeeper.fading()}.
+ *
  * <p>{@link #evictStale} uses a two-phase approach: a lock-free scan
  * collects candidates (relying on {@code volatile} semantics of {@link
  * KeyState#lastUpdateTime}), then each candidate is re-checked under the

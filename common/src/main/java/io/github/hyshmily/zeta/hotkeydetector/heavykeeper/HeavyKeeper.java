@@ -79,6 +79,15 @@ import lombok.extern.slf4j.Slf4j;
  *       members via {@link #findMinMember}) and never touches the sketch.</li>
  * </ol>
  *
+ * <p><b>Cross-domain lock ordering</b> (see ADR-0017): this class sits below
+ * the state machine per-key locks in the global hierarchy. The acquisition
+ * order within this class is <i>sketch stripes → admissionLock</i> (the
+ * admission path in {@link #addDirect} acquires stripes first, then
+ * {@code admissionLock}; {@link #fading} acquires and releases stripes
+ * sequentially before taking {@code admissionLock}). No code path in this
+ * class acquires or calls into the state machine layer, so the hierarchy
+ * is never inverted.
+ *
  * <p><b>Memory-for-accuracy/performance trade-offs applied here:</b>
  * <ul>
  *   <li>Enlarged decay lookup table ({@link #LOOKUP_TABLE_SIZE} = 65 536) so
