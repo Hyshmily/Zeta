@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.sync.local;
 
 import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -218,7 +218,7 @@ public class CacheSyncPublisher {
       try {
         String json = OBJECT_MAPPER.writeValueAsString(batch);
         MessageProperties props = new MessageProperties();
-        props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+        props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
         Message message = new Message(json.getBytes(StandardCharsets.UTF_8), props);
 
         rabbitTemplate.send(properties.getExchangeName(), "", message);
@@ -254,8 +254,8 @@ public class CacheSyncPublisher {
     }
     try {
       MessageProperties props = new MessageProperties();
-      props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
-      props.setHeader(AMQP_HEADER_RULES_VERSION, rulesVersion);
+      props.setHeader(HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
+      props.setHeader(HEADER_RULES_VERSION, rulesVersion);
       Message message = new Message(rulesJson.getBytes(StandardCharsets.UTF_8), props);
 
       rabbitTemplate.send(properties.getExchangeName(), "", message);
@@ -329,9 +329,9 @@ public class CacheSyncPublisher {
     try {
       MessageProperties props = new MessageProperties();
 
-      props.setHeader(AMQP_HEADER_TYPE, type);
-      props.setHeader(AMQP_HEADER_VERSION, version);
-      props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, degraded);
+      props.setHeader(HEADER_TYPE, type);
+      props.setHeader(HEADER_VERSION, version);
+      props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
 
       Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
 

@@ -54,8 +54,8 @@ class WorkerPropertiesTest {
    */
   @Test
   void shouldHaveDefaultMessagingValues() {
-    assertThat(properties.getMessaging().getReportExchange()).isEqualTo(ZetaConstants.EXCHANGE_REPORT);
-    assertThat(properties.getMessaging().getBroadcastExchange()).isEqualTo(ZetaConstants.EXCHANGE_BROADCAST);
+    assertThat(properties.getMessaging().getReportExchange()).isEqualTo(ZetaConstants.Exchange.REPORT);
+    assertThat(properties.getMessaging().getBroadcastExchange()).isEqualTo(ZetaConstants.Exchange.BROADCAST);
   }
 
   /**

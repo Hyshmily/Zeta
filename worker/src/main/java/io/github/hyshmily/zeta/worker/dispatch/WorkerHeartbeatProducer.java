@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.worker.dispatch;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.ROUTING_KEY_HEARTBEAT;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
 
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
@@ -355,7 +355,7 @@ public class WorkerHeartbeatProducer {
         stateMachine.getPreCoolGraceCount(),
         configTimestampCounter.get()
       );
-      rabbitTemplate.send(heartbeatExchange, ROUTING_KEY_HEARTBEAT + workerId, hb.toMessage());
+      rabbitTemplate.send(heartbeatExchange, KEY_HEARTBEAT + workerId, hb.toMessage());
     } catch (Exception e) {
       log.error("Scheduled sendHeartbeat failed", e);
     }

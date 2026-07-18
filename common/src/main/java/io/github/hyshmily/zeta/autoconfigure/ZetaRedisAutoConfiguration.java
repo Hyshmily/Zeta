@@ -63,7 +63,10 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * enabling rule CRUD operations to survive app restarts.
  */
 @Internal
-@AutoConfiguration(after = { ZetaAutoConfiguration.class, RedisAutoConfiguration.class })
+@AutoConfiguration(
+  after = ZetaAutoConfiguration.class,
+  afterName = "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration"
+)
 @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
 @EnableConfigurationProperties(ZetaProperties.class)
 public class ZetaRedisAutoConfiguration {
@@ -118,7 +121,6 @@ public class ZetaRedisAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   @ConditionalOnBean({ RedisTemplate.class, HotKeyDetector.class })
-  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyCache hotKeyCache(
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,

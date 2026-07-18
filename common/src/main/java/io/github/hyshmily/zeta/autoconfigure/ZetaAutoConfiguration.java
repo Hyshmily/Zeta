@@ -57,7 +57,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -76,7 +75,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
  * Worker is disabled or the property is absent.
  */
 @Internal
-@AutoConfiguration(after = RedisAutoConfiguration.class)
+@AutoConfiguration(afterName = "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration")
 @ConditionalOnProperty(prefix = "zeta.worker", name = "enabled", havingValue = "false", matchIfMissing = true)
 @EnableConfigurationProperties(ZetaProperties.class)
 @Slf4j
@@ -209,7 +208,7 @@ public class ZetaAutoConfiguration {
     executor.setAllowCoreThreadTimeOut(true);
     executor.setQueueCapacity(properties.getExecutorQueueCapacity());
     executor.setAllowCoreThreadTimeOut(true);
-    executor.setThreadNamePrefix(ZetaConstants.THREAD_PREFIX_HOTKEY);
+    executor.setThreadNamePrefix(ZetaConstants.Thread.PREFIX_HOTKEY);
     executor.setWaitForTasksToCompleteOnShutdown(true);
     executor.setAwaitTerminationSeconds(60);
     executor.setRejectedExecutionHandler((r, exe) -> {
@@ -238,7 +237,7 @@ public class ZetaAutoConfiguration {
    * @return a new RuleMatcher instance (in-memory only)
    */
   @Bean
-  @ConditionalOnMissingBean({ RuleMatcher.class, StringRedisTemplate.class })
+  @ConditionalOnMissingBean(value = RuleMatcher.class, type = "org.springframework.data.redis.core.StringRedisTemplate")
   public RuleMatcher ruleMatcher(ObjectProvider<CacheSyncPublisher> publisherProvider) {
     return new RuleMatcherImpl(Optional.empty(), Optional.ofNullable(publisherProvider.getIfAvailable()));
   }

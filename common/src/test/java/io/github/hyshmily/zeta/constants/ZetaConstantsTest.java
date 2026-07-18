@@ -24,158 +24,112 @@ import org.junit.jupiter.api.Test;
  */
 class ZetaConstantsTest {
 
-  /**
-   * Verifies the AMQP message header constant values.
-   */
   @Test
   void shouldHaveExpectedAmqpHeaders() {
-    assertThat(ZetaConstants.AMQP_HEADER_TYPE).isEqualTo("type");
-    assertThat(ZetaConstants.AMQP_HEADER_VERSION).isEqualTo("version");
-    assertThat(ZetaConstants.AMQP_HEADER_IS_VERSION_DEGRADED).isEqualTo("isVersionDegraded");
+    assertThat(ZetaConstants.Amqp.HEADER_TYPE).isEqualTo("type");
+    assertThat(ZetaConstants.Amqp.HEADER_VERSION).isEqualTo("version");
+    assertThat(ZetaConstants.Amqp.HEADER_IS_VERSION_DEGRADED).isEqualTo("isVersionDegraded");
   }
 
-  /**
-   * Verifies the thread name prefix constant values.
-   */
   @Test
   void shouldHaveExpectedThreadPrefixes() {
-    assertThat(ZetaConstants.THREAD_PREFIX_HOTKEY).isEqualTo("zeta-");
-    assertThat(ZetaConstants.THREAD_PREFIX_SYNC).isEqualTo("zeta-sync");
-    assertThat(ZetaConstants.THREAD_PREFIX_WORKER).isEqualTo("zeta-worker");
-    assertThat(ZetaConstants.THREAD_PREFIX_REPORT).isEqualTo("zeta-report");
+    assertThat(ZetaConstants.Thread.PREFIX_HOTKEY).isEqualTo("zeta-");
+    assertThat(ZetaConstants.Thread.PREFIX_SYNC).isEqualTo("zeta-sync");
+    assertThat(ZetaConstants.Thread.PREFIX_WORKER).isEqualTo("zeta-worker");
+    assertThat(ZetaConstants.Thread.PREFIX_REPORT).isEqualTo("zeta-report");
   }
 
-  /**
-   * Verifies the AMQP routing key constant values.
-   */
   @Test
   void shouldHaveExpectedRoutingKeys() {
-    assertThat(ZetaConstants.ROUTING_KEY_BROADCAST).isEqualTo("send.");
-    assertThat(ZetaConstants.ROUTING_KEY_REPORT).isEqualTo("report.");
+    assertThat(ZetaConstants.Routing.KEY_BROADCAST).isEqualTo("send.");
+    assertThat(ZetaConstants.Routing.KEY_REPORT).isEqualTo("report.");
   }
 
-  /**
-   * Verifies the report queue prefix constant value.
-   */
   @Test
   void shouldHaveExpectedQueuePrefix() {
-    assertThat(ZetaConstants.QUEUE_PREFIX_REPORT).isEqualTo("zeta.report.");
+    assertThat(ZetaConstants.Routing.QUEUE_PREFIX_REPORT).isEqualTo("zeta.report.");
   }
 
-  /**
-   * Verifies the source identifier constant values.
-   */
   @Test
   void shouldHaveExpectedSources() {
-    assertThat(ZetaConstants.SOURCE_SLIDING_WINDOW).isEqualTo("sliding_window");
-    assertThat(ZetaConstants.SOURCE_TOPK_PRE_WARM).isEqualTo("topk_pre_warm");
+    assertThat(ZetaConstants.Source.SLIDING_WINDOW).isEqualTo("sliding_window");
+    assertThat(ZetaConstants.Source.TOPK_PRE_WARM).isEqualTo("topk_pre_warm");
   }
 
-  /**
-   * Verifies the Redis version key prefix constant value.
-   */
   @Test
   void shouldHaveExpectedRedisKeyPrefix() {
-    assertThat(ZetaConstants.REDIS_VERSION_KEY_PREFIX).isEqualTo("zeta:ver:");
+    assertThat(ZetaConstants.Redis.VERSION_KEY_PREFIX).isEqualTo("zeta:ver:");
   }
 
-  /**
-   * Verifies that the default version constant is zero.
-   */
   @Test
   void shouldHaveExpectedDefaultVersion() {
-    assertThat(ZetaConstants.VERSION_DEFAULT).isZero();
+    assertThat(ZetaConstants.Version.VERSION_DEFAULT).isZero();
   }
 
-  /**
-   * Verifies that the default TopK increment constant is one.
-   */
   @Test
   void shouldHaveExpectedTopKIncrement() {
     assertThat(ZetaConstants.TOPK_INCR).isEqualTo(1);
   }
 
-  /**
-   * Verifies the AMQP header constants for node ID and timestamp.
-   */
   @Test
   void shouldHaveExpectedNodeAndTimestampHeaders() {
-    assertThat(ZetaConstants.AMQP_HEADER_NODE_ID).isEqualTo("nodeId");
-    assertThat(ZetaConstants.AMQP_HEADER_TIMESTAMP).isEqualTo("timestamp");
+    assertThat(ZetaConstants.Amqp.HEADER_NODE_ID).isEqualTo("nodeId");
+    assertThat(ZetaConstants.Amqp.HEADER_TIMESTAMP).isEqualTo("timestamp");
   }
 
-  /**
-   * Verifies the AMQP header constants for heartbeat fields.
-   */
   @Test
   void shouldHaveExpectedHeartbeatHeaders() {
-    assertThat(ZetaConstants.AMQP_HEADER_HEARTBEAT_EPOCH).isEqualTo("hbEpoch");
-    assertThat(ZetaConstants.AMQP_HEADER_HEARTBEAT_LOAD).isEqualTo("hbLoad");
-    assertThat(ZetaConstants.AMQP_HEADER_HEARTBEAT_READY).isEqualTo("hbReady");
-    assertThat(ZetaConstants.AMQP_HEADER_HEARTBEAT_CONFIG_FP).isEqualTo("hbConfigFp");
-    assertThat(ZetaConstants.AMQP_HEADER_HEARTBEAT_DV_HWM).isEqualTo("hbDvHwm");
+    assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_EPOCH).isEqualTo("hbEpoch");
+    assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_LOAD).isEqualTo("hbLoad");
+    assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_READY).isEqualTo("hbReady");
+    assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_CONFIG_FP).isEqualTo("hbConfigFp");
+    assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_DV_HWM).isEqualTo("hbDvHwm");
   }
 
-  /**
-   * Verifies the AMQP header constants for verify/ping-pong fields.
-   */
   @Test
   void shouldHaveExpectedVerifyHeaders() {
-    assertThat(ZetaConstants.AMQP_HEADER_VERIFY_TYPE).isEqualTo("verifyType");
-    assertThat(ZetaConstants.AMQP_HEADER_VERIFY_APP_INSTANCE).isEqualTo("verifyAppInstance");
-    assertThat(ZetaConstants.AMQP_HEADER_VERIFY_WORKER_ID).isEqualTo("verifyWorkerId");
-    assertThat(ZetaConstants.AMQP_HEADER_VERIFY_PING).isEqualTo("PING");
-    assertThat(ZetaConstants.AMQP_HEADER_VERIFY_PONG).isEqualTo("PONG");
+    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_TYPE).isEqualTo("verifyType");
+    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_APP_INSTANCE).isEqualTo("verifyAppInstance");
+    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_WORKER_ID).isEqualTo("verifyWorkerId");
+    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_PING).isEqualTo("PING");
+    assertThat(ZetaConstants.Amqp.HEADER_VERIFY_PONG).isEqualTo("PONG");
   }
 
-  /**
-   * Verifies the scheduler thread name prefix constant.
-   */
   @Test
   void shouldHaveExpectedSchedulerThreadPrefix() {
-    assertThat(ZetaConstants.THREAD_PREFIX_SCHEDULER).isEqualTo("zeta-scheduler");
+    assertThat(ZetaConstants.Thread.PREFIX_SCHEDULER).isEqualTo("zeta-scheduler");
   }
 
-  /**
-   * Verifies the NO_SYNC_PUBLISHER warning message constant.
-   */
   @Test
   void shouldHaveExpectedNoSyncPublisherMessage() {
     assertThat(ZetaConstants.NO_SYNC_PUBLISHER).isEqualTo("No sync publisher found, please enable zeta.sync");
   }
 
-  /**
-   * Verifies the rules version AMQP header constant.
-   */
   @Test
   void shouldHaveExpectedRulesVersionHeader() {
-    assertThat(ZetaConstants.AMQP_HEADER_RULES_VERSION).isEqualTo("rulesVersion");
+    assertThat(ZetaConstants.Amqp.HEADER_RULES_VERSION).isEqualTo("rulesVersion");
   }
 
-  /**
-   * Verifies the Redis key for dynamic rules.
-   */
   @Test
   void shouldHaveExpectedRedisKeyRules() {
-    assertThat(ZetaConstants.REDIS_KEY_RULES).isEqualTo("zeta:rules");
+    assertThat(ZetaConstants.Redis.KEY_RULES).isEqualTo("zeta:rules");
   }
 
-  /**
-   * Verifies that the utility class has a private constructor for coverage.
-   */
   @Test
-  void privateConstructor_shouldBeAccessibleViaReflection() throws Exception {
-    var ctor = ZetaConstants.class.getDeclaredConstructor();
-    ctor.setAccessible(true);
-    var instance = ctor.newInstance();
-    assertThat(instance).isNotNull();
+  void shouldHaveExpectedExchangeNames() {
+    assertThat(ZetaConstants.Exchange.REPORT).isEqualTo("zeta.report.exchange");
+    assertThat(ZetaConstants.Exchange.HEARTBEAT).isEqualTo("zeta.heartbeat.exchange");
+    assertThat(ZetaConstants.Exchange.BROADCAST).isEqualTo("zeta.send.exchange");
+    assertThat(ZetaConstants.Exchange.SYNC).isEqualTo("zeta.sync.exchange");
   }
 
-  /**
-   * Verifies the epoch AMQP header constant value.
-   */
+  @Test
+  void shouldHaveExpectedRedisLockKeyPrefix() {
+    assertThat(ZetaConstants.Redis.LOCK_KEY_PREFIX).isEqualTo("zeta:lock:");
+  }
+
   @Test
   void shouldHaveExpectedEpochHeader() {
-    assertThat(ZetaConstants.AMQP_HEADER_EPOCH).isEqualTo("epoch");
+    assertThat(ZetaConstants.Amqp.HEADER_EPOCH).isEqualTo("epoch");
   }
 }

@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.sync;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -70,10 +70,10 @@ class WorkerHeartbeatVerifierTest {
     ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
     verify(rabbitTemplate).sendAndReceive(eq(""), eq("zeta.verify.ping.w2"), captor.capture());
     Message sent = captor.getValue();
-    assertThat((String) sent.getMessageProperties().getHeader(AMQP_HEADER_VERIFY_TYPE)).isEqualTo(
-      AMQP_HEADER_VERIFY_PING
+    assertThat((String) sent.getMessageProperties().getHeader(HEADER_VERIFY_TYPE)).isEqualTo(
+      HEADER_VERIFY_PING
     );
-    assertThat((String) sent.getMessageProperties().getHeader(AMQP_HEADER_VERIFY_APP_INSTANCE)).isEqualTo("test-app");
+    assertThat((String) sent.getMessageProperties().getHeader(HEADER_VERIFY_APP_INSTANCE)).isEqualTo("test-app");
     assertThat(sent.getMessageProperties().getReplyTo()).isEqualTo("amq.rabbitmq.reply-to");
   }
 

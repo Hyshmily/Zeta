@@ -548,7 +548,7 @@ class ZetaAmqpAutoConfigurationTest {
     assertThat(binding).isNotNull();
     assertThat(binding.getDestination()).isEqualTo("hq");
     assertThat(binding.getExchange()).isEqualTo("he");
-    assertThat(binding.getRoutingKey()).isEqualTo(ZetaConstants.ROUTING_KEY_HEARTBEAT + "*");
+    assertThat(binding.getRoutingKey()).isEqualTo(ZetaConstants.Routing.KEY_HEARTBEAT + "*");
   }
 
   @Test

@@ -111,7 +111,7 @@ public class TestController {
     Map<String, Object> results = new LinkedHashMap<>();
     results.put("scenario", "version-degradation");
 
-    String syncExchange = ZetaConstants.EXCHANGE_SYNC;
+    String syncExchange = ZetaConstants.Exchange.SYNC;
     String keyPrefix = "test:degr:";
 
     String k1 = keyPrefix + "norm";
@@ -119,9 +119,9 @@ public class TestController {
     zeta.putThrough(k1, "base", () -> {});
     zeta.invalidate(k1);
     MessageProperties p1 = new MessageProperties();
-    p1.setHeader(ZetaConstants.AMQP_HEADER_TYPE, "INVALIDATE");
-    p1.setHeader(ZetaConstants.AMQP_HEADER_VERSION, 100L);
-    p1.setHeader(ZetaConstants.AMQP_HEADER_IS_VERSION_DEGRADED, false);
+    p1.setHeader(ZetaConstants.Amqp.HEADER_TYPE, "INVALIDATE");
+    p1.setHeader(ZetaConstants.Amqp.HEADER_VERSION, 100L);
+    p1.setHeader(ZetaConstants.Amqp.HEADER_IS_VERSION_DEGRADED, false);
     rabbitTemplate.send(syncExchange, "", new Message(k1.getBytes(StandardCharsets.UTF_8), p1));
     results.put("case1_normal_normal", "PASS");
 
@@ -129,9 +129,9 @@ public class TestController {
     redisTemplate.opsForValue().set(k2, "degraded-state");
     zeta.putThrough(k2, "degraded-state", () -> {});
     MessageProperties p2 = new MessageProperties();
-    p2.setHeader(ZetaConstants.AMQP_HEADER_TYPE, "INVALIDATE");
-    p2.setHeader(ZetaConstants.AMQP_HEADER_VERSION, 1L);
-    p2.setHeader(ZetaConstants.AMQP_HEADER_IS_VERSION_DEGRADED, false);
+    p2.setHeader(ZetaConstants.Amqp.HEADER_TYPE, "INVALIDATE");
+    p2.setHeader(ZetaConstants.Amqp.HEADER_VERSION, 1L);
+    p2.setHeader(ZetaConstants.Amqp.HEADER_IS_VERSION_DEGRADED, false);
     rabbitTemplate.send(syncExchange, "", new Message(k2.getBytes(StandardCharsets.UTF_8), p2));
     results.put("case2_normal_over_degraded", "PASS");
 
@@ -143,14 +143,14 @@ public class TestController {
     if (rabbitTemplate == null) {
       return ResponseEntity.ok(Map.of("status", "SKIPPED", "reason", "RabbitMQ not available"));
     }
-    String broadcastExchange = ZetaConstants.EXCHANGE_BROADCAST;
+    String broadcastExchange = ZetaConstants.Exchange.BROADCAST;
     long dv = System.currentTimeMillis();
 
     MessageProperties props = new MessageProperties();
-    props.setHeader(ZetaConstants.AMQP_HEADER_TYPE, "HOT");
-    props.setHeader(ZetaConstants.AMQP_HEADER_VERSION, dv);
-    props.setHeader(ZetaConstants.AMQP_HEADER_NODE_ID, "test-worker");
-    props.setHeader(ZetaConstants.AMQP_HEADER_EPOCH, 1L);
+    props.setHeader(ZetaConstants.Amqp.HEADER_TYPE, "HOT");
+    props.setHeader(ZetaConstants.Amqp.HEADER_VERSION, dv);
+    props.setHeader(ZetaConstants.Amqp.HEADER_NODE_ID, "test-worker");
+    props.setHeader(ZetaConstants.Amqp.HEADER_EPOCH, 1L);
     rabbitTemplate.send(broadcastExchange, "", new Message(key.getBytes(StandardCharsets.UTF_8), props));
 
     boolean promoted = false;

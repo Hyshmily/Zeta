@@ -34,7 +34,7 @@ class CacheSyncPropertiesTest {
   void shouldHaveDefaultValues() {
     CacheSyncProperties props = new CacheSyncProperties();
     assertThat(props.isEnabled()).isFalse();
-    assertThat(props.getExchangeName()).isEqualTo(ZetaConstants.EXCHANGE_SYNC);
+    assertThat(props.getExchangeName()).isEqualTo(ZetaConstants.Exchange.SYNC);
     assertThat(props.getQueuePrefix()).isEqualTo("zeta.sync");
     assertThat(props.getDedupWindowSeconds()).isEqualTo(10);
     assertThat(props.getDedupMaxSize()).isEqualTo(10_000);

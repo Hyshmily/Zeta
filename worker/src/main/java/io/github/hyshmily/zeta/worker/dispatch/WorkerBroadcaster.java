@@ -15,7 +15,8 @@
  */
 package io.github.hyshmily.zeta.worker.dispatch;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_BROADCAST;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -40,7 +41,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  *
  * <p>Messages are delivered to every instance's dedicated queue through a
  * fanout exchange ({@code zeta.send.exchange}) — the receiver
- * differentiates message type via the {@code AMQP_HEADER_TYPE} header.
+ * differentiates message type via the {@code HEADER_TYPE} header.
  */
 @RequiredArgsConstructor
 @Slf4j
@@ -161,13 +162,13 @@ public class WorkerBroadcaster {
    */
   private void sendBroadcast(String cacheKey, String type, long version) {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, type);
-    props.setHeader(AMQP_HEADER_VERSION, version);
-    props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, false);
-    props.setHeader(AMQP_HEADER_NODE_ID, nodeId);
-    props.setHeader(AMQP_HEADER_EPOCH, epochCounter.get());
+    props.setHeader(HEADER_TYPE, type);
+    props.setHeader(HEADER_VERSION, version);
+    props.setHeader(HEADER_IS_VERSION_DEGRADED, false);
+    props.setHeader(HEADER_NODE_ID, nodeId);
+    props.setHeader(HEADER_EPOCH, epochCounter.get());
 
     Message msg = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
-    rabbitTemplate.send(broadcastExchange, ROUTING_KEY_BROADCAST + appName, msg);
+    rabbitTemplate.send(broadcastExchange, KEY_BROADCAST + appName, msg);
   }
 }

@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport.impl;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.VERSION_DEFAULT;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;

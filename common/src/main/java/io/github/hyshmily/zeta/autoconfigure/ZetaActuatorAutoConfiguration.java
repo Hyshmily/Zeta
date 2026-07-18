@@ -32,7 +32,6 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -67,7 +66,7 @@ import org.springframework.context.annotation.Bean;
  */
 @Internal
 @AutoConfiguration
-@ConditionalOnClass(Endpoint.class)
+@ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
 @EnableConfigurationProperties(ZetaProperties.class)
 public class ZetaActuatorAutoConfiguration {
 
@@ -93,6 +92,7 @@ public class ZetaActuatorAutoConfiguration {
    * @return a new {@link ZetaEndpoint} instance
    */
   @Bean
+  @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
   @ConditionalOnMissingBean
   public ZetaEndpoint hotKeyEndpoint(
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,

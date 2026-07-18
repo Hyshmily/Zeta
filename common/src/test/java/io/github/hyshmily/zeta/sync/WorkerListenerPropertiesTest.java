@@ -34,7 +34,7 @@ class WorkerListenerPropertiesTest {
   void shouldHaveDefaultValues() {
     WorkerListenerProperties props = new WorkerListenerProperties();
     assertThat(props.isEnabled()).isFalse();
-    assertThat(props.getExchangeName()).isEqualTo(ZetaConstants.EXCHANGE_BROADCAST);
+    assertThat(props.getExchangeName()).isEqualTo(ZetaConstants.Exchange.BROADCAST);
     assertThat(props.getQueuePrefix()).isEqualTo("zeta.worker");
     assertThat(props.getWarmupJitterMs()).isEqualTo(50);
   }

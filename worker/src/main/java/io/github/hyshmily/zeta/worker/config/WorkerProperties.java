@@ -49,9 +49,9 @@ public class WorkerProperties {
   @Data
   public static class Messaging {
 
-    private String reportExchange = ZetaConstants.EXCHANGE_REPORT;
-    private String broadcastExchange = ZetaConstants.EXCHANGE_BROADCAST;
-    private String heartbeatExchange = ZetaConstants.EXCHANGE_HEARTBEAT;
+    private String reportExchange = ZetaConstants.Exchange.REPORT;
+    private String broadcastExchange = ZetaConstants.Exchange.BROADCAST;
+    private String heartbeatExchange = ZetaConstants.Exchange.HEARTBEAT;
   }
 
   /** Container tuning for the report-message RabbitMQ listener. Default constructor. */

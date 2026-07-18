@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.rule.impl;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.REDIS_KEY_RULES;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Redis.KEY_RULES;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -34,7 +34,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
-import org.springframework.data.redis.core.script.RedisScript;
 
 /**
  * Central component for evaluating cache-key rules that govern blocking,
@@ -75,31 +74,33 @@ public class RuleMatcherImpl implements RuleMatcher {
     false
   );
 
-  /** Lua compare-and-set script: writes only if incoming version > current Redis version. */
-  private static final RedisScript<Long> RULE_CAS_SCRIPT;
+  /** Lua compare-and-set script holder: lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
+  private static class CasScriptHolder {
+    static final DefaultRedisScript<Long> SCRIPT = create();
 
-  static {
-    DefaultRedisScript<Long> s = new DefaultRedisScript<>();
-    s.setScriptText(
-      """
-      local current = redis.call('GET', KEYS[1])
-      if current == false then
-        redis.call('SET', KEYS[1], ARGV[1])
-        return 1
-      end
-      local ok, decoded = pcall(cjson.decode, current)
-      local curVer = 0
-      if ok and type(decoded) == 'table' and decoded['rulesVersion'] then
-        curVer = decoded['rulesVersion']
-      end
-      if tonumber(ARGV[2]) > curVer then
-        redis.call('SET', KEYS[1], ARGV[1])
-        return 1
-      end
-      return 0"""
-    );
-    s.setResultType(Long.class);
-    RULE_CAS_SCRIPT = s;
+    private static DefaultRedisScript<Long> create() {
+      DefaultRedisScript<Long> s = new DefaultRedisScript<>();
+      s.setScriptText(
+        """
+        local current = redis.call('GET', KEYS[1])
+        if current == false then
+          redis.call('SET', KEYS[1], ARGV[1])
+          return 1
+        end
+        local ok, decoded = pcall(cjson.decode, current)
+        local curVer = 0
+        if ok and type(decoded) == 'table' and decoded['rulesVersion'] then
+          curVer = decoded['rulesVersion']
+        end
+        if tonumber(ARGV[2]) > curVer then
+          redis.call('SET', KEYS[1], ARGV[1])
+          return 1
+        end
+        return 0"""
+      );
+      s.setResultType(Long.class);
+      return s;
+    }
   }
 
   /** Optional Redis template for rule persistence across restarts. */
@@ -404,11 +405,11 @@ public class RuleMatcherImpl implements RuleMatcher {
    */
   private void persistToRedis(StringRedisTemplate r, String json, long version) {
     try {
-      r.execute(RULE_CAS_SCRIPT, List.of(REDIS_KEY_RULES), json, String.valueOf(version));
+      r.execute(CasScriptHolder.SCRIPT, List.of(KEY_RULES), json, String.valueOf(version));
     } catch (Exception e) {
       log.warn("Lua compare-and-set failed for rules (version={}), fallback to plain set", version, e);
       try {
-        r.opsForValue().set(REDIS_KEY_RULES, json);
+        r.opsForValue().set(KEY_RULES, json);
       } catch (Exception e2) {
         log.error("Redis fallback set also failed, skipping persist", e2);
       }
@@ -556,7 +557,7 @@ public class RuleMatcherImpl implements RuleMatcher {
   private void loadRulesFromRedis() {
     redisTemplate.ifPresent(r -> {
       try {
-        String json = r.opsForValue().get(REDIS_KEY_RULES);
+        String json = r.opsForValue().get(KEY_RULES);
 
         if (json == null || json.isEmpty()) {
           log.info("No rules found in Redis, starting with empty rule set");

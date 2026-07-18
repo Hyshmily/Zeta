@@ -50,7 +50,7 @@ public class WorkerListenerProperties {
 
   /** FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats.
    * Must match the {@code zeta.worker.messaging.send-exchange} on the Worker side. */
-  private String exchangeName = ZetaConstants.EXCHANGE_BROADCAST;
+  private String exchangeName = ZetaConstants.Exchange.BROADCAST;
 
   /** Prefix for the per-instance queue name, suffixed with the instance ID
    * from {@link InstanceIdGenerator}. Final queue: {@code {queuePrefix}:{instanceId}}. */

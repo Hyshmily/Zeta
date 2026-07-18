@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.sync;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -107,7 +107,7 @@ class CacheSyncListenerTest {
   @Test
   void handleSyncMessage_shouldNackOnError() throws IOException {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, "INVALIDATE");
+    props.setHeader(HEADER_TYPE, "INVALIDATE");
     Message msg = new Message("key1".getBytes(StandardCharsets.UTF_8), props);
     doThrow(new RuntimeException("forced error")).when(channel).basicAck(anyLong(), eq(false));
     listener.handleSyncMessage(channel, msg);
@@ -208,9 +208,9 @@ class CacheSyncListenerTest {
 
   private static Message syncMessage(String key, String type, long version, boolean degraded) {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, type);
-    props.setHeader(AMQP_HEADER_VERSION, version);
-    props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, degraded);
+    props.setHeader(HEADER_TYPE, type);
+    props.setHeader(HEADER_VERSION, version);
+    props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
     return new Message(key.getBytes(StandardCharsets.UTF_8), props);
   }
 
@@ -234,7 +234,7 @@ class CacheSyncListenerTest {
     cache.put("k2", "v2");
     cache.put("k3", "v3");
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+    props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
     Message msg = new Message("[\"k1\",\"k2\"]".getBytes(StandardCharsets.UTF_8), props);
     listener.handleSyncMessage(channel, msg);
     verify(channel).basicAck(anyLong(), eq(false));
@@ -250,7 +250,7 @@ class CacheSyncListenerTest {
   @Test
   void handleSyncMessage_withInvalidateAllMalformedJson_shouldNack() throws IOException {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+    props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
     Message msg = new Message("not-json".getBytes(StandardCharsets.UTF_8), props);
     listener.handleSyncMessage(channel, msg);
     verify(channel).basicAck(anyLong(), eq(false));

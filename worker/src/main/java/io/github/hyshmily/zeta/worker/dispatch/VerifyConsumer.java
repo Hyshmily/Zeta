@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.worker.dispatch;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 
 import lombok.AllArgsConstructor;
 import org.springframework.amqp.core.Message;
@@ -50,8 +50,8 @@ public class VerifyConsumer {
     }
 
     MessageProperties pongProps = new MessageProperties();
-    pongProps.setHeader(AMQP_HEADER_VERIFY_TYPE, AMQP_HEADER_VERIFY_PONG);
-    pongProps.setHeader(AMQP_HEADER_VERIFY_WORKER_ID, workerId);
+    pongProps.setHeader(HEADER_VERIFY_TYPE, HEADER_VERIFY_PONG);
+    pongProps.setHeader(HEADER_VERIFY_WORKER_ID, workerId);
 
     Message pong = new Message(new byte[0], pongProps);
     rabbitTemplate.send("", replyTo, pong);

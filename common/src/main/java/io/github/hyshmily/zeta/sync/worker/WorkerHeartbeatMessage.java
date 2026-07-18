@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 
 import io.github.hyshmily.zeta.Internal;
 import java.nio.charset.StandardCharsets;
@@ -93,16 +93,16 @@ public record WorkerHeartbeatMessage(
   public Message toMessage() {
     MessageProperties props = new MessageProperties();
 
-    props.setHeader(AMQP_HEADER_TYPE, TYPE);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_EPOCH, epoch);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_DV_HWM, decisionVersionHwm);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_LOAD, loadFactor);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_READY, readyToServe);
-    props.setHeader(AMQP_HEADER_NODE_ID, workerId);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, configConfirmCount);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, configCoolCount);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, configGraceCount);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTimestamp);
+    props.setHeader(HEADER_TYPE, TYPE);
+    props.setHeader(HEADER_HEARTBEAT_EPOCH, epoch);
+    props.setHeader(HEADER_HEARTBEAT_DV_HWM, decisionVersionHwm);
+    props.setHeader(HEADER_HEARTBEAT_LOAD, loadFactor);
+    props.setHeader(HEADER_HEARTBEAT_READY, readyToServe);
+    props.setHeader(HEADER_NODE_ID, workerId);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM, configConfirmCount);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_COOL, configCoolCount);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_GRACE, configGraceCount);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTimestamp);
 
     return new Message(workerId.getBytes(StandardCharsets.UTF_8), props);
   }
@@ -126,20 +126,20 @@ public record WorkerHeartbeatMessage(
     if (h == null) {
       return null;
     }
-    if (!TYPE.equals(h.getHeader(AMQP_HEADER_TYPE))) {
+    if (!TYPE.equals(h.getHeader(HEADER_TYPE))) {
       return null;
     }
 
     return new WorkerHeartbeatMessage(
-      h.getHeader(AMQP_HEADER_NODE_ID) instanceof String s ? s : "",
-      h.getHeader(AMQP_HEADER_HEARTBEAT_EPOCH) instanceof Number n ? n.longValue() : 0,
-      h.getHeader(AMQP_HEADER_HEARTBEAT_DV_HWM) instanceof Number n ? n.longValue() : 0,
-      h.getHeader(AMQP_HEADER_HEARTBEAT_LOAD) instanceof Number n ? n.doubleValue() : 0.0,
-      Boolean.TRUE.equals(h.getHeader(AMQP_HEADER_HEARTBEAT_READY)),
-      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM) instanceof Number n ? n.intValue() : 0,
-      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL) instanceof Number n ? n.intValue() : 0,
-      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE) instanceof Number n ? n.intValue() : 0,
-      h.getHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP) instanceof Number n ? n.longValue() : 0
+      h.getHeader(HEADER_NODE_ID) instanceof String s ? s : "",
+      h.getHeader(HEADER_HEARTBEAT_EPOCH) instanceof Number n ? n.longValue() : 0,
+      h.getHeader(HEADER_HEARTBEAT_DV_HWM) instanceof Number n ? n.longValue() : 0,
+      h.getHeader(HEADER_HEARTBEAT_LOAD) instanceof Number n ? n.doubleValue() : 0.0,
+      Boolean.TRUE.equals(h.getHeader(HEADER_HEARTBEAT_READY)),
+      h.getHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM) instanceof Number n ? n.intValue() : 0,
+      h.getHeader(HEADER_HEARTBEAT_CONFIG_COOL) instanceof Number n ? n.intValue() : 0,
+      h.getHeader(HEADER_HEARTBEAT_CONFIG_GRACE) instanceof Number n ? n.intValue() : 0,
+      h.getHeader(HEADER_HEARTBEAT_CONFIG_TIMESTAMP) instanceof Number n ? n.longValue() : 0
     );
   }
 }

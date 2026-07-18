@@ -373,7 +373,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public Queue reportQueue(WorkerProperties properties) {
-    String queueName = ZetaConstants.QUEUE_PREFIX_REPORT + properties.getRouting().getAppName() + "." + nodeId;
+    String queueName = ZetaConstants.Routing.QUEUE_PREFIX_REPORT + properties.getRouting().getAppName() + "." + nodeId;
     return QueueBuilder.durable(queueName).withArgument("x-expires", 604_800_000).build();
   }
 
@@ -388,7 +388,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public Binding reportBinding(Queue reportQueue, DirectExchange reportExchange, WorkerProperties properties) {
-    String routingKey = ZetaConstants.ROUTING_KEY_REPORT + properties.getRouting().getAppName() + "." + nodeId;
+    String routingKey = ZetaConstants.Routing.KEY_REPORT + properties.getRouting().getAppName() + "." + nodeId;
     return BindingBuilder.bind(reportQueue).to(reportExchange).with(routingKey);
   }
 
@@ -418,7 +418,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public Binding workerConfigBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
-    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with(ZetaConstants.ROUTING_KEY_HEARTBEAT + "*");
+    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with(ZetaConstants.Routing.KEY_HEARTBEAT + "*");
   }
 
   /**

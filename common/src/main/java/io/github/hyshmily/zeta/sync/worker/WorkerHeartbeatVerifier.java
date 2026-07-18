@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.zeta.Internal;
@@ -274,7 +274,7 @@ public class WorkerHeartbeatVerifier {
    * via AMQP Direct reply-to ({@code amq.rabbitmq.reply-to}).
    *
    * <p>The PING carries the application instance ID in the
-   * {@link ZetaConstants#AMQP_HEADER_VERIFY_APP_INSTANCE} header so the Worker
+   * {@link ZetaConstants.Amqp#HEADER_VERIFY_APP_INSTANCE} header so the Worker
    * can identify the requester. The reply timeout is set in the message properties.
    *
    * @param workerId the Worker to ping; must not be null
@@ -284,8 +284,8 @@ public class WorkerHeartbeatVerifier {
    */
   public boolean sendPingAndWaitPong(String workerId) {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_VERIFY_TYPE, AMQP_HEADER_VERIFY_PING);
-    props.setHeader(AMQP_HEADER_VERIFY_APP_INSTANCE, appInstanceId);
+    props.setHeader(HEADER_VERIFY_TYPE, HEADER_VERIFY_PING);
+    props.setHeader(HEADER_VERIFY_APP_INSTANCE, appInstanceId);
     props.setReplyTo("amq.rabbitmq.reply-to");
 
     Message ping = new Message(new byte[0], props);

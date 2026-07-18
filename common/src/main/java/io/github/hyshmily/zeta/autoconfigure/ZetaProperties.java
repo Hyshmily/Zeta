@@ -214,7 +214,7 @@ public class ZetaProperties {
   private String appName = "default";
 
   /** Exchange name for app-to-Worker report routing. */
-  private String reportExchange = ZetaConstants.EXCHANGE_REPORT;
+  private String reportExchange = ZetaConstants.Exchange.REPORT;
 
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
   private long reportIntervalMs = 50;
@@ -350,7 +350,7 @@ public class ZetaProperties {
   public static class Heartbeat {
 
     /** Heartbeat exchange name. */
-    private String exchangeName = ZetaConstants.EXCHANGE_HEARTBEAT;
+    private String exchangeName = ZetaConstants.Exchange.HEARTBEAT;
     /** Heartbeat timeout (ms). */
     private int timeoutMs = 10000;
     /** Verify interval (ms). */

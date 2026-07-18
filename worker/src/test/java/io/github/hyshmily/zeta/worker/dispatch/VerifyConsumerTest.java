@@ -1,6 +1,6 @@
 package io.github.hyshmily.zeta.worker.dispatch;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -62,8 +62,8 @@ class VerifyConsumerTest {
 
     verify(rabbitTemplate).send(eq(""), eq("amq.rabbitmq.reply-to"), messageCaptor.capture());
     Message pong = messageCaptor.getValue();
-    assertThat(pong.getMessageProperties().getHeaders().get(AMQP_HEADER_VERIFY_TYPE)).isEqualTo(
-      AMQP_HEADER_VERIFY_PONG
+    assertThat(pong.getMessageProperties().getHeaders().get(HEADER_VERIFY_TYPE)).isEqualTo(
+      HEADER_VERIFY_PONG
     );
   }
 
@@ -75,7 +75,7 @@ class VerifyConsumerTest {
 
     verify(rabbitTemplate).send(eq(""), eq("amq.rabbitmq.reply-to"), messageCaptor.capture());
     Message pong = messageCaptor.getValue();
-    assertThat(pong.getMessageProperties().getHeaders().get(AMQP_HEADER_VERIFY_WORKER_ID)).isEqualTo(workerId);
+    assertThat(pong.getMessageProperties().getHeaders().get(HEADER_VERIFY_WORKER_ID)).isEqualTo(workerId);
   }
 
   @Test
@@ -105,8 +105,8 @@ class VerifyConsumerTest {
     consumer.handlePing(ping);
 
     verify(rabbitTemplate).send(eq(""), eq(""), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders().get(AMQP_HEADER_VERIFY_TYPE)).isEqualTo(
-      AMQP_HEADER_VERIFY_PONG
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_VERIFY_TYPE)).isEqualTo(
+      HEADER_VERIFY_PONG
     );
   }
 

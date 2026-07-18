@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.sync;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
@@ -36,9 +36,9 @@ class SyncMessageTest {
   @Test
   void from_shouldParseValidMessage() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_REFRESH);
-    props.setHeader(AMQP_HEADER_VERSION, 42L);
-    props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, true);
+    props.setHeader(HEADER_TYPE, SyncMessage.TYPE_REFRESH);
+    props.setHeader(HEADER_VERSION, 42L);
+    props.setHeader(HEADER_IS_VERSION_DEGRADED, true);
     Message msg = new Message("cacheKey".getBytes(StandardCharsets.UTF_8), props);
     SyncMessage sm = SyncMessage.from(msg);
     assertThat(sm).isNotNull();
@@ -63,7 +63,7 @@ class SyncMessageTest {
   @Test
   void from_shouldReturnNullForBlankKey() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_REFRESH);
+    props.setHeader(HEADER_TYPE, SyncMessage.TYPE_REFRESH);
     Message msg = new Message("   ".getBytes(StandardCharsets.UTF_8), props);
     assertThat(SyncMessage.from(msg)).isNull();
   }
@@ -94,7 +94,7 @@ class SyncMessageTest {
   @Test
   void from_withInvalidateAllType_shouldSkipKeyValidityCheck() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+    props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
     Message msg = new Message("   ".getBytes(StandardCharsets.UTF_8), props);
     assertThat(SyncMessage.from(msg)).isNotNull();
   }
@@ -105,7 +105,7 @@ class SyncMessageTest {
   @Test
   void from_withRulesSyncType_shouldSkipKeyValidityCheck() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
+    props.setHeader(HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
     Message msg = new Message("payload".getBytes(StandardCharsets.UTF_8), props);
     assertThat(SyncMessage.from(msg)).isNotNull();
   }
@@ -116,8 +116,8 @@ class SyncMessageTest {
   @Test
   void from_withVersionHeaderAsInteger_shouldHandleCorrectly() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_REFRESH);
-    props.setHeader(AMQP_HEADER_VERSION, 42);
+    props.setHeader(HEADER_TYPE, SyncMessage.TYPE_REFRESH);
+    props.setHeader(HEADER_VERSION, 42);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     SyncMessage sm = SyncMessage.from(msg);
     assertThat(sm.version()).isEqualTo(42L);
@@ -129,8 +129,8 @@ class SyncMessageTest {
   @Test
   void from_withVersionDegradedHeaderAsString_shouldDefaultToFalse() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, SyncMessage.TYPE_REFRESH);
-    props.setHeader(AMQP_HEADER_IS_VERSION_DEGRADED, "true");
+    props.setHeader(HEADER_TYPE, SyncMessage.TYPE_REFRESH);
+    props.setHeader(HEADER_IS_VERSION_DEGRADED, "true");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     SyncMessage sm = SyncMessage.from(msg);
     assertThat(sm.isVersionDegraded()).isFalse();

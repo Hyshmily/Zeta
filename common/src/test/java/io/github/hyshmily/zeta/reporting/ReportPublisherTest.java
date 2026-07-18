@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.reporting;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.ROUTING_KEY_REPORT;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_REPORT;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -38,7 +38,7 @@ class ReportPublisherTest {
   @BeforeEach
   void setUp() {
     rabbitTemplate = mock(RabbitTemplate.class);
-    publisher = new ReportPublisher(rabbitTemplate, ZetaConstants.EXCHANGE_REPORT, "testApp");
+    publisher = new ReportPublisher(rabbitTemplate, ZetaConstants.Exchange.REPORT, "testApp");
   }
 
   /**
@@ -49,8 +49,8 @@ class ReportPublisherTest {
     ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
     publisher.publish("0", message);
     verify(rabbitTemplate).convertAndSend(
-      eq(ZetaConstants.EXCHANGE_REPORT),
-      eq(ROUTING_KEY_REPORT + "testApp.0"),
+      eq(ZetaConstants.Exchange.REPORT),
+      eq(KEY_REPORT + "testApp.0"),
       any(ReportMessage.class)
     );
   }
@@ -60,8 +60,8 @@ class ReportPublisherTest {
     ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
     publisher.publish("", message);
     verify(rabbitTemplate).convertAndSend(
-      eq(ZetaConstants.EXCHANGE_REPORT),
-      eq(ROUTING_KEY_REPORT + "testApp."),
+      eq(ZetaConstants.Exchange.REPORT),
+      eq(KEY_REPORT + "testApp."),
       any(ReportMessage.class)
     );
   }
@@ -77,8 +77,8 @@ class ReportPublisherTest {
     doThrow(new AmqpException("Broker unavailable"))
       .when(rabbitTemplate)
       .convertAndSend(
-        eq(ZetaConstants.EXCHANGE_REPORT),
-        eq(ROUTING_KEY_REPORT + "testApp.target"),
+        eq(ZetaConstants.Exchange.REPORT),
+        eq(KEY_REPORT + "testApp.target"),
         any(ReportMessage.class)
       );
     org.junit.jupiter.api.Assertions.assertThrows(AmqpException.class, () -> publisher.publish("target", message));

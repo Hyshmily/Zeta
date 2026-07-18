@@ -55,7 +55,7 @@ public final class TimeSource {
         while (threadRunning.get()) {
           currentMillis = System.currentTimeMillis();
           try {
-            Thread.sleep(5);
+            Thread.sleep(1);
           } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
             threadRunning.set(false);

@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.sync;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
@@ -36,8 +36,8 @@ class WorkerMessageTest {
   @Test
   void from_shouldParseHotMessage() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
-    props.setHeader(AMQP_HEADER_VERSION, 10L);
+    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_VERSION, 10L);
     Message msg = new Message("cacheKey".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm).isNotNull();
@@ -61,7 +61,7 @@ class WorkerMessageTest {
   @Test
   void from_shouldUseDefaultVersionWhenMissing() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_COOL);
+    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_COOL);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm.decisionVersion()).isZero();
@@ -82,10 +82,10 @@ class WorkerMessageTest {
   @Test
   void from_withTimestampAndNodeId_shouldParse() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
-    props.setHeader(AMQP_HEADER_VERSION, 10L);
-    props.setHeader(AMQP_HEADER_TIMESTAMP, 123456L);
-    props.setHeader(AMQP_HEADER_NODE_ID, "worker-1");
+    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_VERSION, 10L);
+    props.setHeader(HEADER_TIMESTAMP, 123456L);
+    props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm.timestamp()).isEqualTo(123456L);
@@ -98,8 +98,8 @@ class WorkerMessageTest {
   @Test
   void from_withMissingTimestampAndNodeId_shouldDefault() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
-    props.setHeader(AMQP_HEADER_VERSION, 10L);
+    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_VERSION, 10L);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm.timestamp()).isZero();
@@ -112,8 +112,8 @@ class WorkerMessageTest {
   @Test
   void from_withVersionAsInteger_shouldHandle() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
-    props.setHeader(AMQP_HEADER_VERSION, 42);
+    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_VERSION, 42);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm.decisionVersion()).isEqualTo(42L);
@@ -127,10 +127,10 @@ class WorkerMessageTest {
   @Test
   void from_withEpoch_shouldParse() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
-    props.setHeader(AMQP_HEADER_VERSION, 10L);
-    props.setHeader(AMQP_HEADER_EPOCH, 3L);
-    props.setHeader(AMQP_HEADER_NODE_ID, "worker-1");
+    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_VERSION, 10L);
+    props.setHeader(HEADER_EPOCH, 3L);
+    props.setHeader(HEADER_NODE_ID, "worker-1");
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm.epoch()).isEqualTo(3L);
@@ -143,8 +143,8 @@ class WorkerMessageTest {
   @Test
   void from_withMissingEpoch_shouldDefaultToZero() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
-    props.setHeader(AMQP_HEADER_VERSION, 10L);
+    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_VERSION, 10L);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm.epoch()).isZero();
@@ -156,9 +156,9 @@ class WorkerMessageTest {
   @Test
   void from_withEpochAsInteger_shouldHandle() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerMessage.TYPE_HOT);
-    props.setHeader(AMQP_HEADER_VERSION, 10L);
-    props.setHeader(AMQP_HEADER_EPOCH, 2);
+    props.setHeader(HEADER_TYPE, WorkerMessage.TYPE_HOT);
+    props.setHeader(HEADER_VERSION, 10L);
+    props.setHeader(HEADER_EPOCH, 2);
     Message msg = new Message("key".getBytes(StandardCharsets.UTF_8), props);
     WorkerMessage wm = WorkerMessage.from(msg);
     assertThat(wm.epoch()).isEqualTo(2L);

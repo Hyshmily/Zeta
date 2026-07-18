@@ -72,7 +72,7 @@ public class ZetaFacadeAutoConfiguration {
   public ScheduledExecutorService hotKeyScheduler() {
     return Executors.newScheduledThreadPool(
       properties.getSchedulerPoolSize(),
-      new ZetaThreadFactory(ZetaConstants.THREAD_PREFIX_SCHEDULER)
+      new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER)
     );
   }
 

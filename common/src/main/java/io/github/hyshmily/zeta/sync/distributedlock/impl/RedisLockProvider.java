@@ -15,23 +15,22 @@
  */
 package io.github.hyshmily.zeta.sync.distributedlock.impl;
 
+import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
+
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.RedisSystemException;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
-
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-
-import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.RedisSystemException;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 /**
  * Redis-backed {@link LockProvider} using {@code SET NX PX} with UUID-based
@@ -144,7 +143,7 @@ public class RedisLockProvider implements LockProvider {
       return null;
     }
 
-    String lockKey = ZetaConstants.REDIS_LOCK_KEY_PREFIX + key;
+    String lockKey = ZetaConstants.Redis.LOCK_KEY_PREFIX + key;
     String uuid = lockId();
     long expireMs = unit.toMillis(expire);
     long expireTimestamp = System.currentTimeMillis() + expireMs;

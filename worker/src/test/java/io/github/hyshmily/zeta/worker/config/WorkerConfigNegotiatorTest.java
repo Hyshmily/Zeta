@@ -1,6 +1,6 @@
 package io.github.hyshmily.zeta.worker.config;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.verify;
@@ -40,24 +40,24 @@ class WorkerConfigNegotiatorTest {
 
   private static Message createHeartbeatMessage(String workerId, long configTs) {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
-    props.setHeader(AMQP_HEADER_NODE_ID, workerId);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTs);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_CONFIRM, 5);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_COOL, 10);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_GRACE, 3);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_EPOCH, 1L);
-    props.setHeader(AMQP_HEADER_TIMESTAMP, System.currentTimeMillis());
-    props.setHeader(AMQP_HEADER_HEARTBEAT_DV_HWM, 0L);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_LOAD, 0.0);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_READY, true);
-    props.setHeader(AMQP_HEADER_HEARTBEAT_CONFIG_FP, 0);
+    props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
+    props.setHeader(HEADER_NODE_ID, workerId);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTs);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM, 5);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_COOL, 10);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_GRACE, 3);
+    props.setHeader(HEADER_HEARTBEAT_EPOCH, 1L);
+    props.setHeader(HEADER_TIMESTAMP, System.currentTimeMillis());
+    props.setHeader(HEADER_HEARTBEAT_DV_HWM, 0L);
+    props.setHeader(HEADER_HEARTBEAT_LOAD, 0.0);
+    props.setHeader(HEADER_HEARTBEAT_READY, true);
+    props.setHeader(HEADER_HEARTBEAT_CONFIG_FP, 0);
     return new Message(workerId.getBytes(), props);
   }
 
   private static Message createMessageWithWrongType() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, "OTHER");
+    props.setHeader(HEADER_TYPE, "OTHER");
     return new Message(new byte[0], props);
   }
 
@@ -197,7 +197,7 @@ class WorkerConfigNegotiatorTest {
   @Test
   void shouldIgnoreMessageWithWrongHeaders() {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
+    props.setHeader(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
     // Missing required headers (nodeId, configTs, etc.) → WorkerHeartbeatMessage.from returns null
     Message msg = new Message("worker-2".getBytes(), props);
 

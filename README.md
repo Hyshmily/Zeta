@@ -390,7 +390,7 @@ Enable `zeta.sync.enabled=true` to enable cross-instance rule synchronization. T
 
 ### Persistence & Broadcast
 
-- **With Redis:** Each `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `ZetaConstants.REDIS_KEY_RULES` (`"zeta:rules"`). On startup, `RuleMatcher.initRules()` loads from Redis. Changes are also broadcast via `TYPE_RULES_SYNC` — peers call `RuleMatcher.syncRules()` for atomic replacement without triggering secondary broadcasts (loop-free).
+- **With Redis:** Each `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `ZetaConstants.Redis.KEY_RULES` (`"zeta:rules"`). On startup, `RuleMatcher.initRules()` loads from Redis. Changes are also broadcast via `TYPE_RULES_SYNC` — peers call `RuleMatcher.syncRules()` for atomic replacement without triggering secondary broadcasts (loop-free).
 - **Without Redis:** Same operations are broadcast to all peers via the `CacheSyncPublisher` fanout exchange. Each peer holds the full rule set in memory.
 - **Manual broadcast:** `zeta.broadcastAllLocalRulesManually()` loads from Redis (if available) and re-broadcasts the current rule set to all peers.
 

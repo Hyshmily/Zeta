@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.sync;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -110,7 +110,7 @@ class WorkerListenerTest {
   @Test
   void handleWorkerMessage_shouldNackOnError() throws IOException {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, "HOT");
+    props.setHeader(HEADER_TYPE, "HOT");
     Message msg = new Message("key1".getBytes(StandardCharsets.UTF_8), props);
     doThrow(new RuntimeException("forced error")).when(channel).basicAck(anyLong(), anyBoolean());
     listener.handleWorkerMessage(channel, msg);
@@ -119,8 +119,8 @@ class WorkerListenerTest {
 
   private static Message workerMessage(String key, String type, long version) {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, type);
-    props.setHeader(AMQP_HEADER_VERSION, version);
+    props.setHeader(HEADER_TYPE, type);
+    props.setHeader(HEADER_VERSION, version);
     return new Message(key.getBytes(StandardCharsets.UTF_8), props);
   }
 
@@ -407,10 +407,10 @@ class WorkerListenerTest {
     long epoch
   ) {
     MessageProperties props = new MessageProperties();
-    props.setHeader(AMQP_HEADER_TYPE, type);
-    props.setHeader(AMQP_HEADER_VERSION, version);
-    props.setHeader(AMQP_HEADER_NODE_ID, nodeId);
-    props.setHeader(AMQP_HEADER_EPOCH, epoch);
+    props.setHeader(HEADER_TYPE, type);
+    props.setHeader(HEADER_VERSION, version);
+    props.setHeader(HEADER_NODE_ID, nodeId);
+    props.setHeader(HEADER_EPOCH, epoch);
     return new Message(key.getBytes(StandardCharsets.UTF_8), props);
   }
 

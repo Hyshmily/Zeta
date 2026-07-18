@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.ROUTING_KEY_HEARTBEAT;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
@@ -57,12 +57,10 @@ import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -89,10 +87,17 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * Requires Redis.
  */
 @Internal
-@AutoConfiguration(after = { RedisAutoConfiguration.class, RabbitAutoConfiguration.class })
+@AutoConfiguration(
+  afterName = {
+    "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration",
+    "org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration",
+  }
+)
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @EnableConfigurationProperties({ ZetaProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class })
 public class ZetaAmqpAutoConfiguration {
+
+  private ZetaAmqpAutoConfiguration() {}
 
   /**
    * Inner configuration for app-to-Worker report routing via DirectExchange.
@@ -333,7 +338,7 @@ public class ZetaAmqpAutoConfiguration {
       int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
       return Executors.newScheduledThreadPool(
         poolSize,
-        new ZetaThreadFactory(ZetaConstants.THREAD_PREFIX_SCHEDULER + "-sync")
+        new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER + "-sync")
       );
     }
 
@@ -495,7 +500,7 @@ public class ZetaAmqpAutoConfiguration {
      */
     @Bean
     public Binding hotkeyHeartbeatBinding(Queue hotkeyHeartbeatQueue, TopicExchange hotkeyHeartbeatExchange) {
-      return BindingBuilder.bind(hotkeyHeartbeatQueue).to(hotkeyHeartbeatExchange).with(ROUTING_KEY_HEARTBEAT + "*");
+      return BindingBuilder.bind(hotkeyHeartbeatQueue).to(hotkeyHeartbeatExchange).with(KEY_HEARTBEAT + "*");
     }
 
     /**
@@ -539,7 +544,7 @@ public class ZetaAmqpAutoConfiguration {
       int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
       return Executors.newScheduledThreadPool(
         poolSize,
-        new ZetaThreadFactory(ZetaConstants.THREAD_PREFIX_SCHEDULER + "-worker")
+        new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER + "-worker")
       );
     }
 

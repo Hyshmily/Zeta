@@ -71,10 +71,14 @@ public class VersionControllerImpl implements VersionController {
    */
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
 
-  private static final DefaultRedisScript<Long> INCR_SCRIPT = new DefaultRedisScript<>(
-    "local v = redis.call('INCR', KEYS[1]); redis.call('EXPIRE', KEYS[1], ARGV[1]); return v",
-    Long.class
-  );
+  /** Holder for the Redis INCR script — lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
+  private static class IncrScriptHolder {
+
+    static final DefaultRedisScript<Long> SCRIPT = new DefaultRedisScript<>(
+      "local v = redis.call('INCR', KEYS[1]); redis.call('EXPIRE', KEYS[1], ARGV[1]); return v",
+      Long.class
+    );
+  }
 
   /**
    * Atomically increments the version counter for the given cache key and returns
@@ -100,8 +104,8 @@ public class VersionControllerImpl implements VersionController {
       .map(t -> {
         try {
           Long v = t.execute(
-            INCR_SCRIPT,
-            List.of(ZetaConstants.REDIS_VERSION_KEY_PREFIX + cacheKey),
+            IncrScriptHolder.SCRIPT,
+            List.of(ZetaConstants.Redis.VERSION_KEY_PREFIX + cacheKey),
             String.valueOf(versionKeyTtlMinutes * 60L)
           );
           return new VersionResult(v, false);

@@ -15,7 +15,9 @@
  */
 package io.github.hyshmily.zeta.worker.dispatch;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Exchange.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -51,7 +53,7 @@ class WorkerBroadcasterTest {
 
   @BeforeEach
   void setUp() {
-    broadcaster = new WorkerBroadcaster(rabbitTemplate, EXCHANGE_BROADCAST, "testApp", "test-node", epochCounter);
+    broadcaster = new WorkerBroadcaster(rabbitTemplate, BROADCAST, "testApp", "test-node", epochCounter);
   }
 
   /**
@@ -60,12 +62,12 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendHotWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastHot("myKey");
-    verify(rabbitTemplate).send(eq(EXCHANGE_BROADCAST), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate).send(eq(BROADCAST), eq(KEY_BROADCAST + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
-    assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_HOT);
-    assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_IS_VERSION_DEGRADED)).isEqualTo(false);
-    assertThat((Long) sent.getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION)).isPositive();
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_HOT);
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_IS_VERSION_DEGRADED)).isEqualTo(false);
+    assertThat((Long) sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isPositive();
   }
 
   /**
@@ -74,12 +76,12 @@ class WorkerBroadcasterTest {
   @Test
   void shouldSendCoolWithCorrectRoutingKeyAndHeaders() {
     broadcaster.broadcastCool("myKey");
-    verify(rabbitTemplate).send(eq(EXCHANGE_BROADCAST), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    verify(rabbitTemplate).send(eq(BROADCAST), eq(KEY_BROADCAST + "testApp"), messageCaptor.capture());
     Message sent = messageCaptor.getValue();
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
-    assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_COOL);
-    assertThat(sent.getMessageProperties().getHeaders().get(AMQP_HEADER_IS_VERSION_DEGRADED)).isEqualTo(false);
-    assertThat((Long) sent.getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION)).isPositive();
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_COOL);
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_IS_VERSION_DEGRADED)).isEqualTo(false);
+    assertThat((Long) sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isPositive();
   }
 
   /**
@@ -92,9 +94,9 @@ class WorkerBroadcasterTest {
     broadcaster.broadcastHot("k2");
     broadcaster.broadcastHot("k3");
 
-    verify(rabbitTemplate, times(4)).send(any(), eq(ROUTING_KEY_BROADCAST + "testApp"), messageCaptor.capture());
-    long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
-    long v3 = (Long) messageCaptor.getAllValues().get(3).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
+    verify(rabbitTemplate, times(4)).send(any(), eq(KEY_BROADCAST + "testApp"), messageCaptor.capture());
+    long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(HEADER_VERSION);
+    long v3 = (Long) messageCaptor.getAllValues().get(3).getMessageProperties().getHeaders().get(HEADER_VERSION);
     assertThat(v3).isGreaterThan(v0);
   }
 
@@ -129,25 +131,22 @@ class WorkerBroadcasterTest {
     broadcaster.broadcastHot("k3");
 
     verify(rabbitTemplate, times(3)).send(any(), any(), messageCaptor.capture());
-    long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
-    long v1 = (Long) messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
-    long v2 = (Long) messageCaptor.getAllValues().get(2).getMessageProperties().getHeaders().get(AMQP_HEADER_VERSION);
+    long v0 = (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(HEADER_VERSION);
+    long v1 = (Long) messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(HEADER_VERSION);
+    long v2 = (Long) messageCaptor.getAllValues().get(2).getMessageProperties().getHeaders().get(HEADER_VERSION);
     assertThat(v1).isGreaterThan(v0);
     assertThat(v2).isGreaterThan(v1);
   }
 
   /**
-   * Verifies that {@code broadcastHot} sets the {@link ZetaConstants#AMQP_HEADER_NODE_ID}
+   * Verifies that {@code broadcastHot} sets the {@link ZetaConstants.Amqp#HEADER_NODE_ID}
    * header on the sent message.
    */
   @Test
   void sendBroadcast_shouldIncludeNodeIdHeader() {
     broadcaster.broadcastHot("key");
     verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-      AMQP_HEADER_NODE_ID,
-      "test-node"
-    );
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(HEADER_NODE_ID, "test-node");
   }
 
   /**
@@ -163,10 +162,10 @@ class WorkerBroadcasterTest {
     verify(rabbitTemplate, times(2)).send(any(), any(), messageCaptor.capture());
     assertThat(messageCaptor.getAllValues()).hasSize(2);
     assertThat(
-      (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(AMQP_HEADER_EPOCH)
+      (Long) messageCaptor.getAllValues().get(0).getMessageProperties().getHeaders().get(HEADER_EPOCH)
     ).isEqualTo(0L);
     assertThat(
-      (Long) messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(AMQP_HEADER_EPOCH)
+      (Long) messageCaptor.getAllValues().get(1).getMessageProperties().getHeaders().get(HEADER_EPOCH)
     ).isEqualTo(1L);
   }
 

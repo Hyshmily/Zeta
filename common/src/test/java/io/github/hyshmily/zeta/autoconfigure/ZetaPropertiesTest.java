@@ -216,7 +216,7 @@ class ZetaPropertiesTest {
   @Test
   void heartbeat_shouldHaveDefaultValues() {
     ZetaProperties p = props();
-    assertThat(p.getHeartbeat().getExchangeName()).isEqualTo(ZetaConstants.EXCHANGE_HEARTBEAT);
+    assertThat(p.getHeartbeat().getExchangeName()).isEqualTo(ZetaConstants.Exchange.HEARTBEAT);
     assertThat(p.getHeartbeat().getTimeoutMs()).isEqualTo(10000);
     assertThat(p.getHeartbeat().getVerifyIntervalMs()).isEqualTo(5000);
     assertThat(p.getHeartbeat().getPingTimeoutMs()).isEqualTo(3000);

@@ -62,7 +62,7 @@ import org.springframework.context.annotation.Bean;
  */
 @Internal
 @AutoConfiguration(after = ZetaAutoConfiguration.class)
-@ConditionalOnClass(MeterBinder.class)
+@ConditionalOnClass(name = "io.micrometer.core.instrument.binder.MeterBinder")
 @EnableConfigurationProperties(ZetaProperties.class)
 public class ZetaMicrometerAutoConfiguration {
 

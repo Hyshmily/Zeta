@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.reporting;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.ROUTING_KEY_REPORT;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_REPORT;
 
 import io.github.hyshmily.zeta.Internal;
 import lombok.RequiredArgsConstructor;
@@ -47,7 +47,7 @@ public class ReportPublisher {
    * @param message the report data
    */
   public void publish(String target, ReportMessage message) {
-    String routingKey = ROUTING_KEY_REPORT + appName + "." + target;
+    String routingKey = KEY_REPORT + appName + "." + target;
 
     try {
       rabbitTemplate.convertAndSend(reportExchange, routingKey, message);

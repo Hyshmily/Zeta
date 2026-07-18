@@ -48,7 +48,7 @@ public class CacheSyncProperties {
   private boolean enabled = false;
 
   /** FanoutExchange name for broadcasting INVALIDATE, REFRESH, and RULES_SYNC messages. */
-  private String exchangeName = ZetaConstants.EXCHANGE_SYNC;
+  private String exchangeName = ZetaConstants.Exchange.SYNC;
 
   /** Prefix for the per-instance queue name, suffixed with the instance ID
    * from {@link InstanceIdGenerator}. Final queue: {@code {queuePrefix}:{instanceId}}. */

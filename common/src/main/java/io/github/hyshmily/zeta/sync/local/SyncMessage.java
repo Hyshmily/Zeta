@@ -16,7 +16,8 @@
 package io.github.hyshmily.zeta.sync.local;
 
 import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.*;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
@@ -58,7 +59,7 @@ import org.springframework.amqp.core.Message;
  * @param isVersionDegraded whether the {@code dataVersion} was obtained in degraded mode
  *                          (node-local counter fallback, indicating Redis was unavailable)
  * @param rulesVersion      the rules version for {@code TYPE_RULES_SYNC} messages;
- *                          {@link ZetaConstants#VERSION_DEFAULT} (0) for other types
+ *                          {@link ZetaConstants.Version#VERSION_DEFAULT} (0) for other types
  */
 @Internal
 public record SyncMessage(String cacheKey, String type, long version, boolean isVersionDegraded, long rulesVersion) {
@@ -87,10 +88,10 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
    * <p>Deserialization rules:
    * <ul>
    *   <li>The cache key / payload is read from the message body (UTF-8 decoded).</li>
-   *   <li>The type is read from the {@link ZetaConstants#AMQP_HEADER_TYPE} header.</li>
-   *   <li>The {@code dataVersion} is read from the {@code AMQP_HEADER_VERSION} header;
-   *       defaults to {@link ZetaConstants#VERSION_DEFAULT} (0) if missing or non-numeric.</li>
-   *   <li>The degraded flag is read from the {@code AMQP_HEADER_IS_VERSION_DEGRADED} header;
+   *   <li>The type is read from the {@link ZetaConstants.Amqp#HEADER_TYPE} header.</li>
+   *   <li>The {@code dataVersion} is read from the {@code HEADER_VERSION} header;
+   *       defaults to {@link ZetaConstants.Version#VERSION_DEFAULT} (0) if missing or non-numeric.</li>
+   *   <li>The degraded flag is read from the {@code HEADER_IS_VERSION_DEGRADED} header;
    *       defaults to {@code false} if missing.</li>
    *   <li>For batch types ({@link #TYPE_INVALIDATE_ALL}, {@link #TYPE_RULES_SYNC}),
    *       the key validity check is skipped — the body carries a JSON payload rather
@@ -108,18 +109,18 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
       return null;
     }
 
-    String type = msg.getMessageProperties().getHeader(AMQP_HEADER_TYPE);
+    String type = msg.getMessageProperties().getHeader(HEADER_TYPE);
     String cacheKey = new String(body, StandardCharsets.UTF_8);
     if ((type == null || !BATCH_TYPES.contains(type)) && invalidCacheKey(cacheKey)) {
       return null;
     }
 
     long version =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
+      msg.getMessageProperties().getHeader(HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
     boolean isVersionDegraded =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_IS_VERSION_DEGRADED) instanceof Boolean b && b;
+      msg.getMessageProperties().getHeader(HEADER_IS_VERSION_DEGRADED) instanceof Boolean b && b;
     long rulesVersion =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_RULES_VERSION) instanceof Number n2
+      msg.getMessageProperties().getHeader(HEADER_RULES_VERSION) instanceof Number n2
         ? n2.longValue()
         : VERSION_DEFAULT;
 

@@ -15,7 +15,8 @@
  */
 package io.github.hyshmily.zeta.sync.worker;
 
-import static io.github.hyshmily.zeta.constants.ZetaConstants.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.*;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
@@ -81,14 +82,14 @@ public record WorkerMessage(
     }
 
     String cacheKey = new String(body, StandardCharsets.UTF_8);
-    String type = msg.getMessageProperties().getHeader(AMQP_HEADER_TYPE);
+    String type = msg.getMessageProperties().getHeader(HEADER_TYPE);
 
     long decisionVersion =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
+      msg.getMessageProperties().getHeader(HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
     long timestamp =
-      msg.getMessageProperties().getHeader(AMQP_HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
-    String nodeId = msg.getMessageProperties().getHeader(AMQP_HEADER_NODE_ID) instanceof String s ? s : null;
-    long epoch = msg.getMessageProperties().getHeader(AMQP_HEADER_EPOCH) instanceof Number n ? n.longValue() : 0L;
+      msg.getMessageProperties().getHeader(HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
+    String nodeId = msg.getMessageProperties().getHeader(HEADER_NODE_ID) instanceof String s ? s : null;
+    long epoch = msg.getMessageProperties().getHeader(HEADER_EPOCH) instanceof Number n ? n.longValue() : 0L;
     return new WorkerMessage(cacheKey, type, decisionVersion, timestamp, nodeId, epoch);
   }
 }
