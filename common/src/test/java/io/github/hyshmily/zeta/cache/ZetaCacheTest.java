@@ -23,6 +23,7 @@ import static org.mockito.Mockito.*;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.cache.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
@@ -938,6 +939,126 @@ class ZetaCacheTest {
     assertThat(hotKeyCache.compareAndInvalidate(null, "old")).isFalse();
   }
 
+  // ── putIfAbsent ──
+
+  @Test
+  void putIfAbsent_withAbsentKey_shouldInsertAndReturnTrue() {
+    assertThat(hotKeyCache.putIfAbsent("k", "v", 0L, 0L)).isTrue();
+    assertThat(hotKeyCache.peek("k")).contains("v");
+  }
+
+  @Test
+  void putIfAbsent_withExistingKey_shouldReturnFalseAndNotOverwrite() {
+    assertThat(hotKeyCache.putIfAbsent("k", "first", 0L, 0L)).isTrue();
+    assertThat(hotKeyCache.putIfAbsent("k", "second", 0L, 0L)).isFalse();
+    assertThat(hotKeyCache.peek("k")).contains("first");
+  }
+
+  @Test
+  void putIfAbsent_withExistingKeyAndDifferentTtl_shouldReturnFalseAndRefreshTtl() {
+    assertThat(hotKeyCache.putIfAbsent("k", "v", 10000L, 1000L)).isTrue();
+    assertThat(hotKeyCache.putIfAbsent("k", "v", 50000L, 5000L)).isFalse();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getHardTtlMs()).isEqualTo(50000L);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(5000L);
+  }
+
+  @Test
+  void putIfAbsent_withExistingNullValueSentinel_shouldReturnFalseAndNotOverwrite() {
+    caffeineCache.put(
+      "k",
+      CacheEntry.builder()
+        .value(NullValue.INSTANCE)
+        .dataVersion(0)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(10_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(0)
+        .softExpireAtMs(0)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(10_000)
+        .normalSoftTtlMs(0)
+        .build()
+    );
+    assertThat(hotKeyCache.putIfAbsent("k", "v", 0L, 0L)).isFalse();
+    assertThat(hotKeyCache.peek("k")).isEmpty();
+  }
+
+  @Test
+  void putIfAbsent_withExistingWorkerManagedHotEntry_shouldPreserveHotState() {
+    caffeineCache.put(
+      "k",
+      CacheEntry.builder()
+        .value("workerVal")
+        .dataVersion(100)
+        .isVersionDegraded(false)
+        .decisionVersion(42)
+        .hardTtlMs(3_600_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(300_000)
+        .softExpireAtMs(Long.MAX_VALUE)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    assertThat(hotKeyCache.putIfAbsent("k", "localVal", 0L, 0L)).isFalse();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getValue()).isEqualTo("workerVal");
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  @Test
+  void putIfAbsent_withExistingWorkerManagedCoolEntry_shouldPreserveCoolState() {
+    caffeineCache.put(
+      "k",
+      CacheEntry.builder()
+        .value("workerCool")
+        .dataVersion(200)
+        .isVersionDegraded(false)
+        .decisionVersion(10)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(Long.MAX_VALUE)
+        .keyState(KeyState.COOL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    assertThat(hotKeyCache.putIfAbsent("k", "override", 0L, 0L)).isFalse();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.COOL);
+  }
+
+  @Test
+  void putIfAbsent_withBlacklistedKey_shouldThrow() {
+    hotKeyCache.addBlacklist("block:*");
+    assertThatThrownBy(() -> hotKeyCache.putIfAbsent("block:k", "v", 0L, 0L)).isInstanceOf(ZetaBlockedException.class);
+  }
+
+  @Test
+  void putIfAbsent_withInvalidKey_shouldReturnFalse() {
+    assertThat(hotKeyCache.putIfAbsent(null, "v", 0L, 0L)).isFalse();
+    assertThat(hotKeyCache.putIfAbsent("", "v", 0L, 0L)).isFalse();
+  }
+
+  @Test
+  void putIfAbsent_withCustomTtl_shouldUseCustomTtl() {
+    assertThat(hotKeyCache.putIfAbsent("k", "v", 50000L, 5000L)).isTrue();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getHardTtlMs()).isEqualTo(50000L);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(5000L);
+  }
+
+  @Test
+  void putIfAbsent_withExistingBareObject_shouldNotOverwrite() {
+    caffeineCache.put("k", "bareValue");
+    assertThat(hotKeyCache.putIfAbsent("k", "newValue", 0L, 0L)).isFalse();
+    assertThat(caffeineCache.getIfPresent("k")).isEqualTo("bareValue");
+  }
+
   // ── invalidateLocal ──
 
   @Test
@@ -1714,5 +1835,120 @@ class ZetaCacheTest {
     assertThat(raw).isInstanceOf(CacheEntry.class);
     CacheEntry entry = (CacheEntry) raw;
     assertThat(entry.getValue()).isEqualTo("original");
+  }
+
+  // ── getAndSet ──
+
+  @Test
+  void getAndSet_shouldReplaceValueAndReturnOld() {
+    caffeineCache.put("k", CacheEntry.builder().value("old").build());
+    Optional<String> result = hotKeyCache.getAndSet("k", "new", 0L, 0L);
+    assertThat(result).contains("old");
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("new");
+  }
+
+  @Test
+  void getAndSet_withAbsentKey_shouldReturnEmpty() {
+    assertThat(hotKeyCache.getAndSet("k", "new", 0L, 0L)).isEmpty();
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("new");
+  }
+
+  @Test
+  void getAndSet_shouldPreserveExistingMetadata() {
+    caffeineCache.put(
+      "k",
+      CacheEntry.builder()
+        .value("old")
+        .dataVersion(42)
+        .isVersionDegraded(false)
+        .decisionVersion(7)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() + 60_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    hotKeyCache.getAndSet("k", "new", 0L, 0L);
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getValue()).isEqualTo("new");
+    assertThat(entry.getDataVersion()).isEqualTo(42);
+    assertThat(entry.getDecisionVersion()).isEqualTo(7);
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(entry.getHardTtlMs()).isEqualTo(300_000);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(30_000);
+  }
+
+  @Test
+  void getAndSet_withBlacklistedKey_shouldThrow() {
+    hotKeyCache.addBlacklist("block:*");
+    assertThatThrownBy(() -> hotKeyCache.getAndSet("block:k", "v", 0L, 0L)).isInstanceOf(ZetaBlockedException.class);
+  }
+
+  @Test
+  void getAndSet_withInvalidKey_shouldReturnEmpty() {
+    assertThat(hotKeyCache.getAndSet(null, "v", 0L, 0L)).isEmpty();
+    assertThat(hotKeyCache.getAndSet("", "v", 0L, 0L)).isEmpty();
+  }
+
+  @Test
+  void getAndSet_withNullNewValue_shouldStoreNullViaSentinel() {
+    caffeineCache.put("k", CacheEntry.builder().value("old").build());
+    Optional<String> result = hotKeyCache.getAndSet("k", null, 0L, 0L);
+    assertThat(result).contains("old");
+    assertThat(hotKeyCache.peek("k")).isEmpty();
+  }
+
+  @Test
+  void getAndSet_withExistingNullValue_shouldReturnEmpty() {
+    caffeineCache.put("k", CacheEntry.builder().value(null).build());
+    assertThat(hotKeyCache.getAndSet("k", "new", 0L, 0L)).isEmpty();
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("new");
+  }
+
+  @Test
+  void getAndSet_withCustomTtlOnAbsent_shouldUseCustomTtl() {
+    hotKeyCache.getAndSet("k", "v", 50000L, 5000L);
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getHardTtlMs()).isEqualTo(50000L);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(5000L);
+  }
+
+  @Test
+  void getAndSet_withBareObject_shouldReturnBareAndWrapInEntry() {
+    caffeineCache.put("k", "bare");
+    Optional<String> result = hotKeyCache.getAndSet("k", "new", 0L, 0L);
+    assertThat(result).contains("bare");
+    assertThat(caffeineCache.getIfPresent("k")).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("k")).getValue()).isEqualTo("new");
+  }
+
+  @Test
+  void getAndSet_shouldNotBumpDataVersionOrBroadcast() {
+    caffeineCache.put(
+      "k",
+      CacheEntry.builder()
+        .value("old")
+        .dataVersion(100)
+        .decisionVersion(50)
+        .hardTtlMs(300_000)
+        .softTtlMs(30_000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    Optional<String> result = hotKeyCache.getAndSet("k", "new", 0L, 0L);
+    assertThat(result).contains("old");
+
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
+    assertThat(entry.getDataVersion()).isEqualTo(100);
+    assertThat(entry.getDecisionVersion()).isEqualTo(50);
+    assertThat(entry.getValue()).isEqualTo("new");
   }
 }

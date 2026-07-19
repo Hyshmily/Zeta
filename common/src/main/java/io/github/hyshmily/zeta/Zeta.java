@@ -394,6 +394,128 @@ public class Zeta implements DisposableBean {
   }
 
   /**
+   * Atomically set the cache value and return the previous value.
+   * Shorthand for {@link #getAndSet(String, Object, long, long) getAndSet(cacheKey, newValue, 0, 0)}.
+   *
+   * @param cacheKey the key to update
+   * @param newValue the new value to cache (nullable)
+   * @param <T>      the type of the previously cached value
+   * @return the previous value, or empty if none existed
+   * @throws ZetaBlockedException when the key matches a blocklist rule
+   */
+  public <T> Optional<T> getAndSet(String cacheKey, Object newValue) {
+    return getAndSet(cacheKey, newValue, 0, 0);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #getAndSet(String, Object, long, long) getAndSet(cacheKey, newValue, hardTtlMs, ...)}
+   * with explicit hard TTL. Soft TTL uses the configured default.
+   *
+   * @param cacheKey  the key to update
+   * @param newValue  the new value to cache (nullable)
+   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @param <T>       the type of the previously cached value
+   * @return the previous value, or empty if none existed
+   * @throws ZetaBlockedException when the key matches a blocklist rule
+   */
+  public <T> Optional<T> getAndSet(String cacheKey, Object newValue, long hardTtlMs) {
+    return getAndSet(cacheKey, newValue, hardTtlMs, 0);
+  }
+
+  /**
+   * Atomically set the cache value for the given key and return the previously
+   * cached value. This is a logical equivalent of {@link java.util.concurrent.atomic.AtomicReference#getAndSet}.
+   *
+   * <p>If the key is absent, the new value is inserted and the method returns
+   * an empty {@link Optional}. If the key already exists, its current
+   * user-facing value is returned after the swap. Existing entry metadata
+   * ({@code dataVersion}, {@code decisionVersion}, TTLs) is preserved exactly
+   * as-is; only the value payload is replaced. No version bump or broadcast
+   * occurs.
+   *
+   * <p>Use with caution: unlike {@link #compareAndSet}, this method does not
+   * perform any concurrency control (CAS). If multiple threads call this
+   * method concurrently, the final value is the last writer's. For
+   * conditional swaps, prefer {@link #compareAndSet}.
+   *
+   * @param cacheKey  the key to update
+   * @param newValue  the new value to cache (nullable)
+   * @param hardTtlMs hard TTL override in milliseconds for the <b>new</b>
+   *                  entry (only applies when the key was absent);
+   *                  {@code 0} means use the configured default
+   * @param softTtlMs soft TTL override in milliseconds (same rules as
+   *                  {@code hardTtlMs})
+   * @param <T>       the type of the previously cached value
+   * @return the previous value, or empty if none existed
+   * @throws ZetaBlockedException when the key matches a blocklist rule
+   */
+  public <T> Optional<T> getAndSet(String cacheKey, Object newValue, long hardTtlMs, long softTtlMs) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
+    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
+    requireAppCache("getAndSet");
+    return hotKeyCache.getAndSet(cacheKey, newValue, hardTtlMs, softTtlMs);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #putIfAbsent(String, Object, long, long) putIfAbsent(cacheKey, value, 0, 0)}.
+   *
+   * @param cacheKey the key to insert
+   * @param value    the value to cache (must not be {@code null})
+   * @return {@code true} if the entry was inserted, {@code false} if already present
+   * @throws ZetaBlockedException when the key matches a blocklist rule
+   */
+  public boolean putIfAbsent(String cacheKey, Object value) {
+    return putIfAbsent(cacheKey, value, 0, 0);
+  }
+
+  /**
+   * Convenience shorthand for
+   * {@link #putIfAbsent(String, Object, long, long) putIfAbsent(cacheKey, value, hardTtlMs, ...)}
+   * with explicit hard TTL. Soft TTL uses the configured default.
+   *
+   * @param cacheKey  the key to insert
+   * @param value     the value to cache (must not be {@code null})
+   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @return {@code true} if the entry was inserted, {@code false} if already present
+   * @throws ZetaBlockedException when the key matches a blocklist rule
+   */
+  public boolean putIfAbsent(String cacheKey, Object value, long hardTtlMs) {
+    return putIfAbsent(cacheKey, value, hardTtlMs, 0);
+  }
+
+  /**
+   * Atomically insert the given value into the cache only if the key is not
+   * already present. This is a fast, lock-free-at-key-level operation that
+   * never triggers a data-source writer, version bump, or cross-instance
+   * broadcast.
+   *
+   * <p>If the key already exists in L1 (including as a {@code NullValue}
+   * sentinel), the method returns {@code false} and the existing entry is
+   * left untouched. If the key is absent, a fresh cache entry in
+   * {@code KeyState.NORMAL} is created with the supplied TTLs and the
+   * method returns {@code true}.
+   *
+   * @param cacheKey  the key to insert
+   * @param value     the value to cache (must not be {@code null}; to cache a
+   *                  {@code null} result, use the NullValue sentinel
+   *                  explicitly or rely on the {@code @NullCaching} annotation)
+   * @param hardTtlMs hard TTL override in milliseconds (0 = use configured default;
+   *                  {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs soft TTL override in milliseconds (0 = use configured default)
+   * @return {@code true} if the entry was inserted, {@code false} if the key
+   *         was already present
+   * @throws ZetaBlockedException when the key matches a blocklist rule
+   */
+  public boolean putIfAbsent(String cacheKey, Object value, long hardTtlMs, long softTtlMs) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    requireAppCache("putIfAbsent");
+    return hotKeyCache.putIfAbsent(cacheKey, value, hardTtlMs, softTtlMs);
+  }
+
+  /**
    * Convenience shorthand for
    * {@link #invalidateAfterPut(String, Runnable, boolean) invalidateAfterPut(cacheKey, mutation, true)}.
    *

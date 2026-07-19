@@ -599,6 +599,43 @@ class ZetaTest {
     assertThatThrownBy(() -> workerOnly.compareAndInvalidate("k", "old")).isInstanceOf(ZetaModeException.class);
   }
 
+  // ── getAndSet / putIfAbsent ──
+
+  @Test
+  void getAndSet_shouldDelegateToCache() {
+    @SuppressWarnings("unchecked")
+    Optional<Object> old = (Optional) Optional.of("old");
+    when(hotKeyCache.getAndSet(eq("k"), eq("new"), eq(0L), eq(0L))).thenReturn(old);
+    assertThat(zeta.getAndSet("k", "new", 0L, 0L)).isSameAs(old);
+    verify(hotKeyCache).getAndSet("k", "new", 0L, 0L);
+  }
+
+  @Test
+  void getAndSet_shouldThrowInWorkerMode() {
+    Zeta workerOnly = new Zeta(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.getAndSet("k", "v", 0L, 0L)).isInstanceOf(ZetaModeException.class);
+  }
+
+  @Test
+  void putIfAbsent_shouldDelegateToCache() {
+    when(hotKeyCache.putIfAbsent(eq("k"), eq("v"), eq(0L), eq(0L))).thenReturn(true);
+    assertThat(zeta.putIfAbsent("k", "v", 0L, 0L)).isTrue();
+    verify(hotKeyCache).putIfAbsent("k", "v", 0L, 0L);
+  }
+
+  @Test
+  void putIfAbsent_shouldReturnFalseWhenPresent() {
+    when(hotKeyCache.putIfAbsent(eq("k"), eq("v"), eq(0L), eq(0L))).thenReturn(false);
+    assertThat(zeta.putIfAbsent("k", "v", 0L, 0L)).isFalse();
+    verify(hotKeyCache).putIfAbsent("k", "v", 0L, 0L);
+  }
+
+  @Test
+  void putIfAbsent_shouldThrowInWorkerMode() {
+    Zeta workerOnly = new Zeta(null, null, workerTopK);
+    assertThatThrownBy(() -> workerOnly.putIfAbsent("k", "v", 0L, 0L)).isInstanceOf(ZetaModeException.class);
+  }
+
   // ── estimatedSizeOfKeysCount ──
 
   @Test

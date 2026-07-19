@@ -49,7 +49,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
  * {@link AtomicLong} and is safe for concurrent access from multiple threads.
  *
  * @see VersionGuard
- * @see ZetaConstants#REDIS_VERSION_KEY_PREFIX
+ * @see ZetaConstants#VERSION_KEY_PREFIX
  */
 @Internal
 @RequiredArgsConstructor
