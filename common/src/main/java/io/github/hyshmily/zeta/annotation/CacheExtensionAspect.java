@@ -21,8 +21,8 @@ import io.github.bucket4j.Bandwidth;
 import io.github.bucket4j.Bucket;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.annotationsupporter.ZetaCacheContext;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -130,7 +130,6 @@ public class CacheExtensionAspect {
     NullCaching nullCaching,
     SkipBroadcast skipBroadcast,
     SkipDetection skipDetection,
-    HotTTL hotTtl,
     CacheCondition cacheCondition
   ) {}
 
@@ -202,7 +201,6 @@ public class CacheExtensionAspect {
     NullCaching nullCaching = ann.nullCaching();
     SkipBroadcast skipBroadcast = ann.skipBroadcast();
     SkipDetection skipDetection = ann.skipDetection();
-    HotTTL hotTtl = ann.hotTtl();
     CacheCondition cacheCondition = ann.cacheCondition();
 
     // Register preload keys so the local detector starts tracking them early.
@@ -273,9 +271,6 @@ public class CacheExtensionAspect {
       method
     );
 
-    long hotHardTtlMs = hotTtl != null ? hotTtl.hardTtlMs() : 0L;
-    long hotSoftTtlMs = hotTtl != null ? hotTtl.softTtlMs() : 0L;
-
     boolean allowNull = nullCaching != null && nullCaching.value();
     boolean skipBroadcastFlag = skipBroadcast != null;
     boolean skipDetectionFlag = skipDetection != null;
@@ -284,15 +279,7 @@ public class CacheExtensionAspect {
     ZetaCacheContext.ContextValues prev = ZetaCacheContext.get().snapshot();
     try {
       // Push the resolved cache-control metadata into the thread-local context.
-      ZetaCacheContext.get().apply(
-        hardTtlMs,
-        softTtlMs,
-        allowNull,
-        skipBroadcastFlag,
-        hotHardTtlMs,
-        hotSoftTtlMs,
-        skipDetectionFlag
-      );
+      ZetaCacheContext.get().apply(hardTtlMs, softTtlMs, allowNull, skipBroadcastFlag, skipDetectionFlag);
 
       Object result = pjp.proceed();
 
@@ -454,7 +441,7 @@ public class CacheExtensionAspect {
     boolean skipBroadcastFlag = skipBroadcast != null;
     ZetaCacheContext.ContextValues prev = ZetaCacheContext.get().snapshot();
     try {
-      ZetaCacheContext.get().apply(0, 0, false, skipBroadcastFlag, 0, 0, false);
+      ZetaCacheContext.get().apply(0, 0, false, skipBroadcastFlag, false);
       return pjp.proceed();
     } finally {
       ZetaCacheContext.get().restore(prev);
@@ -658,7 +645,7 @@ public class CacheExtensionAspect {
 
   /**
    * Aggregates all cache-extension annotations present on the given method.
-   * Class-level {@link CacheTTL} and {@link HotTTL} annotations are also
+   * Class-level {@link CacheTTL} annotations are also
    * taken into account if not already found at the method level.
    *
    * @param method the method
@@ -673,7 +660,6 @@ public class CacheExtensionAspect {
       NullCaching nullCaching = null;
       SkipBroadcast skipBroadcast = null;
       SkipDetection skipDetection = null;
-      HotTTL hotTtl = null;
       CacheCondition cacheCondition = null;
 
       for (Annotation a : m.getDeclaredAnnotations()) {
@@ -689,31 +675,17 @@ public class CacheExtensionAspect {
           skipBroadcast = s;
         } else if (a instanceof SkipDetection s) {
           skipDetection = s;
-        } else if (a instanceof HotTTL h) {
-          hotTtl = h;
         } else if (a instanceof CacheCondition c) {
           cacheCondition = c;
         }
       }
 
-      // Fall back to class-level annotations for TTL and hot TTL.
+      // Fall back to class-level annotations for TTL.
       if (ttl == null) {
         ttl = m.getDeclaringClass().getAnnotation(CacheTTL.class);
       }
-      if (hotTtl == null) {
-        hotTtl = m.getDeclaringClass().getAnnotation(HotTTL.class);
-      }
 
-      return new AnnotationSet(
-        ttl,
-        intercept,
-        fallback,
-        nullCaching,
-        skipBroadcast,
-        skipDetection,
-        hotTtl,
-        cacheCondition
-      );
+      return new AnnotationSet(ttl, intercept, fallback, nullCaching, skipBroadcast, skipDetection, cacheCondition);
     });
   }
 }

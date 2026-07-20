@@ -19,7 +19,7 @@ import static org.apache.lucene.util.RamUsageEstimator.NUM_BYTES_OBJECT_REF;
 import static org.apache.lucene.util.RamUsageEstimator.shallowSizeOf;
 
 import com.github.benmanes.caffeine.cache.Weigher;
-import io.github.hyshmily.zeta.cache.annotationsupporter.NullValue;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import java.util.Collection;
 import java.util.Map;

@@ -2,7 +2,7 @@ package io.github.hyshmily.zeta.cache.codec;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.hyshmily.zeta.cache.annotationsupporter.NullValue;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import java.util.List;
 import java.util.Map;

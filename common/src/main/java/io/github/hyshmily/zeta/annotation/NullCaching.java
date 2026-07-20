@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.annotation;
 
+import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import jakarta.validation.constraints.NotNull;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -28,7 +29,7 @@ import java.lang.annotation.Target;
  * <p>By default, when a {@code @Cacheable} method returns {@code null}, the result is
  * <em>not</em> cached — a subsequent call with the same key will invoke the method again.
  * With {@code @NullCaching(true)}, the {@code null} value is stored via an internal sentinel
- * ({@link io.github.hyshmily.zeta.cache.annotationsupporter.NullValue}), and subsequent calls skip the method
+ * ({@link NullValue}), and subsequent calls skip the method
  * and return {@code null} directly.
  *
  * <p>This annotation is only effective on {@code @Cacheable} methods. It has no effect on

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.cache.annotationsupporter;
+package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
 import java.io.Serial;

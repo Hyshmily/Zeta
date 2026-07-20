@@ -21,8 +21,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.annotationsupporter.ZetaCacheContext;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -403,7 +403,7 @@ class ZetaCacheExtensionAspectTest {
   @Test
   @DisplayName("context is restored after proceed in finally block")
   void contextRestoredAfterProceed() throws Throwable {
-    ZetaCacheContext.get().apply(999L, 888L, true, false, 0L, 0L, false);
+    ZetaCacheContext.get().apply(999L, 888L, true, false, false);
 
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);

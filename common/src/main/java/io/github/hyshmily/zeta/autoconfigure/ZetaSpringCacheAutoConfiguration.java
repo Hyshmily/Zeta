@@ -18,7 +18,7 @@ package io.github.hyshmily.zeta.autoconfigure;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.CacheExtensionAspect;
-import io.github.hyshmily.zeta.cache.annotationsupporter.ZetaCacheManager;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheManager;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;

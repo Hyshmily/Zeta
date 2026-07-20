@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheManager;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
@@ -143,7 +144,7 @@ class ZetaCacheManagerTest {
   void getCache_whenGetMissingCacheNull_returnsNull() {
     ZetaCacheManager nullManager = new ZetaCacheManager(zeta, properties) {
       @Override
-      protected Cache getMissingCache(String name) {
+      public Cache getMissingCache(String name) {
         return null;
       }
     };

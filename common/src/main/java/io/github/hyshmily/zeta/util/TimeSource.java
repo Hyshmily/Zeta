@@ -42,7 +42,7 @@ public final class TimeSource {
   private static final int THREAD_TRY_MAX = 3;
 
   /**
-   * Start the background clock-cache thread.  Idempotent after the thread is
+   * Start the background clock-cache thread. Idempotent after the thread is
    * running.  If the thread dies unexpectedly it will be restarted up to
    * {@link #THREAD_TRY_MAX} times with a 1-second delay between attempts.
    * Called automatically during {@code ZetaFacadeAutoConfiguration}

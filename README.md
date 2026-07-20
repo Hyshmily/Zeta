@@ -333,8 +333,7 @@ Enable `zeta.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `
 
 | Annotation        | Target | Role on `@Cacheable`                                                                                                                                  |
 | ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@CacheTTL`       | M/T    | Override hard/soft TTL. Supports static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`)                                                                |
-| `@HotTTL`         | M/T    | Hot-key specific TTL override (applied when key is classified HOT by local TopK)                                                                      |
+| `@CacheTTL`       | M/T    | Override hard/soft TTL. Supports static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated per invocation.                                |
 | `@Intercept`      | M      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`); fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
 | `@Fallback`       | M      | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                                |
 | `@NullCaching`    | M      | Allow caching null return values (sentinel-based, default `true`)                                                                                     |
@@ -346,7 +345,6 @@ Enable `zeta.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
 @CacheTTL(hardTtlMs = 60000, softTtlMs = 10000)
-@HotTTL(hardTtlMs = 300000)       // hot key gets 5min
 @Intercept @Fallback
 public User getUser(Long id) { ... }
 

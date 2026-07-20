@@ -20,7 +20,7 @@ import static org.mockito.Mockito.mock;
 
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.CacheExtensionAspect;
-import io.github.hyshmily.zeta.cache.annotationsupporter.ZetaCacheManager;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheManager;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.FilteredClassLoader;

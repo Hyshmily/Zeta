@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.cache.annotationsupporter;
+package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
@@ -64,7 +64,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
 
   @Override
   @Nullable
-  protected Object lookup(@NonNull Object key) {
+  public Object lookup(@NonNull Object key) {
     String prefixed = prefixedKey(key);
     Object value = zeta.peek(prefixed).orElse(null);
     if (value != null) {
@@ -114,13 +114,6 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
     long hardTtlMs = cv.getHardTtlMs();
     long softTtlMs = cv.getSoftTtlMs();
     boolean hasTtlOverride = hardTtlMs > 0 || softTtlMs > 0;
-
-    // Merge @HotTTL values when @CacheTTL is absent
-    if (cv != null && !hasTtlOverride) {
-      hardTtlMs = cv.getHotHardTtlMs();
-      softTtlMs = cv.getHotSoftTtlMs();
-      hasTtlOverride = hardTtlMs > 0 || softTtlMs > 0;
-    }
 
     boolean allowReport = !skipDetection;
 

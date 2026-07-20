@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.cache.fluentAPI;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.cache.annotationsupporter.NullValue;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.rule.Rule;
 import java.util.ArrayList;

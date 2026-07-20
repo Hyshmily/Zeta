@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.cache.annotationsupporter;
+package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
@@ -101,7 +101,7 @@ public class ZetaCacheManager implements CacheManager {
    * @param name the cache name
    * @return a new {@link ZetaSpringCache} that allows null values
    */
-  protected Cache getMissingCache(String name) {
+  public Cache getMissingCache(String name) {
     return new ZetaSpringCache(name, zeta, properties, true);
   }
 

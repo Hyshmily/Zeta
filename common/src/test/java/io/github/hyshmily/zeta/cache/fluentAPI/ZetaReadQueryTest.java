@@ -21,7 +21,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.cache.annotationsupporter.NullValue;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.rule.Rule;
 import java.util.Optional;

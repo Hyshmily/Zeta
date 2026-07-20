@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.cache.annotationsupporter;
+package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
 import jakarta.annotation.Nullable;
@@ -48,8 +48,6 @@ public final class ZetaCacheContext {
    * @param softTtlMs       soft TTL override in milliseconds (0 = use global default)
    * @param allowNull       whether {@code null} return values may be cached in L1
    * @param skipBroadcast   whether to skip broadcasting sync messages to peers
-   * @param hotHardTtlMs    hot-key hard TTL override in milliseconds (0 = use global default)
-   * @param hotSoftTtlMs    hot-key soft TTL override in milliseconds (0 = use global default)
    * @param skipDetection   whether to skip hot-key detection and Worker reporting
    */
   public record ContextValues(
@@ -57,8 +55,6 @@ public final class ZetaCacheContext {
     long softTtlMs,
     boolean allowNull,
     boolean skipBroadcast,
-    long hotHardTtlMs,
-    long hotSoftTtlMs,
     boolean skipDetection
   ) {}
 
@@ -86,8 +82,6 @@ public final class ZetaCacheContext {
     long softTtlMs,
     boolean allowNull,
     boolean skipBroadcast,
-    long hotHardTtlMs,
-    long hotSoftTtlMs,
     boolean skipDetection
   ) {
     if (
@@ -95,12 +89,10 @@ public final class ZetaCacheContext {
       softTtlMs > 0 ||
       allowNull ||
       skipBroadcast ||
-      hotHardTtlMs > 0 ||
-      hotSoftTtlMs > 0 ||
       skipDetection
     ) {
       HOLDER.set(
-        new ContextValues(hardTtlMs, softTtlMs, allowNull, skipBroadcast, hotHardTtlMs, hotSoftTtlMs, skipDetection)
+        new ContextValues(hardTtlMs, softTtlMs, allowNull, skipBroadcast, skipDetection)
       );
     } else {
       HOLDER.remove();
@@ -138,18 +130,6 @@ public final class ZetaCacheContext {
   public boolean isSkipBroadcast() {
     ContextValues v = getValues();
     return v != null && v.skipBroadcast();
-  }
-
-  /** Returns the hot-key hard TTL override, or 0 if none is active. */
-  public long getHotHardTtlMs() {
-    ContextValues v = getValues();
-    return v != null ? v.hotHardTtlMs() : 0L;
-  }
-
-  /** Returns the hot-key soft TTL override, or 0 if none is active. */
-  public long getHotSoftTtlMs() {
-    ContextValues v = getValues();
-    return v != null ? v.hotSoftTtlMs() : 0L;
   }
 
   /** Returns whether hot-key detection and Worker reporting are skipped. */

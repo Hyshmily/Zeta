@@ -333,7 +333,6 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 | 注解              | 目标 | 在 `@Cacheable` 上的作用                                                                                                                       |
 | ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@CacheTTL`       | M/T  | 覆盖硬/软 TTL。支持静态值和 SpEL（`hardTtlSpEl`、`softTtlSpEl`）                                                                               |
-| `@HotTTL`         | M/T  | Hot key 专属 TTL 覆盖（当 key 被本地 TopK 判为 HOT 时生效）                                                                                    |
 | `@Intercept`      | M    | 通过触发模式（`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`）跳过方法体；fallback 优先级：`@Intercept.fallback()` → `@Fallback` → `peek()` |
 | `@Fallback`       | M    | 回退值（SpEL）或命名约定方法（`{methodName}Fallback`），被拦截/异常时调用                                                                      |
 | `@NullCaching`    | M    | 允许缓存 null 返回值（基于 sentinel，默认 `true`）                                                                                             |
@@ -345,7 +344,6 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
 @CacheTTL(hardTtlMs = 60000, softTtlMs = 10000)
-@HotTTL(hardTtlMs = 300000)       // 热 key 用 5 分钟
 @Intercept @Fallback
 public User getUser(Long id) { ... }
 
