@@ -372,8 +372,13 @@ public class RuleMatcherImpl implements RuleMatcher {
    */
   public RuleAction evaluateRule(String cacheKey) {
     for (Rule rule : rulesList) {
-      if (rule.match(cacheKey)) {
-        return rule.getAction();
+      try {
+        if (rule.match(cacheKey)) {
+          return rule.getAction();
+        }
+      } catch (RuntimeException e) {
+        if (e instanceof NullPointerException) throw e;
+        log.error("Rule evaluation failed for pattern='{}', type={}, skipping", rule.getPattern(), rule.getType(), e);
       }
     }
     return RuleAction.ALLOW;

@@ -148,17 +148,28 @@ public class SlidingWindowDetector {
     }
 
     int currentIndex = (int) ((now / timeMillisPerSlice) % slices.length());
+    int length = slices.length();
 
+    // Detect infrequent-call gap: if more than windowSize slices elapsed,
+    // all previously written data is stale — reset the entire buffer.
+    long prevTs = lastAccessTime.getOrDefault(key, 0L);
     lastAccessTime.put(key, now);
 
-    // Single pass: clear stale slices then sum window
-    int length = slices.length();
-    int clearStart = (currentIndex + windowSize) % length;
-    long sum = 0;
-    for (int i = 0; i < windowSize; i++) {
-      int idx = (clearStart - i + length) % length;
-      slices.set(idx, 0);
+    if (prevTs > 0) {
+      long elapsedSlices = (now - prevTs) / timeMillisPerSlice;
+      if (elapsedSlices >= windowSize) {
+        for (int i = 0; i < length; i++) {
+          slices.set(i, 0);
+        }
+      } else if (elapsedSlices > 0) {
+        int clearStart = (currentIndex + windowSize - (int) elapsedSlices + length) % length;
+        for (int i = 0; i < elapsedSlices; i++) {
+          slices.set((clearStart + i) % length, 0);
+        }
+      }
     }
+
+    long sum = 0;
     slices.addAndGet(currentIndex, count);
     for (int i = 0; i < windowSize; i++) {
       int idx = (currentIndex - i + length) % length;

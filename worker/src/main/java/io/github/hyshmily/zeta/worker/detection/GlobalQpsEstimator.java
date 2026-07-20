@@ -69,7 +69,9 @@ public class GlobalQpsEstimator {
    */
   public GlobalQpsEstimator(long windowDurationMs, int slices) {
     if (slices <= 0) throw new IllegalArgumentException("slices must be positive, got " + slices);
-    if (windowDurationMs < slices) throw new IllegalArgumentException("windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero");
+    if (windowDurationMs < slices) throw new IllegalArgumentException(
+      "windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero"
+    );
     this.windowSize = slices;
     this.timeMillisPerSlice = windowDurationMs / slices;
     this.slices = new AtomicLong[slices * 2];
@@ -90,17 +92,29 @@ public class GlobalQpsEstimator {
    * @param totalCount the total number of access counts across all keys in
    *                   the batch; must be non-negative
    */
+  private long lastAddTotalTime;
+
   public synchronized void addTotal(long totalCount) {
     long now = System.currentTimeMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) % slices.length);
+    int length = slices.length;
 
-    // Clear stale slices that are one full window behind
-    int clearStart = (currentIndex + windowSize) % slices.length;
-    for (int i = 0; i < windowSize; i++) {
-      // Walk backwards to avoid clearing slices still within the current window.
-      int idx = (clearStart - i + slices.length) % slices.length;
-      slices[idx].set(0);
+    // Detect infrequent-call gap: if more than windowSize slices elapsed,
+    // all previously written data is stale — reset the entire buffer.
+    if (lastAddTotalTime > 0) {
+      long elapsedSlices = (now - lastAddTotalTime) / timeMillisPerSlice;
+      if (elapsedSlices >= windowSize) {
+        for (AtomicLong slice : slices) {
+          slice.set(0);
+        }
+      } else if (elapsedSlices > 0) {
+        int clearStart = (currentIndex + (int) elapsedSlices) % length;
+        for (int i = 0; i < elapsedSlices; i++) {
+          slices[(clearStart + i) % length].set(0);
+        }
+      }
     }
+    lastAddTotalTime = now;
 
     slices[currentIndex].addAndGet(totalCount);
   }

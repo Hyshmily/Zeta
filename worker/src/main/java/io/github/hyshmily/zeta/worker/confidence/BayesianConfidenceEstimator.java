@@ -78,6 +78,8 @@ public class BayesianConfidenceEstimator {
    *                      adjusted dynamically when CV is provided
    */
   public BayesianConfidenceEstimator(double priorMean, double priorStd, double likelihoodStd) {
+    if (priorStd <= 0) throw new IllegalArgumentException("priorStd must be positive, got " + priorStd);
+    if (likelihoodStd <= 0) throw new IllegalArgumentException("likelihoodStd must be positive, got " + likelihoodStd);
     this.priorMean = priorMean;
     this.priorStd = priorStd;
     this.likelihoodStd = likelihoodStd;
@@ -101,7 +103,7 @@ public class BayesianConfidenceEstimator {
    */
   public ProbabilityResult evaluate(long observedCount, double logThreshold, Double cv) {
     double y = Math.log(Math.max(observedCount, 1.0));
-    double sigma = (cv != null) ? adjustLikelihoodStd(likelihoodStd, cv) : likelihoodStd;
+    double sigma = (cv != null && Double.isFinite(cv)) ? adjustLikelihoodStd(likelihoodStd, cv) : likelihoodStd;
 
     double priorPrecision = 1.0 / (priorStd * priorStd);
     double likelihoodPrecision = 1.0 / (sigma * sigma);

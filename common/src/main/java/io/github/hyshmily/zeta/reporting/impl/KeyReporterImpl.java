@@ -103,6 +103,9 @@ public class KeyReporterImpl implements KeyReporter {
   @SuppressWarnings("java:S3077") // BBR is thread-safe
   private volatile BbrRateLimiterImpl bbrRateLimiter;
 
+  /** Cumulative counter of report batches silently dropped because no Workers were alive. */
+  private final AtomicLong workerDeadDropCounter = new AtomicLong();
+
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
   /** The reportToWorker dispatcher instance; created on start(). */
@@ -254,7 +257,8 @@ public class KeyReporterImpl implements KeyReporter {
 
       Set<String> aliveNodes = healthView.getAliveWorkerIds();
       if (aliveNodes.isEmpty()) {
-        log.warn("No alive Worker nodes for routing; dropping {} keys in this flush", keyCounts.size());
+        long total = workerDeadDropCounter.addAndGet(keyCounts.size());
+        log.warn("No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})", keyCounts.size(), total);
         return;
       }
 

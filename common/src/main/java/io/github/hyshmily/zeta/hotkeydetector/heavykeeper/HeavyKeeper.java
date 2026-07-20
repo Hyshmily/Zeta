@@ -654,6 +654,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     fingerprints[index] = (int) itemFingerprint;
     windows[index * windowStride + active] += increment;
     slotSums[index] += increment;
+    if (increment > 0 && slotSums[index] < 0) slotSums[index] = Long.MAX_VALUE;
     return Math.max(maxCount, slotSums[index]);
   }
 
@@ -664,6 +665,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   private long updateMatchingSlot(int index, int active, long increment, long maxCount) {
     windows[index * windowStride + active] += increment;
     slotSums[index] += increment;
+    if (increment > 0 && slotSums[index] < 0) slotSums[index] = Long.MAX_VALUE;
     return Math.max(maxCount, slotSums[index]);
   }
 
