@@ -328,32 +328,65 @@ Worker mode provides cluster-wide hotspot detection via dedicated nodes. App ins
 
 Enable `zeta.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `@CacheEvict` are automatically routed through Zeta's hotspot detection, soft expiration, and cross-instance sync.
 
-| Annotation        | Role on `@Cacheable`                                                                                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `@HotKeyCacheTTL` | Override hard/soft TTL                                                                                                           |
-| `@HotKeyPreload`  | Pre-inflate HeavyKeeper counts so known hot keys take effect immediately                                                         |
-| `@Intercept`      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`); degrades via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
-| `@Fallback`       | Provide fallback value when blocked, intercepted, or on exception                                                                |
-| `@NullCaching`    | Opt into caching null return values (default `true`)                                                                             |
-| `@Broadcast`      | Suppress cross-instance sync messages                                                                                            |
+**Extension Annotations** (processed by `CacheExtensionAspect` at `HIGHEST_PRECEDENCE`):
+
+| Annotation        | Target  | Role on `@Cacheable`                                                                                                                    |
+| ----------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `@CacheTTL`       | M/T     | Override hard/soft TTL. Supports static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`)                                                  |
+| `@HotTTL`         | M/T     | Hot-key specific TTL override (applied when key is classified HOT by local TopK)                                                        |
+| `@Intercept`      | M       | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`); fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
+| `@Fallback`       | M       | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                  |
+| `@NullCaching`    | M       | Allow caching null return values (sentinel-based, default `true`)                                                                       |
+| `@SkipBroadcast`  | M       | Suppress cross-instance AMQP sync messages (local-only write)                                                                           |
+| `@SkipDetection`  | M       | Bypass TopK detection + Worker reporting for this method's keys                                                                         |
+| `@Preload`        | M       | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL)                                           |
+| `@CacheCondition` | M       | SpEL `unless` — skip caching result when expression evaluates true (uses `#result` + method params)                                     |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
-@HotKeyCacheTTL(softTtlMs = 1000)
+@CacheTTL(hardTtlMs = 60000, softTtlMs = 10000)
+@HotTTL(hardTtlMs = 300000)       // hot key gets 5min
 @Intercept @Fallback
 public User getUser(Long id) { ... }
 
-// qps rate-limit interception
+// Dynamic TTL from SpEL
+@Cacheable(cacheNames = "users", key = "#id")
+@CacheTTL(hardTtlSpEl = "#id.startsWith('vip') ? 600000 : 60000")
+@Intercept
+public User getUserVip(Long id) { ... }
+
+// QPS rate-limit interception
 @Cacheable(cacheNames = "products", key = "#id")
-@Intercept(trigger = InterceptTrigger.QPS, QPS = 500, fallback = "'throttled'")
+@Intercept(type = InterceptType.QPS, qps = 500, fallback = "'throttled'")
 @Fallback
 public Product getProduct(String id) { ... }
 
+// Concurrent threads interception
+@Cacheable(cacheNames = "orders", key = "#id")
+@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrentThreads = 10, fallback = "'busy'")
+@Fallback
+public Order getOrder(Long id) { ... }
+
 // Hot key preloading
 @Cacheable(cacheNames = "flash", key = "#id")
-@HotKeyPreload(keys = {"item-001", "item-002"})
+@Preload(keys = {"item-001", "item-002"})
 @Intercept
 public String getFlashItem(String id) { ... }
+
+// Skip caching null results conditionally
+@Cacheable(cacheNames = "products", key = "#id")
+@CacheCondition(unless = "#result == null || #result.disable()")
+public Product getProduct(String id) { ... }
+
+// Skip detection entirely (static config, no hot-key tracking needed)
+@Cacheable(cacheNames = "config", key = "#key")
+@SkipDetection
+public String getConfig(String key) { ... }
+
+// Local-only write, no broadcast
+@CachePut(cacheNames = "local", key = "#id")
+@SkipBroadcast
+public String updateLocal(String id, String val) { ... }
 ```
 
 Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classpath.

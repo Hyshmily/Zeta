@@ -328,32 +328,65 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 
 启用 `zeta.spring-cache.enabled=true`。标准 `@Cacheable` / `@CachePut` / `@CacheEvict` 自动通过 Zeta 的热点检测、软过期和跨实例同步路由。
 
-| 注解              | 在 `@Cacheable` 上的作用                                                                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `@HotKeyCacheTTL` | 覆盖硬/软 TTL                                                                                                        |
-| `@HotKeyPreload`  | 预膨胀 HeavyKeeper 计数，使已知热点 key 立即生效                                                                     |
-| `@Intercept`      | 通过触发模式（`IS_LOCAL_HOT`/`FORCE`/`QPS`）跳过方法体；按 `@Intercept.fallback()`、`@Fallback`、`peek()` 优先级降级 |
-| `@Fallback`       | 被黑名单阻止、拦截或异常时提供回退值                                                                                 |
-| `@NullCaching`    | 选择缓存 null 返回值（默认 `true`）                                                                                  |
-| `@Broadcast`      | 禁止跨实例同步消息                                                                                                   |
+**扩展注解**（由 `CacheExtensionAspect` 以 `HIGHEST_PRECEDENCE` 优先级处理）：
+
+| 注解              | 目标 | 在 `@Cacheable` 上的作用                                                                                                                       |
+| ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@CacheTTL`       | M/T  | 覆盖硬/软 TTL。支持静态值和 SpEL（`hardTtlSpEl`、`softTtlSpEl`）                                                                               |
+| `@HotTTL`         | M/T  | Hot key 专属 TTL 覆盖（当 key 被本地 TopK 判为 HOT 时生效）                                                                                    |
+| `@Intercept`      | M    | 通过触发模式（`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`）跳过方法体；fallback 优先级：`@Intercept.fallback()` → `@Fallback` → `peek()` |
+| `@Fallback`       | M    | 回退值（SpEL）或命名约定方法（`{methodName}Fallback`），被拦截/异常时调用                                                                      |
+| `@NullCaching`    | M    | 允许缓存 null 返回值（基于 sentinel，默认 `true`）                                                                                             |
+| `@SkipBroadcast`  | M    | 禁止跨实例 AMQP 同步消息（仅本地写）                                                                                                           |
+| `@SkipDetection`  | M    | 跳过 TopK 检测 + Worker 上报                                                                                                                   |
+| `@Preload`        | M    | 预膨胀 HeavyKeeper 计数（静态 `keys[]` 或动态 `keyExpr` SpEL）                                                                                 |
+| `@CacheCondition` | M    | SpEL `unless` — 条件满足时不缓存结果（使用 `#result` + 方法参数）                                                                              |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
-@HotKeyCacheTTL(softTtlMs = 1000)
+@CacheTTL(hardTtlMs = 60000, softTtlMs = 10000)
+@HotTTL(hardTtlMs = 300000)       // 热 key 用 5 分钟
 @Intercept @Fallback
 public User getUser(Long id) { ... }
 
-// qps 限流拦截
+// 动态 TTL
+@Cacheable(cacheNames = "users", key = "#id")
+@CacheTTL(hardTtlSpEl = "#id.startsWith('vip') ? 600000 : 60000")
+@Intercept
+public User getUserVip(Long id) { ... }
+
+// QPS 限流拦截
 @Cacheable(cacheNames = "products", key = "#id")
-@Intercept(trigger = InterceptTrigger.QPS, QPS = 500, fallback = "'throttled'")
+@Intercept(type = InterceptType.QPS, qps = 500, fallback = "'throttled'")
 @Fallback
 public Product getProduct(String id) { ... }
 
+// 并发线程数限流
+@Cacheable(cacheNames = "orders", key = "#id")
+@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrentThreads = 10, fallback = "'busy'")
+@Fallback
+public Order getOrder(Long id) { ... }
+
 // 热点预加载
 @Cacheable(cacheNames = "flash", key = "#id")
-@HotKeyPreload(keys = {"item-001", "item-002"})
+@Preload(keys = {"item-001", "item-002"})
 @Intercept
 public String getFlashItem(String id) { ... }
+
+// 条件跳过缓存
+@Cacheable(cacheNames = "products", key = "#id")
+@CacheCondition(unless = "#result == null || #result.disable()")
+public Product getProduct(String id) { ... }
+
+// 跳过检测（静态配置）
+@Cacheable(cacheNames = "config", key = "#key")
+@SkipDetection
+public String getConfig(String key) { ... }
+
+// 仅本地写，不广播
+@CachePut(cacheNames = "local", key = "#id")
+@SkipBroadcast
+public String updateLocal(String id, String val) { ... }
 ```
 
 需 classpath 中包含 `spring-boot-starter-cache` 和 `spring-boot-starter-aop`。
