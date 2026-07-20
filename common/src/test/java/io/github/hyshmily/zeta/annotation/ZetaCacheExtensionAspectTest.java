@@ -283,7 +283,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey("test::myId")).thenReturn(true);
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("fallback-myId");
     verify(pjp, never()).proceed();
@@ -305,7 +305,7 @@ class ZetaCacheExtensionAspectTest {
     when(zeta.isLocalHotKey("test::myId")).thenReturn(true);
     when(zeta.peek("test::myId")).thenReturn(Optional.of("cached-value"));
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("cached-value");
     verify(pjp, never()).proceed();
@@ -327,7 +327,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey("test::myId")).thenReturn(false);
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("result-myId");
     verify(pjp).proceed();
@@ -351,7 +351,7 @@ class ZetaCacheExtensionAspectTest {
     when(zeta.isLocalHotKey("test::myId")).thenReturn(false);
     when(zeta.peek("test::myId")).thenReturn(Optional.of("cached-value"));
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("cached-value");
     verify(pjp, never()).proceed();
@@ -373,7 +373,7 @@ class ZetaCacheExtensionAspectTest {
     when(zeta.isLocalHotKey("test::myId")).thenReturn(false);
     when(zeta.peek("test::myId")).thenReturn(Optional.empty());
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isNull();
     verify(pjp, never()).proceed();
@@ -394,7 +394,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey("test::myId")).thenReturn(false);
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("fallback-force-true-myId");
     verify(pjp, never()).proceed();
@@ -416,7 +416,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
 
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isEqualTo(999L);
     assertThat(ZetaCacheContext.get().getSoftTtlMs()).isEqualTo(888L);
@@ -439,7 +439,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
 
     assertThat(ZetaCacheContext.get().snapshot()).isNull();
   }
@@ -462,7 +462,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("fallback-result");
   }
@@ -483,7 +483,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    assertThatThrownBy(() -> aspect.aroundCacheable(pjp, cacheable))
+    assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
       .isInstanceOf(RuntimeException.class)
       .hasMessage("from-method");
   }
@@ -508,7 +508,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
   }
 
   @Test
@@ -529,7 +529,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
   }
 
   @Test
@@ -550,7 +550,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
   }
 
   // ── resolveKey tests ──
@@ -574,7 +574,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
   }
 
   @Test
@@ -592,7 +592,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "spelKey" });
     when(pjp.proceed()).thenReturn("result-spelKey");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
   }
 
   // ── resolveMethod tests ──
@@ -615,7 +615,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("impl-myId");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
     verify(pjp).proceed();
   }
 
@@ -643,7 +643,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
   }
 
   // ── @SkipBroadcast tests ──
@@ -670,7 +670,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
   }
 
   @Test
@@ -763,7 +763,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
   }
 
   // ── resolveKey: empty expression with 0 args ──
@@ -786,7 +786,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[0]);
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
     verify(pjp).proceed();
   }
 
@@ -808,7 +808,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "a", "b" });
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
     verify(pjp).proceed();
   }
 
@@ -830,7 +830,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { null });
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
     verify(pjp).proceed();
   }
 
@@ -852,7 +852,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { new String[] { "x" } });
     when(pjp.proceed()).thenReturn("ok");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
     verify(pjp).proceed();
   }
 
@@ -876,7 +876,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
     verify(pjp).proceed();
   }
 
@@ -898,7 +898,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey("test::myId")).thenReturn(true);
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("spel-fallback-value");
     verify(pjp, never()).proceed();
@@ -923,7 +923,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isNull();
   }
@@ -947,7 +947,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("base-fallback-myId");
   }
@@ -971,7 +971,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    assertThatThrownBy(() -> aspect.aroundCacheable(pjp, cacheable))
+    assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
       .isInstanceOf(IllegalArgumentException.class)
       .hasMessage("fallback-threw");
   }
@@ -995,7 +995,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("result-myId");
   }
@@ -1021,9 +1021,9 @@ class ZetaCacheExtensionAspectTest {
     // Exceed qps by calling 6 times (threshold = 5)
     Object ignored;
     for (int i = 0; i < 5; i++) {
-      ignored = aspect.aroundCacheable(pjp, cacheable);
+      ignored = aspect.aroundCacheable(pjp);
     }
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isNull();
   }
@@ -1048,9 +1048,9 @@ class ZetaCacheExtensionAspectTest {
     // Exceed qps by calling 6 times (threshold = 5)
     Object ignored;
     for (int i = 0; i < 5; i++) {
-      ignored = aspect.aroundCacheable(pjp, cacheable);
+      ignored = aspect.aroundCacheable(pjp);
     }
-    Object result = aspect.aroundCacheable(pjp, cacheable);
+    Object result = aspect.aroundCacheable(pjp);
 
     assertThat(result).isEqualTo("qps-fallback");
   }
@@ -1087,7 +1087,7 @@ class ZetaCacheExtensionAspectTest {
       futures.add(
         exec.submit(() -> {
           try {
-            return aspect.aroundCacheable(pjp, cacheable);
+            return aspect.aroundCacheable(pjp);
           } catch (Throwable e) {
             throw new RuntimeException(e);
           }
@@ -1126,7 +1126,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
 
     verify(zeta).notifyLocalDetectorDirect(
       Map.of("test::preload-key-a", Long.MAX_VALUE, "test::preload-key-b", Long.MAX_VALUE)
@@ -1150,7 +1150,7 @@ class ZetaCacheExtensionAspectTest {
 
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
 
     verify(zeta).notifyLocalDetectorDirect("test::myDynamicKey", Long.MAX_VALUE);
   }
@@ -1173,8 +1173,8 @@ class ZetaCacheExtensionAspectTest {
     when(zeta.isLocalHotKey(anyString())).thenReturn(false);
 
     // Call twice — notifyLocalDetectorDirect should only be called once per key
-    aspect.aroundCacheable(pjp, cacheable);
-    aspect.aroundCacheable(pjp, cacheable);
+    aspect.aroundCacheable(pjp);
+    aspect.aroundCacheable(pjp);
 
     verify(zeta, times(1)).notifyLocalDetectorDirect(
       Map.of("test::preload-key-a", Long.MAX_VALUE, "test::preload-key-b", Long.MAX_VALUE)

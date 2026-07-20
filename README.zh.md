@@ -311,7 +311,7 @@ boolean ok = zeta.compareAndInvalidate("user:123", staleValue);
 
 两个操作均为委托模式：调用方负责在 CAS 成功后重新读取或写入。无 L2 锁——守卫条件是调用时刻 L1 缓存 entry 的当前值。条件匹配且操作应用时返回 `true`，否则返回 `false`。
 
-**Worker 模式**
+## Worker 模式
 
 Worker 模式通过专用节点提供集群维度热点检测。App 实例定期报告访问计数，Worker 运行滑动窗口+状态机管道，将 HOT/COOL 决策广播回所有实例。状态机参数（`confirmCount`、`coolCount`、`preCoolGraceCount`）可通过 `/actuator/hotkey/worker/state` 运行时调整。
 
@@ -324,9 +324,45 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 
 **Worker TopK 持久化（热启动）：** 当 `zeta.worker.persistence.enabled=true`，Worker 定期快照 TopK 列表到 Redis。重启时 `TopKPersistService` 加载上次快照并回放到 HeavyKeeper sketch，预热从数小时缩至数秒。
 
-**Spring Cache 集成**
+### 说明
+
+**`hot-threshold: -1` 在学习期内禁用热点检测**
+
+当 `zeta.worker.threshold.hot-threshold` 设为 `-1`（比例模式）时，Worker 将滑动窗口阈值初始化为 `Long.MAX_VALUE`——实际上在 30 秒学习期（`learning-period-ms`，默认 30s）内没有任何 key 能被分类为 HOT。学习期结束后，`ThresholdLearner` 计算 `threshold = globalQps × hotThresholdRatio`，恢复正常运作。
+
+**缓解措施：** 配合设置一个合理的绝对阈值：
+
+```yaml
+zeta:
+  worker:
+    threshold:
+      hot-threshold: 1000 # 学习期内的回退阈值
+    global-qps-dynamic-threshold:
+      learning-period-ms: 5000 # 缩短学习期加速收敛
+```
+
+或在流量模式已知的情况下直接禁用学习期（`learning-period-ms: 0`）。
+
+**Worker 广播 Exchange 声明**
+
+Worker 模块（`zeta-worker`）已将广播 exchange（默认 `zeta.send.exchange`）声明为 Spring `FanoutExchange` bean。如果通过非 `WorkerAutoConfiguration` 的方式独立部署 Worker，需要确保该 exchange 在 RabbitMQ 中存在——否则 Worker 的 HOT/COOL 广播会因 channel 级 `not_found` 异常而失败。
+
+**PING/PONG 验证是辅助手段**
+
+`WorkerHeartbeatVerifier` 定期向**非存活**状态（心跳超时超过 `heartbeat.timeout-ms`，默认 10s）的 Worker 发送 PING。启动时的瞬态失败是预期的且安全的——首次 PING 可能在 Worker 的 verify 队列就绪前发出。主心跳路径（Worker → `zeta.heartbeat.exchange` → App 心跳队列）是 HealthView 更新和 RingManager 路由的权威机制。
+
+## Spring Cache 集成
 
 启用 `zeta.spring-cache.enabled=true`。标准 `@Cacheable` / `@CachePut` / `@CacheEvict` 自动通过 Zeta 的热点检测、软过期和跨实例同步路由。
+
+**需要 `@EnableCaching`：** `CacheExtensionAspect` 包装在 Spring 的 `CacheInterceptor` 外层——没有 `@EnableCaching`，该拦截器不会注册，`@Cacheable` 方法会执行但结果不会被缓存。
+
+```java
+@SpringBootApplication
+@EnableCaching
+@EnableScheduling
+public class MyApplication { ... }
+```
 
 **扩展注解**（由 `CacheExtensionAspect` 以 `HIGHEST_PRECEDENCE` 优先级处理）：
 

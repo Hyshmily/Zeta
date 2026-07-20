@@ -312,7 +312,7 @@ boolean ok = zeta.compareAndInvalidate("user:123", staleValue);
 
 Both operations are delegation-based: the caller is responsible for re-reading or re-writing after a successful CAS. There is no L2 lock — the guard is the L1 cache entry's current value at the time of call. Returns `true` if the condition matched and the operation was applied; `false` otherwise.
 
-**Worker Mode**
+## Worker Mode
 
 Worker mode provides cluster-wide hotspot detection via dedicated nodes. App instances periodically report access counts; the Worker runs a sliding window + state machine pipeline and broadcasts HOT/COOL decisions back to all instances. State machine parameters (`confirmCount`, `coolCount`, `preCoolGraceCount`) can be adjusted at runtime via `/actuator/hotkey/worker/state`.
 
@@ -325,9 +325,45 @@ Worker mode provides cluster-wide hotspot detection via dedicated nodes. App ins
 
 **Worker TopK Persistence (Warm Start):** When `zeta.worker.persistence.enabled=true`, the Worker periodically snapshots the TopK list to Redis. On restart, `TopKPersistService` loads the last snapshot and replays it into the HeavyKeeper sketch, reducing warmup from hours to seconds.
 
-**Spring Cache Integration**
+### Notes
+
+**`hot-threshold: -1` Disables Hot Detection During Learning Period**
+
+When `zeta.worker.threshold.hot-threshold` is set to `-1` (ratio-based mode), the Worker initializes the sliding-window threshold to `Long.MAX_VALUE` — effectively no key can be classified as HOT during the 30-second learning period (`learning-period-ms`, default 30s). After the learning period, `ThresholdLearner` calculates `threshold = globalQps × hotThresholdRatio` and normal operation begins.
+
+**Mitigation:** Set a reasonable absolute threshold alongside the ratio:
+
+```yaml
+zeta:
+  worker:
+    threshold:
+      hot-threshold: 1000 # fallback during learning period
+    global-qps-dynamic-threshold:
+      learning-period-ms: 5000 # shorten for faster convergence
+```
+
+Or disable the learning period entirely (`learning-period-ms: 0`) if the traffic pattern is known upfront.
+
+**Worker Broadcast Exchange Declaration**
+
+The Worker module (`zeta-worker`) declares the broadcast exchange (`zeta.send.exchange` by default) as a Spring `FanoutExchange` bean. If deploying Workers separately (not through the provided `WorkerAutoConfiguration`), ensure the exchange exists in RabbitMQ — otherwise the Worker's HOT/COOL broadcasts will fail with a channel-level `not_found` exception.
+
+**PING/PONG Verification Is Auxiliary**
+
+The `WorkerHeartbeatVerifier` periodically sends PING messages to Workers that appear **not alive** (heartbeat timeout > `heartbeat.timeout-ms`, default 10s). Transient failures at startup are expected and safe — the first PING may arrive before the Worker's verify queue is ready. The primary heartbeat path (Worker → `zeta.heartbeat.exchange` → App heartbeat queue) is the authoritative mechanism for HealthView updates and RingManager routing.
+
+## Spring Cache Integration
 
 Enable `zeta.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `@CacheEvict` are automatically routed through Zeta's hotspot detection, soft expiration, and cross-instance sync.
+
+**Requires `@EnableCaching`:** The `CacheExtensionAspect` wraps Spring's `CacheInterceptor` — without `@EnableCaching`, the interceptor is not registered and `@Cacheable` methods will execute without being cached.
+
+```java
+@SpringBootApplication
+@EnableCaching
+@EnableScheduling
+public class MyApplication { ... }
+```
 
 **Extension Annotations** (processed by `CacheExtensionAspect` at `HIGHEST_PRECEDENCE`):
 

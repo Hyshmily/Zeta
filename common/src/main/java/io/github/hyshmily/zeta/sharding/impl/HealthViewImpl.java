@@ -129,6 +129,11 @@ public class HealthViewImpl implements HealthView {
         r.epoch = hb.epoch();
         r.lastHeartbeatTime = now;
         r.readyToServe = hb.readyToServe();
+        if (existing == null) {
+          log.info("Worker joined cluster: {} (epoch={})", hb.workerId(), hb.epoch());
+        } else {
+          log.info("Worker re-joined with new epoch: {} (epoch {} -> {})", hb.workerId(), existing.epoch, hb.epoch());
+        }
         return r;
       }
 

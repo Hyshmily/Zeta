@@ -15,9 +15,14 @@
  */
 package io.github.hyshmily.zeta.util;
 
+import static java.util.logging.Level.FINE;
+import static java.util.logging.Level.INFO;
+
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.logging.Logger;
 
 /**
  * Generates a unique instance identifier used for per-instance RabbitMQ queue names.
@@ -47,6 +52,8 @@ public final class InstanceIdGenerator {
 
   private static final String NODE_UUID_STRING;
 
+  private static final Logger LOG = Logger.getLogger(InstanceIdGenerator.class.getName());
+
   static {
     NODE_ID = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
     NODE_UUID_STRING = UUID.randomUUID().toString();
@@ -71,6 +78,9 @@ public final class InstanceIdGenerator {
    * Typically called in a {@code @PostConstruct} from the first {@code @AutoConfiguration}.
    */
   public static void setOverride(String id) {
+    if (!Objects.equals(id, override)) {
+      LOG.log(INFO, "Instance ID override set: {0}", id);
+    }
     override = id;
     cached = null;
   }
@@ -80,18 +90,21 @@ public final class InstanceIdGenerator {
    *
    * @return the instance identifier, never {@code null}
    */
+  @SuppressWarnings("all")
   public static String get() {
+    // Check override on every call so that setOverride() takes effect even if
+    // get() was already invoked earlier (e.g. WorkerAutoConfiguration field init).
+    if (override != null && !override.isBlank()) {
+      return override;
+    }
     if (cached == null) {
       synchronized (InstanceIdGenerator.class) {
         if (cached == null) {
-          if (override != null && !override.isBlank()) {
-            cached = override;
-          } else {
-            String port = System.getProperty("server.port", "instance");
-            String hostname = System.getenv("HOSTNAME");
-            String uniquePart = (hostname != null && !hostname.isBlank()) ? hostname : NODE_UUID_STRING;
-            cached = port + "-" + uniquePart;
-          }
+          String port = System.getProperty("server.port", "instance");
+          String hostname = System.getenv("HOSTNAME");
+          String uniquePart = (hostname != null && !hostname.isBlank()) ? hostname : NODE_UUID_STRING;
+          cached = port + "-" + uniquePart;
+          LOG.log(FINE, "Instance ID resolved (auto): {0}", cached);
         }
       }
     }

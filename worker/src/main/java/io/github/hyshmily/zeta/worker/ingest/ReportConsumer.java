@@ -126,6 +126,8 @@ public class ReportConsumer {
   @SuppressWarnings("all")
   private void doOnReport(ReportMessage message) {
     long now = currentTimeMillis();
+    log.debug("Processing report: appName={}, keys={}, counts={}, age={}ms",
+      message.appName(), message.counts().size(), message.counts(), now - message.timestamp());
     LongAdder totalQps = new LongAdder();
 
     // Discard reports that are more than 5 seconds old.
@@ -175,6 +177,9 @@ public class ReportConsumer {
             // Unified evaluation: sliding-window detection + HeavyKeeper frequency
             // + Bayesian confidence scoring, all in a single call.
             ZetaDecision decision = keyEvaluator.evaluate(key, count);
+            if (decision.type() != ZetaDecision.DecisionType.NONE) {
+              log.debug("KeyEvaluator decision: key={}, type={}, snapshot={}", key, decision.type(), decision.snapShot());
+            }
             StateSnapshot previousState = decision.snapShot();
 
             switch (decision.type()) {

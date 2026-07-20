@@ -179,15 +179,17 @@ public class CacheExtensionAspect {
    *       fallback method.</li>
    * </ol>
    *
-   * @param pjp       the join point representing the intercepted call
-   * @param cacheable the source {@code @Cacheable} annotation
+   * @param pjp the join point representing the intercepted call
    * @return the result of the cached invocation or a fallback value
    * @throws Throwable if no fallback is configured and the original invocation fails
    */
-  @Around("@annotation(cacheable)")
+  @Around("@annotation(org.springframework.cache.annotation.Cacheable)")
   @SuppressWarnings("all")
-  public Object aroundCacheable(ProceedingJoinPoint pjp, Cacheable cacheable) throws Throwable {
+  public Object aroundCacheable(ProceedingJoinPoint pjp) throws Throwable {
     Method method = resolveMethod(pjp);
+    Cacheable cacheable = method.getAnnotation(Cacheable.class);
+    if (cacheable == null) return pjp.proceed();
+
     String cacheName = resolveCacheName(cacheable);
     String key = resolveKey(pjp, cacheable.key(), method);
     String prefixedKey = cacheName + properties.getSpringCache().getKeySeparator() + key;

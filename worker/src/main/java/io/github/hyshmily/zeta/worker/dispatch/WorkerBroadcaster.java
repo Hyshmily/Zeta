@@ -110,6 +110,7 @@ public class WorkerBroadcaster {
     try {
       sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
       broadcastDedupCache.put(dedupKey, Boolean.TRUE);
+      log.info("Broadcast HOT: key={}, dv={}", cacheKey, dv);
     } catch (Exception e) {
       log.error("Failed to broadcast HOT decision for key {}: {}", cacheKey, e.getMessage());
       return false;
@@ -131,6 +132,7 @@ public class WorkerBroadcaster {
     try {
       sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
       broadcastDedupCache.put(dedupKey, Boolean.TRUE);
+      log.info("Broadcast COOL: key={}, dv={}", cacheKey, dv);
     } catch (Exception e) {
       log.error("Failed to broadcast COOL decision for key {}: {}", cacheKey, e.getMessage());
       return false;

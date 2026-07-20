@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLongArray;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * A high‑performance, lock‑free sliding‑window detector for real‑time hot‑key
@@ -73,7 +74,11 @@ import lombok.Setter;
  */
 @Getter
 @Setter
+@Slf4j
 public class SlidingWindowDetector {
+
+  /** Tracks per-key isHot state to log only on transitions. */
+  private final ConcurrentHashMap<String, Boolean> isHotCache = new ConcurrentHashMap<>();
 
   /** Number of time slices that form one complete window. */
   private final int windowSize;
@@ -176,7 +181,13 @@ public class SlidingWindowDetector {
       sum += slices.get(idx);
     }
 
-    return sum >= threshold;
+    boolean isHot = sum >= threshold;
+    Boolean prev = isHotCache.get(key);
+    if (prev == null || prev != isHot) {
+      isHotCache.put(key, isHot);
+      log.debug("Hot status changed: key={} isHot={} windowSum={} threshold={}", key, isHot, sum, threshold);
+    }
+    return isHot;
   }
 
   /**

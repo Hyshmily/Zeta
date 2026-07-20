@@ -97,7 +97,16 @@ public class WorkerAutoConfiguration {
    * <p>Used in queue names ({@code zeta.worker.config.<nodeId>}) and heartbeat
    * messages to identify this Worker instance uniquely.
    */
-  private final String nodeId = InstanceIdGenerator.get();
+  private String nodeId;
+
+  @PostConstruct
+  void initInstanceId() {
+    String envId = System.getenv("INSTANCE_ID");
+    if (envId != null && !envId.isBlank()) {
+      InstanceIdGenerator.setOverride(envId);
+    }
+    this.nodeId = InstanceIdGenerator.get();
+  }
 
   /**
    * Worker TopK snapshot service that persists the current hot-key list to

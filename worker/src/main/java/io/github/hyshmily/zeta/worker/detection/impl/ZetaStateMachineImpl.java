@@ -241,6 +241,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
         switch (pr.level()) {
           case HIGH -> {
             state.currentState = CONFIRMED_HOT;
+            log.info("State transition: COLD -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
             return ZetaDecision.hot(key, snapShot);
           }
           case MEDIUM -> {
@@ -258,12 +259,14 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
         ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
         if (pr.level() == ConfidenceLevel.HIGH) {
           state.currentState = CONFIRMED_HOT;
+          log.info("State transition: CANDIDATE_HOT -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
           return ZetaDecision.hot(key, snapShot);
         }
         return ZetaDecision.none(key, snapShot);
       }
       case PRE_COOLING -> {
         state.currentState = CONFIRMED_HOT;
+        log.info("State transition: PRE_COOLING -> CONFIRMED_HOT (silent revive) key={}", key);
         return ZetaDecision.none(key, snapShot);
       }
       default -> {
@@ -294,6 +297,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
       case CONFIRMED_HOT -> {
         if (state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
           state.currentState = PRE_COOLING;
+          log.info("State transition: CONFIRMED_HOT -> PRE_COOLING key={}", key);
           return evaluatePreCooling(key, state, ctx, snapShot);
         }
         return ZetaDecision.none(key, snapShot);
@@ -333,6 +337,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
       ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
       if (pr.level() != ConfidenceLevel.HIGH) {
         state.currentState = COLD;
+        log.info("State transition: PRE_COOLING -> COLD key={} obs={} pct={}", key, obs, pr.probability());
         return ZetaDecision.cool(key, snapShot);
       }
       state.coolStreak--;

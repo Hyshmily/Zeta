@@ -23,6 +23,7 @@ import java.util.Set;
 import java.util.function.IntConsumer;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Manages the consistent-hash ring for Worker shard routing.
@@ -31,6 +32,7 @@ import lombok.Setter;
  * by {@link HealthView} on each reconciliation cycle.
  */
 @Internal
+@Slf4j
 public class RingManagerImpl implements RingManager {
 
   @Getter
@@ -60,8 +62,10 @@ public class RingManagerImpl implements RingManager {
    */
   public synchronized void reconcileFromHealthView(HealthView healthView) {
     Set<String> alive = healthView.getAliveWorkerIds();
-    if (!alive.equals(ring.getNodes())) {
+    Set<String> prev = ring.getNodes();
+    if (!alive.equals(prev)) {
       ring.rebuild(alive);
+      log.info("Ring rebuilt: {} -> {} workers [{}]", prev.size(), alive.size(), String.join(", ", alive));
       if (onRingReconciled != null) {
         onRingReconciled.accept(alive.size());
       }
