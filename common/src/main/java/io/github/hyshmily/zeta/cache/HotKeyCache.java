@@ -48,7 +48,6 @@ import java.util.*;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import lombok.Builder;
@@ -229,7 +228,7 @@ public class HotKeyCache {
    *         when the rule engine decided to skip
    */
   private static boolean isSkipReport(boolean isSkipReportByGuard, boolean isReportByThisTime) {
-    return isReportByThisTime || isSkipReportByGuard;
+    return isSkipReportByGuard || !isReportByThisTime;
   }
 
   /**
@@ -979,13 +978,10 @@ public class HotKeyCache {
       return;
     }
 
-    AtomicBoolean writerOk = new AtomicBoolean(false);
-
     TransactionSupport.runAsyncAfterCommit(
       () -> {
         try {
           writer.run();
-          writerOk.compareAndSet(false, true);
         } catch (Exception e) {
           // Writer failed — do NOT cache, do NOT send, do NOT bump version.
           log.error("putThrough writer failed for key={}, cache update skipped: {}", nk, e.getMessage(), e);

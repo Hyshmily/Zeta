@@ -258,15 +258,15 @@ public class KeyReporterImpl implements KeyReporter {
         return;
       }
 
-      if (bbrRateLimiter != null) {
-        // sync minInFlight floor to current Worker count; only updates when count changes
+      BbrRateLimiterImpl limiter = bbrRateLimiter;
+      if (limiter != null) {
         int currentCount = ringManager.nodeCount();
         if (currentCount != lastNodeCount) {
           lastNodeCount = currentCount;
-          bbrRateLimiter.setMinInFlight(currentCount);
+          limiter.setMinInFlight(currentCount);
         }
-        if (!bbrRateLimiter.tryAcquire()) {
-          bbrRateLimiter.onGateDrop();
+        if (!limiter.tryAcquire()) {
+          limiter.onGateDrop();
           return;
         }
       }
@@ -296,8 +296,8 @@ public class KeyReporterImpl implements KeyReporter {
               dropped
             );
           }
-        } else if (bbrRateLimiter != null) {
-          bbrRateLimiter.onEnqueue();
+        } else if (limiter != null) {
+          limiter.onEnqueue();
         }
       });
     } catch (Exception e) {
@@ -583,19 +583,21 @@ public class KeyReporterImpl implements KeyReporter {
           break;
         }
 
+        BbrRateLimiterImpl limiter = bbrRateLimiter;
+
         // 5s stale check — discard data that waited too long in the queue
         if (currentTimeMillis() - batch.timestamp() > 5_000) {
           expiredCount.incrementAndGet();
-          if (bbrRateLimiter != null) {
-            bbrRateLimiter.onConsumerDrop();
+          if (limiter != null) {
+            limiter.onConsumerDrop();
           }
           continue;
         }
 
         try {
           reportPublisher.publish(batch.target(), new ReportMessage(appName, batch.timestamp(), batch.counts()));
-          if (bbrRateLimiter != null) {
-            bbrRateLimiter.onSuccess(currentTimeMillis() - batch.timestamp());
+          if (limiter != null) {
+            limiter.onSuccess(currentTimeMillis() - batch.timestamp());
           }
         } catch (Exception e) {
           log.error(
@@ -604,8 +606,11 @@ public class KeyReporterImpl implements KeyReporter {
             batch.counts().size(),
             e
           );
-          if (bbrRateLimiter != null) {
-            bbrRateLimiter.onConsumerDrop();
+          if (e instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
+          }
+          if (limiter != null) {
+            limiter.onConsumerDrop();
           }
         }
       }

@@ -412,7 +412,7 @@ public class CacheSyncListener {
    */
   private boolean isInvalidation(String key, long refreshVersion) {
     Long highWater = recentInvalidated.getIfPresent(key);
-    return highWater != null && refreshVersion <= highWater;
+    return highWater != null && refreshVersion < highWater;
   }
 
   /**

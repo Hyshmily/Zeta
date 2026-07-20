@@ -277,7 +277,7 @@ public class WorkerHeartbeatProducer {
     } catch (Exception e) {
       log.warn("Failed to compute CPU load factor; defaulting to 0.0", e);
     }
-    return Math.min(1.0, cpuLoad);
+    return Math.max(0.0, Math.min(1.0, cpuLoad));
   }
 
   /**

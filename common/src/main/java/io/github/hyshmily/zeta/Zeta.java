@@ -1669,8 +1669,9 @@ public class Zeta implements DisposableBean {
     Assert.hasText(cacheKey, "cacheKey must not be empty");
     Objects.requireNonNull(loader, "loader must not be null");
     requireAppCache("refresh");
+    Object value = loader.get();
     invalidate(cacheKey, false);
-    putThrough(cacheKey, loader.get(), () -> {});
+    putThrough(cacheKey, value, () -> {});
   }
 
   /**
@@ -1703,8 +1704,9 @@ public class Zeta implements DisposableBean {
     Assert.isTrue(hotHardTtlMs >= 0, "hotHardTtlMs must not be negative");
     Assert.isTrue(hotSoftTtlMs >= 0, "hotSoftTtlMs must not be negative");
     requireAppCache("refresh");
+    V value = loader.get();
     invalidate(cacheKey, false);
-    putThrough(cacheKey, loader.get(), () -> {}, hotHardTtlMs, hotSoftTtlMs, true);
+    putThrough(cacheKey, value, () -> {}, hotHardTtlMs, hotSoftTtlMs, true);
   }
 
   /**

@@ -116,6 +116,8 @@ public class SlidingWindowDetector {
    * @param threshold        initial hot‑key threshold
    */
   public SlidingWindowDetector(long windowDurationMs, int slices, long threshold) {
+    if (slices <= 0) throw new IllegalArgumentException("slices must be positive, got " + slices);
+    if (windowDurationMs < slices) throw new IllegalArgumentException("windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero");
     this.windowSize = slices;
     this.timeMillisPerSlice = windowDurationMs / slices;
     this.threshold = threshold;

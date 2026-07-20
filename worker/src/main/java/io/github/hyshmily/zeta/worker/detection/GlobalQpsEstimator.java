@@ -68,6 +68,8 @@ public class GlobalQpsEstimator {
    * @param slices           number of slices within the window; must be at least 1
    */
   public GlobalQpsEstimator(long windowDurationMs, int slices) {
+    if (slices <= 0) throw new IllegalArgumentException("slices must be positive, got " + slices);
+    if (windowDurationMs < slices) throw new IllegalArgumentException("windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero");
     this.windowSize = slices;
     this.timeMillisPerSlice = windowDurationMs / slices;
     this.slices = new AtomicLong[slices * 2];
