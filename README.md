@@ -39,7 +39,8 @@ Benchmarks:
 - peek ~16M ops/s (pure Caffeine lookup, no side effects)
 - get (L1 hit) ~15M ops/s (full path including TopK + Reporter)
 
-Inspired by JD.com's [hotkey] (https://gitee.com/jd-platform-opensource/hotkey) project; algorithm support from [Aegis] (https://github.com/go-kratos/aegis).
+Inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project; algorithm support from [Aegis](https://github.com/go-kratos/aegis)、[neural](https://github.com/yu120/neural/tree/master)
+.
 
 ## Quick Start
 
@@ -330,17 +331,17 @@ Enable `zeta.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `
 
 **Extension Annotations** (processed by `CacheExtensionAspect` at `HIGHEST_PRECEDENCE`):
 
-| Annotation        | Target  | Role on `@Cacheable`                                                                                                                    |
-| ----------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `@CacheTTL`       | M/T     | Override hard/soft TTL. Supports static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`)                                                  |
-| `@HotTTL`         | M/T     | Hot-key specific TTL override (applied when key is classified HOT by local TopK)                                                        |
-| `@Intercept`      | M       | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`); fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
-| `@Fallback`       | M       | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                  |
-| `@NullCaching`    | M       | Allow caching null return values (sentinel-based, default `true`)                                                                       |
-| `@SkipBroadcast`  | M       | Suppress cross-instance AMQP sync messages (local-only write)                                                                           |
-| `@SkipDetection`  | M       | Bypass TopK detection + Worker reporting for this method's keys                                                                         |
-| `@Preload`        | M       | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL)                                           |
-| `@CacheCondition` | M       | SpEL `unless` — skip caching result when expression evaluates true (uses `#result` + method params)                                     |
+| Annotation        | Target | Role on `@Cacheable`                                                                                                                                  |
+| ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@CacheTTL`       | M/T    | Override hard/soft TTL. Supports static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`)                                                                |
+| `@HotTTL`         | M/T    | Hot-key specific TTL override (applied when key is classified HOT by local TopK)                                                                      |
+| `@Intercept`      | M      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`); fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
+| `@Fallback`       | M      | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                                |
+| `@NullCaching`    | M      | Allow caching null return values (sentinel-based, default `true`)                                                                                     |
+| `@SkipBroadcast`  | M      | Suppress cross-instance AMQP sync messages (local-only write)                                                                                         |
+| `@SkipDetection`  | M      | Bypass TopK detection + Worker reporting for this method's keys                                                                                       |
+| `@Preload`        | M      | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL)                                                         |
+| `@CacheCondition` | M      | SpEL `unless` — skip caching result when expression evaluates true (uses `#result` + method params)                                                   |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
