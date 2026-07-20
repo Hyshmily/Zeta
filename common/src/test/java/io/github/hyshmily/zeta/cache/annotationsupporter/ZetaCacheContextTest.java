@@ -40,7 +40,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with non-default hardTtlMs sets context")
   void apply_withHardTtlMs_setsContext() {
-    ZetaCacheContext.get().apply(1000L, 0L, false, false);
+    ZetaCacheContext.get().apply(1000L, 0L, false, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isEqualTo(1000L);
     assertThat(ZetaCacheContext.get().getSoftTtlMs()).isZero();
     assertThat(ZetaCacheContext.get().isAllowNull()).isFalse();
@@ -49,7 +49,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with non-default softTtlMs sets context")
   void apply_withSoftTtlMs_setsContext() {
-    ZetaCacheContext.get().apply(0L, 500L, false, false);
+    ZetaCacheContext.get().apply(0L, 500L, false, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isZero();
     assertThat(ZetaCacheContext.get().getSoftTtlMs()).isEqualTo(500L);
     assertThat(ZetaCacheContext.get().isAllowNull()).isFalse();
@@ -58,7 +58,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with allowNull true sets context")
   void apply_withAllowNull_setsContext() {
-    ZetaCacheContext.get().apply(0L, 0L, true, false);
+    ZetaCacheContext.get().apply(0L, 0L, true, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isZero();
     assertThat(ZetaCacheContext.get().getSoftTtlMs()).isZero();
     assertThat(ZetaCacheContext.get().isAllowNull()).isTrue();
@@ -67,10 +67,10 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with all defaults clears context")
   void apply_withAllDefaults_clearsContext() {
-    ZetaCacheContext.get().apply(1000L, 500L, true, false);
+    ZetaCacheContext.get().apply(1000L, 500L, true, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isEqualTo(1000L);
 
-    ZetaCacheContext.get().apply(0L, 0L, false, false);
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isZero();
     assertThat(ZetaCacheContext.get().getSoftTtlMs()).isZero();
     assertThat(ZetaCacheContext.get().isAllowNull()).isFalse();
@@ -97,7 +97,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("snapshot returns current context values")
   void snapshot_returnsCurrentValues() {
-    ZetaCacheContext.get().apply(2000L, 1000L, true, false);
+    ZetaCacheContext.get().apply(2000L, 1000L, true, false, 0L, 0L, false);
     ZetaCacheContext.ContextValues snapshot = ZetaCacheContext.get().snapshot();
     assertThat(snapshot).isNotNull();
     assertThat(snapshot.hardTtlMs()).isEqualTo(2000L);
@@ -114,10 +114,10 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("restore restores previously captured values")
   void restore_restoresValues() {
-    ZetaCacheContext.get().apply(2000L, 1000L, true, false);
+    ZetaCacheContext.get().apply(2000L, 1000L, true, false, 0L, 0L, false);
     ZetaCacheContext.ContextValues snapshot = ZetaCacheContext.get().snapshot();
 
-    ZetaCacheContext.get().apply(0L, 0L, false, false);
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isZero();
 
     ZetaCacheContext.get().restore(snapshot);
@@ -129,7 +129,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("restore null clears context")
   void restore_null_clearsContext() {
-    ZetaCacheContext.get().apply(2000L, 1000L, true, false);
+    ZetaCacheContext.get().apply(2000L, 1000L, true, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isPositive();
 
     ZetaCacheContext.get().restore(null);
@@ -141,7 +141,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("different threads have isolated contexts")
   void threadIsolation() throws Exception {
-    ZetaCacheContext.get().apply(100L, 200L, true, false);
+    ZetaCacheContext.get().apply(100L, 200L, true, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().getHardTtlMs()).isEqualTo(100L);
 
     AtomicReference<Long> otherThreadHardTtl = new AtomicReference<>();
@@ -149,7 +149,7 @@ class ZetaCacheContextTest {
 
     Thread other = new Thread(() -> {
       assertThat(ZetaCacheContext.get().getHardTtlMs()).isZero();
-      ZetaCacheContext.get().apply(300L, 400L, false, false);
+      ZetaCacheContext.get().apply(300L, 400L, false, false, 0L, 0L, false);
       otherThreadHardTtl.set(ZetaCacheContext.get().getHardTtlMs());
       latch.countDown();
     });
@@ -170,7 +170,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("ContextValues reportToWorker accessors work correctly")
   void contextValuesRecordAccessors() {
-    var values = new ZetaCacheContext.ContextValues(5000L, 1000L, true, false);
+    var values = new ZetaCacheContext.ContextValues(5000L, 1000L, true, false, 0L, 0L, false);
     assertThat(values.hardTtlMs()).isEqualTo(5000L);
     assertThat(values.softTtlMs()).isEqualTo(1000L);
     assertThat(values.allowNull()).isTrue();
@@ -182,7 +182,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with skipBroadcast true sets skipBroadcast")
   void apply_withSkipBroadcast_setsContext() {
-    ZetaCacheContext.get().apply(0L, 0L, false, true);
+    ZetaCacheContext.get().apply(0L, 0L, false, true, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().isSkipBroadcast()).isTrue();
     assertThat(ZetaCacheContext.get().isAllowNull()).isFalse();
   }
@@ -196,19 +196,19 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("isSkipBroadcast returns false when context set without skipBroadcast")
   void isSkipBroadcast_whenContextWithoutFlag_returnsFalse() {
-    ZetaCacheContext.get().apply(100L, 0L, false, false);
+    ZetaCacheContext.get().apply(100L, 0L, false, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().isSkipBroadcast()).isFalse();
   }
 
   @Test
   @DisplayName("snapshot preserves skipBroadcast flag")
   void snapshot_preservesSkipBroadcast() {
-    ZetaCacheContext.get().apply(0L, 0L, false, true);
+    ZetaCacheContext.get().apply(0L, 0L, false, true, 0L, 0L, false);
     ZetaCacheContext.ContextValues snapshot = ZetaCacheContext.get().snapshot();
     assertThat(snapshot).isNotNull();
     assertThat(snapshot.skipBroadcast()).isTrue();
 
-    ZetaCacheContext.get().apply(0L, 0L, false, false);
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().isSkipBroadcast()).isFalse();
 
     ZetaCacheContext.get().restore(snapshot);
@@ -218,11 +218,145 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with skipBroadcast alone does not clear context")
   void apply_withSkipBroadcastOnly_keepsContext() {
-    ZetaCacheContext.get().apply(0L, 0L, false, true);
+    ZetaCacheContext.get().apply(0L, 0L, false, true, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().isSkipBroadcast()).isTrue();
 
-    ZetaCacheContext.get().apply(0L, 0L, false, false);
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 0L, 0L, false);
     assertThat(ZetaCacheContext.get().isSkipBroadcast()).isFalse();
     assertThat(ZetaCacheContext.get().snapshot()).isNull();
+  }
+
+  // ── Hot-key / skipDetection tests ──
+
+  @Test
+  @DisplayName("getHotHardTtlMs returns 0 when no context set")
+  void getHotHardTtlMs_whenNoContext_returnsZero() {
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isZero();
+  }
+
+  @Test
+  @DisplayName("getHotSoftTtlMs returns 0 when no context set")
+  void getHotSoftTtlMs_whenNoContext_returnsZero() {
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isZero();
+  }
+
+  @Test
+  @DisplayName("isSkipDetection returns false when no context set")
+  void isSkipDetection_whenNoContext_returnsFalse() {
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isFalse();
+  }
+
+  @Test
+  @DisplayName("apply with hotHardTtlMs sets context")
+  void apply_withHotHardTtlMs_setsContext() {
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 3000L, 0L, false);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isEqualTo(3000L);
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isFalse();
+  }
+
+  @Test
+  @DisplayName("apply with hotSoftTtlMs sets context")
+  void apply_withHotSoftTtlMs_setsContext() {
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 0L, 1500L, false);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isEqualTo(1500L);
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isFalse();
+  }
+
+  @Test
+  @DisplayName("apply with skipDetection true sets context")
+  void apply_withSkipDetection_setsContext() {
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 0L, 0L, true);
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isTrue();
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isZero();
+  }
+
+  @Test
+  @DisplayName("isSkipDetection returns false when context set without skipDetection")
+  void isSkipDetection_whenContextWithoutFlag_returnsFalse() {
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 5000L, 0L, false);
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isFalse();
+  }
+
+  @Test
+  @DisplayName("snapshot preserves hotHardTtlMs, hotSoftTtlMs, skipDetection")
+  void snapshot_preservesHotKeyFields() {
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 4000L, 2000L, true);
+    ZetaCacheContext.ContextValues snapshot = ZetaCacheContext.get().snapshot();
+    assertThat(snapshot).isNotNull();
+    assertThat(snapshot.hotHardTtlMs()).isEqualTo(4000L);
+    assertThat(snapshot.hotSoftTtlMs()).isEqualTo(2000L);
+    assertThat(snapshot.skipDetection()).isTrue();
+
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 0L, 0L, false);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isFalse();
+
+    ZetaCacheContext.get().restore(snapshot);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isEqualTo(4000L);
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isEqualTo(2000L);
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isTrue();
+  }
+
+  @Test
+  @DisplayName("apply with all defaults also clears hot-key context")
+  void apply_withAllDefaults_clearsHotKeyContext() {
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 3000L, 1500L, true);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isEqualTo(3000L);
+
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 0L, 0L, false);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isFalse();
+    assertThat(ZetaCacheContext.get().snapshot()).isNull();
+  }
+
+  @Test
+  @DisplayName("ContextValues hot-key record accessors work correctly")
+  void contextValues_hotKeyRecordAccessors() {
+    var values = new ZetaCacheContext.ContextValues(0L, 0L, false, false, 6000L, 2500L, true);
+    assertThat(values.hotHardTtlMs()).isEqualTo(6000L);
+    assertThat(values.hotSoftTtlMs()).isEqualTo(2500L);
+    assertThat(values.skipDetection()).isTrue();
+  }
+
+  @Test
+  @DisplayName("restore null clears hot-key context")
+  void restore_null_clearsHotKeyContext() {
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 3000L, 1500L, true);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isPositive();
+
+    ZetaCacheContext.get().restore(null);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isZero();
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isFalse();
+  }
+
+  @Test
+  @DisplayName("hot-key fields are thread-isolated")
+  void hotKeyThreadIsolation() throws Exception {
+    ZetaCacheContext.get().apply(0L, 0L, false, false, 3000L, 1500L, true);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isEqualTo(3000L);
+
+    AtomicReference<Long> otherThreadHotHardTtl = new AtomicReference<>();
+    CountDownLatch latch = new CountDownLatch(1);
+
+    Thread other = new Thread(() -> {
+      assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isZero();
+      assertThat(ZetaCacheContext.get().isSkipDetection()).isFalse();
+      ZetaCacheContext.get().apply(0L, 0L, false, false, 7000L, 0L, true);
+      otherThreadHotHardTtl.set(ZetaCacheContext.get().getHotHardTtlMs());
+      latch.countDown();
+    });
+    other.start();
+    latch.await();
+
+    assertThat(otherThreadHotHardTtl.get()).isEqualTo(7000L);
+    assertThat(ZetaCacheContext.get().getHotHardTtlMs()).isEqualTo(3000L);
+    assertThat(ZetaCacheContext.get().getHotSoftTtlMs()).isEqualTo(1500L);
+    assertThat(ZetaCacheContext.get().isSkipDetection()).isTrue();
   }
 }

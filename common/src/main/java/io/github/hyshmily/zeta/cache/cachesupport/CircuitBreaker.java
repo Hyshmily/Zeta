@@ -17,6 +17,15 @@ package io.github.hyshmily.zeta.cache.cachesupport;
 
 /**
  * Sliding-window circuit breaker for protecting remote calls from cascading failures.
+ *
+ * <p>State machine: CLOSED → OPEN → HALF_OPEN → CLOSED.
+ * CLOSED: sliding-window failure rate tracking.
+ * OPEN:  fast-fail, blocks all requests.
+ * HALF_OPEN: allows limited probe requests; requires N consecutive
+ * successes to close, reverts to OPEN on any failure.
+ *
+ * <p>Supports exception filtering — exceptions matching exclude/include
+ * rules are treated as success and do not trip the breaker.
  */
 public interface CircuitBreaker extends AutoCloseable {
   /**
@@ -33,6 +42,16 @@ public interface CircuitBreaker extends AutoCloseable {
   /** Record a failed call. */
   void onFailure();
 
+  /**
+   * Record a failed call with exception context.
+   * The exception is checked against include/exclude rules — if ignored,
+   * the failure is treated as a success and does not trip the breaker.
+   */
+  void onFailure(Throwable t);
+
   /** Whether the breaker is currently open. */
   boolean isOpen();
+
+  /** Current state of the circuit breaker. */
+  CircuitBreakerState getState();
 }

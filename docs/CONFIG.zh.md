@@ -92,49 +92,48 @@
 
 > **设计说明：** 应用端 HeavyKeeper 使用更宽（50k）但更浅（depth 5）的 Sketch，衰减稍慢（0.92）。较宽的 Sketch 在单 key 插入时减少指纹冲突概率。较浅的深度足以满足应用端快速*启发式*本地升级判断的需要——它不做权威的 HOT/COOL 决策。参见下方 [Worker 端 HeavyKeeper](#zetaworkerheavy-keeper) 的对比配置。
 
-| 属性                               | 默认值   | 说明                                                                                                                                                                   |
-| ---------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `zeta.local.top-k`                 | `100`    | Top-K 集合大小                                                                                                                                                         |
-| `zeta.local.width`                 | `50000`  | Count-Min Sketch 宽度                                                                                                                                                  |
-| `zeta.local.depth`                 | `5`      | Count-Min Sketch 深度（行数）                                                                                                                                          |
-| `zeta.local.decay`                 | `0.92`   | 冲突衰减因子                                                                                                                                                           |
-| `zeta.local.min-count`             | `10`     | 热点 key 最低计数阈值                                                                                                                                                  |
-| `zeta.local.sketch-window-count`   | `3`      | 每 sketch slot 的滑动窗口数（环形缓冲区）。W=3 覆盖 3×衰减周期的数据，消除热点漂移。范围 1–10                                                                          |
-| `zeta.local.cache.max-size`        | `100000` | Caffeine L1 最大条目数（`max-weight` 为 0 时生效）                                                                                                                     |
-| `zeta.local.cache.max-weight`      | `0`      | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重                                                                                |
-| `zeta.local.cache.max-value-size`  | `0`      | 单值字节大小限制；0 = 不限。超过此大小的值不会被缓存                                                                                                                   |
-| `zeta.local.cache-key.strip-query` | `false`  | 在缓存操作前从缓存键中剥离查询参数（`?key=val`），避免相同业务数据因 URL 参数不同而分裂到多个 Caffeine 条目中，从而稀释 HeavyKeeper 热点检测。默认关闭——未启用时零开销 |
-
-| `zeta.local.local-cache-ttl-minutes` | `5` | Caffeine L1 写入 TTL（分钟） |
-| `zeta.local.inflight-max-size` | `50000` | Inflight 去重最大条目数 |
-| `zeta.local.inflight-ttl-seconds` | `5` | Inflight 去重 TTL（必须超过最慢 L2 响应） |
-| `zeta.local.inflight-timeout-seconds` | `3` | Inflight 超时（必须 < inflight-ttl-seconds）。超时返回 `Optional.empty()`，调用方应回退到 DB |
-| `zeta.local.executor-core-pool-size` | `8` | 线程池核心大小 |
-| `zeta.local.executor-max-pool-size` | `32` | 线程池最大大小 |
-| `zeta.local.executor-queue-capacity` | `2000` | 线程池队列容量 |
-| `zeta.local.expelled-queue-capacity` | `50000` | 被驱逐热 key 暂存队列容量（防止 TopK 溢出） |
-| `zeta.local.default-hard-ttl-ms` | `300000`（5分钟） | 普通 key 默认硬 TTL（Caffeine 驱逐） |
-| `zeta.local.hard-ttl-ms` | `0` | 普通 key 每次调用的硬 TTL 覆盖；0 = 使用 `default-hard-ttl-ms` |
-| `zeta.local.default-hot-hard-ttl-ms` | `3600000`（1小时） | 热点 key 默认硬 TTL |
-| `zeta.local.hot-hard-ttl-ms` | `0` | 热点 key 每次调用的硬 TTL 覆盖；0 = 使用 `default-hot-hard-ttl-ms` |
-| `zeta.local.default-soft-ttl-ms` | `30000`（30秒） | 普通 key 默认软 TTL（过期后异步刷新） |
-| `zeta.local.soft-ttl-ms` | `0` | 普通 key 每次调用的软 TTL 覆盖；0 = 使用 `default-soft-ttl-ms` |
-| `zeta.local.default-hot-soft-ttl-ms` | `300000`（5分钟） | 热点 key 默认软 TTL |
-| `zeta.local.hot-soft-ttl-ms` | `0` | 热点 key 每次调用的软 TTL 覆盖；0 = 使用 `default-hot-soft-ttl-ms` |
-| `zeta.local.null-value-ttl-seconds` | `10` | null 缓存条目 TTL（秒）；避免长时间缓存负结果 |
-| `zeta.local.ttl-jitter-ratio` | `0.05` | 偏移比例（0.0–1.0）；例如 0.05 表示对 TTL 计算施加 ±5% 的随机偏移。始终启用。 |
-| `zeta.local.refresh-max-pools` | `100` | 软过期最大并发异步刷新数（信号量） |
-| `zeta.local.version-key-ttl-minutes` | `60` | Redis 版本 key TTL（分钟），最小值为 1 |
-| `zeta.local.report-exchange` | `zeta.report.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机 |
-| `zeta.local.report-interval-ms` | `50` | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒） |
-| `zeta.local.app-name` | `"default"` | 逻辑应用名，用于 Worker 路由的租户区分 |
-| `zeta.local.shard-count` | `1` | 消费者线程数自动计算的除数（max(4, availableProcessors/2)；路由默认使用一致性哈希 |
-| `zeta.local.instance-id` | `""`（自动检测） | 用于队列命名的显式实例 ID；为空时自动检测为 `server.port-HOSTNAME`（或 `server.port-UUID`） |
-| `zeta.local.queue-capacity` | `10000` | 报告分发器队列容量（内部有界队列） |
-| `zeta.local.queue-offer-timeout-ms` | `100` | 报告队列写入超时（毫秒）——阻塞此时长后丢弃 |
-| `zeta.local.consumer-count` | `0` | 报告消费者线程数；0 = 自动（max(4, availableProcessors / 2)） |
-| `zeta.local.scheduler-pool-size` | `8` | Zeta 共享调度器线程池大小（定时任务） |
-| `zeta.local.expected-worker-count` | `0` | 期望的 Worker 节点数，用于基于仲裁的健康检查；0 = 动态发现（收到首个心跳前始终不健康） |
+| 属性                                  | 默认值                 | 说明                                                                                                                                                                   |
+| ------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.local.top-k`                    | `100`                  | Top-K 集合大小                                                                                                                                                         |
+| `zeta.local.width`                    | `50000`                | Count-Min Sketch 宽度                                                                                                                                                  |
+| `zeta.local.depth`                    | `5`                    | Count-Min Sketch 深度（行数）                                                                                                                                          |
+| `zeta.local.decay`                    | `0.92`                 | 冲突衰减因子                                                                                                                                                           |
+| `zeta.local.min-count`                | `10`                   | 热点 key 最低计数阈值                                                                                                                                                  |
+| `zeta.local.sketch-window-count`      | `3`                    | 每 sketch slot 的滑动窗口数（环形缓冲区）。W=3 覆盖 3×衰减周期的数据，消除热点漂移。范围 1–10                                                                          |
+| `zeta.local.cache.max-size`           | `100000`               | Caffeine L1 最大条目数（`max-weight` 为 0 时生效）                                                                                                                     |
+| `zeta.local.cache.max-weight`         | `0`                    | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重                                                                                |
+| `zeta.local.cache.max-value-size`     | `0`                    | 单值字节大小限制；0 = 不限。超过此大小的值不会被缓存                                                                                                                   |
+| `zeta.local.cache-key.strip-query`    | `false`                | 在缓存操作前从缓存键中剥离查询参数（`?key=val`），避免相同业务数据因 URL 参数不同而分裂到多个 Caffeine 条目中，从而稀释 HeavyKeeper 热点检测。默认关闭——未启用时零开销 |
+| `zeta.local.local-cache-ttl-minutes`  | `5`                    | Caffeine L1 写入 TTL（分钟）                                                                                                                                           |
+| `zeta.local.inflight-max-size`        | `50000`                | Inflight 去重最大条目数                                                                                                                                                |
+| `zeta.local.inflight-ttl-seconds`     | `5`                    | Inflight 去重 TTL（必须超过最慢 L2 响应）                                                                                                                              |
+| `zeta.local.inflight-timeout-seconds` | `3`                    | Inflight 超时（必须 < inflight-ttl-seconds）。超时返回 `Optional.empty()`，调用方应回退到 DB                                                                           |
+| `zeta.local.executor-core-pool-size`  | `8`                    | 线程池核心大小                                                                                                                                                         |
+| `zeta.local.executor-max-pool-size`   | `32`                   | 线程池最大大小                                                                                                                                                         |
+| `zeta.local.executor-queue-capacity`  | `2000`                 | 线程池队列容量                                                                                                                                                         |
+| `zeta.local.expelled-queue-capacity`  | `50000`                | 被驱逐热 key 暂存队列容量（防止 TopK 溢出）                                                                                                                            |
+| `zeta.local.default-hard-ttl-ms`      | `300000`（5分钟）      | 普通 key 默认硬 TTL（Caffeine 驱逐）                                                                                                                                   |
+| `zeta.local.hard-ttl-ms`              | `0`                    | 普通 key 每次调用的硬 TTL 覆盖；0 = 使用 `default-hard-ttl-ms`                                                                                                         |
+| `zeta.local.default-hot-hard-ttl-ms`  | `3600000`（1小时）     | 热点 key 默认硬 TTL                                                                                                                                                    |
+| `zeta.local.hot-hard-ttl-ms`          | `0`                    | 热点 key 每次调用的硬 TTL 覆盖；0 = 使用 `default-hot-hard-ttl-ms`                                                                                                     |
+| `zeta.local.default-soft-ttl-ms`      | `30000`（30秒）        | 普通 key 默认软 TTL（过期后异步刷新）                                                                                                                                  |
+| `zeta.local.soft-ttl-ms`              | `0`                    | 普通 key 每次调用的软 TTL 覆盖；0 = 使用 `default-soft-ttl-ms`                                                                                                         |
+| `zeta.local.default-hot-soft-ttl-ms`  | `300000`（5分钟）      | 热点 key 默认软 TTL                                                                                                                                                    |
+| `zeta.local.hot-soft-ttl-ms`          | `0`                    | 热点 key 每次调用的软 TTL 覆盖；0 = 使用 `default-hot-soft-ttl-ms`                                                                                                     |
+| `zeta.local.null-value-ttl-seconds`   | `10`                   | null 缓存条目 TTL（秒）；避免长时间缓存负结果                                                                                                                          |
+| `zeta.local.ttl-jitter-ratio`         | `0.05`                 | 偏移比例（0.0–1.0）；例如 0.05 表示对 TTL 计算施加 ±5% 的随机偏移。始终启用。                                                                                          |
+| `zeta.local.refresh-max-pools`        | `100`                  | 软过期最大并发异步刷新数（信号量）                                                                                                                                     |
+| `zeta.local.version-key-ttl-minutes`  | `60`                   | Redis 版本 key TTL（分钟），最小值为 1                                                                                                                                 |
+| `zeta.local.report-exchange`          | `zeta.report.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                                                                                                                           |
+| `zeta.local.report-interval-ms`       | `50`                   | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）                                                                                                                 |
+| `zeta.local.app-name`                 | `"default"`            | 逻辑应用名，用于 Worker 路由的租户区分                                                                                                                                 |
+| `zeta.local.shard-count`              | `1`                    | 消费者线程数自动计算的除数（max(4, availableProcessors/2)；路由默认使用一致性哈希                                                                                      |
+| `zeta.local.instance-id`              | `""`（自动检测）       | 用于队列命名的显式实例 ID；为空时自动检测为 `server.port-HOSTNAME`（或 `server.port-UUID`）                                                                            |
+| `zeta.local.queue-capacity`           | `10000`                | 报告分发器队列容量（内部有界队列）                                                                                                                                     |
+| `zeta.local.queue-offer-timeout-ms`   | `100`                  | 报告队列写入超时（毫秒）——阻塞此时长后丢弃                                                                                                                             |
+| `zeta.local.consumer-count`           | `0`                    | 报告消费者线程数；0 = 自动（max(4, availableProcessors / 2)）                                                                                                          |
+| `zeta.local.scheduler-pool-size`      | `8`                    | Zeta 共享调度器线程池大小（定时任务）                                                                                                                                  |
+| `zeta.local.expected-worker-count`    | `0`                    | 期望的 Worker 节点数，用于基于仲裁的健康检查；0 = 动态发现（收到首个心跳前始终不健康）                                                                                 |
 
 ### 心跳配置（`zeta.local.heartbeat.*`）
 
@@ -150,17 +149,24 @@
 
 ### 熔断器配置（`zeta.local.circuit-breaker.*`）
 
-| 属性                                                  | 默认值  | 说明                                         |
-| ----------------------------------------------------- | ------- | -------------------------------------------- |
-| `zeta.local.circuit-breaker.enabled`                  | `false` | 启用滑动窗口熔断器保护远程调用（默认关闭）   |
-| `zeta.local.circuit-breaker.window-time-ms`           | `10000` | 滑动窗口时长（毫秒）                         |
-| `zeta.local.circuit-breaker.window-buckets`           | `10`    | 滑动窗口桶数                                 |
-| `zeta.local.circuit-breaker.fail-threshold`           | `0.5`   | 失败率阈值（0.0–1.0），超过时打开熔断器      |
-| `zeta.local.circuit-breaker.request-volume-threshold` | `20`    | 评估失败率所需的最小请求总数                 |
-| `zeta.local.circuit-breaker.single-test-interval-ms`  | `5000`  | 半开探测间隔（毫秒）                         |
-| `zeta.local.circuit-breaker.log-enabled`              | `true`  | 是否记录状态切换日志（OPEN/CLOSE/HALF-OPEN） |
+| 属性                                                       | 默认值  | 说明                                               |
+| ---------------------------------------------------------- | ------- | -------------------------------------------------- |
+| `zeta.local.circuit-breaker.enabled`                       | `false` | 启用滑动窗口熔断器保护远程调用（默认关闭）         |
+| `zeta.local.circuit-breaker.window-time-ms`                | `10000` | 滑动窗口时长（毫秒）                               |
+| `zeta.local.circuit-breaker.window-buckets`                | `10`    | 滑动窗口桶数                                       |
+| `zeta.local.circuit-breaker.fail-threshold`                | `0.5`   | 失败率阈值（0.0–1.0），超过时打开熔断器            |
+| `zeta.local.circuit-breaker.request-volume-threshold`      | `20`    | 评估失败率所需的最小请求总数                       |
+| `zeta.local.circuit-breaker.single-test-interval-ms`       | `5000`  | 半开探测间隔（毫秒）                               |
+| `zeta.local.circuit-breaker.consecutive-success-threshold` | `3`     | 半开状态下连续成功次数阈值，防止单次成功导致抖动   |
+| `zeta.local.circuit-breaker.log-enabled`                   | `true`  | 是否记录状态切换日志（OPEN/CLOSE/HALF-OPEN）       |
+| `zeta.local.circuit-breaker.exclude-exceptions`            | `[]`    | 不触发熔断的异常全类名白名单                       |
+| `zeta.local.circuit-breaker.include-exceptions`            | `[]`    | 只有这些异常才触发熔断（为空表示全部触发）         |
 
 熔断器作用于 `SingleFlight.load()`——打开时 `load()` 立即返回 `Optional.empty()`，`HotKeyCache.get()` 会尝试返回过期缓存（如果 L1 中存在）。仅当缓存加载器（数据库查询、远程 API）容易出现级联故障时再启用。
+
+**状态机：** CLOSED → OPEN → HALF_OPEN → CLOSED。CLOSED 状态下滑动窗口记录失败率，超过 `fail-threshold` 且请求量满足 `request-volume-threshold` 时打开熔断。OPEN 状态等待 `single-test-interval-ms` 后允许一个探针进入 HALF_OPEN。HALF_OPEN 需要 `consecutive-success-threshold` 次连续成功才能关闭——任何失败立即回到 OPEN。此防抖动设计借鉴自 `neural-circuitbreaker` 项目。
+
+**异常过滤：** `exclude-exceptions` 非空时，匹配的异常（或它们的 `cause`）视为成功，不会触发熔断。`include-exceptions` 非空时，只有列出的异常类型才会触发熔断，其余全部忽略。例如 `IllegalArgumentException` 属于客户端错误，不应打开熔断器。
 
 ### 上报配置（`zeta.report.*`）
 

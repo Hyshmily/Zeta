@@ -32,7 +32,7 @@ class TopKDefaultMethodTest {
   void contains_shouldReturnTrueWhenKeyIsInList() {
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) {
+      public AddResult addDirect(String key, long increment) {
         throw new UnsupportedOperationException();
       }
 
@@ -72,7 +72,7 @@ class TopKDefaultMethodTest {
   void contains_shouldReturnFalseWhenKeyIsNotInList() {
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) {
+      public AddResult addDirect(String key, long increment) {
         throw new UnsupportedOperationException();
       }
 
@@ -112,7 +112,7 @@ class TopKDefaultMethodTest {
     List<AddResult> results = new ArrayList<>();
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) {
+      public AddResult addDirect(String key, long increment) {
         throw new UnsupportedOperationException();
       }
 
@@ -159,7 +159,7 @@ class TopKDefaultMethodTest {
   void estimatedSize_shouldReturnListSize() {
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) {
+      public AddResult addDirect(String key, long increment) {
         throw new UnsupportedOperationException();
       }
 
@@ -198,7 +198,7 @@ class TopKDefaultMethodTest {
   void estimatedSize_whenEmpty_shouldReturnZero() {
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) {
+      public AddResult addDirect(String key, long increment) {
         throw new UnsupportedOperationException();
       }
 
@@ -237,7 +237,7 @@ class TopKDefaultMethodTest {
   void contains_shouldReturnFalseWhenListIsEmpty() {
     TopK topK = new TopK() {
       @Override
-      public AddResult addDirect(String key, int increment) {
+      public AddResult addDirect(String key, long increment) {
         throw new UnsupportedOperationException();
       }
 

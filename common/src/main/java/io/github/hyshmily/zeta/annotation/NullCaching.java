@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.annotation;
 
+import jakarta.validation.constraints.NotNull;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -43,5 +44,6 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface NullCaching {
   /** Whether to cache {@code null} return values. Default is {@code true}. */
+  @NotNull
   boolean value() default true;
 }

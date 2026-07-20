@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.cache.annotationsupporter.ZetaCacheContext;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.*;
 import org.aspectj.lang.ProceedingJoinPoint;
@@ -133,23 +134,22 @@ class ZetaCacheExtensionAspectTest {
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Broadcast(false)
+    @SkipBroadcast
     public String findBroadcastOff(String id) {
       return "result-" + id;
     }
 
     @CachePut(cacheNames = "test", key = "#p0")
-    @Broadcast(false)
+    @SkipBroadcast
     public String putBroadcastOff(String id) {
       return "result-" + id;
     }
 
     @CacheEvict(cacheNames = "test", key = "#p0")
-    @Broadcast(false)
+    @SkipBroadcast
     public void evictBroadcastOff(String id) {}
 
     @CachePut(cacheNames = "test", key = "#p0")
-    @Broadcast
     public String putBroadcastDefault(String id) {
       return "result-" + id;
     }
@@ -403,7 +403,7 @@ class ZetaCacheExtensionAspectTest {
   @Test
   @DisplayName("context is restored after proceed in finally block")
   void contextRestoredAfterProceed() throws Throwable {
-    ZetaCacheContext.get().apply(999L, 888L, true, false);
+    ZetaCacheContext.get().apply(999L, 888L, true, false, 0L, 0L, false);
 
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -646,10 +646,10 @@ class ZetaCacheExtensionAspectTest {
     aspect.aroundCacheable(pjp, cacheable);
   }
 
-  // ── @Broadcast tests ──
+  // ── @SkipBroadcast tests ──
 
   @Test
-  @DisplayName("@Broadcast(false) on @Cacheable sets skipBroadcast in context")
+  @DisplayName("@SkipBroadcast on @Cacheable sets skipBroadcast in context")
   void broadcastFalse_onCacheable_setsSkipBroadcast() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
@@ -674,7 +674,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@Broadcast(false) on @CachePut sets skipBroadcast in context")
+  @DisplayName("@SkipBroadcast on @CachePut sets skipBroadcast in context")
   void broadcastFalse_onCachePut_setsSkipBroadcast() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
@@ -696,7 +696,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@Broadcast(false) on @CacheEvict sets skipBroadcast in context")
+  @DisplayName("@SkipBroadcast on @CacheEvict sets skipBroadcast in context")
   void broadcastFalse_onCacheEvict_setsSkipBroadcast() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
@@ -718,7 +718,7 @@ class ZetaCacheExtensionAspectTest {
   }
 
   @Test
-  @DisplayName("@Broadcast (default true) on @CachePut does not set skipBroadcast")
+  @DisplayName("without @SkipBroadcast on @CachePut does not set skipBroadcast")
   void broadcastDefault_onCachePut_doesNotSkip() throws Throwable {
     ZetaCacheContext.get().restore(null);
 
@@ -1128,8 +1128,9 @@ class ZetaCacheExtensionAspectTest {
 
     aspect.aroundCacheable(pjp, cacheable);
 
-    verify(zeta).notifyLocalDetectorDirect("test::preload-key-a", Integer.MAX_VALUE);
-    verify(zeta).notifyLocalDetectorDirect("test::preload-key-b", Integer.MAX_VALUE);
+    verify(zeta).notifyLocalDetectorDirect(
+      Map.of("test::preload-key-a", Long.MAX_VALUE, "test::preload-key-b", Long.MAX_VALUE)
+    );
   }
 
   @Test
@@ -1151,7 +1152,7 @@ class ZetaCacheExtensionAspectTest {
 
     aspect.aroundCacheable(pjp, cacheable);
 
-    verify(zeta).notifyLocalDetectorDirect("test::myDynamicKey", Integer.MAX_VALUE);
+    verify(zeta).notifyLocalDetectorDirect("test::myDynamicKey", Long.MAX_VALUE);
   }
 
   @Test
@@ -1175,7 +1176,8 @@ class ZetaCacheExtensionAspectTest {
     aspect.aroundCacheable(pjp, cacheable);
     aspect.aroundCacheable(pjp, cacheable);
 
-    verify(zeta, times(1)).notifyLocalDetectorDirect("test::preload-key-a", Integer.MAX_VALUE);
-    verify(zeta, times(1)).notifyLocalDetectorDirect("test::preload-key-b", Integer.MAX_VALUE);
+    verify(zeta, times(1)).notifyLocalDetectorDirect(
+      Map.of("test::preload-key-a", Long.MAX_VALUE, "test::preload-key-b", Long.MAX_VALUE)
+    );
   }
 }

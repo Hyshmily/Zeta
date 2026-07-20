@@ -15,28 +15,34 @@
  */
 package io.github.hyshmily.zeta.annotation;
 
-import io.github.hyshmily.zeta.Zeta;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Controls whether cache write/evict operations on this method send
- * sync messages to peer instances via RabbitMQ.
- * <p>
- * When {@code @Broadcast(false)} is present, the underlying
- * {@link Zeta} methods use local-only variants
+ * Suppresses cross-instance broadcast (RabbitMQ sync messages) for cache
+ * write/evict operations on this method.
+ *
+ * <p>When present, the underlying {@link
+ * io.github.hyshmily.zeta.Zeta Zeta} methods use local-only variants
  * ({@code putLocal()} / {@code invalidateLocal()}) instead of the default
- * {@code putThrough()} / {@code invalidate()} paths.
- * <p>
- * Applies to {@link org.springframework.cache.annotation.Cacheable @Cacheable},
+ * {@code putThrough()} / {@code invalidate()} paths. Peer instances will
+ * not receive invalidation or refresh messages for this operation.
+ *
+ * <p>Typical use cases:
+ * <ul>
+ *   <li>Ephemeral data that is local to this instance</li>
+ *   <li>High-frequency writes where cross-instance consistency is not required</li>
+ *   <li>Bulk operations where individual broadcasts would flood the AMQP bus</li>
+ * </ul>
+ *
+ * <p>Applies to {@link org.springframework.cache.annotation.Cacheable @Cacheable},
  * {@link org.springframework.cache.annotation.CachePut @CachePut}, and
  * {@link org.springframework.cache.annotation.CacheEvict @CacheEvict} methods.
+ *
+ * <p>Replaces the earlier {@code @Broadcast(false)} convention.
  */
 @Target(ElementType.METHOD)
 @Retention(RetentionPolicy.RUNTIME)
-public @interface Broadcast {
-  /** Whether to send sync messages. Default is {@code true}. */
-  boolean value() default true;
-}
+public @interface SkipBroadcast {}

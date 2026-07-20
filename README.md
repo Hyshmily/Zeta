@@ -17,14 +17,14 @@
 
 Zeta is a configurable, high-performance, low-cost lightweight distributed cache and preheating framework, designed to solve cluster-wide distributed consistent caching problems for arbitrary sudden hotspot data at minimal cost, fully decoupling business code from distributed coordination infrastructure via Redis and RabbitMQ.
 
-Local-Distributed Collaborative Detection
+### Local-Distributed Collaborative Detection
 
 Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper probabilistic sketch and a remote Worker cluster — and automatically warms up the L1 cache based on the detection results.
 
 - Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency.
 - The reporting path is protected by a BBR congestion control algorithm that automatically throttles based on CPU load, preventing burst traffic from overwhelming the channel. The Worker cluster aggregates access reports from all application instances, runs sliding-window frequency analysis combined with a Bayesian confidence state machine, and broadcasts HOT/COOL decisions back to every instance. Each cache entry (CacheEntry) carries two orthogonal version numbers — dataVersion and decisionVersion — and a KeyState marking its lifecycle state (HOT/COOL/NORMAL). Worker decisions override local promotions via a monotonically increasing decisionVersion, ensuring cluster-wide consistency.
 
-Multi-Node Cache Coherency
+### Multi-Node Cache Coherency
 
 Much like how a primary-backup database synchronizes writes through a log replication protocol, Zeta synchronizes cache mutations across application instances through a publish-subscribe mechanism backed by RabbitMQ.
 
@@ -39,7 +39,7 @@ Benchmarks:
 - peek ~16M ops/s (pure Caffeine lookup, no side effects)
 - get (L1 hit) ~15M ops/s (full path including TopK + Reporter)
 
-Inspired by JD.com's hotkey (https://gitee.com/jd-platform-opensource/hotkey) project; algorithm support from Aegis (https://github.com/go-kratos/aegis).
+Inspired by JD.com's [hotkey] (https://gitee.com/jd-platform-opensource/hotkey) project; algorithm support from [Aegis] (https://github.com/go-kratos/aegis).
 
 ## Quick Start
 

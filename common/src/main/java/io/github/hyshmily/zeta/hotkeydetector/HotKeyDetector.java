@@ -107,7 +107,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    * @return result indicating whether the key became hot
    */
   @Override
-  public AddResult addDirect(String key, int increment) {
+  public AddResult addDirect(String key, long increment) {
     if (invalidCacheKey(key)) {
       return null;
     }

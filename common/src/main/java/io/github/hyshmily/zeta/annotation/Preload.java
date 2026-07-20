@@ -26,7 +26,7 @@ import java.lang.annotation.Target;
  * naturally accumulate enough accesses in the HeavyKeeper TopK sketch.
  *
  * <p>Pre-loaded keys have their detection counts inflated via
- * {@link Zeta#notifyLocalDetectorDirect(String, int)}
+ * {@link Zeta#notifyLocalDetectorDirect(String, long)}
  * so they immediately benefit from long TTLs, hot-key interception
  * ({@link Intercept @Intercept}), and priority treatment — without waiting
  * for the detection engine to recognise them organically.
@@ -81,7 +81,7 @@ public @interface Preload {
 
   /**
    * Inflated access count injected into the detection engine per key.
-   * {@code 0} means {@link Integer#MAX_VALUE} — virtually guaranteed to
+   * {@code 0} means {@link Long#MAX_VALUE} — virtually guaranteed to
    * be classified as hot by the HeavyKeeper sketch.
    */
   int count() default 0;

@@ -157,17 +157,24 @@
 
 ### Circuit Breaker (`zeta.local.circuit-breaker.*`)
 
-| Property                                              | Default | Description                                                                  |
-| ----------------------------------------------------- | ------- | ---------------------------------------------------------------------------- |
-| `zeta.local.circuit-breaker.enabled`                  | `false` | Enable sliding-window circuit breaker for remote calls (disabled by default) |
-| `zeta.local.circuit-breaker.window-time-ms`           | `10000` | Sliding window duration (ms)                                                 |
-| `zeta.local.circuit-breaker.window-buckets`           | `10`    | Number of buckets dividing the sliding window                                |
-| `zeta.local.circuit-breaker.fail-threshold`           | `0.5`   | Failure rate threshold (0.0–1.0); opens breaker when exceeded                |
-| `zeta.local.circuit-breaker.request-volume-threshold` | `20`    | Minimum total requests before evaluating failure rate                        |
-| `zeta.local.circuit-breaker.single-test-interval-ms`  | `5000`  | Interval (ms) between half-open probe requests                               |
-| `zeta.local.circuit-breaker.log-enabled`              | `true`  | Whether to log state transitions (OPEN/CLOSE/HALF-OPEN)                      |
+| Property                                                   | Default | Description                                                                        |
+| ---------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------- |
+| `zeta.local.circuit-breaker.enabled`                       | `false` | Enable sliding-window circuit breaker for remote calls (disabled by default)       |
+| `zeta.local.circuit-breaker.window-time-ms`                | `10000` | Sliding window duration (ms)                                                       |
+| `zeta.local.circuit-breaker.window-buckets`                | `10`    | Number of buckets dividing the sliding window                                      |
+| `zeta.local.circuit-breaker.fail-threshold`                | `0.5`   | Failure rate threshold (0.0–1.0); opens breaker when exceeded                      |
+| `zeta.local.circuit-breaker.request-volume-threshold`      | `20`    | Minimum total requests before evaluating failure rate                              |
+| `zeta.local.circuit-breaker.single-test-interval-ms`       | `5000`  | Interval (ms) between half-open probe requests                                     |
+| `zeta.local.circuit-breaker.consecutive-success-threshold` | `3`     | Consecutive probe successes in HALF_OPEN required to close (anti-flapping)         |
+| `zeta.local.circuit-breaker.log-enabled`                   | `true`  | Whether to log state transitions (OPEN/CLOSE/HALF-OPEN)                            |
+| `zeta.local.circuit-breaker.exclude-exceptions`            | `[]`    | Exception class names (fully qualified) that should NOT trip the breaker           |
+| `zeta.local.circuit-breaker.include-exceptions`            | `[]`    | Exception class names (fully qualified) that SHOULD trip the breaker (empty = all) |
 
 The circuit breaker wraps `SingleFlight.load()` — when open, `load()` returns `Optional.empty()` immediately without executing the supplier. The calling `HotKeyCache.get()` then falls back to returning any stale L1 entry if available. Only enable when your cache-load suppliers (database queries, remote API calls) are prone to cascading failures.
+
+**State machine:** CLOSED → OPEN → HALF_OPEN → CLOSED. In CLOSED state, a sliding-window tracks failure rate. When the rate exceeds `fail-threshold` and volume meets `request-volume-threshold`, the breaker opens. After `single-test-interval-ms`, one probe request enters HALF_OPEN. It requires `consecutive-success-threshold` consecutive successes to close — any failure in HALF_OPEN returns immediately to OPEN. This anti-flapping design is inspired by the `neural-circuitbreaker` project.
+
+**Exception filtering:** When `exclude-exceptions` is non-empty, exceptions matching these types (or their `cause`) are treated as success and never trip the breaker. When `include-exceptions` is non-empty, ONLY the listed exception types trip the breaker — all others are ignored. For example, `IllegalArgumentException` is a client error and should not open the circuit.
 
 ### Reporting (`zeta.report.*`)
 

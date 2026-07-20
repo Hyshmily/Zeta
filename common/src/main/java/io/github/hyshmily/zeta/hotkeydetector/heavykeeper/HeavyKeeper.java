@@ -410,7 +410,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * admission/eviction).
    */
   @Override
-  public AddResult addDirect(String key, int increment) {
+  public AddResult addDirect(String key, long increment) {
     long maxCount = addToSketch(key, increment);
     return admit(key, maxCount);
   }
@@ -418,7 +418,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   /**
    * Record accesses for multiple keys in batch.
    *
-   * <p>More efficient than repeated {@link #addDirect(String, int)} calls
+   * <p>More efficient than repeated {@link #addDirect(String, long)} calls
    * because the sketch update and admission decision are bundled in a single
    * pass. Returns results only for keys that actually entered the TopK set
    * (cold keys are filtered out), reducing downstream noise.

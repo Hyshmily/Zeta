@@ -20,6 +20,8 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Positive;
+import java.util.ArrayList;
+import java.util.List;
 import lombok.AccessLevel;
 import lombok.Data;
 import lombok.Getter;
@@ -402,6 +404,31 @@ public class ZetaProperties {
 
     /** Whether to log state transitions. */
     private boolean logEnabled = true;
+
+    /**
+     * Consecutive successes in HALF_OPEN state required to close the breaker.
+     * Higher values prevent flapping from single lucky probe requests.
+     * Default 3 balances fast recovery with stability.
+     */
+    private int consecutiveSuccessThreshold = 3;
+
+    /**
+     * Exception class names (fully qualified) that should NOT trip the breaker.
+     * For example, business-level exceptions like {@code IllegalArgumentException}
+     * should not open the circuit — these are client errors, not system failures.
+     * When non-empty and the thrown exception (or its cause) matches, it is
+     * treated as a success for breaker accounting.
+     */
+    private List<String> excludeExceptions = new ArrayList<>();
+
+    /**
+     * Exception class names (fully qualified) that SHOULD trip the breaker.
+     * When non-empty, ONLY these exceptions are counted as failures; all others
+     * are treated as successes. When empty (default), all exceptions are counted.
+     * Mutually exclusive with {@code excludeExceptions} in intent, but both
+     * can be set — exclude checks run first.
+     */
+    private List<String> includeExceptions = new ArrayList<>();
   }
 
   /** Circuit breaker configuration. */

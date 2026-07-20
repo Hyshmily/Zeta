@@ -42,13 +42,13 @@ public interface TopK {
    * @param increment the number of accesses to reportToWorker
    * @return the  result indicating whether the key became hot and whether another key was evicted
    */
-  AddResult addDirect(String key, int increment);
+  AddResult addDirect(String key, long increment);
 
   /**
    * Record accesses for multiple keys in batch.
    *
    * <p>Always updates both the sketch counters and the TopK heap. More
-   * efficient than repeated {@link #addDirect(String, int)} calls because
+   * efficient than repeated {@link #addDirect(String, long)} calls because
    * the heap is updated once for the entire batch rather than per-key,
    * reducing locking overhead. Returns results only for keys that actually
    * entered the TopK set (possibly displacing existing members).

@@ -27,6 +27,7 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -40,6 +41,7 @@ import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.CachePut;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cache.interceptor.SimpleKey;
+import org.springframework.cache.interceptor.SimpleKeyGenerator;
 import org.springframework.context.expression.MethodBasedEvaluationContext;
 import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.Ordered;
@@ -52,29 +54,15 @@ import org.springframework.expression.spel.standard.SpelExpressionParser;
 /**
  * Companion AOP aspect for Spring {@link Cacheable @Cacheable},
  * {@link CachePut @CachePut}, and {@link CacheEvict @CacheEvict} methods.
- *
- * <p>Runs at {@link Ordered#HIGHEST_PRECEDENCE} — before Spring's own
- * {@code CacheInterceptor} — to set up thread-bound TTL overrides,
- * null-caching mode, send suppression, and apply
- * {@link Intercept @Intercept} / {@link Fallback @Fallback} semantics.
- *
- * <p>For each {@code @Cacheable} invocation:
- * <ol>
- *   <li>Resolves the cache key from SpEL</li>
- *   <li>If {@code @Intercept} is present and the key is a local hot key,
- *       skips the method and returns the cached value or fallback</li>
- *   <li>Applies TTL from {@code @CacheTTL}, null-caching from
- *       {@code @NullCaching}, and send suppression from
- *       {@link Broadcast @Broadcast} into {@link ZetaCacheContext}</li>
- *   <li>Proceeds to the Spring {@code CacheInterceptor}</li>
- *   <li>Restores the context snapshot in a {@code finally} block</li>
- *   <li>If the method throws and {@code @Fallback} is present, returns the fallback</li>
- * </ol>
- *
- * <p>For {@code @CachePut} and {@code @CacheEvict}, the aspect only reads
- * {@link Broadcast @Broadcast} to set the send suppression flag. All other
- * companion annotations ({@code @CacheTTL}, {@code @Intercept},
- * {@code @Fallback}, {@code @NullCaching}) are ignored on these methods.
+ * <p>
+ * This aspect extends the default Spring Cache behavior by injecting
+ * additional cache-control metadata (TTL, interception policies, fallback
+ * logic, null-caching rules, broadcast skipping, hot-key handling, and
+ * conditional caching). It acts as a bridge between the annotation-driven
+ * configuration and the underlying {@link Zeta} distributed cache infrastructure.
+ * <p>
+ * The aspect is ordered at {@link Ordered#HIGHEST_PRECEDENCE} to ensure
+ * it wraps the caching layer before other interceptors execute.
  */
 @Internal
 @Aspect
@@ -82,65 +70,90 @@ import org.springframework.expression.spel.standard.SpelExpressionParser;
 @Slf4j
 public class CacheExtensionAspect {
 
-  /** The HotKey facade for cache introspection. */
+  /**
+   * Reference to the core Zeta cache / detection engine.
+   */
   private final Zeta zeta;
 
-  /** Configuration properties (for key separator). */
+  /**
+   * Global configuration properties, including key separators and defaults.
+   */
   private final ZetaProperties properties;
 
-  /** SpEL expression parser, shared across all evaluations. */
+  /**
+   * Parser for SpEL expressions used in annotation attributes.
+   */
   private final SpelExpressionParser parser = new SpelExpressionParser();
 
-  /** Discoverer for resolving method parameter names at runtime. */
+  /**
+   * Discovers method parameter names at runtime, enabling SpEL references
+   * like {@code #paramName}.
+   */
   private final ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();
 
-  /** Cache of parsed SpEL expressions keyed by expression string. */
+  /**
+   * Cache of compiled SpEL expressions to avoid repeated parsing.
+   */
   private final Map<String, Expression> expressionCache = new ConcurrentHashMap<>();
 
-  /** Cache of resolved naming-convention fallback methods, keyed by original Method. */
+  /**
+   * Cache of resolved fallback methods keyed by the original method.
+   * Reduces reflection overhead on repeated fallback calls.
+   */
   private final Map<Method, Method> fallbackMethodCache = new ConcurrentHashMap<>();
 
   /**
-   * Tracks which keys have already been preload-registered to avoid redundant
-   * {@link Zeta#notifyLocalDetectorDirect(String, int)} calls.
-   * Bounded at 100k entries with 1-hour TTL to prevent unbounded growth.
+   * Lightweight Caffeine cache that tracks which preload keys have already
+   * been registered with the local detector. Prevents duplicate registrations
+   * for keys that are repeatedly processed (e.g., under high concurrency).
    */
   private final Cache<String, Boolean> registeredPreloadKeys = Caffeine.newBuilder()
     .maximumSize(100_000)
     .expireAfterWrite(1, TimeUnit.HOURS)
     .build();
 
-  /** Cache of resolved companion annotations keyed by Method. */
+  /**
+   * Method-level cache for {@link Preload} annotations.
+   */
   private final Map<Method, Preload> preloadCache = new ConcurrentHashMap<>();
 
+  private static final SimpleKeyGenerator SIMPLE_KEY_GENERATOR = new SimpleKeyGenerator();
+
+  /**
+   * Aggregates all cache-extension annotations found on a method
+   * (and its declaring class) for quick access.
+   */
   private record AnnotationSet(
     CacheTTL ttl,
     Intercept intercept,
     Fallback fallback,
     NullCaching nullCaching,
-    Broadcast broadcast
+    SkipBroadcast skipBroadcast,
+    SkipDetection skipDetection,
+    HotTTL hotTtl,
+    CacheCondition cacheCondition
   ) {}
 
+  /**
+   * Method-level cache for the resolved {@link AnnotationSet}.
+   */
   private final Map<Method, AnnotationSet> annotationCache = new ConcurrentHashMap<>();
 
   /**
-   * Per-key qps rate-limit buckets for {@link InterceptType#QPS} interception.
-   * Each key gets a bucket that refills at the configured qps rate.
-   * Bounded at 100k entries; idle buckets are evicted by Caffeine.
+   * Token-bucket based QPS rate limiters, one per cache key.
    */
   private final Cache<String, Bucket> qpsBuckets = Caffeine.newBuilder().maximumSize(100_000).build();
 
   /**
-   * Per-key concurrent thread counters for {@link InterceptType#CONCURRENT_THREADS} interception.
-   * Incremented before method execution, decremented in {@code finally}.
+   * Atomic counters for tracking concurrent thread usage per cache key.
    */
   private final ConcurrentHashMap<String, AtomicInteger> concurrentCounters = new ConcurrentHashMap<>();
 
   /**
-   * Creates a new {@code CacheExtensionAspect}.
+   * Constructs the aspect with the required dependencies.
    *
-   * @param zeta     the HotKey facade
-   * @param properties configuration properties
+   * @param zeta       the core cache engine
+   * @param properties the configuration properties
    */
   public CacheExtensionAspect(Zeta zeta, ZetaProperties properties) {
     this.zeta = zeta;
@@ -148,16 +161,29 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Intercepts {@link Cacheable @Cacheable} methods to apply TTL overrides, intercept
-   * logic, and fallback handling before the method reaches Spring's {@code CacheInterceptor}.
+   * Intercepts methods annotated with {@link Cacheable} to apply extended
+   * cache semantics.
+   * <p>
+   * The advice performs the following steps:
+   * <ol>
+   *   <li>Resolve the target method, cache name and key.</li>
+   *   <li>Collect all relevant extension annotations.</li>
+   *   <li>Register preload keys if a {@link Preload} annotation is present.</li>
+   *   <li>Apply interception logic ({@link Intercept}) – may return a
+   *       fallback value before the actual method is called.</li>
+   *   <li>Compute hard/soft TTL values and hot-key TTL (static or SpEL).</li>
+   *   <li>Push cache-control flags into {@link ZetaCacheContext}.</li>
+   *   <li>Proceed with the original method invocation.</li>
+   *   <li>Optionally invalidate the cache entry if a {@link CacheCondition}
+   *       is not met after the invocation.</li>
+   *   <li>On exception, attempt fallback via {@link Fallback} or a dedicated
+   *       fallback method.</li>
+   * </ol>
    *
-   * <p>If {@code @Intercept} is present and the key is a local hot key, the method is
-   * skipped entirely. If a {@code @Fallback} is provided, it is returned instead.
-   * If the method throws, the exception is caught and the fallback is returned.
-   *
-   * @param pjp       the join point for the intercepted method
-   * @param cacheable the {@code @Cacheable} annotation on the intercepted method
-   * @return the cached or method return value
+   * @param pjp       the join point representing the intercepted call
+   * @param cacheable the source {@code @Cacheable} annotation
+   * @return the result of the cached invocation or a fallback value
+   * @throws Throwable if no fallback is configured and the original invocation fails
    */
   @Around("@annotation(cacheable)")
   @SuppressWarnings("all")
@@ -174,31 +200,33 @@ public class CacheExtensionAspect {
     Intercept intercept = ann.intercept();
     Fallback fallback = ann.fallback();
     NullCaching nullCaching = ann.nullCaching();
-    Broadcast broadcast = ann.broadcast();
+    SkipBroadcast skipBroadcast = ann.skipBroadcast();
+    SkipDetection skipDetection = ann.skipDetection();
+    HotTTL hotTtl = ann.hotTtl();
+    CacheCondition cacheCondition = ann.cacheCondition();
 
-    // @Preload: inflate detection counts after @Intercept (so first call loads normally)
-    // but before context setup (so pjp.proceed() → CacheInterceptor sees inflated counts)
+    // Register preload keys so the local detector starts tracking them early.
     if (preload != null) {
       handlePreload(preload, pjp, cacheName, method);
     }
 
-    // @Intercept: skip method when key is a local hot key if necessary
     boolean needsDecrement = false;
     if (intercept != null) {
       String interceptFallback = intercept.fallback();
-
       switch (intercept.type()) {
         case FORCE -> {
+          // Force a fallback without even calling the original method.
           return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
         }
         case IS_LOCAL_HOT -> {
+          // If the local detector has identified the key as a hot key, fall back.
           if (zeta.isLocalHotKey(prefixedKey)) {
             return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
           }
         }
         case QPS -> {
+          // Token-bucket rate limiting per key.
           int qpsThreshold = intercept.qps();
-
           if (qpsThreshold > 0) {
             Bucket bucket = qpsBuckets.get(prefixedKey, k ->
               Bucket.builder()
@@ -213,32 +241,70 @@ public class CacheExtensionAspect {
           }
         }
         case CONCURRENT_THREADS -> {
+          // Limit the number of concurrent threads executing the original method for this key.
           int maxThreads = intercept.concurrentThreads();
           if (maxThreads > 0) {
             AtomicInteger counter = concurrentCounters.computeIfAbsent(prefixedKey, k -> new AtomicInteger(0));
             if (counter.incrementAndGet() > maxThreads) {
+              // Exceeded the limit; decrement immediately and fall back.
               concurrentCounters.computeIfPresent(prefixedKey, (k, v) -> {
                 int after = v.decrementAndGet();
                 return after == 0 ? null : v;
               });
               return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
             }
-            needsDecrement = true;
+            needsDecrement = true; // must decrement in finally block
           }
         }
       }
     }
 
-    // Save-restore context to prevent leakage across nested @Cacheable calls
+    // Resolve TTL values: static first, then SpEL fallback
+    long hardTtlMs = resolveTtlValue(
+      ttl != null ? ttl.hardTtlMs() : 0L,
+      ttl != null ? ttl.hardTtlSpEl() : "",
+      pjp,
+      method
+    );
+    long softTtlMs = resolveTtlValue(
+      ttl != null ? ttl.softTtlMs() : 0L,
+      ttl != null ? ttl.softTtlSpEl() : "",
+      pjp,
+      method
+    );
+
+    long hotHardTtlMs = hotTtl != null ? hotTtl.hardTtlMs() : 0L;
+    long hotSoftTtlMs = hotTtl != null ? hotTtl.softTtlMs() : 0L;
+
+    boolean allowNull = nullCaching != null && nullCaching.value();
+    boolean skipBroadcastFlag = skipBroadcast != null;
+    boolean skipDetectionFlag = skipDetection != null;
+
+    // Save the current context so we can restore it after the invocation.
     ZetaCacheContext.ContextValues prev = ZetaCacheContext.get().snapshot();
     try {
-      long hardTtlMs = (ttl != null && ttl.hardTtlMs() > 0) ? ttl.hardTtlMs() : 0L;
-      long softTtlMs = (ttl != null && ttl.softTtlMs() > 0) ? ttl.softTtlMs() : 0L;
-      boolean allowNull = nullCaching != null && nullCaching.value();
-      boolean skipBroadcast = broadcast != null && !broadcast.value();
+      // Push the resolved cache-control metadata into the thread-local context.
+      ZetaCacheContext.get().apply(
+        hardTtlMs,
+        softTtlMs,
+        allowNull,
+        skipBroadcastFlag,
+        hotHardTtlMs,
+        hotSoftTtlMs,
+        skipDetectionFlag
+      );
 
-      ZetaCacheContext.get().apply(hardTtlMs, softTtlMs, allowNull, skipBroadcast);
-      return pjp.proceed();
+      Object result = pjp.proceed();
+
+      // @CacheCondition: evaluate after proceed; invalidate the entry if condition fails.
+      if (cacheCondition != null && !cacheCondition.unless().isEmpty()) {
+        boolean shouldSkip = evaluateCacheCondition(cacheCondition.unless(), pjp, method, result);
+        if (shouldSkip) {
+          zeta.invalidate(prefixedKey, false);
+        }
+      }
+
+      return result;
     } catch (Throwable e) {
       if (fallback != null) {
         log.warn("[HotKeyCacheExtension] fallback triggered for key={}, reason={}", prefixedKey, e.getMessage());
@@ -246,6 +312,8 @@ public class CacheExtensionAspect {
       }
       throw e;
     } finally {
+      // Cleanup: decrement concurrent counter if it was incremented,
+      // and restore the previous thread-local context.
       if (needsDecrement) {
         concurrentCounters.computeIfPresent(prefixedKey, (k, v) -> {
           int after = v.decrementAndGet();
@@ -257,36 +325,83 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Handle {@link Preload @Preload} by inflating HeavyKeeper counts
-   * for static and/or dynamic cache keys.
+   * Evaluates the {@code unless} expression of {@link CacheCondition} against the
+   * method invocation result. If the expression returns {@code true}, the cache
+   * entry should be skipped/invalidated.
    *
-   * <p>Each key is inflated at most once, tracked by the bounded Caffeine cache
-   * {@link #registeredPreloadKeys} (100k max, 1-hour TTL). This prevents
-   * unbounded growth from dynamic key expressions while ensuring automatic
-   * re-inflation if a key needs to be preloaded again after a long idle period.
+   * @param unlessExpr the SpEL expression to evaluate
+   * @param pjp        the join point
+   * @param method     the intercepted method
+   * @param result     the result of the original method invocation
+   * @return {@code true} if the condition is met (cache should be skipped)
+   */
+  private boolean evaluateCacheCondition(String unlessExpr, ProceedingJoinPoint pjp, Method method, Object result) {
+    try {
+      MethodBasedEvaluationContext ctx = new MethodBasedEvaluationContext(
+        pjp.getTarget(),
+        method,
+        pjp.getArgs(),
+        parameterNameDiscoverer
+      );
+      ctx.setVariable("result", result);
+      Expression expr = expressionCache.computeIfAbsent("cacheCondition_" + unlessExpr, parser::parseExpression);
+      return Boolean.TRUE.equals(expr.getValue(ctx, Boolean.class));
+    } catch (Exception e) {
+      log.warn("Failed to evaluate @CacheCondition unless='{}': {}", unlessExpr, e.toString());
+      return false;
+    }
+  }
+
+  /**
+   * Resolves a TTL value from either a static long or a SpEL expression.
+   * The static value takes precedence if it is greater than 0.
    *
-   * <p>Static keys ({@link Preload#keys}) are inflated immediately.
-   * Dynamic keys ({@link Preload#keyExpr}) are evaluated via SpEL against
-   * the current method parameters.
+   * @param staticVal the static TTL value from the annotation
+   * @param spelExpr  a SpEL expression that evaluates to a numeric value
+   * @param pjp       the join point
+   * @param method    the intercepted method
+   * @return the resolved TTL in milliseconds, or 0 if unresolvable
+   */
+  private long resolveTtlValue(long staticVal, String spelExpr, ProceedingJoinPoint pjp, Method method) {
+    if (staticVal > 0) return staticVal;
+    if (spelExpr == null || spelExpr.isEmpty()) return 0L;
+    try {
+      Expression expr = expressionCache.computeIfAbsent("ttl_" + spelExpr, parser::parseExpression);
+      Number val = expr.getValue(buildEvaluationContext(pjp, method), Number.class);
+      return val != null ? val.longValue() : 0L;
+    } catch (Exception e) {
+      log.warn("Failed to evaluate TTL SpEL '{}': {}", spelExpr, e.toString());
+      return 0L;
+    }
+  }
+
+  /**
+   * Registers preload keys with the local detector so that they are
+   * proactively recognized as hot (or pre-warmed) keys.
    *
-   * @param preload   the annotation instance
-   * @param pjp       the join point providing method arguments and target
-   * @param cacheName the resolved cache name from {@code @Cacheable}
+   * @param preload   the {@link Preload} annotation instance
+   * @param pjp       the join point
+   * @param cacheName the cache name
+   * @param method    the intercepted method
    */
   private void handlePreload(Preload preload, ProceedingJoinPoint pjp, String cacheName, Method method) {
     String separator = properties.getSpringCache().getKeySeparator();
-    int preloadCount = preload.count() > 0 ? preload.count() : Integer.MAX_VALUE;
+    long preloadCount = preload.count() > 0 ? preload.count() : Long.MAX_VALUE;
 
-    // Static keys — register once per key
+    Map<String, Boolean> registeredKeys = new HashMap<>(preload.keys().length + 1);
+    Map<String, Long> notifiedKeys = new HashMap<>(preload.keys().length + 1);
+    // Static keys specified directly in the annotation.
     for (String staticKey : preload.keys()) {
       String fullKey = cacheName + separator + staticKey;
       if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
-        zeta.notifyLocalDetectorDirect(fullKey, preloadCount);
-        registeredPreloadKeys.put(fullKey, Boolean.TRUE);
+        registeredKeys.put(fullKey, Boolean.TRUE);
+        notifiedKeys.put(fullKey, preloadCount);
       }
     }
+    registeredPreloadKeys.putAll(registeredKeys);
+    zeta.notifyLocalDetectorDirect(notifiedKeys);
 
-    // Dynamic key via SpEL — register once per unique evaluated key
+    // Dynamic key resolved via SpEL expression.
     String keyExpr = preload.keyExpr();
     if (!keyExpr.isEmpty()) {
       try {
@@ -294,7 +409,6 @@ public class CacheExtensionAspect {
           parser.parseExpression(keyExpr)
         );
         Object value = expression.getValue(buildEvaluationContext(pjp, method));
-
         if (value != null) {
           String fullKey = cacheName + separator + value;
           if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
@@ -309,33 +423,38 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Intercepts both {@link CachePut @CachePut} and {@link CacheEvict @CacheEvict}
-   * methods to set the send suppression flag from {@link Broadcast @Broadcast}
-   * before the method reaches Spring's {@code CacheInterceptor}.
+   * Intercepts methods annotated with {@link CachePut} or {@link CacheEvict}
+   * and applies a potential {@link SkipBroadcast} flag so that cache updates
+   * are not propagated unnecessarily.
    *
-   * <p>Only the {@code @Broadcast} annotation is read here. Other companion
-   * annotations ({@code @CacheTTL}, {@code @Intercept}, {@code @Fallback},
-   * {@code @NullCaching}) are ignored on write/evict methods.
-   *
-   * @param pjp the join point for the intercepted method
-   * @return the method return value
+   * @param pjp the join point
+   * @return the result of the original method invocation
+   * @throws Throwable if the underlying method throws
    */
   @SuppressWarnings("unused")
   @Around(
     "@annotation(org.springframework.cache.annotation.CachePut) || @annotation(org.springframework.cache.annotation.CacheEvict)"
   )
   public Object aroundCachePutOrEvict(ProceedingJoinPoint pjp) throws Throwable {
-    return setBroadcast(pjp);
+    return setSkipBroadcast(pjp);
   }
 
-  private Object setBroadcast(ProceedingJoinPoint pjp) throws Throwable {
+  /**
+   * Checks whether the intercepted method carries a {@link SkipBroadcast}
+   * annotation, and if so, sets the corresponding flag in the thread-local
+   * {@link ZetaCacheContext} for the duration of the invocation.
+   *
+   * @param pjp the join point
+   * @return the result of the original method invocation
+   * @throws Throwable if the underlying method throws
+   */
+  private Object setSkipBroadcast(ProceedingJoinPoint pjp) throws Throwable {
     Method method = resolveMethod(pjp);
-    Broadcast broadcast = method.getAnnotation(Broadcast.class);
-    boolean skipBroadcast = broadcast != null && !broadcast.value();
-
+    SkipBroadcast skipBroadcast = method.getAnnotation(SkipBroadcast.class);
+    boolean skipBroadcastFlag = skipBroadcast != null;
     ZetaCacheContext.ContextValues prev = ZetaCacheContext.get().snapshot();
     try {
-      ZetaCacheContext.get().apply(0, 0, false, skipBroadcast);
+      ZetaCacheContext.get().apply(0, 0, false, skipBroadcastFlag, 0, 0, false);
       return pjp.proceed();
     } finally {
       ZetaCacheContext.get().restore(prev);
@@ -343,10 +462,10 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Resolves the first available cache name from the {@link Cacheable @Cacheable} annotation.
+   * Extracts the first cache name from the given {@link Cacheable} annotation.
    *
    * @param cacheable the annotation instance
-   * @return the cache name, or {@code "zeta"} if none is specified
+   * @return the cache name, or {@code "zeta"} as a fallback
    */
   private String resolveCacheName(Cacheable cacheable) {
     String[] names = cacheable.cacheNames();
@@ -361,32 +480,28 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Evaluates the cache key SpEL expression against method parameter variables.
+   * Resolves the cache key for the intercepted method. If no SpEL expression
+   * is provided, a {@link SimpleKey} is generated from the method arguments.
    *
-   * @param pjp        the join point providing method arguments
-   * @param expression the SpEL expression to evaluate
-   * @return the evaluated cache key string, or all arguments as string if expression is empty
+   * @param pjp        the join point
+   * @param expression the SpEL key expression (may be empty)
+   * @param method     the intercepted method
+   * @return the computed cache key as a string
    */
   private String resolveKey(ProceedingJoinPoint pjp, String expression, Method method) {
     if (expression.isEmpty()) {
       Object[] args = pjp.getArgs();
-      if (args.length == 0) {
-        return "empty";
-      }
-      if (args.length == 1 && args[0] != null && !args[0].getClass().isArray()) {
-        return args[0].toString();
-      }
-      return new SimpleKey(args).toString();
+      return SIMPLE_KEY_GENERATOR.generate(pjp.getTarget(), method, args).toString();
     }
     return getExpression(expression).getValue(buildEvaluationContext(pjp, method), String.class);
   }
 
   /**
-   * Resolves the concrete {@link Method} for the join point, unwrapping interface
-   * methods to the implementation class when necessary.
+   * Resolves the actual target method, unwinding any interface-based proxies
+   * that Spring AOP might have created.
    *
-   * @param pjp the join point whose method to resolve
-   * @return the resolved concrete method
+   * @param pjp the join point
+   * @return the concrete method instance
    */
   private Method resolveMethod(ProceedingJoinPoint pjp) {
     MethodSignature sig = (MethodSignature) pjp.getSignature();
@@ -395,55 +510,49 @@ public class CacheExtensionAspect {
       try {
         method = pjp.getTarget().getClass().getMethod(method.getName(), method.getParameterTypes());
       } catch (NoSuchMethodException ignored) {
-        // Keep the interface method
+        // fall back to the interface method
       }
     }
     return method;
   }
 
   /**
-   * Builds an {@link EvaluationContext} with method parameters registered
-   * as context variables via {@link MethodBasedEvaluationContext}.
+   * Builds a SpEL {@link EvaluationContext} populated with method parameters.
    *
-   * @param pjp the join point providing method arguments and target
-   * @return a configured evaluation context with method parameters as variables
+   * @param pjp    the join point
+   * @param method the method
+   * @return a new evaluation context
    */
   private EvaluationContext buildEvaluationContext(ProceedingJoinPoint pjp, Method method) {
     return new MethodBasedEvaluationContext(pjp.getTarget(), method, pjp.getArgs(), parameterNameDiscoverer);
   }
 
   /**
-   * Returns a cached {@link Expression} for the given expression string, parsing it
-   * on first access.
+   * Retrieves a compiled SpEL {@link Expression} from the cache.
    *
-   * @param expressionString the SpEL expression string to retrieve or parse
-   * @return the cached or freshly parsed expression
+   * @param expressionString the raw expression string
+   * @return the compiled expression
    */
   private Expression getExpression(String expressionString) {
     return expressionCache.computeIfAbsent(expressionString, parser::parseExpression);
   }
 
   /**
-   * Resolve the intercept fallback chain when the method call is intercepted.
-   *
-   * <p>Priority order:
+   * Handles the fallback path triggered by an {@link Intercept} rule.
+   * Priorities:
    * <ol>
-   *   <li>{@link Intercept#fallback()} — SpEL expression evaluated against
-   *       method parameters</li>
-   *   <li>{@link Fallback @Fallback} — naming-convention method or SpEL expression</li>
-   *   <li>{@link Zeta#peek(String)} — stale cached
-   *       value if available, otherwise {@code null}</li>
+   *   <li>Use the {@code intercept.fallback()} SpEL expression if not blank.</li>
+   *   <li>Fall back to the method-level {@link Fallback} annotation.</li>
+   *   <li>Attempt to {@link Zeta#peek(String)} the currently cached value.</li>
    * </ol>
    *
-   * @param pjp               the join point providing method arguments
-   * @param fallback          the method-level {@code @Fallback} annotation
-   *                          (may be {@code null})
-   * @param interceptFallback the fallback SpEL from {@code @Intercept.fallback()}
-   *                          (may be blank)
-   * @param prefixedKey       the fully-qualified cache key (cache name + separator + key)
-   * @return the resolved fallback value, or {@code null} if no fallback is available
-   *         and the cache does not contain the key
-   * @throws Throwable if the SpEL evaluation or fallback method invocation fails
+   * @param pjp               the join point
+   * @param fallback          the method-level fallback annotation (may be null)
+   * @param interceptFallback the SpEL expression from {@code @Intercept.fallback()}
+   * @param prefixedKey       the fully qualified cache key
+   * @param method            the intercepted method
+   * @return the fallback value
+   * @throws Throwable if no fallback can be resolved and the peeked value is null
    */
   private Object resolveInterceptFallback(
     ProceedingJoinPoint pjp,
@@ -462,13 +571,18 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Resolves the fallback value from a {@link Fallback @Fallback} annotation.
-   * <p>If the annotated SpEL expression is non-empty it is evaluated first;
-   * otherwise the naming-convention method ({@code {methodName}Fallback}) is invoked.
+   * Resolves a fallback value from the {@link Fallback} annotation:
+   * <ul>
+   *   <li>If {@link Fallback#value()} is provided, it is evaluated as a SpEL expression.</li>
+   *   <li>Otherwise, a convention-based fallback method is invoked
+   *       (named {@code <methodName>Fallback}).</li>
+   * </ul>
    *
-   * @param pjp      the join point providing method arguments
+   * @param pjp      the join point
    * @param fallback the fallback annotation
-   * @return the resolved fallback value
+   * @param method   the intercepted method
+   * @return the fallback value
+   * @throws Throwable if the fallback method throws
    */
   private Object resolveFallback(ProceedingJoinPoint pjp, Fallback fallback, Method method) throws Throwable {
     if (!fallback.value().isEmpty()) {
@@ -478,37 +592,32 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Invokes the naming-convention fallback method on the target bean with
-   * the original method arguments.
+   * Invokes a convention-based fallback method. The fallback method must have
+   * the same signature as the original method and be named
+   * {@code <originalMethodName>Fallback}.
    *
-   * <p>The fallback method is expected to follow the naming convention
-   * {@code {originalMethodName}Fallback} with the same parameter types
-   * as the original method. The resolved method is cached in
-   * {@link #fallbackMethodCache} for subsequent invocations.
-   *
-   * <p>If no matching fallback method exists anywhere in the class
-   * hierarchy, {@code null} is returned silently (no error is logged).
-   *
-   * @param pjp the join point providing the original method's arguments,
-   *            target object, and signature metadata
-   * @return the return value of the fallback method, or {@code null} if
-   *         no fallback method was found
-   * @throws Throwable the unwrapped cause if the fallback method throws
+   * @param pjp the join point
+   * @return the result of the fallback method, or {@code null} if none is found
+   * @throws Throwable if the fallback method throws an exception
    */
   @SuppressWarnings("all")
   private Object invokeFallbackMethod(ProceedingJoinPoint pjp) throws Throwable {
-    MethodSignature sig = (MethodSignature) pjp.getSignature();
-    Method originalMethod = sig.getMethod();
+    Method originalMethod = resolveMethod(pjp);
     Object target = pjp.getTarget();
     Object[] args = pjp.getArgs();
 
     Method fallbackMethod = fallbackMethodCache.computeIfAbsent(originalMethod, m ->
       findFallbackMethod(target.getClass(), m.getName() + "Fallback", m.getParameterTypes())
     );
+
     if (fallbackMethod == null) {
       return null;
     }
+
     try {
+      if (!fallbackMethod.canAccess(target)) {
+        fallbackMethod.setAccessible(true);
+      }
       return fallbackMethod.invoke(target, args);
     } catch (InvocationTargetException e) {
       throw e.getCause();
@@ -516,27 +625,13 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Recursively searches the class hierarchy (superclasses, not interfaces)
-   * for a method matching the given name and parameter types.
+   * Recursively searches for a fallback method in the given class and its
+   * superclasses.
    *
-   * <p>The search starts at the provided class and walks up the inheritance
-   * chain via {@link Class#getSuperclass()}, stopping at {@link Object}.
-   * This ensures that fallback methods defined in abstract base classes
-   * or superclasses are discovered.
-   *
-   * <p>Interface default methods are <em>not</em> searched, as the
-   * annotation-based contract is that the fallback method resides in the
-   * concrete bean's class hierarchy.
-   *
-   * @param clazz      the class to start the search from (typically the
-   *                   target object's runtime class)
-   * @param name       the name of the fallback method to find (e.g.,
-   *                   {@code "findUserFallback"})
-   * @param paramTypes the parameter types of the method to find (must
-   *                   exactly match the original method's parameter types)
-   * @return the matching {@link Method}, or {@code null} if no method
-   *         with the given name and parameter types exists in the
-   *         hierarchy
+   * @param clazz      the class to start searching from
+   * @param name       the desired method name
+   * @param paramTypes the parameter types
+   * @return the method, or {@code null} if not found
    */
   private Method findFallbackMethod(Class<?> clazz, String name, Class<?>... paramTypes) {
     try {
@@ -551,23 +646,35 @@ public class CacheExtensionAspect {
   }
 
   /**
-   * Resolve {@link Preload @Preload} from the given method,
-   * using a local cache to avoid repeated reflection lookups.
+   * Retrieves the {@link Preload} annotation for the given method, caching
+   * the result.
    *
-   * @param method the candidate method
-   * @return the {@code @Preload} annotation if present, or {@code null}
+   * @param method the method
+   * @return the annotation instance, or {@code null}
    */
   private Preload resolvePreloadAnnotation(Method method) {
     return preloadCache.computeIfAbsent(method, m -> m.getAnnotation(Preload.class));
   }
 
+  /**
+   * Aggregates all cache-extension annotations present on the given method.
+   * Class-level {@link CacheTTL} and {@link HotTTL} annotations are also
+   * taken into account if not already found at the method level.
+   *
+   * @param method the method
+   * @return an {@link AnnotationSet} containing the resolved annotations
+   */
+  @SuppressWarnings("all")
   private AnnotationSet resolveAnnotations(Method method) {
     return annotationCache.computeIfAbsent(method, m -> {
       CacheTTL ttl = null;
       Intercept intercept = null;
       Fallback fallback = null;
       NullCaching nullCaching = null;
-      Broadcast broadcast = null;
+      SkipBroadcast skipBroadcast = null;
+      SkipDetection skipDetection = null;
+      HotTTL hotTtl = null;
+      CacheCondition cacheCondition = null;
 
       for (Annotation a : m.getDeclaredAnnotations()) {
         if (a instanceof CacheTTL t) {
@@ -578,11 +685,35 @@ public class CacheExtensionAspect {
           fallback = f;
         } else if (a instanceof NullCaching n) {
           nullCaching = n;
-        } else if (a instanceof Broadcast b) {
-          broadcast = b;
+        } else if (a instanceof SkipBroadcast s) {
+          skipBroadcast = s;
+        } else if (a instanceof SkipDetection s) {
+          skipDetection = s;
+        } else if (a instanceof HotTTL h) {
+          hotTtl = h;
+        } else if (a instanceof CacheCondition c) {
+          cacheCondition = c;
         }
       }
-      return new AnnotationSet(ttl, intercept, fallback, nullCaching, broadcast);
+
+      // Fall back to class-level annotations for TTL and hot TTL.
+      if (ttl == null) {
+        ttl = m.getDeclaringClass().getAnnotation(CacheTTL.class);
+      }
+      if (hotTtl == null) {
+        hotTtl = m.getDeclaringClass().getAnnotation(HotTTL.class);
+      }
+
+      return new AnnotationSet(
+        ttl,
+        intercept,
+        fallback,
+        nullCaching,
+        skipBroadcast,
+        skipDetection,
+        hotTtl,
+        cacheCondition
+      );
     });
   }
 }

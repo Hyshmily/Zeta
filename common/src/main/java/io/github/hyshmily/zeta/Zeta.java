@@ -1606,7 +1606,7 @@ public class Zeta implements DisposableBean {
    * @param cacheKey the key to record
    * @param count    the number of accesses to add
    */
-  public void notifyLocalDetectorDirect(String cacheKey, int count) {
+  public void notifyLocalDetectorDirect(String cacheKey, long count) {
     requireAppDetector("notifyLocalDetectorDirect");
     appHotKeyDetector.addDirect(cacheKey, count);
   }

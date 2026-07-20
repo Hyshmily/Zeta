@@ -96,6 +96,8 @@ class CircuitBreakerImplTest {
   @Test
   void onSuccess_whenOpen_shouldCloseBreaker() throws Exception {
     triggerOpen();
+    Thread.sleep(config.getSingleTestIntervalMs() + 50);
+    assertThat(breaker.allowRequest()).isTrue();
     breaker.onSuccess();
     assertThat(breaker.isOpen()).isFalse();
   }

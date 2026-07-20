@@ -45,8 +45,11 @@ public final class InstanceIdGenerator {
    */
   private static final long NODE_ID;
 
+  private static final String NODE_UUID_STRING;
+
   static {
     NODE_ID = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
+    NODE_UUID_STRING = UUID.randomUUID().toString();
   }
 
   /**
@@ -86,7 +89,7 @@ public final class InstanceIdGenerator {
           } else {
             String port = System.getProperty("server.port", "instance");
             String hostname = System.getenv("HOSTNAME");
-            String uniquePart = (hostname != null && !hostname.isBlank()) ? hostname : UUID.randomUUID().toString();
+            String uniquePart = (hostname != null && !hostname.isBlank()) ? hostname : NODE_UUID_STRING;
             cached = port + "-" + uniquePart;
           }
         }
