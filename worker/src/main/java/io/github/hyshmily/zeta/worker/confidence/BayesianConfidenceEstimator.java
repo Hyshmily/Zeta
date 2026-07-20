@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.confidence;
+package io.github.hyshmily.zeta.worker.confidence;
 
 import io.github.hyshmily.zeta.Internal;
 import lombok.Getter;
@@ -100,43 +100,22 @@ public class BayesianConfidenceEstimator {
    *         confidence level, and distribution parameters
    */
   public ProbabilityResult evaluate(long observedCount, double logThreshold, Double cv) {
-    // Natural-log transform: map count to log-space for Normality
     double y = Math.log(Math.max(observedCount, 1.0));
     double sigma = (cv != null) ? adjustLikelihoodStd(likelihoodStd, cv) : likelihoodStd;
 
-    // Prior and likelihood precision
     double priorPrecision = 1.0 / (priorStd * priorStd);
     double likelihoodPrecision = 1.0 / (sigma * sigma);
     double posteriorPrecision = priorPrecision + likelihoodPrecision;
 
-    // Precision-weighted posterior mean and std
     double posteriorMean = (priorMean * priorPrecision + y * likelihoodPrecision) / posteriorPrecision;
     double posteriorStd = Math.sqrt(1.0 / posteriorPrecision);
 
-    // Z-score: how many posterior std the threshold is above the posterior mean
     double z = (logThreshold - posteriorMean) / posteriorStd;
     double hotProbability = 1.0 - NormalCdfTable.phi(z);
 
     return new ProbabilityResult(hotProbability, posteriorMean, posteriorStd, cv);
   }
 
-  /**
-   * Adjusts the likelihood standard deviation based on the coefficient of
-   * variation of the sliding-window sums.
-   *
-   * <p>The adjustment follows a piecewise-linear scheme:
-   * <ul>
-   *   <li>CV &lt; 0.2 (stable traffic): reduce &#x03C3; to as low as
-   *       0.5&times; base (higher confidence)</li>
-   *   <li>0.2 &le; CV &le; 0.5 (normal): use base &#x03C3;</li>
-   *   <li>CV &gt; 0.5 (bursty traffic): increase &#x03C3; up to
-   *       3.0&times; base (lower confidence)</li>
-   * </ul>
-   *
-   * @param baseStd the base likelihood standard deviation
-   * @param cv      the coefficient of variation
-   * @return the adjusted standard deviation
-   */
   private static double adjustLikelihoodStd(double baseStd, double cv) {
     if (cv < 0.2) {
       return baseStd * (0.5 + (cv / 0.2) * 0.5);

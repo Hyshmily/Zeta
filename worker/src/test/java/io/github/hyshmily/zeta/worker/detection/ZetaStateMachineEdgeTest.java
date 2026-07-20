@@ -13,17 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.detection;
+package io.github.hyshmily.zeta.worker.detection;
 
 import static org.assertj.core.api.Assertions.*;
 
-import io.github.hyshmily.zeta.confidence.BayesianConfidenceEstimator;
-import io.github.hyshmily.zeta.confidence.ConfidenceEvaluator;
-import io.github.hyshmily.zeta.confidence.EvaluationContext;
-import io.github.hyshmily.zeta.detection.impl.ZetaStateMachineImpl;
+import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
+import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
+import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
+import io.github.hyshmily.zeta.worker.detection.impl.ZetaStateMachineImpl;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,64 +36,36 @@ import org.junit.jupiter.api.Test;
  * Edge case tests for {@link ZetaStateMachine} covering single window, immediate cooling, and interleaved keys.
  *
  * <p>All tests use a {@link ConfidenceEvaluator} that always yields
- * {@link io.github.hyshmily.zeta.confidence.ConfidenceLevel#HIGH} so that
+ * {@link io.github.hyshmily.zeta.worker.confidence.ConfidenceLevel#HIGH} so that
  * state transitions are gated purely by the hot/cold streak counters,
  * matching the pre-Bayesian behaviour.
  */
 class ZetaStateMachineEdgeTest {
 
-  /**
-   * Bayesian evaluator configured with optimistic likelihood std (0.5).
-   * When {@code cmsCount >> threshold} (as in {@link #CTX}) the posterior
-   * probability exceeds 0.95, producing {@code HIGH} confidence.
-   */
   private static final ConfidenceEvaluator EVAL = new ConfidenceEvaluator(
     new BayesianConfidenceEstimator(2.3026, 2.0, 0.5)
   );
 
-  /**
-   * Evaluation context with a high CMS count relative to threshold,
-   * ensuring HIGH confidence.
-   */
   private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null);
 
-  /** Evaluation context with a low CMS count relative to threshold, ensuring LOW confidence. */
   private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, null);
 
-  /** Evaluation context calibrated for MEDIUM confidence (~0.91) with optimistic likelihood std (0.5). */
   private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null);
 
-  /**
-   * "Cold" context with windowSum below threshold (so the hot re-check inside
-   * the lock does NOT fire) but cmsCount >> threshold, yielding HIGH confidence.
-   * Used by tests that need to simulate a cold-window observation on a key
-   * that the confidence evaluator still considers confidently hot.
-   */
   private static final EvaluationContext COLD_HIGH_CTX = new EvaluationContext(100L, 5L, 10L, null);
 
-  /**
-   * Cold context with MEDIUM confidence (windowSum < threshold, so the re-check
-   * does not fire, but confidence is MEDIUM).
-   */
   private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null);
 
-  /** Helper to create a state machine with the given thresholds + always-HIGH evaluator. */
   private static ZetaStateMachine machineWith(int confirm, int cool, int grace) {
     return new ZetaStateMachineImpl(confirm, cool, grace, EVAL);
   }
 
-  /**
-   * Verifies that the state machine emits HOT on the first evaluation within a single-window configuration.
-   */
   @Test
   void shouldHandleSingleHotWindow() {
     ZetaStateMachine m = machineWith(1, 5, 2);
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
   }
 
-  /**
-   * Verifies that a hot window followed by cold windows transitions from HOT to NONE to COOL.
-   */
   @Test
   void shouldHandleImmediateCooling() {
     ZetaStateMachine m = machineWith(1, 2, 1);
@@ -101,9 +74,6 @@ class ZetaStateMachineEdgeTest {
     assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
-  /**
-   * Verifies that MEDIUM confidence does not block immediate cooling (MEDIUM != HIGH).
-   */
   @Test
   void mediumConfidence_shouldNotBlockImmediateCooling() {
     ZetaStateMachine m = machineWith(1, 2, 1);
@@ -112,19 +82,14 @@ class ZetaStateMachineEdgeTest {
     assertThat(m.evaluate("key", false, COLD_MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
-  /**
-   * Verifies that interleaved evaluations for different keys are tracked independently without interference.
-   */
   @Test
   void shouldHandleInterleavedKeys() {
-    // Each machine() call creates a fresh state machine with 2-window confirm
     assertThat(machine("key1", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(machine("key2", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(machine("key1", true).type()).isEqualTo(DecisionType.NONE);
     assertThat(machine("key2", true).type()).isEqualTo(DecisionType.NONE);
   }
 
-  /** Creates a single-use machine with confirmCount=2 and evaluates once. */
   private static ZetaDecision machine(String key, boolean hot) {
     ZetaStateMachine m = machineWith(2, 5, 2);
     return m.evaluate(key, hot, CTX);
@@ -223,11 +188,8 @@ class ZetaStateMachineEdgeTest {
   void highConfidence_shouldDelayCoolInPreCooling() {
     ZetaStateMachine m = machineWith(1, 2, 1);
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    // coolStreak=1 ≥ coolCount-grace=1 → enters PRE_COOLING, HIGH → stays
     assertThat(m.evaluate("key", false, COLD_HIGH_CTX).type()).isEqualTo(DecisionType.NONE);
-    // coolStreak=2 ≥ coolCount=2 → attempts cooling, but HIGH still blocks
     assertThat(m.evaluate("key", false, COLD_HIGH_CTX).type()).isEqualTo(DecisionType.NONE);
-    // COLD_CTX gives LOW → proceeds to COOL
     assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
@@ -357,10 +319,8 @@ class ZetaStateMachineEdgeTest {
   @Test
   void decisionSnapshot_shouldCapturePreMutationState() {
     ZetaStateMachine m = machineWith(3, 10, 4);
-    // First evaluation: creates state with COLD + hotStreak=1
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
 
-    // Second evaluation: snapShot captures {COLD, 1, 0} before mutation
     ZetaDecision d = m.evaluate("key", true, CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
     assertThat(d.snapShot()).isNotNull();
@@ -373,40 +333,29 @@ class ZetaStateMachineEdgeTest {
   @Test
   void rollbackWithDecisionSnapshot_shouldRestorePreMutationState() {
     ZetaStateMachine m = machineWith(3, 10, 4);
-    // First evaluation: creates state (COLD, hotStreak=1)
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    // Second evaluation: returns snapshot of {COLD, 1, 0}
     ZetaDecision d = m.evaluate("key", true, CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
 
-    // Simulate a failed broadcast: rollback to captured snapshot
     m.rollbackToPreviousState("key", d.snapShot());
 
-    // State should be restored to {COLD, 1, 0}
     StateSnapshot restored = m.getStateSnapshot("key");
     assertThat(restored.currentState()).isEqualTo("COLD");
     assertThat(restored.hotStreak()).isEqualTo(1);
     assertThat(restored.coolStreak()).isEqualTo(0);
 
-    // Next evaluation should continue from restored state (hotStreak=2)
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    // Third hot window → hotStreak=3 >= confirmCount(3) → CONFIRMED_HOT
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void decisionSnapshot_shouldBeNonNullForHotDecision() {
     ZetaStateMachine m = machineWith(3, 10, 4);
-    // Three hot evaluations to reach CONFIRMED_HOT
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
     ZetaDecision hot = m.evaluate("key", true, CTX);
     assertThat(hot.type()).isEqualTo(DecisionType.HOT);
-    // HOT decision carries snapshot of state before this evaluation
     assertThat(hot.snapShot()).isNotNull();
-    // Snapshot captures the state BEFORE this evaluation (COLD).
-    // With always-HIGH ConfidenceEvaluator and confirmCount=3, the
-    // transition is COLD→CONFIRMED_HOT directly — never via CANDIDATE_HOT.
     assertThat(hot.snapShot().currentState()).isEqualTo("COLD");
     assertThat(hot.snapShot().hotStreak()).isEqualTo(2);
     assertThat(hot.snapShot().coolStreak()).isEqualTo(0);
@@ -415,11 +364,8 @@ class ZetaStateMachineEdgeTest {
   @Test
   void decisionSnapshot_shouldBeNonNullForCoolDecision() {
     ZetaStateMachine m = machineWith(1, 2, 1);
-    // Single hot evaluation → CONFIRMED_HOT
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    // Cold evaluation: enters PRE_COOLING, snapShot captures {CONFIRMED_HOT, 0, 1}
     assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    // Second cold → COOL with snapshot
     ZetaDecision cool = m.evaluate("key", false, COLD_CTX);
     assertThat(cool.type()).isEqualTo(DecisionType.COOL);
     assertThat(cool.snapShot()).isNotNull();
@@ -432,67 +378,51 @@ class ZetaStateMachineEdgeTest {
     ZetaStateMachine m = machineWith(3, 10, 4);
     m.evaluate("key", true, CTX);
 
-    // Simulate a concurrent evaluation that updates the key just before eviction
-    // evictStale with staleAfterMs=1 but the key was just updated by evaluate
     Thread.sleep(1);
-    m.evaluate("key", true, CTX); // fresh update
-    m.evictStale(0); // should NOT remove the freshly-updated key
+    m.evaluate("key", true, CTX);
+    m.evictStale(0);
     assertThat(m.getTrackedKeys()).isEqualTo(1);
   }
 
   @Test
   void isHotRecheckInsideLock_shouldRouteToHotWhenCallerSaysCold() {
-    // EvaluationContext with windowSum >= threshold so the re-check fires
     EvaluationContext hotCtx = new EvaluationContext(100L, 100L, 10L, null);
 
     ZetaStateMachine m = machineWith(2, 5, 2);
-    // First evaluation: creates state with COLD, hotStreak=1
     assertThat(m.evaluate("k", true, hotCtx).type()).isEqualTo(DecisionType.NONE);
 
-    // Second evaluation: caller passes isHotThisWindow=false (stale) but
-    // windowSum >= threshold inside the lock → re-check routes to evaluateHot.
-    // hotStreak becomes 2 >= confirmCount(2) → HIGH confidence → CONFIRMED_HOT → HOT.
     ZetaDecision d = m.evaluate("k", false, hotCtx);
     assertThat(d.type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void isHotRecheck_shouldNotUpgradeWhenWindowSumBelowThreshold() {
-    // EvaluationContext with windowSum < threshold — re-check should NOT fire
     EvaluationContext belowThresholdCtx = new EvaluationContext(100L, 5L, 10L, null);
 
     ZetaStateMachine m = machineWith(2, 5, 2);
     assertThat(m.evaluate("k", true, CTX).type()).isEqualTo(DecisionType.NONE);
 
-    // Caller says not-hot AND windowSum < threshold → should go to evaluateCold
     ZetaDecision d = m.evaluate("k", false, belowThresholdCtx);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
 
-    // Verify we went through evaluateCold: hotStreak was reset to 0
     assertThat(m.getStateSnapshot("k").hotStreak()).isEqualTo(0);
   }
 
   @Test
   void lowConfidence_shouldDecrementHotStreak() {
-    // LOW confidence (COLD_CTX: cmsCount=1, threshold=10 → probability < 0.80)
-    // should never promote — hotStreak is clamped at confirmCount-1.
     ZetaStateMachine m = machineWith(3, 10, 4);
     assertThat(m.evaluate("key", true, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    // A fourth hot window should still not promote: LOW keeps hotStreak at 2.
     assertThat(m.evaluate("key", true, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").hotStreak()).isEqualTo(2);
   }
 
   @Test
   void candidateHot_withMediumConfidence_shouldStayInCandidateHot() {
-    // MEDIUM_CTX (cmsCount=20, threshold=10) yields ~0.91 → MEDIUM level.
-    // With confirmCount=1 the key enters CANDIDATE_HOT, not CONFIRMED_HOT.
     ZetaStateMachine m = machineWith(1, 5, 2);
     assertThat(m.evaluate("key", true, MEDIUM_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
-    // Another MEDIUM window should stay in CANDIDATE_HOT.
     ZetaDecision d = m.evaluate("key", true, MEDIUM_CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
@@ -501,10 +431,8 @@ class ZetaStateMachineEdgeTest {
   @Test
   void candidateHot_withHighConfidence_shouldPromoteToConfirmedHot() {
     ZetaStateMachine m = machineWith(1, 5, 2);
-    // First: MEDIUM → enter CANDIDATE_HOT
     assertThat(m.evaluate("key", true, MEDIUM_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
-    // Second: HIGH → promote to CONFIRMED_HOT, emit HOT
     ZetaDecision hot = m.evaluate("key", true, CTX);
     assertThat(hot.type()).isEqualTo(DecisionType.HOT);
     assertThat(hot.snapShot().currentState()).isEqualTo("CANDIDATE_HOT");
@@ -537,7 +465,6 @@ class ZetaStateMachineEdgeTest {
     executor.shutdown();
 
     assertThat(errors).hasValue(0);
-    // Key should still be tracked (only one key entry in states).
     assertThat(m.getTrackedKeys()).isEqualTo(1);
   }
 
@@ -566,7 +493,6 @@ class ZetaStateMachineEdgeTest {
     executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
 
     assertThat(error).hasValue(null);
-    // All keys should be tracked.
     assertThat(m.getTrackedKeys()).isEqualTo(keyCount);
   }
 
@@ -581,15 +507,11 @@ class ZetaStateMachineEdgeTest {
 
   @Test
   void highConfidenceWithCv_shouldBlockPreCoolingTransition() {
-    // Configure so that a single hot windows promotes, then 2 cold windows cool.
     ZetaStateMachine m = machineWith(1, 2, 1);
-    // Promote to CONFIRMED_HOT
     assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    // Cold window with HIGH confidence + CV → enters PRE_COOLING but HIGH blocks
     EvaluationContext coldHighCv = new EvaluationContext(100L, 5L, 10L, 0.5);
     assertThat(m.evaluate("key", false, coldHighCv).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("PRE_COOLING");
-    // Second cold with LOW → finally cools
     assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 }

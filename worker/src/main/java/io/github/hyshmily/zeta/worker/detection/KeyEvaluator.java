@@ -15,9 +15,9 @@
  */
 package io.github.hyshmily.zeta.worker.detection;
 
-import io.github.hyshmily.zeta.confidence.EvaluationContext;
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import java.util.concurrent.ConcurrentHashMap;
 import lombok.RequiredArgsConstructor;

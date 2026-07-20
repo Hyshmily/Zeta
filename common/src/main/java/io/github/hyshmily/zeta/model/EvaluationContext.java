@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.confidence;
+package io.github.hyshmily.zeta.model;
 
 /**
  * Aggregated observation data fed into Bayesian confidence evaluation.
@@ -28,13 +28,14 @@ package io.github.hyshmily.zeta.confidence;
  * before each call to
  * {@link io.github.hyshmily.zeta.detection.ZetaStateMachine#evaluate(String, boolean, EvaluationContext)}.
  *
- * @param cmsCount   HeavyKeeper frequency estimate for this key (global, cross-instance)
- * @param windowSum  total access count in the current sliding window (local);
- *                   used as the primary {@code observedCount} in the Bayesian model
- * @param threshold  the hot threshold (raw count) that the {@code windowSum} is
- *                   compared against for the binary is-hot flag
- * @param cv         coefficient of variation of the per-key sliding-window sums
- *                   over recent windows (may be {@code null} if not enough data)
+ * @param cmsCount    HeavyKeeper frequency estimate for this key (global, cross-instance)
+ * @param windowSum   total access count in the current sliding window (local);
+ *                    used as the primary {@code observedCount} in the Bayesian model
+ * @param threshold   the hot threshold (raw count) that the {@code windowSum} is
+ *                    compared against for the binary is-hot flag
+ * @param cv          coefficient of variation of the per-key sliding-window sums
+ *                    over recent windows (may be {@code null} if not enough data)
+ * @param logThreshold the hot threshold in log space (natural log of raw count)
  */
 public record EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv, double logThreshold) {
   public EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv) {

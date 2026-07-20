@@ -1,4 +1,4 @@
-package io.github.hyshmily.zeta.confidence;
+package io.github.hyshmily.zeta.worker.confidence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;

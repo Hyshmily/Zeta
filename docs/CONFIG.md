@@ -19,6 +19,7 @@
 | `computeIfAbsentWithSoftExpire(Collection, Function)`                            | Batch soft-expire overload — returns `Map<String, V>`                                                                                                                                                                                        |
 | `get(key, reader)`                                                               | Read from L1 or L2 reader; every access triggers local TopK tracking + App&#8594;Worker reporting; hot keys promoted to L1 (with hot TTL), normal keys use normal TTL                                                                        |
 | `get(key, reader, hardTtlMs, softTtlMs)`                                         | Same as above, with per-entry hard and soft TTL override (pass 0 to use default)                                                                                                                                                             |
+| `get(key, reader, boolean)`                                                      | Same as 2-arg `get()` with explicit report control — `false` skips App&#8594;Worker reporting and local TopK tracking                                                                                                                        |
 | `getWithSoftExpire(key, reader)`                                                 | Soft expiry — returns stale data + triggers async refresh; every access triggers local TopK tracking + App&#8594;Worker reporting; uses global default TTLs based on key state                                                               |
 | `getWithSoftExpire(key, reader, softTtlMs)`                                      | Same as above, with per-call soft TTL override (ms)                                                                                                                                                                                          |
 | `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)`                           | Same as above, with both per-entry hard TTL and per-call soft TTL override (ms)                                                                                                                                                              |
@@ -31,6 +32,7 @@
 | `read(key)`                                                                      | Fluent read query builder: `hotKey.read(key).withPrimary(...).thenExecute(...).withHardTtl(...).execute()` returns `Optional<T>`; `executeOrNull()` returns `T` directly. Supports fallback chain, broadcast toggle, null-caching toggle     |
 | `write(key)`                                                                     | Fluent write command builder: `hotKey.write(key).withHardTtl(...).putThrough(value, writer)` / `.invalidateAfterPut(mutation)` / `.invalidate()`                                                                                             |
 | `putLocal(key, value)`                                                           | Local-only write: stores value in L1 without version bump, broadcast, hot-key detection, or reporting; preserves existing entry metadata                                                                                                     |
+| `putLocal(key, value, hardTtlMs)`                                                | Same as above, with explicit hard TTL override (ms)                                                                                                                                                                                          |
 | `putLocal(key, value, hardTtlMs, softTtlMs)`                                     | Same as above, with per-entry hard and soft TTL override (pass 0 to use default)                                                                                                                                                             |
 | `putLocal(Map)`                                                                  | Batch local-only write — stores all entries without version bump, broadcast, hot-key detection, or reporting                                                                                                                                 |
 | `putThrough(key, value, writer)`                                                 | Write-through: writer.run(), nextVersion(), L1 update (with effective TTL based on key state), optional sync                                                                                                                                 |
@@ -83,10 +85,16 @@
 | `isWorker()`                                                                     | Whether Worker TopK is available                                                                                                                                                                                                             |
 | `isAppOnly()`                                                                    | Whether in pure App-only mode                                                                                                                                                                                                                |
 | `isWorkerOnly()`                                                                 | Whether in pure Worker-only mode                                                                                                                                                                                                             |
+| `addBlacklist(key)`                                                              | Add a single key pattern to the blacklist                                                                                                                                                                                                    |
 | `addBlacklist(Collection)`                                                       | Add multiple key patterns to the blacklist                                                                                                                                                                                                   |
+| `removeBlacklist(key)`                                                           | Remove a single key pattern from the blacklist                                                                                                                                                                                               |
 | `removeBlacklist(Collection)`                                                    | Remove multiple key patterns from the blacklist                                                                                                                                                                                              |
+| `addWhitelist(key)`                                                              | Add a single key pattern to the whitelist                                                                                                                                                                                                    |
 | `addWhitelist(Collection)`                                                       | Add multiple key patterns to the whitelist                                                                                                                                                                                                   |
+| `removeWhitelist(key)`                                                           | Remove a single key pattern from the whitelist                                                                                                                                                                                               |
 | `removeWhitelist(Collection)`                                                    | Remove multiple key patterns from the whitelist                                                                                                                                                                                              |
+| `getAllRules()`                                                                  | Return all currently registered rules                                                                                                                                                                                                        |
+| `clearAllRules()`                                                                | Clear all rules (blacklist and whitelist)                                                                                                                                                                                                    |
 
 ### Core (`zeta.local.*`)
 
@@ -124,7 +132,7 @@
 | `zeta.local.ttl-jitter-ratio`         | `0.05`                 | Jitter ratio (0.0–1.0); e.g. 0.05 = ±5% random offset applied to all TTL calculations. Always enabled.                                                                                                                                                          |
 | `zeta.local.refresh-max-pools`        | `100`                  | Max concurrent async refreshes for soft expire (Semaphore)                                                                                                                                                                                                      |
 | `zeta.local.version-key-ttl-minutes`  | `60`                   | Redis version key TTL (minutes); minimum 1                                                                                                                                                                                                                      |
-| `zeta.local.report-exchange`          | `zeta.report.exchange` | RabbitMQ exchange for app-to-Worker report messages                                                                                                                                                                                                             |
+| `zeta.local.report-exchange`          | `zeta.reportToWorker.exchange` | RabbitMQ exchange for app-to-Worker report messages                                                                                                                                    |
 | `zeta.local.report-interval-ms`       | `50`                   | Interval at which app instances batch and send TopK reports to the Worker (ms)                                                                                                                                                                                  |
 | `zeta.local.app-name`                 | `"default"`            | Logical application name used as tenant discriminator for Worker routing                                                                                                                                                                                        |
 | `zeta.local.shard-count`              | `1`                    | Divisor for auto consumer count calculation (max(4, availableProcessors/2) when 0); routing uses CH by default                                                                                                                                                  |
@@ -200,7 +208,7 @@ The circuit breaker wraps `SingleFlight.load()` — when open, `load()` returns 
 | -------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `zeta.worker-listener.enabled`               | `false`              | **Must be `true` when a Worker cluster is deployed.** Enables heartbeat consumption, Worker hot/cool decision listening, and the ClusterHealthView that drives report routing via consistent-hash ring |
 | `zeta.worker-listener.exchange-name`         | `zeta.send.exchange` | FanoutExchange name for receiving Worker HOT/COOL decisions and heartbeats; must match Worker-side `zeta.worker.messaging.broadcast-exchange`                                                          |
-| `zeta.worker-listener.queue-prefix`          | `hotkey.worker`      | Prefix for the per-instance Worker listener queue; final queue: `{prefix}:{instanceId}`                                                                                                                |
+| `zeta.worker-listener.queue-prefix`          | `zeta.worker`      | Prefix for the per-instance Worker listener queue; final queue: `{prefix}:{instanceId}`                                                                                                                |
 | `zeta.worker-listener.warmup-jitter-ms`      | `50`                 | Random delay (ms) before processing each Worker decision; spreads Redis reads across instances to avoid thundering herd                                                                                |
 | `zeta.worker-listener.concurrent-consumers`  | `2`                  | Number of concurrent RabbitMQ consumers for the Worker decision queue                                                                                                                                  |
 | `zeta.worker-listener.prefetch-count`        | `5`                  | AMQP prefetch count per consumer                                                                                                                                                                       |
@@ -217,6 +225,8 @@ The circuit breaker wraps `SingleFlight.load()` — when open, `load()` returns 
 | ------------------------- | ------- | -------------------------------------------------------------------------------------------------- |
 | `zeta.scheduling.enabled` | `true`  | Enable internal scheduler for HeavyKeeper decay and expelled queue drain                           |
 | `zeta.decay-period`       | `20`    | HeavyKeeper decay period in seconds (resolved via `@Scheduled` directly, not under `zeta.local.*`) |
+
+> ⚠️ Currently hardcoded at 20s — not yet configurable via property.
 
 ### Consistent Hashing (`zeta.local.consistent-hashing.*`)
 
@@ -249,25 +259,6 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `zeta.sync.prefetch-count`       | `5`                  | AMQP prefetch count per sync consumer                                                       |
 | `zeta.sync.auto-startup`         | `true`               | Whether the sync listener container starts automatically with the application               |
 
-### Worker Listener (`zeta.worker-listener.*`)
-
-| Property                                     | Default              | Description                                                                     |
-| -------------------------------------------- | -------------------- | ------------------------------------------------------------------------------- |
-| `zeta.worker-listener.enabled`               | `false`              | Enable listening for Worker HOT/COOL decisions                                  |
-| `zeta.worker-listener.exchange-name`         | `zeta.send.exchange` | Fanout exchange name for Worker broadcasts                                      |
-| `zeta.worker-listener.queue-prefix`          | `hotkey.worker`      | Queue name prefix; full name = `{prefix}:{instanceId}`                          |
-| `zeta.worker-listener.warmup-jitter-ms`      | `50`                 | Random jitter before processing Worker messages (prevents herd)                 |
-| `zeta.worker-listener.concurrent-consumers`  | `2`                  | Number of concurrent RabbitMQ consumers for Worker listener queue               |
-| `zeta.worker-listener.scheduler-pool-size`   | `2`                  | Thread pool size for jittered Worker cache-update tasks                         |
-| `zeta.worker-listener.prefetch-count`        | `5`                  | AMQP prefetch count per worker-listener consumer                                |
-| `zeta.worker-listener.auto-startup`          | `true`               | Whether the worker listener container starts automatically with the application |
-| **`zeta.worker-listener.sre.*`**             |                      | **SRE Adaptive Rate Limiter**                                                   |
-| `zeta.worker-listener.sre.enabled`           | `true`               | Enable SRE rate limiter on HOT decision processing path                         |
-| `zeta.worker-listener.sre.window-ms`         | `3000`               | Sliding window duration for rate calculation (ms)                               |
-| `zeta.worker-listener.sre.buckets`           | `10`                 | Number of buckets in the sliding window                                         |
-| `zeta.worker-listener.sre.min-samples`       | `20`                 | Minimum total samples before throttling starts                                  |
-| `zeta.worker-listener.sre.success-threshold` | `0.6`                | Success ratio threshold (0.0–1.0); throttles when success rate drops below this |
-
 ### Worker Node (`zeta.worker.*`)
 
 > **Design note:** The Worker-side HeavyKeeper prioritises overcount bounding over insert speed — it uses narrower (20k) but deeper (depth 10) sketch dimensions with slightly faster decay (0.9). The batch-report consumer feeds large key-count maps (up to 10k keys per flush), and greater depth provides tighter frequency estimates per batch. Faster decay means the Worker adapts more quickly to changing traffic patterns before making authoritative HOT/COOL decisions. Compare with the [app-side configuration](#core-zetalocal-).
@@ -278,7 +269,7 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | **`zeta.worker.routing.*`**                                        |                           | **Routing**                                                                                                                     |
 | `zeta.worker.routing.app-name`                                     | `"default"`               | Logical application name (tenant discriminator)                                                                                 |
 | **`zeta.worker.messaging.*`**                                      |                           | **Messaging**                                                                                                                   |
-| `zeta.worker.messaging.report-exchange`                            | `zeta.report.exchange`    | Direct exchange for app report messages                                                                                         |
+| `zeta.worker.messaging.report-exchange`                            | `zeta.reportToWorker.exchange`    | Direct exchange for app report messages                                                                                         |
 | `zeta.worker.messaging.broadcast-exchange`                         | `zeta.send.exchange`      | Exchange for HOT/COOL broadcasts (Worker publishes with routing keys; may need alignment with worker-listener.exchange-name)    |
 | `zeta.worker.messaging.heartbeat-exchange`                         | `zeta.heartbeat.exchange` | Topic exchange for epoch-driven structured heartbeats (must match App-side `zeta.local.heartbeat.exchange-name`)                |
 | **`zeta.worker.report-consumer.*`**                                |                           | **Report Consumer**                                                                                                             |
@@ -343,7 +334,7 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 
 ## Security
 
-All RabbitMQ-based exchanges (`zeta.sync.exchange`, `zeta.report.exchange`, `zeta.send.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*`:
+All RabbitMQ-based exchanges (`zeta.sync.exchange`, `zeta.reportToWorker.exchange`, `zeta.send.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*`:
 
 ```yaml
 spring:

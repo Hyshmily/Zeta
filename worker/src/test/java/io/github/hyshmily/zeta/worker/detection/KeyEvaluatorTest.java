@@ -4,9 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.when;
 
-import io.github.hyshmily.zeta.confidence.EvaluationContext;
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
 import org.junit.jupiter.api.BeforeEach;

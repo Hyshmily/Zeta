@@ -38,9 +38,9 @@
 
 ## Lifecycle
 
-- **Graceful Degradation** — When the Worker cluster fails majority quorum (`ClusterHealthView.isClusterHealthy()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
-- **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `processLocalHotkeyIfNeeded`) or by Worker broadcast (in `handleHot`).
-- **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `CacheExpireManager` to prevent cache stampedes. Controlled by `zeta.local.ttl-jitter-ratio` (default 0.05 = ±5%). Always enabled.
+ - **Graceful Degradation** — When the Worker cluster fails majority quorum (`HealthView.isClusterHealthy()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
+ - **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `isPromotableState`) or by Worker broadcast (in `handleHot`).
+ - **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `ExpireManager` to prevent cache stampedes. Controlled by `zeta.local.ttl-jitter-ratio` (default 0.05 = ±5%). Always enabled.
 - **Expire** — Two-tier: **soft expire** (stale-while-revalidate, returns stale data + async refresh) and **hard expire** (absolute TTL, entry invalidated). Soft expire only applies to HOT and COOL entries.
 - **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `ZetaCacheManager` (implements `CacheManager`) and `ZetaSpringCache` (implements `Cache`). Enabled via `zeta.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
 - **ZetaCacheContext** — ThreadLocal singleton holding TTL (`hardTtlMs`, `softTtlMs`) and `allowNull` context for the current cache operation. `CacheExtensionAspect` snapshots/restores these values around each `@Cacheable` invocation. `ZetaSpringCache.get(Object, Callable)` reads them from context.
@@ -66,6 +66,6 @@
 
 ## Failure Behavior
 
-- **Worker Majority Dead** — A majority of Worker shards have missed the heartbeat window (5s timeout). Activated threshold: `ClusterHealthView.isClusterHealthy()` returns `false`. Local TopK assumes authority: COOL entries become promotable, `isWorkerManagedEntry` returns false. Worker broadcast on recovery overrides local promotions via decisionVersion.
+ - **Worker Majority Dead** — A majority of Worker shards have missed the heartbeat window (5s timeout). Activated threshold: `HealthView.isClusterHealthy()` returns `false`. Local TopK assumes authority: COOL entries become promotable, `isWorkerManagedEntry` returns false. Worker broadcast on recovery overrides local promotions via decisionVersion.
 - **Worker Partial Dead** — Some shards alive, some not. Alive shards continue normally. Dead shard's keys are routed to other shards via consistent-hashing ring reconciliation.
 - **Redis Degraded** — `nextVersion()` falls back to node-local counter (`Long.MIN_VALUE + counter`). Broadcast carries `isVersionDegraded=true`. Peers apply 4-case comparison to prevent degraded versions overwriting normal ones.

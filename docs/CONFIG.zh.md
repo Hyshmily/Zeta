@@ -19,6 +19,7 @@
 | `computeIfAbsentWithSoftExpire(Collection, Function)`                            | 批量软过期重载——返回 `Map<String, V>`                                                                                                                                                          |
 | `get(key, reader)`                                                               | 从 L1 或 L2 reader 读取；每次访问触发本地 TopK 追踪 + App→Worker 上报；热点 key 提升到 L1（使用热点 TTL），普通 key 使用普通 TTL                                                               |
 | `get(key, reader, hardTtlMs, softTtlMs)`                                         | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                                    |
+| `get(key, reader, boolean)`                                                      | 同 2 参数 `get()`，带显式上报控制——`false` 跳过 App→Worker 上报和本地 TopK 追踪                                                                                                                |
 | `getWithSoftExpire(key, reader)`                                                 | 软失效——返回过期旧值+触发异步刷新；每次访问触发本地 TopK 追踪 + App→Worker 上报；根据 key 状态使用全局默认 TTL                                                                                 |
 | `getWithSoftExpire(key, reader, softTtlMs)`                                      | 同上，带 per-call 软 TTL 覆盖（毫秒）                                                                                                                                                          |
 | `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)`                           | 同上，同时带 per-entry 硬 TTL 和 per-call 软 TTL 覆盖（毫秒）                                                                                                                                  |
@@ -31,6 +32,7 @@
 | `read(key)`                                                                      | 流式读查询构造器：`hotKey.read(key).withPrimary(...).thenExecute(...).withHardTtl(...).execute()` 返回 `Optional<T>`；`executeOrNull()` 直接返回 `T`。支持 fallback 链、广播开关、空值缓存开关 |
 | `write(key)`                                                                     | 流式写命令构造器：`hotKey.write(key).withHardTtl(...).putThrough(value, writer)` / `.invalidateAfterPut(mutation)` / `.invalidate()`                                                           |
 | `putLocal(key, value)`                                                           | 仅本地写：将值存入 L1，不 bump 版本号、不广播、不触发热 key 检测、不上报；保留现有 entry 元数据                                                                                                |
+| `putLocal(key, value, hardTtlMs)`                                                | 同上，带显式硬 TTL 覆盖（毫秒）                                                                                                                                                               |
 | `putLocal(key, value, hardTtlMs, softTtlMs)`                                     | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                                    |
 | `putLocal(Map)`                                                                  | 批量仅本地写——存储所有条目，不 bump 版本号、不广播、不触发热 key 检测、不上报                                                                                                                  |
 | `putThrough(key, value, writer)`                                                 | 写穿透：writer.run()、nextVersion()、L1 更新（根据 key 状态使用有效 TTL）、可选同步                                                                                                            |
@@ -83,10 +85,16 @@
 | `isWorker()`                                                                     | 是否 Worker TopK 可用                                                                                                                                                                          |
 | `isAppOnly()`                                                                    | 是否纯 App-only 模式                                                                                                                                                                           |
 | `isWorkerOnly()`                                                                 | 是否纯 Worker-only 模式                                                                                                                                                                        |
+| `addBlacklist(key)`                                                              | 添加单个 key 模式到黑名单                                                                                                                                                                     |
 | `addBlacklist(Collection)`                                                       | 批量添加多个 key 模式到黑名单                                                                                                                                                                  |
+| `removeBlacklist(key)`                                                           | 从黑名单移除单个 key 模式                                                                                                                                                                      |
 | `removeBlacklist(Collection)`                                                    | 批量从黑名单移除多个 key 模式                                                                                                                                                                  |
+| `addWhitelist(key)`                                                              | 添加单个 key 模式到白名单                                                                                                                                                                     |
 | `addWhitelist(Collection)`                                                       | 批量添加多个 key 模式到白名单                                                                                                                                                                  |
+| `removeWhitelist(key)`                                                           | 从白名单移除单个 key 模式                                                                                                                                                                      |
 | `removeWhitelist(Collection)`                                                    | 批量从白名单移除多个 key 模式                                                                                                                                                                  |
+| `getAllRules()`                                                                  | 返回所有当前注册的规则                                                                                                                                                                         |
+| `clearAllRules()`                                                                | 清除所有规则（黑名单和白名单）                                                                                                                                                                 |
 
 ### 核心配置（`zeta.local.*`）
 
@@ -124,7 +132,7 @@
 | `zeta.local.ttl-jitter-ratio`         | `0.05`                 | 偏移比例（0.0–1.0）；例如 0.05 表示对 TTL 计算施加 ±5% 的随机偏移。始终启用。                                                                                          |
 | `zeta.local.refresh-max-pools`        | `100`                  | 软过期最大并发异步刷新数（信号量）                                                                                                                                     |
 | `zeta.local.version-key-ttl-minutes`  | `60`                   | Redis 版本 key TTL（分钟），最小值为 1                                                                                                                                 |
-| `zeta.local.report-exchange`          | `zeta.report.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                                                                                                                           |
+| `zeta.local.report-exchange`          | `zeta.reportToWorker.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                                                                                                                           |
 | `zeta.local.report-interval-ms`       | `50`                   | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）                                                                                                                 |
 | `zeta.local.app-name`                 | `"default"`            | 逻辑应用名，用于 Worker 路由的租户区分                                                                                                                                 |
 | `zeta.local.shard-count`              | `1`                    | 消费者线程数自动计算的除数（max(4, availableProcessors/2)；路由默认使用一致性哈希                                                                                      |
@@ -192,7 +200,7 @@
 | -------------------------------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `zeta.worker-listener.enabled`               | `false`              | **部署了 Worker 集群时必须设为 `true`**。开启心跳消费、Worker 热/冷决策监听，以及驱动 Reporter 一致性哈希路由的 ClusterHealthView |
 | `zeta.worker-listener.exchange-name`         | `zeta.send.exchange` | 接收 Worker HOT/COOL 决策和心跳的 FanoutExchange 名称；必须与 Worker 侧 `zeta.worker.messaging.broadcast-exchange` 一致           |
-| `zeta.worker-listener.queue-prefix`          | `hotkey.worker`      | 实例级 Worker 监听队列前缀；最终队列名 `{prefix}:{instanceId}`                                                                    |
+| `zeta.worker-listener.queue-prefix`          | `zeta.worker`      | 实例级 Worker 监听队列前缀；最终队列名 `{prefix}:{instanceId}`                                                                    |
 | `zeta.worker-listener.warmup-jitter-ms`      | `50`                 | 处理每个 Worker 决策前的随机延迟（毫秒）；分散各实例的 Redis 读取，避免惊群效应                                                   |
 | `zeta.worker-listener.concurrent-consumers`  | `2`                  | Worker 决策队列的并发消费者数                                                                                                     |
 | `zeta.worker-listener.prefetch-count`        | `5`                  | 每消费者的 AMQP 预取数                                                                                                            |
@@ -209,6 +217,8 @@
 | ------------------------- | ------ | ------------------------------------------------------------------------------ |
 | `zeta.scheduling.enabled` | `true` | 启用内部定时器（HeavyKeeper 衰减 + 挤出队列清空）                              |
 | `zeta.decay-period`       | `20`   | HeavyKeeper 衰减周期（秒），通过 `@Scheduled` 直接解析，不在 `zeta.local.*` 下 |
+
+> ⚠️ 当前硬编码为 20 秒——尚未通过属性可配置。
 
 ### 一致性哈希（`zeta.local.consistent-hashing.*`）
 
@@ -241,25 +251,6 @@
 | `zeta.sync.prefetch-count`       | `5`                  | 每个同步消费者的 AMQP 预取数量                                                   |
 | `zeta.sync.auto-startup`         | `true`               | 同步监听器容器是否随应用自动启动                                                 |
 
-### Worker 监听器（`zeta.worker-listener.*`）
-
-| 属性                                         | 默认值               | 说明                                            |
-| -------------------------------------------- | -------------------- | ----------------------------------------------- |
-| `zeta.worker-listener.enabled`               | `false`              | 启用接收 Worker HOT/COOL 决策                   |
-| `zeta.worker-listener.exchange-name`         | `zeta.send.exchange` | Worker 广播 Fanout 交换机名称                   |
-| `zeta.worker-listener.queue-prefix`          | `hotkey.worker`      | 队列名前缀；完整名称 = `{prefix}:{instanceId}`  |
-| `zeta.worker-listener.warmup-jitter-ms`      | `50`                 | 处理 Worker 消息前的随机 jitter（防止惊群效应） |
-| `zeta.worker-listener.concurrent-consumers`  | `2`                  | Worker 监听队列 RabbitMQ 消费者并发数           |
-| `zeta.worker-listener.scheduler-pool-size`   | `2`                  | Worker 监听器抖动缓存更新任务的线程池大小       |
-| `zeta.worker-listener.prefetch-count`        | `5`                  | Worker 监听器每个消费者的 AMQP 预取数量         |
-| `zeta.worker-listener.auto-startup`          | `true`               | Worker 监听器容器是否随应用自动启动             |
-| **`zeta.worker-listener.sre.*`**             |                      | **SRE 自适应速率限制器**                        |
-| `zeta.worker-listener.sre.enabled`           | `true`               | 在 HOT 决策处理路径上启用 SRE 速率限制器        |
-| `zeta.worker-listener.sre.window-ms`         | `3000`               | 速率计算的滑动窗口时长（毫秒）                  |
-| `zeta.worker-listener.sre.buckets`           | `10`                 | 滑动窗口的桶数                                  |
-| `zeta.worker-listener.sre.min-samples`       | `20`                 | 限流开始前的最小总样本数                        |
-| `zeta.worker-listener.sre.success-threshold` | `0.6`                | 成功率阈值（0.0–1.0）；成功率低于此值时触发限流 |
-
 ### Worker 节点（`zeta.worker.*`）
 
 > **设计说明：** Worker 端 HeavyKeeper 优先保证频率估计边界而不是插入速度——使用更窄（20k）但更深（depth 10）的 Sketch，衰减略快（0.9）。批量报表消费者每次喂入大量 key-count 映射（最多 10k keys），更大的深度能提供更精确的批量频率估计。更快的衰减使 Worker 能更快适应流量变化，从而做出权威的 HOT/COOL 决策。与 [应用端配置](#core-zetalocal-) 对比。
@@ -270,7 +261,7 @@
 | **`zeta.worker.routing.*`**                                        |                           | **路由**                                                                                       |
 | `zeta.worker.routing.app-name`                                     | `"default"`               | 逻辑应用名（租户区分）                                                                         |
 | **`zeta.worker.messaging.*`**                                      |                           | **消息**                                                                                       |
-| `zeta.worker.messaging.report-exchange`                            | `zeta.report.exchange`    | App 报告消息的直接交换机                                                                       |
+| `zeta.worker.messaging.report-exchange`                            | `zeta.reportToWorker.exchange`    | App 报告消息的直接交换机                                                                       |
 | `zeta.worker.messaging.broadcast-exchange`                         | `zeta.send.exchange`      | HOT/COOL 广播的交换机（Worker 使用路由键发布；可能需要与 worker-listener.exchange-name 对齐）  |
 | `zeta.worker.messaging.heartbeat-exchange`                         | `zeta.heartbeat.exchange` | epoch 驱动结构化心跳的 Topic 交换机（必须与 App 端 `zeta.local.heartbeat.exchange-name` 一致） |
 | **`zeta.worker.report-consumer.*`**                                |                           | **上报消费者**                                                                                 |
@@ -335,7 +326,7 @@
 
 ## 安全性
 
-所有基于 RabbitMQ 的交换机（`zeta.sync.exchange`、`zeta.report.exchange`、`zeta.send.exchange`）默认使用明文 AMQP 连接。生产环境中应通过 Spring Boot 的 `spring.rabbitmq.ssl.*` 配置 TLS：
+所有基于 RabbitMQ 的交换机（`zeta.sync.exchange`、`zeta.reportToWorker.exchange`、`zeta.send.exchange`）默认使用明文 AMQP 连接。生产环境中应通过 Spring Boot 的 `spring.rabbitmq.ssl.*` 配置 TLS：
 
 ```yaml
 spring:

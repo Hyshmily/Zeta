@@ -260,7 +260,7 @@ zeta.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // 带 TTL 
 
 // J. 流式写 API
 zeta.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
-zeta.write("user:42").invalidateAfterPut(dbMutation);
+zeta.write("user:42").putBeforeInvalidate(dbMutation);
 zeta.write("user:42").invalidate();
 ```
 
@@ -292,7 +292,7 @@ zeta.putThrough("weather:" + city, weatherData,
 ```
 
 > [!NOTE]
-> **缓存雪崩防护：** `CacheExpireManager` 通过 `DelayUtil.computeTtlJitter()` 对每个过期时间戳施加均匀随机偏移（默认 ±5%）。5 分钟硬 TTL 在默认偏移下实际到期 4.75 ~ 5.25 分钟。通过 `zeta.local.ttl-jitter-ratio`（比例，默认 `0.05` = ±5%,`0`为禁用）控制。
+> **缓存雪崩防护：** `ExpireManager` 通过 `DelayUtil.computeTtlJitter()` 对每个过期时间戳施加均匀随机偏移（默认 ±5%）。5 分钟硬 TTL 在默认偏移下实际到期 4.75 ~ 5.25 分钟。通过 `zeta.local.ttl-jitter-ratio`（比例，默认 `0.05` = ±5%,`0`为禁用）控制。
 
 > [!TIP]
 > per-call TTL 语义：传入 `0` 表示使用该 key 状态的配置默认值。彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：向 `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` 传入 `hardTtlMs = Long.MAX_VALUE`，entry 永久驻留 Caffeine。此用法受 Caffeine `Expiry` JavaDoc 明确支持：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))

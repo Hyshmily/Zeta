@@ -129,11 +129,16 @@ management:
 | `zeta.reporter.queue.dropped.total` | Gauge | —                    | 累计丢弃批次（队列满）           |
 | `zeta.reporter.queue.expired.total` | Gauge | —                    | 累计过期批次                     |
 | `zeta.reporter.pending.keys`        | Gauge | —                    | Reporter 计数缓存中缓冲的 key 数 |
+| `zeta.reporter.bbr.passed`          | Gauge | —                    | Reporter BBR 通过次数             |
+| `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR 丢弃次数             |
+| `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR 进行中请求数         |
+| `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR 最大进行中请求数     |
 | `zeta.expire.refresh.available`     | Gauge | —                    | 刷新信号量可用许可数             |
 | `zeta.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
 | `zeta.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
 | `zeta.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
 | `zeta.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数              |
+| `zeta.cpu.load`                     | Gauge | —                    | 当前 CPU 负载（0-1000 范围）     |
 
 ## 3. 一致性哈希环管理
 

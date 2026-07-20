@@ -182,13 +182,13 @@ The Bayesian confidence evaluation is **orthogonal** to this threshold: even whe
 
 | Class | Location | Role |
 |---|---|---|
-| `BayesianConfidenceEstimator` | `common/.../confidence/` | Core Normal-Normal conjugate computation |
-| `ConfidenceEvaluator` | `common/.../confidence/` | Thin facade, decouples state machine from estimator |
-| `EvaluationContext` | `common/.../confidence/` | Data carrier for all evaluation inputs |
-| `ProbabilityResult` | `common/.../confidence/` | Posterior output with level classification |
-| `ConfidenceLevel` | `common/.../confidence/` | HIGH/MEDIUM/LOW enum |
-| `NormalCdfTable` | `common/.../confidence/` | Pre-computed Φ(z) table, Abramowitz & Stegun approx |
-| `ZetaStateMachineImpl` | `common/.../detection/impl/` | Per-key state machine with Bayesian gating |
+| `BayesianConfidenceEstimator` | `worker/.../confidence/` | Core Normal-Normal conjugate computation |
+| `ConfidenceEvaluator` | `worker/.../confidence/` | Thin facade, decouples state machine from estimator |
+| `EvaluationContext` | `common/.../model/` | Data carrier for all evaluation inputs |
+| `ProbabilityResult` | `worker/.../confidence/` | Posterior output with level classification |
+| `ConfidenceLevel` | `worker/.../confidence/` | HIGH/MEDIUM/LOW enum |
+| `NormalCdfTable` | `worker/.../confidence/` | Pre-computed Φ(z) table, Abramowitz & Stegun approx |
+| `ZetaStateMachineImpl` | `worker/.../detection/impl/` | Per-key state machine with Bayesian gating |
 | `KeyEvaluator` | `worker/.../detection/` | Pipeline orchestrator, CV computation |
 | `SlidingWindowDetector` | `worker/.../detection/` | Lock-free circular buffer for per-key frequency |
 | `ThresholdLearner` | `worker/.../detection/` | Adaptive threshold based on global QPS |
@@ -214,4 +214,4 @@ The standard Normal CDF Φ(z) is pre-computed across z ∈ [-6, 6] at step 0.001
 
 4. **Three-tier thresholds are uncalibrated.** The 0.80/0.95 splits were chosen based on developer intuition and ad-hoc testing, not systematic ROC analysis. If production data shows excessive false HOT broadcasts or missed detections, these thresholds should be revisited.
 
-5. **State machine code in common module.** `ZetaStateMachineImpl` and all confidence types ship in the Maven Central `zeta` starter JAR, even though only the Worker runtime uses them. This is a historical artifact of the Worker depending on the common module as a library. No functional impact.
+5. **State machine code in worker module.** `ZetaStateMachineImpl` and all confidence types reside in the `worker` module, never shipped in the Maven Central `zeta` starter JAR. Only the `ZetaStateMachine` interface stays in `common` for type safety across module boundaries. The Worker module depends on `common` for the interface and packages the implementation exclusively in its own artifact.

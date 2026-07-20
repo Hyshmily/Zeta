@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.confidence;
+package io.github.hyshmily.zeta.worker.confidence;
 
 import io.github.hyshmily.zeta.Internal;
 import lombok.RequiredArgsConstructor;
@@ -22,11 +22,8 @@ import lombok.RequiredArgsConstructor;
  * Facade over {@link BayesianConfidenceEstimator} for the state machine.
  *
  * <p>This thin wrapper exists to keep the state machine
- * ({@link io.github.hyshmily.zeta.detection.impl.ZetaStateMachineImpl})
- * decoupled from the specific estimator implementation. The state machine
- * injects a {@code ConfidenceEvaluator} and calls {@link #evaluate} without
- * knowing whether the underlying engine is Bayesian, frequentist, or
- * heuristic — enabling future swap-outs without touching the state machine.
+ * ({@link io.github.hyshmily.zeta.detection.ZetaStateMachine})
+ * decoupled from the specific estimator implementation.
  *
  * <p>The three parameters (CMS count, threshold, CV) mirror the three
  * dimensions of evidence available at decision time:
@@ -42,18 +39,8 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class ConfidenceEvaluator {
 
-  /** The underlying Bayesian estimator. */
   private final BayesianConfidenceEstimator estimator;
 
-  /**
-   * Evaluates the Bayesian posterior probability that this key is hot.
-   *
-   * @param cmsCount     HeavyKeeper frequency estimate for the key
-   * @param logThreshold the hot threshold in log space (natural log of raw count)
-   * @param cv        coefficient of variation (may be {@code null})
-   * @return a {@link ProbabilityResult} with the posterior probability
-   *         and confidence level
-   */
   public ProbabilityResult evaluate(long cmsCount, double logThreshold, Double cv) {
     return estimator.evaluate(cmsCount, logThreshold, cv);
   }

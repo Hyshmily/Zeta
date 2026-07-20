@@ -20,9 +20,9 @@ import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 /**
  * Immutable snapshot of a key's state machine state at a point in time.
  *
- * <p>Captured <em>before</em> a mutation in {@link
- * io.github.hyshmily.zeta.detection.impl.ZetaStateMachineImpl#evaluate}
- * and carried by {@link ZetaDecision} for failure rollback.  The
+ * <p>Captured <em>before</em> a mutation in the state machine's
+ * {@code evaluate} method and carried by {@link ZetaDecision} for
+ * failure rollback.  The
  * {@code key} field enables the single-argument overload of
  * {@link ZetaStateMachine#rollbackToPreviousState(ZetaStateMachine.StateSnapshot)}.
  *

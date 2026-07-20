@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.detection;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.confidence.EvaluationContext;
+import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 

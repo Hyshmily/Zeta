@@ -262,7 +262,7 @@ zeta.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // with TTL
 
 // J. Fluent write API
 zeta.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
-zeta.write("user:42").invalidateAfterPut(dbMutation);
+zeta.write("user:42").putBeforeInvalidate(dbMutation);
 zeta.write("user:42").invalidate();
 ```
 
@@ -293,7 +293,7 @@ zeta.putThrough("weather:" + city, weatherData,
 ```
 
 > [!NOTE]
-> **Cache avalanche protection:** `CacheExpireManager` applies a uniform random offset via `DelayUtil.computeTtlJitter()` to every expiration timestamp (default ±5%). A 5-minute hard TTL actually expires between 4.75 ~ 5.25 minutes under the default offset. Controlled by `zeta.local.ttl-jitter-ratio` (ratio, default `0.05` = ±5%, `0` to disable).
+> **Cache avalanche protection:** `ExpireManager` applies a uniform random offset via `DelayUtil.computeTtlJitter()` to every expiration timestamp (default ±5%). A 5-minute hard TTL actually expires between 4.75 ~ 5.25 minutes under the default offset. Controlled by `zeta.local.ttl-jitter-ratio` (ratio, default `0.05` = ±5%, `0` to disable).
 
 > [!TIP]
 > Per-call TTL semantics: passing `0` uses the configured default for that key state. For pure logical expiration (hard TTL never evicts, soft expire only): pass `hardTtlMs = Long.MAX_VALUE` to `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` — the entry permanently resides in Caffeine. This usage is explicitly supported by Caffeine's `Expiry` JavaDoc: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))

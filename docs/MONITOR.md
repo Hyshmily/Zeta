@@ -129,11 +129,16 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.reporter.queue.dropped.total` | Gauge | —                    | Cumulative dropped batches (queue full) |
 | `zeta.reporter.queue.expired.total` | Gauge | —                    | Cumulative expired batches              |
 | `zeta.reporter.pending.keys`        | Gauge | —                    | Keys buffered in reporter counter cache |
+| `zeta.reporter.bbr.passed`          | Gauge | —                    | Reporter BBR passed count              |
+| `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR dropped count             |
+| `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR in-flight count           |
+| `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR max in-flight count       |
 | `zeta.expire.refresh.available`     | Gauge | —                    | Available refresh limiter permits       |
 | `zeta.version.degraded.total`       | Gauge | —                    | Cumulative version fallback count       |
 | `zeta.sync.dedup.size`              | Gauge | —                    | Broadcast dedup cache size              |
 | `zeta.worker.alive`                 | Gauge | —                    | Whether any worker shard is alive (0/1) |
 | `zeta.worker.tracked.keys`          | Gauge | —                    | Keys tracked by state machine           |
+| `zeta.cpu.load`                     | Gauge | —                    | Current CPU load (0-1000 scale)         |
 
 ## 3. Consistent Hash Ring Management
 

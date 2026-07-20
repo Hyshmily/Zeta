@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.confidence;
+package io.github.hyshmily.zeta.worker.confidence;
 
 /**
  * Three-tier confidence classification for Bayesian posterior probabilities.
@@ -33,10 +33,7 @@ package io.github.hyshmily.zeta.confidence;
  * promotion).
  */
 public enum ConfidenceLevel {
-  /** Probability &#x2265; 0.95 — strong evidence; proceed with broadcast. */
   HIGH,
-  /** 0.80 &#x2264; probability &lt; 0.95 — likely but not certain; defer broadcast. */
   MEDIUM,
-  /** Probability &lt; 0.80 — insufficient evidence; stay in current state. */
   LOW,
 }
