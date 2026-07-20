@@ -49,7 +49,6 @@
   <modules>
     <module>common</module>
     <module>worker</module>
-    <module>demo-app</module>
   </modules>
 
   <properties>
