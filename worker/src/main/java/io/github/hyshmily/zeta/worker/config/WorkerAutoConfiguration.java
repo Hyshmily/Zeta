@@ -361,6 +361,21 @@ public class WorkerAutoConfiguration {
   }
 
   /**
+   * Fanout exchange for broadcasting HOT/COOL decisions to all application instances.
+   *
+   * <p>App instances bind their per-instance queues to this exchange to receive
+   * decision broadcasts. Both app and worker declare this exchange so that it
+   * exists regardless of startup order.
+   *
+   * @param properties worker configuration providing the broadcast exchange name
+   * @return a durable, non-auto-delete {@link FanoutExchange}
+   */
+  @Bean
+  public FanoutExchange broadcastExchange(WorkerProperties properties) {
+    return new FanoutExchange(properties.getMessaging().getBroadcastExchange(), true, false);
+  }
+
+  /**
    * Direct exchange to which clients publish reportToWorker messages.
    * Routing keys follow the pattern {@code reportToWorker.<appName>.<nodeId>}.
    *
@@ -509,9 +524,10 @@ public class WorkerAutoConfiguration {
     SlidingWindowDetector detector,
     ZetaStateMachine stateMachine,
     KeyEvaluator keyEvaluator,
-    WorkerProperties properties
+    WorkerProperties properties,
+    WorkerBroadcaster broadcaster
   ) {
-    return new EvictStaleTask(detector, stateMachine, keyEvaluator, properties);
+    return new EvictStaleTask(detector, stateMachine, keyEvaluator, properties, broadcaster);
   }
 
   /**
@@ -525,6 +541,7 @@ public class WorkerAutoConfiguration {
     private final ZetaStateMachine stateMachine;
     private final KeyEvaluator keyEvaluator;
     private final WorkerProperties properties;
+    private final WorkerBroadcaster broadcaster;
 
     /**
      * Evicts keys that have not been accessed within {@code 2 * coolDurationMs}.
@@ -534,7 +551,11 @@ public class WorkerAutoConfiguration {
       try {
         long staleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
         detector.evictStale(staleAfterMs);
-        stateMachine.evictStale(staleAfterMs);
+        stateMachine.evictStale(staleAfterMs, key -> {
+          if (!broadcaster.broadcastCool(key)) {
+            log.warn("Failed to broadcast COOL for stale key: {}", key);
+          }
+        });
         keyEvaluator.evictStale(staleAfterMs);
         log.debug("EvictStale tick: staleAfterMs={}", staleAfterMs);
       } catch (Exception e) {

@@ -83,6 +83,7 @@ public class TopKPersistService {
       }
 
       topK.warm(items.stream().collect(Collectors.toMap(Item::key, Item::count, Long::sum)));
+      log.info("TopK restored from Redis: {} keys at key: {}", items.size(), redisKey);
     } catch (Exception e) {
       log.error("Failed to restore TopK from Redis at key: {}", redisKey, e);
     }

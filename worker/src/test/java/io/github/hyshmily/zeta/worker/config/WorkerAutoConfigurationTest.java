@@ -289,6 +289,7 @@ class WorkerAutoConfigurationTest {
   void evictStaleTaskShouldCallEvictStaleOnDetectorAndStateMachine() {
     SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
     ZetaStateMachine stateMachine = Mockito.mock(ZetaStateMachine.class);
+    WorkerBroadcaster broadcaster = Mockito.mock(WorkerBroadcaster.class);
     KeyEvaluator keyEvaluator = Mockito.mock(KeyEvaluator.class);
     WorkerProperties properties = new WorkerProperties();
 
@@ -296,13 +297,14 @@ class WorkerAutoConfigurationTest {
       detector,
       stateMachine,
       keyEvaluator,
-      properties
+      properties,
+      broadcaster
     );
     task.evictStale();
 
     long expectedStaleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
     Mockito.verify(detector).evictStale(expectedStaleAfterMs);
-    Mockito.verify(stateMachine).evictStale(expectedStaleAfterMs);
+    Mockito.verify(stateMachine).evictStale(Mockito.eq(expectedStaleAfterMs), Mockito.any());
   }
 
   /**
@@ -411,6 +413,7 @@ class WorkerAutoConfigurationTest {
   void evictStaleTaskShouldCatchExceptionsFromDetector() {
     SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
     ZetaStateMachine stateMachine = Mockito.mock(ZetaStateMachine.class);
+    WorkerBroadcaster broadcaster = Mockito.mock(WorkerBroadcaster.class);
     KeyEvaluator keyEvaluator = Mockito.mock(KeyEvaluator.class);
     WorkerProperties properties = new WorkerProperties();
     Mockito.doThrow(new RuntimeException("eviction failed")).when(detector).evictStale(Mockito.anyLong());
@@ -419,7 +422,8 @@ class WorkerAutoConfigurationTest {
       detector,
       stateMachine,
       keyEvaluator,
-      properties
+      properties,
+      broadcaster
     );
     assertThatCode(task::evictStale).doesNotThrowAnyException();
   }

@@ -118,7 +118,7 @@ class ZetaStateMachineEdgeTest {
   @Test
   void evictStale_withEmptyState_shouldNotThrow() {
     ZetaStateMachine m = machineWith(3, 10, 4);
-    m.evictStale(1000);
+    m.evictStale(1000, k -> {});
     assertThat(m.getTrackedKeys()).isZero();
   }
 
@@ -198,7 +198,7 @@ class ZetaStateMachineEdgeTest {
     ZetaStateMachine m = machineWith(3, 10, 4);
     m.evaluate("stale", true, CTX);
     Thread.sleep(1);
-    m.evictStale(0);
+    m.evictStale(0, k -> {});
     assertThat(m.getTrackedKeys()).isZero();
   }
 
@@ -305,7 +305,7 @@ class ZetaStateMachineEdgeTest {
     m.evaluate("key", true, CTX);
     m.reset("key");
     Thread.sleep(1);
-    m.evictStale(0);
+    m.evictStale(0, k -> {});
     assertThat(m.getTrackedKeys()).isZero();
   }
 
@@ -380,7 +380,7 @@ class ZetaStateMachineEdgeTest {
 
     Thread.sleep(1);
     m.evaluate("key", true, CTX);
-    m.evictStale(0);
+    m.evictStale(1, k -> {});
     assertThat(m.getTrackedKeys()).isEqualTo(1);
   }
 

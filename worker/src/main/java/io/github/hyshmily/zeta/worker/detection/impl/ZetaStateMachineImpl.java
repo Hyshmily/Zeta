@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
+import java.util.function.Consumer;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -58,8 +59,12 @@ import lombok.extern.slf4j.Slf4j;
  *    ▲                                                                       │
  *    │                                  PRE_COOLING ◄── coolStreak >= grace ─┤
  *    │                                   │                                   │
- *    │                                   └── coolStreak >= cool ──► COLD ────┘
- *    │                                         (MEDIUM/LOW confidence)
+ *    │                                   ├── coolStreak >= cool ──► COLD ────┘
+ *    │                                   │        (MEDIUM/LOW confidence)
+ *    │                                   │
+ *    │                                   └── evictStale (stale) ──► broadcast COOL ──► (removed)
+ *    │                                              |                     (CONFIRMED_HOT or PRE_COOLING,
+ *    │                                              |                      staleAfterMs = 2 × coolDurationMs)
  *    └──── hotStreak > 0 ───────────────────────────┘
  *                              (silent revive)
  * </pre>
@@ -81,6 +86,15 @@ import lombok.extern.slf4j.Slf4j;
  *       in PRE_COOLING for another window</li>
  *   <li><b>Silent revive:</b> PRE_COOLING + hot window → CONFIRMED_HOT
  *       with no broadcast (regardless of confidence)</li>
+ *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs every
+ *       {@code evict-interval-ms} (default 30s) and scans for keys whose
+ *       {@code lastUpdateTime} exceeds {@code 2 × coolDurationMs}. Any
+ *       key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
+ *       the {@code onCoolEvict} callback to broadcast COOL to all app
+ *       instances, then removes the key from the state map. This is the
+ *       safety net that cleans up keys left in HOT state after the
+ *       worker has stopped receiving reports (e.g. the app instance died
+ *       or the network partition healed).</li>
  * </ul>
  *
  * <h3>Thread safety</h3>
@@ -470,7 +484,8 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
    * @param staleAfterMs maximum idle time in milliseconds before a key is evicted
    */
   @Override
-  public void evictStale(long staleAfterMs) {
+  @SuppressWarnings("all")
+  public void evictStale(long staleAfterMs, Consumer<String> onCoolEvict) {
     long now = System.currentTimeMillis();
 
     // Phase 1: lock-free scan to collect candidates that appear stale.
@@ -492,6 +507,12 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
           try {
             KeyState state = states.get(key);
             if (state != null && now - state.lastUpdateTime > staleAfterMs) {
+              if (state.currentState == CONFIRMED_HOT || state.currentState == PRE_COOLING) {
+                // handle the key can not be evicted silently,
+                // we need to broadcast COOL to the app if the key is still HOT or PRE_COOLING
+                onCoolEvict.accept(key);
+                log.info("Stale HOT key evicted, COOL broadcast triggered: key={}", key);
+              }
               states.remove(key);
             }
           } finally {

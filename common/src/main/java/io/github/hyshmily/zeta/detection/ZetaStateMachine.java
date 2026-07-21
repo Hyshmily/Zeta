@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
+import java.util.function.Consumer;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -43,13 +44,15 @@ import io.github.hyshmily.zeta.model.ZetaDecision;
  *    ▲                                                                        │
  *    │                                  PRE_COOLING ◄──────coolStreak >= grace─┤
  *    │                                   │                                   │
-   *    │                                   └──coolStreak >= coolCount──► COLD──┘
-   *    │                                        (MEDIUM/LOW confidence)
+ *    │                                   ├──coolStreak >= coolCount──► COLD──┘
+ *    │                                   │        (MEDIUM/LOW confidence)
+ *    │                                   │
+ *    │                                   └──evictStale (stale)──► broadcast COOL ──► (removed)
+ *    │                                                                         (CONFIRMED_HOT or PRE_COOLING,
+ *    │                                                                          staleAfterMs = 2 × coolDurationMs)
  *    └──── hotStreak > 0 ───────────────────────────┘
  *                              (silent revive, no broadcast)
  * </pre>
- *
- * <p>Key design properties:
  * <ul>
  *   <li><b>Bayesian-primary gating:</b> {@code confirmCount} is a minimal
  *       floor (1 window by default). Bayesian confidence is the sole
@@ -66,11 +69,19 @@ import io.github.hyshmily.zeta.model.ZetaDecision;
  *   <li><b>Silent revive:</b> during PRE_COOLING, a single hot window silently
  *       returns the key to CONFIRMED_HOT without broadcasting, preventing
  *       HOT/COOL oscillation.</li>
+ *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs every
+ *       {@code evict-interval-ms} (default 30s) and scans for keys whose
+ *       {@code lastUpdateTime} exceeds {@code 2 × coolDurationMs}. Any
+ *       key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
+ *       the {@code onCoolEvict} callback to broadcast COOL to all app
+ *       instances, then removes the key from the state map. This is the
+ *       safety net that cleans up keys left in HOT state after the
+ *       worker has stopped receiving reports (e.g. the app instance died
+ *       or the network partition healed).</li>
  * </ul>
  */
 @Internal
 public interface ZetaStateMachine {
-
   /** Key-level lifecycle stages. */
   enum State {
     /** Default state — key is not hot, no tracking state exists. */
@@ -131,7 +142,7 @@ public interface ZetaStateMachine {
   int getTrackedKeys();
 
   /** Garbage-collect stale keys. */
-  void evictStale(long staleAfterMs);
+  void evictStale(long staleAfterMs, Consumer<String> onCoolEvict);
 
   /**
    * Return a snapshot of the current state for a key.

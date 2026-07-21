@@ -127,7 +127,7 @@ class ZetaStateMachineTest {
   void evictStale_shouldRemoveOldKeys() throws InterruptedException {
     machine.evaluate("staleKey", true, CTX);
     Thread.sleep(50);
-    machine.evictStale(10);
+    machine.evictStale(10, k -> {});
     assertThat(machine.evaluate("staleKey", false, CTX).type()).isEqualTo(DecisionType.NONE);
   }
 }
