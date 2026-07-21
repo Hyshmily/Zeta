@@ -238,7 +238,11 @@ public class SingleFlightImpl implements SingleFlight {
     if (cause instanceof InterruptedException) {
       Thread.currentThread().interrupt();
     }
-    if (cause instanceof RuntimeException re) throw re;
-    if (cause instanceof Error err) throw err;
+    if (cause instanceof RuntimeException re) {
+      throw re;
+    }
+    if (cause instanceof Error err) {
+      throw err;
+    }
   }
 }

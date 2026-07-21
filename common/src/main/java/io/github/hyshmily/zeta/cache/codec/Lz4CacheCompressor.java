@@ -59,8 +59,12 @@ public class Lz4CacheCompressor implements CacheCompressor {
 
   @Override
   public Object wrap(Object value) {
-    if (value instanceof String s) return wrapString(s);
-    if (value instanceof byte[] b) return wrapBytes(b);
+    if (value instanceof String s) {
+      return wrapString(s);
+    }
+    if (value instanceof byte[] b) {
+      return wrapBytes(b);
+    }
     return value;
   }
 
@@ -94,8 +98,12 @@ public class Lz4CacheCompressor implements CacheCompressor {
 
   @Override
   public Object unwrap(Object stored) throws IOException {
-    if (!(stored instanceof byte[] b)) return stored;
-    if (b.length < 1) return stored;
+    if (!(stored instanceof byte[] b)) {
+      return stored;
+    }
+    if (b.length < 1) {
+      return stored;
+    }
 
     return switch (b[0]) {
       case FLAG_RAW -> new String(b, 1, b.length - 1, UTF_8);
@@ -107,7 +115,9 @@ public class Lz4CacheCompressor implements CacheCompressor {
   }
 
   private byte[] decompress(byte[] compressed) throws IOException {
-    if (compressed.length < 5) throw new IOException("Truncated LZ4 data");
+    if (compressed.length < 5) {
+      throw new IOException("Truncated LZ4 data");
+    }
     int originalLen = readLen(compressed);
     if (originalLen <= 0 || originalLen > 100_000_000) {
       throw new IOException("Invalid decompressed length: " + originalLen);

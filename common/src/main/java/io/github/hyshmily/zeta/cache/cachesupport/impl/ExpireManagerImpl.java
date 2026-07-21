@@ -165,6 +165,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param entry the cache entry to inspect
    * @return {@code true} if the entry has logically expired
    */
+  @Override
   public boolean isLogicallyExpired(CacheEntry entry) {
     return entry.getHardExpireAtMs() != Long.MAX_VALUE && TimeSource.currentTimeMillis() >= entry.getHardExpireAtMs();
   }
@@ -180,6 +181,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param raw      the raw value from the Caffeine cache
    * @return {@code true} if the entry was expired and has been invalidated
    */
+  @Override
   public boolean invalidateIfIsLogicallyExpired(String cacheKey, Object raw) {
     if (raw instanceof CacheEntry ce && isLogicallyExpired(ce)) {
       caffeineCache.invalidate(cacheKey);
@@ -189,6 +191,7 @@ public class ExpireManagerImpl implements ExpireManager {
     return false;
   }
 
+  @Override
   public long computeNullExpireAt(long nullTtlMs) {
     long effective = nullTtlMs > 0 ? nullTtlMs : ttlConfig.effectiveNullTtlMs();
     return toHardExpireTimestamp(effective);
@@ -201,6 +204,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param hardTtlMs the hard TTL duration in milliseconds (&lt;= 0 uses configured default)
    * @return absolute epoch-ms timestamp for hard expiry
    */
+  @Override
   public long computeHardExpireAt(long hardTtlMs) {
     return toHardExpireTimestamp(resolveEffectiveHardTtl(hardTtlMs));
   }
@@ -211,6 +215,7 @@ public class ExpireManagerImpl implements ExpireManager {
    *
    * @return absolute epoch-ms timestamp for hot-key hard expiry
    */
+  @Override
   public long computeHotHardExpireAt() {
     return toHardExpireTimestamp(ttlConfig.effectiveHotHardTtlMs());
   }
@@ -220,6 +225,7 @@ public class ExpireManagerImpl implements ExpireManager {
    *
    * @return absolute epoch-ms timestamp for hot-key soft expiry, or 0 if disabled
    */
+  @Override
   public long computeHotSoftExpireAt() {
     return toSoftExpireTimestamp(ttlConfig.effectiveHotSoftTtlMs());
   }
@@ -231,6 +237,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param softTtlMs the soft TTL duration in milliseconds (&lt;= 0 uses configured default)
    * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
    */
+  @Override
   public long computeSoftExpireAt(long softTtlMs) {
     if (!isSoftExpireEnabled()) {
       return 0L;
@@ -243,6 +250,7 @@ public class ExpireManagerImpl implements ExpireManager {
    *
    * @return effective hard TTL duration in milliseconds
    */
+  @Override
   public long getEffectiveHardTtlMs() {
     return ttlConfig.effectiveHardTtlMs();
   }
@@ -254,6 +262,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param hardTtlMs hard TTL override ({@code 0} or negative uses default)
    * @return effective hard TTL duration in milliseconds
    */
+  @Override
   public long resolveEffectiveHardTtl(long hardTtlMs) {
     return hardTtlMs > 0 ? hardTtlMs : getEffectiveHardTtlMs();
   }
@@ -263,6 +272,7 @@ public class ExpireManagerImpl implements ExpireManager {
    *
    * @return effective hot hard TTL duration in milliseconds
    */
+  @Override
   public long getEffectiveHotHardTtlMs() {
     return ttlConfig.effectiveHotHardTtlMs();
   }
@@ -274,6 +284,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param hardTtlMs hard TTL override ({@code 0} or negative uses default)
    * @return effective hot-key hard TTL duration in milliseconds
    */
+  @Override
   public long resolveEffectiveHotHard(long hardTtlMs) {
     return hardTtlMs > 0 ? hardTtlMs : getEffectiveHotHardTtlMs();
   }
@@ -283,6 +294,7 @@ public class ExpireManagerImpl implements ExpireManager {
    *
    * @return effective soft TTL duration in milliseconds
    */
+  @Override
   public long getEffectiveSoftTtlMs() {
     return ttlConfig.effectiveSoftTtlMs();
   }
@@ -294,6 +306,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param softTtlMs soft TTL override ({@code 0} or negative uses default)
    * @return effective soft TTL duration in milliseconds
    */
+  @Override
   public long resolveEffectiveSoftTtl(long softTtlMs) {
     return softTtlMs > 0 ? softTtlMs : getEffectiveSoftTtlMs();
   }
@@ -303,6 +316,7 @@ public class ExpireManagerImpl implements ExpireManager {
    *
    * @return effective hot soft TTL duration in milliseconds
    */
+  @Override
   public long getEffectiveHotSoftTtlMs() {
     return ttlConfig.effectiveHotSoftTtlMs();
   }
@@ -314,6 +328,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param softTtlMs soft TTL override ({@code 0} or negative uses default)
    * @return effective hot-key soft TTL duration in milliseconds
    */
+  @Override
   public long resolveEffectiveHotSoft(long softTtlMs) {
     return softTtlMs > 0 ? softTtlMs : getEffectiveHotSoftTtlMs();
   }
@@ -343,6 +358,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param keyState           the initial key state (NORMAL, HOT, COOL)
    * @return a new {@link CacheEntry} with all fields set
    */
+  @Override
   public CacheEntry createBuilder(
     Object value,
     long dataVersion,
@@ -401,6 +417,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param keyState           the initial key state
    * @return a new {@link CacheEntry} with expire timestamps computed
    */
+  @Override
   public CacheEntry createBuilder(
     Object value,
     long dataVersion,
@@ -457,6 +474,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param keyState           the initial key state
    * @return a new {@link CacheEntry} with all fields set
    */
+  @Override
   public CacheEntry createBuilder(
     Object value,
     long dataVersion,
@@ -507,6 +525,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param keyState           the initial key state
    * @return a new {@link CacheEntry} with expire timestamps computed
    */
+  @Override
   public CacheEntry createBuilder(
     Object value,
     long dataVersion,
@@ -559,6 +578,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param softTtlMs  normal soft TTL duration in milliseconds
    * @return a new {@link CacheEntry} with the normal TTL fields updated
    */
+  @Override
   public CacheEntry applyNormalTtl(CacheEntry original, long hardTtlMs, long softTtlMs) {
     return original.withNormalTtl(hardTtlMs, softTtlMs);
   }
@@ -578,6 +598,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @return a new {@link CacheEntry} with the updated TTL timestamps,
    *         while keeping all version, state, and normal TTL fields unchanged
    */
+  @Override
   public CacheEntry applyTtl(CacheEntry original, long hardTtlMs, long softTtlMs) {
     return original.withTtl(hardTtlMs, softTtlMs, computeHardExpireAt(hardTtlMs), computeSoftExpireAt(softTtlMs));
   }
@@ -590,6 +611,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param hardTtlMs  hard TTL duration in milliseconds
    * @return a new {@link CacheEntry} with the updated hard TTL and expiration
    */
+  @Override
   public CacheEntry applyHardTtl(CacheEntry original, long hardTtlMs) {
     return original.withHardTtl(hardTtlMs, computeHardExpireAt(hardTtlMs));
   }
@@ -602,6 +624,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param softTtlMs  soft TTL duration in milliseconds
    * @return a new {@link CacheEntry} with the updated soft TTL and expiration
    */
+  @Override
   public CacheEntry applySoftTtl(CacheEntry original, long softTtlMs) {
     return original.withSoftTtl(softTtlMs, computeSoftExpireAt(softTtlMs));
   }
@@ -612,6 +635,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * Propagates {@link Long#MAX_VALUE} unchanged — used to signal permanent entries
    * (pure logical expiry with no hard TTL eviction).
    */
+  @Override
   public long toHardExpireTimestamp(long hardTtlMs) {
     return toHardExpireTimestamp(hardTtlMs, defaultTtlJitterRatio);
   }
@@ -625,6 +649,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param ttlJitterRatio the jitter ratio to apply (0.0–1.0)
    * @return absolute epoch-ms timestamp for hard expiry
    */
+  @Override
   public long toHardExpireTimestamp(long hardTtlMs, double ttlJitterRatio) {
     if (hardTtlMs == Long.MAX_VALUE) {
       return Long.MAX_VALUE;
@@ -642,6 +667,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param softTtlMs the soft TTL duration in milliseconds
    * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
    */
+  @Override
   public long toSoftExpireTimestamp(long softTtlMs) {
     return toSoftExpireTimestamp(softTtlMs, defaultTtlJitterRatio);
   }
@@ -655,6 +681,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param ttlJitterRatio the jitter ratio to apply (0.0–1.0)
    * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
    */
+  @Override
   public long toSoftExpireTimestamp(long softTtlMs, double ttlJitterRatio) {
     if (!isSoftExpireEnabled() || softTtlMs <= 0) {
       return 0L;
@@ -673,6 +700,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @return {@code true} if the entry's soft TTL has expired or the entry is absent
    * @throws IllegalStateException if soft expire is disabled
    */
+  @Override
   public boolean isSoftExpired(Object cacheEntry) {
     if (!isSoftExpireEnabled()) {
       throw new IllegalStateException("ExpireManager soft expire is disabled, isSoftExpired() should not be called");
@@ -702,6 +730,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param reader    the data-source supplier
    * @param softTtlMs the soft TTL to set on the refreshed entry (milliseconds)
    */
+  @Override
   @SuppressWarnings("java:S1181")
   public void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs) {
     if (!isSoftExpireEnabled()) {
@@ -906,6 +935,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param softTtlMs new soft TTL in milliseconds; {@code 0} to use the
    *                  configured hot soft TTL
    */
+  @Override
   public void extendExpiry(String cacheKey, long hardTtlMs, long softTtlMs) {
     long hard = resolveEffectiveHotHard(hardTtlMs);
     long soft = resolveEffectiveHotSoft(softTtlMs);
@@ -926,6 +956,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param hardTtlMs new hard TTL in milliseconds; {@code 0} to use the
    *                  configured hot hard TTL
    */
+  @Override
   public void extendHardExpiry(String cacheKey, long hardTtlMs) {
     long hard = resolveEffectiveHotHard(hardTtlMs);
     extendExpiry(cacheKey, hard, 0, true, false);
@@ -943,6 +974,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @param softTtlMs new soft TTL in milliseconds; {@code 0} to use the
    *                  configured hot soft TTL
    */
+  @Override
   public void extendSoftExpiry(String cacheKey, long softTtlMs) {
     long soft = resolveEffectiveHotSoft(softTtlMs);
     extendExpiry(cacheKey, 0, soft, false, true);
