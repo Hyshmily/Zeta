@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.*;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -96,6 +97,8 @@ public class KeyReporterImpl implements KeyReporter {
   /** Cluster health view for filtering dead Workers. */
   private final HealthView healthView;
 
+  private final SnowflakeIdGenerator snowflakeIdGenerator;
+
   private volatile int lastNodeCount = -1;
 
   /** Optional BBR adaptive rate limiter; null disables BBR gating. */
@@ -134,7 +137,8 @@ public class KeyReporterImpl implements KeyReporter {
     int queueOfferTimeoutMs,
     int consumerCount,
     RingManager ringManager,
-    HealthView healthView
+    HealthView healthView,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     this.reportPublisher = reportPublisher;
     this.scheduler = scheduler;
@@ -145,6 +149,7 @@ public class KeyReporterImpl implements KeyReporter {
     this.consumerCount = consumerCount;
     this.ringManager = ringManager;
     this.healthView = healthView;
+    this.snowflakeIdGenerator = snowflakeIdGenerator;
     this.reportBufferedCounter = new BufferedCounter(
       this::onFlush,
       MAX_BUFFER_SIZE,
@@ -172,6 +177,7 @@ public class KeyReporterImpl implements KeyReporter {
    *
    * @param cacheKey the accessed key
    */
+  @Override
   public void reportToWorker(String cacheKey) {
     reportBufferedCounter.count(cacheKey, TOPK_INCR);
   }
@@ -185,6 +191,7 @@ public class KeyReporterImpl implements KeyReporter {
    * to RabbitMQ runs on dedicated consumer threads, decoupling the flush
    * callback from network I/O.
    */
+  @Override
   public void start() {
     if (!started.compareAndSet(false, true)) {
       log.debug("KeyReporterImpl already started, skip");
@@ -226,6 +233,7 @@ public class KeyReporterImpl implements KeyReporter {
    *
    * <p>Idempotent — safe to call multiple times.
    */
+  @Override
   public void stop() {
     reportBufferedCounter.destroy();
     if (dispatcher != null) {
@@ -258,7 +266,11 @@ public class KeyReporterImpl implements KeyReporter {
       Set<String> aliveNodes = healthView.getAliveWorkerIds();
       if (aliveNodes.isEmpty()) {
         long total = workerDeadDropCounter.addAndGet(keyCounts.size());
-        log.warn("No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})", keyCounts.size(), total);
+        log.warn(
+          "No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})",
+          keyCounts.size(),
+          total
+        );
         return;
       }
 
@@ -315,6 +327,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @return queue depth (number of enqueued but not yet consumed batches),
    *         or {@code -1} if the dispatcher has not been started
    */
+  @Override
   public int dispatcherDepth() {
     return dispatcher == null ? -1 : dispatcher.depth();
   }
@@ -325,6 +338,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @return the queue capacity as configured via {@code queueCapacity},
    *         or {@code -1} if the dispatcher has not been started
    */
+  @Override
   public int dispatcherCapacity() {
     return dispatcher == null ? -1 : dispatcher.capacity();
   }
@@ -336,6 +350,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @return total expired batch count since startup, or {@code -1} if the
    *         dispatcher has not been started
    */
+  @Override
   public long dispatcherExpired() {
     return dispatcher == null ? -1 : dispatcher.expired();
   }
@@ -347,6 +362,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @return total dropped batch count since startup, or {@code -1} if the
    *         dispatcher has not been started
    */
+  @Override
   public long dispatcherDropped() {
     return dispatcher == null ? -1 : dispatcher.dropped();
   }
@@ -360,6 +376,7 @@ public class KeyReporterImpl implements KeyReporter {
    *
    * @return estimated number of unique keys with pending access counts
    */
+  @Override
   public long getPendingKeyCount() {
     return reportBufferedCounter.estimatedSizeOfKeysCount();
   }
@@ -371,6 +388,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @return total passed count, or {@code -1} if BBR rate limiting is disabled
    *         ({@link #bbrRateLimiter} is {@code null})
    */
+  @Override
   public long bbrPassed() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalPassed();
   }
@@ -381,6 +399,7 @@ public class KeyReporterImpl implements KeyReporter {
    *
    * @return total dropped count, or {@code -1} if BBR rate limiting is disabled
    */
+  @Override
   public long bbrDropped() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalDropped();
   }
@@ -392,6 +411,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @return current in-flight count (non-negative), or {@code -1} if BBR
    *         rate limiting is disabled
    */
+  @Override
   public long bbrInFlight() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getInFlight();
   }
@@ -407,6 +427,7 @@ public class KeyReporterImpl implements KeyReporter {
    * @return the computed max in-flight budget, or {@code -1} if BBR rate
    *         limiting is disabled
    */
+  @Override
   public long bbrMaxInFlight() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxInFlight();
   }
@@ -599,7 +620,10 @@ public class KeyReporterImpl implements KeyReporter {
         }
 
         try {
-          reportPublisher.publish(batch.target(), new ReportMessage(appName, batch.timestamp(), batch.counts()));
+          reportPublisher.publish(
+            batch.target(),
+            new ReportMessage(snowflakeIdGenerator.nextId(), appName, batch.timestamp(), batch.counts())
+          );
           if (limiter != null) {
             limiter.onSuccess(currentTimeMillis() - batch.timestamp());
           }

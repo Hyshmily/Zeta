@@ -61,6 +61,7 @@ public class SreRateLimiterImpl implements SreRateLimiter {
    *
    * @return {@code true} if the request is within the adaptive budget
    */
+  @Override
   public boolean tryAcquire() {
     long total = totalWindow.sum();
     if (total < minSamples) {
@@ -95,6 +96,7 @@ public class SreRateLimiterImpl implements SreRateLimiter {
    * (e.g. timeout, error response). This reduces the effective success rate and
    * tightens the adaptive budget for subsequent requests.
    */
+  @Override
   public void onFailed() {
     totalWindow.add(1);
   }

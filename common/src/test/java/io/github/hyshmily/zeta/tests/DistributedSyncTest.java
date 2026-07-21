@@ -28,6 +28,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -168,7 +169,7 @@ class DistributedSyncTest {
     void broadcastRefresh_setsCorrectHeaders() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       CacheSyncProperties props = new CacheSyncProperties();
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props);
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, mock(SnowflakeIdGenerator.class));
       pub.init();
 
       pub.broadcastRefresh("myKey", 42L, false);
@@ -186,7 +187,7 @@ class DistributedSyncTest {
     @DisplayName("broadcastLocalInvalidate sets correct headers and body")
     void broadcastLocalInvalidate_setsCorrectHeaders() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties());
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
       pub.init();
 
       pub.broadcastLocalInvalidate("del-key", 7L, true);
@@ -203,7 +204,7 @@ class DistributedSyncTest {
     @DisplayName("broadcastLocalInvalidateAll sends JSON array body")
     void broadcastLocalInvalidateAll_sendsJsonBody() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties());
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
       pub.init();
 
       pub.broadcastLocalInvalidateAll(List.of("k1", "k2"));
@@ -221,7 +222,7 @@ class DistributedSyncTest {
     @DisplayName("broadcastAllLocalRules sends rules JSON and version header")
     void broadcastAllLocalRules_setsRulesVersionHeader() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties());
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
       pub.init();
 
       pub.broadcastAllLocalRules("{\"v\":2}", 99L);
@@ -238,7 +239,7 @@ class DistributedSyncTest {
     @DisplayName("dedup composite key differs between degraded and normal")
     void dedupSeparatesDegradedAndNormal() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties());
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
       pub.init();
 
       pub.broadcastRefresh("k", 1L, false);
@@ -251,7 +252,7 @@ class DistributedSyncTest {
     @DisplayName("dedup blocks same degraded version re-send")
     void dedupBlocksDegradedResend() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties());
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
       pub.init();
 
       pub.broadcastRefresh("k", 5L, true);
@@ -265,7 +266,7 @@ class DistributedSyncTest {
     void publisher_handlesAmqpException() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       doThrow(new AmqpException("Broker down")).when(rt).send(anyString(), anyString(), any());
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties());
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
       pub.init();
 
       pub.broadcastRefresh("k", 1L, false);
@@ -440,9 +441,9 @@ class DistributedSyncTest {
     @Test
     @DisplayName("SyncMessage record equality works")
     void record_equality() {
-      SyncMessage a = new SyncMessage("k", "T", 1, false, 0);
-      SyncMessage b = new SyncMessage("k", "T", 1, false, 0);
-      SyncMessage c = new SyncMessage("k", "T", 2, false, 0);
+      SyncMessage a = new SyncMessage(0L, "k", "T", 1, false, 0);
+      SyncMessage b = new SyncMessage(0L, "k", "T", 1, false, 0);
+      SyncMessage c = new SyncMessage(0L, "k", "T", 2, false, 0);
       assertThat(a).isEqualTo(b);
       assertThat(a).isNotEqualTo(c);
       assertThat(a.hashCode()).isEqualTo(b.hashCode());
@@ -609,9 +610,9 @@ class DistributedSyncTest {
     @Test
     @DisplayName("WorkerMessage record equality works")
     void record_equality() {
-      WorkerMessage a = new WorkerMessage("k", "HOT", 1, 0, "w1", 1);
-      WorkerMessage b = new WorkerMessage("k", "HOT", 1, 0, "w1", 1);
-      WorkerMessage c = new WorkerMessage("k", "HOT", 2, 0, "w1", 1);
+      WorkerMessage a = new WorkerMessage(0L, "k", "HOT", 1, 0, "w1", 1);
+      WorkerMessage b = new WorkerMessage(0L, "k", "HOT", 1, 0, "w1", 1);
+      WorkerMessage c = new WorkerMessage(0L, "k", "HOT", 2, 0, "w1", 1);
       assertThat(a).isEqualTo(b);
       assertThat(a).isNotEqualTo(c);
     }
@@ -628,7 +629,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("toMessage sets all headers correctly")
     void toMessage_setsAllHeaders() {
-      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("w-42", 5L, 99L, 0.75, true, 3, 10, 2, 9999L);
+      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-42", 5L, 99L, 0.75, true, 3, 10, 2, 9999L);
       Message msg = hb.toMessage();
       MessageProperties h = msg.getMessageProperties();
       Object type = h.getHeader(HEADER_TYPE);
@@ -644,14 +645,14 @@ class DistributedSyncTest {
     @Test
     @DisplayName("toMessage body contains workerId")
     void toMessage_bodyIsWorkerId() {
-      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("w-x", 1L, 0L, 0.0, false, 0, 0, 0, 0L);
+      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-x", 1L, 0L, 0.0, false, 0, 0, 0, 0L);
       assertThat(new String(hb.toMessage().getBody(), StandardCharsets.UTF_8)).isEqualTo("w-x");
     }
 
     @Test
     @DisplayName("from round-trips correctly")
     void from_roundTrips() {
-      WorkerHeartbeatMessage original = new WorkerHeartbeatMessage("w-7", 3L, 42L, 0.5, true, 5, 8, 1, 7777L);
+      WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(0L, "w-7", 3L, 42L, 0.5, true, 5, 8, 1, 7777L);
       WorkerHeartbeatMessage restored = WorkerHeartbeatMessage.from(original.toMessage());
       assertThat(restored).isEqualTo(original);
     }
@@ -717,7 +718,7 @@ class DistributedSyncTest {
     }
 
     private static WorkerHeartbeatMessage hb(String workerId, boolean ready) {
-      return new WorkerHeartbeatMessage(workerId, 1, 0, 0.0, ready, 0, 0, 0, 0);
+      return new WorkerHeartbeatMessage(0L, workerId, 1, 0, 0.0, ready, 0, 0, 0, 0);
     }
 
     @Test

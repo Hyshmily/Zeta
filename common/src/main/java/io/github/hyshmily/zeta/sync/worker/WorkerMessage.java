@@ -51,6 +51,7 @@ import org.springframework.amqp.core.Message;
  */
 @Internal
 public record WorkerMessage(
+  long id,
   String cacheKey,
   String type,
   long decisionVersion,
@@ -89,6 +90,8 @@ public record WorkerMessage(
     long timestamp = msg.getMessageProperties().getHeader(HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
     String nodeId = msg.getMessageProperties().getHeader(HEADER_NODE_ID) instanceof String s ? s : null;
     long epoch = msg.getMessageProperties().getHeader(HEADER_EPOCH) instanceof Number n ? n.longValue() : 0L;
-    return new WorkerMessage(cacheKey, type, decisionVersion, timestamp, nodeId, epoch);
+    long id =
+      msg.getMessageProperties().getHeader(HEADER_MESSAGE_ID) instanceof Number n4 ? n4.longValue() : 0L;
+    return new WorkerMessage(id, cacheKey, type, decisionVersion, timestamp, nodeId, epoch);
   }
 }

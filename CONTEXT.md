@@ -27,6 +27,8 @@
 - **CANDIDATE_HOT** — State machine holding state for keys that crossed the hot-streak threshold but have only MEDIUM Bayesian confidence. Tracked internally, never broadcast. A single cold window drops back to COLD.
 - **Lock Hierarchy** — Three locking domains in strict ordinal order: (1) state machine per-key locks (`Striped.lock`), (2) HeavyKeeper sketch stripe locks (`synchronized(Object[])`), (3) HeavyKeeper admission lock (`ReentrantLock`). The first is highest in acquisition order; the last is lowest. No code path inside a higher-order lock may acquire a lower-order lock.
 - **SingleFlight** — Deduplication mechanism that coalesces concurrent loads for the same key into a single execution. Prevents thundering herd.
+- **SnowflakeIdGenerator** — Twitter-Snowflake style 64-bit ID generator producing time-sortable, cluster-unique IDs. Bit layout: `1s | 41ts | 2dc | 8worker | 12seq`. Uses `TimeSource` as cached clock. Worker ID derived from `InstanceIdGenerator.getNodeId()`. Attached to all message types (`ReportMessage`, `SyncMessage`, `WorkerMessage`, `WorkerHeartbeatMessage`) as trace ID via AMQP `messageId` header.
+- **StandardThreadExecutor** — Tomcat-style `ThreadPoolExecutor` with core→max→queue→reject ordering (vs JDK's core→queue→max→reject). Used for I/O-bound async cache operations. Replaces `ThreadPoolTaskExecutor` in `hotKeyExecutor` bean.
 - **Rule** — A cache access rule with a `pattern`, `action` (`BLOCK`/`ALLOW_NO_REPORT`/`ALLOW`), and `type` (`EXACT`/`PREFIX`/`WILDCARD`/`REGEX`). Rules are serialized to JSON for Redis persistence and AMQP broadcast. **JSON should include `"type"`** — the Java field initializer defaults to `RuleType.EXACT`, and `match()` defensively returns `false` if `type` is `null` (e.g. from manual `setType(null)`). Managed by `RuleMatcher`.
 
 ## Versions
@@ -34,7 +36,7 @@
 - **dataVersion** — Monotonically increasing counter (Redis INCR or node-local fallback). Orders data mutations across instances. May be **degraded** (local counter) when Redis is unavailable.
 - **decisionVersion** — Monotonically increasing `AtomicLong` on the Worker. Orders HOT/COOL decisions. Never degraded. Independent of dataVersion.
 - **rulesVersion** — Monotonically increasing `AtomicLong` in `RuleMatcher`. Orders rule set changes across instances. Used to prevent stale rule broadcasts from overwriting newer rule sets. Independent of both dataVersion and decisionVersion.
-- **Degraded Version** — A dataVersion produced by the node-local fallback counter (`Long.MIN_VALUE + counter`). Marked with `isVersionDegraded=true`. Never wins against a normal (Redis) version in broadcast comparisons.
+- **Degraded Version** — A dataVersion produced when Redis is unavailable. Previously `Long.MIN_VALUE + localCounter` (per-JVM partitioned); now `Long.MIN_VALUE + SnowflakeId` (globally time-sortable, cross-instance comparable). Marked with `isVersionDegraded=true`. Always loses against a normal (Redis) version in broadcast comparisons — the `Long.MIN_VALUE` offset ensures degraded versions sort below any positive Redis INCR value.
 
 ## Lifecycle
 

@@ -24,6 +24,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import jakarta.annotation.PostConstruct;
 import java.nio.charset.StandardCharsets;
@@ -89,6 +90,8 @@ public class CacheSyncPublisher {
    * Configuration for sync exchange name, dedup window, and other sync settings.
    */
   private final CacheSyncProperties properties;
+
+  private final SnowflakeIdGenerator snowflakeIdGenerator;
 
   /**
    * Dedup cache keyed by {@code "type:cacheKey"} → dataVersion. Prevents
@@ -219,6 +222,7 @@ public class CacheSyncPublisher {
         String json = OBJECT_MAPPER.writeValueAsString(batch);
         MessageProperties props = new MessageProperties();
         props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
+        props.setHeader(HEADER_MESSAGE_ID, snowflakeIdGenerator.nextId());
         Message message = new Message(json.getBytes(StandardCharsets.UTF_8), props);
 
         rabbitTemplate.send(properties.getExchangeName(), "", message);
@@ -256,6 +260,7 @@ public class CacheSyncPublisher {
       MessageProperties props = new MessageProperties();
       props.setHeader(HEADER_TYPE, SyncMessage.TYPE_RULES_SYNC);
       props.setHeader(HEADER_RULES_VERSION, rulesVersion);
+      props.setHeader(HEADER_MESSAGE_ID, snowflakeIdGenerator.nextId());
       Message message = new Message(rulesJson.getBytes(StandardCharsets.UTF_8), props);
 
       rabbitTemplate.send(properties.getExchangeName(), "", message);
@@ -332,6 +337,7 @@ public class CacheSyncPublisher {
       props.setHeader(HEADER_TYPE, type);
       props.setHeader(HEADER_VERSION, version);
       props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
+      props.setHeader(HEADER_MESSAGE_ID, snowflakeIdGenerator.nextId());
 
       Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
 

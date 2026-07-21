@@ -39,6 +39,7 @@ import io.github.hyshmily.zeta.rule.Rule.RuleAction;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import java.util.Arrays;
 import java.util.List;
@@ -57,6 +58,8 @@ import org.junit.jupiter.api.Test;
  * Tests for {@link HotKeyCache}, covering peek, get, invalidate, and blacklist behaviors.
  */
 class ZetaCacheTest {
+
+  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1);
 
   private HotKeyDetector hotKeyDetector;
   private Cache<String, Object> caffeineCache;
@@ -90,7 +93,7 @@ class ZetaCacheTest {
         hotKeyDetector
       ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-      new VersionControllerImpl(Optional.empty(), 60),
+      new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
       ttlConfig,
       mock(HealthView.class),
       CacheCompressor.NONE
@@ -315,7 +318,7 @@ class ZetaCacheTest {
         hotKeyDetector
       ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-      new VersionControllerImpl(Optional.empty(), 60),
+      new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
       props,
       mock(HealthView.class),
       CacheCompressor.NONE
@@ -1208,6 +1211,8 @@ class ZetaCacheTest {
   @DisplayName("Hot path detection and promotion")
   class HotPathTest {
 
+    private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1);
+
     private HotKeyDetector hotKeyDetector;
     private Cache<String, Object> caffeineCache;
     private SingleFlight singleFlight;
@@ -1245,7 +1250,7 @@ class ZetaCacheTest {
         executor,
         new CentralDispatcher(Optional.of(reporter), Optional.of(publisher), broadcastBuffer, hotKeyDetector),
         new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-        new VersionControllerImpl(Optional.empty(), 60),
+        new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
         ttlConfig,
         healthView,
         CacheCompressor.NONE

@@ -17,7 +17,7 @@ package io.github.hyshmily.zeta.util.version.impl;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.util.List;
@@ -51,8 +51,8 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
  * @see VersionGuard
  */
 @Internal
-@RequiredArgsConstructor
 @Slf4j
+@RequiredArgsConstructor
 public class VersionControllerImpl implements VersionController {
 
   /** Optional Redis template — absent when Redis is not configured. */
@@ -62,12 +62,10 @@ public class VersionControllerImpl implements VersionController {
   /** TTL (minutes) for the per-key version keys in Redis. */
   private final int versionKeyTtlMinutes;
 
-  /**
-   * Local counter used when Redis is unavailable. Each call to {@link #fallbackVersion()}
-   * increments this counter. The resulting version is computed as
-   * {@code Long.MIN_VALUE + increment}, ensuring all degraded versions sort below
-   * any positive Redis INCR version in numeric comparison.
-   */
+  /** Snowflake ID generator for time-sortable, globally unique degraded versions. */
+  private final SnowflakeIdGenerator snowflakeIdGenerator;
+
+  /** Counter tracking total degraded version allocations since startup. */
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
 
   /** Holder for the Redis INCR script — lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
@@ -98,6 +96,7 @@ public class VersionControllerImpl implements VersionController {
    *         {@code degraded} flag indicating whether the version came from the
    *         local fallback ({@code true}) or from Redis ({@code false})
    */
+  @Override
   public VersionResult nextVersion(String cacheKey) {
     return redisTemplate
       .map(t -> {
@@ -119,18 +118,19 @@ public class VersionControllerImpl implements VersionController {
   /**
    * Allocates a version in the negative {@code long} space for degraded operation.
    *
-   * <p>The version is computed as {@code Long.MIN_VALUE + incrementing counter},
-   * ensuring that every degraded version is numerically less than any positive
-   * Redis INCR version. This guarantees that the numeric comparison in
-   * {@link CacheSyncPublisher #sendDeduped} and {@link io.github.hyshmily.zeta.util.version.VersionGuard#shouldSkipForSync}
-   * correctly prefers normal (Redis-backed) broadcasts over degraded ones without
-   * requiring flag-aware logic.
+   * <p>The version is computed as {@code Long.MIN_VALUE + Snowflake ID}, ensuring
+   * that every degraded version is numerically less than any positive Redis INCR
+   * version. Snowflake IDs provide global time-sortability, so degraded versions
+   * from different instances are directly comparable — unlike the previous per-JVM
+   * counter approach that added a local counter to {@code Long.MIN_VALUE}.
    *
    * @return a {@link VersionResult} with a negative version and {@code degraded=true},
    *         never null
    */
+  @Override
   public VersionResult fallbackVersion() {
-    long version = Long.MIN_VALUE + fallbackVersionCounter.incrementAndGet();
+    fallbackVersionCounter.incrementAndGet();
+    long version = Long.MIN_VALUE + snowflakeIdGenerator.nextId();
     return new VersionResult(version, true);
   }
 
@@ -140,6 +140,7 @@ public class VersionControllerImpl implements VersionController {
    * @return {@code true} if a {@link StringRedisTemplate} bean is available;
    *         {@code false} if only local fallback is possible
    */
+  @Override
   public boolean isRedisConfigured() {
     return redisTemplate.isPresent();
   }
@@ -153,6 +154,7 @@ public class VersionControllerImpl implements VersionController {
    *
    * @return the total number of degraded version allocations since startup
    */
+  @Override
   public long getDegradedVersionCount() {
     return fallbackVersionCounter.get();
   }

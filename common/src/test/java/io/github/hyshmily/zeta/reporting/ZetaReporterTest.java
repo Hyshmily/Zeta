@@ -30,6 +30,7 @@ import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -84,7 +85,8 @@ class ZetaReporterTest {
       100,
       1,
       ringManager,
-      healthView
+      healthView,
+      mock(SnowflakeIdGenerator.class)
     );
   }
 
@@ -95,7 +97,7 @@ class ZetaReporterTest {
   }
 
   private static void registerWorker(HealthView hv, String workerId) {
-    hv.onHeartbeat(new WorkerHeartbeatMessage(workerId, 1, 0, 0.0, true, 0, 0, 0, 0));
+    hv.onHeartbeat(new WorkerHeartbeatMessage(0L, workerId, 1, 0, 0.0, true, 0, 0, 0, 0));
   }
 
   private void awaitPublish(int minCount) throws InterruptedException {
@@ -334,7 +336,8 @@ class ZetaReporterTest {
       100,
       1,
       ringManager,
-      healthView
+      healthView,
+      mock(SnowflakeIdGenerator.class)
     );
     failingReporter.start();
     assertThat(failingReporter.dispatcherDepth()).isNotNegative();

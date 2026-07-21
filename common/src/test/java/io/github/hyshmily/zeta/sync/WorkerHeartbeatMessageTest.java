@@ -30,7 +30,7 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void toMessage_shouldSetAllHeaders() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("worker-1", 5L, 42L, 0.75, true, 3, 10, 2, 9999L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "worker-1", 5L, 42L, 0.75, true, 3, 10, 2, 9999L);
     Message msg = hb.toMessage();
     var h = msg.getMessageProperties();
     assertThat((String) h.getHeader(HEADER_TYPE)).isEqualTo(WorkerHeartbeatMessage.TYPE);
@@ -47,14 +47,14 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void toMessage_bodyShouldBeWorkerIdBytes() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("worker-x", 1L, 0L, 0.0, false, 0, 0, 0, 0L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "worker-x", 1L, 0L, 0.0, false, 0, 0, 0, 0L);
     Message msg = hb.toMessage();
     assertThat(new String(msg.getBody(), StandardCharsets.UTF_8)).isEqualTo("worker-x");
   }
 
   @Test
   void from_shouldRoundTrip() {
-    WorkerHeartbeatMessage original = new WorkerHeartbeatMessage("w-42", 7L, 99L, 0.5, true, 5, 8, 1, 7777L);
+    WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(0L, "w-42", 7L, 99L, 0.5, true, 5, 8, 1, 7777L);
     Message msg = original.toMessage();
     WorkerHeartbeatMessage restored = WorkerHeartbeatMessage.from(msg);
     assertThat(restored).isEqualTo(original);
@@ -130,7 +130,7 @@ class WorkerHeartbeatMessageTest {
 
   @Test
   void constructor_shouldSetAllFields() {
-    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage("w-1", 2L, 4L, 0.5, true, 6, 7, 8, 9L);
+    WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-1", 2L, 4L, 0.5, true, 6, 7, 8, 9L);
     assertThat(hb.workerId()).isEqualTo("w-1");
     assertThat(hb.epoch()).isEqualTo(2L);
     assertThat(hb.decisionVersionHwm()).isEqualTo(4L);

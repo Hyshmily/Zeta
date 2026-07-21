@@ -26,6 +26,7 @@ import static org.mockito.Mockito.anyLong;
 
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.Executors;
@@ -121,7 +122,8 @@ class WorkerHeartbeatProducerTest {
         configTimestampCounter,
         redisFactoryMock,
         PING_INTERVAL_MS,
-        mock(ScheduledExecutorService.class)
+        mock(ScheduledExecutorService.class),
+        mock(SnowflakeIdGenerator.class)
       );
       producer.sendHeartbeat();
 
@@ -337,7 +339,8 @@ class WorkerHeartbeatProducerTest {
         configTimestampCounter,
         redisFactoryMock,
         PING_INTERVAL_MS,
-        schedulerMock
+        schedulerMock,
+        mock(SnowflakeIdGenerator.class)
       );
       producer.start();
       producer.stop();
@@ -405,7 +408,8 @@ class WorkerHeartbeatProducerTest {
       stateMachine,
       broadcaster,
       configTimestampCounter,
-      PING_INTERVAL_MS
+      PING_INTERVAL_MS,
+      mock(SnowflakeIdGenerator.class)
     );
   }
 

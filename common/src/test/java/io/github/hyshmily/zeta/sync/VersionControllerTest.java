@@ -20,6 +20,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionController.VersionResult;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
@@ -38,11 +39,13 @@ class VersionControllerTest {
 
   private VersionController controller;
   private StringRedisTemplate redisTemplate;
+  private SnowflakeIdGenerator snowflake;
 
   @BeforeEach
   void setUp() {
+    snowflake = new SnowflakeIdGenerator(0, 1);
     redisTemplate = mock(StringRedisTemplate.class);
-    controller = new VersionControllerImpl(Optional.of(redisTemplate), 10);
+    controller = new VersionControllerImpl(Optional.of(redisTemplate), 10, snowflake);
   }
 
   /**
@@ -120,7 +123,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_withEmptyRedisTemplate_shouldAlwaysBeDegraded() {
-    VersionController noRedis = new VersionControllerImpl(Optional.empty(), 10);
+    VersionController noRedis = new VersionControllerImpl(Optional.empty(), 10, snowflake);
     VersionResult r1 = noRedis.nextVersion("key1");
     assertThat(r1.dataVersion()).isNegative();
     assertThat(r1.degraded()).isTrue();
@@ -184,7 +187,7 @@ class VersionControllerTest {
    */
   @Test
   void fallbackVersion_shouldNotOverflowToPositive() {
-    VersionController vc = new VersionControllerImpl(Optional.empty(), 10);
+    VersionController vc = new VersionControllerImpl(Optional.empty(), 10, snowflake);
     for (int i = 0; i < 100_000; i++) {
       VersionResult r = vc.fallbackVersion();
       assertThat(r.dataVersion()).isNegative();
@@ -217,7 +220,7 @@ class VersionControllerTest {
    */
   @Test
   void isRedisConfigured_withoutRedis_shouldReturnFalse() {
-    VersionController noRedis = new VersionControllerImpl(Optional.empty(), 10);
+    VersionController noRedis = new VersionControllerImpl(Optional.empty(), 10, snowflake);
     assertThat(noRedis.isRedisConfigured()).isFalse();
   }
 
@@ -237,7 +240,7 @@ class VersionControllerTest {
    */
   @Test
   void nextVersion_withZeroTtl_shouldStillIncrement() {
-    VersionController zeroTtl = new VersionControllerImpl(Optional.of(redisTemplate), 0);
+    VersionController zeroTtl = new VersionControllerImpl(Optional.of(redisTemplate), 0, snowflake);
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(7L);
     VersionResult result = zeroTtl.nextVersion("key1");
     assertThat(result.dataVersion()).isEqualTo(7L);

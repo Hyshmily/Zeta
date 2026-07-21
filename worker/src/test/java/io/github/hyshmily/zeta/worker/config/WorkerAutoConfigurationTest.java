@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.detection.*;
 import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
@@ -487,6 +488,11 @@ class WorkerAutoConfigurationTest {
     @Bean("hotKeyScheduler")
     ScheduledExecutorService hotKeyScheduler() {
       return Executors.newSingleThreadScheduledExecutor();
+    }
+
+    @Bean
+    SnowflakeIdGenerator snowflakeIdGenerator() {
+      return org.mockito.Mockito.mock(SnowflakeIdGenerator.class);
     }
   }
 

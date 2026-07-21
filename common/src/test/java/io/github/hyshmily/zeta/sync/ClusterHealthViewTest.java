@@ -37,11 +37,11 @@ class ClusterHealthViewTest {
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, long epoch, boolean ready) {
-    return new WorkerHeartbeatMessage(workerId, epoch, 0, 0.0, ready, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(0L, workerId, epoch, 0, 0.0, ready, 0, 0, 0, 0);
   }
 
   private static WorkerHeartbeatMessage hbWithHwm(String workerId, long epoch, boolean ready, long hwm) {
-    return new WorkerHeartbeatMessage(workerId, epoch, hwm, 0.0, ready, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(0L, workerId, epoch, hwm, 0.0, ready, 0, 0, 0, 0);
   }
 
   // ── onHeartbeat ──

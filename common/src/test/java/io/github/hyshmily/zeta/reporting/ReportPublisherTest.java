@@ -46,7 +46,7 @@ class ReportPublisherTest {
    */
   @Test
   void publish_shouldSendToCorrectRoutingKey() {
-    ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
+    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, Map.of("key1", 5L));
     publisher.publish("0", message);
     verify(rabbitTemplate).convertAndSend(
       eq(ZetaConstants.Exchange.REPORT),
@@ -57,7 +57,7 @@ class ReportPublisherTest {
 
   @Test
   void publish_withEmptyTarget_shouldSendCorrectly() {
-    ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
+    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, Map.of("key1", 5L));
     publisher.publish("", message);
     verify(rabbitTemplate).convertAndSend(
       eq(ZetaConstants.Exchange.REPORT),
@@ -73,7 +73,7 @@ class ReportPublisherTest {
 
   @Test
   void publish_whenAmqpException_shouldThrowToCaller() {
-    ReportMessage message = new ReportMessage("testApp", 1000L, Map.of("key1", 5L));
+    ReportMessage message = new ReportMessage(0L, "testApp", 1000L, Map.of("key1", 5L));
     doThrow(new AmqpException("Broker unavailable"))
       .when(rabbitTemplate)
       .convertAndSend(

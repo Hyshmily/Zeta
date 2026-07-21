@@ -62,7 +62,7 @@ import org.springframework.amqp.core.Message;
  *                          {@link ZetaConstants.Version#VERSION_DEFAULT} (0) for other types
  */
 @Internal
-public record SyncMessage(String cacheKey, String type, long version, boolean isVersionDegraded, long rulesVersion) {
+public record SyncMessage(long id, String cacheKey, String type, long version, boolean isVersionDegraded, long rulesVersion) {
   /** Invalidates a single cache key across all peer instances. */
   public static final String TYPE_INVALIDATE = "INVALIDATE";
 
@@ -123,7 +123,9 @@ public record SyncMessage(String cacheKey, String type, long version, boolean is
       msg.getMessageProperties().getHeader(HEADER_RULES_VERSION) instanceof Number n2
         ? n2.longValue()
         : VERSION_DEFAULT;
+    long id =
+      msg.getMessageProperties().getHeader(HEADER_MESSAGE_ID) instanceof Number n3 ? n3.longValue() : 0L;
 
-    return new SyncMessage(cacheKey, type, version, isVersionDegraded, rulesVersion);
+    return new SyncMessage(id, cacheKey, type, version, isVersionDegraded, rulesVersion);
   }
 }

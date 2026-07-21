@@ -20,6 +20,7 @@ import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.detection.*;
@@ -346,14 +347,16 @@ public class WorkerAutoConfiguration {
     RabbitTemplate rabbitTemplate,
     WorkerProperties properties,
     @Qualifier("workerNodeId") String nodeId,
-    @Qualifier("workerEpochCounter") AtomicLong epochCounter
+    @Qualifier("workerEpochCounter") AtomicLong epochCounter,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     return new WorkerBroadcaster(
       rabbitTemplate,
       properties.getMessaging().getBroadcastExchange(),
       properties.getRouting().getAppName(),
       nodeId,
-      epochCounter
+      epochCounter,
+      snowflakeIdGenerator
     );
   }
 
@@ -791,7 +794,8 @@ public class WorkerAutoConfiguration {
     WorkerBroadcaster broadcaster,
     @Qualifier("workerEpochCounter") AtomicLong epochCounter,
     @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     return new WorkerHeartbeatProducer(
       rabbitTemplate,
@@ -802,7 +806,8 @@ public class WorkerAutoConfiguration {
       configTimestampCounter,
       epochCounter.get(),
       properties.getHeartbeat().getPingIntervalMs(),
-      scheduler
+      scheduler,
+      snowflakeIdGenerator
     );
   }
 }

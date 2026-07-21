@@ -30,7 +30,7 @@ class ReportMessageTest {
    */
   @Test
   void shouldCreateReportMessage() {
-    ReportMessage msg = new ReportMessage("app1", 1000L, Map.of("key1", 5L, "key2", 3L));
+    ReportMessage msg = new ReportMessage(0L, "app1", 1000L, Map.of("key1", 5L, "key2", 3L));
     assertThat(msg.appName()).isEqualTo("app1");
     assertThat(msg.timestamp()).isEqualTo(1000L);
     assertThat(msg.counts()).hasSize(2);
@@ -38,33 +38,33 @@ class ReportMessageTest {
 
   @Test
   void emptyCountsMap_shouldBeAccepted() {
-    ReportMessage msg = new ReportMessage("app1", 1000L, Map.of());
+    ReportMessage msg = new ReportMessage(0L, "app1", 1000L, Map.of());
     assertThat(msg.counts()).isEmpty();
   }
 
   @Test
   void nullAppName_shouldBeAccepted() {
-    ReportMessage msg = new ReportMessage(null, 1000L, Map.of("k", 1L));
+    ReportMessage msg = new ReportMessage(0L, null, 1000L, Map.of("k", 1L));
     assertThat(msg.appName()).isNull();
   }
 
   @Test
   void nullCountsMap_shouldBeAccepted() {
-    ReportMessage msg = new ReportMessage("app1", 1000L, null);
+    ReportMessage msg = new ReportMessage(0L, "app1", 1000L, null);
     assertThat(msg.counts()).isNull();
   }
 
   @Test
   void negativeTimestamp_shouldBeAccepted() {
-    ReportMessage msg = new ReportMessage("app1", -1L, Map.of("k", 1L));
+    ReportMessage msg = new ReportMessage(0L, "app1", -1L, Map.of("k", 1L));
     assertThat(msg.timestamp()).isNegative();
   }
 
   @Test
   void equalsAndHashCode_shouldWork() {
-    ReportMessage a = new ReportMessage("app", 1L, Map.of("k", 1L));
-    ReportMessage b = new ReportMessage("app", 1L, Map.of("k", 1L));
-    ReportMessage c = new ReportMessage("app", 1L, Map.of("k", 2L));
+    ReportMessage a = new ReportMessage(0L, "app", 1L, Map.of("k", 1L));
+    ReportMessage b = new ReportMessage(0L, "app", 1L, Map.of("k", 1L));
+    ReportMessage c = new ReportMessage(0L, "app", 1L, Map.of("k", 2L));
     assertThat(a).isEqualTo(b);
     assertThat(a).hasSameHashCodeAs(b);
     assertThat(a).isNotEqualTo(c);
@@ -72,14 +72,14 @@ class ReportMessageTest {
 
   @Test
   void toString_shouldNotBeNull() {
-    ReportMessage msg = new ReportMessage("app", 1L, Map.of("k", 1L));
+    ReportMessage msg = new ReportMessage(0L, "app", 1L, Map.of("k", 1L));
     assertThat(msg.toString()).isNotNull();
   }
 
   @Test
   void veryLongAppName_shouldBeAccepted() {
     String longName = "a".repeat(10_000);
-    ReportMessage msg = new ReportMessage(longName, 1L, Map.of("k", 1L));
+    ReportMessage msg = new ReportMessage(0L, longName, 1L, Map.of("k", 1L));
     assertThat(msg.appName()).isEqualTo(longName);
   }
 }

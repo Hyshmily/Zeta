@@ -60,6 +60,7 @@ public class RingManagerImpl implements RingManager {
    * @param healthView the current cluster health view; must not be {@code null}
    * @throws NullPointerException if {@code healthView} is {@code null}
    */
+  @Override
   public synchronized void reconcileFromHealthView(HealthView healthView) {
     Set<String> alive = healthView.getAliveWorkerIds();
     Set<String> prev = ring.getNodes();
@@ -77,6 +78,7 @@ public class RingManagerImpl implements RingManager {
    *
    * @return the set of live node identifiers
    */
+  @Override
   public Set<String> getCurrentNodes() {
     return ring.getNodes();
   }
@@ -86,6 +88,7 @@ public class RingManagerImpl implements RingManager {
    *
    * @return the node count
    */
+  @Override
   public int nodeCount() {
     return ring.nodeCount();
   }
@@ -98,6 +101,7 @@ public class RingManagerImpl implements RingManager {
    * @return the node identifier that owns the key, or {@code null} if no node is available
    * @throws NullPointerException if {@code key} or {@code healthView} is {@code null}
    */
+  @Override
   public String routeNode(String key, HealthView healthView) {
     Set<String> alive = healthView.getAliveWorkerIds();
     return ring.locateNode(key, alive::contains);
@@ -113,6 +117,7 @@ public class RingManagerImpl implements RingManager {
    *                   be {@code null} or modified concurrently
    * @return the target Worker node id, or {@code null} if no alive nodes
    */
+  @Override
   public String routeNode(String key, Set<String> aliveNodes) {
     if (aliveNodes == null || aliveNodes.isEmpty()) {
       return null;

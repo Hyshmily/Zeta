@@ -70,6 +70,8 @@ public interface ZetaConstants {
     String HEADER_VERIFY_PONG = "PONG";
     /** Rule set version (rulesVersion). */
     String HEADER_RULES_VERSION = "rulesVersion";
+    /** Snowflake message ID for end-to-end tracing. */
+    String HEADER_MESSAGE_ID = "messageId";
   }
 
   /** Thread name prefixes for zeta thread pools. */

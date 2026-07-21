@@ -41,6 +41,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import java.util.concurrent.ScheduledExecutorService;
@@ -142,7 +143,8 @@ class ZetaAmqpAutoConfigurationTest {
       properties,
       new RingManagerImpl(150),
       healthViewProvider,
-      bbrProvider
+      bbrProvider,
+      mock(SnowflakeIdGenerator.class)
     );
 
     assertThat(reporter).isNotNull();
@@ -460,7 +462,8 @@ class ZetaAmqpAutoConfigurationTest {
       properties,
       ringManager,
       healthViewProvider,
-      bbrProvider
+      bbrProvider,
+      mock(SnowflakeIdGenerator.class)
     );
 
     assertThat(reporter).isNotNull();
@@ -472,7 +475,7 @@ class ZetaAmqpAutoConfigurationTest {
     CacheSyncProperties props = new CacheSyncProperties();
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheSyncPublisher publisher = config.cacheSyncPublisher(rabbitTemplate, props);
+    CacheSyncPublisher publisher = config.cacheSyncPublisher(rabbitTemplate, props, mock(SnowflakeIdGenerator.class));
 
     assertThat(publisher).isNotNull();
   }
@@ -684,7 +687,8 @@ class ZetaAmqpAutoConfigurationTest {
       properties,
       ringManager,
       healthViewProvider,
-      bbrProvider
+      bbrProvider,
+      mock(SnowflakeIdGenerator.class)
     );
 
     assertThat(reporter).isNotNull();

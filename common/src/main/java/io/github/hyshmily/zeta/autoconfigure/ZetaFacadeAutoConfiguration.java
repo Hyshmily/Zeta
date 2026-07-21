@@ -30,6 +30,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -112,6 +113,19 @@ public class ZetaFacadeAutoConfiguration {
     );
     view.setMinAliveWorkers(properties.getHeartbeat().getMinAliveWorkers());
     return view;
+  }
+
+  /**
+   * Shared Snowflake ID generator for traceable message IDs across all message
+   * types ({@link io.github.hyshmily.zeta.reporting.ReportMessage},
+   * {@link io.github.hyshmily.zeta.sync.local.SyncMessage},
+   * {@link io.github.hyshmily.zeta.sync.worker.WorkerMessage},
+   * {@link io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage}).
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public SnowflakeIdGenerator snowflakeIdGenerator() {
+    return new SnowflakeIdGenerator();
   }
 
   /**

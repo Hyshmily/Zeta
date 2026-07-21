@@ -42,6 +42,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.impl.SystemLoadMonitorImpl;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
@@ -230,7 +231,8 @@ public class ZetaAmqpAutoConfiguration {
       ZetaProperties properties,
       RingManager ringManager,
       ObjectProvider<HealthView> healthViewProvider,
-      ObjectProvider<BbrRateLimiterImpl> bbrRateLimiterProvider
+      ObjectProvider<BbrRateLimiterImpl> bbrRateLimiterProvider,
+      SnowflakeIdGenerator snowflakeIdGenerator
     ) {
       KeyReporterImpl reporter = new KeyReporterImpl(
         reportPublisher,
@@ -247,7 +249,8 @@ public class ZetaAmqpAutoConfiguration {
             properties.getHeartbeat().getTimeoutMs(),
             properties.getHeartbeat().getDegradeAfterFailures()
           )
-        )
+        ),
+        snowflakeIdGenerator
       );
       bbrRateLimiterProvider.ifAvailable(reporter::setBbrRateLimiter);
       return reporter;
@@ -316,8 +319,12 @@ public class ZetaAmqpAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean
-    public CacheSyncPublisher cacheSyncPublisher(RabbitTemplate rabbitTemplate, CacheSyncProperties properties) {
-      return new CacheSyncPublisher(rabbitTemplate, properties);
+    public CacheSyncPublisher cacheSyncPublisher(
+      RabbitTemplate rabbitTemplate,
+      CacheSyncProperties properties,
+      SnowflakeIdGenerator snowflakeIdGenerator
+    ) {
+      return new CacheSyncPublisher(rabbitTemplate, properties, snowflakeIdGenerator);
     }
 
     /**

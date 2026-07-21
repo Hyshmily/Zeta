@@ -43,6 +43,9 @@ import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.executor.StandardThreadExecutor;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import java.util.Optional;
@@ -60,7 +63,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 /**
  * App-side autoconfiguration for the HotKey library.
@@ -189,38 +191,38 @@ public class ZetaAutoConfiguration {
    *
    * <p>This executor handles all async operations in the HotKey data path: cache loading
    * via SingleFlight, soft-expiry refresh tasks, and cross-instance send callbacks.
-   * Uses a bounded thread pool to limit concurrent AMQP channel usage (RabbitMQ's
-   * {@code CachingConnectionFactory} associates channels with platform threads, so
-   * unbounded virtual-thread concurrency causes channel-open timeouts). The pool is
-   * configured with core/max pool size, bounded queue capacity, and a rejection policy
-   * that throws {@link RejectedExecutionException} when the queue is full. On shutdown,
-   * in-progress tasks are allowed to complete with a 60-second grace period.
+   * Uses a bounded thread pool with Tomcat-style ordering (core → max → queue → reject)
+   * to limit concurrent AMQP channel usage (RabbitMQ's {@code CachingConnectionFactory}
+   * associates channels with platform threads, so unbounded virtual-thread concurrency
+   * causes channel-open timeouts). The pool is configured with core/max pool size,
+   * bounded queue capacity, and a rejection policy that throws
+   * {@link RejectedExecutionException} when the total in-flight tasks exceed
+   * {@code queueCapacity + maxPoolSize}.
    *
    * @param properties the HotKey configuration properties (never {@code null})
-   * @return a configured {@link ThreadPoolTaskExecutor}
+   * @return a configured {@link StandardThreadExecutor}
    */
-  @Bean("hotKeyExecutor")
+  @Bean(name = "hotKeyExecutor")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
   public Executor hotKeyExecutor(ZetaProperties properties) {
-    ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-    executor.setCorePoolSize(properties.getExecutorCorePoolSize());
-    executor.setMaxPoolSize(properties.getExecutorMaxPoolSize());
-    executor.setAllowCoreThreadTimeOut(true);
-    executor.setQueueCapacity(properties.getExecutorQueueCapacity());
-    executor.setAllowCoreThreadTimeOut(true);
-    executor.setThreadNamePrefix(ZetaConstants.Thread.PREFIX_HOTKEY);
-    executor.setWaitForTasksToCompleteOnShutdown(true);
-    executor.setAwaitTerminationSeconds(60);
-    executor.setRejectedExecutionHandler((r, exe) -> {
-      log.warn(
-        "HotKey executor task rejected: corePool={}, maxPool={}, queueCapacity={}",
-        properties.getExecutorCorePoolSize(),
-        properties.getExecutorMaxPoolSize(),
-        properties.getExecutorQueueCapacity()
-      );
-      throw new RejectedExecutionException("HotKey executor queue full");
-    });
-    executor.initialize();
+    var executor = new StandardThreadExecutor(
+      properties.getExecutorCorePoolSize(),
+      properties.getExecutorMaxPoolSize(),
+      60L,
+      TimeUnit.SECONDS,
+      properties.getExecutorQueueCapacity(),
+      new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_HOTKEY),
+      (r, exe) -> {
+        log.warn(
+          "Zeta executor task rejected: corePool={}, maxPool={}, queueCapacity={}",
+          properties.getExecutorCorePoolSize(),
+          properties.getExecutorMaxPoolSize(),
+          properties.getExecutorQueueCapacity()
+        );
+        throw new RejectedExecutionException("HotKey executor queue full");
+      }
+    );
+    executor.allowCoreThreadTimeOut(true);
     return executor;
   }
 
@@ -301,7 +303,8 @@ public class ZetaAutoConfiguration {
     ZetaProperties properties,
     RuleMatcher ruleMatcher,
     ObjectProvider<HealthView> healthViewProvider,
-    CacheCompressor compressor
+    CacheCompressor compressor,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -311,7 +314,7 @@ public class ZetaAutoConfiguration {
       hotKeyExecutor,
       centralDispatcher,
       ruleMatcher,
-      new VersionControllerImpl(Optional.empty(), properties.getVersionKeyTtlMinutes()),
+      new VersionControllerImpl(Optional.empty(), properties.getVersionKeyTtlMinutes(), snowflakeIdGenerator),
       properties,
       healthViewProvider.getIfAvailable(() ->
         new HealthViewImpl(

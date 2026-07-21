@@ -19,11 +19,12 @@ import io.github.hyshmily.zeta.Internal;
 import java.util.Map;
 
 /**
- * A batched reportToWorker of access counts sent from an app instance to the Worker.
+ * A batched report of access counts sent from an app instance to the Worker.
  *
+ * @param id        globally unique, time-sortable Snowflake message ID for tracing
  * @param appName   the reporting application name
- * @param timestamp the time at which the reportToWorker was generated
+ * @param timestamp the time at which the report was generated
  * @param counts    a map of key → cumulative access count
  */
 @Internal
-public record ReportMessage(String appName, long timestamp, Map<String, Long> counts) {}
+public record ReportMessage(long id, String appName, long timestamp, Map<String, Long> counts) {}

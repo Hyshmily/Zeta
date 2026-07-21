@@ -28,6 +28,7 @@ import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import java.util.Optional;
 import java.util.concurrent.Executor;
@@ -132,7 +133,8 @@ public class ZetaRedisAutoConfiguration {
     ZetaProperties properties,
     RuleMatcher ruleMatcher,
     ObjectProvider<HealthView> healthViewProvider,
-    CacheCompressor compressor
+    CacheCompressor compressor,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -144,7 +146,8 @@ public class ZetaRedisAutoConfiguration {
       ruleMatcher,
       new VersionControllerImpl(
         Optional.ofNullable(redisTemplateProvider.getIfAvailable()),
-        properties.getVersionKeyTtlMinutes()
+        properties.getVersionKeyTtlMinutes(),
+        snowflakeIdGenerator
       ),
       properties,
       healthViewProvider.getIfAvailable(() ->

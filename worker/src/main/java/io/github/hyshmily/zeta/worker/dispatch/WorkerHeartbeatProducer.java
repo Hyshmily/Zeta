@@ -20,6 +20,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTB
 import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.lang.management.ManagementFactory;
@@ -72,8 +73,11 @@ public class WorkerHeartbeatProducer {
   private final boolean ownsScheduler;
   /** Shared monotonic counter for config-change timestamps embedded in heartbeats. */
   private final AtomicLong configTimestampCounter;
+
   /** Interval between consecutive heartbeat sends (milliseconds). */
   private final long pingIntervalMs;
+
+  private final SnowflakeIdGenerator snowflakeIdGenerator;
   /** Handle for the scheduled heartbeat task. */
   private ScheduledFuture<?> heartbeatTask;
 
@@ -102,7 +106,8 @@ public class WorkerHeartbeatProducer {
     AtomicLong configTimestampCounter,
     RedisConnectionFactory redisConnectionFactory,
     long pingIntervalMs,
-    ScheduledExecutorService scheduler
+    ScheduledExecutorService scheduler,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     this(
       rabbitTemplate,
@@ -115,7 +120,8 @@ public class WorkerHeartbeatProducer {
       scheduler,
       false,
       configTimestampCounter,
-      pingIntervalMs
+      pingIntervalMs,
+      snowflakeIdGenerator
     );
   }
 
@@ -143,7 +149,8 @@ public class WorkerHeartbeatProducer {
     AtomicLong configTimestampCounter,
     long epoch,
     long pingIntervalMs,
-    ScheduledExecutorService scheduler
+    ScheduledExecutorService scheduler,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     this(
       rabbitTemplate,
@@ -156,7 +163,8 @@ public class WorkerHeartbeatProducer {
       scheduler,
       false,
       configTimestampCounter,
-      pingIntervalMs
+      pingIntervalMs,
+      snowflakeIdGenerator
     );
   }
 
@@ -174,14 +182,15 @@ public class WorkerHeartbeatProducer {
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
    * @return a new heartbeat producer ready for testing
    */
-  static WorkerHeartbeatProducer forTesting(
+  public static WorkerHeartbeatProducer forTesting(
     RabbitTemplate rabbitTemplate,
     String heartbeatExchange,
     String workerId,
     ZetaStateMachine stateMachine,
     WorkerBroadcaster broadcaster,
     AtomicLong configTimestampCounter,
-    long pingIntervalMs
+    long pingIntervalMs,
+    SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     long epoch = initEpochFromLocalFile(workerId);
     var scheduler = Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-producer"));
@@ -196,7 +205,8 @@ public class WorkerHeartbeatProducer {
       scheduler,
       true,
       configTimestampCounter,
-      pingIntervalMs
+      pingIntervalMs,
+      snowflakeIdGenerator
     );
   }
 
@@ -345,6 +355,7 @@ public class WorkerHeartbeatProducer {
   void sendHeartbeat() {
     try {
       WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(
+        snowflakeIdGenerator.nextId(),
         workerId,
         epoch,
         broadcaster.getCurrentDecisionVersion(),

@@ -21,6 +21,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_BROADC
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
@@ -62,6 +63,8 @@ public class WorkerBroadcaster {
    * restart. Transmitted in send headers so receivers detect Worker restarts and
    * unconditionally accept decisions from a higher epoch (see ADR-0010). */
   private final AtomicLong epochCounter;
+
+  private final SnowflakeIdGenerator snowflakeIdGenerator;
 
   /**
    * Worker‑local decision version counter.
@@ -169,6 +172,7 @@ public class WorkerBroadcaster {
     props.setHeader(HEADER_IS_VERSION_DEGRADED, false);
     props.setHeader(HEADER_NODE_ID, nodeId);
     props.setHeader(HEADER_EPOCH, epochCounter.get());
+    props.setHeader(HEADER_MESSAGE_ID, snowflakeIdGenerator.nextId());
 
     Message msg = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
     rabbitTemplate.send(broadcastExchange, KEY_BROADCAST + appName, msg);

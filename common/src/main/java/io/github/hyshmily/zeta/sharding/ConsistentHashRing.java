@@ -61,8 +61,12 @@ public class ConsistentHashRing {
   ) {
     @Override
     public boolean equals(Object o) {
-      if (this == o) return true;
-      if (!(o instanceof RingState that)) return false;
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof RingState that)) {
+        return false;
+      }
       return (
         Arrays.equals(hashRing, that.hashRing) &&
         Arrays.equals(nodeRing, that.nodeRing) &&

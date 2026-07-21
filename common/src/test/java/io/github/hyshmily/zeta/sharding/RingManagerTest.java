@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
 class RingManagerTest {
 
   private static void registerAlive(HealthView healthView, String nodeId) {
-    healthView.onHeartbeat(new WorkerHeartbeatMessage(nodeId, 1, 0, 0, true, 0, 0, 0, 0));
+    healthView.onHeartbeat(new WorkerHeartbeatMessage(0L, nodeId, 1, 0, 0, true, 0, 0, 0, 0));
   }
 
   @Test

@@ -70,7 +70,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldProcessEntriesAndFeedAllComponents() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("key1", 5L, "key2", 3L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("key1", 5L, "key2", 3L));
     when(keyEvaluator.evaluate(anyString(), anyLong())).thenReturn(ZetaDecision.none("key", null));
 
     consumer.onReport(message);
@@ -83,7 +83,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldBroadcastHotWhenStateMachineReturnsHot() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
     when(keyEvaluator.evaluate("hotKey", 100L)).thenReturn(ZetaDecision.hot("hotKey", null));
 
     consumer.onReport(message);
@@ -94,7 +94,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldBroadcastCoolWhenStateMachineReturnsCool() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
     when(keyEvaluator.evaluate("coolKey", 1L)).thenReturn(ZetaDecision.cool("coolKey", null));
 
     consumer.onReport(message);
@@ -105,7 +105,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldSkipStaleMessages() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
     consumer.onReport(message);
 
     verify(workerTopK, never()).addDirect(any());
@@ -114,7 +114,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldHandleExceptionsGracefully() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("badKey", 1L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("badKey", 1L));
     when(keyEvaluator.evaluate("badKey", 1L)).thenThrow(new RuntimeException("test error"));
 
     consumer.onReport(message);
@@ -124,7 +124,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldHandleEmptyCountsMap() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of());
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of());
     consumer.onReport(message);
     verify(globalQpsEstimator, never()).addTotal(anyLong());
     verify(workerTopK, never()).addDirect(any());
@@ -133,6 +133,7 @@ class ReportConsumerTest {
   @Test
   void shouldHandleCountAtMaxIntegerBoundary() {
     ReportMessage message = new ReportMessage(
+      0L,
       "testApp",
       System.currentTimeMillis(),
       Map.of("bigKey", (long) Integer.MAX_VALUE)
@@ -148,6 +149,7 @@ class ReportConsumerTest {
   @Test
   void shouldClampCountToMaxIntForTopK() {
     ReportMessage message = new ReportMessage(
+      0L,
       "testApp",
       System.currentTimeMillis(),
       Map.of("hugeKey", (long) Integer.MAX_VALUE + 1)
@@ -161,7 +163,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldHandleNegativeCounts() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("negKey", -5L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("negKey", -5L));
     when(keyEvaluator.evaluate("negKey", -5L)).thenReturn(ZetaDecision.none("negKey", null));
 
     consumer.onReport(message);
@@ -174,7 +176,7 @@ class ReportConsumerTest {
   void shouldProcessMessageUnderStalenessBoundary() {
     consumer.stalenessThresholdMs = 100_000L;
     long now = System.currentTimeMillis();
-    ReportMessage message = new ReportMessage("testApp", now - 1, Map.of("key", 1L));
+    ReportMessage message = new ReportMessage(0L, "testApp", now - 1, Map.of("key", 1L));
     when(keyEvaluator.evaluate("key", 1L)).thenReturn(ZetaDecision.none("key", null));
 
     consumer.onReport(message);
@@ -184,7 +186,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldNotBroadcastWhenDecisionIsNone() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("key", 1L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("key", 1L));
     when(keyEvaluator.evaluate("key", 1L)).thenReturn(ZetaDecision.none("key", null));
 
     consumer.onReport(message);
@@ -198,6 +200,7 @@ class ReportConsumerTest {
   @Test
   void shouldContinueProcessingAfterEvaluationError() {
     ReportMessage message = new ReportMessage(
+      0L,
       "testApp",
       System.currentTimeMillis(),
       Map.of("goodKey", 1L, "badKey", 2L)
@@ -213,7 +216,7 @@ class ReportConsumerTest {
 
   @Test
   void broadcastHotSuccess_shouldNotRollback() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
     when(keyEvaluator.evaluate("hotKey", 100L)).thenReturn(ZetaDecision.hot("hotKey", null));
 
     consumer.onReport(message);
@@ -224,7 +227,7 @@ class ReportConsumerTest {
 
   @Test
   void broadcastCoolSuccess_shouldNotRollback() {
-    ReportMessage message = new ReportMessage("testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
     when(keyEvaluator.evaluate("coolKey", 1L)).thenReturn(ZetaDecision.cool("coolKey", null));
 
     consumer.onReport(message);

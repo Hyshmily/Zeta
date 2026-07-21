@@ -66,6 +66,7 @@ import org.springframework.amqp.core.MessageProperties;
  */
 @Internal
 public record WorkerHeartbeatMessage(
+  long id,
   String workerId,
   long epoch,
   long decisionVersionHwm,
@@ -103,6 +104,7 @@ public record WorkerHeartbeatMessage(
     props.setHeader(HEADER_HEARTBEAT_CONFIG_COOL, configCoolCount);
     props.setHeader(HEADER_HEARTBEAT_CONFIG_GRACE, configGraceCount);
     props.setHeader(HEADER_HEARTBEAT_CONFIG_TIMESTAMP, configTimestamp);
+    props.setHeader(HEADER_MESSAGE_ID, id);
 
     return new Message(workerId.getBytes(StandardCharsets.UTF_8), props);
   }
@@ -131,6 +133,7 @@ public record WorkerHeartbeatMessage(
     }
 
     return new WorkerHeartbeatMessage(
+      h.getHeader(HEADER_MESSAGE_ID) instanceof Number n ? n.longValue() : 0,
       h.getHeader(HEADER_NODE_ID) instanceof String s ? s : "",
       h.getHeader(HEADER_HEARTBEAT_EPOCH) instanceof Number n ? n.longValue() : 0,
       h.getHeader(HEADER_HEARTBEAT_DV_HWM) instanceof Number n ? n.longValue() : 0,

@@ -22,6 +22,7 @@ import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -41,7 +42,7 @@ class CacheSyncPublisherTest {
   void setUp() {
     rabbitTemplate = mock(RabbitTemplate.class);
     properties = new CacheSyncProperties();
-    publisher = new CacheSyncPublisher(rabbitTemplate, properties);
+    publisher = new CacheSyncPublisher(rabbitTemplate, properties, mock(SnowflakeIdGenerator.class));
     publisher.init();
   }
 
@@ -194,7 +195,7 @@ class CacheSyncPublisherTest {
    */
   @Test
   void getDedupCacheSize_beforeInit_shouldReturnZero() {
-    CacheSyncPublisher p = new CacheSyncPublisher(rabbitTemplate, properties);
+    CacheSyncPublisher p = new CacheSyncPublisher(rabbitTemplate, properties, mock(SnowflakeIdGenerator.class));
     assertThat(p.getDedupCacheSize()).isZero();
   }
 

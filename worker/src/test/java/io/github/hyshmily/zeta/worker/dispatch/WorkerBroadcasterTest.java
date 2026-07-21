@@ -25,6 +25,7 @@ import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,7 +54,7 @@ class WorkerBroadcasterTest {
 
   @BeforeEach
   void setUp() {
-    broadcaster = new WorkerBroadcaster(rabbitTemplate, BROADCAST, "testApp", "test-node", epochCounter);
+    broadcaster = new WorkerBroadcaster(rabbitTemplate, BROADCAST, "testApp", "test-node", epochCounter, mock(SnowflakeIdGenerator.class));
   }
 
   /**

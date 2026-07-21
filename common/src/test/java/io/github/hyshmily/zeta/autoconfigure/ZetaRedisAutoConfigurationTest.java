@@ -33,6 +33,7 @@ import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -62,6 +63,8 @@ class ZetaRedisAutoConfigurationTest {
   private ObjectProvider<CacheSyncPublisher> publisherProvider;
 
   private final ScheduledExecutorService testScheduler = Executors.newSingleThreadScheduledExecutor();
+
+  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1);
 
   private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
     AutoConfigurations.of(ZetaRedisAutoConfiguration.class)
@@ -112,7 +115,8 @@ class ZetaRedisAutoConfigurationTest {
       properties,
       ruleMatcher,
       healthViewProvider,
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      snowflakeIdGenerator
     );
 
     assertThat(cache).isNotNull();
@@ -154,7 +158,8 @@ class ZetaRedisAutoConfigurationTest {
       properties,
       ruleMatcher,
       healthViewProvider,
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      snowflakeIdGenerator
     );
 
     assertThat(cache).isNotNull();
