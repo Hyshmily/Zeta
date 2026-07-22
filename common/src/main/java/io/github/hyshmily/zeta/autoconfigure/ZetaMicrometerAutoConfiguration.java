@@ -19,7 +19,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
@@ -140,7 +140,7 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<ExpireManager> expireManagerProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
-    ObjectProvider<ZetaStateMachine> stateMachineProvider,
+    ObjectProvider<ZetaBayesianSM> stateMachineProvider,
     ObjectProvider<HealthView> healthViewProvider,
     ObjectProvider<SystemLoadMonitor> cpuMonitorProvider
   ) {

@@ -19,7 +19,7 @@ package io.github.hyshmily.zeta.model;
  * A decision emitted by the Worker's sliding-window / state-machine pipeline,
  * instructing application instances how to treat a specific cache key.
  *
- * <p>Each evaluation cycle of {@link io.github.hyshmily.zeta.detection.ZetaStateMachine}
+ * <p>Each evaluation cycle of {@link ZetaBayesianSM}
  * produces at most one {@code ZetaDecision} per key. The decision is then
  * serialized into a {@link io.github.hyshmily.zeta.sync.worker.WorkerMessage} and
  * send to all application instances via RabbitMQ.
@@ -37,6 +37,9 @@ package io.github.hyshmily.zeta.model;
  * @param type     the decision type (never {@code null})
  * @param cacheKey the affected cache key (never {@code null})
  */
+
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+
 /**
  * @param type     the decision type (never {@code null})
  * @param cacheKey the affected cache key (never {@code null})

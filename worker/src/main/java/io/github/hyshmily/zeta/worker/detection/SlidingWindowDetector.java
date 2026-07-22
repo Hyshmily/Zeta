@@ -77,9 +77,6 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class SlidingWindowDetector {
 
-  /** Tracks per-key isHot state to log only on transitions. */
-  private final ConcurrentHashMap<String, Boolean> isHotCache = new ConcurrentHashMap<>();
-
   /** Number of time slices that form one complete window. */
   private final int windowSize;
 
@@ -122,7 +119,9 @@ public class SlidingWindowDetector {
    */
   public SlidingWindowDetector(long windowDurationMs, int slices, long threshold) {
     if (slices <= 0) throw new IllegalArgumentException("slices must be positive, got " + slices);
-    if (windowDurationMs < slices) throw new IllegalArgumentException("windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero");
+    if (windowDurationMs < slices) throw new IllegalArgumentException(
+      "windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero"
+    );
     this.windowSize = slices;
     this.timeMillisPerSlice = windowDurationMs / slices;
     this.threshold = threshold;
@@ -144,7 +143,7 @@ public class SlidingWindowDetector {
    *         meets or exceeds {@link #threshold}; {@code false} otherwise
    * @throws NullPointerException if {@code key} is {@code null}
    */
-  public boolean addCount(String key, long count) {
+  public long addCount(String key, long count) {
     long now = System.currentTimeMillis();
 
     AtomicLongArray slices = windows.get(key);
@@ -180,14 +179,7 @@ public class SlidingWindowDetector {
       int idx = (currentIndex - i + length) % length;
       sum += slices.get(idx);
     }
-
-    boolean isHot = sum >= threshold;
-    Boolean prev = isHotCache.get(key);
-    if (prev == null || prev != isHot) {
-      isHotCache.put(key, isHot);
-      log.debug("Hot status changed: key={} isHot={} windowSum={} threshold={}", key, isHot, sum, threshold);
-    }
-    return isHot;
+    return sum;
   }
 
   /**
@@ -244,29 +236,6 @@ public class SlidingWindowDetector {
     // corresponding timestamp entry survived (e.g. due to a prior race that
     // has now been fixed).
     lastAccessTime.keySet().removeIf(k -> !windows.containsKey(k));
-  }
-
-  /**
-   * Returns the total access count within the current sliding window for the
-   * given key, or {@code 0} if the key is unknown.
-   *
-   * @param key the cache key to query
-   * @return the sum of access counts in the current window, or {@code 0} if
-   *         the key is not being tracked
-   */
-  public long getWindowSum(String key) {
-    AtomicLongArray slices = windows.get(key);
-    if (slices == null) {
-      return 0;
-    }
-    int currentIndex = (int) ((System.currentTimeMillis() / timeMillisPerSlice) % slices.length());
-    long sum = 0;
-    int length = slices.length();
-    for (int i = 0; i < windowSize; i++) {
-      int idx = (currentIndex - i + length) % length;
-      sum += slices.get(idx);
-    }
-    return sum;
   }
 
   /**

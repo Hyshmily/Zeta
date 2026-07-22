@@ -67,6 +67,36 @@
       "defaultValue": 5
     },
     {
+      "name": "zeta.local.cache.max-size",
+      "type": "java.lang.Integer",
+      "description": "Maximum number of L1 cache entries (ignored when max-weight > 0).",
+      "defaultValue": 100000
+    },
+    {
+      "name": "zeta.local.cache.max-weight",
+      "type": "java.lang.Long",
+      "description": "Memory weight limit for L1 cache (bytes). 0 = use max-size.",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.cache.max-value-size",
+      "type": "java.lang.Long",
+      "description": "Single value size limit (bytes). 0 = unlimited.",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.cache-key.strip-query",
+      "type": "java.lang.Boolean",
+      "description": "Strip query parameters (?key=val) from cache keys before cache operations.",
+      "defaultValue": false
+    },
+    {
+      "name": "zeta.local.sketch-window-count",
+      "type": "java.lang.Integer",
+      "description": "Sliding-window depth per sketch slot (ring buffer). Range 1–10.",
+      "defaultValue": 3
+    },
+    {
       "name": "zeta.local.inflight-max-size",
       "type": "java.lang.Integer",
       "description": "Maximum number of in-flight (pending) SingleFlight requests.",
@@ -113,6 +143,12 @@
       "type": "java.lang.Integer",
       "description": "Capacity of the expelled-key queue (for keys evicted from the top-K ranking).",
       "defaultValue": 50000
+    },
+    {
+      "name": "zeta.local.expected-worker-count",
+      "type": "java.lang.Integer",
+      "description": "Expected number of Worker nodes for quorum-based health checks; 0 = dynamic discovery.",
+      "defaultValue": 0
     },
     {
       "name": "zeta.local.decay-period",
@@ -200,13 +236,13 @@
       "name": "zeta.local.report-exchange",
       "type": "java.lang.String",
       "description": "Name of the DirectExchange for app-to-Worker report messages.",
-      "defaultValue": "zeta.report.exchange"
+      "defaultValue": "zeta.reportToWorker.exchange"
     },
     {
       "name": "zeta.local.report-interval-ms",
       "type": "java.lang.Long",
       "description": "Interval in milliseconds between periodic report flushes.",
-      "defaultValue": 100
+      "defaultValue": 50
     },
     {
       "name": "zeta.local.shard-count",
@@ -287,24 +323,6 @@
       "defaultValue": 100
     },
     {
-      "name": "zeta.local.cache.max-size",
-      "type": "java.lang.Integer",
-      "description": "Maximum number of L1 cache entries (ignored when max-weight > 0).",
-      "defaultValue": 1000
-    },
-    {
-      "name": "zeta.local.cache.max-weight",
-      "type": "java.lang.Long",
-      "description": "Memory weight limit for L1 cache (bytes). 0 = use max-size.",
-      "defaultValue": 0
-    },
-    {
-      "name": "zeta.local.cache.max-value-size",
-      "type": "java.lang.Long",
-      "description": "Single value size limit (bytes). 0 = unlimited.",
-      "defaultValue": 0
-    },
-    {
       "name": "zeta.local.reporter.bbr-cooldown-ms",
       "type": "java.lang.Long",
       "description": "Cooldown period in ms after a reporter drop before allowing again.",
@@ -319,38 +337,146 @@
     {
       "name": "zeta.local.heartbeat.timeout-ms",
       "type": "java.lang.Long",
-      "description": "Heartbeat timeout in milliseconds.",
-      "defaultValue": 3000
+      "description": "Heartbeat timeout in ms — a Worker is considered dead if no heartbeat is received within this window.",
+      "defaultValue": 10000
     },
     {
       "name": "zeta.local.heartbeat.verify-interval-ms",
       "type": "java.lang.Long",
-      "description": "Verify interval in milliseconds for worker liveliness checks.",
-      "defaultValue": 1500
+      "description": "Verify interval in ms for suspected dead Worker via Direct reply-to PING.",
+      "defaultValue": 5000
     },
     {
       "name": "zeta.local.heartbeat.ping-timeout-ms",
       "type": "java.lang.Long",
-      "description": "PING timeout in milliseconds for worker verification.",
-      "defaultValue": 2000
+      "description": "PING timeout in ms for Worker verification probe.",
+      "defaultValue": 3000
     },
     {
       "name": "zeta.local.heartbeat.degrade-after-failures",
       "type": "java.lang.Integer",
-      "description": "Number of consecutive heartbeat failures before graceful degradation.",
+      "description": "Consecutive PING failures before graceful degradation of the Worker.",
+      "defaultValue": 3
+    },
+    {
+      "name": "zeta.local.heartbeat.verify-max-backoff-ms",
+      "type": "java.lang.Long",
+      "description": "Max exponential backoff in ms between verification probes for a repeatedly failing Worker.",
+      "defaultValue": 600000
+    },
+    {
+      "name": "zeta.local.heartbeat.min-alive-workers",
+      "type": "java.lang.Integer",
+      "description": "Minimum alive Workers for cluster health; 0 = use majority formula (knownWorkerCount / 2 + 1).",
+      "defaultValue": 0
+    },
+    {
+      "name": "zeta.local.try-lock-lock-count",
+      "type": "java.lang.Integer",
+      "description": "Number of SET NX retries for distributed lock acquisition.",
       "defaultValue": 2
     },
     {
-      "name": "zeta.spring-cache.enabled",
-      "type": "java.lang.Boolean",
-      "description": "Enable Spring @Cacheable integration with HotKey dynamic TTL.",
-      "defaultValue": false
+      "name": "zeta.local.try-lock-inquiry-count",
+      "type": "java.lang.Integer",
+      "description": "Number of GET inquiries after transient SET NX failure.",
+      "defaultValue": 1
+    },
+    {
+      "name": "zeta.local.try-lock-unlock-count",
+      "type": "java.lang.Integer",
+      "description": "Number of DEL retries for distributed lock release.",
+      "defaultValue": 2
     },
     {
       "name": "zeta.local.spring-cache.key-separator",
       "type": "java.lang.String",
       "description": "Separator between cache name and key in internal cache key string.",
       "defaultValue": "::"
+    },
+    {
+      "name": "zeta.local.sync.flush-delay-ms",
+      "type": "java.lang.Long",
+      "description": "Delay in ms before pending sync records are flushed.",
+      "defaultValue": 500
+    },
+    {
+      "name": "zeta.local.sync.max-defer-ms",
+      "type": "java.lang.Long",
+      "description": "Maximum deferral in ms before a flush is forced, even under continuous writes.",
+      "defaultValue": 2000
+    },
+    {
+      "name": "zeta.local.circuit-breaker.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable sliding-window circuit breaker for remote calls (disabled by default).",
+      "defaultValue": false
+    },
+    {
+      "name": "zeta.local.circuit-breaker.window-time-ms",
+      "type": "java.lang.Long",
+      "description": "Sliding window duration in ms.",
+      "defaultValue": 10000
+    },
+    {
+      "name": "zeta.local.circuit-breaker.window-buckets",
+      "type": "java.lang.Integer",
+      "description": "Number of buckets dividing the sliding window.",
+      "defaultValue": 10
+    },
+    {
+      "name": "zeta.local.circuit-breaker.fail-threshold",
+      "type": "java.lang.Double",
+      "description": "Failure rate threshold (0.0–1.0); opens breaker when exceeded.",
+      "defaultValue": 0.5
+    },
+    {
+      "name": "zeta.local.circuit-breaker.request-volume-threshold",
+      "type": "java.lang.Long",
+      "description": "Minimum total requests before evaluating failure rate.",
+      "defaultValue": 20
+    },
+    {
+      "name": "zeta.local.circuit-breaker.single-test-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Interval in ms between half-open probe requests.",
+      "defaultValue": 5000
+    },
+    {
+      "name": "zeta.local.circuit-breaker.half-open-max-probes",
+      "type": "java.lang.Integer",
+      "description": "Maximum concurrent probe requests in HALF_OPEN state.",
+      "defaultValue": 3
+    },
+    {
+      "name": "zeta.local.circuit-breaker.consecutive-success-threshold",
+      "type": "java.lang.Integer",
+      "description": "Consecutive probe successes in HALF_OPEN required to close (anti-flapping).",
+      "defaultValue": 3
+    },
+    {
+      "name": "zeta.local.circuit-breaker.log-enabled",
+      "type": "java.lang.Boolean",
+      "description": "Whether to log state transitions (OPEN/CLOSE/HALF-OPEN).",
+      "defaultValue": true
+    },
+    {
+      "name": "zeta.local.circuit-breaker.exclude-exceptions",
+      "type": "java.util.List",
+      "description": "Exception class names that should NOT trip the breaker.",
+      "defaultValue": []
+    },
+    {
+      "name": "zeta.local.circuit-breaker.include-exceptions",
+      "type": "java.util.List",
+      "description": "Exception class names that SHOULD trip the breaker (empty = all).",
+      "defaultValue": []
+    },
+    {
+      "name": "zeta.spring-cache.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Enable Spring @Cacheable integration with HotKey dynamic TTL.",
+      "defaultValue": false
     },
     {
       "name": "zeta.sync.enabled",
@@ -421,8 +547,8 @@
     {
       "name": "zeta.worker-listener.exchange-name",
       "type": "java.lang.String",
-      "description": "Name of the FanoutExchange for Worker decision broadcasts. Must match hotkey.worker.messaging.broadcast-exchange.",
-      "defaultValue": "zeta.broadcast.exchange"
+      "description": "Name of the FanoutExchange for Worker decision broadcasts. Must match zeta.worker.messaging.broadcast-exchange.",
+      "defaultValue": "zeta.send.exchange"
     },
     {
       "name": "zeta.worker-listener.queue-prefix",
@@ -439,8 +565,14 @@
     {
       "name": "zeta.worker-listener.warmup-jitter-ms",
       "type": "java.lang.Integer",
-      "description": "Maximum random jitter in milliseconds applied to Worker listener startup.",
-      "defaultValue": 100
+      "description": "Maximum random jitter in ms before processing each Worker decision (anti-thundering-herd).",
+      "defaultValue": 50
+    },
+    {
+      "name": "zeta.worker-listener.broadcast-jitter-ms",
+      "type": "java.lang.Integer",
+      "description": "Maximum random jitter in ms before applying Worker broadcasts. 0 = immediate.",
+      "defaultValue": 0
     },
     {
       "name": "zeta.worker-listener.concurrent-consumers",
@@ -451,8 +583,8 @@
     {
       "name": "zeta.worker-listener.scheduler-pool-size",
       "type": "java.lang.Integer",
-      "description": "Pool size for the Worker listener scheduler (deferred Redis reads).",
-      "defaultValue": 2
+      "description": "Pool size for the Worker listener scheduler (jittered cache-update tasks).",
+      "defaultValue": 4
     },
     {
       "name": "zeta.worker-listener.prefetch-count",
@@ -469,7 +601,7 @@
     {
       "name": "zeta.worker-listener.sre.window-ms",
       "type": "java.lang.Long",
-      "description": "Sliding window duration in milliseconds for SRE rate limiter tracking.",
+      "description": "Sliding window duration in ms for SRE rate limiter tracking.",
       "defaultValue": 3000
     },
     {

@@ -20,7 +20,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
@@ -85,7 +85,7 @@ public class ZetaEndpoint {
   /** Cross-instance cache sync publisher (AMQP). */
   private final CacheSyncPublisher cacheSyncPublisher;
   /** Worker-side hot-key state machine. */
-  private final ZetaStateMachine zetaStateMachine;
+  private final ZetaBayesianSM zetaBayesianSM;
   /** Cluster health view (may be {@code null} in Worker-only mode). */
   private final HealthView healthView;
 
@@ -233,8 +233,8 @@ public class ZetaEndpoint {
       worker.put("health", healthView.isClusterHealthy() ? "healthy" : "unhealthy");
     }
 
-    if (zetaStateMachine != null) {
-      worker.put("trackedKeys", zetaStateMachine.getTrackedKeys());
+    if (zetaBayesianSM != null) {
+      worker.put("trackedKeys", zetaBayesianSM.getTrackedKeys());
     }
 
     return worker;

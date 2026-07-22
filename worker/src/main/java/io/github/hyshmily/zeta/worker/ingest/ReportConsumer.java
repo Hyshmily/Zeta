@@ -17,14 +17,13 @@ package io.github.hyshmily.zeta.worker.ingest;
 
 import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
+import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
-import io.github.hyshmily.zeta.worker.detection.KeyEvaluator;
-import io.github.hyshmily.zeta.worker.detection.TopKValidator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,15 +45,13 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  *   <li>Feeds the count into the {@link io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector} to update the
  *       sliding‑window sum and obtain a binary hot‑or‑not verdict for the
  *       current window.</li>
- *   <li>Passes that verdict to the {@link ZetaStateMachine} which tracks
+ *   <li>Passes that verdict to the {@link ZetaBayesianSM} which tracks
  *       consecutive hot/cold windows and decides whether a state transition
  *       (COLD → CONFIRMED_HOT → PRE_COOLING → COLD) has occurred.</li>
  *   <li>If the state machine returns a {@code HOT} decision, the consumer
- *       broadcasts a {@code HOT} message to all application instances and
- *       records the confirmation in the {@link io.github.hyshmily.zeta.worker.detection.TopKValidator}.</li>
+ *       broadcasts a {@code HOT} message to all application instances.</li>
  *   <li>If the state machine returns a {@code COOL} decision, it broadcasts
- *       a {@code COOL} message and marks the key as cooled in the
- *       {@link TopKValidator}.</li>
+ *       a {@code COOL} message.</li>
  * </ol>
  *
  * <p>Messages older than 5 seconds are silently discarded to prevent stale
@@ -67,18 +64,16 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 @Slf4j
 public class ReportConsumer {
 
-  /** Unified evaluator combining sliding-window detection + Bayesian confidence. */
-  private final KeyEvaluator keyEvaluator;
+  /** Unified evaluator with integrated fast-lane support. */
+  private final Evaluator evaluator;
   /** Publishes HOT and COOL decisions back to all application instances. */
   private final WorkerBroadcaster broadcaster;
-  /** TopK pre-warm validator for cross-instance frequency-based confirmation. */
-  private final TopKValidator topKValidator;
   /** Worker-scoped HeavyKeeper sketch for cross-instance frequency estimation. */
   private final TopK workerTopK;
   /** Global qps estimator tracking overall throughput for dynamic threshold learning. */
   private final GlobalQpsEstimator globalQpsEstimator;
-  /** Per-key lifecycle state machine (retained for TopKValidator integration). */
-  private final ZetaStateMachine stateMachine;
+  /** Per-key lifecycle state machine. */
+  private final ZetaBayesianSM stateMachine;
 
   /** Staleness threshold in milliseconds. Package-visible for testing. */
   long stalenessThresholdMs = 5000L;
@@ -90,16 +85,14 @@ public class ReportConsumer {
   private static final int BATCH_DRAIN_WARN_THRESHOLD = 5000;
 
   public ReportConsumer(
-    KeyEvaluator keyEvaluator,
+    Evaluator evaluator,
     WorkerBroadcaster broadcaster,
-    TopKValidator topKValidator,
     TopK workerTopK,
     GlobalQpsEstimator globalQpsEstimator,
-    ZetaStateMachine stateMachine
+    ZetaBayesianSM stateMachine
   ) {
-    this.keyEvaluator = keyEvaluator;
+    this.evaluator = evaluator;
     this.broadcaster = broadcaster;
-    this.topKValidator = topKValidator;
     this.workerTopK = workerTopK;
     this.globalQpsEstimator = globalQpsEstimator;
     this.stateMachine = stateMachine;
@@ -126,8 +119,13 @@ public class ReportConsumer {
   @SuppressWarnings("all")
   private void doOnReport(ReportMessage message) {
     long now = currentTimeMillis();
-    log.debug("Processing report: appName={}, keys={}, counts={}, age={}ms",
-      message.appName(), message.counts().size(), message.counts(), now - message.timestamp());
+    log.debug(
+      "Processing report: appName={}, keys={}, counts={}, age={}ms",
+      message.appName(),
+      message.counts().size(),
+      message.counts(),
+      now - message.timestamp()
+    );
     LongAdder totalQps = new LongAdder();
 
     // Discard reports that are more than 5 seconds old.
@@ -145,13 +143,6 @@ public class ReportConsumer {
     Map<String, Long> keyCounts = message.counts();
     if (keyCounts.isEmpty()) return;
 
-    // Feed all key counts into the Worker's HeavyKeeper in a single
-    // batch call.  This executes sketch updates per-key under fine-grained
-    // stripe locks, then acquires the global sortedTopK heap
-    // lock exactly ONCE for the entire batch — rather than once per
-    // key — eliminating the P1-3 lock-contention bottleneck.
-    workerTopK.addDirect(keyCounts);
-
     List<Map.Entry<String, Long>> entries = new ArrayList<>(keyCounts.entrySet());
     int totalKeys = entries.size();
 
@@ -164,7 +155,9 @@ public class ReportConsumer {
       // AMQP channel write locks.
       Queue<Report> pendingBroadcasts = new ConcurrentLinkedQueue<>();
 
-      // Process each key independently
+      // Process each key independently — both evaluation and HeavyKeeper
+      // update happen inside the parallel stream so that the sliding-window
+      // detection is not blocked by a serial addDirect up front.
       chunk
         .parallelStream()
         .forEach(entry -> {
@@ -174,11 +167,19 @@ public class ReportConsumer {
 
             totalQps.add(count);
 
-            // Unified evaluation: sliding-window detection + HeavyKeeper frequency
-            // + Bayesian confidence scoring, all in a single call.
-            ZetaDecision decision = keyEvaluator.evaluate(key, count);
+            // Update HeavyKeeper inline (parallel, not serial before the stream).
+            // The estimatedCount from this batch will be visible to the Bayesian
+            // path starting from the next batch — FastLane is unaffected.
+            workerTopK.addDirect(key, count);
+
+            ZetaDecision decision = evaluator.evaluate(key, count);
             if (decision.type() != ZetaDecision.DecisionType.NONE) {
-              log.debug("KeyEvaluator decision: key={}, type={}, snapshot={}", key, decision.type(), decision.snapShot());
+              log.debug(
+                "BayesianEvaluator decision: key={}, type={}, snapshot={}",
+                key,
+                decision.type(),
+                decision.snapShot()
+              );
             }
             StateSnapshot previousState = decision.snapShot();
 
@@ -195,7 +196,7 @@ public class ReportConsumer {
                       .build()
                   )
                 ) {
-                  topKValidator.markConfirmed(key);
+                  // markConfirmed handled by TopKValidator (removed — use Baysian state machine as sole authority)
                 } else {
                   stateMachine.rollbackToPreviousState(key, previousState);
                   log.warn("Failed to enqueue HOT broadcast for key={}, rolling back state to {}", key, previousState);
@@ -210,7 +211,7 @@ public class ReportConsumer {
                       .build()
                   )
                 ) {
-                  topKValidator.markCooled(key);
+                  // markCooled handled by TopKValidator (removed — use Baysian state machine as sole authority)
                 } else {
                   stateMachine.rollbackToPreviousState(key, previousState);
                   log.warn("Failed to enqueue COOL broadcast for key={}, rolling back state to {}", key, previousState);

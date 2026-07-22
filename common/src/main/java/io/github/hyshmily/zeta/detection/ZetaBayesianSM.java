@@ -81,7 +81,7 @@ import java.util.function.Consumer;
  * </ul>
  */
 @Internal
-public interface ZetaStateMachine {
+public interface ZetaBayesianSM {
   /** Key-level lifecycle stages. */
   enum State {
     /** Default state — key is not hot, no tracking state exists. */
@@ -134,6 +134,14 @@ public interface ZetaStateMachine {
    *         caller should take (HOT, COOL, or NONE)
    */
   ZetaDecision evaluate(String key, boolean isHotThisWindow, EvaluationContext ctx);
+
+  /**
+   * Directly promote a key to CONFIRMED_HOT, bypassing Bayesian confidence gating.
+   *
+   * @param key the cache key to promote
+   * @return a HOT decision with snapshot for rollback
+   */
+  ZetaDecision fastlane(String key);
 
   /** Remove all tracked state for the given key, resetting it to COLD. */
   void reset(String key);

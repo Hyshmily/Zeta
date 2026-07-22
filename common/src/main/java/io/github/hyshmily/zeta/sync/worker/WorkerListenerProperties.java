@@ -64,13 +64,19 @@ public class WorkerListenerProperties {
    * when the Worker broadcasts a decision to many app instances simultaneously. */
   private int warmupJitterMs = 50;
 
+  /** Maximum random jitter (milliseconds) added before each Worker broadcast cache update.
+   * When non-zero, spreads Redis reads across a small time window to avoid thundering herds
+   * when the Worker broadcasts a decision to many app instances simultaneously.
+   * Default 0 — no jitter; the broadcast is applied immediately on reception. */
+  private int broadcastJitterMs = 0;
+
   /** Number of concurrent RabbitMQ consumers for the Worker decision queue.
    * Higher values increase throughput under load at the cost of more Redis connections. */
   private int concurrentConsumers = 2;
 
   /** Pool size for the scheduled executor that runs jittered Worker cache-update tasks.
    * Should be at least as large as the number of concurrent consumers. */
-  private int schedulerPoolSize = 2;
+  private int schedulerPoolSize = 4;
 
   /** AMQP prefetch count per consumer. Controls how many unacknowledged messages
    * each consumer can hold at once. */

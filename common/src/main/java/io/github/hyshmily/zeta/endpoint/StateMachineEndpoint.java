@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.endpoint;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -45,7 +45,7 @@ import org.springframework.web.bind.annotation.*;
 public class StateMachineEndpoint {
 
   /** Hot-key state machine whose config is being exposed/modified. */
-  private final ZetaStateMachine stateMachine;
+  private final ZetaBayesianSM stateMachine;
   /** Shared atomic counter bumped on each config change; send via heartbeat. */
   private final ObjectProvider<AtomicLong> configTimestampCounter;
 
@@ -56,7 +56,7 @@ public class StateMachineEndpoint {
    * @param configTimestampCounter shared atomic counter bumped on each config change;
    *                               propagated to peer Workers via heartbeat send
    */
-  public StateMachineEndpoint(ZetaStateMachine stateMachine, ObjectProvider<AtomicLong> configTimestampCounter) {
+  public StateMachineEndpoint(ZetaBayesianSM stateMachine, ObjectProvider<AtomicLong> configTimestampCounter) {
     this.stateMachine = stateMachine;
     this.configTimestampCounter = configTimestampCounter;
   }

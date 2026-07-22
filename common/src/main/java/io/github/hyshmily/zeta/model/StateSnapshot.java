@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.model;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 
 /**
  * Immutable snapshot of a key's state machine state at a point in time.
@@ -24,11 +24,11 @@ import io.github.hyshmily.zeta.detection.ZetaStateMachine;
  * {@code evaluate} method and carried by {@link ZetaDecision} for
  * failure rollback.  The
  * {@code key} field enables the single-argument overload of
- * {@link ZetaStateMachine#rollbackToPreviousState(ZetaStateMachine.StateSnapshot)}.
+ * {@link ZetaBayesianSM#rollbackToPreviousState(ZetaBayesianSM.StateSnapshot)}.
  *
  * @param key          the cache key (never {@code null})
  * @param currentState the lifecycle stage at snapshot time ({@link
- *                     ZetaStateMachine.State} enum name, never {@code null})
+ *                     ZetaBayesianSM.State} enum name, never {@code null})
  * @param hotStreak    consecutive hot-window count at snapshot time
  * @param coolStreak   consecutive cold-window count at snapshot time
  */

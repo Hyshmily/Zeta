@@ -61,7 +61,7 @@ import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_HOT;
  *
  * <p><b>Ack-before-update pattern:</b> The AMQP message is acknowledged immediately after
  * parsing (see {@link #handleWorkerMessage}). The actual cache mutation is scheduled
- * asynchronously with a random jitter (see {@link WorkerListenerProperties#warmupJitterMs}).
+ * asynchronously with a random jitter (see {@link WorkerListenerProperties#broadcastJitterMs}).
  * This decoupling provides at-most-once delivery semantics — if the application crashes
  * after ack but before the cache write, the decision is lost and will be re-driven by the
  * next Worker heartbeat cycle (see ADR-0004).
@@ -154,7 +154,7 @@ public class WorkerListener {
   /**
    * Decodes the raw AMQP message into a {@link WorkerMessage} and schedules the
    * appropriate handler to run after a random delay within
-   * {@link WorkerListenerProperties#getWarmupJitterMs()}. The jitter spreads Redis
+    * {@link WorkerListenerProperties#getBroadcastJitterMs()}. The jitter spreads Redis
    * reads across a small time window when the Worker broadcasts to many instances.
    *
    * @param msg the raw AMQP message; may have null or empty body, in which case
@@ -183,7 +183,7 @@ public class WorkerListener {
       }
     };
 
-    long jitterMs = properties.getWarmupJitterMs();
+    long jitterMs = properties.getBroadcastJitterMs();
     dispatcher.submit(wm.cacheKey(), task, jitterMs);
   }
 

@@ -19,7 +19,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.RingEndpoint;
 import io.github.hyshmily.zeta.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
@@ -104,7 +104,7 @@ public class ZetaActuatorAutoConfiguration {
     ObjectProvider<ExpireManager> expireManagerProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
-    ObjectProvider<ZetaStateMachine> stateMachineProvider,
+    ObjectProvider<ZetaBayesianSM> stateMachineProvider,
     ObjectProvider<HealthView> healthViewProvider,
     ZetaProperties properties
   ) {
@@ -119,7 +119,7 @@ public class ZetaActuatorAutoConfiguration {
       .expireManager(expireManagerProvider.getIfAvailable())
       .versionController(versionControllerProvider.getIfAvailable())
       .cacheSyncPublisher(cacheSyncPublisherProvider.getIfAvailable())
-      .zetaStateMachine(stateMachineProvider.getIfAvailable())
+      .zetaBayesianSM(stateMachineProvider.getIfAvailable())
       .healthView(healthViewProvider.getIfAvailable())
       .build();
   }
@@ -151,7 +151,7 @@ public class ZetaActuatorAutoConfiguration {
    * Create the {@link StateMachineEndpoint} for reading and updating the Worker's
    * state-machine configuration at runtime.
    *
-   * <p>Only active when a {@link ZetaStateMachine} bean is present
+   * <p>Only active when a {@link ZetaBayesianSM} bean is present
    * (i.e. in Worker mode) and Spring MVC is on the classpath.
    * Exposes REST endpoints at {@code /actuator/zeta/worker/state}
    * for GET (read config) and POST (update config) operations.
@@ -165,10 +165,10 @@ public class ZetaActuatorAutoConfiguration {
    */
   @Bean
   @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
-  @ConditionalOnBean(ZetaStateMachine.class)
+  @ConditionalOnBean(ZetaBayesianSM.class)
   @ConditionalOnMissingBean
   public StateMachineEndpoint stateMachineEndpoint(
-    ZetaStateMachine stateMachine,
+    ZetaBayesianSM stateMachine,
     ObjectProvider<java.util.concurrent.atomic.AtomicLong> configTimestampCounterProvider
   ) {
     return new StateMachineEndpoint(stateMachine, configTimestampCounterProvider);

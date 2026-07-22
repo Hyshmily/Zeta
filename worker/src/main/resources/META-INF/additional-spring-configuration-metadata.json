@@ -3,74 +3,98 @@
     {
       "name": "zeta.worker.enabled",
       "type": "java.lang.Boolean",
-      "description": "Enable standalone Worker mode for cluster-wide hot key detection.",
+      "description": "Master switch to activate Worker mode for cluster-wide hot key detection.",
       "defaultValue": false
     },
     {
       "name": "zeta.worker.routing.app-name",
       "type": "java.lang.String",
-      "description": "Application name for Worker-side report queue routing.",
+      "description": "Logical application name (tenant discriminator) for queue routing.",
       "defaultValue": "default"
     },
     {
       "name": "zeta.worker.messaging.report-exchange",
       "type": "java.lang.String",
-      "description": "Name of the DirectExchange for receiving app-to-Worker report messages.",
-      "defaultValue": "zeta.report.exchange"
+      "description": "Direct exchange name for app-to-Worker report messages.",
+      "defaultValue": "zeta.reportToWorker.exchange"
     },
     {
       "name": "zeta.worker.messaging.broadcast-exchange",
       "type": "java.lang.String",
-      "description": "Name of the FanoutExchange for broadcasting HOT/COOL decisions.",
-      "defaultValue": "zeta.broadcast.exchange"
+      "description": "Fanout exchange name for broadcasting HOT/COOL decisions.",
+      "defaultValue": "zeta.send.exchange"
     },
     {
       "name": "zeta.worker.messaging.heartbeat-exchange",
       "type": "java.lang.String",
-      "description": "Name of the TopicExchange for epoch-driven structured worker heartbeats.",
+      "description": "Topic exchange name for epoch-driven structured worker heartbeats.",
       "defaultValue": "zeta.heartbeat.exchange"
+    },
+    {
+      "name": "zeta.worker.report-consumer.concurrent-consumers",
+      "type": "java.lang.Integer",
+      "description": "Number of concurrent consumers for the report queue. Minimum 1.",
+      "defaultValue": 8
+    },
+    {
+      "name": "zeta.worker.report-consumer.prefetch-count",
+      "type": "java.lang.Integer",
+      "description": "Prefetch count per consumer; balances throughput vs memory pressure.",
+      "defaultValue": 50
     },
     {
       "name": "zeta.worker.sliding-window.duration-ms",
       "type": "java.lang.Long",
-      "description": "Total duration in milliseconds of the sliding window for QPS tracking.",
+      "description": "Sliding window duration in milliseconds for QPS tracking.",
       "defaultValue": 1000
     },
     {
       "name": "zeta.worker.sliding-window.slices",
       "type": "java.lang.Integer",
-      "description": "Number of time slices within the sliding window.",
+      "description": "Number of time slices within one sliding window. Minimum 1.",
       "defaultValue": 10
     },
     {
       "name": "zeta.worker.threshold.hot-threshold",
       "type": "java.lang.Long",
-      "description": "Absolute QPS threshold for HOT key classification. A value of -1 disables absolute threshold.",
+      "description": "Absolute hot-key threshold; ≤0 disables absolute threshold (uses ratio-based).",
       "defaultValue": 1000
     },
     {
       "name": "zeta.worker.threshold.hot-threshold-ratio",
       "type": "java.lang.Double",
-      "description": "Ratio-based threshold for HOT key classification (fraction of total QPS).",
+      "description": "Hot-key threshold as fraction of estimated global QPS (1%).",
       "defaultValue": 0.01
+    },
+    {
+      "name": "zeta.worker.state-machine.sm-duration-ms",
+      "type": "java.lang.Long",
+      "description": "State-machine base window duration in milliseconds. Each slice = sm-duration-ms / sm-slices.",
+      "defaultValue": 500
+    },
+    {
+      "name": "zeta.worker.state-machine.sm-slices",
+      "type": "java.lang.Integer",
+      "description": "Number of slices within the state-machine window. Minimum 1.",
+      "defaultValue": 10
     },
     {
       "name": "zeta.worker.state-machine.confirm-duration-ms",
       "type": "java.lang.Long",
-      "description": "Duration in milliseconds a key must remain hot before emitting a HOT decision.",
-      "defaultValue": 300
+      "description": "Total duration in milliseconds for HOT confirmation (confirmCount = ceil(confirmDurationMs / sliceMs)).",
+      "defaultValue": 50
     },
     {
       "name": "zeta.worker.state-machine.cool-duration-ms",
       "type": "java.lang.Long",
-      "description": "Duration in milliseconds a key must remain cool before emitting a COOL decision.",
-      "defaultValue": 15000
+      "description": "Duration in milliseconds a key must stay below threshold to be considered COLD.",
+      "defaultValue": 600000
     },
     {
       "name": "zeta.worker.state-machine.pre-cool-grace-ms",
       "type": "java.lang.Long",
-      "description": "Grace period in milliseconds in the pre-cooling state before confirming cool.",
-      "defaultValue": 5000
+      "description": "Grace period in milliseconds at end of cool-down for silent revival.",
+      "defaultValue": 60000
     },
     {
       "name": "zeta.worker.state-machine.evict-interval-ms",
@@ -81,7 +105,7 @@
     {
       "name": "zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance",
       "type": "java.lang.Double",
-      "description": "Tolerance factor for QPS change before recalculating dynamic thresholds.",
+      "description": "QPS change tolerance before threshold update (±50%).",
       "defaultValue": 0.5
     },
     {
@@ -103,87 +127,87 @@
       "defaultValue": 60000
     },
     {
-      "name": "zeta.worker.topk-validation.validate-interval-ms",
-      "type": "java.lang.Long",
-      "description": "Interval in milliseconds for TopK pre-warm validation cycles.",
-      "defaultValue": 60000
-    },
-    {
-      "name": "zeta.worker.topk-validation.pre-warm-count",
-      "type": "java.lang.Integer",
-      "description": "Number of top-K entries to pre-warm validate before broadcasting HOT.",
-      "defaultValue": 5
-    },
-    {
-      "name": "zeta.worker.topk-validation.pre-warm-min-appearances",
-      "type": "java.lang.Integer",
-      "description": "Minimum appearances in consecutive validation cycles to confirm a pre-warm HOT.",
-      "defaultValue": 2
-    },
-    {
       "name": "zeta.worker.heavy-keeper.top-k",
       "type": "java.lang.Integer",
-      "description": "Worker-scoped HeavyKeeper top-K capacity.",
+      "description": "Worker-side HeavyKeeper Top-K capacity.",
       "defaultValue": 100
     },
     {
       "name": "zeta.worker.heavy-keeper.width",
       "type": "java.lang.Integer",
-      "description": "Worker-scoped HeavyKeeper sketch width.",
+      "description": "Worker-side Count-Min Sketch width.",
       "defaultValue": 20000
     },
     {
       "name": "zeta.worker.heavy-keeper.depth",
       "type": "java.lang.Integer",
-      "description": "Worker-scoped HeavyKeeper sketch depth.",
+      "description": "Worker-side Count-Min Sketch depth.",
       "defaultValue": 10
     },
     {
       "name": "zeta.worker.heavy-keeper.decay",
       "type": "java.lang.Double",
-      "description": "Worker-scoped HeavyKeeper decay factor.",
+      "description": "Worker-side HeavyKeeper decay factor.",
       "defaultValue": 0.9
     },
     {
       "name": "zeta.worker.heavy-keeper.min-count",
       "type": "java.lang.Integer",
-      "description": "Worker-scoped HeavyKeeper minimum frequency count.",
+      "description": "Worker-side minimum frequency count.",
       "defaultValue": 10
+    },
+    {
+      "name": "zeta.worker.heartbeat.ping-interval-ms",
+      "type": "java.lang.Integer",
+      "description": "Interval in milliseconds between structured heartbeat sends.",
+      "defaultValue": 1000
     },
     {
       "name": "zeta.worker.bayesian.prior-mean",
       "type": "java.lang.Double",
-      "description": "Prior mean of the log-frequency distribution for Normal-Normal conjugate Bayesian confidence estimation. The default ln(10) makes a key with 10 observed accesses per window neutral (posterior mean = prior mean).",
+      "description": "Prior mean of log-frequency distribution (ln(10) — key with ~10 accesses per window is neutral).",
       "defaultValue": 2.3026
     },
     {
       "name": "zeta.worker.bayesian.prior-std",
       "type": "java.lang.Double",
-      "description": "Prior standard deviation of the log-frequency distribution. Larger values make the estimator rely more on observed data; smaller values anchor more to the prior.",
+      "description": "Prior standard deviation; larger = more data-driven, smaller = anchored to prior.",
       "defaultValue": 2.0
     },
     {
       "name": "zeta.worker.bayesian.likelihood-std",
       "type": "java.lang.Double",
-      "description": "Base likelihood standard deviation of the observed log-count. Adjusted dynamically by the coefficient of variation (CV) of sliding-window sums to account for traffic variability.",
+      "description": "Base likelihood standard deviation; adjusted dynamically by CV for traffic-adaptive confidence.",
       "defaultValue": 0.8
     },
     {
-      "name": "zeta.worker.heartbeat.ping-interval-ms",
-      "type": "java.lang.Integer",
-      "description": "Interval in milliseconds between structured heartbeat sends (epoch, loadFactor, decisionVersionHwm, config gossip).",
-      "defaultValue": 1000
+      "name": "zeta.worker.fast-lane.enabled",
+      "type": "java.lang.Boolean",
+      "description": "Bypass Bayesian state machine; broadcast on sliding-window threshold only.",
+      "defaultValue": false
+    },
+    {
+      "name": "zeta.worker.fast-lane.rules[].key-pattern",
+      "type": "java.lang.String",
+      "description": "Key pattern for fast-lane rule matching.",
+      "defaultValue": ""
+    },
+    {
+      "name": "zeta.worker.fast-lane.rules[].threshold",
+      "type": "java.lang.Long",
+      "description": "Count threshold for fast-lane rule; matched keys exceeding this are promoted immediately.",
+      "defaultValue": 100
     },
     {
       "name": "zeta.worker.persistence.enabled",
       "type": "java.lang.Boolean",
-      "description": "Whether TopK persistence to Redis is enabled for warm-start after Worker restart.",
+      "description": "Enable periodic TopK snapshot to Redis (opt-in).",
       "defaultValue": false
     },
     {
       "name": "zeta.worker.persistence.persist-interval-ms",
       "type": "java.lang.Long",
-      "description": "Interval in milliseconds between periodic TopK snapshots.",
+      "description": "Interval in milliseconds between TopK snapshots.",
       "defaultValue": 30000
     },
     {
@@ -195,7 +219,7 @@
     {
       "name": "zeta.worker.persistence.redis-key-prefix",
       "type": "java.lang.String",
-      "description": "Redis key prefix for persisted TopK data (final key = prefix + appName + ':' + nodeId).",
+      "description": "Redis key prefix; final key = prefix + appName + ':' + nodeId.",
       "defaultValue": "zeta:topk:worker:"
     },
     {

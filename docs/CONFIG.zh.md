@@ -202,10 +202,16 @@
 | `zeta.worker-listener.enabled`               | `false`              | **部署了 Worker 集群时必须设为 `true`**。开启心跳消费、Worker 热/冷决策监听，以及驱动 Reporter 一致性哈希路由的 ClusterHealthView |
 | `zeta.worker-listener.exchange-name`         | `zeta.send.exchange` | 接收 Worker HOT/COOL 决策和心跳的 FanoutExchange 名称；必须与 Worker 侧 `zeta.worker.messaging.broadcast-exchange` 一致           |
 | `zeta.worker-listener.queue-prefix`          | `zeta.worker`      | 实例级 Worker 监听队列前缀；最终队列名 `{prefix}:{instanceId}`                                                                    |
+| `zeta.worker-listener.auto-startup`          | `true`               | Worker 监听器容器是否随应用自动启动                                                                                                |
 | `zeta.worker-listener.warmup-jitter-ms`      | `50`                 | 处理每个 Worker 决策前的随机延迟（毫秒）；分散各实例的 Redis 读取，避免惊群效应                                                   |
+| `zeta.worker-listener.broadcast-jitter-ms`   | `0`                  | 应用 Worker 广播前的随机 jitter（毫秒）；0 = 收到后立即应用                                                                       |
 | `zeta.worker-listener.concurrent-consumers`  | `2`                  | Worker 决策队列的并发消费者数                                                                                                     |
+| `zeta.worker-listener.scheduler-pool-size`   | `4`                  | 执行 Worker 缓存更新任务的调度线程池大小                                                                                          |
 | `zeta.worker-listener.prefetch-count`        | `5`                  | 每消费者的 AMQP 预取数                                                                                                            |
 | `zeta.worker-listener.sre.enabled`           | `true`               | 启用 Google SRE 自适应速率限制器作用于 HOT 提升处理                                                                               |
+| `zeta.worker-listener.sre.window-ms`         | `3000`               | SRE 速率限制器的滑动窗口时长（毫秒）                                                                                              |
+| `zeta.worker-listener.sre.buckets`           | `10`                 | SRE 滑动窗口的时间桶数                                                                                                            |
+| `zeta.worker-listener.sre.min-samples`       | `20`                 | SRE 速率限制器开始主动限流前的最小样本数（防止预热期过早限流）                                                                   |
 | `zeta.worker-listener.sre.success-threshold` | `0.6`                | 成功率低于此值时概率性丢弃 HOT 提升                                                                                               |
 
 > **⚠️ 重要：启动顺序** — `zeta.heartbeat.exchange` 和 `zeta.send.exchange` 由 App（common 模块）创建。Worker 节点**必须在 App 之后启动**，否则心跳会因 `NOT_FOUND` 错误失败，集群健康环将始终为空。使用 Docker Compose 时，请为 Worker 服务添加 `depends_on: app-1: { condition: service_started }`。或者，Worker 的心跳生产者延迟首次发送 `pingIntervalMs`（默认 1000ms）以使 RabbitAdmin 有足够时间声明 exchange。
@@ -282,16 +288,13 @@
 | `zeta.worker.state-machine.confirm-duration-ms`                    | `50`                      | HOT 确认总时长。confirmCount = ceil(confirm-duration-ms / slice-ms)                            |
 | `zeta.worker.state-machine.cool-duration-ms`                       | `600000`                  | key 持续低于阈值才确认 COLD 的时长                                                             |
 | `zeta.worker.state-machine.pre-cool-grace-ms`                      | `60000`                   | COOL 结束时的宽限期，允许静默恢复                                                              |
-| `zeta.worker.state-machine.evict-interval-ms`                      | `30000`                   | 过期状态擦除间隔（毫秒）；必须 >= cool-duration-ms \* 2                                        |
+| `zeta.worker.state-machine.evict-interval-ms`                      | `30000`                   | 过期状态擦除间隔（毫秒）；建议 >= cool-duration-ms \* 2 以免过早擦除冷却中的 key                |
 | **`zeta.worker.global-qps-dynamic-threshold.*`**                   |                           | **动态阈值（全局 QPS）**                                                                       |
 | `zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms` | `60000`                   | 动态阈值重新计算的时间间隔                                                                     |
 | `zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance`    | `0.5`                     | 触发阈值更新的 QPS 变化容忍度（±50%）                                                          |
 | `zeta.worker.global-qps-dynamic-threshold.learning-period-ms`      | `30000`                   | QPS 估算的学习周期                                                                             |
 | `zeta.worker.global-qps-dynamic-threshold.hot-threshold-ratio`     | `0.01`                    | 热阈值占估计全局 QPS 的比例                                                                    |
-| **`zeta.worker.topk-validation.*`**                                |                           | **TopK 验证**                                                                                  |
-| `zeta.worker.topk-validation.validate-interval-ms`                 | `60000`                   | Top-K 交叉验证的运行间隔                                                                       |
-| `zeta.worker.topk-validation.pre-warm-count`                       | `5`                       | 有资格预热的 Top-K 数量                                                                        |
-| `zeta.worker.topk-validation.pre-warm-min-appearances`             | `2`                       | 预热前所需的最小连续 Top-K 出现次数                                                            |
+
 | **`zeta.worker.heavy-keeper.*`**                                   |                           | **HeavyKeeper（Worker 端）**                                                                   |
 | `zeta.worker.heavy-keeper.top-k`                                   | `100`                     | Worker 端 HeavyKeeper Top-K 容量                                                               |
 | `zeta.worker.heavy-keeper.width`                                   | `20000`                   | Worker 端 Count-Min Sketch 宽度                                                                |
@@ -302,6 +305,11 @@
 | `zeta.worker.bayesian.prior-mean`                                  | `2.3026`                  | 对数频率分布的先验均值（ln(10)——每个窗口≈10次访问的 key 为中性）                               |
 | `zeta.worker.bayesian.prior-std`                                   | `2.0`                     | 先验标准差；越大越依赖观测数据，越小越锚定先验                                                 |
 | `zeta.worker.bayesian.likelihood-std`                              | `0.8`                     | 基础似然标准差；由滑动窗口和的变异系数（CV）动态调整，实现流量自适应的置信度估计               |
+| **`zeta.worker.fast-lane.*`**                                      |                           | **快速通道规则（绕过贝叶斯门控）**                                                              |
+| `zeta.worker.fast-lane.enabled`                                    | `false`                   | 绕过贝叶斯状态机，仅基于滑动窗口阈值广播                                                        |
+| `zeta.worker.fast-lane.rules`                                      | `[]`                      | 快速通道规则列表（key 模式 + 阈值）                                                             |
+| `zeta.worker.fast-lane.rules[].key-pattern`                        | `""`                      | 快速通道规则的 key 模式                                                                        |
+| `zeta.worker.fast-lane.rules[].threshold`                          | `100`                     | 快速通道规则的计数阈值；匹配的 key 超过此值立即提升                                             |
 | **`zeta.worker.heartbeat.*`**                                      |                           | **心跳**                                                                                       |
 | `zeta.worker.heartbeat.ping-interval-ms`                           | `1000`                    | 结构化心跳发送间隔（毫秒）                                                                     |
 | **`zeta.worker.persistence.*`**                                    |                           | **TopK 持久化（热启动）**                                                                      |

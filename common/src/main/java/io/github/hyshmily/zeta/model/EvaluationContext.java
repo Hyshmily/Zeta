@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.model;
 
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+
 /**
  * Aggregated observation data fed into Bayesian confidence evaluation.
  *
@@ -26,7 +28,7 @@ package io.github.hyshmily.zeta.model;
  *
  * <p>Created by the worker {@code KeyEvaluator}
  * before each call to
- * {@link io.github.hyshmily.zeta.detection.ZetaStateMachine#evaluate(String, boolean, EvaluationContext)}.
+ * {@link ZetaBayesianSM#evaluate(String, boolean, EvaluationContext)}.
  *
  * @param cmsCount    HeavyKeeper frequency estimate for this key (global, cross-instance)
  * @param windowSum   total access count in the current sliding window (local);

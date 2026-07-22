@@ -22,12 +22,12 @@ import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
-import io.github.hyshmily.zeta.worker.detection.impl.ZetaStateMachineImpl;
+import io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link io.github.hyshmily.zeta.detection.ZetaStateMachine} covering cold-to-hot, hot-to-cool, pre-cooling revive, reset, and eviction
+ * Tests for {@link io.github.hyshmily.zeta.detection.ZetaBayesianSM} covering cold-to-hot, hot-to-cool, pre-cooling revive, reset, and eviction
  * transitions.
  *
  * <p>All tests use a {@link ConfidenceEvaluator} that always yields
@@ -35,7 +35,7 @@ import org.junit.jupiter.api.Test;
  * state transitions are gated purely by the hot/cold streak counters,
  * matching the pre-Bayesian behaviour.
  */
-class ZetaStateMachineTest {
+class ZetaBayesianSMTest {
 
   private static final ConfidenceEvaluator EVAL = new ConfidenceEvaluator(
     new BayesianConfidenceEstimator(2.3026, 2.0, 0.5)
@@ -49,11 +49,11 @@ class ZetaStateMachineTest {
 
   private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null);
 
-  private ZetaStateMachineImpl machine;
+  private ZetaBayesianSM machine;
 
   @BeforeEach
   void setUp() {
-    machine = new ZetaStateMachineImpl(3, 10, 4, EVAL);
+    machine = new ZetaBayesianSM(3, 10, 4, EVAL);
   }
 
   @Test

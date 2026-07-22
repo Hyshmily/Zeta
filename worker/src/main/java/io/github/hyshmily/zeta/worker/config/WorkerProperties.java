@@ -18,6 +18,8 @@ package io.github.hyshmily.zeta.worker.config;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
+import java.util.ArrayList;
+import java.util.List;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
@@ -29,7 +31,7 @@ import org.springframework.validation.annotation.Validated;
  *
  * <p>Groups cover routing, AMQP exchange names, sliding-window parameters,
  * threshold settings, state-machine timings, dynamic threshold adaptation,
- * TopK pre-warm validation, and HeavyKeeper algorithm tuning.
+ * and HeavyKeeper algorithm tuning.
  *
  * Default constructor.
  */
@@ -109,15 +111,6 @@ public class WorkerProperties {
     private long recalculateIntervalMs = 60_000;
   }
 
-  /** Pre-warm validation before emitting HOT decisions. Default constructor. */
-  @Data
-  public static class TopKValidation {
-
-    private long validateIntervalMs = 60000;
-    private int preWarmCount = 5;
-    private int preWarmMinAppearances = 2;
-  }
-
   /** HeavyKeeper TopK algorithm parameters for worker-side hot key detection. Default constructor. */
   @Data
   public static class HeavyKeeper {
@@ -143,6 +136,23 @@ public class WorkerProperties {
     private double priorMean = 2.3026;
     private double priorStd = 2.0;
     private double likelihoodStd = 0.8;
+  }
+
+  /** Fast-lane rules — bypass Bayesian state machine, broadcast on sliding-window threshold only. */
+  @Data
+  public static class FastLane {
+
+    private boolean enabled = false;
+
+    private List<FastLaneRule> rules = new ArrayList<>();
+  }
+
+  /** A single fast-lane rule: key pattern + threshold. */
+  @Data
+  public static class FastLaneRule {
+
+    private String keyPattern = "";
+    private long threshold = 100;
   }
 
   /** TopK persistence to Redis for warm-start after Worker restart. Default constructor. */
@@ -189,9 +199,6 @@ public class WorkerProperties {
   private GlobalQpsDynamicThreshold globalQpsDynamicThreshold = new GlobalQpsDynamicThreshold();
 
   @Valid
-  private TopKValidation topKValidation = new TopKValidation();
-
-  @Valid
   private HeavyKeeper heavyKeeper = new HeavyKeeper();
 
   @Valid
@@ -199,6 +206,9 @@ public class WorkerProperties {
 
   @Valid
   private Bayesian bayesian = new Bayesian();
+
+  @Valid
+  private FastLane fastLane = new FastLane();
 
   @Valid
   private Persistence persistence = new Persistence();

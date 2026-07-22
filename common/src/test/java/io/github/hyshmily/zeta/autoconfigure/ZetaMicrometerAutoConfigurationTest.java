@@ -23,7 +23,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
@@ -120,7 +120,7 @@ class ZetaMicrometerAutoConfigurationTest {
     when(csp.getDedupCacheSize()).thenReturn(15L);
     HealthView healthView = mock(HealthView.class);
     when(healthView.isClusterHealthy()).thenReturn(true);
-    ZetaStateMachine sm = mock(ZetaStateMachine.class);
+    ZetaBayesianSM sm = mock(ZetaBayesianSM.class);
     when(sm.getTrackedKeys()).thenReturn(12);
 
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);

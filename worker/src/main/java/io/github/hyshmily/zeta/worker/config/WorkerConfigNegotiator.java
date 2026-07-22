@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.worker.config;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import jakarta.annotation.PostConstruct;
@@ -40,7 +40,7 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 public class WorkerConfigNegotiator {
 
   /** State machine whose config (confirm/cool/grace counts) is updated from heartbeat messages. */
-  private final ZetaStateMachine stateMachine;
+  private final ZetaBayesianSM stateMachine;
   /** Monotonically increasing counter tracking the latest config-change timestamp. */
   private final AtomicLong configTimestampCounter;
   /** Unique identifier for this Worker node, used in queue names and heartbeat identification. */

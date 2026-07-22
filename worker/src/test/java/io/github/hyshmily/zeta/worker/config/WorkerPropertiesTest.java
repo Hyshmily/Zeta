@@ -139,16 +139,6 @@ class WorkerPropertiesTest {
   }
 
   /**
-   * Verifies the default values of the {@code topk-validation} sub-properties.
-   */
-  @Test
-  void shouldHaveDefaultTopKValidation() {
-    assertThat(properties.getTopKValidation().getValidateIntervalMs()).isEqualTo(60000);
-    assertThat(properties.getTopKValidation().getPreWarmCount()).isEqualTo(5);
-    assertThat(properties.getTopKValidation().getPreWarmMinAppearances()).isEqualTo(2);
-  }
-
-  /**
    * Verifies that {@code confirmWindows} with a non-exact division rounds up via ceil.
    * Edge case: confirmDurationMs=350, sliceMs=100 → 350/100 = 3.5 → ceil = 4.
    */

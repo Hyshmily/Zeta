@@ -18,9 +18,12 @@ package io.github.hyshmily.zeta.worker.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.worker.detection.*;
+import io.github.hyshmily.zeta.worker.detection.Evaluator;
+import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
+import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
+import io.github.hyshmily.zeta.worker.detection.ThresholdLearner;
 import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
@@ -66,14 +69,12 @@ class WorkerAutoConfigurationTest {
   void allBeansAreCreatedWhenWorkerEnabled() {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(SlidingWindowDetector.class);
-      assertThat(ctx).hasSingleBean(ZetaStateMachine.class);
-      assertThat(ctx).hasSingleBean(TopKValidator.class);
+      assertThat(ctx).hasSingleBean(ZetaBayesianSM.class);
       assertThat(ctx).hasSingleBean(WorkerBroadcaster.class);
       assertThat(ctx).hasSingleBean(ReportConsumer.class);
       assertThat(ctx).hasSingleBean(GlobalQpsEstimator.class);
       assertThat(ctx).hasSingleBean(ThresholdLearner.class);
       assertThat(ctx).hasSingleBean(WorkerAutoConfiguration.EvictStaleTask.class);
-      assertThat(ctx).hasSingleBean(WorkerAutoConfiguration.TopKValidationTask.class);
     });
   }
 
@@ -89,7 +90,7 @@ class WorkerAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(SlidingWindowDetector.class);
-        assertThat(ctx).doesNotHaveBean(ZetaStateMachine.class);
+        assertThat(ctx).doesNotHaveBean(ZetaBayesianSM.class);
         assertThat(ctx).doesNotHaveBean(WorkerBroadcaster.class);
         assertThat(ctx).doesNotHaveBean(ReportConsumer.class);
         assertThat(ctx).doesNotHaveBean(GlobalQpsEstimator.class);
@@ -260,43 +261,30 @@ class WorkerAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).doesNotHaveBean(SlidingWindowDetector.class);
-        assertThat(ctx).doesNotHaveBean(ZetaStateMachine.class);
+        assertThat(ctx).doesNotHaveBean(ZetaBayesianSM.class);
         assertThat(ctx).doesNotHaveBean(WorkerBroadcaster.class);
         assertThat(ctx).doesNotHaveBean(ReportConsumer.class);
       });
   }
 
   /**
-   * Verifies that {@code TopKValidationTask.validate()} does not throw.
-   * Mirrors the {@code evictStaleTaskShouldCatchExceptions} pattern.
-   */
-  @Test
-  @DisplayName("TopKValidationTask.validate should catch exceptions")
-  void topKValidationTaskShouldCatchExceptions() {
-    runner.run(ctx -> {
-      WorkerAutoConfiguration.TopKValidationTask task = ctx.getBean(WorkerAutoConfiguration.TopKValidationTask.class);
-      assertThatCode(task::validate).doesNotThrowAnyException();
-    });
-  }
-
-  /**
    * Verifies that {@code EvictStaleTask.evictStale()} calls both
    * {@link SlidingWindowDetector#evictStale(long)} and
-   * {@link ZetaStateMachine#evictStale(long)} with the expected stale threshold.
+   * {@link ZetaBayesianSM#evictStale(long)} with the expected stale threshold.
    */
   @Test
   @DisplayName("EvictStaleTask.evictStale should call evictStale on detector and stateMachine")
   void evictStaleTaskShouldCallEvictStaleOnDetectorAndStateMachine() {
     SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
-    ZetaStateMachine stateMachine = Mockito.mock(ZetaStateMachine.class);
+    ZetaBayesianSM stateMachine = Mockito.mock(ZetaBayesianSM.class);
     WorkerBroadcaster broadcaster = Mockito.mock(WorkerBroadcaster.class);
-    KeyEvaluator keyEvaluator = Mockito.mock(KeyEvaluator.class);
+    Evaluator evaluator = Mockito.mock(Evaluator.class);
     WorkerProperties properties = new WorkerProperties();
 
     WorkerAutoConfiguration.EvictStaleTask task = new WorkerAutoConfiguration.EvictStaleTask(
       detector,
       stateMachine,
-      keyEvaluator,
+      evaluator,
       properties,
       broadcaster
     );
@@ -391,20 +379,6 @@ class WorkerAutoConfigurationTest {
   }
 
   /**
-   * Verifies that {@code TopKValidationTask.validate()} does not propagate
-   * exceptions thrown by the underlying {@link TopKValidator}.
-   */
-  @Test
-  @DisplayName("TopKValidationTask.validate should catch exceptions from TopKValidator")
-  void topKValidationTaskShouldCatchExceptionsFromValidator() {
-    TopKValidator validator = Mockito.mock(TopKValidator.class);
-    Mockito.doThrow(new RuntimeException("validation failed")).when(validator).validate();
-
-    WorkerAutoConfiguration.TopKValidationTask task = new WorkerAutoConfiguration.TopKValidationTask(validator);
-    assertThatCode(task::validate).doesNotThrowAnyException();
-  }
-
-  /**
    * Verifies that {@code EvictStaleTask.evictStale()} does not propagate
    * exceptions thrown by the underlying {@link SlidingWindowDetector}.
    */
@@ -412,16 +386,16 @@ class WorkerAutoConfigurationTest {
   @DisplayName("EvictStaleTask.evictStale should catch exceptions from detector")
   void evictStaleTaskShouldCatchExceptionsFromDetector() {
     SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
-    ZetaStateMachine stateMachine = Mockito.mock(ZetaStateMachine.class);
+    ZetaBayesianSM stateMachine = Mockito.mock(ZetaBayesianSM.class);
     WorkerBroadcaster broadcaster = Mockito.mock(WorkerBroadcaster.class);
-    KeyEvaluator keyEvaluator = Mockito.mock(KeyEvaluator.class);
+    Evaluator evaluator = Mockito.mock(Evaluator.class);
     WorkerProperties properties = new WorkerProperties();
     Mockito.doThrow(new RuntimeException("eviction failed")).when(detector).evictStale(Mockito.anyLong());
 
     WorkerAutoConfiguration.EvictStaleTask task = new WorkerAutoConfiguration.EvictStaleTask(
       detector,
       stateMachine,
-      keyEvaluator,
+      evaluator,
       properties,
       broadcaster
     );

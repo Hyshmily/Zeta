@@ -18,13 +18,12 @@ package io.github.hyshmily.zeta.worker.ingest;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
+import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
-import io.github.hyshmily.zeta.worker.detection.KeyEvaluator;
-import io.github.hyshmily.zeta.worker.detection.TopKValidator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,13 +36,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 class ReportConsumerTest {
 
   @Mock
-  private KeyEvaluator keyEvaluator;
+  private Evaluator keyEvaluator;
 
   @Mock
   private WorkerBroadcaster broadcaster;
-
-  @Mock
-  private TopKValidator topKValidator;
 
   @Mock
   private TopK workerTopK;
@@ -52,30 +48,29 @@ class ReportConsumerTest {
   private GlobalQpsEstimator globalQpsEstimator;
 
   @Mock
-  private ZetaStateMachine stateMachine;
+  private ZetaBayesianSM stateMachine;
 
   private ReportConsumer consumer;
 
   @BeforeEach
   void setUp() {
-    consumer = new ReportConsumer(
-      keyEvaluator,
-      broadcaster,
-      topKValidator,
-      workerTopK,
-      globalQpsEstimator,
-      stateMachine
-    );
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, workerTopK, globalQpsEstimator, stateMachine);
   }
 
   @Test
   void shouldProcessEntriesAndFeedAllComponents() {
-    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("key1", 5L, "key2", 3L));
+    ReportMessage message = new ReportMessage(
+      0L,
+      "testApp",
+      System.currentTimeMillis(),
+      Map.of("key1", 5L, "key2", 3L)
+    );
     when(keyEvaluator.evaluate(anyString(), anyLong())).thenReturn(ZetaDecision.none("key", null));
 
     consumer.onReport(message);
 
-    verify(workerTopK).addDirect(Map.of("key1", 5L, "key2", 3L));
+    verify(workerTopK).addDirect("key1", 5L);
+    verify(workerTopK).addDirect("key2", 3L);
     verify(keyEvaluator).evaluate("key1", 5L);
     verify(keyEvaluator).evaluate("key2", 3L);
     verify(globalQpsEstimator).addTotal(8L);
@@ -89,18 +84,6 @@ class ReportConsumerTest {
     consumer.onReport(message);
 
     verify(broadcaster).broadcastHot("hotKey");
-    verify(topKValidator).markConfirmed("hotKey");
-  }
-
-  @Test
-  void shouldBroadcastCoolWhenStateMachineReturnsCool() {
-    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
-    when(keyEvaluator.evaluate("coolKey", 1L)).thenReturn(ZetaDecision.cool("coolKey", null));
-
-    consumer.onReport(message);
-
-    verify(broadcaster).broadcastCool("coolKey");
-    verify(topKValidator).markCooled("coolKey");
   }
 
   @Test
@@ -108,7 +91,7 @@ class ReportConsumerTest {
     ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
     consumer.onReport(message);
 
-    verify(workerTopK, never()).addDirect(any());
+    verify(workerTopK, never()).addDirect(anyString(), anyLong());
     verify(keyEvaluator, never()).evaluate(anyString(), anyLong());
   }
 
@@ -127,7 +110,7 @@ class ReportConsumerTest {
     ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of());
     consumer.onReport(message);
     verify(globalQpsEstimator, never()).addTotal(anyLong());
-    verify(workerTopK, never()).addDirect(any());
+    verify(workerTopK, never()).addDirect(anyString(), anyLong());
   }
 
   @Test
@@ -142,7 +125,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(workerTopK).addDirect(Map.of("bigKey", (long) Integer.MAX_VALUE));
+    verify(workerTopK).addDirect("bigKey", (long) Integer.MAX_VALUE);
     verify(globalQpsEstimator).addTotal((long) Integer.MAX_VALUE);
   }
 
@@ -158,7 +141,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(workerTopK).addDirect(Map.of("hugeKey", (long) Integer.MAX_VALUE + 1));
+    verify(workerTopK).addDirect("hugeKey", (long) Integer.MAX_VALUE + 1);
   }
 
   @Test
@@ -193,8 +176,16 @@ class ReportConsumerTest {
 
     verify(broadcaster, never()).broadcastHot(anyString());
     verify(broadcaster, never()).broadcastCool(anyString());
-    verify(topKValidator, never()).markConfirmed(anyString());
-    verify(topKValidator, never()).markCooled(anyString());
+  }
+
+  @Test
+  void shouldBroadcastCoolWhenStateMachineReturnsCool() {
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
+    when(keyEvaluator.evaluate("coolKey", 1L)).thenReturn(ZetaDecision.cool("coolKey", null));
+
+    consumer.onReport(message);
+
+    verify(broadcaster).broadcastCool("coolKey");
   }
 
   @Test
@@ -222,7 +213,6 @@ class ReportConsumerTest {
     consumer.onReport(message);
 
     verify(broadcaster).broadcastHot("hotKey");
-    verify(topKValidator).markConfirmed("hotKey");
   }
 
   @Test
@@ -233,6 +223,5 @@ class ReportConsumerTest {
     consumer.onReport(message);
 
     verify(broadcaster).broadcastCool("coolKey");
-    verify(topKValidator).markCooled("coolKey");
   }
 }

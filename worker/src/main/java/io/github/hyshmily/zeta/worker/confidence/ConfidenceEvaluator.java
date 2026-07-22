@@ -16,13 +16,14 @@
 package io.github.hyshmily.zeta.worker.confidence;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import lombok.RequiredArgsConstructor;
 
 /**
  * Facade over {@link BayesianConfidenceEstimator} for the state machine.
  *
  * <p>This thin wrapper exists to keep the state machine
- * ({@link io.github.hyshmily.zeta.detection.ZetaStateMachine})
+ * ({@link ZetaBayesianSM})
  * decoupled from the specific estimator implementation.
  *
  * <p>The three parameters (CMS count, threshold, CV) mirror the three

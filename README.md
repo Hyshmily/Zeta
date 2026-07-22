@@ -22,7 +22,14 @@ Zeta is a configurable, high-performance, low-cost lightweight distributed cache
 Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper probabilistic sketch and a remote Worker cluster — and automatically warms up the L1 cache based on the detection results.
 
 - Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency.
-- The reporting path is protected by a BBR congestion control algorithm that automatically throttles based on CPU load, preventing burst traffic from overwhelming the channel. The Worker cluster aggregates access reports from all application instances, runs sliding-window frequency analysis combined with a Bayesian confidence state machine, and broadcasts HOT/COOL decisions back to every instance. Each cache entry (CacheEntry) carries two orthogonal version numbers — dataVersion and decisionVersion — and a KeyState marking its lifecycle state (HOT/COOL/NORMAL). Worker decisions override local promotions via a monotonically increasing decisionVersion, ensuring cluster-wide consistency.
+
+- The Worker cluster aggregates access reports from all application instances and runs a two-path evaluation pipeline:
+  - **FastLane path**: For keys matching user-configured glob rules (e.g. `product:*`), the sliding-window sum is compared directly against the rule's threshold. When the threshold is met, the key is promoted to `CONFIRMED_HOT` immediately — no Bayesian confidence gating, no confirm windows. End-to-end latency: **~60ms** (P99). Designed for flash-sale product IDs, breaking-news slugs, and any key where false positives are tolerable.
+  - **Bayesian path**: For all other keys, sliding-window frequency analysis combined with a Bayesian confidence state machine (Normal-Normal conjugate posterior) produces HOT/COOL decisions. This path trades ~5s latency for high-confidence, low false-positive decisions.
+
+- The reporting path is protected by a BBR congestion control algorithm that automatically throttles based on CPU load, preventing burst traffic from overwhelming the channel.
+
+- Each cache entry (CacheEntry) carries two orthogonal version numbers — dataVersion and decisionVersion — and a KeyState marking its lifecycle state (HOT/COOL/NORMAL). Worker decisions override local promotions via a monotonically increasing decisionVersion, ensuring cluster-wide consistency.
 
 ### Multi-Node Cache Coherency
 
@@ -31,8 +38,6 @@ Much like how a primary-backup database synchronizes writes through a log replic
 When any instance performs a write-through (putThrough) or invalidation, it increments a per-key dataVersion (via Redis INCR, with a local fallback for degraded mode) and broadcasts the event to all peers. Each peer compares the incoming dataVersion against its local version — stale messages are silently dropped. When all Workers are unreachable, the local TopK assumes full authority over promotions and the reporter drops silently; when Workers recover, they automatically reclaim control via a higher version number — no manual intervention required.
 
 This version comparison mechanism ensures eventual coherency without the overhead of distributed consensus protocols like Paxos or Raft.
-
-End-to-end latency under default settings: ~300ms (P99).
 
 Benchmarks:
 

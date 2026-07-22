@@ -19,12 +19,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.autoconfigure.ZetaFacadeAutoConfiguration;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.worker.config.WorkerAutoConfiguration;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
 import io.github.hyshmily.zeta.worker.detection.ThresholdLearner;
-import io.github.hyshmily.zeta.worker.detection.TopKValidator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
@@ -110,12 +109,11 @@ class WorkerApplicationTest {
   @DisplayName("all key worker beans are created")
   void allWorkerBeansAreCreated() {
     assertThat(applicationContext.getBean(SlidingWindowDetector.class)).isNotNull();
-    assertThat(applicationContext.getBean(ZetaStateMachine.class)).isNotNull();
+    assertThat(applicationContext.getBean(ZetaBayesianSM.class)).isNotNull();
     assertThat(applicationContext.getBean(WorkerBroadcaster.class)).isNotNull();
     assertThat(applicationContext.getBean(ReportConsumer.class)).isNotNull();
     assertThat(applicationContext.getBean(GlobalQpsEstimator.class)).isNotNull();
     assertThat(applicationContext.getBean(ThresholdLearner.class)).isNotNull();
-    assertThat(applicationContext.getBean(TopKValidator.class)).isNotNull();
     assertThat(applicationContext.getBean(WorkerHeartbeatProducer.class)).isNotNull();
   }
 

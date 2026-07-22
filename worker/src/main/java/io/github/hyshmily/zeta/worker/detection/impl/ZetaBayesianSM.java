@@ -15,25 +15,25 @@
  */
 package io.github.hyshmily.zeta.worker.detection.impl;
 
-import static io.github.hyshmily.zeta.detection.ZetaStateMachine.State.*;
-
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceLevel;
 import io.github.hyshmily.zeta.worker.confidence.ProbabilityResult;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.function.Consumer;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -41,7 +41,7 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p>Each Worker shard owns a subset of keys (determined by
  * {@link io.github.hyshmily.zeta.sharding.ConsistentHashRing} routing)
- * and runs one {@code ZetaStateMachineImpl} per shard. The state machine
+ * and runs one {@code ZetaBayesianSM} per shard. The state machine
  * converts per-key sliding-window frequency observations into lifecycle
  * transitions, with every decision gated by Bayesian confidence scoring
  * to suppress false-positive broadcasts.
@@ -130,7 +130,7 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Internal
 @Slf4j
-public class ZetaStateMachineImpl implements ZetaStateMachine {
+public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBayesianSM {
 
   /**
    * Constructs the state machine with the given lifecycle thresholds and
@@ -141,7 +141,7 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
    * @param preCoolGraceCount   cold windows before entering PRE_COOLING
    * @param confidenceEvaluator the Bayesian confidence evaluator (must not be {@code null})
    */
-  public ZetaStateMachineImpl(
+  public ZetaBayesianSM(
     int confirmCount,
     int coolCount,
     int preCoolGraceCount,
@@ -443,6 +443,29 @@ public class ZetaStateMachineImpl implements ZetaStateMachine {
    *
    * @param key the cache key to reset
    */
+  @Override
+  public ZetaDecision fastlane(String key) {
+    Lock lock = keyLocks.get(key);
+    lock.lock();
+    try {
+      KeyState state = states.get(key);
+      StateSnapshot snapShot = null;
+      if (state != null) {
+        snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
+      } else {
+        state = new KeyState();
+        states.put(key, state);
+      }
+      state.currentState = CONFIRMED_HOT;
+      state.hotStreak = Math.max(state.hotStreak, confirmCount);
+      state.coolStreak = 0;
+      state.lastUpdateTime = System.currentTimeMillis();
+      return ZetaDecision.hot(key, snapShot);
+    } finally {
+      lock.unlock();
+    }
+  }
+
   @Override
   public void reset(String key) {
     Lock lock = keyLocks.get(key);

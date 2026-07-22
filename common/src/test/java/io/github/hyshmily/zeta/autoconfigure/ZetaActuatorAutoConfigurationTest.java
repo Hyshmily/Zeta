@@ -22,7 +22,7 @@ import static org.mockito.Mockito.mock;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.RingEndpoint;
 import io.github.hyshmily.zeta.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
@@ -83,7 +83,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<ExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
-    ObjectProvider<ZetaStateMachine> stateMachineProvider = mock(ObjectProvider.class);
+    ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
@@ -130,7 +130,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<ExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
-    ObjectProvider<ZetaStateMachine> stateMachineProvider = mock(ObjectProvider.class);
+    ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
     ZetaProperties properties = new ZetaProperties();
 
@@ -177,7 +177,7 @@ class ZetaActuatorAutoConfigurationTest {
   }
 
   /**
-   * Verifies that stateMachineEndpoint is NOT created when ZetaStateMachine bean is absent.
+   * Verifies that stateMachineEndpoint is NOT created when ZetaBayesianSM bean is absent.
    */
   @Test
   void stateMachineEndpoint_shouldNotBeCreatedWhenStateMachineBeanAbsent() {
@@ -201,7 +201,7 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<ExpireManager> expireManagerProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
-    ObjectProvider<ZetaStateMachine> stateMachineProvider = mock(ObjectProvider.class);
+    ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
     ZetaProperties properties = new ZetaProperties();
 

@@ -24,7 +24,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 import static org.mockito.Mockito.anyLong;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.nio.file.Files;
@@ -65,7 +65,7 @@ class WorkerHeartbeatProducerTest {
   private RabbitTemplate rabbitTemplate;
 
   @Mock
-  private ZetaStateMachine stateMachine;
+  private ZetaBayesianSM stateMachine;
 
   @Mock
   private WorkerBroadcaster broadcaster;
@@ -102,10 +102,7 @@ class WorkerHeartbeatProducerTest {
     producer.sendHeartbeat();
 
     verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-      HEADER_HEARTBEAT_EPOCH,
-      1L
-    );
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(HEADER_HEARTBEAT_EPOCH, 1L);
   }
 
   /** Subsequent start: Redis INCR returns 6 (previous epoch was 5) → epoch = 6. */

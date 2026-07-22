@@ -86,22 +86,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
   public <T> T get(@NonNull Object key, @NonNull Callable<T> valueLoader) {
     String prefixed = prefixedKey(key);
     ZetaCacheContext cv = ZetaCacheContext.get();
-
     boolean skipDetection = cv.isSkipDetection();
-
-    // Fast path: check for cached NullValue sentinel
-    var localCache = zeta.getLocalCache();
-    if (localCache != null) {
-      Object raw = localCache.getIfPresent(prefixed);
-      if (raw instanceof CacheEntry entry && entry.getValue() == NullValue.INSTANCE) {
-        return null;
-      }
-      // skipDetection: return cached value without loading
-      if (skipDetection && raw != null) {
-        Object val = raw instanceof CacheEntry ce ? (T) ce.getValue() : (T) raw;
-        if (val != null) return (T) fromStoreValue(val);
-      }
-    }
 
     Supplier<Object> loader = () -> {
       try {
@@ -111,21 +96,41 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
       }
     };
 
+    // Fast path: if value is already cached, return immediately without
+    // resolving SpEL TTL. On cache hit the existing entry already carries
+    // its own TTL; zero overrides mean "use defaults" in HotKeyCache.
+    var localCache = zeta.getLocalCache();
+    if (localCache != null) {
+      Object raw = localCache.getIfPresent(prefixed);
+      if (raw != null) {
+        if (raw instanceof CacheEntry entry) {
+          if (entry.getValue() == NullValue.INSTANCE) return null;
+          // skipDetection: return cached value without loading
+          if (skipDetection) {
+            return (T) fromStoreValue(entry.getValue());
+          }
+          // Non-null cached value on regular path: still call computeIfAbsent
+          // (for Worker reporting + local promotion) but with 0 TTL override
+          // so SpEL is never triggered.
+          Object result = zeta.computeIfAbsent(prefixed, loader, 0L, 0L, true);
+          return result != null ? (T) fromStoreValue(result) : null;
+        }
+        // Bare (non-CacheEntry) value
+        return (T) fromStoreValue(raw);
+      }
+    }
+
+    // Cache miss: resolve TTL (may trigger SpEL supplier) then load.
     long hardTtlMs = cv.getHardTtlMs();
     long softTtlMs = cv.getSoftTtlMs();
     boolean hasTtlOverride = hardTtlMs > 0 || softTtlMs > 0;
-
     boolean allowReport = !skipDetection;
 
     Object result = hasTtlOverride
       ? zeta.computeIfAbsentWithSoftExpire(prefixed, loader, hardTtlMs, softTtlMs, allowReport)
       : zeta.computeIfAbsent(prefixed, loader, 0L, 0L, allowReport);
 
-    if (result != null) {
-      return (T) fromStoreValue(result);
-    }
-
-    return null;
+    return result != null ? (T) fromStoreValue(result) : null;
   }
 
   @Override

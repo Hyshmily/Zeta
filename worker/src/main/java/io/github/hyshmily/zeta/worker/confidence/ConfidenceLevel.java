@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.worker.confidence;
 
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+
 /**
  * Three-tier confidence classification for Bayesian posterior probabilities.
  *
@@ -22,7 +24,7 @@ package io.github.hyshmily.zeta.worker.confidence;
  * <ul>
  *   <li>{@link #HIGH} (p &#x2265; 0.95) — emit broadcast immediately</li>
  *   <li>{@link #MEDIUM} (0.80 &#x2264; p &lt; 0.95) — defer to
- *       {@link io.github.hyshmily.zeta.detection.ZetaStateMachine.State#CANDIDATE_HOT}</li>
+ *       {@link ZetaBayesianSM.State#CANDIDATE_HOT}</li>
  *   <li>{@link #LOW} (p &lt; 0.80) — suppress broadcast, continue accumulating
  *       evidence</li>
  * </ul>

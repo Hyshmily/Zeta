@@ -23,7 +23,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
@@ -63,7 +63,7 @@ class ZetaEndpointTest {
   private ExpireManager expireManager;
   private VersionController versionController;
   private CacheSyncPublisher cacheSyncPublisher;
-  private ZetaStateMachine zetaStateMachine;
+  private ZetaBayesianSM zetaBayesianSM;
   private HealthView healthView;
 
   @BeforeEach
@@ -80,7 +80,7 @@ class ZetaEndpointTest {
     expireManager = mock(ExpireManager.class);
     versionController = mock(VersionController.class);
     cacheSyncPublisher = mock(CacheSyncPublisher.class);
-    zetaStateMachine = mock(ZetaStateMachine.class);
+    zetaBayesianSM = mock(ZetaBayesianSM.class);
     healthView = mock(HealthView.class);
     when(healthView.isClusterHealthy()).thenReturn(true);
   }
@@ -99,7 +99,7 @@ class ZetaEndpointTest {
       .expireManager(expireManager)
       .versionController(versionController)
       .cacheSyncPublisher(cacheSyncPublisher)
-      .zetaStateMachine(zetaStateMachine)
+      .zetaBayesianSM(zetaBayesianSM)
       .healthView(healthView)
       .build();
   }
@@ -135,7 +135,7 @@ class ZetaEndpointTest {
     when(versionController.isRedisConfigured()).thenReturn(true);
     when(versionController.getDegradedVersionCount()).thenReturn(0L);
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(15L);
-    when(zetaStateMachine.getTrackedKeys()).thenReturn(7);
+    when(zetaBayesianSM.getTrackedKeys()).thenReturn(7);
 
     Map<String, Object> info = endpointWithAll().hotKeyInfo(100);
 
@@ -274,11 +274,11 @@ class ZetaEndpointTest {
   @Test
   void workerSection_shouldListWorkerHealth() {
     mockTopK(workerTopK, List.of(new Item("k", 1)), 10L);
-    when(zetaStateMachine.getTrackedKeys()).thenReturn(3);
+    when(zetaBayesianSM.getTrackedKeys()).thenReturn(3);
     ZetaEndpoint ep = ZetaEndpoint.builder()
       .workerTopK(workerTopK)
       .properties(properties)
-      .zetaStateMachine(zetaStateMachine)
+      .zetaBayesianSM(zetaBayesianSM)
       .healthView(healthView)
       .build();
 
@@ -393,7 +393,7 @@ class ZetaEndpointTest {
     ZetaEndpoint ep = ZetaEndpoint.builder()
       .workerTopK(workerTopK)
       .properties(properties)
-      .zetaStateMachine(zetaStateMachine)
+      .zetaBayesianSM(zetaBayesianSM)
       .build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);

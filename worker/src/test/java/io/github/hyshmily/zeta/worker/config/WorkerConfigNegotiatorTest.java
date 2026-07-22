@@ -6,7 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,7 +21,7 @@ import org.springframework.amqp.core.MessageProperties;
 class WorkerConfigNegotiatorTest {
 
   @Mock
-  private ZetaStateMachine stateMachine;
+  private ZetaBayesianSM stateMachine;
 
   private final AtomicLong configTimestampCounter = new AtomicLong(0);
   private final String nodeId = "worker-1";

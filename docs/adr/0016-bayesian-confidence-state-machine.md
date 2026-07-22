@@ -50,23 +50,23 @@ The observation fed to the Bayesian model is `cmsCount` (HeavyKeeper estimate) w
 
 ### Mathematical formulation
 
-| Component | Expression |
-|---|---|
-| Prior | μ ~ N(μ₀, σ₀²), where μ₀ = priorMean, σ₀ = priorStd |
-| Likelihood | y \| μ ~ N(μ, σ²), where y = ln(max(observedCount, 1)), σ = likelihoodStd |
-| Posterior | μ \| y ~ N(μₙ, σₙ²) |
-| Posterior mean | μₙ = (μ₀/σ₀² + y/σ²) / (1/σ₀² + 1/σ²) |
-| Posterior variance | σₙ² = 1 / (1/σ₀² + 1/σ²) |
-| Z-score | z = (ln(threshold) - μₙ) / σₙ |
-| Hot probability | P(μ > ln(threshold)) = 1 - Φ(z) |
+| Component          | Expression                                                                |
+| ------------------ | ------------------------------------------------------------------------- |
+| Prior              | μ ~ N(μ₀, σ₀²), where μ₀ = priorMean, σ₀ = priorStd                       |
+| Likelihood         | y \| μ ~ N(μ, σ²), where y = ln(max(observedCount, 1)), σ = likelihoodStd |
+| Posterior          | μ \| y ~ N(μₙ, σₙ²)                                                       |
+| Posterior mean     | μₙ = (μ₀/σ₀² + y/σ²) / (1/σ₀² + 1/σ²)                                     |
+| Posterior variance | σₙ² = 1 / (1/σ₀² + 1/σ²)                                                  |
+| Z-score            | z = (ln(threshold) - μₙ) / σₙ                                             |
+| Hot probability    | P(μ > ln(threshold)) = 1 - Φ(z)                                           |
 
 ### Default parameters
 
-| Parameter | Value | Rationale |
-|---|---|---|
-| priorMean | ln(10) ≈ 2.3026 | A key with 10 observed accesses is neutral (posterior = prior). |
-| priorStd | 1.0 | One order of magnitude uncertainty around the prior. |
-| likelihoodStd | 0.5 | Observation noise at half the prior uncertainty; 4× precision weight on data vs prior. |
+| Parameter     | Value           | Rationale                                                                              |
+| ------------- | --------------- | -------------------------------------------------------------------------------------- |
+| priorMean     | ln(10) ≈ 2.3026 | A key with 10 observed accesses is neutral (posterior = prior).                        |
+| priorStd      | 1.0             | One order of magnitude uncertainty around the prior.                                   |
+| likelihoodStd | 0.5             | Observation noise at half the prior uncertainty; 4× precision weight on data vs prior. |
 
 ### Prior calibration rationale
 
@@ -93,6 +93,7 @@ p < 0.80             LOW                   → suppress, reset or hold
 ### Threshold rationale
 
 The 0.80/0.95 split was chosen empirically:
+
 - **0.95 (HIGH):** at this threshold, the false-positive rate is approximately 5%. A HOT broadcast triggers L1 promotion across all Apps (up to 1h TTL), so the cost of a false positive is measurable — the Bayesian model requires strong evidence.
 - **0.80 (MEDIUM):** at this threshold, evidence is suggestive but not conclusive. The key is held in CANDIDATE_HOT (tracked but not broadcast) so that a single additional hot window can push it to HIGH. If the next window is cold, the key drops back to COLD silently — no broadcast noise.
 - **Below 0.80 (LOW):** insufficient evidence. The streak is decremented rather than fully reset, giving the key a second chance on the next window rather than requiring a full restart.
@@ -115,52 +116,52 @@ f(CV) =    ⎨ 1.0                          if 0.2 ≤ CV ≤ 0.5
            ⎩ 1.0 + min((CV - 0.5) / 0.5, 2.0)   if CV > 0.5
 ```
 
-| CV | f(CV) | Interpretation |
-|---|---|---|
-| 0.0 | 0.50 | Perfectly stable: tighten σ by 2× |
-| 0.1 | 0.75 | Mildly stable |
-| 0.2 | 1.00 | Normal threshold |
-| 0.5 | 1.00 | Upper normal bound |
-| 1.0 | 2.00 | Bursty: loosen σ by 2× |
-| ≥ 1.5 | 3.00 | Maximum dampening: loosen σ by 3× |
+| CV    | f(CV) | Interpretation                    |
+| ----- | ----- | --------------------------------- |
+| 0.0   | 0.50  | Perfectly stable: tighten σ by 2× |
+| 0.1   | 0.75  | Mildly stable                     |
+| 0.2   | 1.00  | Normal threshold                  |
+| 0.5   | 1.00  | Upper normal bound                |
+| 1.0   | 2.00  | Bursty: loosen σ by 2×            |
+| ≥ 1.5 | 3.00  | Maximum dampening: loosen σ by 3× |
 
-The CV is computed from the last 20 window sums per key, maintained in a ring buffer (`WindowSumHistory` in `KeyEvaluator`). The first 5 samples are required before CV is reported (returns `null`), which triggers use of the base σ unchanged.
+The CV is computed from the last 20 window sums per key, maintained in a ring buffer (`WindowSumHistory` in `BayesianEvaluator`). The first 5 samples are required before CV is reported (returns `null`), which triggers use of the base σ unchanged.
 
 ## State Machine Transition Matrix
 
 ### States
 
-| State | Meaning | Broadcast? |
-|---|---|---|
-| COLD | Default, no tracking state exists | Never |
-| CANDIDATE_HOT | Hot-streak met but only MEDIUM confidence | Never |
-| CONFIRMED_HOT | Actively hot, HIGH confidence | Yes (HOT) |
-| PRE_COOLING | Traffic dropped, grace period | Conditional (COOL only when cooled fully) |
+| State         | Meaning                                   | Broadcast?                                |
+| ------------- | ----------------------------------------- | ----------------------------------------- |
+| COLD          | Default, no tracking state exists         | Never                                     |
+| CANDIDATE_HOT | Hot-streak met but only MEDIUM confidence | Never                                     |
+| CONFIRMED_HOT | Actively hot, HIGH confidence             | Yes (HOT)                                 |
+| PRE_COOLING   | Traffic dropped, grace period             | Conditional (COOL only when cooled fully) |
 
 ### Hot window transitions (windowSum ≥ threshold)
 
-| Current | Condition | Next | Decision | Rationale |
-|---|---|---|---|---|
-| COLD, streak < confirmCount | — | COLD | NONE | Not enough consecutive hot windows |
-| COLD, streak ≥ confirmCount | HIGH | CONFIRMED_HOT | **HOT** | Strong evidence ready for broadcast |
-| COLD, streak ≥ confirmCount | MEDIUM | CANDIDATE_HOT | NONE | Promising but hold for more evidence |
-| COLD, streak ≥ confirmCount | LOW | COLD (streak decremented) | NONE | Weak evidence, one more window needed |
-| CANDIDATE_HOT | HIGH | CONFIRMED_HOT | **HOT** | Additional window pushed to HIGH |
-| CANDIDATE_HOT | MEDIUM/LOW | CANDIDATE_HOT (stay) | NONE | Still not enough for broadcast |
-| CONFIRMED_HOT | any | CONFIRMED_HOT (stay) | NONE | Already hot, no action needed |
-| PRE_COOLING | any | CONFIRMED_HOT | NONE | **Silent revive:** traffic returned, no broadcast |
+| Current                     | Condition  | Next                      | Decision | Rationale                                         |
+| --------------------------- | ---------- | ------------------------- | -------- | ------------------------------------------------- |
+| COLD, streak < confirmCount | —          | COLD                      | NONE     | Not enough consecutive hot windows                |
+| COLD, streak ≥ confirmCount | HIGH       | CONFIRMED_HOT             | **HOT**  | Strong evidence ready for broadcast               |
+| COLD, streak ≥ confirmCount | MEDIUM     | CANDIDATE_HOT             | NONE     | Promising but hold for more evidence              |
+| COLD, streak ≥ confirmCount | LOW        | COLD (streak decremented) | NONE     | Weak evidence, one more window needed             |
+| CANDIDATE_HOT               | HIGH       | CONFIRMED_HOT             | **HOT**  | Additional window pushed to HIGH                  |
+| CANDIDATE_HOT               | MEDIUM/LOW | CANDIDATE_HOT (stay)      | NONE     | Still not enough for broadcast                    |
+| CONFIRMED_HOT               | any        | CONFIRMED_HOT (stay)      | NONE     | Already hot, no action needed                     |
+| PRE_COOLING                 | any        | CONFIRMED_HOT             | NONE     | **Silent revive:** traffic returned, no broadcast |
 
 ### Cold window transitions (windowSum < threshold)
 
-| Current | Condition | Next | Decision | Rationale |
-|---|---|---|---|---|
-| COLD | any | COLD | NONE | Already cold |
-| CANDIDATE_HOT | any | COLD | NONE | Single cold window drops candidate |
-| CONFIRMED_HOT | streak < grace | CONFIRMED_HOT (stay) | NONE | Within grace period |
-| CONFIRMED_HOT | streak ≥ grace | PRE_COOLING | NONE | Enter grace period, check immediate COOL |
-| PRE_COOLING | streak < coolCount | PRE_COOLING (stay) | NONE | Still cooling |
-| PRE_COOLING | streak ≥ coolCount, MEDIUM/LOW | COLD | **COOL** | Fully cooled, confident |
-| PRE_COOLING | streak ≥ coolCount, HIGH | PRE_COOLING (streak decremented) | NONE | Bayesian still thinks it's hot |
+| Current       | Condition                      | Next                             | Decision | Rationale                                |
+| ------------- | ------------------------------ | -------------------------------- | -------- | ---------------------------------------- |
+| COLD          | any                            | COLD                             | NONE     | Already cold                             |
+| CANDIDATE_HOT | any                            | COLD                             | NONE     | Single cold window drops candidate       |
+| CONFIRMED_HOT | streak < grace                 | CONFIRMED_HOT (stay)             | NONE     | Within grace period                      |
+| CONFIRMED_HOT | streak ≥ grace                 | PRE_COOLING                      | NONE     | Enter grace period, check immediate COOL |
+| PRE_COOLING   | streak < coolCount             | PRE_COOLING (stay)               | NONE     | Still cooling                            |
+| PRE_COOLING   | streak ≥ coolCount, MEDIUM/LOW | COLD                             | **COOL** | Fully cooled, confident                  |
+| PRE_COOLING   | streak ≥ coolCount, HIGH       | PRE_COOLING (streak decremented) | NONE     | Bayesian still thinks it's hot           |
 
 ### Key design properties
 
@@ -180,18 +181,18 @@ The Bayesian confidence evaluation is **orthogonal** to this threshold: even whe
 
 ## Implementation Components
 
-| Class | Location | Role |
-|---|---|---|
-| `BayesianConfidenceEstimator` | `worker/.../confidence/` | Core Normal-Normal conjugate computation |
-| `ConfidenceEvaluator` | `worker/.../confidence/` | Thin facade, decouples state machine from estimator |
-| `EvaluationContext` | `common/.../model/` | Data carrier for all evaluation inputs |
-| `ProbabilityResult` | `worker/.../confidence/` | Posterior output with level classification |
-| `ConfidenceLevel` | `worker/.../confidence/` | HIGH/MEDIUM/LOW enum |
-| `NormalCdfTable` | `worker/.../confidence/` | Pre-computed Φ(z) table, Abramowitz & Stegun approx |
-| `ZetaStateMachineImpl` | `worker/.../detection/impl/` | Per-key state machine with Bayesian gating |
-| `KeyEvaluator` | `worker/.../detection/` | Pipeline orchestrator, CV computation |
-| `SlidingWindowDetector` | `worker/.../detection/` | Lock-free circular buffer for per-key frequency |
-| `ThresholdLearner` | `worker/.../detection/` | Adaptive threshold based on global QPS |
+| Class                         | Location                     | Role                                                |
+| ----------------------------- | ---------------------------- | --------------------------------------------------- |
+| `BayesianConfidenceEstimator` | `worker/.../confidence/`     | Core Normal-Normal conjugate computation            |
+| `ConfidenceEvaluator`         | `worker/.../confidence/`     | Thin facade, decouples state machine from estimator |
+| `EvaluationContext`           | `common/.../model/`          | Data carrier for all evaluation inputs              |
+| `ProbabilityResult`           | `worker/.../confidence/`     | Posterior output with level classification          |
+| `ConfidenceLevel`             | `worker/.../confidence/`     | HIGH/MEDIUM/LOW enum                                |
+| `NormalCdfTable`              | `worker/.../confidence/`     | Pre-computed Φ(z) table, Abramowitz & Stegun approx |
+| `ZetaBayesianSM`              | `worker/.../detection/impl/` | Per-key state machine with Bayesian gating          |
+| `BayesianEvaluator`           | `worker/.../detection/`      | Pipeline orchestrator, CV computation               |
+| `SlidingWindowDetector`       | `worker/.../detection/`      | Lock-free circular buffer for per-key frequency     |
+| `ThresholdLearner`            | `worker/.../detection/`      | Adaptive threshold based on global QPS              |
 
 ### NormalCdfTable performance note
 
@@ -214,4 +215,4 @@ The standard Normal CDF Φ(z) is pre-computed across z ∈ [-6, 6] at step 0.001
 
 4. **Three-tier thresholds are uncalibrated.** The 0.80/0.95 splits were chosen based on developer intuition and ad-hoc testing, not systematic ROC analysis. If production data shows excessive false HOT broadcasts or missed detections, these thresholds should be revisited.
 
-5. **State machine code in worker module.** `ZetaStateMachineImpl` and all confidence types reside in the `worker` module, never shipped in the Maven Central `zeta` starter JAR. Only the `ZetaStateMachine` interface stays in `common` for type safety across module boundaries. The Worker module depends on `common` for the interface and packages the implementation exclusively in its own artifact.
+5. **State machine code in worker module.** `ZetaBayesianSM` and all confidence types reside in the `worker` module, never shipped in the Maven Central `zeta` starter JAR. Only the `ZetaBayesianSM` interface stays in `common` for type safety across module boundaries. The Worker module depends on `common` for the interface and packages the implementation exclusively in its own artifact.

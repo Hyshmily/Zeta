@@ -69,7 +69,7 @@ class WorkerListenerPropertiesTest {
   void shouldHaveAllDefaultValues() {
     WorkerListenerProperties props = new WorkerListenerProperties();
     assertThat(props.getConcurrentConsumers()).isEqualTo(2);
-    assertThat(props.getSchedulerPoolSize()).isEqualTo(2);
+    assertThat(props.getSchedulerPoolSize()).isEqualTo(4);
     assertThat(props.getPrefetchCount()).isEqualTo(5);
     assertThat(props.isAutoStartup()).isTrue();
   }

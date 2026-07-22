@@ -16,21 +16,26 @@
 package io.github.hyshmily.zeta.worker.config;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
-import io.github.hyshmily.zeta.worker.detection.*;
-import io.github.hyshmily.zeta.worker.detection.impl.ZetaStateMachineImpl;
+import io.github.hyshmily.zeta.worker.detection.Evaluator;
+import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
+import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
+import io.github.hyshmily.zeta.worker.detection.ThresholdLearner;
 import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
 import io.github.hyshmily.zeta.worker.persistence.TopKPersistService;
+import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
+import io.github.hyshmily.zeta.worker.rule.impl.FastLaneRuleManagerImpl;
 import jakarta.annotation.PostConstruct;
+import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -67,11 +72,9 @@ import org.springframework.scheduling.annotation.Scheduled;
  * <h2>Provisioned beans</h2>
  * <ul>
  *   <li>{@link SlidingWindowDetector} – sliding‑window counter.</li>
- *   <li>{@link ZetaStateMachine} – per‑key lifecycle state machine.</li>
+ *   <li>{@link ZetaBayesianSM} – per‑key lifecycle state machine.</li>
  *   <li>{@link TopK} (worker‑scoped) – global frequency estimator for
- *       Top‑K cross‑validation and pre‑warming.</li>
- *   <li>{@link TopKValidator} – periodic Top‑K inspection that pre‑warms
- *       stable hot keys.</li>
+ *       Bayesian confidence evaluation.</li>
  *   <li>{@link ReportConsumer} – AMQP listener that drives the pipeline.</li>
  *   <li>{@link WorkerBroadcaster} – publishes HOT / COOL broadcasts.</li>
  *   <li>RabbitMQ topology ({@code reportExchange}, shard‑specific
@@ -230,11 +233,11 @@ public class WorkerAutoConfiguration {
    * @param properties        worker configuration properties providing confirm, cool, and
    *                          pre-cool grace window counts
    * @param confidenceEvaluator the Bayesian confidence evaluator injected into the state machine
-   * @return a new {@link ZetaStateMachine} instance
+   * @return a new {@link ZetaBayesianSM} instance
    */
   @Bean
-  public ZetaStateMachine hotKeyStateMachine(WorkerProperties properties, ConfidenceEvaluator confidenceEvaluator) {
-    return new ZetaStateMachineImpl(
+  public ZetaBayesianSM hotKeyStateMachine(WorkerProperties properties, ConfidenceEvaluator confidenceEvaluator) {
+    return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(
       properties.getConfirmWindows(),
       properties.getCoolWindows(),
       properties.getPreCoolGraceWindows(),
@@ -266,45 +269,27 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Top‑K validator that periodically inspects the worker's Top‑K list
-   * and pre‑warms keys that appear consistently.
-   *
-   * @param workerTopK  the worker-scoped HeavyKeeper sketch for frequency estimation
-   * @param broadcaster the worker broadcaster used to emit pre-warm HOT decisions
-   * @param properties  worker configuration providing TopK validation parameters
-   *                    (pre-warm count and minimum consecutive appearances)
-   * @return a new {@link TopKValidator} instance
+   * Bayesian key evaluator (always present) with integrated fast-lane support.
    */
   @Bean
-  public TopKValidator topKValidator(
-    @Qualifier("workerTopK") TopK workerTopK,
-    WorkerBroadcaster broadcaster,
-    WorkerProperties properties
-  ) {
-    return new TopKValidator(
-      workerTopK,
-      broadcaster,
-      properties.getTopKValidation().getPreWarmCount(),
-      properties.getTopKValidation().getPreWarmMinAppearances()
-    );
+  public FastLaneRuleManager fastLaneRuleManager(WorkerProperties properties) {
+    List<FastLaneRuleManager.FastLaneRule> rules = properties
+      .getFastLane()
+      .getRules()
+      .stream()
+      .map(r -> new FastLaneRuleManager.FastLaneRule(r.getKeyPattern(), r.getThreshold()))
+      .toList();
+    return new FastLaneRuleManagerImpl(rules);
   }
 
-  /**
-   * Unified key evaluator that combines sliding-window detection, HeavyKeeper
-   * frequency estimation, and Bayesian confidence evaluation into a single call.
-   *
-   * @param detector     the sliding-window detector
-   * @param stateMachine the per-key lifecycle state machine with Bayesian integration
-   * @param workerTopK   the worker-scoped HeavyKeeper sketch
-   * @return a new {@link KeyEvaluator} instance
-   */
   @Bean
-  public KeyEvaluator keyEvaluator(
+  public Evaluator keyEvaluator(
     SlidingWindowDetector detector,
-    ZetaStateMachine stateMachine,
-    @Qualifier("workerTopK") TopK workerTopK
+    ZetaBayesianSM stateMachine,
+    @Qualifier("workerTopK") TopK workerTopK,
+    FastLaneRuleManager fastLaneRuleManager
   ) {
-    return new KeyEvaluator(detector, stateMachine, workerTopK);
+    return new Evaluator(detector, stateMachine, workerTopK, fastLaneRuleManager);
   }
 
   /**
@@ -313,24 +298,22 @@ public class WorkerAutoConfiguration {
    * <p>Injects the worker‑scoped Top‑K so that every consumed reportToWorker also
    * feeds the frequency estimator.
    *
-   * @param keyEvaluator       the unified key evaluator (sliding window + Bayesian)
-   * @param broadcaster        publishes HOT and COOL decisions to all application instances
-   * @param topKValidator      pre-warm validator for cross-instance frequency-based confirmation
-   * @param workerTopK         the worker-scoped HeavyKeeper sketch for frequency estimation
+   * @param evaluator         the Bayesian evaluator with integrated fast-lane support
+   * @param broadcaster       publishes HOT and COOL decisions to all application instances
+   * @param workerTopK        the worker-scoped HeavyKeeper sketch for frequency estimation
    * @param globalQpsEstimator the global qps estimator tracking overall throughput
-   * @param stateMachine       the per-key lifecycle state machine (retained for TopKValidator integration)
+   * @param stateMachine      the per-key lifecycle state machine
    * @return a new {@link ReportConsumer} instance
    */
   @Bean
   public ReportConsumer reportConsumer(
-    KeyEvaluator keyEvaluator,
+    Evaluator evaluator,
     WorkerBroadcaster broadcaster,
-    TopKValidator topKValidator,
     @Qualifier("workerTopK") TopK workerTopK,
     GlobalQpsEstimator globalQpsEstimator,
-    ZetaStateMachine stateMachine
+    ZetaBayesianSM stateMachine
   ) {
-    return new ReportConsumer(keyEvaluator, broadcaster, topKValidator, workerTopK, globalQpsEstimator, stateMachine);
+    return new ReportConsumer(evaluator, broadcaster, workerTopK, globalQpsEstimator, stateMachine);
   }
 
   /**
@@ -515,37 +498,34 @@ public class WorkerAutoConfiguration {
    *
    * @param detector     the sliding-window detector whose idle keys will be evicted
    * @param stateMachine the state machine whose idle entries will be evicted
-   * @param keyEvaluator the key evaluator whose CV history will be evicted
-   * @param properties   worker configuration providing the cool duration for stale threshold
+   * @param evaluator the evaluator whose state will be evicted
+   * @param properties      worker configuration providing the cool duration for stale threshold
    * @return a new {@link EvictStaleTask} instance
    */
   @Bean
   public EvictStaleTask evictStaleTask(
     SlidingWindowDetector detector,
-    ZetaStateMachine stateMachine,
-    KeyEvaluator keyEvaluator,
+    ZetaBayesianSM stateMachine,
+    Evaluator evaluator,
     WorkerProperties properties,
     WorkerBroadcaster broadcaster
   ) {
-    return new EvictStaleTask(detector, stateMachine, keyEvaluator, properties, broadcaster);
+    return new EvictStaleTask(detector, stateMachine, evaluator, properties, broadcaster);
   }
 
   /**
    * Scheduled task that evicts stale keys from the sliding-window detector,
-   * state machine, and CV history.
+   * state machine, and evaluator state.
    */
   @RequiredArgsConstructor
   public static class EvictStaleTask {
 
     private final SlidingWindowDetector detector;
-    private final ZetaStateMachine stateMachine;
-    private final KeyEvaluator keyEvaluator;
+    private final ZetaBayesianSM stateMachine;
+    private final Evaluator evaluator;
     private final WorkerProperties properties;
     private final WorkerBroadcaster broadcaster;
 
-    /**
-     * Evicts keys that have not been accessed within {@code 2 * coolDurationMs}.
-     */
     @Scheduled(fixedDelayString = "${zeta.worker.state-machine.evict-interval-ms:30000}")
     public void evictStale() {
       try {
@@ -556,48 +536,10 @@ public class WorkerAutoConfiguration {
             log.warn("Failed to broadcast COOL for stale key: {}", key);
           }
         });
-        keyEvaluator.evictStale(staleAfterMs);
+        evaluator.evictStale(staleAfterMs);
         log.debug("EvictStale tick: staleAfterMs={}", staleAfterMs);
       } catch (Exception e) {
         log.error("Scheduled evictStale failed", e);
-      }
-    }
-  }
-
-  /**
-   * Periodically runs Top‑K cross‑validation to detect slow‑warming hot
-   * keys that the sliding window might miss.
-   *
-   * <p>Interval is controlled by {@code zeta.worker.topk-validation.validate-interval-ms}
-   * (default 60 seconds).
-   *
-   * @param topKValidator the TopK validator whose {@link TopKValidator#validate()} will be scheduled
-   * @return a new {@link TopKValidationTask} instance
-   */
-  @Bean
-  public TopKValidationTask topKValidationTask(TopKValidator topKValidator) {
-    return new TopKValidationTask(topKValidator);
-  }
-
-  /**
-   * Scheduled task that inspects the Worker TopK and pre-warms stable hot keys.
-   * Default constructor.
-   */
-  @RequiredArgsConstructor
-  public static class TopKValidationTask {
-
-    private final TopKValidator topKValidator;
-
-    /**
-     * Runs TopK validation and pre-warm logic.
-     */
-    @Scheduled(fixedDelayString = "${zeta.worker.topk-validation.validate-interval-ms:60000}")
-    public void validate() {
-      try {
-        topKValidator.validate();
-        log.debug("TopK validation tick completed");
-      } catch (Exception e) {
-        log.error("Scheduled TopK validation failed", e);
       }
     }
   }
@@ -709,7 +651,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public WorkerConfigNegotiator workerConfigNegotiator(
-    ZetaStateMachine stateMachine,
+    ZetaBayesianSM stateMachine,
     @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter
   ) {
     return new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId);
@@ -811,7 +753,7 @@ public class WorkerAutoConfiguration {
   public WorkerHeartbeatProducer workerHeartbeatProducer(
     RabbitTemplate rabbitTemplate,
     WorkerProperties properties,
-    ZetaStateMachine stateMachine,
+    ZetaBayesianSM stateMachine,
     WorkerBroadcaster broadcaster,
     @Qualifier("workerEpochCounter") AtomicLong epochCounter,
     @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter,

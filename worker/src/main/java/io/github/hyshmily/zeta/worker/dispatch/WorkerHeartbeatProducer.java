@@ -17,7 +17,7 @@ package io.github.hyshmily.zeta.worker.dispatch;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTBEAT;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
@@ -60,7 +60,7 @@ public class WorkerHeartbeatProducer {
   /** Unique identity of this Worker node. */
   private final String workerId;
   /** State machine providing config-gossip fields (confirm/cool/grace counts). */
-  private final ZetaStateMachine stateMachine;
+  private final ZetaBayesianSM stateMachine;
   /** Broadcaster for reading the current decision version watermark. */
   private final WorkerBroadcaster broadcaster;
   /** Monotonically increasing epoch, persisted across restarts. */
@@ -101,7 +101,7 @@ public class WorkerHeartbeatProducer {
     RabbitTemplate rabbitTemplate,
     String heartbeatExchange,
     String workerId,
-    ZetaStateMachine stateMachine,
+    ZetaBayesianSM stateMachine,
     WorkerBroadcaster broadcaster,
     AtomicLong configTimestampCounter,
     RedisConnectionFactory redisConnectionFactory,
@@ -144,7 +144,7 @@ public class WorkerHeartbeatProducer {
     RabbitTemplate rabbitTemplate,
     String heartbeatExchange,
     String workerId,
-    ZetaStateMachine stateMachine,
+    ZetaBayesianSM stateMachine,
     WorkerBroadcaster broadcaster,
     AtomicLong configTimestampCounter,
     long epoch,
@@ -186,7 +186,7 @@ public class WorkerHeartbeatProducer {
     RabbitTemplate rabbitTemplate,
     String heartbeatExchange,
     String workerId,
-    ZetaStateMachine stateMachine,
+    ZetaBayesianSM stateMachine,
     WorkerBroadcaster broadcaster,
     AtomicLong configTimestampCounter,
     long pingIntervalMs,

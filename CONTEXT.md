@@ -21,7 +21,8 @@
 - **Compression Format** — `Lz4CacheCompressor` stores a 1-byte flag prefix: `0x00` = uncompressed String (UTF-8), `0x01` = LZ4 compressed String with 4-byte little-endian original length header, `0x02` = LZ4 compressed `byte[]`, `0x03` = uncompressed `byte[]`. Compression is transparent: `ExpireManagerImpl.createBuilder()` wraps automatically; `HotKeyCache.unwrapValue()` decompresses on read.
 - **Worker** — Standalone Spring Boot application (`zeta-worker`). Consumes App reports via AMQP, runs its own TopK, emits HOT/COOL decisions back to Apps via broadcast. Published as a separate module, never deployed to Maven Central.
 - **TopK** — Interface for the hot key detection algorithm. Implemented by `HeavyKeeper` (Count-Min Sketch variant). Tracks the `K` most frequent keys. The app-side facade is **HotKeyDetector** which wraps HeavyKeeper and adds a buffered `add` path for batched frequency updates.
-- **ConfidenceEvaluator** — Facade over `BayesianConfidenceEstimator` that decouples the state machine from the specific estimator implementation. Injected into `ZetaStateMachineImpl` to gate every HOT/COOL transition.
+- **FastLane** — Evaluation path that bypasses Bayesian confidence gating. Keys matching user-configured glob rules are promoted to `CONFIRMED_HOT` when the sliding-window sum reaches the rule's threshold — no confirm windows, no confidence scoring. Configured via `zeta.worker.fast-lane.*`. Managed at runtime by `FastLaneRuleManager`. End-to-end latency: ~60ms (P99).
+- **ConfidenceEvaluator** — Facade over `BayesianConfidenceEstimator` that decouples the state machine from the specific estimator implementation. Injected into `ZetaBayesianSM` to gate every HOT/COOL transition.
 - **BayesianConfidenceEstimator** — Normal-Normal conjugate Bayesian model for log-frequency hotness. Computes P(true frequency > threshold) as a closed-form posterior. Prior mean calibrated at ln(10). Likelihood std is dynamically adjusted via the coefficient of variation (CV) of window sums: stable traffic (CV < 0.2) tightens σ down to 0.5×, bursty traffic (CV > 0.5) loosens σ up to 3.0×.
 - **ConfidenceLevel** — Three-tier classification of the Bayesian posterior probability: HIGH (≥ 0.95, broadcast immediately), MEDIUM (≥ 0.80, defer to CANDIDATE_HOT), LOW (< 0.80, suppress broadcast). Thresholds defined in `ProbabilityResult`.
 - **CANDIDATE_HOT** — State machine holding state for keys that crossed the hot-streak threshold but have only MEDIUM Bayesian confidence. Tracked internally, never broadcast. A single cold window drops back to COLD.
@@ -40,9 +41,9 @@
 
 ## Lifecycle
 
- - **Graceful Degradation** — When the Worker cluster fails majority quorum (`HealthView.isClusterHealthy()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
- - **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `isPromotableState`) or by Worker broadcast (in `handleHot`).
- - **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `ExpireManager` to prevent cache stampedes. Controlled by `zeta.local.ttl-jitter-ratio` (default 0.05 = ±5%). Always enabled.
+- **Graceful Degradation** — When the Worker cluster fails majority quorum (`HealthView.isClusterHealthy()` returns false), the App falls back to local TopK-driven TTL decisions: COOL entries become eligible for local promotion to HOT, and `isWorkerManagedEntry` checks return false. Restored automatically when a Worker heartbeat arrives.
+- **Promote** — Upgrade a cache entry from NORMAL or COOL to HOT with longer TTLs. Triggered by local TopK (in `isPromotableState`) or by Worker broadcast (in `handleHot`).
+- **TTL Jitter** — Configurable ±ratio random offset applied to all TTL expiry timestamps in `ExpireManager` to prevent cache stampedes. Controlled by `zeta.local.ttl-jitter-ratio` (default 0.05 = ±5%). Always enabled.
 - **Expire** — Two-tier: **soft expire** (stale-while-revalidate, returns stale data + async refresh) and **hard expire** (absolute TTL, entry invalidated). Soft expire only applies to HOT and COOL entries.
 - **Spring Cache** — Standard `@Cacheable`/`@CachePut`/`@CacheEvict` integration via `ZetaCacheManager` (implements `CacheManager`) and `ZetaSpringCache` (implements `Cache`). Enabled via `zeta.spring-cache.enabled`. Companion annotations `@HotKeyCacheTTL`, `@Intercept`, `@Fallback`, and `@NullCaching` work alongside `@Cacheable`.
 - **ZetaCacheContext** — ThreadLocal singleton holding TTL (`hardTtlMs`, `softTtlMs`) and `allowNull` context for the current cache operation. `CacheExtensionAspect` snapshots/restores these values around each `@Cacheable` invocation. `ZetaSpringCache.get(Object, Callable)` reads them from context.
@@ -68,6 +69,6 @@
 
 ## Failure Behavior
 
- - **Worker Majority Dead** — A majority of Worker shards have missed the heartbeat window (5s timeout). Activated threshold: `HealthView.isClusterHealthy()` returns `false`. Local TopK assumes authority: COOL entries become promotable, `isWorkerManagedEntry` returns false. Worker broadcast on recovery overrides local promotions via decisionVersion.
+- **Worker Majority Dead** — A majority of Worker shards have missed the heartbeat window (5s timeout). Activated threshold: `HealthView.isClusterHealthy()` returns `false`. Local TopK assumes authority: COOL entries become promotable, `isWorkerManagedEntry` returns false. Worker broadcast on recovery overrides local promotions via decisionVersion.
 - **Worker Partial Dead** — Some shards alive, some not. Alive shards continue normally. Dead shard's keys are routed to other shards via consistent-hashing ring reconciliation.
 - **Redis Degraded** — `nextVersion()` falls back to node-local counter (`Long.MIN_VALUE + counter`). Broadcast carries `isVersionDegraded=true`. Peers apply 4-case comparison to prevent degraded versions overwriting normal ones.

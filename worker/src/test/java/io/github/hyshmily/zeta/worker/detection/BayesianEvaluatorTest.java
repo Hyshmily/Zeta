@@ -2,13 +2,16 @@ package io.github.hyshmily.zeta.worker.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
+import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
+import io.github.hyshmily.zeta.worker.rule.impl.FastLaneRuleManagerImpl;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -19,13 +22,13 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
-class KeyEvaluatorTest {
+class BayesianEvaluatorTest {
 
   @Mock
   private SlidingWindowDetector detector;
 
   @Mock
-  private ZetaStateMachine stateMachine;
+  private ZetaBayesianSM stateMachine;
 
   @Mock
   private TopK workerTopK;
@@ -33,20 +36,19 @@ class KeyEvaluatorTest {
   @Captor
   private ArgumentCaptor<EvaluationContext> ctxCaptor;
 
-  private KeyEvaluator evaluator;
+  private Evaluator evaluator;
 
   @BeforeEach
   void setUp() {
-    evaluator = new KeyEvaluator(detector, stateMachine, workerTopK);
+    evaluator = new Evaluator(detector, stateMachine, workerTopK, new FastLaneRuleManagerImpl(List.of()));
   }
 
   @Nested
   class Evaluate {
 
     @Test
-    void shouldFeedDetectorAndReturnDecision() {
-      when(detector.addCount("key", 5L)).thenReturn(true);
-      when(detector.getWindowSum("key")).thenReturn(100L);
+    void shouldReturnDecision() {
+      when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(42L);
       when(stateMachine.evaluate(eq("key"), eq(true), any())).thenReturn(
@@ -54,17 +56,15 @@ class KeyEvaluatorTest {
       );
 
       ZetaDecision result = evaluator.evaluate("key", 5L);
-
       assertThat(result.type()).isEqualTo(DecisionType.HOT);
     }
 
     @Test
     void shouldPassCmsCountAsObservation_whenAvailable() {
-      when(detector.addCount("key", 5L)).thenReturn(false);
-      when(detector.getWindowSum("key")).thenReturn(100L);
+      when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(42L);
-      when(stateMachine.evaluate(eq("key"), eq(false), ctxCaptor.capture())).thenReturn(
+      when(stateMachine.evaluate(eq("key"), eq(true), ctxCaptor.capture())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
@@ -78,11 +78,10 @@ class KeyEvaluatorTest {
 
     @Test
     void shouldFallbackToWindowSum_whenCmsCountIsZero() {
-      when(detector.addCount("key", 5L)).thenReturn(false);
-      when(detector.getWindowSum("key")).thenReturn(100L);
+      when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(0L);
-      when(stateMachine.evaluate(eq("key"), eq(false), ctxCaptor.capture())).thenReturn(
+      when(stateMachine.evaluate(eq("key"), eq(true), ctxCaptor.capture())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
@@ -98,9 +97,7 @@ class KeyEvaluatorTest {
 
     @Test
     void shouldRemoveEntriesOlderThanStaleAfterMs() throws InterruptedException {
-      // First evaluation creates a windowSumHistory entry
-      when(detector.addCount(any(), anyLong())).thenReturn(false);
-      when(detector.getWindowSum(any())).thenReturn(100L);
+      when(detector.addCount(any(), anyLong())).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount(any())).thenReturn(0L);
       when(stateMachine.evaluate(any(), anyBoolean(), any())).thenReturn(
@@ -109,14 +106,12 @@ class KeyEvaluatorTest {
 
       evaluator.evaluate("key", 1L);
       evaluator.evictStale(1);
-      // With staleAfterMs=1 and at least 1ms elapsed, the entry should be evicted
       evaluator.evictStale(1);
     }
 
     @Test
     void shouldKeepRecentEntries() throws InterruptedException {
-      when(detector.addCount(any(), anyLong())).thenReturn(false);
-      when(detector.getWindowSum(any())).thenReturn(100L);
+      when(detector.addCount(any(), anyLong())).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount(any())).thenReturn(0L);
       when(stateMachine.evaluate(any(), anyBoolean(), any())).thenReturn(
@@ -136,8 +131,7 @@ class KeyEvaluatorTest {
 
   @Test
   void shouldComputeCvFromMultipleEvaluations() {
-    when(detector.addCount(any(), anyLong())).thenReturn(false);
-    when(detector.getWindowSum(any())).thenReturn(100L);
+    when(detector.addCount(any(), anyLong())).thenReturn(100L);
     when(detector.getThreshold()).thenReturn(10L);
     when(workerTopK.estimatedCount(any())).thenReturn(0L);
     when(stateMachine.evaluate(any(), anyBoolean(), ctxCaptor.capture())).thenReturn(
@@ -150,5 +144,65 @@ class KeyEvaluatorTest {
 
     EvaluationContext ctx = ctxCaptor.getValue();
     assertThat(ctx.cv()).isNotNull();
+  }
+
+  @Nested
+  class FastLane {
+
+    private Evaluator fastLaneEvaluator;
+
+    @BeforeEach
+    void setUp() {
+      FastLaneRuleManager ruleManager = new FastLaneRuleManagerImpl(List.of(
+        new FastLaneRuleManager.FastLaneRule("hot:*", 500)
+      ));
+      fastLaneEvaluator = new Evaluator(detector, stateMachine, workerTopK, ruleManager);
+    }
+
+    @Test
+    void shouldCallFastlaneWhenKeyMatchesRuleAndWindowSumAboveThreshold() {
+      when(detector.addCount("hot:key", 10L)).thenReturn(600L);
+      when(stateMachine.fastlane("hot:key")).thenReturn(
+        new ZetaDecision(DecisionType.HOT, "hot:key", null)
+      );
+
+      ZetaDecision result = fastLaneEvaluator.evaluate("hot:key", 10L);
+      assertThat(result.type()).isEqualTo(DecisionType.HOT);
+    }
+
+    @Test
+    void shouldNotCallBayesianEvaluateWhenFastLaneMatchesAndHot() {
+      when(detector.addCount("hot:key", 10L)).thenReturn(600L);
+      when(stateMachine.fastlane("hot:key")).thenReturn(
+        new ZetaDecision(DecisionType.HOT, "hot:key", null)
+      );
+      fastLaneEvaluator.evaluate("hot:key", 10L);
+      verify(stateMachine, never()).evaluate(any(), anyBoolean(), any());
+    }
+
+    @Test
+    void shouldFallthroughToBayesianWhenFastLaneMatchesButBelowThreshold() {
+      when(detector.addCount("hot:key", 10L)).thenReturn(100L);
+      when(detector.getThreshold()).thenReturn(10L);
+      when(workerTopK.estimatedCount("hot:key")).thenReturn(0L);
+      when(stateMachine.evaluate(eq("hot:key"), eq(true), any())).thenReturn(
+        new ZetaDecision(DecisionType.NONE, "hot:key", null)
+      );
+      fastLaneEvaluator.evaluate("hot:key", 10L);
+      verify(stateMachine, never()).fastlane(any());
+      verify(stateMachine).evaluate(eq("hot:key"), eq(true), any());
+    }
+
+    @Test
+    void shouldNotCallFastlaneWhenKeyDoesNotMatchAnyRule() {
+      when(detector.addCount("normal:key", 10L)).thenReturn(200L);
+      when(detector.getThreshold()).thenReturn(10L);
+      when(workerTopK.estimatedCount("normal:key")).thenReturn(0L);
+      when(stateMachine.evaluate(eq("normal:key"), eq(true), any())).thenReturn(
+        new ZetaDecision(DecisionType.NONE, "normal:key", null)
+      );
+      fastLaneEvaluator.evaluate("normal:key", 10L);
+      verify(stateMachine, never()).fastlane("normal:key");
+    }
   }
 }

@@ -3,7 +3,7 @@ package io.github.hyshmily.zeta.endpoint;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
-import io.github.hyshmily.zeta.detection.ZetaStateMachine;
+import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,13 +12,13 @@ import org.springframework.beans.factory.ObjectProvider;
 
 class StateMachineEndpointTest {
 
-  private ZetaStateMachine stateMachine;
+  private ZetaBayesianSM stateMachine;
   private ObjectProvider<AtomicLong> configTimestampCounter;
   private StateMachineEndpoint endpoint;
 
   @BeforeEach
   void setUp() {
-    stateMachine = mock(ZetaStateMachine.class);
+    stateMachine = mock(ZetaBayesianSM.class);
     configTimestampCounter = mock(ObjectProvider.class);
     endpoint = new StateMachineEndpoint(stateMachine, configTimestampCounter);
   }
