@@ -259,29 +259,37 @@ public class CacheExtensionAspect {
       }
     }
 
-    // Resolve TTL values: static first, then SpEL fallback
-    long hardTtlMs = resolveTtlValue(
-      ttl != null ? ttl.hardTtlMs() : 0L,
-      ttl != null ? ttl.hardTtlSpEl() : "",
-      pjp,
-      method
-    );
-    long softTtlMs = resolveTtlValue(
-      ttl != null ? ttl.softTtlMs() : 0L,
-      ttl != null ? ttl.softTtlSpEl() : "",
-      pjp,
-      method
-    );
-
     boolean allowNull = nullCaching != null && nullCaching.value();
     boolean skipBroadcastFlag = skipBroadcast != null;
     boolean skipDetectionFlag = skipDetection != null;
 
+    boolean hasHardSpel = ttl != null && !ttl.hardTtlSpEl().isEmpty();
+    boolean hasSoftSpel = ttl != null && !ttl.softTtlSpEl().isEmpty();
+
     // Save the current context so we can restore it after the invocation.
     ZetaCacheContext.ContextValues prev = ZetaCacheContext.get().snapshot();
     try {
-      // Push the resolved cache-control metadata into the thread-local context.
-      ZetaCacheContext.get().apply(hardTtlMs, softTtlMs, allowNull, skipBroadcastFlag, skipDetectionFlag);
+      // Push cache parameters lazily: SpEL expressions are evaluated only
+      // on cache miss (when getHardTtlMs / getSoftTtlMs is actually called).
+      if (hasHardSpel || hasSoftSpel) {
+        ZetaCacheContext.get().applyLazy(
+          ttl.hardTtlMs(),
+          ttl.softTtlMs(),
+          hasHardSpel ? () -> resolveTtlValue(ttl.hardTtlMs(), ttl.hardTtlSpEl(), pjp, method) : null,
+          hasSoftSpel ? () -> resolveTtlValue(ttl.softTtlMs(), ttl.softTtlSpEl(), pjp, method) : null,
+          allowNull,
+          skipBroadcastFlag,
+          skipDetectionFlag
+        );
+      } else {
+        ZetaCacheContext.get().apply(
+          ttl != null ? ttl.hardTtlMs() : 0,
+          ttl != null ? ttl.softTtlMs() : 0,
+          allowNull,
+          skipBroadcastFlag,
+          skipDetectionFlag
+        );
+      }
 
       Object result = pjp.proceed();
 

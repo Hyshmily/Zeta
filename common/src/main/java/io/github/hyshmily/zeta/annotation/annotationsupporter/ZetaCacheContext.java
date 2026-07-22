@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
 import jakarta.annotation.Nullable;
+import java.util.function.LongSupplier;
 
 /**
  * Thread-bound context for propagating per-invocation cache parameters from
@@ -59,6 +60,8 @@ public final class ZetaCacheContext {
   ) {}
 
   private static final ThreadLocal<ContextValues> HOLDER = new ThreadLocal<>();
+  private static final ThreadLocal<LongSupplier> HARD_TTL_SUPPLIER = new ThreadLocal<>();
+  private static final ThreadLocal<LongSupplier> SOFT_TTL_SUPPLIER = new ThreadLocal<>();
   private static final ZetaCacheContext INSTANCE = new ZetaCacheContext();
 
   private ZetaCacheContext() {}
@@ -84,6 +87,8 @@ public final class ZetaCacheContext {
     boolean skipBroadcast,
     boolean skipDetection
   ) {
+    HARD_TTL_SUPPLIER.remove();
+    SOFT_TTL_SUPPLIER.remove();
     if (
       hardTtlMs > 0 ||
       softTtlMs > 0 ||
@@ -91,6 +96,32 @@ public final class ZetaCacheContext {
       skipBroadcast ||
       skipDetection
     ) {
+      HOLDER.set(
+        new ContextValues(hardTtlMs, softTtlMs, allowNull, skipBroadcast, skipDetection)
+      );
+    } else {
+      HOLDER.remove();
+    }
+  }
+
+  /**
+   * Sets cache parameters with lazy SpEL evaluation. The suppliers are
+   * evaluated only when {@link #getHardTtlMs()} / {@link #getSoftTtlMs()}
+   * are actually called — which happens only on cache miss.
+   */
+  public void applyLazy(
+    long hardTtlMs,
+    long softTtlMs,
+    @Nullable LongSupplier hardTtlSupplier,
+    @Nullable LongSupplier softTtlSupplier,
+    boolean allowNull,
+    boolean skipBroadcast,
+    boolean skipDetection
+  ) {
+    if (hardTtlSupplier != null) HARD_TTL_SUPPLIER.set(hardTtlSupplier);
+    if (softTtlSupplier != null) SOFT_TTL_SUPPLIER.set(softTtlSupplier);
+    boolean hasStatic = hardTtlMs > 0 || softTtlMs > 0;
+    if (hasStatic || allowNull || skipBroadcast || skipDetection) {
       HOLDER.set(
         new ContextValues(hardTtlMs, softTtlMs, allowNull, skipBroadcast, skipDetection)
       );
@@ -108,14 +139,26 @@ public final class ZetaCacheContext {
     return HOLDER.get();
   }
 
-  /** Returns the hard TTL override, or 0 if none is active. */
+  /** Returns the hard TTL override, or 0 if none is active. Lazily resolves SpEL on first call. */
   public long getHardTtlMs() {
+    LongSupplier s = HARD_TTL_SUPPLIER.get();
+    if (s != null) {
+      long val = s.getAsLong();
+      HARD_TTL_SUPPLIER.remove();
+      return val;
+    }
     ContextValues v = getValues();
     return v != null ? v.hardTtlMs() : 0L;
   }
 
-  /** Returns the soft TTL override, or 0 if none is active. */
+  /** Returns the soft TTL override, or 0 if none is active. Lazily resolves SpEL on first call. */
   public long getSoftTtlMs() {
+    LongSupplier s = SOFT_TTL_SUPPLIER.get();
+    if (s != null) {
+      long val = s.getAsLong();
+      SOFT_TTL_SUPPLIER.remove();
+      return val;
+    }
     ContextValues v = getValues();
     return v != null ? v.softTtlMs() : 0L;
   }
@@ -146,6 +189,8 @@ public final class ZetaCacheContext {
 
   /** Restores a previously captured snapshot. */
   public void restore(@Nullable ContextValues snapshot) {
+    HARD_TTL_SUPPLIER.remove();
+    SOFT_TTL_SUPPLIER.remove();
     if (snapshot != null) {
       HOLDER.set(snapshot);
     } else {
