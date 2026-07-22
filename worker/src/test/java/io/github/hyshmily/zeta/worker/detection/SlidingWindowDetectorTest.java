@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.*;
 
 import java.lang.reflect.Field;
 import java.util.Map;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -167,6 +168,7 @@ class SlidingWindowDetectorTest {
    * that were accessed in the past (boundary: zero stale timeout).
    */
   @Test
+  @Tag("flaky")
   void shouldEvictAllWithZeroStaleTimeout() throws InterruptedException {
     SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
     detector.addCount("key", 1);

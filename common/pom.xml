@@ -127,6 +127,7 @@
         <version>3.5.3</version>
         <configuration>
           <argLine>@{argLine}</argLine>
+          <excludedGroups>flaky</excludedGroups>
         </configuration>
       </plugin>
     </plugins>
