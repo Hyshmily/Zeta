@@ -958,12 +958,12 @@ class ZetaCacheTest {
   }
 
   @Test
-  void putIfAbsent_withExistingKeyAndDifferentTtl_shouldReturnFalseAndRefreshTtl() {
+  void putIfAbsent_withExistingKeyAndDifferentTtl_shouldReturnFalseAndNotChangeTtl() {
     assertThat(hotKeyCache.putIfAbsent("k", "v", 10000L, 1000L)).isTrue();
     assertThat(hotKeyCache.putIfAbsent("k", "v", 50000L, 5000L)).isFalse();
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
-    assertThat(entry.getHardTtlMs()).isEqualTo(50000L);
-    assertThat(entry.getSoftTtlMs()).isEqualTo(5000L);
+    assertThat(entry.getHardTtlMs()).isEqualTo(10000L);
+    assertThat(entry.getSoftTtlMs()).isEqualTo(1000L);
   }
 
   @Test

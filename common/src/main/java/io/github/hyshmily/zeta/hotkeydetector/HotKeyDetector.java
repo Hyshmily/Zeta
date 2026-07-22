@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.AddResult;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -109,7 +110,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
   @Override
   public AddResult addDirect(String key, long increment) {
     if (invalidCacheKey(key)) {
-      return null;
+      return AddResult.cold();
     }
     return heavyKeeper.addDirect(key, increment);
   }
@@ -122,8 +123,9 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   @Override
   public List<AddResult> addDirect(Map<String, Long> keyCounts) {
-    keyCounts.entrySet().removeIf(entry -> invalidCacheKey(entry.getKey()));
-    return heavyKeeper.addDirect(keyCounts);
+    Map<String, Long> filtered = new HashMap<>(keyCounts);
+    filtered.entrySet().removeIf(entry -> invalidCacheKey(entry.getKey()));
+    return heavyKeeper.addDirect(filtered);
   }
 
   /**

@@ -25,6 +25,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
@@ -123,10 +124,14 @@ public class SingleFlightImpl implements SingleFlight {
     CompletableFuture<Object> future = inflightLoads.asMap().computeIfAbsent(cacheKey, k -> submitReader(reader::get));
 
     try {
-      return Optional.ofNullable((T) future.join());
+      T result = (T) future.join();
+      circuitBreaker.onSuccess();
+      return Optional.ofNullable(result);
     } catch (CompletionException e) {
+      if (e.getCause() instanceof TimeoutException) {
+        circuitBreaker.onFailure(e.getCause());
+      }
       handleFailure(cacheKey, e);
-      // handleFailure always throws; this return is unreachable
       return Optional.empty();
     }
   }
@@ -167,10 +172,15 @@ public class SingleFlightImpl implements SingleFlight {
         continue;
       }
       try {
-        results.put(key, Optional.ofNullable((T) future.join()));
+        T result = (T) future.join();
+        circuitBreaker.onSuccess();
+        results.put(key, Optional.ofNullable(result));
       } catch (CompletionException e) {
         log.warn("singleflight join failed: key={}", key, e);
 
+        if (e.getCause() instanceof TimeoutException) {
+          circuitBreaker.onFailure(e.getCause());
+        }
         inflightLoads.invalidate(key);
         results.put(key, Optional.empty());
 
@@ -206,19 +216,8 @@ public class SingleFlightImpl implements SingleFlight {
    * @return a {@link CompletableFuture} that will complete with the result or timeout
    */
   private CompletableFuture<Object> submitReader(Supplier<Object> reader) {
-    return CompletableFuture.supplyAsync(
-      () -> {
-        try {
-          Object val = reader.get();
-          circuitBreaker.onSuccess();
-          return val;
-        } catch (Exception e) {
-          circuitBreaker.onFailure(e);
-          throw e;
-        }
-      },
-      executor
-    ).orTimeout(timeoutSeconds, TimeUnit.SECONDS);
+    return CompletableFuture.supplyAsync(reader, executor)
+        .orTimeout(timeoutSeconds, TimeUnit.SECONDS);
   }
 
   /**
@@ -237,6 +236,10 @@ public class SingleFlightImpl implements SingleFlight {
     Throwable cause = e.getCause();
     if (cause instanceof InterruptedException) {
       Thread.currentThread().interrupt();
+      return;
+    }
+    if (cause instanceof TimeoutException) {
+      return;
     }
     if (cause instanceof RuntimeException re) {
       throw re;
@@ -244,5 +247,6 @@ public class SingleFlightImpl implements SingleFlight {
     if (cause instanceof Error err) {
       throw err;
     }
+    throw new CompletionException(cause);
   }
 }

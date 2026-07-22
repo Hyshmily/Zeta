@@ -892,6 +892,13 @@ public class ExpireManagerImpl implements ExpireManager {
           .filter(CacheEntry.class::isInstance)
           .map(CacheEntry.class::cast)
           .map(entry -> {
+            // Degraded version: a Redis-outage write occurred during refresh.
+            // Discard the refresh result unconditionally — it is older than
+            // the degraded write and must not supersede it.
+            if (entry.isVersionDegraded()) {
+              log.debug("Async refresh discarded: degraded version write superseded, key={}", cacheKey);
+              return entry;
+            }
             // Version guard: if a newer write has
             // arrived while we were refreshing,
             // discard the stale refresh result.

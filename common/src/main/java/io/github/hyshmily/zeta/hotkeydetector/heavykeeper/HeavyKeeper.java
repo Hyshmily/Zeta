@@ -318,7 +318,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       "decay must be in [0.0, 1.0], but got: " + decay
     );
     if (minCount < 0) throw new IllegalArgumentException("minCount must be >= 0, but got: " + minCount);
-    if (windowCount < 1) throw new IllegalArgumentException("windowCount must be >= 1, but got: " + windowCount);
+    if (windowCount < 2) throw new IllegalArgumentException("windowCount must be >= 2, but got: " + windowCount);
     if (expelledQueueCapacity <= 0) {
       throw new IllegalArgumentException("expelledQueueCapacity must be > 0, but got: " + expelledQueueCapacity);
     }
@@ -388,7 +388,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
   /** Returns cached {@link SlotLoc} for TopK members; computes on the fly for non-members. */
   private SlotLoc locate(String key) {
-    return locCache.computeIfAbsent(key, m -> new SlotLoc(fingerprint(m)));
+    SlotLoc loc = locCache.get(key);
+    return loc != null ? loc : new SlotLoc(fingerprint(key));
   }
 
   /**
@@ -470,9 +471,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         }
 
         members.put(key, new Node(key, count));
-        locCache.putIfAbsent(key, new SlotLoc(fingerprint(key)));
+        locCache.computeIfAbsent(key, k -> new SlotLoc(fingerprint(k)));
       }
-      minPqCount = members.isEmpty() ? 0L : findMinMember().count();
       this.minPqCount = members.isEmpty() ? 0L : findMinMember().count();
     } finally {
       admissionLock.unlock();
@@ -569,13 +569,18 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    *
    * <p>This operation is invoked automatically by a scheduler at a
    * configured interval (typically 20 seconds).
+   *
+   * <p>The next-epoch window is zeroed <em>before</em> incrementing the epoch,
+   * so concurrent {@link #addToSketch} callers still see the old epoch and
+   * write to a different window — eliminating the race where a concurrent
+   * {@code addToSketch} writes into the window that
+   * {@code rotateSketchWindows} then zeroes.
    */
   @Override
   public void fading() {
-    long e = epoch.incrementAndGet();
-    int aw = Math.floorMod(e, windowCount);
-
-    rotateSketchWindows(aw);
+    int nextAw = Math.floorMod(epoch.get() + 1, windowCount);
+    rotateSketchWindows(nextAw);
+    epoch.incrementAndGet();
     decayMembership();
 
     long half = total.sumThenReset() >> 1;
@@ -626,8 +631,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
       //noinspection SynchronizationOnLocalVariableOrMethodParameter
       synchronized (lock) {
-        // Re-read epoch inside the stripe lock so a concurrent fading() cannot
-        // zero the window we are about to write to underneath us.
+        // Re-read epoch inside the stripe lock to determine the active window.
+        // fading() zeroes the next-epoch window BEFORE incrementing the epoch,
+        // so this read always targets a window that rotateSketchWindows has
+        // already passed (or has not yet reached), making the two operations
+        // disjoint per window.
         int active = Math.floorMod(epoch.get(), windowCount);
 
         long cur = slotSums[index];
@@ -722,7 +730,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       int off = base + w;
       long wv = windows[off];
       if (wv > 0) {
-        long sub = (decays * wv) / cur;
+        long sub = (wv / cur) * decays + (wv % cur) * decays / cur;
         long newVal = Math.max(0, wv - sub);
         totalSubtracted += wv - newVal;
         windows[off] = newVal;

@@ -405,6 +405,9 @@ public class ZetaProperties {
     /** Whether to log state transitions. */
     private boolean logEnabled = true;
 
+    /** Maximum number of probe requests allowed in the HALF_OPEN state. */
+    private int halfOpenMaxProbes = 3;
+
     /**
      * Consecutive successes in HALF_OPEN state required to close the breaker.
      * Higher values prevent flapping from single lucky probe requests.
@@ -449,11 +452,29 @@ public class ZetaProperties {
   }
 
   @Data
+  public static class Sync {
+
+    /** Delay (ms) before pending records are flushed to the sync publisher. */
+    private long flushDelayMs = 500;
+
+    /**
+     * Maximum deferral (ms) before a pending flush is forced to fire, even
+     * when new records keep arriving within the {@link #flushDelayMs} window.
+     * Prevents indefinite debounce starvation under continuous writes.
+     */
+    private long maxDeferMs = 2_000;
+  }
+
+  @Data
   public static class CacheKey {
 
     /** Strip query parameters (?...) from cache keys for normalization. */
     private boolean stripQuery = false;
   }
+
+  /** Cache sync (broadcast) configuration. */
+  @Valid
+  private Sync sync = new Sync();
 
   /** Cache key normalization configuration. */
   @Valid

@@ -15,9 +15,6 @@
  */
 package io.github.hyshmily.zeta.cache;
 
-import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.hyshmily.zeta.Internal;
@@ -43,6 +40,10 @@ import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.Nullable;
+import lombok.Builder;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.Executor;
@@ -50,9 +51,9 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import lombok.Builder;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -288,7 +289,7 @@ public class HotKeyCache {
     if (preGuard(nk) == null) return Optional.empty();
     return execute(nk, () ->
       Optional.ofNullable(caffeineCache.getIfPresent(nk)).map(raw ->
-        raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue()) : (T) raw
+        raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue(), cacheKey) : (T) raw
       )
     );
   }
@@ -391,7 +392,7 @@ public class HotKeyCache {
       return Optional.empty();
     }
     @SuppressWarnings("unchecked")
-    T val = raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue()) : (T) raw;
+    T val = raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue(), cacheKey) : (T) raw;
     return process(cacheKey, raw, val, hardTtlMs, softTtlMs, skipReport);
   }
 
@@ -500,7 +501,7 @@ public class HotKeyCache {
       return Optional.empty();
     }
     @SuppressWarnings("unchecked")
-    T cached = raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue()) : (T) raw;
+    T cached = raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue(), cacheKey) : (T) raw;
     refreshSoftExpire(cacheKey, raw, reader, softTtlMs);
     return process(cacheKey, raw, cached, hardTtlMs, softTtlMs, skipReport);
   }
@@ -658,7 +659,7 @@ public class HotKeyCache {
       Object stale = caffeineCache.getIfPresent(cacheKey);
 
       if (stale != null) {
-        T val = stale instanceof CacheEntry ce ? (T) unwrapValue(ce.getValue()) : (T) stale;
+        T val = stale instanceof CacheEntry ce ? (T) unwrapValue(ce.getValue(), cacheKey) : (T) stale;
         log.debug("CB open, returning stale entry for key={}", cacheKey);
         return Optional.ofNullable(val);
       }
@@ -812,6 +813,9 @@ public class HotKeyCache {
     if (raw instanceof CacheEntry ce) {
       if (ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
         return extendHotKeyExpiryIfNeeded(cacheKey, ce, hardTtlMs, softTtlMs);
+      }
+      if (ce.getValue() == NullValue.INSTANCE || ce.getValue() instanceof NullValue) {
+        return false;
       }
       if (isPromotableState(ce)) {
         return promoteIfLocalHot(cacheKey, hardTtlMs, softTtlMs);
@@ -1502,7 +1506,7 @@ public class HotKeyCache {
       .asMap()
       .compute(cacheKey, (k, existing) -> {
         if (existing instanceof CacheEntry ce) {
-          valueRef[0] = unwrapValue(ce.getValue());
+          valueRef[0] = unwrapValue(ce.getValue(), cacheKey);
 
           if (!expireManager.isLogicallyExpired(ce)) {
             if (ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
@@ -1535,7 +1539,7 @@ public class HotKeyCache {
           errorRef[0] = e;
           // Circuit breaker fallback: return stale entry if available (graceful degradation)
           if (singleFlight.isBreakerOpen() && existing instanceof CacheEntry ce) {
-            valueRef[0] = unwrapValue(ce.getValue());
+            valueRef[0] = unwrapValue(ce.getValue(), cacheKey);
             log.debug("CB open, returning stale entry in computeInLock for key={}", cacheKey);
             return existing;
           }
@@ -1667,7 +1671,7 @@ public class HotKeyCache {
         .asMap()
         .compute(nk, (k, existing) -> {
           if (existing instanceof CacheEntry ce) {
-            oldValue[0] = (T) unwrapValue(ce.getValue());
+            oldValue[0] = (T) unwrapValue(ce.getValue(), nk);
             return expireManager.replaceEntryValue(ce, newValue);
           }
           if (existing != null) {
@@ -1787,8 +1791,8 @@ public class HotKeyCache {
       caffeineCache
         .asMap()
         .compute(nk, (k, existing) -> {
-          if (existing instanceof CacheEntry ce) {
-            return expireManager.applyTtl(ce, hardTtlMs, softTtlMs);
+          if (existing instanceof CacheEntry) {
+            return existing;
           }
           if (existing != null) {
             return existing;
@@ -1812,12 +1816,13 @@ public class HotKeyCache {
    * @return {@code null} if the sentinel, otherwise the original value
    */
   @Nullable
-  private Object unwrapValue(@Nullable Object stored) {
+  private Object unwrapValue(@Nullable Object stored, String cacheKey) {
     try {
       Object val = compressor.unwrap(stored);
       return val == NullValue.INSTANCE ? null : val;
     } catch (IOException e) {
-      log.warn("Failed to decompress cache value", e);
+      log.warn("Failed to decompress cache value for key={}, invalidating", cacheKey, e);
+      caffeineCache.invalidate(cacheKey);
       return null;
     }
   }

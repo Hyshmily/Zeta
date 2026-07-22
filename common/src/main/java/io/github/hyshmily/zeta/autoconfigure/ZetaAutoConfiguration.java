@@ -251,9 +251,10 @@ public class ZetaAutoConfiguration {
   @ConditionalOnMissingBean
   public BroadcastBuffer broadcastBuffer(
     @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
-    Optional<CacheSyncPublisher> syncPublisher
+    Optional<CacheSyncPublisher> syncPublisher,
+    ZetaProperties properties
   ) {
-    return new BroadcastBuffer(hotKeyScheduler, syncPublisher);
+    return new BroadcastBuffer(hotKeyScheduler, syncPublisher, properties.getSync().getFlushDelayMs(), properties.getSync().getMaxDeferMs());
   }
 
   /**

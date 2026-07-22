@@ -72,7 +72,7 @@ public class CentralDispatcher {
   public void report(String cacheKey, boolean skipBroadcast) {
     hotKeyDetector.add(cacheKey);
     if (!skipBroadcast) {
-      // Two BufferCounter attribute to two paths
+      // Detector buffer and reporter buffer are two independent aggregation paths
       hotKeyReporter.ifPresent(r -> r.reportToWorker(cacheKey));
     }
   }

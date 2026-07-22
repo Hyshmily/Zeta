@@ -169,9 +169,9 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * Return an approximate count of distinct keys request across both buffers.
+   * Return an approximate count of distinct keys request in the active buffer.
    *
-   * @return sum of distinct keys request in the active and standby buffers
+   * @return number of distinct keys in the active buffer
    */
   public long estimatedSizeOfKeysCount() {
     return active.get().size();
@@ -294,7 +294,6 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   private static class CounterBuffer {
 
     private final ConcurrentHashMap<String, LongAdder> counters = new ConcurrentHashMap<>();
-    private final LongAdder totalSize = new LongAdder();
 
     /** Reusable result map — avoids allocation on every drain cycle. */
     private Map<String, Long> reusableResult;
@@ -307,7 +306,6 @@ public class BufferedCounter implements InitializingBean, Destroyable {
      */
     void add(String key, long delta) {
       counters.computeIfAbsent(key, k -> new LongAdder()).add(delta);
-      totalSize.add(delta);
     }
 
     /**
@@ -330,7 +328,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
     /**
      * Atomically drain all counters and return a snapshot of the accumulated
-     * counts. After this call the buffer is empty and ready for reuse.
+     * counts. Each LongAdder is zeroed ({@code sumThenReset}),
+     * but the key entries remain in the map ({@code size()} unchanged).
+     * The caller must discard this instance after draining — it is not
+     * reused in place.
      *
      * <p>The returned map is reused between calls to reduce GC pressure.
      * The caller must not retain a reference beyond the synchronous

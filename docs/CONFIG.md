@@ -173,6 +173,7 @@
 | `zeta.local.circuit-breaker.fail-threshold`                | `0.5`   | Failure rate threshold (0.0–1.0); opens breaker when exceeded                      |
 | `zeta.local.circuit-breaker.request-volume-threshold`      | `20`    | Minimum total requests before evaluating failure rate                              |
 | `zeta.local.circuit-breaker.single-test-interval-ms`       | `5000`  | Interval (ms) between half-open probe requests                                     |
+| `zeta.local.circuit-breaker.half-open-max-probes`          | `3`     | Maximum concurrent probe requests in HALF_OPEN state; excess are rejected          |
 | `zeta.local.circuit-breaker.consecutive-success-threshold` | `3`     | Consecutive probe successes in HALF_OPEN required to close (anti-flapping)         |
 | `zeta.local.circuit-breaker.log-enabled`                   | `true`  | Whether to log state transitions (OPEN/CLOSE/HALF-OPEN)                            |
 | `zeta.local.circuit-breaker.exclude-exceptions`            | `[]`    | Exception class names (fully qualified) that should NOT trip the breaker           |
@@ -249,6 +250,8 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | Property                         | Default              | Description                                                                                 |
 | -------------------------------- | -------------------- | ------------------------------------------------------------------------------------------- |
 | `zeta.sync.enabled`              | `false`              | Enable cross-instance cache sync via RabbitMQ                                               |
+| `zeta.sync.flush-delay-ms`       | `500`                | Delay (ms) before pending sync records are flushed. Combines multiple writes into one batch |
+| `zeta.sync.max-defer-ms`         | `2000`               | Maximum deferral (ms) before a flush is forced, even under continuous writes. Prevents indefinite debounce starvation |
 | `zeta.sync.exchange-name`        | `zeta.sync.exchange` | Fanout exchange name for sync messages (REFRESH / INVALIDATE / INVALIDATE_ALL / RULES_SYNC) |
 | `zeta.sync.queue-prefix`         | `zeta.sync`          | Queue name prefix; full name = `{prefix}:{instanceId}`                                      |
 | `zeta.sync.dedup-window-seconds` | `10`                 | Dedup window for received sync messages (seconds)                                           |

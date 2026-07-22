@@ -165,6 +165,7 @@
 | `zeta.local.circuit-breaker.fail-threshold`                | `0.5`   | 失败率阈值（0.0–1.0），超过时打开熔断器            |
 | `zeta.local.circuit-breaker.request-volume-threshold`      | `20`    | 评估失败率所需的最小请求总数                       |
 | `zeta.local.circuit-breaker.single-test-interval-ms`       | `5000`  | 半开探测间隔（毫秒）                               |
+| `zeta.local.circuit-breaker.half-open-max-probes`          | `3`     | 半开状态下最大并发探针数，超出的请求被拒绝         |
 | `zeta.local.circuit-breaker.consecutive-success-threshold` | `3`     | 半开状态下连续成功次数阈值，防止单次成功导致抖动   |
 | `zeta.local.circuit-breaker.log-enabled`                   | `true`  | 是否记录状态切换日志（OPEN/CLOSE/HALF-OPEN）       |
 | `zeta.local.circuit-breaker.exclude-exceptions`            | `[]`    | 不触发熔断的异常全类名白名单                       |
@@ -241,6 +242,8 @@
 | 属性                             | 默认值               | 说明                                                                             |
 | -------------------------------- | -------------------- | -------------------------------------------------------------------------------- |
 | `zeta.sync.enabled`              | `false`              | 启用跨实例缓存同步（RabbitMQ）                                                   |
+| `zeta.sync.flush-delay-ms`       | `500`                | 待发送同步记录的延迟（ms）后合并刷出。合并多个写入为一批发送                      |
+| `zeta.sync.max-defer-ms`         | `2000`               | 最大延迟上限（ms），超过即使持续写入也强制刷出。防止无限期 debounce 饥饿          |
 | `zeta.sync.exchange-name`        | `zeta.sync.exchange` | 同步消息 Fanout 交换机名称（REFRESH / INVALIDATE / INVALIDATE_ALL / RULES_SYNC） |
 | `zeta.sync.queue-prefix`         | `zeta.sync`          | 队列名前缀；完整名称 = `{prefix}:{instanceId}`                                   |
 | `zeta.sync.dedup-window-seconds` | `10`                 | 接收同步消息的去重窗口（秒）                                                     |

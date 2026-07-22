@@ -45,6 +45,9 @@ import lombok.extern.slf4j.Slf4j;
 public class BroadcastBuffer {
 
   private static final long DEFAULT_FLUSH_DELAY_MS = 500;
+  private static final long DEFAULT_MAX_DEFER_MS = 2_000;
+  private final long maxDeferMs;
+  private long firstRecordAtMs = 0L;
 
   @SuppressWarnings("java:S3077")
   private volatile ConcurrentHashMap<String, VersionInfo> pending = new ConcurrentHashMap<>();
@@ -68,24 +71,27 @@ public class BroadcastBuffer {
     ScheduledExecutorService scheduler,
     @SuppressWarnings("OptionalUsedAsFieldOrParameterType") Optional<CacheSyncPublisher> publisher
   ) {
-    this(scheduler, publisher, DEFAULT_FLUSH_DELAY_MS);
+    this(scheduler, publisher, DEFAULT_FLUSH_DELAY_MS, DEFAULT_MAX_DEFER_MS);
   }
 
-  /**
-   * Creates a BroadcastBuffer with a custom flush delay.
-   *
-   * @param scheduler    the shared scheduler
-   * @param publisher    the optional sync publisher
-   * @param flushDelayMs delay in milliseconds before pending records are flushed
-   */
   public BroadcastBuffer(
     ScheduledExecutorService scheduler,
     @SuppressWarnings("OptionalUsedAsFieldOrParameterType") Optional<CacheSyncPublisher> publisher,
     long flushDelayMs
   ) {
+    this(scheduler, publisher, flushDelayMs, Math.max(flushDelayMs, DEFAULT_MAX_DEFER_MS));
+  }
+
+  public BroadcastBuffer(
+    ScheduledExecutorService scheduler,
+    @SuppressWarnings("OptionalUsedAsFieldOrParameterType") Optional<CacheSyncPublisher> publisher,
+    long flushDelayMs,
+    long maxDeferMs
+  ) {
     this.scheduler = scheduler;
     this.publisher = publisher;
     this.flushDelayMs = flushDelayMs;
+    this.maxDeferMs = maxDeferMs;
   }
 
   /**
@@ -131,11 +137,37 @@ public class BroadcastBuffer {
     );
   }
 
+  /**
+   * Reschedules the flush operation based on the current state.
+   */
   private void rescheduleFlush() {
     synchronized (scheduleLock) {
-      cancelScheduledFlush();
-      scheduledFlush = scheduler.schedule(this::flush, flushDelayMs, TimeUnit.MILLISECONDS);
+      long now = System.currentTimeMillis();
+      if (firstRecordAtMs == 0L) {
+        firstRecordAtMs = now;
+      }
+      boolean exceedMax = now - firstRecordAtMs >= maxDeferMs;
+
+      if (scheduledFlush == null || scheduledFlush.isDone()) {
+        scheduledFlush = scheduler.schedule(this::flushAndReset, exceedMax ? 0 : flushDelayMs, TimeUnit.MILLISECONDS);
+        return;
+      }
+      if (!exceedMax) {
+        cancelScheduledFlush();
+        scheduledFlush = scheduler.schedule(this::flushAndReset, flushDelayMs, TimeUnit.MILLISECONDS);
+      }
     }
+  }
+
+  /**
+   * Flushes the pending entries and resets the firstRecordAtMs timestamp.
+   * This method is called by the scheduled flush task.
+   */
+  private void flushAndReset() {
+    synchronized (scheduleLock) {
+      firstRecordAtMs = 0L;
+    }
+    flush();
   }
 
   private void cancelScheduledFlush() {
@@ -145,5 +177,6 @@ public class BroadcastBuffer {
     }
   }
 
+  /** A simple record to hold version information. */
   record VersionInfo(long version, boolean degraded) {}
 }

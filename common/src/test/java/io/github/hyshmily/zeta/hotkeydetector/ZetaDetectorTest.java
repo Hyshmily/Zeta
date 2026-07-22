@@ -82,14 +82,14 @@ class ZetaDetectorTest {
   }
 
   @Test
-  void addDirect_shouldReturnNullWhenKeyNull() {
-    assertThat(detector.addDirect(null, 1)).isNull();
+  void addDirect_shouldReturnColdWhenKeyNull() {
+    assertThat(detector.addDirect(null, 1)).isSameAs(AddResult.cold());
     verify(heavyKeeper, never()).addDirect(anyString(), anyInt());
   }
 
   @Test
-  void addDirect_shouldReturnNullWhenKeyBlank() {
-    assertThat(detector.addDirect("   ", 1)).isNull();
+  void addDirect_shouldReturnColdWhenKeyBlank() {
+    assertThat(detector.addDirect("   ", 1)).isSameAs(AddResult.cold());
     verify(heavyKeeper, never()).addDirect(anyString(), anyInt());
   }
 

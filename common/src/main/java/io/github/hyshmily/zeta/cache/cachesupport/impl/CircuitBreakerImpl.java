@@ -15,21 +15,25 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport.impl;
 
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
-
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerState;
+import lombok.extern.slf4j.Slf4j;
+
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 /**
  * Sliding-window circuit breaker.
@@ -83,6 +87,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   private final AtomicLong lastOpenedTime = new AtomicLong(0L);
   private final AtomicLong lastHalfOpenAttempt = new AtomicLong(0L);
   private final AtomicInteger consecutiveSuccessCounter = new AtomicInteger(0);
+  private final AtomicInteger halfOpenInflight = new AtomicInteger(0);
 
   private final ScheduledFuture<?> slideFuture;
 
@@ -94,6 +99,11 @@ public class CircuitBreakerImpl implements CircuitBreaker {
     this.bucketSize = config.getWindowBuckets();
     this.counts = new long[bucketSize * STRIDE];
     long slideMs = config.getWindowTimeMs() / bucketSize;
+    if (slideMs < 1) {
+      throw new IllegalArgumentException(
+        "window-time-ms (" + config.getWindowTimeMs() + ") must be >= window-buckets (" + bucketSize + ")"
+      );
+    }
     this.slideFuture = SCHEDULER.scheduleAtFixedRate(this::slide, slideMs, slideMs, TimeUnit.MILLISECONDS);
   }
 
@@ -147,7 +157,14 @@ public class CircuitBreakerImpl implements CircuitBreaker {
       return false;
     }
 
-    return true;
+    if (s == CircuitBreakerState.HALF_OPEN) {
+      if (halfOpenInflight.incrementAndGet() <= config.getHalfOpenMaxProbes()) {
+        return true;
+      }
+      halfOpenInflight.decrementAndGet();
+      return false;
+    }
+    return false;
   }
 
   /**
@@ -169,11 +186,13 @@ public class CircuitBreakerImpl implements CircuitBreaker {
     }
 
     if (s == CircuitBreakerState.HALF_OPEN) {
+      halfOpenInflight.decrementAndGet();
       int consec = consecutiveSuccessCounter.incrementAndGet();
 
       if (consec >= config.getConsecutiveSuccessThreshold()) {
         state = CircuitBreakerState.CLOSED;
         lastHalfOpenAttempt.set(0L);
+        halfOpenInflight.set(0);
         resetAllBuckets();
         if (config.isLogEnabled()) {
           log.info("CB CLOSED after {} consecutive successes", consec);
@@ -200,6 +219,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
     }
 
     if (s == CircuitBreakerState.HALF_OPEN) {
+      halfOpenInflight.set(0);
       consecutiveSuccessCounter.set(0);
       state = CircuitBreakerState.OPEN;
       lastOpenedTime.set(currentTimeMillis());
@@ -297,23 +317,44 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    *
    * <p>The two lists are mutually exclusive at configuration time.
    */
+  private volatile Set<Class<?>> excludeClasses;
+  private volatile Set<Class<?>> includeClasses;
+
+  private Set<Class<?>> resolveClasses(List<String> classNames) {
+    if (classNames == null || classNames.isEmpty()) return Set.of();
+    Set<Class<?>> classes = new HashSet<>();
+    for (String name : classNames) {
+      try {
+        classes.add(Class.forName(name));
+      } catch (ClassNotFoundException e) {
+        log.warn("Exception class not found: {}", name);
+      }
+    }
+    return classes;
+  }
+
+  private boolean matchesAny(Throwable t, Set<Class<?>> classes) {
+    if (classes.isEmpty()) return false;
+    for (Class<?> clazz = t.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
+      if (classes.contains(clazz)) return true;
+    }
+    return false;
+  }
+
+  @SuppressWarnings("all")
   private boolean isIgnorableException(Throwable t) {
     var exclude = config.getExcludeExceptions();
     if (exclude != null && !exclude.isEmpty()) {
-      if (exclude.contains(t.getClass().getName())) {
-        return true;
-      }
-      if (t.getCause() != null && exclude.contains(t.getCause().getClass().getName())) {
-        return true;
-      }
+      if (excludeClasses == null) excludeClasses = resolveClasses(exclude);
+      if (matchesAny(t, excludeClasses)) return true;
+      if (t.getCause() != null && matchesAny(t.getCause(), excludeClasses)) return true;
     }
 
     var include = config.getIncludeExceptions();
     if (include != null && !include.isEmpty()) {
-      if (!include.contains(t.getClass().getName())) {
-        return true;
-      }
-      return t.getCause() != null && !include.contains(t.getCause().getClass().getName());
+      if (includeClasses == null) includeClasses = resolveClasses(include);
+      if (!matchesAny(t, includeClasses)) return true;
+      return t.getCause() == null || !matchesAny(t.getCause(), includeClasses);
     }
     return false;
   }
