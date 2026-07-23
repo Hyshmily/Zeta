@@ -327,13 +327,21 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     state.hotStreak++;
     state.coolStreak = 0;
 
+    // Compute the observation once and apply trend boost before the switch.
+    // An upward trend (trendStrength > 1.0) inflates the observed count so that
+    // steadily-rising keys reach HIGH Bayesian confidence sooner without waiting
+    // for the raw window sum to cross the threshold by a wide margin.
+    long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
+    if (ctx.trendStrength() > 1.0) {
+      obs = (long)(obs * ctx.trendStrength());
+    }
+
     switch (state.currentState) {
       case COLD -> {
         if (state.hotStreak < confirmCount) {
           return ZetaDecision.none(key, snapShot);
         }
 
-        long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
         ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
         switch (pr.level()) {
           case HIGH -> {
@@ -352,7 +360,6 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         }
       }
       case CANDIDATE_HOT -> {
-        long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
         ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
         if (pr.level() == ConfidenceLevel.HIGH) {
           state.currentState = CONFIRMED_HOT;
@@ -408,8 +415,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         // Enter pre-cooling after the grace window count is exhausted.
         // If the same window also satisfies the full cool-down, evaluate
         // the PRE_COOLING transition immediately (single-window cool-down).
+        // A downward trend (trendStrength < 1.0) reduces the grace window
+        // proportionally so that decaying keys shed their HOT state faster.
 
-        if (state.coolStreak >= Math.max(1, coolCount - preCoolGraceCount)) {
+        int graceNeeded = Math.max(1, coolCount - preCoolGraceCount);
+        double ts = ctx.trendStrength();
+        if (ts > 0 && ts < 1.0) {
+          graceNeeded = (int)(graceNeeded * Math.max(ts, 0.4));
+        }
+        if (state.coolStreak >= graceNeeded) {
           state.currentState = PRE_COOLING;
           // Check immediate PRE_COOLING → COLD transition
 
@@ -449,6 +463,11 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   private ZetaDecision evaluatePreCooling(String key, KeyState state, EvaluationContext ctx, StateSnapshot snapShot) {
     if (state.coolStreak >= coolCount) {
       long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
+      // A downward trend reduces the effective observation so that
+      // decaying keys reach NON-HIGH confidence faster and emit COOL earlier.
+      if (ctx.trendStrength() > 0 && ctx.trendStrength() < 1.0) {
+        obs = Math.max(1, (long)(obs * ctx.trendStrength()));
+      }
       ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
       if (pr.level() != ConfidenceLevel.HIGH) {
         state.currentState = COLD;

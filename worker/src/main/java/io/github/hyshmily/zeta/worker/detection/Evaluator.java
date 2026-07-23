@@ -72,6 +72,12 @@ public class Evaluator {
    */
   private final ConcurrentHashMap<String, WindowSumHistory> windowSumHistories = new ConcurrentHashMap<>();
 
+  /** Global QPS estimator for traffic-normalised trend detection. Nullable. */
+  private final GlobalQpsEstimator globalQpsEstimator;
+
+  /** Previous snapshot of {@link GlobalQpsEstimator#getWindowTotal} for ratio computation. */
+  private long prevGlobalWindowTotal;
+
   /**
    * Constructs the evaluator with the given dependencies.
    *
@@ -79,17 +85,20 @@ public class Evaluator {
    * @param stateMachine         the per-key lifecycle state machine
    * @param workerTopK           the worker-scoped HeavyKeeper sketch
    * @param fastLaneRuleManager  runtime-managed fast-lane rules
+   * @param globalQpsEstimator   global QPS estimator for trend normalisation (may be {@code null})
    */
   public Evaluator(
     SlidingWindowDetector detector,
     ZetaBayesianSM stateMachine,
     TopK workerTopK,
-    FastLaneRuleManager fastLaneRuleManager
+    FastLaneRuleManager fastLaneRuleManager,
+    GlobalQpsEstimator globalQpsEstimator
   ) {
     this.detector = detector;
     this.stateMachine = stateMachine;
     this.workerTopK = workerTopK;
     this.fastLaneRuleManager = fastLaneRuleManager;
+    this.globalQpsEstimator = globalQpsEstimator;
   }
 
   /**
@@ -114,8 +123,21 @@ public class Evaluator {
     boolean isHot = windowSum >= threshold;
     long cmsCount = workerTopK.estimatedCount(key);
 
-    Double cv = windowSumHistories.computeIfAbsent(key, k -> new WindowSumHistory()).addAndGetCv(windowSum);
-    EvaluationContext ctx = new EvaluationContext(cmsCount, windowSum, threshold, cv);
+    // Compute global traffic ratio for trend normalisation.
+    // When global QPS doubles, a key that doubles is not trending — it is keeping pace.
+    double globalRatio = 1.0;
+    if (globalQpsEstimator != null) {
+      long globalTotal = globalQpsEstimator.getWindowTotal();
+      if (prevGlobalWindowTotal > 0) {
+        globalRatio = (double) globalTotal / Math.max(prevGlobalWindowTotal, 1);
+      }
+      prevGlobalWindowTotal = globalTotal;
+    }
+
+    WindowSumHistory hist = windowSumHistories.computeIfAbsent(key, k -> new WindowSumHistory());
+    Double cv = hist.addAndGetCv(windowSum, globalRatio);
+    double trendStrength = hist.getTrendStrength();
+    EvaluationContext ctx = new EvaluationContext(cmsCount, windowSum, threshold, cv, trendStrength);
 
     return stateMachine.evaluate(key, isHot, isFastlane, ctx);
   }
@@ -142,26 +164,68 @@ public class Evaluator {
    */
   private static final class WindowSumHistory {
 
+    private static final double MAX_TREND_RATIO = 10.0;
+
     private final double[] buffer = new double[CV_HISTORY_SIZE];
     private int writeIndex = 0;
     private int count = 0;
     volatile long lastAccessTime;
 
     /**
+     * Cached trend strength (current / mean of preceding three windows).
+     * Written inside {@link #addAndGetCv} (under the intrinsic lock for
+     * buffer safety), read outside the lock via {@link #getTrendStrength}.
+     */
+    private volatile double trendStrength = 0.0;
+
+    /**
      * Record a new window sum and return the current CV.
      *
-     * @param windowSum the latest sliding-window sum
+     * <p>Also computes and caches {@link #trendStrength} as the ratio of
+     * {@code windowSum} (optionally normalised by {@code globalRatio}) to
+     * the mean of the three preceding non-zero window sums (t-3, t-2, t-1).
+     * A ratio above 1.0 indicates an upward trend; below 1.0 indicates a
+     * downward trend. {@code 0.0} is returned when fewer than 5 samples are
+     * available or all preceding windows are zero.
+     *
+     * <p>Global ratio normalisation prevents global traffic fluctuations
+     * from being mistaken for per-key trends: if the overall QPS doubles
+     * and a key's window sum also doubles, the normalised trend strength
+     * is 1.0 (flat) rather than 2.0 (strong upward).
+     *
+     * @param windowSum   the latest sliding-window sum
+     * @param globalRatio the ratio of current global QPS to the previous
+     *                    window (1.0 = no change, &gt;1.0 = traffic increase)
      * @return the coefficient of variation, or {@code null} if insufficient
      *         data is available
      */
     @SuppressWarnings("all")
-    synchronized Double addAndGetCv(long windowSum) {
+    synchronized Double addAndGetCv(long windowSum, double globalRatio) {
       lastAccessTime = System.currentTimeMillis();
       buffer[writeIndex] = windowSum;
       writeIndex = (writeIndex + 1) % CV_HISTORY_SIZE;
       if (count < CV_HISTORY_SIZE) {
         count++;
       }
+
+      if (count < 5) {
+        trendStrength = 0.0;
+      } else {
+        // Normalised trend = (windowSum / globalRatio) / mean of three preceding non-zero windows.
+        // Dividing by globalRatio removes the effect of global traffic changes from the trend signal.
+        double normSum = windowSum / Math.max(globalRatio, 0.1);
+        double sum = 0;
+        int samples = 0;
+        for (int i = 2; i <= 4; i++) {
+          double prev = buffer[(writeIndex - i + CV_HISTORY_SIZE) % CV_HISTORY_SIZE];
+          if (prev > 0) {
+            sum += prev;
+            samples++;
+          }
+        }
+        trendStrength = samples == 0 ? 0.0 : Math.min(normSum / (sum / samples), MAX_TREND_RATIO);
+      }
+
       if (count < 5) {
         return null;
       }
@@ -181,6 +245,16 @@ public class Evaluator {
         sumSq += d * d;
       }
       return Math.sqrt(sumSq / count) / mean;
+    }
+
+    /**
+     * Return the cached trend strength computed during the last
+     * {@link #addAndGetCv} call. Lock-free volatile read.
+     *
+     * @return trend ratio, or {@code 0.0} if insufficient data
+     */
+    double getTrendStrength() {
+      return trendStrength;
     }
   }
 }

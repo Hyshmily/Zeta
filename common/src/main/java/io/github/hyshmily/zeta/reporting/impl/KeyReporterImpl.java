@@ -610,8 +610,11 @@ public class KeyReporterImpl implements KeyReporter {
 
         BbrRateLimiterImpl limiter = bbrRateLimiter;
 
-        // 5s stale check — discard data that waited too long in the queue
-        if (currentTimeMillis() - batch.timestamp() > 5_000) {
+        // Dead-worker guard — discard if target is no longer alive.
+        // Covers the window between enqueue and consumption when a Worker dies.
+        if (
+          !healthView.getAliveWorkerIds().contains(batch.target()) || currentTimeMillis() - batch.timestamp() > 5_000
+        ) {
           expiredCount.incrementAndGet();
           if (limiter != null) {
             limiter.onConsumerDrop();

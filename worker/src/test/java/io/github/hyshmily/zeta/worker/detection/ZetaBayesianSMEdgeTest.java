@@ -46,15 +46,15 @@ class ZetaBayesianSMEdgeTest {
     new BayesianConfidenceEstimator(2.3026, 2.0, 0.5)
   );
 
-  private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null);
+  private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null, 0.0);
 
-  private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, null);
+  private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, null, 0.0);
 
-  private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null);
+  private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null, 0.0);
 
-  private static final EvaluationContext COLD_HIGH_CTX = new EvaluationContext(100L, 5L, 10L, null);
+  private static final EvaluationContext COLD_HIGH_CTX = new EvaluationContext(100L, 5L, 10L, null, 0.0);
 
-  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null);
+  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null, 0.0);
 
   private static ZetaBayesianSM machineWith(int confirm, int cool, int grace) {
     return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(confirm, cool, grace, EVAL);
@@ -389,7 +389,7 @@ class ZetaBayesianSMEdgeTest {
 
   @Test
   void isHotRecheckInsideLock_shouldRouteToHotWhenCallerSaysCold() {
-    EvaluationContext hotCtx = new EvaluationContext(100L, 100L, 10L, null);
+    EvaluationContext hotCtx = new EvaluationContext(100L, 100L, 10L, null, 0.0);
 
     ZetaBayesianSM m = machineWith(2, 5, 2);
     assertThat(m.evaluate("k", true, false, hotCtx).type()).isEqualTo(DecisionType.NONE);
@@ -400,7 +400,7 @@ class ZetaBayesianSMEdgeTest {
 
   @Test
   void isHotRecheck_shouldNotUpgradeWhenWindowSumBelowThreshold() {
-    EvaluationContext belowThresholdCtx = new EvaluationContext(100L, 5L, 10L, null);
+    EvaluationContext belowThresholdCtx = new EvaluationContext(100L, 5L, 10L, null, 0.0);
 
     ZetaBayesianSM m = machineWith(2, 5, 2);
     assertThat(m.evaluate("k", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
@@ -501,7 +501,7 @@ class ZetaBayesianSMEdgeTest {
 
   @Test
   void coldToHot_withCvPresent_shouldTransitionNormally() {
-    EvaluationContext cvCtx = new EvaluationContext(100L, 100L, 10L, 0.5);
+    EvaluationContext cvCtx = new EvaluationContext(100L, 100L, 10L, 0.5, 0.0);
     ZetaBayesianSM m = machineWith(3, 10, 4);
     assertThat(m.evaluate("key", true, false, cvCtx).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true, false, cvCtx).type()).isEqualTo(DecisionType.NONE);
@@ -512,7 +512,7 @@ class ZetaBayesianSMEdgeTest {
   void highConfidenceWithCv_shouldBlockPreCoolingTransition() {
     ZetaBayesianSM m = machineWith(1, 2, 1);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
-    EvaluationContext coldHighCv = new EvaluationContext(100L, 5L, 10L, 0.5);
+    EvaluationContext coldHighCv = new EvaluationContext(100L, 5L, 10L, 0.5, 0.0);
     assertThat(m.evaluate("key", false, false, coldHighCv).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("PRE_COOLING");
     assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);

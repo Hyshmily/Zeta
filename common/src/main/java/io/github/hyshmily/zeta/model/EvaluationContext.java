@@ -35,12 +35,17 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
  *                    used as the primary {@code observedCount} in the Bayesian model
  * @param threshold   the hot threshold (raw count) that the {@code windowSum} is
  *                    compared against for the binary is-hot flag
- * @param cv          coefficient of variation of the per-key sliding-window sums
- *                    over recent windows (may be {@code null} if not enough data)
- * @param logThreshold the hot threshold in log space (natural log of raw count)
+ * @param cv            coefficient of variation of the per-key sliding-window sums
+ *                     over recent windows (may be {@code null} if not enough data)
+ * @param logThreshold  the hot threshold in log space (natural log of raw count)
+ * @param trendStrength  ratio of current window sum to the mean of the preceding
+ *                       three window sums; &gt;1.0 indicates an upward trend,
+ *                       &lt;1.0 indicates a downward trend, 0.0 = insufficient data
  */
-public record EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv, double logThreshold) {
-  public EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv) {
-    this(cmsCount, windowSum, threshold, cv, Math.log(Math.max(threshold, 1.0)));
+public record EvaluationContext(
+  long cmsCount, long windowSum, long threshold, Double cv, double logThreshold, double trendStrength
+) {
+  public EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv, double trendStrength) {
+    this(cmsCount, windowSum, threshold, cv, Math.log(Math.max(threshold, 1.0)), trendStrength);
   }
 }

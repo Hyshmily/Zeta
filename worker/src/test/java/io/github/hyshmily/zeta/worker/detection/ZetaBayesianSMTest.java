@@ -41,13 +41,13 @@ class ZetaBayesianSMTest {
     new BayesianConfidenceEstimator(2.3026, 2.0, 0.5)
   );
 
-  private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null);
+  private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null, 0.0);
 
-  private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, null);
+  private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, null, 0.0);
 
-  private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null);
+  private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null, 0.0);
 
-  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null);
+  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null, 0.0);
 
   private ZetaBayesianSM machine;
 

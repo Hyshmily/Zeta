@@ -287,9 +287,10 @@ public class WorkerAutoConfiguration {
     SlidingWindowDetector detector,
     ZetaBayesianSM stateMachine,
     @Qualifier("workerTopK") TopK workerTopK,
-    FastLaneRuleManager fastLaneRuleManager
+    FastLaneRuleManager fastLaneRuleManager,
+    GlobalQpsEstimator globalQpsEstimator
   ) {
-    return new Evaluator(detector, stateMachine, workerTopK, fastLaneRuleManager);
+    return new Evaluator(detector, stateMachine, workerTopK, fastLaneRuleManager, globalQpsEstimator);
   }
 
   /**
