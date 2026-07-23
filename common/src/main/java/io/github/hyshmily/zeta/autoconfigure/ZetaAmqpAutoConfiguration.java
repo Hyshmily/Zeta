@@ -43,9 +43,12 @@ import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
+import io.github.hyshmily.zeta.util.version.VersionController;
+import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import io.github.hyshmily.zeta.util.impl.SystemLoadMonitorImpl;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.springframework.amqp.core.*;
@@ -558,11 +561,15 @@ public class ZetaAmqpAutoConfiguration {
     /**
      * Create the listener that processes HOT/COOL decisions send by the Worker.
      *
-     * @param hotLocalCache          the L1 Caffeine cache
-     * @param hotKeyRedisLoader      the function for loading values from Redis
-     * @param properties             the Worker listener configuration properties
-     * @param expireManager          the cache expiry manager
-     * @param sreRateLimiterProvider optional provider for the SRE rate limiter
+     * @param hotLocalCache               the L1 Caffeine cache
+     * @param hotKeyRedisLoader           the function for loading values from Redis
+     * @param properties                  the Worker listener configuration properties
+     * @param expireManager               the cache expiry manager
+     * @param sreRateLimiterProvider      optional provider for the SRE rate limiter
+     * @param stringRedisTemplate         Redis template for version tracking
+     * @param zetaProperties              global zeta properties (provides versionKeyTtlMinutes)
+     * @param snowflakeIdGenerator        Snowflake ID generator for degraded versions
+     * @param hotKeyRedisTemplateProvider optional provider for the Redis template
      * @return a new {@link WorkerListener} instance
      */
     @Bean
@@ -573,15 +580,25 @@ public class ZetaAmqpAutoConfiguration {
       WorkerListenerProperties properties,
       @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
       ExpireManager expireManager,
-      ObjectProvider<SreRateLimiterImpl> sreRateLimiterProvider
+      ObjectProvider<SreRateLimiterImpl> sreRateLimiterProvider,
+      StringRedisTemplate stringRedisTemplate,
+      ZetaProperties zetaProperties,
+      SnowflakeIdGenerator snowflakeIdGenerator,
+      ObjectProvider<StringRedisTemplate> hotKeyRedisTemplateProvider
     ) {
+      VersionController vc = new VersionControllerImpl(
+        Optional.ofNullable(stringRedisTemplate),
+        zetaProperties.getVersionKeyTtlMinutes(),
+        snowflakeIdGenerator
+      );
       return new WorkerListener(
         hotLocalCache,
         hotKeyRedisLoader,
         properties,
         workerSchedScheduler,
         expireManager,
-        sreRateLimiterProvider.getIfAvailable()
+        sreRateLimiterProvider.getIfAvailable(),
+        vc
       );
     }
 
@@ -653,24 +670,49 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
+     * Dedicated {@link RabbitTemplate} for the heartbeat verifier, initialized
+     * with a fixed {@code replyTimeout} at construction time.
+     *
+     * <p>This avoids mutating the shared {@code rabbitTemplate} bean's
+     * {@code replyTimeout} at runtime — the shared template is used by
+     * reporters, sync publishers, and negotiators, all of which have their
+     * own reply-timeout expectations.  See issue P2-4.5.
+     *
+     * @param connectionFactory the shared RabbitMQ connection factory
+     * @param properties        the HotKey configuration properties
+     * @return a new {@link RabbitTemplate} with {@code replyTimeout} set to
+     *         {@code properties.heartbeat.pingTimeoutMs}
+     */
+    @Bean
+    @ConditionalOnMissingBean(name = "zetaVerifyRabbitTemplate")
+    public RabbitTemplate zetaVerifyRabbitTemplate(
+      ConnectionFactory connectionFactory,
+      ZetaProperties properties
+    ) {
+      RabbitTemplate t = new RabbitTemplate(connectionFactory);
+      t.setReplyTimeout((int) properties.getHeartbeat().getPingTimeoutMs());
+      return t;
+    }
+
+    /**
      * Create the {@link WorkerHeartbeatVerifier} that periodically PINGs Workers
      * to verify they are alive.
      *
-     * @param rabbitTemplate the RabbitMQ template for sending PING messages
-     * @param healthView     the cluster health view to update on verification results
-     * @param properties     the HotKey configuration properties
+     * @param verifyRabbitTemplate the dedicated RabbitMQ template with fixed replyTimeout
+     * @param healthView           the cluster health view to update on verification results
+     * @param properties           the HotKey configuration properties
      * @return a new {@link WorkerHeartbeatVerifier} instance
      */
     @Bean(initMethod = "start", destroyMethod = "stop")
     @ConditionalOnMissingBean
     public WorkerHeartbeatVerifier workerHeartbeatVerifier(
-      RabbitTemplate rabbitTemplate,
+      @Qualifier("zetaVerifyRabbitTemplate") RabbitTemplate verifyRabbitTemplate,
       HealthView healthView,
       ZetaProperties properties,
       @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
     ) {
       return new WorkerHeartbeatVerifier(
-        rabbitTemplate,
+        verifyRabbitTemplate,
         healthView,
         properties.getInstanceId(),
         new WorkerHeartbeatVerifier.VerifierConfig(

@@ -151,7 +151,7 @@ class WorkerListenerTest {
       assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
       sched.shutdown();
     }
-    verify(limiter).onFailed();
+    verify(limiter, never()).onFailed();
     assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(1);
   }
 

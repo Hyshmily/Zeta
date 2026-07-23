@@ -28,7 +28,7 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
  *
  * <p>Created by the worker {@code KeyEvaluator}
  * before each call to
- * {@link ZetaBayesianSM#evaluate(String, boolean, EvaluationContext)}.
+ * {@link ZetaBayesianSM#evaluate(String, boolean, boolean, EvaluationContext)}.
  *
  * @param cmsCount    HeavyKeeper frequency estimate for this key (global, cross-instance)
  * @param windowSum   total access count in the current sliding window (local);

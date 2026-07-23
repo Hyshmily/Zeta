@@ -22,6 +22,8 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 
 /**
@@ -49,6 +51,7 @@ import org.springframework.amqp.core.Message;
  * @param epoch           the originating Worker's restart generation counter; receivers
  *                        unconditionally accept decisions from a higher epoch (see ADR-0010)
  */
+@Slf4j
 @Internal
 public record WorkerMessage(
   long id,
@@ -64,6 +67,10 @@ public record WorkerMessage(
 
   /** Downgrades a cache key to cool state — normal TTL, soft expiration disabled. */
   public static final String TYPE_COOL = "COOL";
+
+  private static final AtomicBoolean WARNED_VERSION_TYPE = new AtomicBoolean(false);
+  private static final AtomicBoolean WARNED_EPOCH_TYPE = new AtomicBoolean(false);
+  private static final AtomicBoolean WARNED_ID_TYPE = new AtomicBoolean(false);
 
   /**
    * Deserializes a {@code WorkerMessage} from an AMQP message body and headers.
@@ -85,13 +92,46 @@ public record WorkerMessage(
     String cacheKey = new String(body, StandardCharsets.UTF_8);
     String type = msg.getMessageProperties().getHeader(HEADER_TYPE);
 
-    long decisionVersion =
-      msg.getMessageProperties().getHeader(HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
-    long timestamp = msg.getMessageProperties().getHeader(HEADER_TIMESTAMP) instanceof Number n ? n.longValue() : 0L;
+    long decisionVersion = toLong(msg, HEADER_VERSION, VERSION_DEFAULT, WARNED_VERSION_TYPE);
+    long timestamp = toLong(msg, HEADER_TIMESTAMP, 0L, null);
     String nodeId = msg.getMessageProperties().getHeader(HEADER_NODE_ID) instanceof String s ? s : null;
-    long epoch = msg.getMessageProperties().getHeader(HEADER_EPOCH) instanceof Number n ? n.longValue() : 0L;
-    long id =
-      msg.getMessageProperties().getHeader(HEADER_MESSAGE_ID) instanceof Number n4 ? n4.longValue() : 0L;
+    long epoch = toLong(msg, HEADER_EPOCH, 0L, WARNED_EPOCH_TYPE);
+    long id = toLong(msg, HEADER_MESSAGE_ID, 0L, WARNED_ID_TYPE);
+
     return new WorkerMessage(id, cacheKey, type, decisionVersion, timestamp, nodeId, epoch);
+  }
+
+  /**
+   * Reads a numeric AMQP message header, returning its {@code long} value.
+   *
+   * <p>If the header value is not a {@link Number} (e.g. a String was sent by
+   * a different version of the sender), the method logs a one-time warning
+   * via the {@code warnFlag} and returns the {@code defaultValue}. The
+   * one-time flag prevents log flooding when every message has the wrong type.
+   *
+   * <p>When {@code warnFlag} is {@code null}, the warning is silently skipped
+   * (used for best-effort headers like {@code timestamp}).
+   *
+   * @param msg          the AMQP message containing the header
+   * @param header       the header name to read
+   * @param defaultValue the fallback value when the header is missing or non-numeric
+   * @param warnFlag     one-shot warning gate; null to suppress warnings
+   * @return the header's numeric value, or {@code defaultValue}
+   */
+  private static long toLong(Message msg, String header, long defaultValue, AtomicBoolean warnFlag) {
+    Object value = msg.getMessageProperties().getHeader(header);
+    if (value instanceof Number n) {
+      return n.longValue();
+    }
+    if (value != null && warnFlag != null && warnFlag.compareAndSet(false, true)) {
+      log.warn(
+        "Non-numeric header '{}' (type {}), defaulting to {}. Value: {}",
+        header,
+        value.getClass().getName(),
+        defaultValue,
+        value
+      );
+    }
+    return defaultValue;
   }
 }

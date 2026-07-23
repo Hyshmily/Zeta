@@ -108,10 +108,7 @@ public class Evaluator {
     long windowSum = detector.addCount(key, count);
 
     FastLaneRuleManager.FastLaneRule rule = fastLaneRuleManager.match(key);
-    if (rule != null && windowSum >= rule.threshold()) {
-      return stateMachine.fastlane(key);
-    }
-
+    boolean isFastlane = rule != null && windowSum >= rule.threshold();
 
     long threshold = detector.getThreshold();
     boolean isHot = windowSum >= threshold;
@@ -120,7 +117,7 @@ public class Evaluator {
     Double cv = windowSumHistories.computeIfAbsent(key, k -> new WindowSumHistory()).addAndGetCv(windowSum);
     EvaluationContext ctx = new EvaluationContext(cmsCount, windowSum, threshold, cv);
 
-    return stateMachine.evaluate(key, isHot, ctx);
+    return stateMachine.evaluate(key, isHot, isFastlane, ctx);
   }
 
   /**

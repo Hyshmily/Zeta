@@ -125,6 +125,7 @@ public interface ZetaBayesianSM {
    * threshold, CV) to produce a confidence-gated decision.
    *
    * @param key             the cache key (must not be {@code null})
+   * @param isFastlane      {@code true} if the key is in fastlane mode; {@code false} otherwise
    * @param isHotThisWindow {@code true} if the sliding-window frequency sum
    *                        exceeds the hot threshold during this evaluation
    *                        cycle; {@code false} otherwise
@@ -133,15 +134,7 @@ public interface ZetaBayesianSM {
    * @return a non-null {@link ZetaDecision} indicating what action the
    *         caller should take (HOT, COOL, or NONE)
    */
-  ZetaDecision evaluate(String key, boolean isHotThisWindow, EvaluationContext ctx);
-
-  /**
-   * Directly promote a key to CONFIRMED_HOT, bypassing Bayesian confidence gating.
-   *
-   * @param key the cache key to promote
-   * @return a HOT decision with snapshot for rollback
-   */
-  ZetaDecision fastlane(String key);
+  ZetaDecision evaluate(String key, boolean isHotThisWindow, boolean isFastlane, EvaluationContext ctx);
 
   /** Remove all tracked state for the given key, resetting it to COLD. */
   void reset(String key);

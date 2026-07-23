@@ -20,6 +20,7 @@ import static org.mockito.Mockito.mock;
 
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
 import io.github.hyshmily.zeta.sync.distributedlock.impl.RedisLockProvider;
+import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -37,9 +38,10 @@ class ZetaLockAutoConfigurationTest {
   @Test
   void redisLockProvider_shouldCreateBean() {
     StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     ZetaProperties properties = new ZetaProperties();
     ZetaLockAutoConfiguration config = new ZetaLockAutoConfiguration();
-    LockProvider provider = config.redisLockProvider(redisTemplate, properties);
+    LockProvider provider = config.redisLockProvider(redisTemplate, properties, scheduler);
     assertThat(provider).isNotNull();
     assertThat(provider).isInstanceOf(RedisLockProvider.class);
   }
@@ -47,9 +49,10 @@ class ZetaLockAutoConfigurationTest {
   @Test
   void redisLockProvider_shouldUsePropertiesDefaults() {
     StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
+    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     ZetaProperties properties = new ZetaProperties();
     ZetaLockAutoConfiguration config = new ZetaLockAutoConfiguration();
-    LockProvider provider = config.redisLockProvider(redisTemplate, properties);
+    LockProvider provider = config.redisLockProvider(redisTemplate, properties, scheduler);
     assertThat(provider).isNotNull();
     assertThat(provider).isInstanceOf(RedisLockProvider.class);
   }

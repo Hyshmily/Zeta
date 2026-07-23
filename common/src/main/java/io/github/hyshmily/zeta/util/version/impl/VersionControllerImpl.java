@@ -15,12 +15,15 @@
  */
 package io.github.hyshmily.zeta.util.version.impl;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
@@ -68,6 +71,17 @@ public class VersionControllerImpl implements VersionController {
   /** Counter tracking total degraded version allocations since startup. */
   private final AtomicLong fallbackVersionCounter = new AtomicLong(0);
 
+  /**
+   * Per-key highest seen dataVersion floor for wraparound detection.
+   * <p>Tracks the maximum dataVersion value observed per cache key. After a
+   * successful Redis INCR, the new version is compared against this floor.
+   * A new version lower than the floor indicates the Redis version key expired
+   * and was re-created (wraparound). This cache is bounded at 10k entries with
+   * weak reference keys — entries are automatically GC'd when version keys
+   * are genuinely abandoned.
+   */
+  private final Cache<String, Long> versionFloorCache = Caffeine.newBuilder().maximumSize(10_000).build();
+
   /** Holder for the Redis INCR script — lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
   private static class IncrScriptHolder {
 
@@ -106,6 +120,21 @@ public class VersionControllerImpl implements VersionController {
             List.of(ZetaConstants.Redis.VERSION_KEY_PREFIX + cacheKey),
             String.valueOf(versionKeyTtlMinutes * 60L)
           );
+          Long floor = versionFloorCache.getIfPresent(cacheKey);
+          if (floor != null && v < floor) {
+            log.error(
+              "dataVersion wraparound detected for key {}: {} < floor {}. " +
+                "The Redis version key (zeta:version:{}) expired before the L1 entry, " +
+                "causing INCR to restart from 1. Increase versionKeyTtlMinutes (currently {} min) " +
+                "or avoid Long.MAX_VALUE hard TTL on this key.",
+              cacheKey,
+              v,
+              floor,
+              cacheKey,
+              versionKeyTtlMinutes
+            );
+          }
+          versionFloorCache.put(cacheKey, v);
           return new VersionResult(v, false);
         } catch (Exception e) {
           log.warn("Redis version increment failed, fallback to local counter: {}", cacheKey, e);
@@ -143,6 +172,25 @@ public class VersionControllerImpl implements VersionController {
   @Override
   public boolean isRedisConfigured() {
     return redisTemplate.isPresent();
+  }
+
+  /**
+   * Read-only current version for the given cache key via Redis GET.
+   *
+   * <p>Returns empty when the key does not exist, Redis is unavailable,
+   * or deserialization fails.
+   */
+  @Override
+  public Optional<Long> currentVersion(String cacheKey) {
+    return redisTemplate.map(t -> {
+      try {
+        String v = t.opsForValue().get(ZetaConstants.Redis.VERSION_KEY_PREFIX + cacheKey);
+        return v != null ? Optional.of(Long.parseLong(v)) : Optional.<Long>empty();
+      } catch (Exception e) {
+        log.warn("Failed to read current version for key {}", cacheKey, e);
+        return Optional.<Long>empty();
+      }
+    }).orElse(Optional.empty());
   }
 
   /**

@@ -43,6 +43,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
@@ -376,13 +377,21 @@ class ZetaAmqpAutoConfigurationTest {
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
     ObjectProvider<SreRateLimiterImpl> sreProvider = mock(ObjectProvider.class);
+    StringRedisTemplate stringRedisTemplate = mock(StringRedisTemplate.class);
+    ZetaProperties zetaProperties = new ZetaProperties();
+    SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator();
+    ObjectProvider<StringRedisTemplate> redisProvider = mock(ObjectProvider.class);
     WorkerListener listener = config.workerListener(
       localCache,
       redisLoader,
       props,
       scheduler,
       expireManager,
-      sreProvider
+      sreProvider,
+      stringRedisTemplate,
+      zetaProperties,
+      snowflakeIdGenerator,
+      redisProvider
     );
 
     assertThat(listener).isNotNull();

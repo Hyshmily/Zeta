@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.worker.detection.impl;
 
+import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
+
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.model.EvaluationContext;
@@ -23,17 +25,15 @@ import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceLevel;
 import io.github.hyshmily.zeta.worker.confidence.ProbabilityResult;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.function.Consumer;
-
-import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -52,11 +52,14 @@ import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
  * the Bayesian posterior determines the outcome: HIGH → promote, MEDIUM →
  * hold at CANDIDATE_HOT, LOW → reset streak.
  *
- * <h3>Bayesian-gated state diagram (simplified)</h3>
+ * <h3>State diagram with fast-lane</h3>
  * <pre>
+ *       fastlane: windowSum >= ruleThreshold ───────┐
+ *                                                   |
+ *                                                   ▼
  *   COLD ──hotStreak >= confirm──► CANDIDATE_HOT ──HIGH confidence──► CONFIRMED_HOT
- *                           + MEDIUM stay / LOW reset
- *    ▲                                                                       │
+ *                           + MEDIUM stay / LOW reset                   │
+ *    ▲                                                                  │
  *    │                                  PRE_COOLING ◄── coolStreak >= grace ─┤
  *    │                                   │                                   │
  *    │                                   ├── coolStreak >= cool ──► COLD ────┘
@@ -68,6 +71,14 @@ import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
  *    └──── hotStreak > 0 ───────────────────────────┘
  *                              (silent revive)
  * </pre>
+ *
+ * <p><b>Fast-lane bypass:</b> When the window sum meets a configured fast-lane
+ * rule threshold, {@link io.github.hyshmily.zeta.worker.detection.Evaluator}
+ * sets {@code isFastlane=true} and the evaluation short-circuits via
+ * {@link #fastlane} — the key is promoted to {@code CONFIRMED_HOT}
+ * unconditionally, skipping all Bayesian confidence gating. Below the rule
+ * threshold {@code isFastlane=false} and the key falls through to the normal
+ * Bayesian path.
  *
  * <h3>Bayesian gating rules</h3>
  * <ul>
@@ -86,6 +97,8 @@ import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
  *       in PRE_COOLING for another window</li>
  *   <li><b>Silent revive:</b> PRE_COOLING + hot window → CONFIRMED_HOT
  *       with no broadcast (regardless of confidence)</li>
+ *   <li><b>Fast-lane revive:</b> PRE_COOLING + fastlane → CONFIRMED_HOT
+ *       with broadcast (unlike silent revive, fastlane always broadcasts)</li>
  *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs every
  *       {@code evict-interval-ms} (default 30s) and scans for keys whose
  *       {@code lastUpdateTime} exceeds {@code 2 × coolDurationMs}. Any
@@ -127,6 +140,13 @@ import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
  * KeyState#lastUpdateTime}), then each candidate is re-checked under the
  * per-key lock before removal. {@link #reset} acquires the per-key lock
  * to avoid races with a concurrent {@link #evaluate} for the same key.
+ *
+ * <p>{@link KeyState} uses Lombok {@code @Builder(toBuilder = true)} so the
+ * fast-lane path can atomically replace state via the builder while the
+ * normal Bayesian path mutates fields in-place on the existing object.
+ * {@code @Builder.Default} on {@code lastUpdateTime} evaluates to
+ * {@link System#currentTimeMillis()} at build time, ensuring freshly
+ * created states have a realistic timestamp.
  */
 @Internal
 @Slf4j
@@ -213,18 +233,31 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    *
    * @param key             the cache key (must not be {@code null})
    * @param isHotThisWindow {@code true} if the sliding-window sum exceeds threshold
+   * @param isFastlane      {@code true} when a fast-lane rule matched and the
+   *                        window sum met the rule threshold — the key is
+   *                        promoted unconditionally, skipping all Bayesian
+   *                        confidence gating; {@code false} otherwise
    * @param ctx             aggregated observation data for Bayesian evaluation
    *                        (must not be {@code null})
    * @return a non-null {@link ZetaDecision}
    */
+
   @Override
-  public ZetaDecision evaluate(String key, boolean isHotThisWindow, EvaluationContext ctx) {
+  public ZetaDecision evaluate(String key, boolean isHotThisWindow, boolean isFastlane, EvaluationContext ctx) {
     Lock lock = keyLocks.get(key);
     lock.lock();
 
     StateSnapshot snapShot = null;
     try {
       KeyState state = states.get(key);
+
+      if (isFastlane) {
+        // Fast-lane path: when the window sum exceeds a configured rule threshold,
+        // promote the key to CONFIRMED_HOT immediately — no Bayesian gating.
+        // Creates state if absent; promotes from any existing state; always updates
+        // lastUpdateTime to prevent stale eviction.
+        return fastlane(state, key);
+      }
       if (state == null) {
         // Truly never-before-seen key + cold window → nothing to evaluate.
         // Note: we deliberately skip the lock-free fast path here (no
@@ -235,7 +268,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         if (!isHotThisWindow) {
           return ZetaDecision.NONE;
         }
-        state = new KeyState();
+        state = KeyState.builder().build();
         states.put(key, state);
       } else {
         snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
@@ -429,41 +462,57 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   }
 
   /**
-   * Immediately removes all tracked state for the given key, effectively
-   * resetting it to {@link State#COLD}.
+   * Fast-lane promotion: unconditionally set the key to CONFIRMED_HOT.
    *
-   * <p>Called when the Worker fails to obtain a version from Redis and must
-   * abort the current HOT decision (e.g. Redis is unreachable or the key
-   * was not found in Redis). After reset, the next {@link #evaluate} call
-   * for this key will start from scratch with fresh streak counters.
+   * <p>Called when a key matches a fast-lane rule and its sliding-window sum
+   * equals or exceeds the rule threshold. Bypasses all Bayesian confidence
+   * gating — the key is promoted immediately and the decision is returned
+   * for broadcast.
    *
-   * <p>The last-touch timestamp is intentionally not removed to prevent
-   * immediate re-creation churn in {@link #evictStale} — it will be cleaned
-   * up lazily on the next eviction cycle.
+   * <p>Three cases:
+   * <ul>
+   *   <li><b>State is null</b> — create a new KeyState, mark CONFIRMED_HOT,
+   *       set hotStreak to confirmCount, store in the map.</li>
+   *   <li><b>State exists, not CONFIRMED_HOT</b> — use toBuilder to promote
+   *       to CONFIRMED_HOT, reset coolStreak, update lastUpdateTime, and
+   *       write back to the map.</li>
+   *   <li><b>State exists, already CONFIRMED_HOT</b> — simply refresh
+   *       lastUpdateTime to keep stale eviction at bay.</li>
+   * </ul>
    *
-   * @param key the cache key to reset
+   * @param state the current KeyState for this key (may be {@code null})
+   * @param key   the cache key
+   * @return a HOT decision with a pre-mutation snapshot for rollback
    */
-  @Override
-  public ZetaDecision fastlane(String key) {
-    Lock lock = keyLocks.get(key);
-    lock.lock();
-    try {
-      KeyState state = states.get(key);
-      StateSnapshot snapShot = null;
-      if (state != null) {
-        snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
-      } else {
-        state = new KeyState();
-        states.put(key, state);
-      }
-      state.currentState = CONFIRMED_HOT;
-      state.hotStreak = Math.max(state.hotStreak, confirmCount);
-      state.coolStreak = 0;
-      state.lastUpdateTime = System.currentTimeMillis();
-      return ZetaDecision.hot(key, snapShot);
-    } finally {
-      lock.unlock();
+  private ZetaDecision fastlane(KeyState state, String key) {
+    if (state == null) {
+      state = KeyState.builder()
+        .currentState(CONFIRMED_HOT)
+        .hotStreak(confirmCount)
+        .lastUpdateTime(System.currentTimeMillis())
+        .build();
+      states.put(key, state);
+
+      return ZetaDecision.hot(
+        key,
+        new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak)
+      );
     }
+
+    if (state.currentState != CONFIRMED_HOT) {
+      state = state
+        .toBuilder()
+        .currentState(CONFIRMED_HOT)
+        .hotStreak(Math.max(state.hotStreak, confirmCount))
+        .coolStreak(0)
+        .lastUpdateTime(System.currentTimeMillis())
+        .build();
+      states.put(key, state);
+    } else {
+      state.lastUpdateTime = System.currentTimeMillis();
+    }
+    StateSnapshot snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
+    return ZetaDecision.hot(key, snapShot);
   }
 
   @Override
@@ -587,7 +636,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         return;
       }
 
-      KeyState keyState = states.computeIfAbsent(key, k -> new KeyState());
+      KeyState keyState = states.computeIfAbsent(key, k -> KeyState.builder().build());
       keyState.currentState = State.valueOf(previousState.currentState());
       keyState.hotStreak = previousState.hotStreak();
       keyState.coolStreak = previousState.coolStreak();
@@ -614,18 +663,23 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    * reads of {@link #lastUpdateTime} by {@link #evictStale} are lock-free
    * and rely on {@code volatile} semantics.
    */
+  @Builder(toBuilder = true)
   private static class KeyState {
 
     /** Current lifecycle stage. Initialised to {@link State#COLD}. */
+    @Builder.Default
     State currentState = COLD;
 
     /** Number of consecutive windows above the hot threshold. */
+    @Builder.Default
     int hotStreak = 0;
 
     /** Number of consecutive windows below the hot threshold. */
+    @Builder.Default
     int coolStreak = 0;
 
     /** Last evaluation timestamp (epoch millis). Volatile for lock-free reads. */
-    volatile long lastUpdateTime;
+    @Builder.Default
+    volatile long lastUpdateTime = System.currentTimeMillis();
   }
 }

@@ -58,76 +58,76 @@ class ZetaBayesianSMTest {
 
   @Test
   void coldToHot_requiresConfirmCountConsecutiveHotWindows() {
-    assertThat(machine.evaluate("key", false, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(machine.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(machine.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(machine.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(machine.evaluate("key", false, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void hotToCool_requiresCoolCountConsecutiveColdWindows() {
     ZetaDecision last = null;
     for (int i = 0; i < 3; i++) {
-      last = machine.evaluate("key", true, CTX);
+      last = machine.evaluate("key", true, false, CTX);
     }
     assertThat(last.type()).isEqualTo(DecisionType.HOT);
 
     for (int i = 0; i < 5; i++) {
-      assertThat(machine.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+      assertThat(machine.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     }
-    assertThat(machine.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
 
     for (int i = 0; i < 3; i++) {
-      assertThat(machine.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+      assertThat(machine.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     }
-    assertThat(machine.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(machine.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
   @Test
   void preCooling_toHot_shouldReviveWithoutOscillation() {
     ZetaDecision last = null;
     for (int i = 0; i < 3; i++) {
-      last = machine.evaluate("key", true, CTX);
+      last = machine.evaluate("key", true, false, CTX);
     }
     assertThat(last.type()).isEqualTo(DecisionType.HOT);
 
     for (int i = 0; i < 6; i++) {
-      machine.evaluate("key", false, CTX);
+      machine.evaluate("key", false, false, CTX);
     }
 
-    assertThat(machine.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
   }
 
   @Test
   void reset_shouldClearState() {
     ZetaDecision last = null;
     for (int i = 0; i < 3; i++) {
-      last = machine.evaluate("key", true, CTX);
+      last = machine.evaluate("key", true, false, CTX);
     }
     assertThat(last.type()).isEqualTo(DecisionType.HOT);
     machine.reset("key");
-    assertThat(machine.evaluate("key", false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.evaluate("key", false, false, CTX).type()).isEqualTo(DecisionType.NONE);
   }
 
   @Test
   void mediumConfidence_shouldStillAllowCooling() {
     ZetaDecision last = null;
     for (int i = 0; i < 3; i++) {
-      last = machine.evaluate("key", true, CTX);
+      last = machine.evaluate("key", true, false, CTX);
     }
     assertThat(last.type()).isEqualTo(DecisionType.HOT);
 
     for (int i = 0; i < 9; i++) {
-      machine.evaluate("key", false, COLD_CTX);
+      machine.evaluate("key", false, false, COLD_CTX);
     }
-    assertThat(machine.evaluate("key", false, COLD_MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(machine.evaluate("key", false, false, COLD_MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
   @Test
   void evictStale_shouldRemoveOldKeys() throws InterruptedException {
-    machine.evaluate("staleKey", true, CTX);
+    machine.evaluate("staleKey", true, false, CTX);
     Thread.sleep(50);
     machine.evictStale(10, k -> {});
-    assertThat(machine.evaluate("staleKey", false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.evaluate("staleKey", false, false, CTX).type()).isEqualTo(DecisionType.NONE);
   }
 }

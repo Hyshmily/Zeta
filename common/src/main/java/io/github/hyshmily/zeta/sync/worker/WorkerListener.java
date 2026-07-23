@@ -26,16 +26,18 @@ import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
+import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
+import jakarta.annotation.Nullable;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 
 import java.io.IOException;
 import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_COOL;
 import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_HOT;
@@ -75,7 +77,6 @@ import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_HOT;
  * @see WorkerHeartbeatVerifier
  * @see CacheSyncListener
  */
-@RequiredArgsConstructor
 @Slf4j
 @Internal
 public class WorkerListener {
@@ -103,8 +104,52 @@ public class WorkerListener {
    * {@code null} disables rate limiting. */
   private final SreRateLimiterImpl sreRateLimiter;
 
+  /**
+   * Optional version controller for reading the current {@code dataVersion}
+   * from Redis when creating new L1 entries. When null (or when the version
+   * cannot be read), the entry is created with {@code dataVersion=0}, which
+   * may allow stale invalidation messages to evict the entry (see issue 4.11).
+   */
+  @Nullable
+  private final VersionController versionController;
+
   /** Per-key FIFO dispatcher for ordered cache mutation execution. */
   private PerKeyOrderedDispatcher dispatcher;
+
+  /**
+   * 6-argument constructor for callers without a {@link VersionController}.
+   */
+  public WorkerListener(
+    Cache<String, Object> caffeineCache,
+    CacheLoader redisLoader,
+    WorkerListenerProperties properties,
+    ScheduledExecutorService scheduler,
+    ExpireManager expireManager,
+    @Nullable SreRateLimiterImpl sreRateLimiter
+  ) {
+    this(caffeineCache, redisLoader, properties, scheduler, expireManager, sreRateLimiter, null);
+  }
+
+  /**
+   * 7-argument constructor with optional {@link VersionController}.
+   */
+  public WorkerListener(
+    Cache<String, Object> caffeineCache,
+    CacheLoader redisLoader,
+    WorkerListenerProperties properties,
+    ScheduledExecutorService scheduler,
+    ExpireManager expireManager,
+    @Nullable SreRateLimiterImpl sreRateLimiter,
+    @Nullable VersionController versionController
+  ) {
+    this.caffeineCache = caffeineCache;
+    this.redisLoader = redisLoader;
+    this.properties = properties;
+    this.scheduler = scheduler;
+    this.expireManager = expireManager;
+    this.sreRateLimiter = sreRateLimiter;
+    this.versionController = versionController;
+  }
 
   /** Fallback hard TTL (seconds) for COOL entries when no normal TTL is configured on the existing entry. */
   private static final long COOL_DEFAULT_PROTECTION_HARDTTL_TIME = 120;
@@ -115,11 +160,26 @@ public class WorkerListener {
   /** Jitter ratio for COOL fallback soft TTL (±20%). */
   private static final double COOL_DEFAULT_PROTECTION_SOFTTTL_TIME_RATIO = 0.2;
 
+  /**
+   * Initializes the per-key ordered dispatcher for cache-mutation ordering.
+   *
+   * <p>Called automatically by the Spring container after all dependencies are
+   * injected. Creates a {@link PerKeyOrderedDispatcher} that guarantees FIFO
+   * processing of Worker decisions per cache key and spreads Redis load via
+   * jitter-delayed submissions.
+   */
   @PostConstruct
   public void init() {
     this.dispatcher = new PerKeyOrderedDispatcher(scheduler, "worker-listener");
   }
 
+  /**
+   * Gracefully shuts down the ordered dispatcher.
+   *
+   * <p>Cancels any pending tasks and releases the dispatcher's internal
+   * resources. Called automatically by the Spring container during
+   * application shutdown.
+   */
   @PreDestroy
   public void destroy() {
     if (dispatcher != null) {
@@ -184,7 +244,8 @@ public class WorkerListener {
     };
 
     long jitterMs = properties.getBroadcastJitterMs();
-    dispatcher.submit(wm.cacheKey(), task, jitterMs);
+    long delay = jitterMs > 0 ? ThreadLocalRandom.current().nextLong(jitterMs) : 0L;
+    dispatcher.submit(wm.cacheKey(), task, delay);
   }
 
   /**
@@ -234,7 +295,6 @@ public class WorkerListener {
   private void handleHot(WorkerMessage wm) {
     // SRE rate limiter gate — skip HOT promotion when the system is overloaded
     if (sreRateLimiter != null && !sreRateLimiter.tryAcquire()) {
-      sreRateLimiter.onFailed();
       log.debug("SRE throttled HOT promotion for key={}", wm.cacheKey());
       return;
     }
@@ -254,6 +314,9 @@ public class WorkerListener {
       .orElse(null);
 
     if (value == null) {
+      if (sreRateLimiter != null) {
+        sreRateLimiter.onFailed();
+      }
       log.debug("handleHot: HotKey value not found in Redis and no degraded entry: {}", wm.cacheKey());
       return;
     }
@@ -282,10 +345,21 @@ public class WorkerListener {
           );
         }
 
+        // Try to read the real dataVersion from Redis to avoid creating
+        // an entry with version=0 that could be evicted by a stale
+        // invalidation (see issue 4.11).  Fall back to 0/not-degraded
+        // when versionController is absent or Redis is unreachable.
+        long actualDataVersion = 0;
+        boolean actualDegraded = false;
+        if (versionController != null) {
+          actualDataVersion =
+            versionController.currentVersion(wm.cacheKey()).orElse(0L);
+        }
+
         return expireManager.createBuilder(
           value,
-          0,
-          false,
+          actualDataVersion,
+          actualDegraded,
           wm.decisionVersion(),
           defultHotHardTtl,
           defultHotSoftTtl,
@@ -383,9 +457,6 @@ public class WorkerListener {
       return redisLoader.load(wm.cacheKey());
     } catch (Exception e) {
       log.warn("handleHot: Redis load failed for key={}, trying degraded entry", wm.cacheKey(), e);
-      if (sreRateLimiter != null) {
-        sreRateLimiter.onFailed();
-      }
       return null;
     }
   }

@@ -63,23 +63,23 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void shouldHandleSingleHotWindow() {
     ZetaBayesianSM m = machineWith(1, 5, 2);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void shouldHandleImmediateCooling() {
     ZetaBayesianSM m = machineWith(1, 2, 1);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
   @Test
   void mediumConfidence_shouldNotBlockImmediateCooling() {
     ZetaBayesianSM m = machineWith(1, 2, 1);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", false, COLD_MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false, false, COLD_MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
   @Test
@@ -92,20 +92,20 @@ class ZetaBayesianSMEdgeTest {
 
   private static ZetaDecision machine(String key, boolean hot) {
     ZetaBayesianSM m = machineWith(2, 5, 2);
-    return m.evaluate(key, hot, CTX);
+    return m.evaluate(key, hot, false, CTX);
   }
 
   @Test
   void nullKey_shouldThrowNullPointer() {
     ZetaBayesianSM m = machineWith(2, 5, 2);
-    assertThatNullPointerException().isThrownBy(() -> m.evaluate(null, true, CTX));
+    assertThatNullPointerException().isThrownBy(() -> m.evaluate(null, true, false, CTX));
   }
 
   @Test
   void emptyKey_shouldBeTracked() {
     ZetaBayesianSM m = machineWith(2, 5, 2);
-    assertThat(m.evaluate("", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
@@ -125,7 +125,7 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void reset_shouldClearTrackedCount() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    m.evaluate("key", true, CTX);
+    m.evaluate("key", true, false, CTX);
     assertThat(m.getTrackedKeys()).isEqualTo(1);
     m.reset("key");
     assertThat(m.getTrackedKeys()).isZero();
@@ -134,7 +134,7 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void repeatedReset_shouldBeSafe() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    m.evaluate("key", true, CTX);
+    m.evaluate("key", true, false, CTX);
     m.reset("key");
     m.reset("key");
     assertThat(m.getTrackedKeys()).isZero();
@@ -144,9 +144,9 @@ class ZetaBayesianSMEdgeTest {
   void getTrackedKeys_shouldReflectActiveKeys() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
     assertThat(m.getTrackedKeys()).isZero();
-    m.evaluate("k1", true, CTX);
+    m.evaluate("k1", true, false, CTX);
     assertThat(m.getTrackedKeys()).isEqualTo(1);
-    m.evaluate("k2", true, CTX);
+    m.evaluate("k2", true, false, CTX);
     assertThat(m.getTrackedKeys()).isEqualTo(2);
     m.reset("k1");
     assertThat(m.getTrackedKeys()).isEqualTo(1);
@@ -155,49 +155,49 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void hotStreak_resetsOnColdWindow() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void confirmCountOfOne_shouldPromoteImmediately() {
     ZetaBayesianSM m = machineWith(1, 5, 2);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    assertThat(m.evaluate("key", false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false, false, CTX).type()).isEqualTo(DecisionType.NONE);
   }
 
   @Test
   void coolCount_one_shouldCoolImmediately() {
     ZetaBayesianSM m = machineWith(1, 1, 0);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
   @Test
   void mediumConfidence_shouldCoolWhenConfidenceNotHigh() {
     ZetaBayesianSM m = machineWith(1, 1, 0);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    assertThat(m.evaluate("key", false, COLD_MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false, false, COLD_MEDIUM_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
   @Test
   void highConfidence_shouldDelayCoolInPreCooling() {
     ZetaBayesianSM m = machineWith(1, 2, 1);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    assertThat(m.evaluate("key", false, COLD_HIGH_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", false, COLD_HIGH_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false, false, COLD_HIGH_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false, false, COLD_HIGH_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 
   @Test
   @Tag("flaky")
   void evictStale_shouldOnlyRemoveStaleKeys() throws InterruptedException {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    m.evaluate("stale", true, CTX);
+    m.evaluate("stale", true, false, CTX);
     Thread.sleep(5);
     m.evictStale(2, k -> {});
     assertThat(m.getTrackedKeys()).isZero();
@@ -207,15 +207,15 @@ class ZetaBayesianSMEdgeTest {
   void settingThresholds_shouldAffectTransitions() {
     ZetaBayesianSM m = machineWith(5, 10, 4);
     m.setConfirmCount(1);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void getStateSnapshot_shouldReturnCorrectSnapshot() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
 
     StateSnapshot snapshot = m.getStateSnapshot("key");
     assertThat(snapshot.currentState()).isEqualTo("CONFIRMED_HOT");
@@ -232,9 +232,9 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackToPreviousState_shouldRestoreState() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
 
     StateSnapshot snapshot = m.getStateSnapshot("key");
 
@@ -246,19 +246,19 @@ class ZetaBayesianSMEdgeTest {
     assertThat(restored.currentState()).isEqualTo("CONFIRMED_HOT");
     assertThat(restored.hotStreak()).isEqualTo(3);
 
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
   }
 
   @Test
   void rollbackToPreviousState_withNull_shouldReset() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
 
     m.rollbackToPreviousState("key", (StateSnapshot) null);
 
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
   }
 
   @Test
@@ -271,7 +271,7 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackToPreviousState_fromCold_shouldRestore() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
     StateSnapshot snap = m.getStateSnapshot("key");
     assertThat(snap.currentState()).isEqualTo("COLD");
     m.reset("key");
@@ -282,10 +282,10 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackToPreviousState_fromPreCooling_shouldRestore() {
     ZetaBayesianSM m = machineWith(1, 5, 2);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     StateSnapshot snap = m.getStateSnapshot("key");
     assertThat(snap.currentState()).isEqualTo("PRE_COOLING");
     m.reset("key");
@@ -304,7 +304,7 @@ class ZetaBayesianSMEdgeTest {
   @Tag("flaky")
   void evictStale_shouldCleanOrphanedTimestamps() throws InterruptedException {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    m.evaluate("key", true, CTX);
+    m.evaluate("key", true, false, CTX);
     m.reset("key");
     Thread.sleep(1);
     m.evictStale(0, k -> {});
@@ -314,16 +314,16 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void decisionSnapshot_shouldBeNullForNewKey() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    ZetaDecision d = m.evaluate("newKey", true, CTX);
+    ZetaDecision d = m.evaluate("newKey", true, false, CTX);
     assertThat(d.snapShot()).isNull();
   }
 
   @Test
   void decisionSnapshot_shouldCapturePreMutationState() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
 
-    ZetaDecision d = m.evaluate("key", true, CTX);
+    ZetaDecision d = m.evaluate("key", true, false, CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
     assertThat(d.snapShot()).isNotNull();
     assertThat(d.snapShot().key()).isEqualTo("key");
@@ -335,8 +335,8 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackWithDecisionSnapshot_shouldRestorePreMutationState() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    ZetaDecision d = m.evaluate("key", true, CTX);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    ZetaDecision d = m.evaluate("key", true, false, CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
 
     m.rollbackToPreviousState("key", d.snapShot());
@@ -346,16 +346,16 @@ class ZetaBayesianSMEdgeTest {
     assertThat(restored.hotStreak()).isEqualTo(1);
     assertThat(restored.coolStreak()).isEqualTo(0);
 
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void decisionSnapshot_shouldBeNonNullForHotDecision() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.NONE);
-    ZetaDecision hot = m.evaluate("key", true, CTX);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    ZetaDecision hot = m.evaluate("key", true, false, CTX);
     assertThat(hot.type()).isEqualTo(DecisionType.HOT);
     assertThat(hot.snapShot()).isNotNull();
     assertThat(hot.snapShot().currentState()).isEqualTo("COLD");
@@ -366,9 +366,9 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void decisionSnapshot_shouldBeNonNullForCoolDecision() {
     ZetaBayesianSM m = machineWith(1, 2, 1);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    ZetaDecision cool = m.evaluate("key", false, COLD_CTX);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    ZetaDecision cool = m.evaluate("key", false, false, COLD_CTX);
     assertThat(cool.type()).isEqualTo(DecisionType.COOL);
     assertThat(cool.snapShot()).isNotNull();
     assertThat(cool.snapShot().currentState()).isEqualTo("PRE_COOLING");
@@ -379,10 +379,10 @@ class ZetaBayesianSMEdgeTest {
   @Tag("flaky")
   void evictStale_shouldNotRemoveConcurrentlyEvaluatedKey() throws InterruptedException {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    m.evaluate("key", true, CTX);
+    m.evaluate("key", true, false, CTX);
 
     Thread.sleep(1);
-    m.evaluate("key", true, CTX);
+    m.evaluate("key", true, false, CTX);
     m.evictStale(100, k -> {});
     assertThat(m.getTrackedKeys()).isEqualTo(1);
   }
@@ -392,9 +392,9 @@ class ZetaBayesianSMEdgeTest {
     EvaluationContext hotCtx = new EvaluationContext(100L, 100L, 10L, null);
 
     ZetaBayesianSM m = machineWith(2, 5, 2);
-    assertThat(m.evaluate("k", true, hotCtx).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("k", true, false, hotCtx).type()).isEqualTo(DecisionType.NONE);
 
-    ZetaDecision d = m.evaluate("k", false, hotCtx);
+    ZetaDecision d = m.evaluate("k", false, false, hotCtx);
     assertThat(d.type()).isEqualTo(DecisionType.HOT);
   }
 
@@ -403,9 +403,9 @@ class ZetaBayesianSMEdgeTest {
     EvaluationContext belowThresholdCtx = new EvaluationContext(100L, 5L, 10L, null);
 
     ZetaBayesianSM m = machineWith(2, 5, 2);
-    assertThat(m.evaluate("k", true, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("k", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
 
-    ZetaDecision d = m.evaluate("k", false, belowThresholdCtx);
+    ZetaDecision d = m.evaluate("k", false, false, belowThresholdCtx);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
 
     assertThat(m.getStateSnapshot("k").hotStreak()).isEqualTo(0);
@@ -414,19 +414,19 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void lowConfidence_shouldDecrementHotStreak() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").hotStreak()).isEqualTo(2);
   }
 
   @Test
   void candidateHot_withMediumConfidence_shouldStayInCandidateHot() {
     ZetaBayesianSM m = machineWith(1, 5, 2);
-    assertThat(m.evaluate("key", true, MEDIUM_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, MEDIUM_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
-    ZetaDecision d = m.evaluate("key", true, MEDIUM_CTX);
+    ZetaDecision d = m.evaluate("key", true, false, MEDIUM_CTX);
     assertThat(d.type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
   }
@@ -434,9 +434,9 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void candidateHot_withHighConfidence_shouldPromoteToConfirmedHot() {
     ZetaBayesianSM m = machineWith(1, 5, 2);
-    assertThat(m.evaluate("key", true, MEDIUM_CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, MEDIUM_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
-    ZetaDecision hot = m.evaluate("key", true, CTX);
+    ZetaDecision hot = m.evaluate("key", true, false, CTX);
     assertThat(hot.type()).isEqualTo(DecisionType.HOT);
     assertThat(hot.snapShot().currentState()).isEqualTo("CANDIDATE_HOT");
   }
@@ -454,8 +454,8 @@ class ZetaBayesianSMEdgeTest {
       executor.submit(() -> {
         try {
           for (int i = 0; i < evaluationsPerThread; i++) {
-            m.evaluate("sharedKey", true, CTX);
-            m.evaluate("sharedKey", false, COLD_CTX);
+            m.evaluate("sharedKey", true, false, CTX);
+            m.evaluate("sharedKey", false, false, COLD_CTX);
           }
         } catch (Exception e) {
           errors.incrementAndGet();
@@ -485,7 +485,7 @@ class ZetaBayesianSMEdgeTest {
         try {
           for (int k = 0; k < keyCount; k++) {
             String key = "key-" + ((threadId + k) % keyCount);
-            m.evaluate(key, true, CTX);
+            m.evaluate(key, true, false, CTX);
           }
         } catch (Exception e) {
           error.compareAndSet(null, e);
@@ -503,18 +503,18 @@ class ZetaBayesianSMEdgeTest {
   void coldToHot_withCvPresent_shouldTransitionNormally() {
     EvaluationContext cvCtx = new EvaluationContext(100L, 100L, 10L, 0.5);
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    assertThat(m.evaluate("key", true, cvCtx).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, cvCtx).type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.evaluate("key", true, cvCtx).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, cvCtx).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, cvCtx).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, cvCtx).type()).isEqualTo(DecisionType.HOT);
   }
 
   @Test
   void highConfidenceWithCv_shouldBlockPreCoolingTransition() {
     ZetaBayesianSM m = machineWith(1, 2, 1);
-    assertThat(m.evaluate("key", true, CTX).type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
     EvaluationContext coldHighCv = new EvaluationContext(100L, 5L, 10L, 0.5);
-    assertThat(m.evaluate("key", false, coldHighCv).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", false, false, coldHighCv).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("PRE_COOLING");
-    assertThat(m.evaluate("key", false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.COOL);
   }
 }

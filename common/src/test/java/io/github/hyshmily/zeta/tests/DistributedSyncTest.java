@@ -1693,8 +1693,8 @@ class DistributedSyncTest {
   class SreIntegrationTests {
 
     @Test
-    @DisplayName("SRE throttled HOT calls onFailed and skips promotion")
-    void sreThrottled_callsOnFailed() throws Exception {
+    @DisplayName("SRE throttled HOT skips promotion without calling onFailed")
+    void sreThrottled_skipsPromotion() throws Exception {
       SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
       when(limiter.tryAcquire()).thenReturn(false);
       cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
@@ -1703,7 +1703,7 @@ class DistributedSyncTest {
       wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
       awaitScheduler();
 
-      verify(limiter).onFailed();
+      verify(limiter, never()).onFailed();
       assertThat(((CacheEntry) cache.getIfPresent("k")).getKeyState()).isNotEqualTo(KeyState.HOT);
     }
 

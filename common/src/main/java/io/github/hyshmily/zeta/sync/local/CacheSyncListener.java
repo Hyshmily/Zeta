@@ -36,6 +36,7 @@ import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -182,7 +183,8 @@ public class CacheSyncListener {
     };
 
     long jitterMs = properties.getWarmupJitterMs();
-    dispatcher.submit(sm.cacheKey(), task, jitterMs);
+    long delay = jitterMs > 0 ? ThreadLocalRandom.current().nextLong(jitterMs) : 0L;
+    dispatcher.submit(sm.cacheKey(), task, delay);
   }
 
   /**
@@ -347,6 +349,10 @@ public class CacheSyncListener {
           return existing; // preserve whatever is currently in cache (may be null)
         }
 
+        // Clear invalidation watermark before writing — the refresh is
+        // proceeding, so the high-water mark is no longer meaningful.
+        clearInvalidation(key);
+
         if (existing instanceof CacheEntry cacheEntry) {
           long hardExpireAt = expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs());
           long softExpireAt = expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs());
@@ -372,7 +378,6 @@ public class CacheSyncListener {
           KeyState.NORMAL
         );
       });
-    clearInvalidation(sm.cacheKey());
     log.debug("Refreshed by sync: {}", sm.cacheKey());
   }
 
@@ -401,9 +406,8 @@ public class CacheSyncListener {
    * Used to reject stale REFRESH messages that arrive after the INVALIDATE.
    */
   private void recordInvalidation(String key, long version) {
-    if (version != 0L) {
-      recentInvalidated.asMap().merge(key, version, Math::max);
-    }
+    long watermark = (version == 0L) ? Long.MAX_VALUE : version;
+    recentInvalidated.asMap().merge(key, watermark, Math::max);
   }
 
   /**

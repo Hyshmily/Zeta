@@ -208,9 +208,18 @@ public class ZetaProperties {
   @Min(1)
   private int refreshMaxPools = 100;
 
-  /** TTL in minutes for Redis version keys used in stale-detection. */
+  /**
+   * TTL in minutes for Redis version keys used in stale-detection.
+   * <p>MUST be far greater than the maximum lifetime of any L1 entry for the same key.
+   * Setting this too low risks version key expiry and silent dataVersion wraparound
+   * (INCR restarts from 1), causing {@link io.github.hyshmily.zeta.util.version.VersionGuard#shouldSkipForSync}
+   * to reject legitimate updates because the new version is numerically lower than
+   * the existing version cached on peer instances.
+   * <p>Default 10080 minutes (7 days). Do not reduce unless you have verified that
+   * no L1 entry in your deployment can outlive this TTL.
+   */
   @Min(1)
-  private int versionKeyTtlMinutes = 60;
+  private int versionKeyTtlMinutes = 10080;
 
   /** Application name used for queue naming and routing keys. */
   private String appName = "default";

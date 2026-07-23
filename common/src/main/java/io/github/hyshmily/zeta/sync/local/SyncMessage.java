@@ -26,6 +26,8 @@ import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 
 /**
@@ -61,8 +63,16 @@ import org.springframework.amqp.core.Message;
  * @param rulesVersion      the rules version for {@code TYPE_RULES_SYNC} messages;
  *                          {@link ZetaConstants.Version#VERSION_DEFAULT} (0) for other types
  */
+@Slf4j
 @Internal
-public record SyncMessage(long id, String cacheKey, String type, long version, boolean isVersionDegraded, long rulesVersion) {
+public record SyncMessage(
+  long id,
+  String cacheKey,
+  String type,
+  long version,
+  boolean isVersionDegraded,
+  long rulesVersion
+) {
   /** Invalidates a single cache key across all peer instances. */
   public static final String TYPE_INVALIDATE = "INVALIDATE";
 
@@ -103,6 +113,10 @@ public record SyncMessage(long id, String cacheKey, String type, long version, b
    *         or the cache key is invalid for non-batch types
    */
 
+  private static final AtomicBoolean WARNED_VERSION_TYPE = new AtomicBoolean(false);
+  private static final AtomicBoolean WARNED_RULES_VERSION_TYPE = new AtomicBoolean(false);
+  private static final AtomicBoolean WARNED_ID_TYPE = new AtomicBoolean(false);
+
   public static SyncMessage from(Message msg) {
     byte[] body = msg.getBody();
     if (body == null || body.length == 0) {
@@ -115,17 +129,44 @@ public record SyncMessage(long id, String cacheKey, String type, long version, b
       return null;
     }
 
-    long version =
-      msg.getMessageProperties().getHeader(HEADER_VERSION) instanceof Number n ? n.longValue() : VERSION_DEFAULT;
+    long version = toLong(msg, HEADER_VERSION, VERSION_DEFAULT, WARNED_VERSION_TYPE);
     boolean isVersionDegraded =
       msg.getMessageProperties().getHeader(HEADER_IS_VERSION_DEGRADED) instanceof Boolean b && b;
-    long rulesVersion =
-      msg.getMessageProperties().getHeader(HEADER_RULES_VERSION) instanceof Number n2
-        ? n2.longValue()
-        : VERSION_DEFAULT;
-    long id =
-      msg.getMessageProperties().getHeader(HEADER_MESSAGE_ID) instanceof Number n3 ? n3.longValue() : 0L;
+    long rulesVersion = toLong(msg, HEADER_RULES_VERSION, VERSION_DEFAULT, WARNED_RULES_VERSION_TYPE);
+    long id = toLong(msg, HEADER_MESSAGE_ID, 0L, WARNED_ID_TYPE);
 
     return new SyncMessage(id, cacheKey, type, version, isVersionDegraded, rulesVersion);
+  }
+
+  /**
+   * Reads a numeric AMQP message header, returning its {@code long} value.
+   *
+   * <p>Shares the same contract as {@link io.github.hyshmily.zeta.sync.worker.WorkerMessage#toLong}:
+   * non-numeric headers trigger a one-time warning via the {@code warnFlag},
+   * then fall back to {@code defaultValue}. When {@code warnFlag} is null,
+   * warnings are suppressed entirely.
+   *
+   * @param msg          the AMQP message containing the header
+   * @param header       the header name to read
+   * @param defaultValue the fallback value when the header is missing or non-numeric
+   * @param warnFlag     one-shot warning gate; null to suppress warnings
+   * @return the header's numeric value, or {@code defaultValue}
+   */
+  @SuppressWarnings("all")
+  private static long toLong(Message msg, String header, long defaultValue, AtomicBoolean warnFlag) {
+    Object value = msg.getMessageProperties().getHeader(header);
+    if (value instanceof Number n) {
+      return n.longValue();
+    }
+    if (value != null && warnFlag != null && warnFlag.compareAndSet(false, true)) {
+      log.warn(
+        "Non-numeric header '{}' (type {}), defaulting to {}. Value: {}",
+        header,
+        value.getClass().getName(),
+        defaultValue,
+        value
+      );
+    }
+    return defaultValue;
   }
 }

@@ -225,6 +225,23 @@ class VersionControllerTest {
   }
 
   /**
+   * Verifies that wraparound detection logs an error when a Redis version key
+   * expires (simulated by returning a lower version than previous calls) but
+   * still returns the new version. After the wraparound, the floor resets to
+   * the new version so subsequent normal increments pass without error.
+   */
+  @Test
+  void nextVersion_whenWraparound_shouldDetectAndRecover() {
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
+      .thenReturn(100L, 1L, 2L);
+    assertThat(controller.nextVersion("wrap-key").dataVersion()).isEqualTo(100L);
+    // Simulate wraparound: version key expired, INCR restarts from 1
+    assertThat(controller.nextVersion("wrap-key").dataVersion()).isEqualTo(1L);
+    // Floor resets to 1; next increment (2) is >= floor so no error
+    assertThat(controller.nextVersion("wrap-key").dataVersion()).isEqualTo(2L);
+  }
+
+  /**
    * Verifies that nextVersion with blank key still produces a result via Redis.
    */
   @Test

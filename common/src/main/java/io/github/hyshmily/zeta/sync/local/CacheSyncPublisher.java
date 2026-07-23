@@ -31,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -115,6 +116,13 @@ public class CacheSyncPublisher {
   private static final int BATCH_SIZE = 1000;
 
   /**
+   * Dedup cache for {@link #broadcastLocalInvalidateAll} to prevent identical
+   * payloads from being broadcast repeatedly within a 1-second window.
+   * Keyed by payload hash, entries expire 1s after write.
+   */
+  private Cache<String, Boolean> invalidateAllDedup;
+
+  /**
    * Initializes the deduplication cache after bean construction.
    * <p>
    * Creates a {@link Caffeine} cache with:
@@ -131,6 +139,10 @@ public class CacheSyncPublisher {
     this.recentBroadcasts = Caffeine.newBuilder()
       .expireAfterWrite(properties.getDedupWindowSeconds(), TimeUnit.SECONDS)
       .maximumSize(properties.getDedupMaxSize())
+      .build();
+    this.invalidateAllDedup = Caffeine.newBuilder()
+      .expireAfterWrite(1, TimeUnit.SECONDS)
+      .maximumSize(1000)
       .build();
   }
 
@@ -220,12 +232,22 @@ public class CacheSyncPublisher {
 
       try {
         String json = OBJECT_MAPPER.writeValueAsString(batch);
+
+        // 1s dedup on the payload to avoid flooding peers with identical
+        // batch invalidations (e.g. rule hot-reload).
+        String dedupKey = "INVALIDATE_ALL:" + Integer.toHexString(Objects.hash(json));
+        if (invalidateAllDedup.getIfPresent(dedupKey) != null) {
+          log.debug("Skip duplicate broadcastInvalidateAll batch (hash {})", dedupKey);
+          continue;
+        }
+
         MessageProperties props = new MessageProperties();
         props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
         props.setHeader(HEADER_MESSAGE_ID, snowflakeIdGenerator.nextId());
         Message message = new Message(json.getBytes(StandardCharsets.UTF_8), props);
 
         rabbitTemplate.send(properties.getExchangeName(), "", message);
+        invalidateAllDedup.put(dedupKey, Boolean.TRUE);
       } catch (AmqpException | JsonProcessingException e) {
         log.error("Failed to serialize batch invalidate keys", e);
       }
@@ -330,6 +352,24 @@ public class CacheSyncPublisher {
     }
   }
 
+  /**
+   * Sends a single cache-sync message to all peer instances via the
+   * {@code zeta.sync.exchange} FanoutExchange.
+   *
+   * <p>The message body is the cache key (UTF-8 bytes), and the type,
+   * data version, degraded flag, and a traceable message ID are set as
+   * AMQP headers. On success the dedup cache is updated by the caller
+   * ({@link #sendDeduped}); on failure the error is logged and the
+   * caller skips the dedup update so a retry within the same window is
+   * still possible.
+   *
+   * @param cacheKey the affected cache key; must not be null or empty
+   * @param type     the sync message type (INVALIDATE, REFRESH, etc.)
+   * @param version  the data version at which the operation occurred
+   * @param degraded whether the version was obtained in degraded mode
+   * @return {@code true} if the message was published successfully,
+   *         {@code false} on AMQP failure
+   */
   private boolean doSend(String cacheKey, String type, long version, boolean degraded) {
     try {
       MessageProperties props = new MessageProperties();

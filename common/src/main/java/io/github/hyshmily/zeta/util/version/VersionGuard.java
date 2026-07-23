@@ -151,12 +151,19 @@ public final class VersionGuard {
    * WorkerListener guard with a cache-level fast path using legacy 3-argument signature.
    * Delegates to the 5-argument overload with {@code null} node ID and {@code 0} epoch.
    *
+   * <p><b>Deprecated:</b> The fixed {@code null, 0} delegation means this overload
+   * always skips any entry that has been written by a Worker (epoch &ge; 1). Use the
+   * 5-argument overload with explicit {@code nodeId} and {@code epoch} instead.
+   *
    * @param cache                    the local Caffeine L1 cache; must not be null
    * @param cacheKey                 the cache key to look up; must not be null
    * @param incomingDecisionVersion  the decision version from the incoming Worker message
    * @return {@code true} if the incoming message should be skipped (existing entry
    *         is already up-to-date); {@code false} if the decision may need to be applied
+   * @deprecated epoch-unaware — do not use for new code; prefer
+   *             {@link #shouldSkipForWorker(Cache, String, long, String, long)}
    */
+  @Deprecated
   public static boolean shouldSkipForWorker(
     Cache<String, Object> cache,
     String cacheKey,

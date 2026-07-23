@@ -23,6 +23,7 @@ import static org.mockito.Mockito.*;
 import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.zeta.sync.distributedlock.impl.RedisLockProvider;
 import java.time.Duration;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,14 +47,16 @@ class RedisLockProviderTest {
 
   private StringRedisTemplate redisTemplate;
   private ValueOperations<String, String> valueOps;
+  private ScheduledExecutorService scheduler;
   private RedisLockProvider provider;
 
   @BeforeEach
   void setUp() {
     redisTemplate = mock(StringRedisTemplate.class);
     valueOps = mock(ValueOperations.class);
+    scheduler = mock(ScheduledExecutorService.class);
     when(redisTemplate.opsForValue()).thenReturn(valueOps);
-    provider = new RedisLockProvider(redisTemplate, LOCK_COUNT, INQUIRY_COUNT, UNLOCK_COUNT);
+    provider = new RedisLockProvider(redisTemplate, LOCK_COUNT, INQUIRY_COUNT, UNLOCK_COUNT, scheduler);
   }
 
   // ── Lock Acquisition ──────────────────────────────────────────
@@ -199,11 +202,10 @@ class RedisLockProviderTest {
   }
 
   @Test
-  void close_whenExpired_shouldSkipUnlock() {
-    long past = System.currentTimeMillis() - 5000;
-    var expired = new RedisLockProvider.RedisLockHandle(redisTemplate, "zeta:lock:expired", "uuid", past, 3);
-    expired.close();
-    verify(redisTemplate, never()).execute(any(), anyList(), anyString());
+  void close_alwaysAttemptsUnlockRegardlessOfClock() {
+    var handle = new RedisLockProvider.RedisLockHandle(redisTemplate, "zeta:lock:expired", "uuid", 3, null, 0);
+    handle.close();
+    verify(redisTemplate, times(3)).execute(any(DefaultRedisScript.class), anyList(), anyString());
   }
 
   @Test

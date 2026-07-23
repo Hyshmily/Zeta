@@ -55,4 +55,21 @@ public interface VersionController {
    * @return a VersionResult with a negative version and degraded=true
    */
   VersionResult fallbackVersion();
+
+  /**
+   * Read-only current version for the given cache key.  Performs a plain
+   * {@code GET} on the Redis version key ({@code zeta:ver:{cacheKey}}) and
+   * returns the value if it exists.
+   *
+   * <p>Returns an empty {@code Optional} when:
+   * <ul>
+   *   <li>The version key does not exist in Redis (never incremented)</li>
+   *   <li>Redis is not configured</li>
+   *   <li>A Redis error occurs (logged at WARN)</li>
+   * </ul>
+   *
+   * @param cacheKey the cache key whose version to look up; must not be null
+   * @return the current version, or empty if absent/unavailable
+   */
+  java.util.Optional<Long> currentVersion(String cacheKey);
 }

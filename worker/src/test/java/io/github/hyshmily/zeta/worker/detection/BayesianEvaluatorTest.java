@@ -51,7 +51,7 @@ class BayesianEvaluatorTest {
       when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(42L);
-      when(stateMachine.evaluate(eq("key"), eq(true), any())).thenReturn(
+      when(stateMachine.evaluate(eq("key"), eq(true), eq(false), any())).thenReturn(
         new ZetaDecision(DecisionType.HOT, "key", null)
       );
 
@@ -64,7 +64,7 @@ class BayesianEvaluatorTest {
       when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(42L);
-      when(stateMachine.evaluate(eq("key"), eq(true), ctxCaptor.capture())).thenReturn(
+      when(stateMachine.evaluate(eq("key"), eq(true), eq(false), ctxCaptor.capture())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
@@ -81,7 +81,7 @@ class BayesianEvaluatorTest {
       when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("key")).thenReturn(0L);
-      when(stateMachine.evaluate(eq("key"), eq(true), ctxCaptor.capture())).thenReturn(
+      when(stateMachine.evaluate(eq("key"), eq(true), eq(false), ctxCaptor.capture())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
@@ -100,7 +100,7 @@ class BayesianEvaluatorTest {
       when(detector.addCount(any(), anyLong())).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount(any())).thenReturn(0L);
-      when(stateMachine.evaluate(any(), anyBoolean(), any())).thenReturn(
+      when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
@@ -114,7 +114,7 @@ class BayesianEvaluatorTest {
       when(detector.addCount(any(), anyLong())).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount(any())).thenReturn(0L);
-      when(stateMachine.evaluate(any(), anyBoolean(), any())).thenReturn(
+      when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
@@ -134,7 +134,7 @@ class BayesianEvaluatorTest {
     when(detector.addCount(any(), anyLong())).thenReturn(100L);
     when(detector.getThreshold()).thenReturn(10L);
     when(workerTopK.estimatedCount(any())).thenReturn(0L);
-    when(stateMachine.evaluate(any(), anyBoolean(), ctxCaptor.capture())).thenReturn(
+    when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), ctxCaptor.capture())).thenReturn(
       new ZetaDecision(DecisionType.NONE, "key", null)
     );
 
@@ -160,9 +160,9 @@ class BayesianEvaluatorTest {
     }
 
     @Test
-    void shouldCallFastlaneWhenKeyMatchesRuleAndWindowSumAboveThreshold() {
+    void shouldPassIsFastlaneTrueWhenFastLaneRuleMatchesAndAboveThreshold() {
       when(detector.addCount("hot:key", 10L)).thenReturn(600L);
-      when(stateMachine.fastlane("hot:key")).thenReturn(
+      when(stateMachine.evaluate(eq("hot:key"), eq(true), eq(true), any())).thenReturn(
         new ZetaDecision(DecisionType.HOT, "hot:key", null)
       );
 
@@ -171,38 +171,27 @@ class BayesianEvaluatorTest {
     }
 
     @Test
-    void shouldNotCallBayesianEvaluateWhenFastLaneMatchesAndHot() {
-      when(detector.addCount("hot:key", 10L)).thenReturn(600L);
-      when(stateMachine.fastlane("hot:key")).thenReturn(
-        new ZetaDecision(DecisionType.HOT, "hot:key", null)
-      );
-      fastLaneEvaluator.evaluate("hot:key", 10L);
-      verify(stateMachine, never()).evaluate(any(), anyBoolean(), any());
-    }
-
-    @Test
-    void shouldFallthroughToBayesianWhenFastLaneMatchesButBelowThreshold() {
+    void shouldPassIsFastlaneFalseWhenFastLaneRuleMatchesButBelowThreshold() {
       when(detector.addCount("hot:key", 10L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("hot:key")).thenReturn(0L);
-      when(stateMachine.evaluate(eq("hot:key"), eq(true), any())).thenReturn(
+      when(stateMachine.evaluate(eq("hot:key"), eq(true), eq(false), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "hot:key", null)
       );
       fastLaneEvaluator.evaluate("hot:key", 10L);
-      verify(stateMachine, never()).fastlane(any());
-      verify(stateMachine).evaluate(eq("hot:key"), eq(true), any());
+      verify(stateMachine).evaluate(eq("hot:key"), eq(true), eq(false), any());
     }
 
     @Test
-    void shouldNotCallFastlaneWhenKeyDoesNotMatchAnyRule() {
+    void shouldPassIsFastlaneFalseWhenKeyDoesNotMatchAnyRule() {
       when(detector.addCount("normal:key", 10L)).thenReturn(200L);
       when(detector.getThreshold()).thenReturn(10L);
       when(workerTopK.estimatedCount("normal:key")).thenReturn(0L);
-      when(stateMachine.evaluate(eq("normal:key"), eq(true), any())).thenReturn(
+      when(stateMachine.evaluate(eq("normal:key"), eq(true), eq(false), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "normal:key", null)
       );
       fastLaneEvaluator.evaluate("normal:key", 10L);
-      verify(stateMachine, never()).fastlane("normal:key");
+      verify(stateMachine).evaluate(eq("normal:key"), eq(true), eq(false), any());
     }
   }
 }

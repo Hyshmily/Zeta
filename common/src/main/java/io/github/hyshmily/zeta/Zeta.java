@@ -63,6 +63,17 @@ import org.springframework.util.Assert;
  * Methods whose backing service is absent throw
  * {@link UnsupportedOperationException} (cache read/write) or return
  * empty / zero (TopK queries).
+ *
+ * <p><b>Version constraint for permanent entries:</b> Entries created with
+ * {@link Long#MAX_VALUE} hard TTL ("permanent" entry) can outlive the Redis
+ * version key ({@code zeta:version:{key}}), whose TTL defaults to 7 days
+ * ({@code zeta.local.versionKeyTtlMinutes}). When the version key expires,
+ * the next write produces a version of 1 (INCR restart), which is numerically
+ * lower than the existing entry's version on peer instances — causing
+ * {@link io.github.hyshmily.zeta.util.version.VersionGuard#shouldSkipForSync}
+ * to reject the update silently. Avoid {@link Long#MAX_VALUE} hard TTL on keys
+ * that participate in cross-instance cache sync, or ensure
+ * {@code versionKeyTtlMinutes} exceeds the entry's actual lifetime.
  */
 public class Zeta implements DisposableBean {
 
@@ -225,7 +236,8 @@ public class Zeta implements DisposableBean {
    *
    * @param cacheKey  the key to retrieve
    * @param loader    the value supplier for cache misses
-   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry;
+   *                  see class-level note on version constraint for permanent entries)
    * @param <V>       the value type
    * @return the cached or loaded value, or {@code null} if the loader returned {@code null}
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -1183,7 +1195,8 @@ public class Zeta implements DisposableBean {
    * @param cacheKey  the key to write
    * @param value     the value to cache
    * @param writer    the data-source mutation to execute before caching
-   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
+   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction;
+   *                  see class-level note on version constraint for permanent entries)
    * @param softTtlMs soft TTL override (0 = use configured default)
    * @param <T>       the value type
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
@@ -1693,7 +1706,8 @@ public class Zeta implements DisposableBean {
    *
    * @param cacheKey     the key to refresh
    * @param loader       the value supplier
-   * @param hotHardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
+   * @param hotHardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry;
+   *                    see class-level note on version constraint for permanent entries)
    * @param hotSoftTtlMs soft TTL override (0 = use configured default)
    * @param <V>          the value type
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)

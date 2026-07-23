@@ -47,8 +47,8 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p><b>Executor rejection recovery:</b> If the underlying executor rejects a task
  * via {@link RejectedExecutionException}, the task is returned to the head of its
- * key queue and the key is marked as not running. A subsequent {@link #submit} for
- * the same key will re-type execution, preserving ordering.
+ * key queue, the running flag is cleared, and a delayed retry is scheduled for the
+ * head of the queue — self-healing without depending on future submissions.
  *
  * <p>This class is thread-safe.
  */
@@ -107,21 +107,37 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
    * Submit a task for a given key. Tasks for the same key are executed
    * in FIFO order. If the dispatcher is closed, the task is silently dropped.
    * If the key's pending queue is full, the task is rejected (dropped without execution).
+   * <p>If the underlying executor rejects a task via {@link RejectedExecutionException},
+   * the task is returned to the head of its key queue and a delayed retry is scheduled
+   * (self-healing, does not depend on future submissions).</p>
    */
   public void submit(Object key, Runnable task) {
     if (closed) {
       return;
     }
 
-    KeyQueue kq = queues.computeIfAbsent(key, k -> new KeyQueue(key));
-    // Try to mark this key as running. If successful, we must execute the task directly.
-    if (kq.tryMarkRunning()) {
-      runTask(key, kq, task);
-    } else {
+    // Loop to recover from the race where scheduleNext removes a queue from the map
+    // right after we obtained it and marked it as running (see scheduleNext).
+    while (true) {
+      KeyQueue kq = queues.computeIfAbsent(key, k -> new KeyQueue(key));
+      // Try to mark this key as running. If successful, we must execute the task directly.
+      if (kq.tryMarkRunning()) {
+        // Re-verify that this queue is still in the map. If scheduleNext removed it
+        // concurrently (pollAndCheck returned null, isRunning returned false, and remove
+        // happened between our computeIfAbsent and tryMarkRunning), we have an orphan queue
+        // that would never be scheduled again. Reset it and retry.
+        if (queues.get(key) == kq) {
+          runTask(key, kq, task);
+          return;
+        }
+        kq.clearAndStop();
+        continue;
+      }
       // Key is already being processed, try to enqueue.
       if (!kq.enqueue(task, maxQueuePerKey)) {
         log.warn("[{}] Task queue full for key {}. Task rejected.", name, key);
       }
+      return;
     }
   }
 
@@ -140,8 +156,23 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
         }
       });
     } catch (RejectedExecutionException e) {
-      // Return the task to the front of the queue and reset running flag.
       kq.returnToFrontAndStop(task);
+      // Self-healing retry: do not rely on future submissions to re-trigger.
+      try {
+        executor.schedule(
+            () -> {
+              if (!closed && kq.tryMarkRunning()) {
+                Runnable head = kq.pollAndCheck();
+                if (head != null) {
+                  runTask(key, kq, head);
+                }
+              }
+            },
+            200,
+            TimeUnit.MILLISECONDS);
+      } catch (RejectedExecutionException ignored) {
+        // Executor is shutting down; close() handles cleanup.
+      }
     }
   }
 

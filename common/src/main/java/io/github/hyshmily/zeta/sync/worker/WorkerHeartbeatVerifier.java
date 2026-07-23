@@ -22,11 +22,11 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
-import lombok.AccessLevel;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Message;
@@ -55,7 +55,6 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * @see HealthView
  * @see WorkerHeartbeatMessage
  */
-@RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 @Slf4j
 @Internal
 public class WorkerHeartbeatVerifier {
@@ -66,9 +65,10 @@ public class WorkerHeartbeatVerifier {
   private final long verifyIntervalMs;
   private final long pingTimeoutMs;
   private final long verifyMaxBackoffMs;
-  private final ScheduledExecutorService scheduler;
+  private ScheduledExecutorService scheduler;
   private final ConcurrentHashMap<String, Long> nextVerifyTime = new ConcurrentHashMap<>();
   private final boolean ownsScheduler;
+  private final Executor probeExecutor;
   private ScheduledFuture<?> verifyTask;
 
   private static final String QUEUE_VERIFY_PING_PREFIX = "zeta.verify.ping.";
@@ -79,6 +79,56 @@ public class WorkerHeartbeatVerifier {
    * Parameter object for {@link WorkerHeartbeatVerifier} construction.
    */
   public record VerifierConfig(long verifyIntervalMs, long pingTimeoutMs, long verifyMaxBackoffMs) {}
+
+  /**
+   * Creates the shared probe executor for parallel Worker PINGs.
+   *
+   * <p>A fixed thread pool of 4 daemon threads ({@code zeta-hb-probe}) allows
+   * up to 4 suspected Workers to be probed concurrently, bounding the
+   * verification round duration to roughly {@code pingTimeoutMs × ceil(N / 4)}
+   * instead of {@code pingTimeoutMs × N}.
+   *
+   * @return a new fixed thread pool for parallel probing
+   */
+  private static Executor createProbeExecutor() {
+    return Executors.newFixedThreadPool(4, new ZetaThreadFactory("zeta-hb-probe"));
+  }
+
+  /**
+   * Common constructor shared by the two public constructors.
+   *
+   * <p>Initialises the probe executor but does NOT start the periodic
+   * verification loop — call {@link #start()} to begin.
+   *
+   * @param rabbitTemplate   used for sending PING messages
+   * @param healthView       shared cluster health state
+   * @param appInstanceId    identifies this app instance in PING headers
+   * @param verifyIntervalMs interval between verification rounds
+   * @param pingTimeoutMs    per-PING timeout
+   * @param verifyMaxBackoffMs  max exponential-backoff delay
+   * @param scheduler        executor for the verification task
+   * @param ownsScheduler    whether to shut down the scheduler in {@link #stop()}
+   */
+  private WorkerHeartbeatVerifier(
+    RabbitTemplate rabbitTemplate,
+    HealthView healthView,
+    String appInstanceId,
+    long verifyIntervalMs,
+    long pingTimeoutMs,
+    long verifyMaxBackoffMs,
+    ScheduledExecutorService scheduler,
+    boolean ownsScheduler
+  ) {
+    this.rabbitTemplate = rabbitTemplate;
+    this.healthView = healthView;
+    this.appInstanceId = appInstanceId;
+    this.verifyIntervalMs = verifyIntervalMs;
+    this.pingTimeoutMs = pingTimeoutMs;
+    this.verifyMaxBackoffMs = verifyMaxBackoffMs;
+    this.scheduler = scheduler;
+    this.ownsScheduler = ownsScheduler;
+    this.probeExecutor = createProbeExecutor();
+  }
 
   /**
    * Creates a verifier with an internally owned single-thread scheduler.
@@ -138,12 +188,21 @@ public class WorkerHeartbeatVerifier {
    * subsequent calls to this method after the verifier is already running are
    * silently ignored.
    *
+   * <p><b>Restart safety:</b> If the scheduler was shut down by a previous
+   * {@link #stop()} call and this verifier owns its scheduler, a new scheduler
+   * is created automatically. This guarantees the verifier is always
+   * restartable per its lifecycle contract.
+   *
    * @see #verifySuspectedWorkers
    * @see #stop()
    */
-  public void start() {
+  public synchronized void start() {
     if (verifyTask != null) {
       return;
+    }
+    if (ownsScheduler && (scheduler == null || scheduler.isShutdown())) {
+      scheduler = Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier"));
+      log.info("Re-created heartbeat verifier scheduler for restart");
     }
     try {
       verifyTask = scheduler.scheduleWithFixedDelay(
@@ -164,19 +223,21 @@ public class WorkerHeartbeatVerifier {
   /**
    * Gracefully stops the periodic heartbeat verification.
    *
-   * <p>Cancels the scheduled verification task and, if this verifier owns its
-   * scheduler (created via the 6-argument constructor), shuts down the scheduler.
+   * <p>Cancels the scheduled verification task (setting {@code verifyTask = null}
+   * to allow re-scheduling on restart), and, if this verifier owns its scheduler
+   * (created via the 6-argument constructor), shuts down the scheduler.
    * When an external scheduler is used (7-argument constructor), the scheduler is
    * left running for the caller to manage.
    *
    * <p>After {@code stop()}, the verifier can be restarted by calling {@link #start()}
-   * again.
+   * again. See {@link #start()} for restart-safety details.
    */
   public void stop() {
     if (verifyTask != null) {
       verifyTask.cancel(false);
+      verifyTask = null;
     }
-    if (ownsScheduler) {
+    if (ownsScheduler && scheduler != null) {
       scheduler.shutdown();
     }
   }
@@ -186,6 +247,14 @@ public class WorkerHeartbeatVerifier {
    * <em>not</em> currently marked alive, sends each a PING via Direct reply-to,
    * and updates the health view based on the response.
    *
+   * <p>Probes are executed <b>in parallel</b> via a dedicated thread pool
+   * ({@code probeExecutor}, 4 threads) using {@link CompletableFuture#allOf}.
+   * This avoids the serial bottleneck of probing N suspected Workers
+   * sequentially (N × {@code pingTimeoutMs} per round).
+   *
+   * <p>Workers in exponential backoff (see {@link #nextVerifyTime}) are
+   * skipped before being added to the probe batch.
+   *
    * <p>When cumulative failures across all suspected Workers reach
    * {@code degradeAfterFailures} and the cluster remains unhealthy, the cluster
    * is marked as degraded.
@@ -193,7 +262,6 @@ public class WorkerHeartbeatVerifier {
    * <p>This method is called periodically by the scheduled task and is also
    * safe to invoke manually for testing.
    */
-  @SuppressWarnings("all")
   public void verifySuspectedWorkers() {
     try {
       Set<String> suspected = healthView
@@ -207,6 +275,7 @@ public class WorkerHeartbeatVerifier {
         return;
       }
 
+      List<CompletableFuture<Void>> futures = new ArrayList<>();
       for (String workerId : suspected) {
         Long skipUntil = nextVerifyTime.get(workerId);
         if (skipUntil != null && currentTimeMillis() < skipUntil) {
@@ -214,33 +283,56 @@ public class WorkerHeartbeatVerifier {
           continue;
         }
 
-        boolean alive = sendPingAndWaitPong(workerId);
-        if (!alive) {
-          healthView.markVerificationFailed(workerId);
-
-          int attempt = healthView.getVerifyFailures(workerId);
-          if (attempt >= MAX_RETRY) {
-            log.warn("Worker {} confirmed dead ({} failures), removing reportToWorker", workerId, MAX_RETRY);
-            healthView.removeRecord(workerId);
-            nextVerifyTime.remove(workerId);
-            continue;
-          }
-
-          long backoffMs = computeBackoffMs(attempt);
-
-          nextVerifyTime.put(workerId, currentTimeMillis() + backoffMs);
-          log.warn("Worker {} verification failed (attempt={}, backoff={}ms)", workerId, attempt, backoffMs);
-        } else {
-          nextVerifyTime.remove(workerId);
-          healthView.recordPong(workerId);
-        }
-
-        if (!healthView.isClusterHealthy()) {
-          log.warn("Cluster is unhealthy after verifying worker {}", workerId);
-        }
+        futures.add(CompletableFuture.runAsync(() -> probeWorker(workerId), probeExecutor));
       }
+
+      CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
     } catch (Exception e) {
       log.error("Scheduled verifySuspectedWorkers failed", e);
+    }
+  }
+
+  /**
+   * Probes a single suspected Worker by sending a PING and processing the result.
+   *
+   * <p>On success (PONG received), the Worker is restored to the alive set
+   * via {@link HealthView#recordPong}. On failure, the failure counter is
+   * incremented and exponential backoff is scheduled. Workers that exceed
+   * {@link #MAX_RETRY} consecutive failures are removed from the health view.
+   *
+   * <p>This method is designed to run on the shared {@link #probeExecutor}
+   * thread pool, enabling concurrent probing of multiple Workers.
+   *
+   * @param workerId the Worker to probe; must not be null
+   */
+  private void probeWorker(String workerId) {
+    try {
+      boolean alive = sendPingAndWaitPong(workerId);
+      if (!alive) {
+        healthView.markVerificationFailed(workerId);
+
+        int attempt = healthView.getVerifyFailures(workerId);
+        if (attempt >= MAX_RETRY) {
+          log.warn("Worker {} confirmed dead ({} failures), removing reportToWorker", workerId, MAX_RETRY);
+          healthView.removeRecord(workerId);
+          nextVerifyTime.remove(workerId);
+          return;
+        }
+
+        long backoffMs = computeBackoffMs(attempt);
+
+        nextVerifyTime.put(workerId, currentTimeMillis() + backoffMs);
+        log.warn("Worker {} verification failed (attempt={}, backoff={}ms)", workerId, attempt, backoffMs);
+      } else {
+        nextVerifyTime.remove(workerId);
+        healthView.recordPong(workerId);
+      }
+
+      if (!healthView.isClusterHealthy()) {
+        log.warn("Cluster is unhealthy after verifying worker {}", workerId);
+      }
+    } catch (Exception e) {
+      log.error("Failed to probe worker {}", workerId, e);
     }
   }
 
@@ -291,7 +383,6 @@ public class WorkerHeartbeatVerifier {
     Message ping = new Message(new byte[0], props);
 
     try {
-      rabbitTemplate.setReplyTimeout((int) pingTimeoutMs);
       Message pong = rabbitTemplate.sendAndReceive("", QUEUE_VERIFY_PING_PREFIX + workerId, ping);
       return pong != null;
     } catch (AmqpTimeoutException e) {

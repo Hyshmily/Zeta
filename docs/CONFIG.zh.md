@@ -131,7 +131,7 @@
 | `zeta.local.null-value-ttl-seconds`   | `10`                   | null 缓存条目 TTL（秒）；避免长时间缓存负结果                                                                                                                          |
 | `zeta.local.ttl-jitter-ratio`         | `0.05`                 | 偏移比例（0.0–1.0）；例如 0.05 表示对 TTL 计算施加 ±5% 的随机偏移。始终启用。                                                                                          |
 | `zeta.local.refresh-max-pools`        | `100`                  | 软过期最大并发异步刷新数（信号量）                                                                                                                                     |
-| `zeta.local.version-key-ttl-minutes`  | `60`                   | Redis 版本 key TTL（分钟），最小值为 1                                                                                                                                 |
+| `zeta.local.version-key-ttl-minutes`  | `10080`（7 天）        | Redis 版本 key TTL（分钟），最小值为 1。必须大于同一 key 在任何实例上 L1 entry 的最大存活时间，否则 dataVersion 回绕会导致写入被 VersionGuard 静默丢弃。默认 7 天覆盖所有实际 L1 生命周期。 |
 | `zeta.local.report-exchange`          | `zeta.reportToWorker.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                                                                                                                           |
 | `zeta.local.report-interval-ms`       | `50`                   | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）                                                                                                                 |
 | `zeta.local.app-name`                 | `"default"`            | 逻辑应用名，用于 Worker 路由的租户区分                                                                                                                                 |

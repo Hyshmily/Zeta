@@ -25,12 +25,23 @@ import java.util.concurrent.TimeUnit;
  * defaults; the extended variant accepts explicit retry counts (the
  * implementation validates and falls back to defaults when parameters are
  * illegal).
+ *
+ * <p><b>No watchdog auto-renewal.</b> This provider does <i>not</i> ship a
+ * background watchdog that extends the lock TTL.  A lock acquired via
+ * {@link #tryLock} expires unconditionally after {@code expire} once the
+ * handle is returned.  Callers MUST ensure the critical section completes
+ * well within the TTL.  For long-running or unpredictable sections
+ * consider Redisson or another lock implementation with built-in
+ * watchdog renewal.
  */
 @Internal
 public interface LockProvider {
   /**
    * Attempt to acquire a distributed lock with the provider's default retry
    * counts.
+   *
+   * <p><b>No watchdog.</b> The lock TTL starts counting when the handle is
+   * returned.  Do not hold the lock longer than {@code expire}.
    *
    * @param key    the lock key (never {@code null})
    * @param expire the time-to-live for the lock
@@ -42,6 +53,9 @@ public interface LockProvider {
 
   /**
    * Attempt to acquire a distributed lock with explicit retry counts.
+   *
+   * <p><b>No watchdog.</b> The lock TTL starts counting when the handle is
+   * returned.  Do not hold the lock longer than {@code expire}.
    *
    * <p>The default implementation ignores the extra parameters and delegates
    * to {@link #tryLock(String, long, TimeUnit)}.  Implementations that
