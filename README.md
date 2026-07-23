@@ -330,6 +330,38 @@ Worker mode provides cluster-wide hotspot detection via dedicated nodes. App ins
 
 **Worker TopK Persistence (Warm Start):** When `zeta.worker.persistence.enabled=true`, the Worker periodically snapshots the TopK list to Redis. On restart, `TopKPersistService` loads the last snapshot and replays it into the HeavyKeeper sketch, reducing warmup from hours to seconds.
 
+**FastLane (Immediate Promotion Bypass):** FastLane is an evaluation path that bypasses the Bayesian confidence gating entirely. Keys matching user-configured glob rules (e.g. `product:*`) are promoted to `CONFIRMED_HOT` as soon as the sliding-window sum reaches the rule's threshold — no confirm windows, no confidence scoring, no streak counting. End-to-end latency: **~60ms** (P99).
+
+Configure FastLane rules via properties at startup:
+
+```yaml
+zeta:
+  worker:
+    fast-lane:
+      rules:
+        - key-pattern: "product:*"      # glob pattern
+          threshold: 500                 # sliding-window sum threshold
+        - key-pattern: "flashsale:*"
+          threshold: 1000
+        - key-pattern: "news:breaking:*"
+          threshold: 200
+```
+
+Or manage rules at runtime via actuator REST API (no restart needed):
+
+| Method   | Path                                              | Action               |
+| -------- | ------------------------------------------------- | -------------------- |
+| `GET`    | `/actuator/hotkey/fastlane`                       | List all rules       |
+| `POST`   | `/actuator/hotkey/fastlane`                       | Add rule             |
+| `PUT`    | `/actuator/hotkey/fastlane`                       | Update rule threshold |
+| `DELETE` | `/actuator/hotkey/fastlane/{pattern}`             | Remove rule          |
+
+Example: `curl -X POST -H 'Content-Type: application/json' -d '{"keyPattern":"promo:*","threshold":300}' http://worker:8080/actuator/hotkey/fastlane`
+
+**FastLane state transitions:** A matched key jumps directly to `CONFIRMED_HOT` from any current state (COLD, CANDIDATE_HOT, PRE_COOLING). The `hotStreak` is immediately set to the required confirmation count, `coolStreak` is reset to 0, and a HOT decision is broadcast — even from PRE_COOLING (where normal-path silent revive would suppress the broadcast). Already-confirmed keys simply refresh their timestamp.
+
+**When to use:** Flash-sale product IDs, breaking-news slugs, promotional item IDs — any key where false positives are tolerable and sub-second detection latency is required. For keys requiring high-confidence decisions with minimal false positives, use the default Bayesian path instead.
+
 ### Notes
 
 **`hot-threshold: -1` Disables Hot Detection During Learning Period**

@@ -329,6 +329,38 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 
 **Worker TopK 持久化（热启动）：** 当 `zeta.worker.persistence.enabled=true`，Worker 定期快照 TopK 列表到 Redis。重启时 `TopKPersistService` 加载上次快照并回放到 HeavyKeeper sketch，预热从数小时缩至数秒。
 
+**快车道（FastLane，立即提升旁路）：** FastLane 是一条绕过贝叶斯置信度门控的评估路径。匹配用户配置的 glob 规则的 key（如 `product:*`），只要滑动窗口计数达到规则阈值，立即提升为 `CONFIRMED_HOT`——无需确认窗口、无需置信度评分、无需连续计数累积。全链路端到端延迟：**~60ms（P99）**。
+
+启动时通过配置文件设置 FastLane 规则：
+
+```yaml
+zeta:
+  worker:
+    fast-lane:
+      rules:
+        - key-pattern: "product:*"      # glob 模式
+          threshold: 500                 # 滑动窗口计数阈值
+        - key-pattern: "flashsale:*"
+          threshold: 1000
+        - key-pattern: "news:breaking:*"
+          threshold: 200
+```
+
+也可通过 Actuator REST API 在运行时管理规则（无需重启）：
+
+| 方法     | 路径                                              | 操作             |
+| -------- | ------------------------------------------------- | ---------------- |
+| `GET`    | `/actuator/hotkey/fastlane`                       | 列出所有规则     |
+| `POST`   | `/actuator/hotkey/fastlane`                       | 添加规则         |
+| `PUT`    | `/actuator/hotkey/fastlane`                       | 更新规则阈值     |
+| `DELETE` | `/actuator/hotkey/fastlane/{pattern}`             | 删除规则         |
+
+示例：`curl -X POST -H 'Content-Type: application/json' -d '{"keyPattern":"promo:*","threshold":300}' http://worker:8080/actuator/hotkey/fastlane`
+
+**FastLane 状态转换：** 匹配的 key 从任何当前状态（COLD、CANDIDATE_HOT、PRE_COOLING）直接跃迁到 `CONFIRMED_HOT`。`hotStreak` 立即设为所需的确认计数，`coolStreak` 重置为 0，并广播 HOT 决策——即使从 PRE_COOLING 状态（正常路径下静默恢复会抑制广播）。已经是 CONFIRMED_HOT 的 key 仅刷新时间戳。
+
+**适用场景：** 秒杀商品 ID、突发新闻 slug、促销活动 key——任何可容忍一定误报、需要亚秒级检测延迟的场景。对于需要高置信度、低误报率的 key，应使用默认的贝叶斯路径。
+
 ### 说明
 
 **`hot-threshold: -1` 在学习期内禁用热点检测**
