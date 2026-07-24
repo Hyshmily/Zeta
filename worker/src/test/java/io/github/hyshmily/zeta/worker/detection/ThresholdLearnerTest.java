@@ -27,11 +27,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 /**
  * Tests for {@link ThresholdLearner}.
  */
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class ThresholdLearnerTest {
 
   @Mock
@@ -48,6 +51,8 @@ class ThresholdLearnerTest {
     properties.getGlobalQpsDynamicThreshold().setLearningPeriodMs(0);
     properties.getGlobalQpsDynamicThreshold().setHotThresholdRatio(0.01);
     properties.getThreshold().setHotThreshold(10);
+    when(detector.getWindowSize()).thenAnswer(invocation -> 10);
+    when(detector.getTimeMillisPerSlice()).thenAnswer(invocation -> 100L);
   }
 
   /**

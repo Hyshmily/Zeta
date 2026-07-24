@@ -25,8 +25,11 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.AccessLevel;
@@ -233,10 +236,21 @@ public class WorkerHeartbeatProducer {
    */
   public static long doInitEpoch(StringRedisTemplate redis, String workerId) {
     try {
+      long floor = System.currentTimeMillis() * 1000L;
       String key = EPOCH_REDIS_KEY_PREFIX + workerId;
-      Long next = redis.opsForValue().increment(key);
-      log.info("Epoch initialized via Redis: workerId={}, epoch={}", workerId, next);
-      return next != null ? next : initEpochFromLocalFile(workerId);
+      Long incr = redis.opsForValue().increment(key);
+      if (incr == null) {
+        return initEpochFromLocalFile(workerId);
+      }
+      // Enforce floor: prevent epoch rollback when Redis counter was reset or
+      // fell behind the timestamp-based fallback space.
+      long next = Math.max(incr, floor);
+      if (next != incr) {
+        // Bring the Redis key up to the floor so the next incarnation benefits.
+        redis.opsForValue().set(key, String.valueOf(next));
+      }
+      log.info("Epoch initialized via Redis: workerId={}, incr={}, floor={}, epoch={}", workerId, incr, floor, next);
+      return next;
     } catch (Exception e) {
       log.warn("Redis unavailable for epoch, using local file fallback", e);
       return initEpochFromLocalFile(workerId);
@@ -256,19 +270,31 @@ public class WorkerHeartbeatProducer {
    * @return the new epoch value, or a timestamp-based value on complete failure
    */
   public static long initEpochFromLocalFile(String workerId) {
-    try {
-      Path path = Path.of(System.getProperty("java.io.tmpdir"), "zeta-epoch-" + workerId);
-      long next = 1;
-      if (Files.exists(path)) {
-        String content = Files.readString(path);
-        next = Long.parseLong(content.trim()) + 1;
+    long floor = System.currentTimeMillis() * 1000L;
+    Path path = Path.of(System.getProperty("java.io.tmpdir"), "zeta-epoch-" + workerId);
+    // Synchronized + FileChannel lock prevents concurrent read-modify-write races
+    // between processes on the same host sharing the same workerId (e.g. K8s rolling
+    // update where old and new Pods briefly coexist).
+    synchronized (WorkerHeartbeatProducer.class) {
+      try (FileChannel channel = FileChannel.open(
+             path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
+           FileLock lock = channel.lock()) {
+        long prev = 0L;
+        long size = channel.size();
+        if (size > 0) {
+          byte[] buf = new byte[(int) size];
+          channel.read(java.nio.ByteBuffer.wrap(buf));
+          prev = Long.parseLong(new String(buf).trim());
+        }
+        long next = Math.max(prev + 1, floor);
+        channel.truncate(0);
+        channel.write(java.nio.ByteBuffer.wrap(String.valueOf(next).getBytes()));
+        return next;
+      } catch (Exception e) {
+        long epoch = floor + ThreadLocalRandom.current().nextInt(1000);
+        log.error("Epoch local file fallback failed, using timestamp with jitter: epoch={}", epoch, e);
+        return epoch;
       }
-      Files.writeString(path, String.valueOf(next));
-      return next;
-    } catch (Exception e) {
-      long epoch = System.currentTimeMillis() * 1000L + ThreadLocalRandom.current().nextInt(1000);
-      log.error("Epoch local file fallback failed, using timestamp with jitter: epoch={}", epoch, e);
-      return epoch;
     }
   }
 

@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.*;
 
 import java.lang.reflect.Field;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLongArray;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
@@ -207,5 +209,64 @@ class SlidingWindowDetectorTest {
     SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, 1000);
     detector.addCount("expired", 100);
     assertThat(detector.addCount("never-tracked", 0)).isZero();
+  }
+
+  @Test
+  void cleanupRegion_shouldNotOverlapSummationRegion() throws Exception {
+    // Verify the doubled-buffer invariant: cleanup region and summation region
+    // are disjoint by construction (length == 2 * windowSize).
+    SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, Long.MAX_VALUE);
+    Field windowsField = SlidingWindowDetector.class.getDeclaredField("windows");
+    windowsField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    ConcurrentHashMap<String, AtomicLongArray> windows =
+        (ConcurrentHashMap<String, AtomicLongArray>) windowsField.get(detector);
+
+    detector.addCount("k", 0);
+    AtomicLongArray buf = windows.get("k");
+    int len = buf.length();
+    int win = detector.getWindowSize();
+    long sliceMs = detector.getTimeMillisPerSlice();
+    assertThat(len).as("doubled-buffer invariant").isEqualTo(2 * win);
+
+    // Fill every slot with a unique marker so we can detect any overwrite.
+    for (int i = 0; i < len; i++) buf.set(i, (long) i + 1);
+
+    // Advance at least 1 slice to trigger the cleanup branch.
+    Thread.sleep(sliceMs + 10);
+
+    // Snapshot currentIndex before addCount mutates the buffer.
+    long beforeCall = System.currentTimeMillis();
+    int ci = (int) ((beforeCall / sliceMs) % len);
+
+    detector.addCount("k", 0);
+
+    // All active-window slots (except currentIndex, which was just written)
+    // must still hold their original markers — proving cleanup never hit them.
+    for (int i = 0; i < win; i++) {
+      int slot = (ci - i + len) % len;
+      if (slot == ci) continue;
+      assertThat(buf.get(slot))
+          .as("active slot %d cleaned by stale-region cleanup", slot)
+          .isEqualTo((long) slot + 1);
+    }
+  }
+
+  @Test
+  void cleanupRegion_shouldHandleSequentialAdvances() throws Exception {
+    // Verify cleanup correctness after multiple sequential advances,
+    // stressing the clearStart derivation across overlapping window positions.
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, Long.MAX_VALUE);
+    long sliceMs = detector.getTimeMillisPerSlice();
+    int win = detector.getWindowSize();
+
+    detector.addCount("seq", 100);
+    for (int step = 1; step <= 6; step++) {
+      Thread.sleep(sliceMs + 10);
+      long sum = detector.addCount("seq", 10);
+      assertThat(sum)
+          .as("sum after step %d", step)
+          .isBetween((long) step * 10, 100L + (long) step * 10);
+    }
   }
 }

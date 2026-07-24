@@ -78,10 +78,20 @@ public class WorkerBroadcaster {
   private final AtomicLong decisionVersionCounter = new AtomicLong(0L);
 
   /**
-   * Short‑lived deduplication cache that prevents redundant AMQP broadcasts
-   * when two Workers transiently evaluate the same key during ring convergence
-   * (see ADR-0013). A (key + type) pair is retained for 100 ms so the second
-   * Worker's broadcast is silently elided.
+   * Per‑instance 100 ms debounce cache; prevents the same key+type from being
+   * broadcast twice by <em>this</em> Worker within the expiry window.  The
+   * original intent was cross‑Worker dedup during ring convergence, but a
+   * per‑JVM Caffeine cache cannot see broadcasts from other Workers.  Actual
+   * cross‑Worker convergence is provided by consistent‑hash sharding (one
+   * owner per key) plus the {@code decisionVersion >=} guard on the App side.
+   *
+   * <p>The real value is local debounce: the state‑machine path and the
+   * FastLane / TopKValidator path may both evaluate the same key within
+   * 100 ms, and this cache silently elides the duplicate.  See ADR-0013.
+   *
+   * <p>Note: {@code put} happens <em>after</em> a successful
+   * {@link #sendBroadcast}, so a failed send leaves the cache clean and the
+   * next cycle will retry.
    */
   private final Cache<String, Boolean> broadcastDedupCache = Caffeine.newBuilder()
     .expireAfterWrite(100, TimeUnit.MILLISECONDS)

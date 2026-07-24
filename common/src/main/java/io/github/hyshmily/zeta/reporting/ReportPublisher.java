@@ -52,12 +52,6 @@ public class ReportPublisher {
     try {
       rabbitTemplate.convertAndSend(reportExchange, routingKey, message);
     } catch (AmqpException e) {
-      log.error(
-        "Failed to publish reportToWorker: target={}, keys={}, error={}",
-        target,
-        message.counts().size(),
-        e.getMessage()
-      );
       throw e;
     }
     log.debug("Published reportToWorker: target={}, keys={}", target, message.counts().size());

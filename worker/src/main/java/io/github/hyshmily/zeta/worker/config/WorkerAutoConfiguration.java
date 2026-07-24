@@ -591,7 +591,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public SimpleRabbitListenerContainerFactory workerConfigListenerContainerFactory(
-    ConnectionFactory connectionFactory
+    @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory
   ) {
     SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
     factory.setConnectionFactory(connectionFactory);
@@ -701,27 +701,48 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Handles PING requests from Apps, replies PONG via Direct reply-to.
+   * Dedicated {@link RabbitTemplate} for control-plane traffic (heartbeat + PING/PONG),
+   * backed by the dedicated heartbeat connection factory from the common module.
+   * Isolated from the data-plane template used by broadcasts and reports.
    *
-   * @param rabbitTemplate the RabbitMQ template used to send PONG responses
+   * @param connectionFactory the dedicated heartbeat connection factory
+   * @return a new {@link RabbitTemplate} for control-plane messaging
+   */
+  @Bean("zetaHeartbeatRabbitTemplate")
+  @ConditionalOnMissingBean(name = "zetaHeartbeatRabbitTemplate")
+  public RabbitTemplate heartbeatRabbitTemplate(
+    @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory
+  ) {
+    return new RabbitTemplate(connectionFactory);
+  }
+
+  /**
+   * Handles PING requests from Apps, replies PONG via Direct reply-to.
+   * Uses the heartbeat-dedicated template so PONG responses are not blocked
+   * by data-plane congestion on the shared connection.
+   *
+   * @param rabbitTemplate the heartbeat-dedicated RabbitMQ template
    * @return a new {@link VerifyConsumer} instance for this Worker node
    */
   @Bean
-  public VerifyConsumer verifyConsumer(RabbitTemplate rabbitTemplate) {
+  public VerifyConsumer verifyConsumer(
+    @Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate
+  ) {
     return new VerifyConsumer(rabbitTemplate, nodeId);
   }
 
   /**
    * Container for the verification ping queue (NONE ack, on-demand only).
+   * Uses the heartbeat-dedicated connection factory for full control-plane isolation.
    *
-   * @param connectionFactory the RabbitMQ connection factory
+   * @param connectionFactory the dedicated heartbeat connection factory
    * @param verifyPingQueue   the auto-delete ping queue
    * @param verifyConsumer    the consumer whose {@link VerifyConsumer#handlePing} handles messages
    * @return a configured {@link SimpleMessageListenerContainer} with NONE acknowledgement mode
    */
   @Bean
   public SimpleMessageListenerContainer verifyPingContainer(
-    ConnectionFactory connectionFactory,
+    @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory,
     Queue verifyPingQueue,
     VerifyConsumer verifyConsumer
   ) {
@@ -741,18 +762,23 @@ public class WorkerAutoConfiguration {
    * so that epoch values in heartbeat messages and send messages are
    * guaranteed identical.
    *
-   * @param rabbitTemplate         the RabbitMQ template for publishing heartbeat messages
+   * <p>Uses the heartbeat-dedicated {@link RabbitTemplate} so that
+   * {@code sendHeartbeat()} is not blocked by data-plane congestion on the
+   * shared connection.  See ADR-0010 (dual-queue isolation extended to the
+   * transport layer).
+   *
+   * @param rabbitTemplate         the heartbeat-dedicated RabbitMQ template
    * @param properties             worker configuration providing exchange and interval settings
    * @param stateMachine           the state machine providing config gossip fields
    * @param broadcaster            the broadcaster for reading the current decision version watermark
-   * @param epochCounter           the shared epoch counter (initialised via Redis INCR)
+   * @param epochCounter           the shared epoch counter (initialised via Redis INTR)
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @param scheduler              the shared worker scheduler for periodic heartbeat sends
    * @return a new {@link WorkerHeartbeatProducer} instance
    */
   @Bean
   public WorkerHeartbeatProducer workerHeartbeatProducer(
-    RabbitTemplate rabbitTemplate,
+    @Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate,
     WorkerProperties properties,
     ZetaBayesianSM stateMachine,
     WorkerBroadcaster broadcaster,

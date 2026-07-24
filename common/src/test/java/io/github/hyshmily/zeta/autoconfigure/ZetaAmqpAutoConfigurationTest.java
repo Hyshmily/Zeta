@@ -436,10 +436,9 @@ class ZetaAmqpAutoConfigurationTest {
   @Test
   void hotKeyCpuMonitorIsCreatedWithCorrectProperties() {
     ZetaProperties properties = new ZetaProperties();
-    ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    SystemLoadMonitor monitor = config.hotKeyCpuMonitor(properties, scheduler);
+    SystemLoadMonitor monitor = config.hotKeyCpuMonitor(properties);
 
     assertThat(monitor).isNotNull();
   }

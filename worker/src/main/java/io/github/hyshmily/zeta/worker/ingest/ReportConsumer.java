@@ -150,18 +150,15 @@ public class ReportConsumer {
       int chunkEnd = Math.min(chunkStart + CHUNK_SIZE, totalKeys);
       List<Map.Entry<String, Long>> chunk = entries.subList(chunkStart, chunkEnd);
 
-      // Accumulate broadcasts during parallel processing; drain serially
-      // after the stream completes to avoid ForkJoin threads blocking on
-      // AMQP channel write locks.
+      // Accumulate broadcasts during processing; drain serially after the
+      // per-key evaluation loop to avoid blocking AMQP channel write locks.
       Queue<Report> pendingBroadcasts = new ConcurrentLinkedQueue<>();
 
-      // Process each key independently — both evaluation and HeavyKeeper
-      // update happen inside the parallel stream so that the sliding-window
-      // detection is not blocked by a serial addDirect up front.
-      chunk
-        .parallelStream()
-        .forEach(entry -> {
-          try {
+      // Process each key sequentially on the consumer thread.  8 concurrent
+      // consumers already provide sufficient parallelism; intra-chunk
+      // parallelisation would amplify stripe-lock contention for no gain.
+      for (Map.Entry<String, Long> entry : chunk) {
+        try {
             String key = entry.getKey();
             long count = entry.getValue();
 
@@ -187,7 +184,7 @@ public class ReportConsumer {
               case HOT -> {
                 // A new hot key has been confirmed. Pre-allocate a decision
                 // version and enqueue to send; actual AMQP send happens
-                // on the consumer thread after parallelStream completes.
+                // on the consumer thread after the per-key loop completes.
                 if (
                   pendingBroadcasts.add(
                     Report.builder()
@@ -231,7 +228,7 @@ public class ReportConsumer {
               e
             );
           }
-        });
+        }
       processReport(pendingBroadcasts, message, chunkStart, totalKeys);
     }
 
@@ -239,10 +236,9 @@ public class ReportConsumer {
   }
 
   private void processReport(Queue<Report> pendingBroadcasts, ReportMessage message, int chunkStart, int totalKeys) {
-    // Drain pending broadcasts serially on the consumer thread.
-    // This avoids ForkJoinPool threads blocking on AMQP channel write
-    // locks under high concurrency (8 concurrent consumers).
-    // Per ADR-0007, lost messages are tolerated by the next periodic cycle.
+    // Drain pending broadcasts serially on the consumer thread, consistent
+    // with the sequential in-chunk evaluation above.  Per ADR-0007, lost
+    // messages are tolerated by the next periodic cycle.
     // sendBroadcast no longer throws — errors are logged and swallowed.
     int drainedCount = 0;
     Report r;

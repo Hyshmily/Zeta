@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.util.ratelimit.impl;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.window.RollingWindow;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Google SRE-inspired adaptive rate limiter.
@@ -78,8 +79,8 @@ public class SreRateLimiterImpl implements SreRateLimiter {
       return true;
     }
 
-    // Probabilistic drop
-    return !trueOnProbability((double) (total - maxRequests) / (total + 1));
+    // Probabilistic drop: tryAcquire returns true when allowed
+    return !shouldDrop((double) (total - maxRequests) / (total + 1));
   }
 
   @Override
@@ -101,7 +102,14 @@ public class SreRateLimiterImpl implements SreRateLimiter {
     totalWindow.add(1);
   }
 
-  private static boolean trueOnProbability(double p) {
-    return Math.random() < p;
+  /**
+   * Decides whether a request should be dropped based on the given probability,
+   * implementing the Kratos SRE drop semantics: drop if random < (total - K*accepts) / (total + 1).
+   *
+   * @param p the probability of dropping a request (0.0 to 1.0)
+   * @return true if the request should be dropped
+   */
+  private static boolean shouldDrop(double p) {
+    return ThreadLocalRandom.current().nextDouble() < p;
   }
 }

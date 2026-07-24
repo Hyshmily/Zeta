@@ -43,13 +43,20 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <h2>Concurrency</h2>
  * <ul>
- *   <li>Per‑key arrays are accessed only by the worker that owns the shard
- *       (thanks to consistent‑hash routing on the client side), so there is
- *       <b>no cross‑thread contention</b> on the same array.</li>
  *   <li>{@link AtomicLongArray} provides built-in atomic get/set/addAndGet on
- *       each element, guaranteeing visibility and atomicity of updates even
- *       though writes are single‑threaded — this protects against JVM
- *       reordering and ensures correct reads from the eviction thread.</li>
+ *       each element, guaranteeing visibility and single‑slot atomicity.</li>
+ *   <li>Cross‑thread access to the <em>same</em> key is possible when
+ *       {@code parallelStream} or multiple consumer threads feed the same key
+ *       concurrently.  Safety is <b>coincidental</b>, relying on three factors:
+ *       (a) {@code AtomicLongArray} slot‑level atomicity means a write from one
+ *       thread never observes a torn value; (b) the cleanup region
+ *       {@code [currentIndex - W - elapsed, currentIndex - W)} and the summation
+ *       region {@code (currentIndex - W, currentIndex]} are separated by the
+ *       doubled‑buffer gap of {@code W} slots, so a thread that cleans on a
+ *       stale {@code currentIndex} will not zero a slot that another thread is
+ *       concurrently summing; (c) the aggregated sum is a statistical signal
+ *       for hotspot detection, where an occasional missed or double‑counted
+ *       access does not materially affect the HOT/COOL decision.</li>
  *   <li>Unlike {@code AtomicLong[]}, every key owns exactly <b>one</b> object
  *       instead of {@code 2 × windowSize} objects, reducing memory overhead
  *       by ~94 % at scale.</li>
@@ -166,6 +173,16 @@ public class SlidingWindowDetector {
           slices.set(i, 0);
         }
       } else if (elapsedSlices > 0) {
+        // Invariant: length == 2 * windowSize (doubled circular buffer).
+        // The previous write was at (currentIndex - elapsedSlices) mod length.
+        // Stale slices that have rolled outside the new summation range
+        //   [currentIndex - windowSize + 1, currentIndex]
+        // are the elapsedSlices oldest slots of the previous window, starting at:
+        //   (currentIndex - elapsedSlices - windowSize + 1 + length) % length
+        //   = (currentIndex + windowSize - elapsedSlices + length) % length
+        // This stale region and the summation range are separated by the
+        // doubled-buffer gap of length/2 slots — guaranteeing zero overlap.
+        // Changing the buffer multiplier (e.g., from 2× to 3×) invalidates this.
         int clearStart = (currentIndex + windowSize - (int) elapsedSlices + length) % length;
         for (int i = 0; i < elapsedSlices; i++) {
           slices.set((clearStart + i) % length, 0);

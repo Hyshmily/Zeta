@@ -26,12 +26,10 @@ import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
+import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.*;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.Getter;
@@ -98,6 +96,8 @@ public class KeyReporterImpl implements KeyReporter {
   private final HealthView healthView;
 
   private final SnowflakeIdGenerator snowflakeIdGenerator;
+  /** Dedicated single-thread executor for O(keys × log vnodes) routing computation. */
+  private final ExecutorService routingExecutor;
 
   private volatile int lastNodeCount = -1;
 
@@ -108,6 +108,8 @@ public class KeyReporterImpl implements KeyReporter {
 
   /** Cumulative counter of report batches silently dropped because no Workers were alive. */
   private final AtomicLong workerDeadDropCounter = new AtomicLong();
+  /** Cumulative counter of keys dropped because routeNode returned null (ring inconsistency window). */
+  private final AtomicLong unroutableDropCounter = new AtomicLong();
 
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
@@ -150,6 +152,7 @@ public class KeyReporterImpl implements KeyReporter {
     this.ringManager = ringManager;
     this.healthView = healthView;
     this.snowflakeIdGenerator = snowflakeIdGenerator;
+    this.routingExecutor = Executors.newSingleThreadExecutor(new ZetaThreadFactory("zeta-report-routing"));
     this.reportBufferedCounter = new BufferedCounter(
       this::onFlush,
       MAX_BUFFER_SIZE,
@@ -234,8 +237,16 @@ public class KeyReporterImpl implements KeyReporter {
    * <p>Idempotent — safe to call multiple times.
    */
   @Override
+  @SuppressWarnings("all")
   public void stop() {
     reportBufferedCounter.destroy();
+    routingExecutor.shutdownNow();
+    try {
+      routingExecutor.awaitTermination(1, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      log.warn("Interrupted while waiting for routingExecutor to terminate");
+      Thread.currentThread().interrupt();
+    }
     if (dispatcher != null) {
       dispatcher.shutdown();
     }
@@ -287,38 +298,57 @@ public class KeyReporterImpl implements KeyReporter {
         }
       }
 
+      // Defer O(keys × log vnodes) routing computation to dedicated executor
+      // so the shared scheduler thread is not starved (SystemLoadMonitor, decay, etc.)
       long now = currentTimeMillis();
-      Map<String, Map<String, Long>> sharded = new HashMap<>();
-
-      keyCounts.forEach((key, val) -> {
-        if (val > 0) {
-          String target = ringManager.routeNode(key, aliveNodes);
-          if (target != null) {
-            sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);
-          }
-        }
-      });
-
-      sharded.forEach((target, counts) -> {
-        if (!dispatcher.enqueue(new ShardBatch(target, now, counts))) {
-          long dropped = dispatcher.dropped();
-          if (dropped % 100 == 0 || dropped == 1) {
-            log.warn(
-              "reportToWorker queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
-              target,
-              counts.size(),
-              dispatcher.depth(),
-              queueCapacity,
-              dropped
-            );
-          }
-        } else if (limiter != null) {
-          limiter.onEnqueue();
-        }
-      });
+      routingExecutor.submit(() -> routeAndEnqueue(keyCounts, aliveNodes, now, limiter));
     } catch (Exception e) {
       log.error("Flush callback failed", e);
     }
+  }
+
+  /**
+   * Route keys to Worker targets and enqueue the resulting batches.
+   * Runs on {@link #routingExecutor} — off the shared scheduler thread.
+   */
+  @SuppressWarnings("all")
+  private void routeAndEnqueue(
+    Map<String, Long> keyCounts,
+    Set<String> aliveNodes,
+    long now,
+    BbrRateLimiterImpl limiter
+  ) {
+    Map<String, Map<String, Long>> sharded = new HashMap<>();
+    keyCounts.forEach((key, val) -> {
+      if (val > 0) {
+        String target = ringManager.routeNode(key, aliveNodes);
+        if (target != null) {
+          sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);
+        } else {
+          long dropped = unroutableDropCounter.incrementAndGet();
+          if (dropped <= 3 || dropped % 100 == 0) {
+            log.debug("routeNode returned null for key={}, cumulativeUnroutable={}", key, dropped);
+          }
+        }
+      }
+    });
+    sharded.forEach((target, counts) -> {
+      if (!dispatcher.enqueue(new ShardBatch(target, now, counts))) {
+        long dropped = dispatcher.dropped();
+        if (dropped % 100 == 0 || dropped == 1) {
+          log.warn(
+            "reportToWorker queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
+            target,
+            counts.size(),
+            dispatcher.depth(),
+            queueCapacity,
+            dropped
+          );
+        }
+      } else if (limiter != null) {
+        limiter.onEnqueue();
+      }
+    });
   }
 
   /**
@@ -448,27 +478,33 @@ public class KeyReporterImpl implements KeyReporter {
     private final AtomicLong expiredCount = new AtomicLong();
     /** Count of batches rejected because the queue was full. */
     private final AtomicLong droppedCount = new AtomicLong();
-    /** Active consumer threads draining the work queue. */
-    private final List<Thread> consumers = new ArrayList<>();
+    /** Timeout for a single publish call before we give up and treat it as dropped. */
+    private static final long PUBLISH_TIMEOUT_MS = 5_000;
+    /** Consumer thread pool draining the work queue. */
+    private final ExecutorService consumers;
+    /** Dedicated executor for timed publish calls. */
+    private final ExecutorService publishTimeoutExecutor;
     /** Lifecycle flag; false after shutdown. */
     private volatile boolean running;
+
+    ReportDispatcher() {
+      this.consumers = Executors.newFixedThreadPool(consumerCount, new ZetaThreadFactory("zeta-report-consumer"));
+      this.publishTimeoutExecutor = Executors.newCachedThreadPool(new ZetaThreadFactory("zeta-report-publish-tmo"));
+    }
 
     /**
      * Start the consumer threads that drain batches from the bounded work
      * queue and publish them via {@link ReportPublisher}.
      *
-     * <p>Each consumer runs in a named daemon thread
-     * ({@code "reportToWorker-consumer-N"}) so they do not prevent JVM shutdown.
+     * <p>Each consumer runs on a named daemon thread pool thread
+     * ({@code "zeta-report-consumer-N"}) so they do not prevent JVM shutdown.
      * The number of consumer threads is determined by the
      * {@code consumerCount} configuration.
      */
     void start() {
       running = true;
       for (int i = 0; i < consumerCount; i++) {
-        Thread t = new Thread(this::consumeLoop, "zeta-reportToWorker-consumer-" + i);
-        t.setDaemon(true);
-        t.start();
-        consumers.add(t);
+        consumers.submit(this::consumeLoop);
       }
     }
 
@@ -504,27 +540,42 @@ public class KeyReporterImpl implements KeyReporter {
      * Gracefully shut down all consumer threads.
      *
      * <p>Signals all consumers to stop via the {@code running} flag and
-     * thread interruption, then waits up to 2 seconds for each thread to
-     * finish. After shutdown, the queue may still contain unconsumed
-     * batches — they are discarded.
+     * executor {@link ExecutorService#shutdownNow()}, then waits up to 2
+     * seconds for termination. After shutdown, the queue may still contain
+     * unconsumed batches — they are discarded.
+     *
+     * <p>The dedicated publish timeout executor is also shut down to
+     * release any lingering publish threads.
      *
      * <p>This method is called from {@link KeyReporterImpl#stop()} and is
      * idempotent. However, after shutdown the dispatcher cannot be
      * restarted.
      */
     void shutdown() {
-      running = false;
-      for (Thread t : consumers) {
-        t.interrupt();
+      consumers.shutdownNow();
+      publishTimeoutExecutor.shutdownNow();
+
+      try {
+        if (consumers.awaitTermination(2, TimeUnit.SECONDS)) {
+          running = false;
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        log.warn("ReportDispatcher shutdown interrupted while waiting for consumers to terminate");
       }
-      for (Thread t : consumers) {
-        try {
-          t.join(2000);
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
+      // Drain remaining queue entries — each was onEnqueue'd but never processed,
+      // so we must onConsumerDrop to keep BBR inFlight balanced.
+      BbrRateLimiterImpl limiter = bbrRateLimiter;
+      if (limiter != null) {
+        List<ShardBatch> abandoned = new ArrayList<>();
+        queue.drainTo(abandoned);
+        if (!abandoned.isEmpty()) {
+          for (int i = 0; i < abandoned.size(); i++) {
+            limiter.onConsumerDrop();
+          }
+          log.info("Drained {} abandoned batches from queue and decremented inFlight", abandoned.size());
         }
       }
-      consumers.clear();
       log.info(
         "ReportDispatcher stopped, remaining queue={}, expired={}, dropped={}",
         queue.size(),
@@ -552,12 +603,12 @@ public class KeyReporterImpl implements KeyReporter {
     }
 
     /**
-     * Return the number of actively running consumer threads.
+     * Return the number of consumer threads configured for this dispatcher.
      *
-     * @return current consumer thread count
+     * @return the configured consumer thread count
      */
     int consumerCount() {
-      return consumers.size();
+      return KeyReporterImpl.this.consumerCount;
     }
 
     /**
@@ -622,28 +673,36 @@ public class KeyReporterImpl implements KeyReporter {
           continue;
         }
 
-        try {
-          reportPublisher.publish(
-            batch.target(),
-            new ReportMessage(snowflakeIdGenerator.nextId(), appName, batch.timestamp(), batch.counts())
-          );
-          if (limiter != null) {
-            limiter.onSuccess(currentTimeMillis() - batch.timestamp());
-          }
-        } catch (Exception e) {
-          log.error(
-            "Failed to publish reportToWorker batch for target={}, keys={}",
-            batch.target(),
-            batch.counts().size(),
-            e
-          );
-          if (e instanceof InterruptedException) {
-            Thread.currentThread().interrupt();
-          }
-          if (limiter != null) {
-            limiter.onConsumerDrop();
-          }
-        }
+        final ShardBatch fb = batch;
+        final long dequeueTime = currentTimeMillis();
+        final BbrRateLimiterImpl capturedLimiter = limiter;
+        CompletableFuture.runAsync(
+          () -> {
+            reportPublisher.publish(
+              fb.target(),
+              new ReportMessage(snowflakeIdGenerator.nextId(), appName, fb.timestamp(), fb.counts())
+            );
+          },
+          publishTimeoutExecutor
+        )
+          .orTimeout(PUBLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+          .whenComplete((ok, ex) -> {
+            if (ex != null) {
+              log.error(
+                "Failed to publish reportToWorker batch for target={}, keys={}",
+                fb.target(),
+                fb.counts().size(),
+                ex
+              );
+              if (capturedLimiter != null) {
+                capturedLimiter.onConsumerDrop();
+              }
+            } else if (capturedLimiter != null) {
+              // Use only publish time (dequeue → completion), not queue wait,
+              // so that backpressure-driven queue buildup does not inflate minRT.
+              capturedLimiter.onSuccess(currentTimeMillis() - dequeueTime);
+            }
+          });
       }
     }
   }

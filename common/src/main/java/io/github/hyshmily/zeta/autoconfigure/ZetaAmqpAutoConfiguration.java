@@ -43,15 +43,16 @@ import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.util.version.VersionController;
-import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import io.github.hyshmily.zeta.util.impl.SystemLoadMonitorImpl;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
+import io.github.hyshmily.zeta.util.version.VersionController;
+import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
@@ -61,6 +62,7 @@ import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -68,7 +70,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -134,22 +135,45 @@ public class ZetaAmqpAutoConfiguration {
      *
      * @return a new {@link Jackson2JsonMessageConverter} instance
      */
-    @Bean
-    @ConditionalOnMissingBean(MessageConverter.class)
+    @Bean("zetaReportMessageConverter")
     public MessageConverter reportMessageConverter() {
       return new Jackson2JsonMessageConverter();
     }
 
     /**
+     * Dedicated {@link RabbitTemplate} for report publishing.
+     * Uses a dedicated instance (not the container-level shared template) so that
+     * Zeta's JSON serialization is isolated from the application's own message
+     * converter — see bidirectional-converter-pollution issue (P1-5.1).
+     *
+     * @param connectionFactory the shared RabbitMQ connection factory
+     * @param converter         the Zeta JSON message converter
+     * @return a new {@link RabbitTemplate} with Zeta's JSON converter
+     */
+    @Bean("zetaReportRabbitTemplate")
+    @ConditionalOnMissingBean(name = "zetaReportRabbitTemplate")
+    public RabbitTemplate zetaReportRabbitTemplate(
+      ConnectionFactory connectionFactory,
+      @Qualifier("zetaReportMessageConverter") MessageConverter converter
+    ) {
+      RabbitTemplate t = new RabbitTemplate(connectionFactory);
+      t.setMessageConverter(converter);
+      return t;
+    }
+
+    /**
      * Create the {@link ReportPublisher} for sending batched access-count reports to the Worker.
      *
-     * @param rabbitTemplate the RabbitMQ template for publishing messages
+     * @param rabbitTemplate the dedicated Zeta report RabbitMQ template
      * @param properties     the HotKey configuration properties
      * @return a new {@link ReportPublisher} instance
      */
     @Bean
     @ConditionalOnMissingBean
-    public ReportPublisher reportPublisher(RabbitTemplate rabbitTemplate, ZetaProperties properties) {
+    public ReportPublisher reportPublisher(
+      @Qualifier("zetaReportRabbitTemplate") RabbitTemplate rabbitTemplate,
+      ZetaProperties properties
+    ) {
       return new ReportPublisher(rabbitTemplate, properties.getReportExchange(), properties.getAppName());
     }
 
@@ -177,12 +201,9 @@ public class ZetaAmqpAutoConfiguration {
      */
     @Bean(initMethod = "start", destroyMethod = "stop")
     @ConditionalOnMissingBean
-    public SystemLoadMonitor hotKeyCpuMonitor(
-      ZetaProperties properties,
-      @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
-    ) {
+    public SystemLoadMonitor hotKeyCpuMonitor(ZetaProperties properties) {
       ZetaProperties.ReporterLimiter cfg = properties.getReporter();
-      return new SystemLoadMonitorImpl(hotKeyScheduler, cfg.getCpuPollIntervalMs(), cfg.getCpuDecay());
+      return new SystemLoadMonitorImpl(cfg.getCpuPollIntervalMs(), cfg.getCpuDecay());
     }
 
     /**
@@ -268,6 +289,7 @@ public class ZetaAmqpAutoConfiguration {
    */
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
+  @ConditionalOnBean(ConnectionFactory.class)
   @ConditionalOnProperty(prefix = "zeta.sync", name = "enabled", havingValue = "true")
   @lombok.extern.slf4j.Slf4j
   static class SyncConfiguration {
@@ -314,16 +336,31 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
+     * Dedicated {@link RabbitTemplate} for cache-sync publishing.
+     * Isolated from the container-level shared template to avoid
+     * MessageConverter cross-contamination (see issue P1-5.1).
+     *
+     * @param connectionFactory the shared RabbitMQ connection factory
+     * @return a new {@link RabbitTemplate} instance
+     */
+    @Bean("zetaSyncRabbitTemplate")
+    @ConditionalOnMissingBean(name = "zetaSyncRabbitTemplate")
+    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
+    public RabbitTemplate zetaSyncRabbitTemplate(ConnectionFactory connectionFactory) {
+      return new RabbitTemplate(connectionFactory);
+    }
+
+    /**
      * Create the cache sync publisher for sending INVALIDATE/REFRESH messages.
      *
-     * @param rabbitTemplate the RabbitMQ template for publishing messages
+     * @param rabbitTemplate the dedicated Zeta cache-sync RabbitMQ template
      * @param properties     the cache sync configuration properties
      * @return a new {@link CacheSyncPublisher} instance
      */
     @Bean
     @ConditionalOnMissingBean
     public CacheSyncPublisher cacheSyncPublisher(
-      RabbitTemplate rabbitTemplate,
+      @Qualifier("zetaSyncRabbitTemplate") RabbitTemplate rabbitTemplate,
       CacheSyncProperties properties,
       SnowflakeIdGenerator snowflakeIdGenerator
     ) {
@@ -344,6 +381,7 @@ public class ZetaAmqpAutoConfiguration {
      */
     @Bean(name = "hotKeySyncScheduler", destroyMethod = "shutdown")
     @ConditionalOnMissingBean(name = "hotKeySyncScheduler")
+    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public ScheduledExecutorService hotKeySyncScheduler(CacheSyncProperties properties) {
       int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
       return Executors.newScheduledThreadPool(
@@ -433,7 +471,7 @@ public class ZetaAmqpAutoConfiguration {
    */
   @Configuration
   @ConditionalOnClass(name = "org.springframework.data.redis.core.RedisTemplate")
-  @ConditionalOnBean(RedisTemplate.class)
+  @ConditionalOnBean(name = "rabbitConnectionFactory")
   @ConditionalOnProperty(prefix = "zeta.worker-listener", name = "enabled", havingValue = "true")
   @lombok.extern.slf4j.Slf4j
   static class WorkerListenerConfiguration {
@@ -550,6 +588,7 @@ public class ZetaAmqpAutoConfiguration {
      */
     @Bean(name = "hotKeyWorkerSchedScheduler", destroyMethod = "shutdown")
     @ConditionalOnMissingBean(name = "hotKeyWorkerSchedScheduler")
+    @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public ScheduledExecutorService hotKeyWorkerSchedScheduler(WorkerListenerProperties properties) {
       int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
       return Executors.newScheduledThreadPool(
@@ -613,7 +652,7 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(name = "hotkeyHeartbeatContainer")
     public SimpleMessageListenerContainer heartbeatContainer(
-      ConnectionFactory connectionFactory,
+      @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory,
       HealthView healthView,
       Queue hotkeyHeartbeatQueue
     ) {
@@ -671,14 +710,14 @@ public class ZetaAmqpAutoConfiguration {
 
     /**
      * Dedicated {@link RabbitTemplate} for the heartbeat verifier, initialized
-     * with a fixed {@code replyTimeout} at construction time.
+     * with a fixed {@code replyTimeout} at construction time and backed by the
+     * dedicated heartbeat connection factory.
      *
-     * <p>This avoids mutating the shared {@code rabbitTemplate} bean's
-     * {@code replyTimeout} at runtime — the shared template is used by
-     * reporters, sync publishers, and negotiators, all of which have their
-     * own reply-timeout expectations.  See issue P2-4.5.
+     * <p>This isolates PING/PONG verification traffic from the data-plane
+     * connection used by reporters, sync publishers, and broadcasters — see
+     * issue P2-6.8 and {@link HeartbeatConnectionConfiguration}.
      *
-     * @param connectionFactory the shared RabbitMQ connection factory
+     * @param connectionFactory the dedicated heartbeat connection factory
      * @param properties        the HotKey configuration properties
      * @return a new {@link RabbitTemplate} with {@code replyTimeout} set to
      *         {@code properties.heartbeat.pingTimeoutMs}
@@ -686,7 +725,7 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(name = "zetaVerifyRabbitTemplate")
     public RabbitTemplate zetaVerifyRabbitTemplate(
-      ConnectionFactory connectionFactory,
+      @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory,
       ZetaProperties properties
     ) {
       RabbitTemplate t = new RabbitTemplate(connectionFactory);
@@ -722,6 +761,40 @@ public class ZetaAmqpAutoConfiguration {
         ),
         hotKeyScheduler
       );
+    }
+  }
+
+  /**
+   * Dedicated {@link CachingConnectionFactory} for heartbeat/verification traffic,
+   * isolated from the data-plane connection (report, sync, broadcast).  Prevents
+   * control-plane liveliness from being affected by data-plane congestion or
+   * broker flow control on the shared connection.
+   *
+   * <p>Shares the same broker host/port/credentials as the default connection
+   * factory but maintains a separate TCP connection and channel pool.  The cost
+   * is one extra connection per node — negligible for the cross‑circuit survivability
+   * gained (standard practice: K8s health endpoint on separate port, Kafka controller
+   * listener, etc.).
+   */
+  @Configuration
+  static class HeartbeatConnectionConfiguration {
+
+    @Bean("zetaHeartbeatConnectionFactory")
+    @ConditionalOnMissingBean(name = "zetaHeartbeatConnectionFactory")
+    public CachingConnectionFactory heartbeatConnectionFactory(ObjectProvider<RabbitProperties> propsProvider) {
+      RabbitProperties props = propsProvider.getIfAvailable();
+      if (props == null) {
+        // Fallback: create an unconfigured factory; Spring Boot's
+        // default connection factory will be used in most environments.
+        return new CachingConnectionFactory();
+      }
+      CachingConnectionFactory cf = new CachingConnectionFactory(props.getHost(), props.getPort());
+      cf.setUsername(props.getUsername());
+      cf.setPassword(props.getPassword());
+      cf.setVirtualHost(props.getVirtualHost());
+      cf.setRequestedHeartBeat((int) props.getRequestedHeartbeat().getSeconds());
+      cf.setConnectionTimeout((int) props.getConnectionTimeout().toMillis());
+      return cf;
     }
   }
 }

@@ -95,17 +95,26 @@ class WorkerHeartbeatProducerTest {
 
   // ── Epoch initialisation ──
 
-  /** First start with Redis available and no prior epoch → INCR returns 1 → epoch = 1. */
+  /**
+   * First start with Redis available and no prior epoch.
+   * Epoch is floored at {@code System.currentTimeMillis() * 1000} to prevent
+   * counter rollback across Redis resets or file deletion.
+   */
   @Test
   void constructor_shouldDoInitEpochFromRedis_whenFirstStart() {
     var producer = newProducer();
     producer.sendHeartbeat();
 
     verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(HEADER_HEARTBEAT_EPOCH, 1L);
+    assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
+      .extracting(HEADER_HEARTBEAT_EPOCH)
+      .isInstanceOfSatisfying(Long.class, epoch -> assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L));
   }
 
-  /** Subsequent start: Redis INCR returns 6 (previous epoch was 5) → epoch = 6. */
+  /**
+   * Subsequent start with Redis available.  INCR returns a value below the
+   * timestamp floor → epoch is floored at the current timestamp.
+   */
   @Test
   void constructor_shouldDoInitEpochFromRedis_whenRestart() {
     var redisFactoryMock = mock(RedisConnectionFactory.class);
@@ -125,16 +134,15 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(eq(HB_EXCHANGE), eq(KEY_HEARTBEAT + WORKER_ID), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-        HEADER_HEARTBEAT_EPOCH,
-        6L
-      );
+      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders())
+        .extracting(HEADER_HEARTBEAT_EPOCH)
+        .isInstanceOfSatisfying(Long.class, epoch -> assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L));
     }
   }
 
   /**
    * Redis unavailable → fallback to local temp file.
-   * File does not exist → created with "1" → epoch = 1.
+   * File does not exist → created with the timestamp-based floor.
    */
   @Test
   void constructor_shouldFallbackToLocalFile_whenRedisFails() throws Exception {
@@ -144,22 +152,20 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-        HEADER_HEARTBEAT_EPOCH,
-        1L
-      );
+      long epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_EPOCH);
+      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L);
 
       var path = epochFilePath();
       assertThat(path).exists();
-      assertThat(Files.readString(path)).isEqualTo("1");
+      assertThat(Files.readString(path)).isEqualTo(String.valueOf(epoch));
     } finally {
       System.setProperty("java.io.tmpdir", origTmpdir);
     }
   }
 
   /**
-   * Redis unavailable, local file pre-seeded with "3" → epoch = 4.
-   * Also verifies the file is updated to "4".
+   * Redis unavailable, local file pre-seeded with "3".
+   * Epoch is floored at the timestamp, which dominates the increment.
    */
   @Test
   void constructor_shouldIncrementLocalFileEpochOnRestart() throws Exception {
@@ -170,12 +176,10 @@ class WorkerHeartbeatProducerTest {
       producer.sendHeartbeat();
 
       verify(rabbitTemplate).send(any(), any(), messageCaptor.capture());
-      assertThat(messageCaptor.getValue().getMessageProperties().getHeaders()).containsEntry(
-        HEADER_HEARTBEAT_EPOCH,
-        4L
-      );
+      long epoch = (Long) messageCaptor.getValue().getMessageProperties().getHeaders().get(HEADER_HEARTBEAT_EPOCH);
+      assertThat(epoch).isPositive().isGreaterThan(1_500_000_000_000_000L);
 
-      assertThat(Files.readString(epochFilePath())).isEqualTo("4");
+      assertThat(Files.readString(epochFilePath())).isEqualTo(String.valueOf(epoch));
     } finally {
       System.setProperty("java.io.tmpdir", origTmpdir);
     }
@@ -222,7 +226,7 @@ class WorkerHeartbeatProducerTest {
 
     assertThat(headers).containsEntry(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
     assertThat(headers).containsEntry(HEADER_NODE_ID, WORKER_ID);
-    assertThat(headers).containsEntry(HEADER_HEARTBEAT_EPOCH, 1L);
+    assertThat((Long) headers.get(HEADER_HEARTBEAT_EPOCH)).isPositive().isGreaterThan(1_500_000_000_000_000L);
     assertThat(headers).containsEntry(HEADER_HEARTBEAT_DV_HWM, dv);
     assertThat(headers.get(HEADER_HEARTBEAT_LOAD)).isInstanceOf(Double.class);
     assertThat((Double) headers.get(HEADER_HEARTBEAT_LOAD)).isBetween(0.0, 1.0);

@@ -449,12 +449,18 @@ class WorkerAutoConfigurationTest {
   static class MinimalMockConfiguration {
 
     @Bean
+    @org.springframework.context.annotation.Primary
     RabbitTemplate rabbitTemplate() {
       return org.mockito.Mockito.mock(RabbitTemplate.class);
     }
 
     @Bean
     ConnectionFactory connectionFactory() {
+      return org.mockito.Mockito.mock(ConnectionFactory.class);
+    }
+
+    @Bean("zetaHeartbeatConnectionFactory")
+    ConnectionFactory zetaHeartbeatConnectionFactory() {
       return org.mockito.Mockito.mock(ConnectionFactory.class);
     }
 

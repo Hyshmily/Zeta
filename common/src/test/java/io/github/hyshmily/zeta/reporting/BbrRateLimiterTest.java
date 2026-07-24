@@ -242,7 +242,8 @@ class BbrRateLimiterTest {
     cacheField.setAccessible(true);
     AtomicLong cache = (AtomicLong) cacheField.get(mpmr);
     cache.set(0);
-    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(Long.MAX_VALUE);
+    // With zero pass buckets, maxPASS decays cache to floor(1), so maxInFlight = minInFlight(1).
+    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(1);
   }
 
   @Test
@@ -292,9 +293,9 @@ class BbrRateLimiterTest {
     assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(5);
     // Force tick to zero all buckets so lookups fall back to cache.
     forceZeroAllBuckets();
-    // maxPASS returns maxPassCache=3, minRT returns minRtCache=50.
-    // maxInFlight = floor(3 * 50 * 10 / 1000 + 0.5) = 2.
-    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(2);
+    // maxPASS returns maxPassCache decayed from 3 → 2 (×0.99), minRtCache=50.
+    // maxInFlight = floor(2 * 50 * 10 / 1000 + 0.5) = 1.
+    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(1);
   }
 
   // ── minRT ──
@@ -330,8 +331,9 @@ class BbrRateLimiterTest {
     // Populate caches: maxPassCache -> 3, minRtCache -> 50.
     assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(5);
     forceZeroAllBuckets();
-    // Cache fallback: maxInFlight = floor(3 * 50 * 10 / 1000 + 0.5) = 2.
-    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(2);
+    // maxPASS decays cache from 3 → 2 (×0.99), minRtCache=50 unchanged.
+    // maxInFlight = floor(2 * 50 * 10 / 1000 + 0.5) = 1.
+    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(1);
   }
 
   // ── tick ──

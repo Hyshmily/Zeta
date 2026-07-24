@@ -88,7 +88,7 @@ import lombok.extern.slf4j.Slf4j;
  *       <ul>
  *         <li>HIGH → promote to CONFIRMED_HOT and broadcast HOT</li>
  *         <li>MEDIUM → promote to CANDIDATE_HOT, defer broadcast</li>
- *         <li>LOW → decrement hotStreak (stay in COLD next window)</li>
+ *         <li>LOW → set hotStreak = confirmCount - 1 (retention, not reset)</li>
  *       </ul></li>
  *   <li><b>CANDIDATE_HOT hot window:</b> HIGH confidence → CONFIRMED_HOT
  *       + HOT broadcast; MEDIUM/LOW → stay in CANDIDATE_HOT</li>
@@ -333,7 +333,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     // for the raw window sum to cross the threshold by a wide margin.
     long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
     if (ctx.trendStrength() > 1.0) {
-      obs = (long)(obs * ctx.trendStrength());
+      obs = (long) (obs * ctx.trendStrength());
     }
 
     switch (state.currentState) {
@@ -354,6 +354,12 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
             return ZetaDecision.none(key, snapShot);
           }
           default -> {
+            // Retention strategy: set hotStreak one below confirmCount so the
+            // very next hot window re-enters Bayesian evaluation immediately.
+            // A full reset (hotStreak = 0) would waste confirmCount windows
+            // re-accumulating the streak — during which the key may already be
+            // genuinely hot again.  See the "LOW → retention" item in the
+            // class-level Javadoc.
             state.hotStreak = confirmCount - 1;
             return ZetaDecision.none(key, snapShot);
           }
@@ -421,7 +427,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         int graceNeeded = Math.max(1, coolCount - preCoolGraceCount);
         double ts = ctx.trendStrength();
         if (ts > 0 && ts < 1.0) {
-          graceNeeded = (int)(graceNeeded * Math.max(ts, 0.4));
+          graceNeeded = (int) (graceNeeded * Math.max(ts, 0.4));
         }
         if (state.coolStreak >= graceNeeded) {
           state.currentState = PRE_COOLING;
@@ -466,7 +472,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       // A downward trend reduces the effective observation so that
       // decaying keys reach NON-HIGH confidence faster and emit COOL earlier.
       if (ctx.trendStrength() > 0 && ctx.trendStrength() < 1.0) {
-        obs = Math.max(1, (long)(obs * ctx.trendStrength()));
+        obs = Math.max(1, (long) (obs * ctx.trendStrength()));
       }
       ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
       if (pr.level() != ConfidenceLevel.HIGH) {
@@ -534,6 +540,16 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     return ZetaDecision.hot(key, snapShot);
   }
 
+  /**
+   * Removes all tracked state for the given key.
+   *
+   * <p><b>Reentrancy note:</b> This method acquires {@link #keyLocks}. Callers
+   * who already hold the per-key lock (e.g. {@link #rollbackToPreviousState})
+   * rely on the lock implementation being reentrant. Switching to a
+   * non-reentrant lock (e.g. {@link java.util.concurrent.locks.ReentrantLock}
+   * → raw {@link java.util.concurrent.locks.Lock}) will cause immediate
+   * deadlock on this call path.
+   */
   @Override
   public void reset(String key) {
     Lock lock = keyLocks.get(key);

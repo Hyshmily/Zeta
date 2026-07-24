@@ -79,8 +79,9 @@ public class ThresholdLearner implements Runnable {
       } else {
         smoothedQps = ALPHA * currentQps + (1 - ALPHA) * smoothedQps;
       }
-      long newThreshold = (long) (smoothedQps * properties.getGlobalQpsDynamicThreshold().getHotThresholdRatio());
-      // Clamp: never below the configured fixed hot threshold (only tighten, never loosen)
+      long windowMs = (long) detector.getWindowSize() * detector.getTimeMillisPerSlice();
+      long newThreshold = (long) (smoothedQps * properties.getGlobalQpsDynamicThreshold().getHotThresholdRatio() * (windowMs / 1000.0));
+      // Clamp: dynamic threshold never below the configured static floor
       newThreshold = Math.max(properties.getThreshold().getHotThreshold(), newThreshold);
 
       long oldThreshold = detector.getThreshold();

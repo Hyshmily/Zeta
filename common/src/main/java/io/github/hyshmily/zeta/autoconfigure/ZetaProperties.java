@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import java.util.ArrayList;
 import java.util.List;
@@ -221,7 +222,8 @@ public class ZetaProperties {
   @Min(1)
   private int versionKeyTtlMinutes = 10080;
 
-  /** Application name used for queue naming and routing keys. */
+  /** Application name used for queue naming and routing keys. Must match {@code [A-Za-z0-9_-]+}. */
+  @Pattern(regexp = "^[A-Za-z0-9_-]+$", message = "appName must match ^[A-Za-z0-9_-]+$")
   private String appName = "default";
 
   /** Exchange name for app-to-Worker reportToWorker routing. */
@@ -331,11 +333,11 @@ public class ZetaProperties {
     /** EMA decay factor for CPU smoothing (0.0 – 1.0). */
     private double cpuDecay = 0.95;
 
-    /** BBR sliding window size in milliseconds. */
+    /** BBR sliding window size in milliseconds. Must be >= {@link #bbrWindowBuckets}. */
     @Min(100)
     private long bbrWindowMs = 10_000;
 
-    /** Number of buckets in the BBR sliding window. */
+    /** Number of buckets in the BBR sliding window. Must be <= {@link #bbrWindowMs}. */
     @Min(2)
     private int bbrWindowBuckets = 100;
 

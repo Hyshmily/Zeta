@@ -21,6 +21,7 @@ import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import java.util.Objects;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Shared version comparison logic for send message guards used by both
@@ -56,6 +57,7 @@ import java.util.Objects;
  * @see CacheSyncListener
  */
 @Internal
+@Slf4j
 public final class VersionGuard {
 
   /**
@@ -102,6 +104,15 @@ public final class VersionGuard {
       return false;
     }
     if (incomingEpoch < existing.getDecisionEpoch()) {
+      // Detect severe epoch rollback (e.g., timestamp-space fallback → Redis INCR
+      // without floor guard). This is a "Worker incarnation failed" strong signal.
+      if (existing.getDecisionEpoch() - incomingEpoch > 1_000_000_000L) {
+        log.warn(
+          "Severe epoch rollback detected: existing={}, incoming={}, nodeId={} — " +
+            "Worker incarnation change likely lost, decisions for this key will be skipped",
+          existing.getDecisionEpoch(), incomingEpoch, incomingNodeId
+        );
+      }
       return true;
     }
 

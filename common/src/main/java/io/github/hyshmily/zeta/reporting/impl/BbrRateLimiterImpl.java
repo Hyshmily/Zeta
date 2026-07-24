@@ -103,12 +103,20 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     int bucketCount,
     long cooldownMs
   ) {
+    if (bucketCount <= 0 || windowMs <= 0) {
+      throw new IllegalArgumentException("windowMs and bucketCount must be positive");
+    }
+    long duration = windowMs / bucketCount;
+    if (duration <= 0) {
+      throw new IllegalArgumentException(
+        "windowMs(" + windowMs + ") must be >= bucketCount(" + bucketCount + ")");
+    }
     this.cpuMonitor = cpuMonitor;
     this.cpuThreshold = cpuThreshold;
     this.cooldownMs = cooldownMs;
     this.bucketCount = bucketCount;
-    this.bucketDurationMs = windowMs / bucketCount;
-    this.bucketPerSecond = (int) (1000L / this.bucketDurationMs);
+    this.bucketDurationMs = duration;
+    this.bucketPerSecond = Math.max(1, (int) (1000L / duration));
     this.passBuckets = new long[bucketCount];
     this.rtBuckets = new long[bucketCount];
     this.rtCounts = new int[bucketCount];
@@ -171,10 +179,22 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     inFlightField.value.decrementAndGet();
   }
 
-  /** Record a dropped flush from the gate (tryAcquire failed — never enqueued, inFlight unchanged).
-   *  Does NOT type global cooldown — the next flush cycle is allowed to retry immediately.
-   *  This prevents a transient drop from blocking all subsequent flushes for {@code cooldownMs}.
-   *  The cooldown mechanism is preserved for {@link #onConsumerDrop()} (consumer-side drops). */
+  /**
+   * Record a dropped flush from the gate (tryAcquire failed — never enqueued, inFlight unchanged).
+   *
+   * <p>Does NOT update the cooldown timestamp — the next flush cycle is allowed to retry immediately.
+   * This prevents a transient drop from blocking all subsequent flushes for {@code cooldownMs}.
+   *
+   * <p><b>Convergence proof:</b> continuous gate drops mean no new passes enter the sliding window,
+   * so maxPASS() eventually reads all-zero buckets and falls back to maxPassCache. The cache decays
+   * slowly (×0.99 per empty-window read), so maxInFlight shrinks gradually. Once inFlight falls
+   * back below the decaying budget, tryAcquire permits again. The design converges without lock-up.
+   *
+   * <p><b>Trade-off:</b> maxPassCache slow decay prevents the budget from anchoring permanently to
+   * a historical peak after a traffic step-down. Without decay, a once-hot key population would
+   * permanently inflate the concurrency budget even after the traffic pattern changes. The 0.99
+   * factor means the budget halves every ~69 empty-window reads (~3.5 s at 50 ms flush intervals).
+   */
   public void onGateDrop() {
     totalDropped.incrementAndGet();
   }
@@ -248,7 +268,10 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
       }
     }
     if (max == 0) {
-      return maxPassMinRtField.maxPassCache.get();
+      // All buckets empty — slowly decay cache so budget loosens under persistent gate drops.
+      // Without decay, maxInFlight would anchor permanently to the last observed peak even
+      // after a traffic step-down, preventing the limiter from adapting to lower load.
+      return maxPassMinRtField.maxPassCache.updateAndGet(c -> Math.max(1, (long) (c * 0.99)));
     }
     final long observed = max;
     maxPassMinRtField.maxPassCache.updateAndGet(c -> (c + observed) / 2);
