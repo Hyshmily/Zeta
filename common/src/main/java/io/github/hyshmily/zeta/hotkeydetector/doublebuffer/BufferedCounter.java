@@ -57,13 +57,13 @@ import org.springframework.beans.factory.InitializingBean;
 public class BufferedCounter implements InitializingBean, Destroyable {
 
   /** Default maximum distinct keys in one buffer before forced swap ({@value}). */
-  static final int DEFAULT_MAX_BUFFER_SIZE = 10_000;
+  private static final int DEFAULT_MAX_BUFFER_SIZE = 10_000;
 
   /** Default flush interval in milliseconds ({@value}). */
-  static final long DEFAULT_FLUSH_INTERVAL_MS = 500;
+  private static final long DEFAULT_FLUSH_INTERVAL_MS = 500;
 
   /** Default eager swap ratio ({@value}). */
-  static final double DEFAULT_EAGER_SWAP_RATIO = 0.8;
+  private static final double DEFAULT_EAGER_SWAP_RATIO = 0.8;
 
   private final int maxBufferSize;
 
@@ -190,21 +190,40 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * try to switch the active buffer with a new one and move the old one to standby for flushing.
+   * Try to switch the active buffer with a new one and move the old one to standby for flushing.
+   *
+   * <p>If the standby queue is full, all enqueued buffers are compacted into one
+   * (the oldest) and the rest are drained and merged into it.  This preserves all
+   * counts, reclaims queue slots, and avoids discarding entire buffers.  The
+   * overhead is O(total standby keys) and occurs on the hot path only when the
+   * queue is persistently backed up — i.e. switch rate > flush rate.
    */
   private void trySwitch() {
     CounterBuffer newBuffer = new CounterBuffer();
     CounterBuffer oldBuffer = active.getAndSet(newBuffer);
     if (oldBuffer != null) {
       if (flushQueue.size() >= MAX_STANDBY_BUFFERS) {
-        CounterBuffer victim = flushQueue.poll();
-        if (victim != null) {
-          victim.drain();
-          log.warn("Flush queue is full, dropping buffer with {} keys", victim.size());
-        }
+        compactFlushQueue();
       }
       flushQueue.offer(oldBuffer);
     }
+  }
+
+  /**
+   * Drain every buffer in the standby queue and merge all counts into the
+   * oldest one, then re-enqueue it. After compaction only one standby buffer
+   * remains, freeing queue slots for subsequent switches.
+   */
+  private void compactFlushQueue() {
+    CounterBuffer driver = flushQueue.poll();
+    if (driver == null) return;
+
+    CounterBuffer buf;
+    while ((buf = flushQueue.poll()) != null) {
+      buf.drain().forEach(driver::add);
+    }
+    log.warn("Flush queue compacted, standby buffer now has {} keys", driver.size());
+    flushQueue.offer(driver);
   }
 
   private void flushStandby() {
@@ -304,7 +323,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
      * @param key   the accessed key
      * @param delta the number of accesses to reportToWorker
      */
-    void add(String key, long delta) {
+    public void add(String key, long delta) {
       counters.computeIfAbsent(key, k -> new LongAdder()).add(delta);
     }
 
@@ -313,7 +332,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
      *
      * @return the number of distinct keys
      */
-    int size() {
+    public int size() {
       return counters.size();
     }
 
@@ -322,7 +341,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
      *
      * @return {@code true} if the buffer is empty
      */
-    boolean isEmpty() {
+    public boolean isEmpty() {
       return size() == 0;
     }
 
@@ -339,7 +358,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
      *
      * @return a map of keys to their accumulated counts, never {@code null}
      */
-    Map<String, Long> drain() {
+    public Map<String, Long> drain() {
       Map<String, LongAdder> oldCounters = counters;
 
       if (reusableResult == null) {
