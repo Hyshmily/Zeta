@@ -45,4 +45,29 @@ public class ConfidenceEvaluator {
   public ProbabilityResult evaluate(long cmsCount, double logThreshold, Double cv) {
     return estimator.evaluate(cmsCount, logThreshold, cv);
   }
+
+  /**
+   * Evaluates with per-key accumulated prior.
+   *
+   * @param observedCount    current window raw count
+   * @param logThreshold     hot threshold in log space
+   * @param cv               coefficient of variation (may be {@code null})
+   * @param accumulatedMean  key's posterior mean from previous evaluation
+   * @param accumulatedPrec  key's accumulated precision from previous evaluations
+   * @return updated {@link ProbabilityResult} with new accumulatedPrecision
+   * @see BayesianConfidenceEstimator#evaluateWithAccumulatedPrior
+   */
+  public ProbabilityResult evaluateWithAccumulatedPrior(
+    long observedCount, double logThreshold, Double cv,
+    double accumulatedMean, double accumulatedPrec
+  ) {
+    return estimator.evaluateWithAccumulatedPrior(
+      observedCount, logThreshold, cv, accumulatedMean, accumulatedPrec
+    );
+  }
+
+  /** Returns the configured prior mean from the underlying estimator. */
+  public double getPriorMean() {
+    return estimator.getPriorMean();
+  }
 }

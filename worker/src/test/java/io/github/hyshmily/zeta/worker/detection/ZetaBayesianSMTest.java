@@ -53,7 +53,7 @@ class ZetaBayesianSMTest {
 
   @BeforeEach
   void setUp() {
-    machine = new ZetaBayesianSM(3, 10, 4, EVAL);
+    machine = new ZetaBayesianSM(3, 10, 4, EVAL, 2.3026);
   }
 
   @Test

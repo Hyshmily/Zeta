@@ -118,6 +118,9 @@ public class Evaluator {
 
     FastLaneRuleManager.FastLaneRule rule = fastLaneRuleManager.match(key);
     boolean isFastlane = rule != null && windowSum >= rule.threshold();
+    if (isFastlane) {
+      return stateMachine.evaluate(key, true, true, null, () -> detector.getWindowSum(key));
+    }
 
     long threshold = detector.getThreshold();
     boolean isHot = windowSum >= threshold;
@@ -129,7 +132,7 @@ public class Evaluator {
     if (globalQpsEstimator != null) {
       long globalTotal = globalQpsEstimator.getWindowTotal();
       if (prevGlobalWindowTotal > 0) {
-        globalRatio = (double) globalTotal / Math.max(prevGlobalWindowTotal, 1);
+        globalRatio = (double) globalTotal / prevGlobalWindowTotal;
       }
       prevGlobalWindowTotal = globalTotal;
     }
@@ -139,7 +142,7 @@ public class Evaluator {
     double trendStrength = hist.getTrendStrength();
     EvaluationContext ctx = new EvaluationContext(cmsCount, windowSum, threshold, cv, trendStrength);
 
-    return stateMachine.evaluate(key, isHot, isFastlane, ctx);
+    return stateMachine.evaluate(key, isHot, isFastlane, ctx, () -> detector.getWindowSum(key));
   }
 
   /**

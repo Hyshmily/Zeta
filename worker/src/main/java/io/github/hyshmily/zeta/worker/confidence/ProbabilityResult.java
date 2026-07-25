@@ -22,25 +22,31 @@ package io.github.hyshmily.zeta.worker.confidence;
  * exceeds the hot threshold, along with the full Normal-Normal conjugate
  * posterior parameters for transparency and debugging.
  *
- * @param probability    P(true frequency &gt; threshold) — the key output decision value
- * @param level          {@link ConfidenceLevel} derived from {@code probability} via {@link #classify}
- * @param posteriorMean  mean of the posterior log-frequency distribution
- * @param posteriorStd   standard deviation of the posterior log-frequency distribution
- * @param cv             coefficient of variation of the observed window sums (may be {@code null})
+ * @param probability          P(true frequency &gt; threshold) — the key output decision value
+ * @param level                {@link ConfidenceLevel} derived from {@code probability} via {@link #classify}
+ * @param posteriorMean        mean of the posterior log-frequency distribution
+ * @param posteriorStd         standard deviation of the posterior log-frequency distribution
+ * @param cv                   coefficient of variation of the observed window sums (may be {@code null})
+ * @param accumulatedPrecision sum of likelihood precisions across evaluations for this key, capped at
+ *                             {@link BayesianConfidenceEstimator#MAX_EFFECTIVE_COUNT} times base
+ *                             likelihood precision; used as the prior precision for the next evaluation
  */
 public record ProbabilityResult(
   double probability,
   ConfidenceLevel level,
   double posteriorMean,
   double posteriorStd,
-  Double cv
+  Double cv,
+  double accumulatedPrecision
 ) {
   private static final double HIGH_THRESHOLD = 0.95;
 
   private static final double MEDIUM_THRESHOLD = 0.80;
 
-  public ProbabilityResult(double probability, double posteriorMean, double posteriorStd, Double cv) {
-    this(probability, classify(probability), posteriorMean, posteriorStd, cv);
+  public ProbabilityResult(
+    double probability, double posteriorMean, double posteriorStd, Double cv, double accumulatedPrecision
+  ) {
+    this(probability, classify(probability), posteriorMean, posteriorStd, cv, accumulatedPrecision);
   }
 
   private static ConfidenceLevel classify(double p) {

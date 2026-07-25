@@ -25,7 +25,7 @@ Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper prob
 
 - The Worker cluster aggregates access reports from all application instances and runs a two-path evaluation pipeline:
   - **FastLane path**: For keys matching user-configured glob rules (e.g. `product:*`), the sliding-window sum is compared directly against the rule's threshold. When the threshold is met, the key is promoted to `CONFIRMED_HOT` immediately — no Bayesian confidence gating, no confirm windows. End-to-end latency: **~60ms** (P99). Designed for flash-sale product IDs, breaking-news slugs, and any key where false positives are tolerable.
-  - **Bayesian path**: For all other keys, sliding-window frequency analysis combined with a Bayesian confidence state machine (Normal-Normal conjugate posterior) produces HOT/COOL decisions. This path trades ~5s latency for high-confidence, low false-positive decisions.
+  - **Bayesian path**: For all other keys, sliding-window frequency analysis combined with a Bayesian confidence state machine (Normal-Normal conjugate posterior with per-key evidence accumulation) produces HOT/COOL decisions. Promotion latency depends on traffic intensity: a strongly hot key (well above threshold) reaches CONFIRMED_HOT in **~50–150ms**, while a borderline key (near-threshold) may require multiple evaluation windows or may never reach HIGH confidence — a deliberate trade-off prioritizing a low false-positive rate over guaranteed promotion speed.
 
 - The reporting path is protected by a BBR congestion control algorithm that automatically throttles based on CPU load, preventing burst traffic from overwhelming the channel.
 

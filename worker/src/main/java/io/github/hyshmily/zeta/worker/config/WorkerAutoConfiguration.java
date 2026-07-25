@@ -241,7 +241,8 @@ public class WorkerAutoConfiguration {
       properties.getConfirmWindows(),
       properties.getCoolWindows(),
       properties.getPreCoolGraceWindows(),
-      confidenceEvaluator
+      confidenceEvaluator,
+      properties.getBayesian().getPriorMean()
     );
   }
 

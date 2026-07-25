@@ -216,3 +216,83 @@ The standard Normal CDF Φ(z) is pre-computed across z ∈ [-6, 6] at step 0.001
 4. **Three-tier thresholds are uncalibrated.** The 0.80/0.95 splits were chosen based on developer intuition and ad-hoc testing, not systematic ROC analysis. If production data shows excessive false HOT broadcasts or missed detections, these thresholds should be revisited.
 
 5. **State machine code in worker module.** `ZetaBayesianSM` and all confidence types reside in the `worker` module, never shipped in the Maven Central `zeta` starter JAR. Only the `ZetaBayesianSM` interface stays in `common` for type safety across module boundaries. The Worker module depends on `common` for the interface and packages the implementation exclusively in its own artifact.
+
+## 2026-07-24 Addendum: Per-Key Adaptive Prior (κ_max = 5)
+
+### Motivation
+
+The original design used a **fixed prior** that never updated: `priorMean` and `priorStd` were set at construction and applied identically to every key regardless of history. A key observed 100 times and a key observed once received the same prior weight. This caused a pathological oscillation for borderline keys:
+
+- A key with consistent `observedCount=15` against `threshold=10` produces `P(hot) ≈ 0.68` (LOW) every evaluation.
+- The state machine's `hotStreak` counter cycles: `2 → 3 → (LOW → reset to 2) → 3 → ...`
+- The key can **never** reach `CONFIRMED_HOT` or `CANDIDATE_HOT`, regardless of how consistently it stays above threshold.
+
+### Design
+
+A per-key **accumulated precision** is now tracked in `ZetaBayesianSM.KeyState` alongside the existing streak counters. After each Bayesian evaluation, the posterior mean and accumulated precision are stored and used as the prior for the next evaluation of the same key.
+
+**Update formula** (Normal-Normal conjugate, same family as the original model):
+
+```
+y = ln(max(observedCount, 1))
+σ = adjustLikelihoodStd(baseLikelihoodStd, CV)
+lp = 1/σ²
+priorPrecision = basePriorPrecision + accumulatedPrecision
+posteriorPrecision = priorPrecision + lp
+posteriorMean = (priorPrecision × accumulatedMean + lp × y) / posteriorPrecision
+newAccumulatedPrecision = min(accumulatedPrecision + lp, κ_max × baseLikelihoodPrecision)
+```
+
+Where:
+- `basePriorPrecision = 1/priorStd²` (config)
+- `baseLikelihoodPrecision = 1/likelihoodStd²` (config)
+- `κ_max = MAX_EFFECTIVE_COUNT = 5` (steady-state upper bound)
+
+### Precision cap (κ_max)
+
+The cap prevents the well-known **stickiness** problem of unbounded Bayesian accumulation: without a cap, a key observed for hours would have near-zero posterior variance and become unable to detect regime changes (e.g., a hot key going cold).
+
+With `κ_max = 5`:
+
+| Metric | Value |
+|--------|-------|
+| Maximum accumulated precision | `5 / 0.64 ≈ 7.81` |
+| Steady-state posterior std (no CV) | `sqrt(1/(0.25 + 7.81 + 1.56)) ≈ 0.322` |
+| Time to reach HIGH for `count ≥ 18` (steady) | `≤ κ_max` windows |
+| Time to cool from `count=100` to `count=5` (HIGH → non-HIGH) | ~9 windows (~450ms at 50ms window) |
+
+The CV-adjusted likelihood precision naturally accelerates convergence for stable traffic (tight σ → higher lp → faster accumulation) and dampens it for bursty traffic (wide σ → lower lp → slower accumulation).
+
+### Implementation changes
+
+| Class | Change |
+|-------|--------|
+| `ProbabilityResult` | Added `accumulatedPrecision` field (double) |
+| `BayesianConfidenceEstimator` | Added `MAX_EFFECTIVE_COUNT = 5`, `evaluateWithAccumulatedPrior()` overload |
+| `ConfidenceEvaluator` | Added `evaluateWithAccumulatedPrior()` pass-through, `getPriorMean()` |
+| `ZetaBayesianSM.KeyState` | Added `posteriorMean` and `accumulatedPrecision` fields |
+| `ZetaBayesianSM` | Constructor accepts `priorMean`; all three `confidenceEvaluator` call sites use accumulated prior; posterior updated after every evaluation |
+
+### Regime-change reset on COOL path
+
+A critical design decision: when a key enters the COOL detection path (`evaluatePreCooling`), the accumulated posterior is **reset** to the global prior (`posteriorMean = priorMean, accumulatedPrecision = 0`). The COOL evaluation then uses the stateless `evaluate()` rather than `evaluateWithAccumulatedPrior()`.
+
+This prevents the hot-phase accumulated posterior from delaying COOL broadcasts: without the reset, a previously-hot key with high posterior precision would require multiple cold windows to shift the posterior mean below the HIGH confidence threshold, causing a noticeable lag in regime-change detection. Each regime (hot vs. cooling) evaluates independently; only the HOT phase enjoys per-key evidence accumulation.
+
+**Silent revive** (`PRE_COOLING → CONFIRMED_HOT`) bypasses the evaluator entirely, so the reset posterior doesn't affect the revive. The next Bayesian evaluation after a silent revive starts from the global prior, which is correct — the key must re-establish its hot status through fresh observations.
+
+### No new configuration surface
+
+### Relation to existing mechanisms
+
+- **Fastlane bypass**: fastlane does not call the estimator, so fastlane keys do not accumulate posterior. When a previously-fastlane key enters the Bayesian path, it starts from the global prior (equivalent to fixed-prior behavior).
+- **hotStreak / confirmCount**: the discrete streak counter and the adaptive posterior are complementary. `hotStreak` gates whether the Bayesian gate is consulted at all; the posterior gates what confidence level is reported. They operate on different timescales (streak for binary gate, posterior for continuous precision).
+- **CV adjustment**: CV modifies `σ` per-evaluation, which changes `lp` and therefore how much each new observation contributes to `accumulatedPrecision`. Stable traffic accumulates faster; bursty traffic accumulates slower. This aligns with the existing CV-based dynamic variance scaling.
+
+### Consequences
+
+1. **Cold-switch latency**: keys that were very hot (count ≫ 18) and then go cold take ~9 evaluation windows to drop below HIGH confidence. At 50ms windows this is ~450ms — acceptable relative to typical cool duration windows (minutes).
+
+2. **Memory**: each tracked key now carries two additional `double` fields (16 bytes per key). At 100k tracked keys, this adds ~1.6 MB to the Worker heap — negligible.
+
+3. **Thread safety**: posterior updates happen inside the existing `Striped` per-key lock. No additional synchronization required.

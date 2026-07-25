@@ -16,6 +16,8 @@
 package io.github.hyshmily.zeta.model;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import lombok.Builder;
+import lombok.experimental.Accessors;
 
 /**
  * Immutable snapshot of a key's state machine state at a point in time.
@@ -26,10 +28,9 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
  * {@code key} field enables the single-argument overload of
  * {@link ZetaBayesianSM#rollbackToPreviousState(ZetaBayesianSM.StateSnapshot)}.
  *
- * @param key          the cache key (never {@code null})
- * @param currentState the lifecycle stage at snapshot time ({@link
- *                     ZetaBayesianSM.State} enum name, never {@code null})
- * @param hotStreak    consecutive hot-window count at snapshot time
- * @param coolStreak   consecutive cold-window count at snapshot time
+ * <p>Fluent accessors ({@code key()}, {@code currentState()}, etc.) preserve
+ * the same API as the previous {@code record} representation.
  */
+@Accessors(fluent = true)
+@Builder
 public record StateSnapshot(String key, String currentState, int hotStreak, int coolStreak) {}

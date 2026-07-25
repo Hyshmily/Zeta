@@ -20,6 +20,7 @@ import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -134,7 +135,21 @@ public interface ZetaBayesianSM {
    * @return a non-null {@link ZetaDecision} indicating what action the
    *         caller should take (HOT, COOL, or NONE)
    */
-  ZetaDecision evaluate(String key, boolean isHotThisWindow, boolean isFastlane, EvaluationContext ctx);
+  ZetaDecision evaluate(
+    String key,
+    boolean isHotThisWindow,
+    boolean isFastlane,
+    EvaluationContext ctx,
+    LongSupplier windowSumSupplier
+  );
+
+  /**
+   * Convenience overload that uses {@code () -> ctx.windowSum()} as the
+   * window-sum supplier, matching the pre-LongSupplier behaviour.
+   */
+  default ZetaDecision evaluate(String key, boolean isHotThisWindow, boolean isFastlane, EvaluationContext ctx) {
+    return evaluate(key, isHotThisWindow, isFastlane, ctx, ctx::windowSum);
+  }
 
   /** Remove all tracked state for the given key, resetting it to COLD. */
   void reset(String key);

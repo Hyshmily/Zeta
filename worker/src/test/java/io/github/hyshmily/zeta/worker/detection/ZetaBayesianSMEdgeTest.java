@@ -57,7 +57,7 @@ class ZetaBayesianSMEdgeTest {
   private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null, 0.0);
 
   private static ZetaBayesianSM machineWith(int confirm, int cool, int grace) {
-    return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(confirm, cool, grace, EVAL);
+    return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(confirm, cool, grace, EVAL, 2.3026);
   }
 
   @Test
@@ -422,13 +422,13 @@ class ZetaBayesianSMEdgeTest {
   }
 
   @Test
-  void candidateHot_withMediumConfidence_shouldStayInCandidateHot() {
+  void candidateHot_withMediumConfidence_shouldReachHighWithAccumulation() {
     ZetaBayesianSM m = machineWith(1, 5, 2);
     assertThat(m.evaluate("key", true, false, MEDIUM_CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
     ZetaDecision d = m.evaluate("key", true, false, MEDIUM_CTX);
-    assertThat(d.type()).isEqualTo(DecisionType.NONE);
-    assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CANDIDATE_HOT");
+    assertThat(d.type()).isEqualTo(DecisionType.HOT);
+    assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("CONFIRMED_HOT");
   }
 
   @Test

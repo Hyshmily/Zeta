@@ -200,6 +200,31 @@ public class SlidingWindowDetector {
   }
 
   /**
+   * Read-only window sum for the given key, computed from the current circular
+   * buffer without any side effects.  Returns {@code 0} if the key has no
+   * tracked slices.
+   *
+   * <p>This is the lock-free re-read used inside the state machine's per-key
+   * lock to close the TOCTOU race between {@link #addCount} (called outside
+   * the lock) and the Bayesian evaluation (called inside the lock).
+   *
+   * @param key the cache key
+   * @return the sliding-window sum at the current time, or {@code 0}
+   */
+  public long getWindowSum(String key) {
+    AtomicLongArray slices = windows.get(key);
+    if (slices == null) return 0L;
+    long now = System.currentTimeMillis();
+    int length = slices.length();
+    int currentIndex = (int) ((now / timeMillisPerSlice) % length);
+    long sum = 0L;
+    for (int i = 0; i < windowSize; i++) {
+      sum += slices.get((currentIndex - i + length) % length);
+    }
+    return sum;
+  }
+
+  /**
    * Evicts stale tracking data for keys that have not been accessed within the
    * given timeout.  Unlike a simple two‑step {@code removeIf}, this implementation
    * uses atomic re‑verification to eliminate a race window between the two maps:

@@ -57,6 +57,14 @@ import lombok.Getter;
 @SuppressWarnings("all")
 public class BayesianConfidenceEstimator {
 
+  /**
+   * Maximum effective sample size per key (κ_max). Once a key's accumulated
+   * precision reaches this many base-likelihood-equivalent observations,
+   * further observations contribute only to the posterior mean while the
+   * precision (and therefore posterior std) stabilises.
+   */
+  static final int MAX_EFFECTIVE_COUNT = 5;
+
   /** Prior mean of the log-frequency distribution. */
   @Getter
   private final double priorMean;
@@ -68,6 +76,12 @@ public class BayesianConfidenceEstimator {
   /** Base likelihood standard deviation. Adjusted by CV when available. */
   @Getter
   private final double likelihoodStd;
+
+  /** Base likelihood precision = 1 / likelihoodStd². */
+  private final double baseLikelihoodPrecision;
+
+  /** Maximum accumulated precision = MAX_EFFECTIVE_COUNT × baseLikelihoodPrecision. */
+  private final double maxAccumulatedPrecision;
 
   /**
    * Constructs the estimator with the given Normal-Normal conjugate parameters.
@@ -83,6 +97,8 @@ public class BayesianConfidenceEstimator {
     this.priorMean = priorMean;
     this.priorStd = priorStd;
     this.likelihoodStd = likelihoodStd;
+    this.baseLikelihoodPrecision = 1.0 / (likelihoodStd * likelihoodStd);
+    this.maxAccumulatedPrecision = MAX_EFFECTIVE_COUNT * this.baseLikelihoodPrecision;
   }
 
   /**
@@ -102,20 +118,57 @@ public class BayesianConfidenceEstimator {
    *         confidence level, and distribution parameters
    */
   public ProbabilityResult evaluate(long observedCount, double logThreshold, Double cv) {
+    return evaluateWithAccumulatedPrior(observedCount, logThreshold, cv, priorMean, 0.0);
+  }
+
+  /**
+   * Computes posterior probability with per-key accumulated prior.
+   *
+   * <p>Unlike {@link #evaluate(long, double, Double)} which always uses the
+   * fixed global prior, this overload accepts a key-specific accumulated
+   * posterior from previous evaluations. The estimator combines it with the
+   * current observation via the Normal-Normal conjugate update, caps the
+   * accumulated precision at {@code MAX_EFFECTIVE_COUNT × baseLikelihoodPrecision},
+   * and returns the updated precision so the caller can store it for the next
+   * evaluation.
+   *
+   * <p>This enables per-key Bayesian evidence accumulation: a key observed
+   * consistently over many windows gains higher posterior precision, while
+   * the cap (κ_max = {@value #MAX_EFFECTIVE_COUNT}) prevents the model from
+   * becoming too sticky to detect regime changes.
+   *
+   * @param observedCount    the raw count observed for this key in the
+   *                         current sliding window
+   * @param logThreshold     the hot threshold in log space (natural log of raw count)
+   * @param cv               coefficient of variation of the per-key
+   *                         sliding-window sums (may be {@code null})
+   * @param accumulatedMean  the key's accumulated posterior mean from
+   *                         previous evaluations (initially {@link #priorMean})
+   * @param accumulatedPrec  the key's accumulated precision from previous
+   *                         evaluations (initially {@code 0.0})
+   * @return a {@link ProbabilityResult} with the updated posterior
+   *         parameters and the new accumulated precision
+   */
+  public ProbabilityResult evaluateWithAccumulatedPrior(
+    long observedCount, double logThreshold, Double cv,
+    double accumulatedMean, double accumulatedPrec
+  ) {
     double y = Math.log(Math.max(observedCount, 1.0));
+
     double sigma = (cv != null && Double.isFinite(cv)) ? adjustLikelihoodStd(likelihoodStd, cv) : likelihoodStd;
 
-    double priorPrecision = 1.0 / (priorStd * priorStd);
     double likelihoodPrecision = 1.0 / (sigma * sigma);
-    double posteriorPrecision = priorPrecision + likelihoodPrecision;
+    double priorPrecision = 1.0 / (priorStd * priorStd);
 
-    double posteriorMean = (priorMean * priorPrecision + y * likelihoodPrecision) / posteriorPrecision;
+    double totalPriorPrecision = priorPrecision + accumulatedPrec;
+    double posteriorPrecision = totalPriorPrecision + likelihoodPrecision;
+    double posteriorMean = (totalPriorPrecision * accumulatedMean + likelihoodPrecision * y) / posteriorPrecision;
     double posteriorStd = Math.sqrt(1.0 / posteriorPrecision);
 
+    double newAccPrec = Math.min(accumulatedPrec + likelihoodPrecision, maxAccumulatedPrecision);
     double z = (logThreshold - posteriorMean) / posteriorStd;
     double hotProbability = 1.0 - NormalCdfTable.phi(z);
-
-    return new ProbabilityResult(hotProbability, posteriorMean, posteriorStd, cv);
+    return new ProbabilityResult(hotProbability, posteriorMean, posteriorStd, cv, newAccPrec);
   }
 
   private static double adjustLikelihoodStd(double baseStd, double cv) {

@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.Setter;
@@ -48,28 +49,42 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p>{@code confirmCount} is the minimum data-sufficiency floor (default 1
  * window, i.e. 50 ms). It is <em>not</em> the primary evidence gate —
- * Bayesian confidence is. The moment {@code hotStreak >= confirmCount},
- * the Bayesian posterior determines the outcome: HIGH → promote, MEDIUM →
- * hold at CANDIDATE_HOT, LOW → reset streak.
+ * the accumulated posterior (per-key {@code posteriorMean} and
+ * {@code accumulatedPrecision}, capped at κ_max = 5) determines the
+ * outcome: HIGH → promote, MEDIUM → hold at CANDIDATE_HOT, LOW → retention
+ * or full reset after {@value #MAX_LOW_RESETS} consecutive LOWs.
  *
  * <h3>State diagram with fast-lane</h3>
  * <pre>
- *       fastlane: windowSum >= ruleThreshold ───────┐
- *                                                   |
- *                                                   ▼
- *   COLD ──hotStreak >= confirm──► CANDIDATE_HOT ──HIGH confidence──► CONFIRMED_HOT
- *                           + MEDIUM stay / LOW reset                   │
- *    ▲                                                                  │
- *    │                                  PRE_COOLING ◄── coolStreak >= grace ─┤
- *    │                                   │                                   │
- *    │                                   ├── coolStreak >= cool ──► COLD ────┘
- *    │                                   │        (MEDIUM/LOW confidence)
- *    │                                   │
- *    │                                   └── evictStale (stale) ──► broadcast COOL ──► (removed)
- *    │                                              |                     (CONFIRMED_HOT or PRE_COOLING,
- *    │                                              |                      staleAfterMs = 2 × coolDurationMs)
- *    └──── hotStreak > 0 ───────────────────────────┘
- *                              (silent revive)
+ *       fastlane: windowSum >= ruleThreshold ───────────────────┐
+ *                                                               │
+ *                                                               ▼
+ *               ┌── accumulate ────────────────────────-──┐
+ *               │  posteriorMean, accumulatedPrecision    │
+ *               ▼                                         │
+ *   COLD ──hotStreak >= confirm──► CANDIDATE_HOT ──accumulate + HIGH ──► CONFIRMED_HOT
+ *              + LOW retention (MAX_LOW_RESETS)            │
+ *              + MEDIUM → CANDIDATE_HOT                    │ coolStreak >= grace
+ *    ▲                                                     ▼
+ *    │                                            ┌───────────────┐
+ *    │                                            │  PRE_COOLING  │
+ *    │                                            │  posterior    │
+ *    │                                            │  reset to     │
+ *    │                                            │  global prior │
+ *    │                                            └───────┬───────┘
+ *    │                                                    │
+ *    │                              coolStreak >= cool ───┤
+ *    │                              + MEDIUM/LOW ────────► COLD (broadcast COOL)
+ *    │                              + HIGH ──────────────► stay (coolStreak--)
+ *    │                                                    │
+ *    │                              evictStale (stale) ───┤
+ *    │                              (CONFIRMED_HOT or     └──► broadcast COOL ──► (removed)
+ *    │                               PRE_COOLING,
+ *    │                               staleAfterMs =
+ *    │                               2 × coolDurationMs)
+ *    │
+ *    └──── hotStreak > 0 ──────────────────────────────────┘
+ *                     (silent revive, no broadcast)
  * </pre>
  *
  * <p><b>Fast-lane bypass:</b> When the window sum meets a configured fast-lane
@@ -82,19 +97,28 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <h3>Bayesian gating rules</h3>
  * <ul>
- *   <li><b>HOT promotion (COLD → CANDIDATE_HOT → CONFIRMED_HOT):</b>
- *       When {@code hotStreak >= confirmCount}, the confidence level
- *       determines the transition:
+ *   <li><b>Accumulated posterior:</b> Each key's {@code posteriorMean} and
+ *       {@code accumulatedPrecision} persist across evaluations and serve as
+ *       the prior for the next Bayesian gate. Precision is capped at
+ *       κ_max = 5 base-likelihood-equivalent observations. Both COLD and
+ *       CANDIDATE_HOT paths use the accumulated prior; the COOL path
+ *       (PRE_COOLING) resets to the global prior on regime change.</li>
+ *   <li><b>HOT promotion (COLD):</b> When {@code hotStreak >= confirmCount},
+ *       the confidence level determines the transition:
  *       <ul>
  *         <li>HIGH → promote to CONFIRMED_HOT and broadcast HOT</li>
  *         <li>MEDIUM → promote to CANDIDATE_HOT, defer broadcast</li>
- *         <li>LOW → set hotStreak = confirmCount - 1 (retention, not reset)</li>
+ *         <li>LOW → retention (hotStreak = confirmCount - 1) for the first
+ *             {@value #MAX_LOW_RESETS} times; then full reset (hotStreak = 0)</li>
  *       </ul></li>
- *   <li><b>CANDIDATE_HOT hot window:</b> HIGH confidence → CONFIRMED_HOT
- *       + HOT broadcast; MEDIUM/LOW → stay in CANDIDATE_HOT</li>
- *   <li><b>COOL broadcast:</b> Sent when Bayesian confidence is MEDIUM or LOW;
- *       HIGH confidence decrements the coolStreak so the key stays
- *       in PRE_COOLING for another window</li>
+ *   <li><b>CANDIDATE_HOT hot window:</b> Uses accumulated prior (same as COLD).
+ *       HIGH confidence → CONFIRMED_HOT + HOT broadcast; MEDIUM/LOW → stay
+ *       in CANDIDATE_HOT</li>
+ *   <li><b>COOL broadcast:</b> Sent when Bayesian confidence is MEDIUM or LOW.
+ *       Uses a <b>reset</b> global prior — the accumulated hot-phase posterior
+ *       is cleared on entry to PRE_COOLING so that hot history does not delay
+ *       regime-change detection. HIGH confidence decrements the coolStreak so
+ *       the key stays in PRE_COOLING for another window.</li>
  *   <li><b>Silent revive:</b> PRE_COOLING + hot window → CONFIRMED_HOT
  *       with no broadcast (regardless of confidence)</li>
  *   <li><b>Fast-lane revive:</b> PRE_COOLING + fastlane → CONFIRMED_HOT
@@ -128,6 +152,14 @@ import lombok.extern.slf4j.Slf4j;
  *   <li>HeavyKeeper admission — never held inside this class.</li>
  * </ol>
  *
+ * <p>The {@code windowSumSupplier} ({@link java.util.function.LongSupplier})
+ * is provided by {@link io.github.hyshmily.zeta.worker.detection.Evaluator}
+ * and calls {@code SlidingWindowDetector.getWindowSum(key)} inside the
+ * per-key lock. This re-read closes the TOCTOU race between the sliding-window
+ * update (called outside the lock) and the Bayesian evaluation (inside the
+ * lock). The state machine depends only on {@code LongSupplier}, not on
+ * {@code SlidingWindowDetector} itself — zero coupling.
+ *
  * <p>{@link #confidenceEvaluator} performs only reads of pre-computed
  * HeavyKeeper sketch data (carried in {@link EvaluationContext#cmsCount})
  * and never acquires any HeavyKeeper lock. This invariant is critical:
@@ -160,17 +192,21 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    * @param coolCount           total consecutive cold windows for full cool-down
    * @param preCoolGraceCount   cold windows before entering PRE_COOLING
    * @param confidenceEvaluator the Bayesian confidence evaluator (must not be {@code null})
+   * @param priorMean           the global prior mean (log scale); used as the initial
+   *                            posterior mean for new keys
    */
   public ZetaBayesianSM(
     int confirmCount,
     int coolCount,
     int preCoolGraceCount,
-    ConfidenceEvaluator confidenceEvaluator
+    ConfidenceEvaluator confidenceEvaluator,
+    double priorMean
   ) {
     this.confirmCount = confirmCount;
     this.coolCount = coolCount;
     this.preCoolGraceCount = preCoolGraceCount;
     this.confidenceEvaluator = confidenceEvaluator;
+    this.priorMean = priorMean;
   }
 
   /** Number of consecutive hot windows required to promote COLD → CONFIRMED_HOT. */
@@ -196,6 +232,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   @Setter
   private volatile int preCoolGraceCount;
 
+  /**
+   * Maximum consecutive LOW-confidence resets before a full streak reset.
+   * The first N evaluations use retention (hotStreak = confirmCount - 1) to
+   * quickly re-evaluate during burst traffic. After N consecutive LOWs, a
+   * full reset (hotStreak = 0) breaks the 2↔3 oscillation for borderline
+   * keys that persistently fail Bayesian confidence but stay above threshold.
+   */
+  private static final int MAX_LOW_RESETS = 2;
+
   /** Current state + streak counters, keyed by cache key. */
   private final ConcurrentHashMap<String, KeyState> states = new ConcurrentHashMap<>();
 
@@ -212,6 +257,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
 
   /** The Bayesian confidence evaluator that gates every state transition. */
   private final ConfidenceEvaluator confidenceEvaluator;
+
+  /** Global prior mean (log scale) for new key initialization. */
+  private final double priorMean;
 
   /**
    * Evaluates the current sliding-window observation with Bayesian confidence
@@ -243,7 +291,13 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    */
 
   @Override
-  public ZetaDecision evaluate(String key, boolean isHotThisWindow, boolean isFastlane, EvaluationContext ctx) {
+  public ZetaDecision evaluate(
+    String key,
+    boolean isHotThisWindow,
+    boolean isFastlane,
+    EvaluationContext ctx,
+    LongSupplier windowSumSupplier
+  ) {
     Lock lock = keyLocks.get(key);
     lock.lock();
 
@@ -268,19 +322,19 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         if (!isHotThisWindow) {
           return ZetaDecision.NONE;
         }
-        state = KeyState.builder().build();
+
+        state = KeyState.builder().posteriorMean(priorMean).accumulatedPrecision(0.0).build();
         states.put(key, state);
       } else {
         snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
       }
       state.lastUpdateTime = System.currentTimeMillis();
 
-      // Re-check isHot inside the lock to close the cross-component gap:
-      // isHotThisWindow was determined before the lock was acquired, and
-      // a concurrent reportToWorker for the same key may have pushed the window
-      // over the threshold in the intervening microseconds.
-      // See isHotRecheckInsideLock_shouldRouteToHotWhenCallerSaysCold.
-      boolean hot = isHotThisWindow || (ctx.windowSum() >= ctx.threshold());
+      // Re-read the current sliding-window sum inside the lock via the
+      // LongSupplier provided by Evaluator.  This closes the TOCTOU race:
+      // addCount(key, count) was called outside the lock, and another thread
+      // could have updated the window between that call and this evaluation.
+      boolean hot = isHotThisWindow || (windowSumSupplier.getAsLong() >= ctx.threshold());
       return hot ? evaluateHot(key, state, ctx, snapShot) : evaluateCold(key, state, ctx, snapShot);
     } catch (Exception e) {
       log.warn("Unexpected StateMachine Exception for key {}", key, e);
@@ -310,7 +364,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    *   <tr><th>Current state</th><th>Confidence</th><th>Next state</th><th>Decision</th></tr>
    *   <tr><td>COLD / hotStreak &ge; confirmCount</td><td>HIGH</td><td>CONFIRMED_HOT</td><td>HOT</td></tr>
    *   <tr><td>COLD / hotStreak &ge; confirmCount</td><td>MEDIUM</td><td>CANDIDATE_HOT</td><td>NONE</td></tr>
-   *   <tr><td>COLD / hotStreak &ge; confirmCount</td><td>LOW</td><td>COLD (stay, streak decremented)</td><td>NONE</td></tr>
+   *   <tr><td>COLD / hotStreak &ge; confirmCount</td><td>LOW</td><td>COLD (stay, retention or full reset)</td><td>NONE</td></tr>
    *   <tr><td>CANDIDATE_HOT</td><td>HIGH</td><td>CONFIRMED_HOT</td><td>HOT</td></tr>
    *   <tr><td>CANDIDATE_HOT</td><td>MEDIUM/LOW</td><td>CANDIDATE_HOT (stay)</td><td>NONE</td></tr>
    *   <tr><td>PRE_COOLING</td><td><em>any</em></td><td>CONFIRMED_HOT</td><td>NONE (silent revive)</td></tr>
@@ -342,33 +396,62 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
           return ZetaDecision.none(key, snapShot);
         }
 
-        ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
+        ProbabilityResult pr = confidenceEvaluator.evaluateWithAccumulatedPrior(
+          obs,
+          ctx.logThreshold(),
+          ctx.cv(),
+          state.posteriorMean,
+          state.accumulatedPrecision
+        );
+        state.posteriorMean = pr.posteriorMean();
+        state.accumulatedPrecision = pr.accumulatedPrecision();
+
         switch (pr.level()) {
           case HIGH -> {
             state.currentState = CONFIRMED_HOT;
+            state.lowResetCount = 0;
             log.info("State transition: COLD -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
             return ZetaDecision.hot(key, snapShot);
           }
           case MEDIUM -> {
             state.currentState = CANDIDATE_HOT;
+            state.lowResetCount = 0;
             return ZetaDecision.none(key, snapShot);
           }
           default -> {
-            // Retention strategy: set hotStreak one below confirmCount so the
-            // very next hot window re-enters Bayesian evaluation immediately.
-            // A full reset (hotStreak = 0) would waste confirmCount windows
-            // re-accumulating the streak — during which the key may already be
-            // genuinely hot again.  See the "LOW → retention" item in the
-            // class-level Javadoc.
-            state.hotStreak = confirmCount - 1;
+            if (state.lowResetCount < MAX_LOW_RESETS) {
+              // Retention strategy: set hotStreak one below confirmCount so the
+              // very next hot window re-enters Bayesian evaluation immediately.
+              // This avoids wasting confirmCount windows during burst traffic.
+              state.hotStreak = confirmCount - 1;
+              state.lowResetCount++;
+            } else {
+              // Full reset after MAX_LOW_RESETS consecutive LOW evaluations.
+              // Prevents the 2↔3 oscillation where a borderline key that
+              // stays above threshold but consistently fails Bayesian
+              // confidence can never reach CONFIRMED_HOT.
+              state.hotStreak = 0;
+              state.lowResetCount = 0;
+            }
             return ZetaDecision.none(key, snapShot);
           }
         }
       }
       case CANDIDATE_HOT -> {
-        ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
+        ProbabilityResult pr = confidenceEvaluator.evaluateWithAccumulatedPrior(
+          obs,
+          ctx.logThreshold(),
+          ctx.cv(),
+          state.posteriorMean,
+          state.accumulatedPrecision
+        );
+        state.posteriorMean = pr.posteriorMean();
+        state.accumulatedPrecision = pr.accumulatedPrecision();
+
         if (pr.level() == ConfidenceLevel.HIGH) {
           state.currentState = CONFIRMED_HOT;
+          state.lowResetCount = 0;
+
           log.info("State transition: CANDIDATE_HOT -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
           return ZetaDecision.hot(key, snapShot);
         }
@@ -376,6 +459,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       }
       case PRE_COOLING -> {
         state.currentState = CONFIRMED_HOT;
+        state.lowResetCount = 0;
+
         log.info("State transition: PRE_COOLING -> CONFIRMED_HOT (silent revive) key={}", key);
         return ZetaDecision.none(key, snapShot);
       }
@@ -411,6 +496,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   private ZetaDecision evaluateCold(String key, KeyState state, EvaluationContext ctx, StateSnapshot snapShot) {
     state.coolStreak++;
     state.hotStreak = 0;
+    state.lowResetCount = 0;
 
     switch (state.currentState) {
       case CANDIDATE_HOT -> {
@@ -431,7 +517,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         }
         if (state.coolStreak >= graceNeeded) {
           state.currentState = PRE_COOLING;
-          // Check immediate PRE_COOLING → COLD transition
+          // Regime change: reset accumulated posterior for COOL detection.
+          state.posteriorMean = priorMean;
+          state.accumulatedPrecision = 0.0;
 
           return evaluatePreCooling(key, state, ctx, snapShot);
         }
@@ -474,7 +562,13 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       if (ctx.trendStrength() > 0 && ctx.trendStrength() < 1.0) {
         obs = Math.max(1, (long) (obs * ctx.trendStrength()));
       }
+      // Regime change: COOL path evaluates with global prior, not accumulated history.
+      // Resetting prevents a previously-hot key's accumulated posterior from
+      // delaying COOL broadcast.
+      state.posteriorMean = priorMean;
+      state.accumulatedPrecision = 0.0;
       ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
+
       if (pr.level() != ConfidenceLevel.HIGH) {
         state.currentState = COLD;
         log.info("State transition: PRE_COOLING -> COLD key={} obs={} pct={}", key, obs, pr.probability());
@@ -510,6 +604,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    * @return a HOT decision with a pre-mutation snapshot for rollback
    */
   private ZetaDecision fastlane(KeyState state, String key) {
+    StateSnapshot snapShot;
+
     if (state == null) {
       state = KeyState.builder()
         .currentState(CONFIRMED_HOT)
@@ -517,11 +613,10 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         .lastUpdateTime(System.currentTimeMillis())
         .build();
       states.put(key, state);
+      snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
 
-      return ZetaDecision.hot(
-        key,
-        new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak)
-      );
+      log.info("Fast-lane promotion: key={} state={}", key, state);
+      return ZetaDecision.hot(key, snapShot);
     }
 
     if (state.currentState != CONFIRMED_HOT) {
@@ -530,13 +625,16 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         .currentState(CONFIRMED_HOT)
         .hotStreak(Math.max(state.hotStreak, confirmCount))
         .coolStreak(0)
+        .lowResetCount(0)
         .lastUpdateTime(System.currentTimeMillis())
         .build();
       states.put(key, state);
     } else {
       state.lastUpdateTime = System.currentTimeMillis();
     }
-    StateSnapshot snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
+
+    log.info("Fast-lane promotion: key={} state={}", key, state);
+    snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
     return ZetaDecision.hot(key, snapShot);
   }
 
@@ -712,6 +810,31 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     /** Number of consecutive windows below the hot threshold. */
     @Builder.Default
     int coolStreak = 0;
+
+    /**
+     * Consecutive LOW-confidence resets in COLD state.
+     * Incremented on LOW retention, reset on MEDIUM/HIGH/cold/fastlane.
+     * When this reaches {@code MAX_LOW_RESETS + 1}, the next LOW forces a
+     * full streak reset to break the 2↔3 oscillation.
+     */
+    @Builder.Default
+    int lowResetCount = 0;
+
+    /**
+     * Accumulated posterior mean (log scale).
+     * Updated after each Bayesian confidence evaluation; initialised to the
+     * global {@code priorMean} when the key is first seen.
+     */
+    @Builder.Default
+    double posteriorMean = 2.3026;
+
+    /**
+     * Accumulated posterior precision from previous observations.
+     * Capped at {@code MAX_EFFECTIVE_COUNT × baseLikelihoodPrecision}.
+     * Reset to {@code 0.0} for new keys or after stale eviction.
+     */
+    @Builder.Default
+    double accumulatedPrecision = 0.0;
 
     /** Last evaluation timestamp (epoch millis). Volatile for lock-free reads. */
     @Builder.Default
