@@ -53,7 +53,6 @@ import org.junit.jupiter.api.Test;
 class ZetaEndpointTest {
 
   private TopK hotKeyDetector;
-  private TopK workerTopK;
   private Cache<String, Object> caffeineCache;
   private SingleFlight singleFlight;
   private ZetaProperties properties;
@@ -70,7 +69,6 @@ class ZetaEndpointTest {
   @SuppressWarnings("unchecked")
   void setUp() {
     hotKeyDetector = mock(TopK.class);
-    workerTopK = mock(TopK.class);
     caffeineCache = mock(Cache.class);
     singleFlight = mock(SingleFlight.class);
     properties = new ZetaProperties();
@@ -90,7 +88,6 @@ class ZetaEndpointTest {
   private ZetaEndpoint endpointWithAll() {
     return ZetaEndpoint.builder()
       .hotKeyDetector(hotKeyDetector)
-      .workerTopK(workerTopK)
       .caffeineCache(caffeineCache)
       .singleFlight(singleFlight)
       .properties(properties)
@@ -118,7 +115,6 @@ class ZetaEndpointTest {
   @Test
   void hotKeyInfo_shouldContainLocalWorkerAndSyncSections() {
     mockTopK(hotKeyDetector, List.of(new Item("k1", 10), new Item("k2", 7)), 200L);
-    mockTopK(workerTopK, List.of(new Item("wk1", 5)), 80L);
     when(caffeineCache.estimatedSize()).thenReturn(42L);
     when(singleFlight.estimatedInflightSize()).thenReturn(3L);
     when(KeyReporter.dispatcherDepth()).thenReturn(7);
@@ -171,10 +167,6 @@ class ZetaEndpointTest {
 
     // ── worker ──
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");
-    assertThat(worker).containsEntry("topKCount", 1);
-    assertThat(worker).containsEntry("totalRequests", 80L);
-    assertThat(worker).containsKey("topK");
-    assertThat(worker).containsKey("recentlyExpelled");
     assertThat(worker).containsKey("health");
     assertThat(worker).containsEntry("trackedKeys", 7);
 
@@ -273,10 +265,8 @@ class ZetaEndpointTest {
    */
   @Test
   void workerSection_shouldListWorkerHealth() {
-    mockTopK(workerTopK, List.of(new Item("k", 1)), 10L);
     when(zetaBayesianSM.getTrackedKeys()).thenReturn(3);
     ZetaEndpoint ep = ZetaEndpoint.builder()
-      .workerTopK(workerTopK)
       .properties(properties)
       .zetaBayesianSM(zetaBayesianSM)
       .healthView(healthView)
@@ -296,7 +286,6 @@ class ZetaEndpointTest {
   @Test
   void localSection_shouldShowEmptyRulesWhenNoRules() {
     mockTopK(hotKeyDetector, List.of(), 0L);
-    mockTopK(workerTopK, List.of(), 0L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     ZetaEndpoint ep = endpointWithAll();
     Map<String, Object> info = ep.hotKeyInfo(100);
@@ -341,7 +330,6 @@ class ZetaEndpointTest {
   @Test
   void localSection_shouldSkipRefreshPoolWhenLimiterNull() {
     mockTopK(hotKeyDetector, List.of(), 0L);
-    mockTopK(workerTopK, List.of(), 0L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     when(expireManager.isSoftExpireEnabled()).thenReturn(true);
     when(expireManager.getEffectiveHardTtlMs()).thenReturn(300000L);
@@ -389,9 +377,7 @@ class ZetaEndpointTest {
    */
   @Test
   void workerSection_shouldOmitHealthWhenHealthViewNull() {
-    mockTopK(workerTopK, List.of(new Item("wk", 1)), 5L);
     ZetaEndpoint ep = ZetaEndpoint.builder()
-      .workerTopK(workerTopK)
       .properties(properties)
       .zetaBayesianSM(zetaBayesianSM)
       .build();
@@ -412,7 +398,6 @@ class ZetaEndpointTest {
     when(hotKeyDetector.list()).thenReturn(List.of());
     when(hotKeyDetector.total()).thenReturn(0L);
     when(hotKeyDetector.expelled()).thenReturn(new LinkedBlockingQueue<>());
-    when(workerTopK.expelled()).thenReturn(new LinkedBlockingQueue<>());
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     ZetaEndpoint ep = endpointWithAll();
     Map<String, Object> info = ep.hotKeyInfo(100);
@@ -430,14 +415,10 @@ class ZetaEndpointTest {
   @Test
   void localAndWorkerTopK_shouldRespectMockData() {
     mockTopK(hotKeyDetector, List.of(new Item("k1", 10)), 200L);
-    mockTopK(workerTopK, List.of(new Item("wk1", 5)), 80L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
     Map<String, Object> info = endpointWithAll().hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
-    Map<String, Object> worker = (Map<String, Object>) info.get("worker");
     assertThat(local).containsEntry("topKCount", 1);
     assertThat(local).containsEntry("totalRequests", 200L);
-    assertThat(worker).containsEntry("topKCount", 1);
-    assertThat(worker).containsEntry("totalRequests", 80L);
   }
 }

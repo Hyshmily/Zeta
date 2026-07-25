@@ -19,7 +19,7 @@ Zeta 是一款可配置、高性能、低成本的轻量级分布式缓存与预
 
 ### 本地+分布式协作检测
 
-Zeta 提供双级热键检测——本地进程内 HeavyKeeper 概率草图与远程 Worker 集群——并基于检测结果自动预热 L1 缓存。
+Zeta 提供双级热键检测——本地进程内 HeavyKeeper 概率草图和远程 Worker 集群的滑动窗口 + 贝叶斯状态机管线——并基于检测结果自动预热 L1 缓存。
 
 - 每个应用实例运行一个本地 TopK 草图，跟踪高频访问的键。当键进入本地 TopK 集合时，其 L1 Caffeine 缓存的 TTL 会自动延长——无需等待 Worker 响应。L1 未命中时由 SingleFlight 机制合并同 key 并发请求，避免缓存击穿。同时支持软过期——在硬 TTL 到达之前，软 TTL 过期的条目可返回陈值并触发后台异步刷新，保障响应速度。
 
@@ -208,7 +208,7 @@ java -jar worker/target/zeta-worker-1.1.55.jar
 | 跨实例同步         | `zeta.sync.enabled=true`                   | 基于 RabbitMQ 的缓存失效                                      |
 | Worker Listener    | `zeta.worker-listener.enabled=true`        | 接收 Worker 的 HOT/COOL 决策                                  |
 | Worker 模式        | `zeta.worker.enabled=true`                 | 运行专用 Worker 节点                                          |
-| Worker TopK 持久化 | `zeta.worker.persistence.enabled=true`     | 重启后从 Redis 热启动                                         |
+
 | 访问上报           | `zeta.report.enabled=true`（默认）         | 向 Worker 上报访问次数                                        |
 | Reporter 自我保护  | `zeta.local.reporter.enabled=true`（默认） | Reporter 刷盘的 BBR 背压保护                                  |
 | Spring Cache 集成  | `zeta.spring-cache.enabled=true`           | `@Cacheable` / `@CachePut` / `@CacheEvict` 融合 Zeta 热点检测 |
@@ -326,8 +326,6 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 | Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `ZetaModeException`） |
 
 **Worker 集群健康：** 设置 `zeta.local.expected-worker-count` 为生产环境期望的 Worker 数量。当设置 >0 时，`ClusterHealthView` 使用多数仲裁（`> expectedWorkerCount / 2`）作为健康 Worker 数量的阈值；当为 0（默认）时，集群在收到至少一个心跳之前始终被视为不健康。这实现了对部分 Worker 故障的精确检测和优雅降级决策。
-
-**Worker TopK 持久化（热启动）：** 当 `zeta.worker.persistence.enabled=true`，Worker 定期快照 TopK 列表到 Redis。重启时 `TopKPersistService` 加载上次快照并回放到 HeavyKeeper sketch，预热从数小时缩至数秒。
 
 **快车道（FastLane，立即提升旁路）：** FastLane 是一条绕过贝叶斯置信度门控的评估路径。匹配用户配置的 glob 规则的 key（如 `product:*`），只要滑动窗口计数达到规则阈值，立即提升为 `CONFIRMED_HOT`——无需确认窗口、无需置信度评分、无需连续计数累积。全链路端到端延迟：**~60ms（P99）**。
 

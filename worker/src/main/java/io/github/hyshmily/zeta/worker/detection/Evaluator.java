@@ -16,7 +16,6 @@
 package io.github.hyshmily.zeta.worker.detection;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
@@ -35,9 +34,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *       Bayesian confidence gating. Below threshold, the evaluation returns
  *       {@code NONE} — stale eviction ({@link ZetaBayesianSM#evictStale})
  *       handles the eventual COOL broadcast for previously-promoted keys.</li>
- *   <li><b>Bayesian path:</b> For non-matching keys, the standard three-stage
- *       pipeline runs: sliding-window sum → HeavyKeeper cross-instance
- *       frequency → Bayesian confidence-gated state machine.</li>
+ *   <li><b>Bayesian path:</b> For non-matching keys, the standard two-stage
+ *       pipeline runs: sliding-window sum → Bayesian confidence-gated
+ *       state machine.</li>
  * </ol>
  *
  * <p>The sliding window is updated <em>before</em> the fast-lane check so
@@ -60,9 +59,6 @@ public class Evaluator {
   /** Per-key lifecycle state machine. */
   private final ZetaBayesianSM stateMachine;
 
-  /** Worker-scoped HeavyKeeper sketch for cross-instance frequency estimation. */
-  private final TopK workerTopK;
-
   /** Runtime-managed fast-lane rules (CRUD via endpoint). */
   private final FastLaneRuleManager fastLaneRuleManager;
 
@@ -71,6 +67,16 @@ public class Evaluator {
    * Only populated for keys that go through the Bayesian path.
    */
   private final ConcurrentHashMap<String, WindowSumHistory> windowSumHistories = new ConcurrentHashMap<>();
+
+  /**
+   * Per-key EMA (Exponential Moving Average) for momentum-based logThreshold
+   * adjustment. Decays each evaluation cycle by {@link #CMS_ALPHA}, providing
+   * a gradual-decay "inertia" signal complementary to the hard-window sum.
+   */
+  private final ConcurrentHashMap<String, Double> cmsCounts = new ConcurrentHashMap<>();
+
+  /** EMA decay factor: 0.98 ≈ 35-cycle half-life. */
+  private static final double CMS_ALPHA = 0.98;
 
   /** Global QPS estimator for traffic-normalised trend detection. Nullable. */
   private final GlobalQpsEstimator globalQpsEstimator;
@@ -83,20 +89,17 @@ public class Evaluator {
    *
    * @param detector             the sliding-window detector
    * @param stateMachine         the per-key lifecycle state machine
-   * @param workerTopK           the worker-scoped HeavyKeeper sketch
    * @param fastLaneRuleManager  runtime-managed fast-lane rules
    * @param globalQpsEstimator   global QPS estimator for trend normalisation (may be {@code null})
    */
   public Evaluator(
     SlidingWindowDetector detector,
     ZetaBayesianSM stateMachine,
-    TopK workerTopK,
     FastLaneRuleManager fastLaneRuleManager,
     GlobalQpsEstimator globalQpsEstimator
   ) {
     this.detector = detector;
     this.stateMachine = stateMachine;
-    this.workerTopK = workerTopK;
     this.fastLaneRuleManager = fastLaneRuleManager;
     this.globalQpsEstimator = globalQpsEstimator;
   }
@@ -123,8 +126,7 @@ public class Evaluator {
     }
 
     long threshold = detector.getThreshold();
-    boolean isHot = windowSum >= threshold;
-    long cmsCount = workerTopK.estimatedCount(key);
+    boolean isWindowHot = windowSum >= threshold;
 
     // Compute global traffic ratio for trend normalisation.
     // When global QPS doubles, a key that doubles is not trending — it is keeping pace.
@@ -140,9 +142,33 @@ public class Evaluator {
     WindowSumHistory hist = windowSumHistories.computeIfAbsent(key, k -> new WindowSumHistory());
     Double cv = hist.addAndGetCv(windowSum, globalRatio);
     double trendStrength = hist.getTrendStrength();
-    EvaluationContext ctx = new EvaluationContext(cmsCount, windowSum, threshold, cv, trendStrength);
 
-    return stateMachine.evaluate(key, isHot, isFastlane, ctx, () -> detector.getWindowSum(key));
+    // cmsCount = cmsCount * α + count
+    // High cmsCount + low windowSum = key was hot but cooling (momentum < 1)
+    // Low cmsCount + high windowSum = sudden spike with no history
+    double prevCms = cmsCounts.getOrDefault(key, 0.0);
+    double cms = prevCms * CMS_ALPHA + count;
+    cmsCounts.put(key, cms);
+
+    // Momentum = cmsCount / windowSum — how much "history" the key carries
+    // relative to its current burst size.
+    double momentum = (cms > 0 && windowSum > 0) ? Math.max(0.1, Math.min(cms / windowSum, 10.0)) : 1.0;
+
+    // Adjusted logThreshold: momentum > 1 lowers the bar (sustained key),
+    // momentum < 1 raises it (first-time spike needs more confidence).
+    double rawLogThresh = Math.log(Math.max(threshold, 1.0));
+    double adjustedLogThresh = rawLogThresh - Math.log(momentum);
+    EvaluationContext ctx = new EvaluationContext(
+      (long) Math.min(cms, Long.MAX_VALUE),
+      windowSum,
+      threshold,
+      cv,
+      rawLogThresh,
+      adjustedLogThresh,
+      trendStrength
+    );
+
+    return stateMachine.evaluate(key, isWindowHot, false, ctx, () -> detector.getWindowSum(key));
   }
 
   /**
@@ -155,6 +181,7 @@ public class Evaluator {
   public void evictStale(long staleAfterMs) {
     long now = System.currentTimeMillis();
     windowSumHistories.values().removeIf(h -> now - h.lastAccessTime > staleAfterMs);
+    cmsCounts.values().removeIf(v -> v < 1.0);
   }
 
   /**

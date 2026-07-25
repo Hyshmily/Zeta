@@ -18,7 +18,6 @@ package io.github.hyshmily.zeta.worker.ingest;
 import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
@@ -68,8 +67,6 @@ public class ReportConsumer {
   private final Evaluator evaluator;
   /** Publishes HOT and COOL decisions back to all application instances. */
   private final WorkerBroadcaster broadcaster;
-  /** Worker-scoped HeavyKeeper sketch for cross-instance frequency estimation. */
-  private final TopK workerTopK;
   /** Global qps estimator tracking overall throughput for dynamic threshold learning. */
   private final GlobalQpsEstimator globalQpsEstimator;
   /** Per-key lifecycle state machine. */
@@ -87,13 +84,11 @@ public class ReportConsumer {
   public ReportConsumer(
     Evaluator evaluator,
     WorkerBroadcaster broadcaster,
-    TopK workerTopK,
     GlobalQpsEstimator globalQpsEstimator,
     ZetaBayesianSM stateMachine
   ) {
     this.evaluator = evaluator;
     this.broadcaster = broadcaster;
-    this.workerTopK = workerTopK;
     this.globalQpsEstimator = globalQpsEstimator;
     this.stateMachine = stateMachine;
   }
@@ -163,11 +158,6 @@ public class ReportConsumer {
             long count = entry.getValue();
 
             totalQps.add(count);
-
-            // Update HeavyKeeper inline (parallel, not serial before the stream).
-            // The estimatedCount from this batch will be visible to the Bayesian
-            // path starting from the next batch — FastLane is unaffected.
-            workerTopK.addDirect(key, count);
 
             ZetaDecision decision = evaluator.evaluate(key, count);
             if (decision.type() != ZetaDecision.DecisionType.NONE) {

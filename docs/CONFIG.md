@@ -39,8 +39,7 @@
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)`                           | Same as above, with per-entry hard and soft TTL override (pass 0 to use default)                                                                                                                                                             |
 | `isLocalHotKey(cacheKey)`                                                        | Check if key is HOT in L1 (O(1))                                                                                                                                                                                                             |
 | `areLocalHotKeys(Collection)`                                                    | Batch check — returns `Map<String, Boolean>` of local hot key status for all given keys                                                                                                                                                      |
-| `isWorkerHotKey(cacheKey)`                                                       | Check if key is a cluster hot key in Worker TopK (O(n))                                                                                                                                                                                      |
-| `areWorkerHotKeys(Collection)`                                                   | Batch check — returns `Map<String, Boolean>` of cluster-wide hot key status for all given keys                                                                                                                                               |
+
 | `notifyLocalDetector(cacheKey)`                                                  | Triggers local HotKeyDetector tracking for a key without performing a full cache read. Used by `@Intercept` to keep TopK accurate when the method body is skipped.                                                                           |
 | `notifyLocalDetector(cacheKey, count)`                                           | Notify local detector with a custom delta, routing through the buffered counter                                                                                                                                                              |
 | `notifyLocalDetector(Map)`                                                       | Batch-notify local detector with multiple key → count entries, routing through the buffered counter                                                                                                                                          |
@@ -71,9 +70,7 @@
 | `returnLocalTopNHotKeys(n)`                                                      | Return top N hot keys from the local detector, ordered by frequency                                                                                                                                                                          |
 | `returnLocalExpelledHotKeys()`                                                   | Get app-side expelled hot key queue; periodically drained by internal timer                                                                                                                                                                  |
 | `returnLocalTotalDataStreams()`                                                  | Cumulative reads through app-side HeavyKeeper                                                                                                                                                                                                |
-| `returnWorkerHotKeys()`                                                          | Worker-side (cluster-level) Top-K snapshot                                                                                                                                                                                                   |
-| `returnWorkerExpelledHotKeys()`                                                  | Worker-side expelled hot key queue                                                                                                                                                                                                           |
-| `returnWorkerTotalDataStreams()`                                                 | Worker-side HeavyKeeper cumulative reads                                                                                                                                                                                                     |
+
 | `compareAndSet(cacheKey, expected, newValue)`                                    | Atomic swap if current value matches expected                                                                                                                                                                                                |
 | `compareAndInvalidate(cacheKey, expected)`                                       | Invalidate only if current value matches expected                                                                                                                                                                                            |
 | `invalidateAfterPut(key, mutation)`                                              | Mutation then L1 invalidation with broadcast                                                                                                                                                                                                 |
@@ -82,9 +79,7 @@
 | `invalidateAfterPut(Map, boolean)`                                               | Batch with explicit broadcast control                                                                                                                                                                                                        |
 | `broadcastAllLocalRulesManually()`                                               | Manually rebroadcast all local rules to peers                                                                                                                                                                                                |
 | `isApp()`                                                                        | Whether app-side cache is available                                                                                                                                                                                                          |
-| `isWorker()`                                                                     | Whether Worker TopK is available                                                                                                                                                                                                             |
 | `isAppOnly()`                                                                    | Whether in pure App-only mode                                                                                                                                                                                                                |
-| `isWorkerOnly()`                                                                 | Whether in pure Worker-only mode                                                                                                                                                                                                             |
 | `addBlacklist(key)`                                                              | Add a single key pattern to the blacklist                                                                                                                                                                                                    |
 | `addBlacklist(Collection)`                                                       | Add multiple key patterns to the blacklist                                                                                                                                                                                                   |
 | `removeBlacklist(key)`                                                           | Remove a single key pattern from the blacklist                                                                                                                                                                                               |
@@ -98,7 +93,7 @@
 
 ### Core (`zeta.local.*`)
 
-> **Design note:** The app-side HeavyKeeper uses wider (50k) but shallower (depth 5) sketch dimensions with slightly slower decay (0.92) compared to the Worker side. A wider sketch reduces fingerprint-collision probability on single-key inserts (the app path). Shallower depth is acceptable because the app only needs a fast _heuristic_ for local promotion — it does not make authoritative HOT/COOL decisions. See [Worker-side HeavyKeeper](#zetaworkerheavy-keeper) below for the contrasting configuration.
+> **Design note:** The app-side HeavyKeeper uses wider (50k) but shallower (depth 5) sketch dimensions with slightly slower decay (0.92). A wider sketch reduces fingerprint-collision probability on single-key inserts (the app path). Shallower depth is acceptable because the app only needs a fast _heuristic_ for local promotion — it does not make authoritative HOT/COOL decisions.
 
 | Property                              | Default                        | Description                                                                                                                                                                                                                                                     |
 | ------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -272,7 +267,6 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 
 ### Worker Node (`zeta.worker.*`)
 
-> **Design note:** The Worker-side HeavyKeeper prioritises overcount bounding over insert speed — it uses narrower (20k) but deeper (depth 10) sketch dimensions with slightly faster decay (0.9). The batch-report consumer feeds large key-count maps (up to 10k keys per flush), and greater depth provides tighter frequency estimates per batch. Faster decay means the Worker adapts more quickly to changing traffic patterns before making authoritative HOT/COOL decisions. Compare with the [app-side configuration](#core-zetalocal-).
 
 | Property                                                           | Default                        | Description                                                                                                                         |
 | ------------------------------------------------------------------ | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
@@ -305,12 +299,6 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `zeta.worker.global-qps-dynamic-threshold.learning-period-ms`      | `30000`                        | Learning period for QPS estimation                                                                                                  |
 | `zeta.worker.global-qps-dynamic-threshold.hot-threshold-ratio`     | `0.01`                         | Hot threshold as fraction of estimated global QPS                                                                                   |
 
-| **`zeta.worker.heavy-keeper.*`** | | **HeavyKeeper (Worker-scoped)** |
-| `zeta.worker.heavy-keeper.top-k` | `100` | Worker-side HeavyKeeper Top-K capacity |
-| `zeta.worker.heavy-keeper.width` | `20000` | Worker-side Count-Min Sketch width |
-| `zeta.worker.heavy-keeper.depth` | `10` | Worker-side Count-Min Sketch depth |
-| `zeta.worker.heavy-keeper.decay` | `0.9` | Worker-side HeavyKeeper decay factor |
-| `zeta.worker.heavy-keeper.min-count` | `10` | Worker-side minimum count threshold |
 | **`zeta.worker.bayesian.*`** | | **Bayesian Confidence Estimation** |
 | `zeta.worker.bayesian.prior-mean` | `2.3026` | Prior mean of the log-frequency distribution (ln(10) — key with ≈10 accesses per window is neutral) |
 | `zeta.worker.bayesian.prior-std` | `2.0` | Prior standard deviation; larger → more data-driven, smaller → anchored to prior |
@@ -322,13 +310,6 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `zeta.worker.fast-lane.rules[].threshold` | `100` | Count threshold; matched keys exceeding this are promoted immediately |
 | **`zeta.worker.heartbeat.*`** | | **Heartbeat** |
 | `zeta.worker.heartbeat.ping-interval-ms` | `1000` | Interval (ms) between structured heartbeat sends |
-| **`zeta.worker.persistence.*`** | | **TopK Persistence (warm-start)** |
-| `zeta.worker.persistence.enabled` | `false` | Enable periodic TopK snapshot to Redis (opt-in) |
-| `zeta.worker.persistence.persist-interval-ms` | `30000` | Interval (ms) between TopK snapshots |
-| `zeta.worker.persistence.topk-count` | `100` | Number of top keys to persist per snapshot |
-| `zeta.worker.persistence.redis-key-prefix` | `"zeta:topk:worker:"` | Redis key prefix; final key = prefix + appName + ":" + nodeId |
-| `zeta.worker.persistence.ttl-days` | `3` | TTL (days) for persisted TopK data in Redis |
-
 ## Modules
 
 | Module                                                   | Dependency                                                                          | Auto-Config                                                                                                                                                        |
@@ -343,7 +324,7 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 | `lock`                                                   | `spring-boot-starter-data-redis`                                                    | `@ConditionalOnClass(StringRedisTemplate.class)` + `@ConditionalOnBean(StringRedisTemplate.class)`                                                                 |
 | `actuator`                                               | `spring-boot-starter-actuator`                                                      | `@ConditionalOnClass(Endpoint.class)`                                                                                                                              |
 | `micrometer`                                             | `io.micrometer:micrometer-core`                                                     | `@ConditionalOnClass(MeterBinder.class)` — auto-registers Caffeine cache metrics (`zeta.l1.*`) + custom Zeta business metrics                                      |
-| `scheduling`                                             | none                                                                                | `@ConditionalOnProperty` + `@ConditionalOnBean(TopK.class)`                                                                                                        |
+| `scheduling`                                             | none                                                                                | `@ConditionalOnProperty` + `@ConditionalOnClass(HotKeyDetector.class)`                                                                                             |
 
 ## Security
 

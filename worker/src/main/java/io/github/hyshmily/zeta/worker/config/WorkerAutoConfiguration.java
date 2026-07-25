@@ -17,8 +17,6 @@ package io.github.hyshmily.zeta.worker.config;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
-import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
@@ -31,7 +29,6 @@ import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
-import io.github.hyshmily.zeta.worker.persistence.TopKPersistService;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import io.github.hyshmily.zeta.worker.rule.impl.FastLaneRuleManagerImpl;
 import jakarta.annotation.PostConstruct;
@@ -73,13 +70,11 @@ import org.springframework.scheduling.annotation.Scheduled;
  * <ul>
  *   <li>{@link SlidingWindowDetector} – sliding‑window counter.</li>
  *   <li>{@link ZetaBayesianSM} – per‑key lifecycle state machine.</li>
- *   <li>{@link TopK} (worker‑scoped) – global frequency estimator for
- *       Bayesian confidence evaluation.</li>
  *   <li>{@link ReportConsumer} – AMQP listener that drives the pipeline.</li>
  *   <li>{@link WorkerBroadcaster} – publishes HOT / COOL broadcasts.</li>
  *   <li>RabbitMQ topology ({@code reportExchange}, shard‑specific
  *       {@code reportQueue}, binding).</li>
- *   <li>Scheduled tasks for stale‑state eviction and Top‑K validation.</li>
+ *   <li>Scheduled tasks for stale‑state eviction.</li>
  * </ul>
  *
  * Default constructor.
@@ -110,58 +105,6 @@ public class WorkerAutoConfiguration {
       InstanceIdGenerator.setOverride(envId);
     }
     this.nodeId = InstanceIdGenerator.get();
-  }
-
-  /**
-   * Worker TopK snapshot service that persists the current hot-key list to
-   * Redis and restores it on startup.
-   *
-   * <p>Only active when {@code zeta.worker.persistence.enabled=true}.
-   *
-   * @param workerTopK  the worker-scoped HeavyKeeper sketch to persist
-   * @param redisTemplate the Redis template used for persistence
-   * @param properties  worker configuration providing persistence settings
-   * @return a new {@link TopKPersistService} instance
-   */
-  @Bean
-  @ConditionalOnProperty(prefix = "zeta.worker.persistence", name = "enabled", havingValue = "true")
-  public TopKPersistService topKPersistService(
-    @Qualifier("workerTopK") TopK workerTopK,
-    StringRedisTemplate redisTemplate,
-    WorkerProperties properties
-  ) {
-    return new TopKPersistService(
-      workerTopK,
-      redisTemplate,
-      properties.getRouting().getAppName(),
-      nodeId,
-      properties.getPersistence()
-    );
-  }
-
-  /**
-   * Schedules periodic TopK snapshot persistence. The returned placeholder bean
-   * keeps the task alive in the context.
-   *
-   * @param service    the TopK persistence service whose {@code persistToRedis} is scheduled
-   * @param properties worker configuration providing the persistence interval
-   * @param scheduler  the shared worker scheduler
-   * @return a placeholder {@link Object} bean that keeps the scheduled task alive
-   */
-  @Bean
-  @ConditionalOnBean(TopKPersistService.class)
-  public Object topKPersistTask(
-    TopKPersistService service,
-    WorkerProperties properties,
-    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
-  ) {
-    long interval = properties.getPersistence().getPersistIntervalMs();
-    try {
-      scheduler.scheduleAtFixedRate(service::persistToRedis, interval, interval, TimeUnit.MILLISECONDS);
-    } catch (Exception e) {
-      log.error("Failed to schedule TopK persistence task; Worker TopK snapshots will not be persisted.", e);
-    }
-    return new Object();
   }
 
   /**
@@ -247,29 +190,6 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Worker‑scoped Top‑K instance backed by a {@link HeavyKeeper} sketch.
-   *
-   * <p>This is intentionally a <b>separate bean</b> qualified with
-   * {@code "workerTopK"} so that it can be distinguished from any other
-   * Top‑K instance that might be defined in the application context
-   * (e.g. for dashboard queries).
-   *
-   * @param properties worker configuration providing HeavyKeeper algorithm parameters
-   *                   (top-K count, width, depth, decay, minimum count)
-   * @return a new {@link HeavyKeeper} instance qualified as {@code workerTopK}
-   */
-  @Bean
-  public TopK workerTopK(WorkerProperties properties) {
-    return new HeavyKeeper(
-      properties.getHeavyKeeper().getTopK(),
-      properties.getHeavyKeeper().getWidth(),
-      properties.getHeavyKeeper().getDepth(),
-      properties.getHeavyKeeper().getDecay(),
-      properties.getHeavyKeeper().getMinCount()
-    );
-  }
-
-  /**
    * Bayesian key evaluator (always present) with integrated fast-lane support.
    */
   @Bean
@@ -287,22 +207,17 @@ public class WorkerAutoConfiguration {
   public Evaluator keyEvaluator(
     SlidingWindowDetector detector,
     ZetaBayesianSM stateMachine,
-    @Qualifier("workerTopK") TopK workerTopK,
     FastLaneRuleManager fastLaneRuleManager,
     GlobalQpsEstimator globalQpsEstimator
   ) {
-    return new Evaluator(detector, stateMachine, workerTopK, fastLaneRuleManager, globalQpsEstimator);
+    return new Evaluator(detector, stateMachine, fastLaneRuleManager, globalQpsEstimator);
   }
 
   /**
    * Report consumer – the main AMQP entry point.
    *
-   * <p>Injects the worker‑scoped Top‑K so that every consumed reportToWorker also
-   * feeds the frequency estimator.
-   *
    * @param evaluator         the Bayesian evaluator with integrated fast-lane support
    * @param broadcaster       publishes HOT and COOL decisions to all application instances
-   * @param workerTopK        the worker-scoped HeavyKeeper sketch for frequency estimation
    * @param globalQpsEstimator the global qps estimator tracking overall throughput
    * @param stateMachine      the per-key lifecycle state machine
    * @return a new {@link ReportConsumer} instance
@@ -311,11 +226,10 @@ public class WorkerAutoConfiguration {
   public ReportConsumer reportConsumer(
     Evaluator evaluator,
     WorkerBroadcaster broadcaster,
-    @Qualifier("workerTopK") TopK workerTopK,
     GlobalQpsEstimator globalQpsEstimator,
     ZetaBayesianSM stateMachine
   ) {
-    return new ReportConsumer(evaluator, broadcaster, workerTopK, globalQpsEstimator, stateMachine);
+    return new ReportConsumer(evaluator, broadcaster, globalQpsEstimator, stateMachine);
   }
 
   /**
@@ -494,9 +408,9 @@ public class WorkerAutoConfiguration {
    * Periodically evicts stale keys from the sliding‑window detector,
    * state machine, and CV history.
    *
-   * <p>The eviction threshold is set to {@code 2 * coolDurationMs},
-   * giving keys a generous grace period after their last access before
-   * their data structures are reclaimed.
+   * <p>The eviction threshold ({@code staleAfterMs}) is read directly
+   * from {@link WorkerProperties.StateMachine#evictIntervalMs}, which
+   * defaults to {@code 2 * coolDurationMs} = 20 minutes.
    *
    * @param detector     the sliding-window detector whose idle keys will be evicted
    * @param stateMachine the state machine whose idle entries will be evicted
@@ -531,7 +445,7 @@ public class WorkerAutoConfiguration {
     @Scheduled(fixedDelayString = "${zeta.worker.state-machine.evict-interval-ms:30000}")
     public void evictStale() {
       try {
-        long staleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
+        long staleAfterMs = properties.getStateMachine().getEvictIntervalMs();
         detector.evictStale(staleAfterMs);
         stateMachine.evictStale(staleAfterMs, key -> {
           if (!broadcaster.broadcastCool(key)) {

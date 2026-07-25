@@ -20,7 +20,7 @@ management:
 
 通过 `management.endpoints.web.exposure.include=health,info,hotkey` 启用。
 
-支持可选的 `?limit=N` 查询参数限制返回的 TopK 条目数（默认 100）。
+支持可选的 `?limit=N` 查询参数限制返回的应用端 TopK 条目数（默认 100）。
 
 ```javascript
 {
@@ -77,15 +77,7 @@ management:
     "versionDegradedCount": 0       // 使用降级节点本地版本的 key 数
   },
   "worker": {
-    // ── Worker 端 TopK（集群级） ──
-    "topK": [{ "key": "cache:shop:17", "count": 8921 }],  // 集群级热 key 列表
-    "topKCount": 1,                                        // Worker 热 key 数
-    "totalRequests": 784512,                               // Worker 总请求数
-    "recentlyExpelled": ["cache:shop:3"],                  // Worker 最近驱逐的 key
-    "topKCapacity": 100,            // Worker HeavyKeeper K
-    "sketchWidth": 20000,           // Worker sketch 宽度
-    "sketchDepth": 10,              // Worker sketch 深度
-    "minCountThreshold": 10,        // Worker 最小晋升计数
+    "trackedKeys": 42,              // 状态机追踪的 key 数
 
     // ── Worker 健康状态 ──
     "health": "healthy",            // 集群健康状态："healthy"、"unhealthy"、"unknown"
@@ -120,8 +112,8 @@ management:
 
 | 指标                                  | 类型  | 标签                 | 说明                             |
 | ------------------------------------- | ----- | -------------------- | -------------------------------- |
-| `zeta.topk.size`                    | Gauge | `type=local\|worker` | TopK 当前排名数                  |
-| `zeta.topk.total`                   | Gauge | `type=local\|worker` | TopK 追踪的总请求数              |
+| `zeta.topk.size`                    | Gauge | `type=local`         | TopK 当前排名数                  |
+| `zeta.topk.total`                   | Gauge | `type=local`         | TopK 追踪的总请求数              |
 | `zeta.expelled.queue.size`          | Gauge | —                    | 驱逐队列积压量                   |
 | `zeta.expelled.queue.remaining`     | Gauge | —                    | 驱逐队列剩余容量                 |
 | `zeta.singleflight.inflight`        | Gauge | —                    | SingleFlight 进行中的去重数      |

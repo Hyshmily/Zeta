@@ -39,8 +39,7 @@
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)`                           | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                                    |
 | `isLocalHotKey(cacheKey)`                                                        | 检查 key 是否在 L1 中为 HOT 状态（O(1)）                                                                                                                                                       |
 | `areLocalHotKeys(Collection)`                                                    | 批量检查——返回 `Map<String, Boolean>` 的所有给定 key 的本地热点状态                                                                                                                            |
-| `isWorkerHotKey(cacheKey)`                                                       | 检查 key 是否在 Worker TopK 中为集群热点（O(n)）                                                                                                                                               |
-| `areWorkerHotKeys(Collection)`                                                   | 批量检查——返回 `Map<String, Boolean>` 的所有给定 key 的集群热点状态                                                                                                                            |
+
 | `notifyLocalDetector(cacheKey)`                                                  | 触发本地 HotKeyDetector 追踪指定 key，无需执行完整缓存读取。被 `@Intercept` 用于在方法体被跳过时保持 TopK 准确。                                                                               |
 | `notifyLocalDetector(cacheKey, count)`                                           | 使用自定义增量通知本地探测器，通过缓冲计数器路由                                                                                                                                               |
 | `notifyLocalDetector(Map)`                                                       | 批量通知本地探测器，多个 key → 计数条目，通过缓冲计数器路由                                                                                                                                    |
@@ -67,9 +66,7 @@
 | `returnLocalTopNHotKeys(n)`                                                      | 从本地探测器返回前 N 个热点 key，按频率排序                                                                                                                                                    |
 | `returnLocalExpelledHotKeys()`                                                   | 获取应用端被挤出的热点 key 队列；由内部定时器周期性清空                                                                                                                                        |
 | `returnLocalTotalDataStreams()`                                                  | 经过应用端 HeavyKeeper 的累计读取数                                                                                                                                                            |
-| `returnWorkerHotKeys()`                                                          | Worker 端（集群维度）Top-K 快照                                                                                                                                                                |
-| `returnWorkerExpelledHotKeys()`                                                  | Worker 端被挤出的热点 key 队列                                                                                                                                                                 |
-| `returnWorkerTotalDataStreams()`                                                 | Worker 端 HeavyKeeper 累计读取数                                                                                                                                                               |
+
 | `tryLock(key, expire, unit)`                                                     | 使用默认重试次数获取分布式锁；返回 `AutoReleaseLock` 或失败时返回 `null`                                                                                                                       |
 | `tryLock(key, expire, unit, lockCount, inquiryCount, unlockCount)`               | 同上，带显式重试次数（负值回退到配置默认值）                                                                                                                                                   |
 | `tryLockAndRun(key, expire, unit, action)`                                       | 便捷方法——获取锁、执行操作、释放锁；锁获取成功且操作完成时返回 `true`                                                                                                                          |
@@ -82,9 +79,7 @@
 | `invalidateAfterPut(Map, boolean)`                                               | 批量带显式广播控制                                                                                                                                                                             |
 | `broadcastAllLocalRulesManually()`                                               | 手动重新广播所有本地规则到对端                                                                                                                                                                 |
 | `isApp()`                                                                        | 是否应用端缓存可用                                                                                                                                                                             |
-| `isWorker()`                                                                     | 是否 Worker TopK 可用                                                                                                                                                                          |
 | `isAppOnly()`                                                                    | 是否纯 App-only 模式                                                                                                                                                                           |
-| `isWorkerOnly()`                                                                 | 是否纯 Worker-only 模式                                                                                                                                                                        |
 | `addBlacklist(key)`                                                              | 添加单个 key 模式到黑名单                                                                                                                                                                      |
 | `addBlacklist(Collection)`                                                       | 批量添加多个 key 模式到黑名单                                                                                                                                                                  |
 | `removeBlacklist(key)`                                                           | 从黑名单移除单个 key 模式                                                                                                                                                                      |
@@ -98,7 +93,7 @@
 
 ### 核心配置（`zeta.local.*`）
 
-> **设计说明：** 应用端 HeavyKeeper 使用更宽（50k）但更浅（depth 5）的 Sketch，衰减稍慢（0.92）。较宽的 Sketch 在单 key 插入时减少指纹冲突概率。较浅的深度足以满足应用端快速*启发式*本地升级判断的需要——它不做权威的 HOT/COOL 决策。参见下方 [Worker 端 HeavyKeeper](#zetaworkerheavy-keeper) 的对比配置。
+> **设计说明：** 应用端 HeavyKeeper 使用更宽（50k）但更浅（depth 5）的 Sketch，衰减稍慢（0.92）。较宽的 Sketch 在单 key 插入时减少指纹冲突概率。较浅的深度足以满足应用端快速*启发式*本地升级判断的需要——它不做权威的 HOT/COOL 决策。
 
 | 属性                                  | 默认值                         | 说明                                                                                                                                                                                        |
 | ------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -264,7 +259,6 @@
 
 ### Worker 节点（`zeta.worker.*`）
 
-> **设计说明：** Worker 端 HeavyKeeper 优先保证频率估计边界而不是插入速度——使用更窄（20k）但更深（depth 10）的 Sketch，衰减略快（0.9）。批量报表消费者每次喂入大量 key-count 映射（最多 10k keys），更大的深度能提供更精确的批量频率估计。更快的衰减使 Worker 能更快适应流量变化，从而做出权威的 HOT/COOL 决策。与 [应用端配置](#core-zetalocal-) 对比。
 
 | 属性                                                               | 默认值                         | 说明                                                                                           |
 | ------------------------------------------------------------------ | ------------------------------ | ---------------------------------------------------------------------------------------------- |
@@ -297,12 +291,6 @@
 | `zeta.worker.global-qps-dynamic-threshold.learning-period-ms`      | `30000`                        | QPS 估算的学习周期                                                                             |
 | `zeta.worker.global-qps-dynamic-threshold.hot-threshold-ratio`     | `0.01`                         | 热阈值占估计全局 QPS 的比例                                                                    |
 
-| **`zeta.worker.heavy-keeper.*`** | | **HeavyKeeper（Worker 端）** |
-| `zeta.worker.heavy-keeper.top-k` | `100` | Worker 端 HeavyKeeper Top-K 容量 |
-| `zeta.worker.heavy-keeper.width` | `20000` | Worker 端 Count-Min Sketch 宽度 |
-| `zeta.worker.heavy-keeper.depth` | `10` | Worker 端 Count-Min Sketch 深度 |
-| `zeta.worker.heavy-keeper.decay` | `0.9` | Worker 端 HeavyKeeper 衰减因子 |
-| `zeta.worker.heavy-keeper.min-count` | `10` | Worker 端最低计数阈值 |
 | **`zeta.worker.bayesian.*`** | | **贝叶斯置信度估计** |
 | `zeta.worker.bayesian.prior-mean` | `2.3026` | 对数频率分布的先验均值（ln(10)——每个窗口≈10次访问的 key 为中性） |
 | `zeta.worker.bayesian.prior-std` | `2.0` | 先验标准差；越大越依赖观测数据，越小越锚定先验 |
@@ -314,13 +302,6 @@
 | `zeta.worker.fast-lane.rules[].threshold` | `100` | 快速通道规则的计数阈值；匹配的 key 超过此值立即提升 |
 | **`zeta.worker.heartbeat.*`** | | **心跳** |
 | `zeta.worker.heartbeat.ping-interval-ms` | `1000` | 结构化心跳发送间隔（毫秒） |
-| **`zeta.worker.persistence.*`** | | **TopK 持久化（热启动）** |
-| `zeta.worker.persistence.enabled` | `false` | 启用周期性 TopK 快照到 Redis（需手动开启） |
-| `zeta.worker.persistence.persist-interval-ms` | `30000` | TopK 快照间隔（毫秒） |
-| `zeta.worker.persistence.topk-count` | `100` | 每次快照保存的 top key 数量 |
-| `zeta.worker.persistence.redis-key-prefix` | `"zeta:topk:worker:"` | Redis key 前缀；最终 key = prefix + appName + ":" + nodeId |
-| `zeta.worker.persistence.ttl-days` | `3` | Redis 中 TopK 数据的过期时间（天） |
-
 ## 模块说明
 
 | 模块                                                   | 依赖                                                                                   | 自动配置条件                                                                                                                                                 |
@@ -335,7 +316,7 @@
 | `lock`                                                 | `spring-boot-starter-data-redis`                                                       | `@ConditionalOnClass(StringRedisTemplate.class)` + `@ConditionalOnBean(StringRedisTemplate.class)`                                                           |
 | `actuator`                                             | `spring-boot-starter-actuator`                                                         | `@ConditionalOnClass(Endpoint.class)`                                                                                                                        |
 | `micrometer`                                           | `io.micrometer:micrometer-core`                                                        | `@ConditionalOnClass(MeterBinder.class)` — 自动注册 Caffeine 缓存指标（`zeta.l1.*`）+ 自定义 Zeta 业务指标                                                   |
-| `scheduling`                                           | 无                                                                                     | `@ConditionalOnProperty` + `@ConditionalOnBean(TopK.class)`                                                                                                  |
+| `scheduling`                                           | 无                                                                                     | `@ConditionalOnProperty` + `@ConditionalOnClass(HotKeyDetector.class)`                                                                                       |
 
 ## 安全性
 

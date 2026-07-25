@@ -19,7 +19,6 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.worker.detection.Evaluator;
@@ -42,9 +41,6 @@ class ReportConsumerTest {
   private WorkerBroadcaster broadcaster;
 
   @Mock
-  private TopK workerTopK;
-
-  @Mock
   private GlobalQpsEstimator globalQpsEstimator;
 
   @Mock
@@ -54,7 +50,7 @@ class ReportConsumerTest {
 
   @BeforeEach
   void setUp() {
-    consumer = new ReportConsumer(keyEvaluator, broadcaster, workerTopK, globalQpsEstimator, stateMachine);
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine);
   }
 
   @Test
@@ -69,8 +65,6 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(workerTopK).addDirect("key1", 5L);
-    verify(workerTopK).addDirect("key2", 3L);
     verify(keyEvaluator).evaluate("key1", 5L);
     verify(keyEvaluator).evaluate("key2", 3L);
     verify(globalQpsEstimator).addTotal(8L);
@@ -91,7 +85,6 @@ class ReportConsumerTest {
     ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
     consumer.onReport(message);
 
-    verify(workerTopK, never()).addDirect(anyString(), anyLong());
     verify(keyEvaluator, never()).evaluate(anyString(), anyLong());
   }
 
@@ -110,7 +103,6 @@ class ReportConsumerTest {
     ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of());
     consumer.onReport(message);
     verify(globalQpsEstimator, never()).addTotal(anyLong());
-    verify(workerTopK, never()).addDirect(anyString(), anyLong());
   }
 
   @Test
@@ -125,23 +117,7 @@ class ReportConsumerTest {
 
     consumer.onReport(message);
 
-    verify(workerTopK).addDirect("bigKey", (long) Integer.MAX_VALUE);
     verify(globalQpsEstimator).addTotal((long) Integer.MAX_VALUE);
-  }
-
-  @Test
-  void shouldClampCountToMaxIntForTopK() {
-    ReportMessage message = new ReportMessage(
-      0L,
-      "testApp",
-      System.currentTimeMillis(),
-      Map.of("hugeKey", (long) Integer.MAX_VALUE + 1)
-    );
-    when(keyEvaluator.evaluate("hugeKey", (long) Integer.MAX_VALUE + 1)).thenReturn(ZetaDecision.none("hugeKey", null));
-
-    consumer.onReport(message);
-
-    verify(workerTopK).addDirect("hugeKey", (long) Integer.MAX_VALUE + 1);
   }
 
   @Test

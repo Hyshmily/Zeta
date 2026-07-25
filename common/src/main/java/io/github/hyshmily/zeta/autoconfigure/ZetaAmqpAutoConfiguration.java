@@ -43,6 +43,7 @@ import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
+import java.time.Duration;
 import io.github.hyshmily.zeta.util.impl.SystemLoadMonitorImpl;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
@@ -70,6 +71,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -150,6 +152,7 @@ public class ZetaAmqpAutoConfiguration {
      * @param converter         the Zeta JSON message converter
      * @return a new {@link RabbitTemplate} with Zeta's JSON converter
      */
+    @Primary
     @Bean("zetaReportRabbitTemplate")
     @ConditionalOnMissingBean(name = "zetaReportRabbitTemplate")
     public RabbitTemplate zetaReportRabbitTemplate(
@@ -443,7 +446,7 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnBean(ConnectionFactory.class)
     public SimpleMessageListenerContainer syncListenerContainer(
-      ConnectionFactory connectionFactory,
+      @Qualifier("rabbitConnectionFactory") ConnectionFactory connectionFactory,
       CacheSyncListener cacheSyncListener,
       CacheSyncProperties properties
     ) {
@@ -688,7 +691,7 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(name = "workerListenerContainer")
     public SimpleMessageListenerContainer workerListenerContainer(
-      ConnectionFactory connectionFactory,
+      @Qualifier("rabbitConnectionFactory") ConnectionFactory connectionFactory,
       Queue hotkeyWorkerQueue,
       WorkerListener workerListener,
       WorkerListenerProperties properties
@@ -779,6 +782,7 @@ public class ZetaAmqpAutoConfiguration {
   @Configuration
   static class HeartbeatConnectionConfiguration {
 
+    @Primary
     @Bean("zetaHeartbeatConnectionFactory")
     @ConditionalOnMissingBean(name = "zetaHeartbeatConnectionFactory")
     public CachingConnectionFactory heartbeatConnectionFactory(ObjectProvider<RabbitProperties> propsProvider) {
@@ -791,9 +795,12 @@ public class ZetaAmqpAutoConfiguration {
       CachingConnectionFactory cf = new CachingConnectionFactory(props.getHost(), props.getPort());
       cf.setUsername(props.getUsername());
       cf.setPassword(props.getPassword());
-      cf.setVirtualHost(props.getVirtualHost());
-      cf.setRequestedHeartBeat((int) props.getRequestedHeartbeat().getSeconds());
-      cf.setConnectionTimeout((int) props.getConnectionTimeout().toMillis());
+      String vh = props.getVirtualHost();
+      cf.setVirtualHost(vh != null ? vh : "/");
+      Duration hb = props.getRequestedHeartbeat();
+      cf.setRequestedHeartBeat(hb != null ? (int) hb.getSeconds() : 60);
+      Duration ct = props.getConnectionTimeout();
+      cf.setConnectionTimeout(ct != null ? (int) ct.toMillis() : 60000);
       return cf;
     }
   }

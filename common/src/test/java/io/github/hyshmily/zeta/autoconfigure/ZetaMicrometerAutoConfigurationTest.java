@@ -104,7 +104,6 @@ class ZetaMicrometerAutoConfigurationTest {
   @Test
   void customMeterBinder_registersAllMetrics_whenAllDepsPresent() {
     TopK detector = mockTopK(5, 100L, 3, 97);
-    TopK workerTopK = mockTopK(3, 500L, 1, 99);
     SingleFlight sf = mock(SingleFlight.class);
     when(sf.estimatedInflightSize()).thenReturn(2L);
     KeyReporter reporter = mock(KeyReporter.class);
@@ -128,7 +127,6 @@ class ZetaMicrometerAutoConfigurationTest {
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
-      providerThatReturns(workerTopK),
       providerThatReturns(sf),
       providerThatReturns(reporter),
       providerThatReturns(expireManager),
@@ -152,8 +150,6 @@ class ZetaMicrometerAutoConfigurationTest {
     assertGaugeValue("zeta.expire.refresh.available", 8.0);
     assertGaugeValue("zeta.version.degraded.total", 7.0);
     assertGaugeValue("zeta.sync.dedup.size", 15.0);
-    assertGaugeValue("zeta.topk.size", "type", "worker", 3.0);
-    assertGaugeValue("zeta.topk.total", "type", "worker", 500.0);
     assertGaugeValue("zeta.worker.alive", 1.0);
     assertGaugeValue("zeta.worker.tracked.keys", 12.0);
     assertGaugeValue("zeta.cpu.load", 0.5);
@@ -165,7 +161,6 @@ class ZetaMicrometerAutoConfigurationTest {
   @Test
   void customMeterBinder_handlesNoDeps() {
     MeterBinder binder = config.hotKeyCustomMetrics(
-      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -193,7 +188,6 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
-      providerThatReturns(null),
       providerThatReturns(expireManager),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -218,7 +212,6 @@ class ZetaMicrometerAutoConfigurationTest {
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
-      providerThatReturns(null),
       providerThatReturns(sf),
       providerThatReturns(null),
       providerThatReturns(null),

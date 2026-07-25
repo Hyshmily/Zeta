@@ -52,7 +52,11 @@ class ZetaBayesianSMEdgeTest {
 
   private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null, 0.0);
 
-  private static final EvaluationContext COLD_HIGH_CTX = new EvaluationContext(100L, 5L, 10L, null, 0.0);
+  // Lower adjustedLogThreshold (1.0 ≈ e^1 ≈ 2.7) simulates the momentum from a
+  // sustained key — Evaluator would produce this when EMA cmsCount >> windowSum.
+  private static final EvaluationContext COLD_HIGH_CTX = new EvaluationContext(
+    100L, 5L, 10L, null, Math.log(10), 0.8, 0.0
+  );
 
   private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null, 0.0);
 

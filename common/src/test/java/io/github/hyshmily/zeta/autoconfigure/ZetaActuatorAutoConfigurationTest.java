@@ -68,14 +68,12 @@ class ZetaActuatorAutoConfigurationTest {
   @Test
   void hotKeyEndpointIsCreatedWithAllDependencies() {
     TopK hotKeyDetector = mock(TopK.class);
-    TopK workerTopK = mock(TopK.class);
     Cache<String, Object> localCache = mock(Cache.class);
     SingleFlight singleFlight = mock(SingleFlight.class);
     KeyReporter reporter = mock(KeyReporter.class);
     ZetaProperties properties = new ZetaProperties();
 
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
-    ObjectProvider<TopK> workerProvider = mock(ObjectProvider.class);
     ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
@@ -87,7 +85,6 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
-    doReturn(workerTopK).when(workerProvider).getIfAvailable();
     doReturn(localCache).when(cacheProvider).getIfAvailable();
     doReturn(singleFlight).when(sfProvider).getIfAvailable();
     doReturn(reporter).when(reporterProvider).getIfAvailable();
@@ -100,7 +97,6 @@ class ZetaActuatorAutoConfigurationTest {
     ZetaActuatorAutoConfiguration config = new ZetaActuatorAutoConfiguration();
     ZetaEndpoint endpoint = config.hotKeyEndpoint(
       detectorProvider,
-      workerProvider,
       cacheProvider,
       sfProvider,
       reporterProvider,
@@ -122,7 +118,6 @@ class ZetaActuatorAutoConfigurationTest {
   @Test
   void hotKeyEndpointHandlesMissingDependenciesAsNull() {
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
-    ObjectProvider<TopK> workerProvider = mock(ObjectProvider.class);
     ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
@@ -135,7 +130,6 @@ class ZetaActuatorAutoConfigurationTest {
     ZetaProperties properties = new ZetaProperties();
 
     doReturn(null).when(detectorProvider).getIfAvailable();
-    doReturn(null).when(workerProvider).getIfAvailable();
     doReturn(null).when(cacheProvider).getIfAvailable();
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
@@ -148,7 +142,6 @@ class ZetaActuatorAutoConfigurationTest {
     ZetaActuatorAutoConfiguration config = new ZetaActuatorAutoConfiguration();
     ZetaEndpoint endpoint = config.hotKeyEndpoint(
       detectorProvider,
-      workerProvider,
       cacheProvider,
       sfProvider,
       reporterProvider,
@@ -193,7 +186,6 @@ class ZetaActuatorAutoConfigurationTest {
   void hotKeyEndpointAcceptsOnlyAppTopK() {
     TopK hotKeyDetector = mock(TopK.class);
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
-    ObjectProvider<TopK> workerProvider = mock(ObjectProvider.class);
     ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
@@ -206,7 +198,6 @@ class ZetaActuatorAutoConfigurationTest {
     ZetaProperties properties = new ZetaProperties();
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
-    doReturn(null).when(workerProvider).getIfAvailable();
     doReturn(null).when(cacheProvider).getIfAvailable();
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
@@ -219,7 +210,6 @@ class ZetaActuatorAutoConfigurationTest {
     ZetaActuatorAutoConfiguration config = new ZetaActuatorAutoConfiguration();
     ZetaEndpoint endpoint = config.hotKeyEndpoint(
       detectorProvider,
-      workerProvider,
       cacheProvider,
       sfProvider,
       reporterProvider,

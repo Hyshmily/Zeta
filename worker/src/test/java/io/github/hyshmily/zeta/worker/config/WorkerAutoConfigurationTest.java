@@ -27,7 +27,6 @@ import io.github.hyshmily.zeta.worker.detection.ThresholdLearner;
 import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
-import io.github.hyshmily.zeta.worker.persistence.TopKPersistService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -290,18 +289,9 @@ class WorkerAutoConfigurationTest {
     );
     task.evictStale();
 
-    long expectedStaleAfterMs = properties.getStateMachine().getCoolDurationMs() * 2;
+    long expectedStaleAfterMs = properties.getStateMachine().getEvictIntervalMs();
     Mockito.verify(detector).evictStale(expectedStaleAfterMs);
     Mockito.verify(stateMachine).evictStale(Mockito.eq(expectedStaleAfterMs), Mockito.any());
-  }
-
-  /**
-   * Verifies that the {@code workerTopK} HeavyKeeper bean is created.
-   */
-  @Test
-  @DisplayName("should create workerTopK bean")
-  void shouldCreateWorkerTopKBean() {
-    runner.run(ctx -> assertThat(ctx).hasBean("workerTopK"));
   }
 
   /**
@@ -423,25 +413,6 @@ class WorkerAutoConfigurationTest {
   }
 
   /**
-   * Verifies that persistence-related beans ({@link TopKPersistService} and
-   * {@code topKPersistTask}) are created when
-   * {@code zeta.worker.persistence.enabled=true} and
-   * {@link org.springframework.data.redis.core.StringRedisTemplate} is available.
-   */
-  @Test
-  @DisplayName("should create persistence beans when persistence enabled")
-  void shouldCreatePersistenceBeansWhenEnabled() {
-    new ApplicationContextRunner()
-      .withPropertyValues("zeta.worker.enabled=true", "zeta.worker.persistence.enabled=true")
-      .withUserConfiguration(MinimalMockConfigurationWithPersistence.class)
-      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
-      .run(ctx -> {
-        assertThat(ctx).hasSingleBean(TopKPersistService.class);
-        assertThat(ctx).hasBean("topKPersistTask");
-      });
-  }
-
-  /**
    * Minimal configuration providing mocked RabbitTemplate, ConnectionFactory, and
    * the shared scheduler for the context runner.
    */
@@ -480,17 +451,4 @@ class WorkerAutoConfigurationTest {
     }
   }
 
-  /**
-   * Extends {@link MinimalMockConfiguration} with a mocked
-   * {@link org.springframework.data.redis.core.StringRedisTemplate} so that
-   * {@link TopKPersistService} can be created when persistence is enabled.
-   */
-  @Configuration
-  static class MinimalMockConfigurationWithPersistence extends MinimalMockConfiguration {
-
-    @Bean
-    StringRedisTemplate stringRedisTemplate() {
-      return org.mockito.Mockito.mock(StringRedisTemplate.class);
-    }
-  }
 }

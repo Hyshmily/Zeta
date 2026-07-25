@@ -119,7 +119,6 @@ public class ZetaMicrometerAutoConfiguration {
    * </table>
    *
    * @param hotKeyDetectorProvider      provider for the app-side TopK (may be absent)
-   * @param workerTopKProvider          provider for the Worker-side TopK (may be absent)
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param reporterProvider            provider for the HotKey reporter (may be absent)
    * @param expireManagerProvider       provider for the cache expiry manager (may be absent)
@@ -134,7 +133,6 @@ public class ZetaMicrometerAutoConfiguration {
   @ConditionalOnMissingBean
   public MeterBinder hotKeyCustomMetrics(
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
-    @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<KeyReporter> reporterProvider,
     ObjectProvider<ExpireManager> expireManagerProvider,
@@ -163,7 +161,6 @@ public class ZetaMicrometerAutoConfiguration {
       cacheSyncPublisherProvider.ifAvailable(csp ->
         Gauge.builder("zeta.sync.dedup.size", csp, p -> (double) p.getDedupCacheSize()).register(registry)
       );
-      workerTopKProvider.ifAvailable(wtk -> registerWorkerTopKGauges(wtk, registry));
       healthViewProvider.ifAvailable(hv ->
         Gauge.builder("zeta.worker.alive", hv, v -> v.isClusterHealthy() ? 1.0 : 0.0).register(registry)
       );
@@ -195,22 +192,6 @@ public class ZetaMicrometerAutoConfiguration {
     Gauge.builder("zeta.expelled.queue.remaining", detector, t -> (double) t.expelled().remainingCapacity()).register(
       registry
     );
-  }
-
-  /**
-   * Register Micrometer gauges for the worker-side TopK detector.
-   * Exposes top-K size and total requests tagged with type=worker.
-   *
-   * @param worker   the worker-side TopK detector
-   * @param registry the Micrometer meter registry
-   */
-  private static void registerWorkerTopKGauges(TopK worker, MeterRegistry registry) {
-    Gauge.builder("zeta.topk.size", worker, t -> t.list().size())
-      .tag("type", "worker")
-      .register(registry);
-    Gauge.builder("zeta.topk.total", worker, t -> (double) t.total())
-      .tag("type", "worker")
-      .register(registry);
   }
 
   /**

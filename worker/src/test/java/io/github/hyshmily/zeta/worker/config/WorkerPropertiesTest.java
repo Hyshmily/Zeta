@@ -89,18 +89,6 @@ class WorkerPropertiesTest {
   }
 
   /**
-   * Verifies the default values of the {@code heavy-keeper} sub-properties.
-   */
-  @Test
-  void shouldHaveDefaultHeavyKeeperValues() {
-    assertThat(properties.getHeavyKeeper().getTopK()).isEqualTo(100);
-    assertThat(properties.getHeavyKeeper().getWidth()).isEqualTo(20000);
-    assertThat(properties.getHeavyKeeper().getDepth()).isEqualTo(10);
-    assertThat(properties.getHeavyKeeper().getDecay()).isEqualTo(0.9);
-    assertThat(properties.getHeavyKeeper().getMinCount()).isEqualTo(10);
-  }
-
-  /**
    * Verifies that {@code confirmWindows} is correctly derived from {@code confirmDurationMs} and {@code sliceMs}.
    */
   @Test
@@ -175,18 +163,6 @@ class WorkerPropertiesTest {
   @Test
   void shouldHaveDefaultHeartbeatValues() {
     assertThat(properties.getHeartbeat().getPingIntervalMs()).isEqualTo(1000);
-  }
-
-  /**
-   * Verifies the default values of the {@code persistence} sub-properties.
-   */
-  @Test
-  void shouldHaveDefaultPersistenceValues() {
-    assertThat(properties.getPersistence().isEnabled()).isFalse();
-    assertThat(properties.getPersistence().getPersistIntervalMs()).isEqualTo(30_000);
-    assertThat(properties.getPersistence().getTopKCount()).isEqualTo(100);
-    assertThat(properties.getPersistence().getRedisKeyPrefix()).isEqualTo("zeta:topk:worker:");
-    assertThat(properties.getPersistence().getTtlDays()).isEqualTo(3);
   }
 
   /**

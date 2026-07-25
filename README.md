@@ -19,7 +19,7 @@ Zeta is a configurable, high-performance, low-cost lightweight distributed cache
 
 ### Local-Distributed Collaborative Detection
 
-Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper probabilistic sketch and a remote Worker cluster — and automatically warms up the L1 cache based on the detection results.
+Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper probabilistic sketch and a remote Worker cluster running a sliding-window + Bayesian state machine pipeline — and automatically warms up the L1 cache based on the detection results.
 
 - Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency.
 
@@ -210,7 +210,7 @@ Default local configuration:
 | Cross-instance Sync      | `zeta.sync.enabled=true`                     | RabbitMQ-based cache invalidation                                    |
 | Worker Listener          | `zeta.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker                               |
 | Worker Mode              | `zeta.worker.enabled=true`                   | Run a dedicated Worker node                                          |
-| Worker TopK Persist      | `zeta.worker.persistence.enabled=true`       | Warm start from Redis after restart                                  |
+
 | Access Reporting         | `zeta.report.enabled=true` (default)         | Report access counts to Worker                                       |
 | Reporter Self-Protection | `zeta.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush                                  |
 | Spring Cache Integration | `zeta.spring-cache.enabled=true`             | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with Zeta detection |
@@ -327,8 +327,6 @@ Worker mode provides cluster-wide hotspot detection via dedicated nodes. App ins
 | Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `ZetaModeException`) |
 
 **Worker Cluster Health:** Set `zeta.local.expected-worker-count` to the expected number of Workers in production. When set >0, `ClusterHealthView` uses majority quorum (`> expectedWorkerCount / 2`) as the healthy Worker threshold; when 0 (default), the cluster is considered unhealthy until at least one heartbeat is received. This enables precise detection of partial Worker failures and graceful degradation decisions.
-
-**Worker TopK Persistence (Warm Start):** When `zeta.worker.persistence.enabled=true`, the Worker periodically snapshots the TopK list to Redis. On restart, `TopKPersistService` loads the last snapshot and replays it into the HeavyKeeper sketch, reducing warmup from hours to seconds.
 
 **FastLane (Immediate Promotion Bypass):** FastLane is an evaluation path that bypasses the Bayesian confidence gating entirely. Keys matching user-configured glob rules (e.g. `product:*`) are promoted to `CONFIRMED_HOT` as soon as the sliding-window sum reaches the rule's threshold — no confirm windows, no confidence scoring, no streak counting. End-to-end latency: **~60ms** (P99).
 

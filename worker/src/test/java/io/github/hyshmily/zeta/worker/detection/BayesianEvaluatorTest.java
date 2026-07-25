@@ -5,7 +5,6 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
@@ -30,9 +29,6 @@ class BayesianEvaluatorTest {
   @Mock
   private ZetaBayesianSM stateMachine;
 
-  @Mock
-  private TopK workerTopK;
-
   @Captor
   private ArgumentCaptor<EvaluationContext> ctxCaptor;
 
@@ -40,7 +36,7 @@ class BayesianEvaluatorTest {
 
   @BeforeEach
   void setUp() {
-    evaluator = new Evaluator(detector, stateMachine, workerTopK, new FastLaneRuleManagerImpl(List.of()), null);
+    evaluator = new Evaluator(detector, stateMachine, new FastLaneRuleManagerImpl(List.of()), null);
   }
 
   @Nested
@@ -50,7 +46,6 @@ class BayesianEvaluatorTest {
     void shouldReturnDecision() {
       when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
-      when(workerTopK.estimatedCount("key")).thenReturn(42L);
       when(stateMachine.evaluate(eq("key"), eq(true), eq(false), any(), any())).thenReturn(
         new ZetaDecision(DecisionType.HOT, "key", null)
       );
@@ -60,10 +55,9 @@ class BayesianEvaluatorTest {
     }
 
     @Test
-    void shouldPassCmsCountAsObservation_whenAvailable() {
+    void shouldPassEmaCmsCount() {
       when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
-      when(workerTopK.estimatedCount("key")).thenReturn(42L);
       when(stateMachine.evaluate(eq("key"), eq(true), eq(false), ctxCaptor.capture(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
@@ -71,16 +65,15 @@ class BayesianEvaluatorTest {
       evaluator.evaluate("key", 5L);
 
       EvaluationContext ctx = ctxCaptor.getValue();
-      assertThat(ctx.cmsCount()).isEqualTo(42L);
+      assertThat(ctx.cmsCount()).isEqualTo(5L);
       assertThat(ctx.windowSum()).isEqualTo(100L);
       assertThat(ctx.threshold()).isEqualTo(10L);
     }
 
     @Test
-    void shouldFallbackToWindowSum_whenCmsCountIsZero() {
+    void shouldEmaGrowsWithCount() {
       when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
-      when(workerTopK.estimatedCount("key")).thenReturn(0L);
       when(stateMachine.evaluate(eq("key"), eq(true), eq(false), ctxCaptor.capture(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
@@ -88,7 +81,7 @@ class BayesianEvaluatorTest {
       evaluator.evaluate("key", 5L);
 
       EvaluationContext ctx = ctxCaptor.getValue();
-      assertThat(ctx.cmsCount()).isZero();
+      assertThat(ctx.cmsCount()).isEqualTo(5L);
     }
   }
 
@@ -99,7 +92,6 @@ class BayesianEvaluatorTest {
     void shouldRemoveEntriesOlderThanStaleAfterMs() throws InterruptedException {
       when(detector.addCount(any(), anyLong())).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
-      when(workerTopK.estimatedCount(any())).thenReturn(0L);
       when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), any(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
@@ -113,7 +105,6 @@ class BayesianEvaluatorTest {
     void shouldKeepRecentEntries() throws InterruptedException {
       when(detector.addCount(any(), anyLong())).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
-      when(workerTopK.estimatedCount(any())).thenReturn(0L);
       when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), any(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
@@ -133,7 +124,6 @@ class BayesianEvaluatorTest {
   void shouldComputeCvFromMultipleEvaluations() {
     when(detector.addCount(any(), anyLong())).thenReturn(100L);
     when(detector.getThreshold()).thenReturn(10L);
-    when(workerTopK.estimatedCount(any())).thenReturn(0L);
     when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), ctxCaptor.capture(), any())).thenReturn(
       new ZetaDecision(DecisionType.NONE, "key", null)
     );
@@ -156,7 +146,7 @@ class BayesianEvaluatorTest {
       FastLaneRuleManager ruleManager = new FastLaneRuleManagerImpl(List.of(
         new FastLaneRuleManager.FastLaneRule("hot:*", 500)
       ));
-      fastLaneEvaluator = new Evaluator(detector, stateMachine, workerTopK, ruleManager, null);
+      fastLaneEvaluator = new Evaluator(detector, stateMachine, ruleManager, null);
     }
 
     @Test
@@ -174,7 +164,6 @@ class BayesianEvaluatorTest {
     void shouldPassIsFastlaneFalseWhenFastLaneRuleMatchesButBelowThreshold() {
       when(detector.addCount("hot:key", 10L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
-      when(workerTopK.estimatedCount("hot:key")).thenReturn(0L);
       when(stateMachine.evaluate(eq("hot:key"), eq(true), eq(false), any(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "hot:key", null)
       );
@@ -186,7 +175,6 @@ class BayesianEvaluatorTest {
     void shouldPassIsFastlaneFalseWhenKeyDoesNotMatchAnyRule() {
       when(detector.addCount("normal:key", 10L)).thenReturn(200L);
       when(detector.getThreshold()).thenReturn(10L);
-      when(workerTopK.estimatedCount("normal:key")).thenReturn(0L);
       when(stateMachine.evaluate(eq("normal:key"), eq(true), eq(false), any(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "normal:key", null)
       );

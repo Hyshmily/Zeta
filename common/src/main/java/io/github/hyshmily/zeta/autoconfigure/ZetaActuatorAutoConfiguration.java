@@ -78,7 +78,6 @@ public class ZetaActuatorAutoConfiguration {
    * in the endpoint response rather than null-pointer errors.
    *
    * @param hotKeyDetectorProvider      provider for the app-side TopK detector (may be absent)
-   * @param workerTopKProvider          provider for the Worker-side TopK detector (may be absent)
    * @param hotLocalCacheProvider       provider for the L1 Caffeine cache (may be absent)
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param hotKeyReporterProvider      provider for the HotKey reporter (may be absent)
@@ -96,7 +95,6 @@ public class ZetaActuatorAutoConfiguration {
   @ConditionalOnMissingBean
   public ZetaEndpoint hotKeyEndpoint(
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
-    @Qualifier("workerTopK") ObjectProvider<TopK> workerTopKProvider,
     ObjectProvider<Cache<String, Object>> hotLocalCacheProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<KeyReporter> hotKeyReporterProvider,
@@ -110,7 +108,6 @@ public class ZetaActuatorAutoConfiguration {
   ) {
     return ZetaEndpoint.builder()
       .hotKeyDetector(hotKeyDetectorProvider.getIfAvailable())
-      .workerTopK(workerTopKProvider.getIfAvailable())
       .caffeineCache(hotLocalCacheProvider.getIfAvailable())
       .singleFlight(singleFlightProvider.getIfAvailable())
       .properties(properties)

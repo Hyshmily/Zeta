@@ -20,7 +20,7 @@ When `spring-boot-starter-actuator` is on the classpath, the Zeta endpoint is au
 
 Enable via `management.endpoints.web.exposure.include=health,info,hotkey`.
 
-Supports an optional `?limit=N` query parameter to cap the number of TopK entries returned (default 100).
+Supports an optional `?limit=N` query parameter to cap the number of app-side TopK entries returned (default 100).
 
 ```javascript
 {
@@ -77,15 +77,7 @@ Supports an optional `?limit=N` query parameter to cap the number of TopK entrie
     "versionDegradedCount": 0       // Keys using degraded node-local version
   },
   "worker": {
-    // ── Worker-side TopK (cluster-wide) ──
-    "topK": [{ "key": "cache:shop:17", "count": 8921 }],  // Cluster-wide hot keys
-    "topKCount": 1,                                        // Worker hot key count
-    "totalRequests": 784512,                               // Worker total requests
-    "recentlyExpelled": ["cache:shop:3"],                  // Worker recently evicted keys
-    "topKCapacity": 100,            // Worker HeavyKeeper K
-    "sketchWidth": 20000,           // Worker sketch width
-    "sketchDepth": 10,              // Worker sketch depth
-    "minCountThreshold": 10,        // Worker minimum hot count
+    "trackedKeys": 42,              // Keys tracked by state machine
 
     // ── Worker health & state ──
     "health": "healthy",            // Cluster health: "healthy", "unhealthy", or "unknown"
@@ -120,8 +112,8 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 
 | Metric                                | Type  | Tags                 | Description                             |
 | ------------------------------------- | ----- | -------------------- | --------------------------------------- |
-| `zeta.topk.size`                    | Gauge | `type=local\|worker` | TopK current ranking count              |
-| `zeta.topk.total`                   | Gauge | `type=local\|worker` | TopK total requests tracked             |
+| `zeta.topk.size`                    | Gauge | `type=local`         | TopK current ranking count              |
+| `zeta.topk.total`                   | Gauge | `type=local`         | TopK total requests tracked             |
 | `zeta.expelled.queue.size`          | Gauge | —                    | Expelled queue backlog                  |
 | `zeta.expelled.queue.remaining`     | Gauge | —                    | Expelled queue remaining capacity       |
 | `zeta.singleflight.inflight`        | Gauge | —                    | SingleFlight in-flight dedup count      |

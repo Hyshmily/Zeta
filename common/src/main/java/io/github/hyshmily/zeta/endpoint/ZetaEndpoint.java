@@ -63,8 +63,6 @@ public class ZetaEndpoint {
 
   /** App-side TopK detector (HeavyKeeper) for local hot-key frequency tracking. */
   private final TopK hotKeyDetector;
-  /** Worker-side TopK detector — separate instance fed by {@code ReportConsumer}. */
-  private final TopK workerTopK;
   /** L1 Caffeine cache instance. */
   private final Cache<String, Object> caffeineCache;
   /** SingleFlight deduplication guard for concurrent L2 reads. */
@@ -218,16 +216,6 @@ public class ZetaEndpoint {
    */
   private Map<String, Object> buildWorkerSection(int limit) {
     Map<String, Object> worker = new LinkedHashMap<>();
-
-    if (workerTopK != null) {
-      List<Item> topKList = workerTopK.list();
-      int actualLimit = Math.min(topKList.size(), Math.max(1, limit));
-      worker.put("topK", toTopKEntries(topKList.subList(0, actualLimit)));
-      worker.put("topKCount", actualLimit);
-      worker.put("totalRequests", workerTopK.total());
-      worker.put("recentlyExpelled", workerTopK.expelled().stream().map(Item::key).limit(10).toList());
-      worker.putAll(heavyKeeperConfig(workerTopK));
-    }
 
     if (healthView != null) {
       worker.put("health", healthView.isClusterHealthy() ? "healthy" : "unhealthy");

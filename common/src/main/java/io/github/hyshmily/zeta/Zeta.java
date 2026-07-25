@@ -89,13 +89,7 @@ public class Zeta implements DisposableBean {
    * app mode.
    */
   private final HotKeyDetector appHotKeyDetector;
-  /**
-   * Worker-side global hot-key detector receiving aggregated reports from
-   * all application instances. {@code null} when no Worker is connected.
-   */
-  private final TopK workerTopKAlgorithm;
-  /**
-   * Distributed lock provider.  {@code null} when no Redis is available
+  /** Distributed lock provider.  {@code null} when no Redis is available
    * (graceful degradation — {@link #tryLock} returns {@code null}).
    */
   private final LockProvider lockProvider;
@@ -114,47 +108,27 @@ public class Zeta implements DisposableBean {
   /**
    * Create a HotKey facade with all three optional components.
    *
-   * <p>Each parameter may be {@code null} depending on the deployment mode:
-   * <ul>
-   *   <li><b>App-only:</b> {@code hotKeyCache} and {@code appHotKeyDetector} are present,
-   *       {@code workerTopKAlgorithm} is {@code null}</li>
-   *   <li><b>Worker-only:</b> only {@code workerTopKAlgorithm} is present</li>
-   *   <li><b>Coexistence:</b> all three are present</li>
-   * </ul>
+   * <p>Either parameter may be {@code null} depending on the deployment mode.
    *
    * @param hotKeyCache         the cache orchestrator (maybe {@code null} in Worker-only mode)
    * @param appHotKeyDetector   the app-side local TopK detector (maybe {@code null} in Worker-only mode)
-   * @param workerTopKAlgorithm the Worker-side global TopK detector (maybe {@code null} in app-only mode)
    */
-  public Zeta(HotKeyCache hotKeyCache, HotKeyDetector appHotKeyDetector, TopK workerTopKAlgorithm) {
-    this(hotKeyCache, appHotKeyDetector, workerTopKAlgorithm, null);
+  public Zeta(HotKeyCache hotKeyCache, HotKeyDetector appHotKeyDetector) {
+    this(hotKeyCache, appHotKeyDetector, null);
   }
 
   /**
    * Create a HotKey facade with an optional distributed lock provider.
    *
-   * <p>Each parameter may be {@code null} depending on the deployment mode:
-   * <ul>
-   *   <li><b>App-only:</b> {@code hotKeyCache} and {@code appHotKeyDetector} are present,
-   *       {@code workerTopKAlgorithm} and {@code lockProvider} may be absent</li>
-   *   <li><b>Worker-only:</b> only {@code workerTopKAlgorithm} is present</li>
-   *   <li><b>Coexistence:</b> all four may be present</li>
-   * </ul>
+   * <p>Each parameter may be {@code null} depending on the deployment mode.
    *
    * @param hotKeyCache         the cache orchestrator (maybe {@code null} in Worker-only mode)
    * @param appHotKeyDetector   the app-side local TopK detector (maybe {@code null} in Worker-only mode)
-   * @param workerTopKAlgorithm the Worker-side global TopK detector (maybe {@code null} in app-only mode)
    * @param lockProvider        the distributed lock provider (maybe {@code null} when no Redis)
    */
-  public Zeta(
-    HotKeyCache hotKeyCache,
-    HotKeyDetector appHotKeyDetector,
-    TopK workerTopKAlgorithm,
-    LockProvider lockProvider
-  ) {
+  public Zeta(HotKeyCache hotKeyCache, HotKeyDetector appHotKeyDetector, LockProvider lockProvider) {
     this.hotKeyCache = hotKeyCache;
     this.appHotKeyDetector = appHotKeyDetector;
-    this.workerTopKAlgorithm = workerTopKAlgorithm;
     this.lockProvider = lockProvider;
     this.refreshFutures = new ConcurrentHashMap<>();
   }
@@ -1724,36 +1698,6 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Check whether a key is currently tracked as a cluster-wide hot key by the
-   * Worker-side global detector.
-   *
-   * @param cacheKey the key to inspect
-   * @return {@code true} if the key appears in the Worker TopK list;
-   *         {@code false} if the key is {@code null} or no Worker is active
-   */
-  public boolean isWorkerHotKey(String cacheKey) {
-    return workerTopKAlgorithm != null && cacheKey != null && workerTopKAlgorithm.contains(cacheKey);
-  }
-
-  /**
-   * Batch variant of {@link #isWorkerHotKey(String)}. Returns a map of key →
-   * Worker hot status for all given keys.
-   *
-   * <p><b>Batch execution:</b> Iterates sequentially; for large batches
-   * consider parallelizing in caller code.
-   *
-   * @param cacheKeys the keys to inspect
-   * @return a map of key → whether it is a cluster-wide hot key;
-   *         all entries are {@code false} when no Worker is active
-   */
-  public Map<String, Boolean> areWorkerHotKeys(Collection<String> cacheKeys) {
-    Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
-    Map<String, Boolean> result = new HashMap<>();
-    cacheKeys.forEach(key -> result.put(key, isWorkerHotKey(key)));
-    return result;
-  }
-
-  /**
    * Return the top N hot keys from the local detector, ordered by frequency.
    * Useful when callers need more or fewer items than the configured TopK capacity.
    *
@@ -1792,39 +1736,6 @@ public class Zeta implements DisposableBean {
    */
   public List<Item> returnLocalHotKeys() {
     return appHotKeyDetector != null ? appHotKeyDetector.list() : List.of();
-  }
-
-  /**
-   * Return the current top-K hot keys from the Worker-side global detector,
-   * ordered by frequency. These keys reflect cross-instance aggregated access
-   * counts and are updated via periodic reports from all application instances.
-   *
-   * @return the cluster-wide top-K list, or an empty list if no Worker is active;
-   *         the returned list is a point-in-time snapshot
-   */
-  public List<Item> returnWorkerHotKeys() {
-    return workerTopKAlgorithm != null ? workerTopKAlgorithm.list() : List.of();
-  }
-
-  /**
-   * Return a blocking queue of recently expelled hot keys from the Worker-side
-   * global detector. Consumers can drain this queue to react to keys that are
-   * no longer considered cluster-wide hot.
-   *
-   * @return the expelled queue, or an empty queue if no Worker is active
-   */
-  public BlockingQueue<Item> returnWorkerExpelledHotKeys() {
-    return workerTopKAlgorithm != null ? workerTopKAlgorithm.expelled() : new LinkedBlockingQueue<>();
-  }
-
-  /**
-   * Return the total number of data streams tracked by the Worker-side
-   * global detector.
-   *
-   * @return the total count, or {@code 0} if no Worker is active
-   */
-  public long returnWorkerTotalDataStreams() {
-    return workerTopKAlgorithm != null ? workerTopKAlgorithm.total() : 0L;
   }
 
   //-------------------------------------------------------------------------------------
@@ -2089,50 +2000,22 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Whether this instance has Worker-side TopK available.
-   *
-   * <p>Returns {@code true} in Worker-only and Coexistence modes,
-   * {@code false} in App-only mode.
-   *
-   * @return {@code true} if Worker TopK queries (returnWorkerHotKeys, etc.) are usable
-   */
-  public boolean isWorker() {
-    return workerTopKAlgorithm != null;
-  }
-
-  /**
-   * Whether this instance is in pure App-only mode (cache present, Worker TopK absent).
+   * Whether this instance is in pure App-only mode (cache present).
    *
    * @return {@code true} if App-only mode
    */
   public boolean isAppOnly() {
-    return hotKeyCache != null && workerTopKAlgorithm == null;
+    return hotKeyCache != null;
   }
 
   /**
-   * Whether this instance is in pure Worker-only mode (cache absent, Worker TopK present).
-   *
-   * @return {@code true} if Worker-only mode
-   */
-  public boolean isWorkerOnly() {
-    return hotKeyCache == null && workerTopKAlgorithm != null;
-  }
-
-  /**
-   * Returns a human-readable label of the current deployment mode based on the
-   * presence/absence of the cache and Worker TopK fields.
+   * Returns a human-readable label of the current deployment mode.
    */
   private String currentModeLabel() {
-    if (hotKeyCache != null && workerTopKAlgorithm != null) {
-      return "Coexistence mode";
-    }
     if (hotKeyCache != null) {
       return "App-only mode";
     }
-    if (workerTopKAlgorithm != null) {
-      return "Worker-only mode";
-    }
-    return "Uninitialized mode (no cache, no TopK)";
+    return "Uninitialized mode (no cache)";
   }
 
   private void requireAppCache(String operation) {

@@ -30,8 +30,7 @@ import org.springframework.validation.annotation.Validated;
  * <p>Prefix: {@code zeta.worker}.
  *
  * <p>Groups cover routing, AMQP exchange names, sliding-window parameters,
- * threshold settings, state-machine timings, dynamic threshold adaptation,
- * and HeavyKeeper algorithm tuning.
+ * threshold settings, state-machine timings, and dynamic threshold adaptation.
  *
  * Default constructor.
  */
@@ -97,8 +96,12 @@ public class WorkerProperties {
 
     private long coolDurationMs = 600_000;
     private long preCoolGraceMs = 60_000;
-    /** Interval for evicting stale sliding-window and state-machine state. */
-    private long evictIntervalMs = 30_000;
+    /**
+     * Staleness threshold and eviction schedule interval.
+     * A key is evicted after this many milliseconds without any report.
+     * Default = 2 × coolDurationMs = 20 minutes.
+     */
+    private long evictIntervalMs = 1_200_000;
   }
 
   /** Dynamic threshold adaptation based on global qps changes. Default constructor. */
@@ -109,17 +112,6 @@ public class WorkerProperties {
     private long learningPeriodMs = 30_000;
     private double hotThresholdRatio = 0.01;
     private long recalculateIntervalMs = 60_000;
-  }
-
-  /** HeavyKeeper TopK algorithm parameters for worker-side hot key detection. Default constructor. */
-  @Data
-  public static class HeavyKeeper {
-
-    private int topK = 100;
-    private int width = 20_000;
-    private int depth = 10;
-    private double decay = 0.9;
-    private int minCount = 10;
   }
 
   /** Heartbeat (ping) interval configuration for worker-to-worker health signalling and config sync. Default constructor. */
@@ -155,26 +147,6 @@ public class WorkerProperties {
     private long threshold = 100;
   }
 
-  /** TopK persistence to Redis for warm-start after Worker restart. Default constructor. */
-  @Data
-  public static class Persistence {
-
-    /** Whether persistence is enabled. */
-    private boolean enabled = false;
-
-    /** Interval (ms) between periodic TopK snapshots. */
-    private long persistIntervalMs = 30_000;
-
-    /** Number of top keys to persist per snapshot. */
-    private int topKCount = 100;
-
-    /** Redis key prefix; final key = prefix + appName + ":" + nodeId. */
-    private String redisKeyPrefix = "zeta:topk:worker:";
-
-    /** TTL (days) for persisted TopK data in Redis. */
-    private int ttlDays = 3;
-  }
-
   private boolean enabled = false;
 
   @Valid
@@ -199,9 +171,6 @@ public class WorkerProperties {
   private GlobalQpsDynamicThreshold globalQpsDynamicThreshold = new GlobalQpsDynamicThreshold();
 
   @Valid
-  private HeavyKeeper heavyKeeper = new HeavyKeeper();
-
-  @Valid
   private Heartbeat heartbeat = new Heartbeat();
 
   @Valid
@@ -209,9 +178,6 @@ public class WorkerProperties {
 
   @Valid
   private FastLane fastLane = new FastLane();
-
-  @Valid
-  private Persistence persistence = new Persistence();
 
   /**
    * Number of state-machine time slices that fit within the CONFIRM duration.

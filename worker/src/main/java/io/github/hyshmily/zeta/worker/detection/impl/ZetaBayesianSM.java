@@ -81,7 +81,7 @@ import lombok.extern.slf4j.Slf4j;
  *    │                              (CONFIRMED_HOT or     └──► broadcast COOL ──► (removed)
  *    │                               PRE_COOLING,
  *    │                               staleAfterMs =
- *    │                               2 × coolDurationMs)
+ *    │                               evictIntervalMs)
  *    │
  *    └──── hotStreak > 0 ──────────────────────────────────┘
  *                     (silent revive, no broadcast)
@@ -124,9 +124,9 @@ import lombok.extern.slf4j.Slf4j;
  *   <li><b>Fast-lane revive:</b> PRE_COOLING + fastlane → CONFIRMED_HOT
  *       with broadcast (unlike silent revive, fastlane always broadcasts)</li>
  *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs every
- *       {@code evict-interval-ms} (default 30s) and scans for keys whose
- *       {@code lastUpdateTime} exceeds {@code 2 × coolDurationMs}. Any
- *       key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
+ *       {@code evict-interval-ms} (default 20 min) and scans for keys whose
+ *       {@code lastUpdateTime} exceeds the configured stale threshold.
+ *       Any key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
  *       the {@code onCoolEvict} callback to broadcast COOL to all app
  *       instances, then removes the key from the state map. This is the
  *       safety net that cleans up keys left in HOT state after the
@@ -381,11 +381,11 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     state.hotStreak++;
     state.coolStreak = 0;
 
-    // Compute the observation once and apply trend boost before the switch.
-    // An upward trend (trendStrength > 1.0) inflates the observed count so that
-    // steadily-rising keys reach HIGH Bayesian confidence sooner without waiting
-    // for the raw window sum to cross the threshold by a wide margin.
-    long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
+    // Observation = window sum (exact, hard-window).
+    // Momentum-adjusted logThreshold (lowered for sustained keys,
+    // raised for first-time spikes) is already baked into
+    // ctx.adjustedLogThreshold() by the Evaluator.
+    long obs = ctx.windowSum();
     if (ctx.trendStrength() > 1.0) {
       obs = (long) (obs * ctx.trendStrength());
     }
@@ -398,7 +398,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
 
         ProbabilityResult pr = confidenceEvaluator.evaluateWithAccumulatedPrior(
           obs,
-          ctx.logThreshold(),
+          ctx.adjustedLogThreshold(),
           ctx.cv(),
           state.posteriorMean,
           state.accumulatedPrecision
@@ -440,7 +440,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       case CANDIDATE_HOT -> {
         ProbabilityResult pr = confidenceEvaluator.evaluateWithAccumulatedPrior(
           obs,
-          ctx.logThreshold(),
+          ctx.adjustedLogThreshold(),
           ctx.cv(),
           state.posteriorMean,
           state.accumulatedPrecision
@@ -556,7 +556,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    */
   private ZetaDecision evaluatePreCooling(String key, KeyState state, EvaluationContext ctx, StateSnapshot snapShot) {
     if (state.coolStreak >= coolCount) {
-      long obs = ctx.cmsCount() > 0 ? ctx.cmsCount() : ctx.windowSum();
+      long obs = ctx.windowSum();
       // A downward trend reduces the effective observation so that
       // decaying keys reach NON-HIGH confidence faster and emit COOL earlier.
       if (ctx.trendStrength() > 0 && ctx.trendStrength() < 1.0) {
@@ -567,7 +567,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       // delaying COOL broadcast.
       state.posteriorMean = priorMean;
       state.accumulatedPrecision = 0.0;
-      ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.logThreshold(), ctx.cv());
+      ProbabilityResult pr = confidenceEvaluator.evaluate(obs, ctx.adjustedLogThreshold(), ctx.cv());
 
       if (pr.level() != ConfidenceLevel.HIGH) {
         state.currentState = COLD;
