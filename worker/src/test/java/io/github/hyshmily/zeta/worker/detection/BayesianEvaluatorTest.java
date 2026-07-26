@@ -2,7 +2,8 @@ package io.github.hyshmily.zeta.worker.detection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.model.EvaluationContext;
@@ -89,7 +90,7 @@ class BayesianEvaluatorTest {
   class EvictStale {
 
     @Test
-    void shouldRemoveEntriesOlderThanStaleAfterMs() throws InterruptedException {
+    void shouldRemoveEntriesOlderThanStaleAfterMs() {
       when(detector.addCount(any(), anyLong())).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), any(), any())).thenReturn(
@@ -143,9 +144,9 @@ class BayesianEvaluatorTest {
 
     @BeforeEach
     void setUp() {
-      FastLaneRuleManager ruleManager = new FastLaneRuleManagerImpl(List.of(
-        new FastLaneRuleManager.FastLaneRule("hot:*", 500)
-      ));
+      FastLaneRuleManager ruleManager = new FastLaneRuleManagerImpl(
+        List.of(new FastLaneRuleManager.FastLaneRule("hot:*", 500))
+      );
       fastLaneEvaluator = new Evaluator(detector, stateMachine, ruleManager, null);
     }
 

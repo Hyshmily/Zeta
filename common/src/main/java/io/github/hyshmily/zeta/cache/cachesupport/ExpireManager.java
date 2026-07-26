@@ -70,12 +70,32 @@ public interface ExpireManager {
   /** Effective soft TTL for hot keys. */
   long getEffectiveHotSoftTtlMs();
 
+  /**
+   * Resolve the effective hard TTL for a NORMAL entry: a positive override
+   * wins, otherwise the configured default is used.
+   */
   long resolveEffectiveHardTtl(long hardTtlMs);
 
+  /**
+   * Resolve the effective hard TTL for a HOT entry: the configured hot TTL
+   * is the floor — a positive override may only raise it
+   * ({@code max(override, hotDefault)}), so promotion never shortens an
+   * entry's lifetime.
+   */
   long resolveEffectiveHotHard(long hardTtlMs);
 
+  /**
+   * Resolve the effective soft TTL for a NORMAL entry: a positive override
+   * wins, otherwise the configured default is used.
+   */
   long resolveEffectiveSoftTtl(long softTtlMs);
 
+  /**
+   * Resolve the effective soft TTL for a HOT entry: the configured hot TTL
+   * is the floor — a positive override may only raise it
+   * ({@code max(override, hotDefault)}), so promotion never shortens an
+   * entry's lifetime.
+   */
   long resolveEffectiveHotSoft(long softTtlMs);
 
   CacheEntry createBuilder(

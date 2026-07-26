@@ -22,6 +22,7 @@ import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -403,7 +404,7 @@ class ZetaCacheExtensionAspectTest {
   @Test
   @DisplayName("context is restored after proceed in finally block")
   void contextRestoredAfterProceed() throws Throwable {
-    ZetaCacheContext.get().apply(999L, 888L, true, false, false);
+    ZetaCacheContext.get().push(CachePolicy.of(999L, 888L, true, false));
 
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -418,9 +419,9 @@ class ZetaCacheExtensionAspectTest {
 
     aspect.aroundCacheable(pjp);
 
-    assertThat(ZetaCacheContext.get().getHardTtlMs()).isEqualTo(999L);
-    assertThat(ZetaCacheContext.get().getSoftTtlMs()).isEqualTo(888L);
-    assertThat(ZetaCacheContext.get().isAllowNull()).isTrue();
+    assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isEqualTo(999L);
+    assertThat(ZetaCacheContext.get().current().softTtlMs().getAsLong()).isEqualTo(888L);
+    assertThat(ZetaCacheContext.get().current().nullCaching()).isTrue();
   }
 
   @Test
@@ -637,7 +638,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().getHardTtlMs()).isEqualTo(5000L);
+      assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isEqualTo(5000L);
       return "result-myId";
     });
 
@@ -664,7 +665,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().isSkipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
       return "result-myId";
     });
 
@@ -688,7 +689,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().isSkipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
       return "result-myId";
     });
 
@@ -710,7 +711,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().isSkipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
       return null;
     });
 
@@ -732,7 +733,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().isSkipBroadcast()).isFalse();
+      assertThat(ZetaCacheContext.get().current().skipBroadcast()).isFalse();
       return "result-myId";
     });
 
@@ -757,7 +758,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().isAllowNull()).isTrue();
+      assertThat(ZetaCacheContext.get().current().nullCaching()).isTrue();
       return "result-myId";
     });
 

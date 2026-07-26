@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.rule.Rule;
 import io.github.hyshmily.zeta.rule.Rule.RuleAction;
@@ -355,7 +356,7 @@ class ZetaTest {
   @Test
   void read_shouldReturnZetaReadQuery() {
     when(hotKeyCache.evaluateRule("k")).thenReturn(RuleAction.ALLOW);
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.get(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(Optional.of("v"));
     assertThat(
       zeta
         .read("k")

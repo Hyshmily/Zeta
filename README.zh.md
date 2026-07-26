@@ -21,6 +21,16 @@ Zeta 是一款可配置、高性能、低成本的轻量级分布式缓存与预
 
 Zeta 提供双级热键检测——本地进程内 HeavyKeeper 概率草图和远程 Worker 集群的滑动窗口 + 贝叶斯状态机管线——并基于检测结果自动预热 L1 缓存。
 
+```java
+private final Zeta zeta;
+
+// 在同一命名空间中标记 key
+zeta.tag("product:123");
+
+// 获取 key
+zeta.peek("product:123");
+```
+
 - 每个应用实例运行一个本地 TopK 草图，跟踪高频访问的键。当键进入本地 TopK 集合时，其 L1 Caffeine 缓存的 TTL 会自动延长——无需等待 Worker 响应。L1 未命中时由 SingleFlight 机制合并同 key 并发请求，避免缓存击穿。同时支持软过期——在硬 TTL 到达之前，软 TTL 过期的条目可返回陈值并触发后台异步刷新，保障响应速度。
 
 - Worker 集群聚合所有应用实例的访问报告，运行**双路径评估管线**：
@@ -202,16 +212,16 @@ java -jar worker/target/zeta-worker-1.1.55.jar
 
 **功能配置：**
 
-| 功能               | 启用方式                                   | 说明                                                          |
-| ------------------ | ------------------------------------------ | ------------------------------------------------------------- |
-| Redis 二级缓存     | 添加 `RedisTemplate` Bean                  | 两级缓存，L2 兜底                                             |
-| 跨实例同步         | `zeta.sync.enabled=true`                   | 基于 RabbitMQ 的缓存失效                                      |
-| Worker Listener    | `zeta.worker-listener.enabled=true`        | 接收 Worker 的 HOT/COOL 决策                                  |
-| Worker 模式        | `zeta.worker.enabled=true`                 | 运行专用 Worker 节点                                          |
+| 功能            | 启用方式                            | 说明                         |
+| --------------- | ----------------------------------- | ---------------------------- |
+| Redis 二级缓存  | 添加 `RedisTemplate` Bean           | 两级缓存，L2 兜底            |
+| 跨实例同步      | `zeta.sync.enabled=true`            | 基于 RabbitMQ 的缓存失效     |
+| Worker Listener | `zeta.worker-listener.enabled=true` | 接收 Worker 的 HOT/COOL 决策 |
+| Worker 模式     | `zeta.worker.enabled=true`          | 运行专用 Worker 节点         |
 
-| 访问上报           | `zeta.report.enabled=true`（默认）         | 向 Worker 上报访问次数                                        |
-| Reporter 自我保护  | `zeta.local.reporter.enabled=true`（默认） | Reporter 刷盘的 BBR 背压保护                                  |
-| Spring Cache 集成  | `zeta.spring-cache.enabled=true`           | `@Cacheable` / `@CachePut` / `@CacheEvict` 融合 Zeta 热点检测 |
+| 访问上报 | `zeta.report.enabled=true`（默认） | 向 Worker 上报访问次数 |
+| Reporter 自我保护 | `zeta.local.reporter.enabled=true`（默认） | Reporter 刷盘的 BBR 背压保护 |
+| Spring Cache 集成 | `zeta.spring-cache.enabled=true` | `@Cacheable` / `@CachePut` / `@CacheEvict` 融合 Zeta 热点检测 |
 
 完整属性参考见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
 
@@ -336,8 +346,8 @@ zeta:
   worker:
     fast-lane:
       rules:
-        - key-pattern: "product:*"      # glob 模式
-          threshold: 500                 # 滑动窗口计数阈值
+        - key-pattern: "product:*" # glob 模式
+          threshold: 500 # 滑动窗口计数阈值
         - key-pattern: "flashsale:*"
           threshold: 1000
         - key-pattern: "news:breaking:*"
@@ -346,12 +356,12 @@ zeta:
 
 也可通过 Actuator REST API 在运行时管理规则（无需重启）：
 
-| 方法     | 路径                                              | 操作             |
-| -------- | ------------------------------------------------- | ---------------- |
-| `GET`    | `/actuator/hotkey/fastlane`                       | 列出所有规则     |
-| `POST`   | `/actuator/hotkey/fastlane`                       | 添加规则         |
-| `PUT`    | `/actuator/hotkey/fastlane`                       | 更新规则阈值     |
-| `DELETE` | `/actuator/hotkey/fastlane/{pattern}`             | 删除规则         |
+| 方法     | 路径                                  | 操作         |
+| -------- | ------------------------------------- | ------------ |
+| `GET`    | `/actuator/hotkey/fastlane`           | 列出所有规则 |
+| `POST`   | `/actuator/hotkey/fastlane`           | 添加规则     |
+| `PUT`    | `/actuator/hotkey/fastlane`           | 更新规则阈值 |
+| `DELETE` | `/actuator/hotkey/fastlane/{pattern}` | 删除规则     |
 
 示例：`curl -X POST -H 'Content-Type: application/json' -d '{"keyPattern":"promo:*","threshold":300}' http://worker:8080/actuator/hotkey/fastlane`
 
@@ -399,18 +409,18 @@ Worker 模块（`zeta-worker`）已将广播 exchange（默认 `zeta.send.exchan
 public class MyApplication { ... }
 ```
 
-**扩展注解**（由 `CacheExtensionAspect` 以 `HIGHEST_PRECEDENCE` 优先级处理）：
+**扩展注解**（由 `CacheExtensionAspect` 以 `HIGHEST_PRECEDENCE` 优先级处理；完整组合矩阵见 [docs/ANNOTATION.zh.md](docs/ANNOTATION.zh.md)）：
 
 | 注解              | 目标 | 在 `@Cacheable` 上的作用                                                                                                                       |
 | ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@CacheTTL`       | M/T  | 覆盖硬/软 TTL。支持静态值和 SpEL（`hardTtlSpEl`、`softTtlSpEl`）                                                                               |
+| `@CacheTTL`       | M/T  | 覆盖硬/软 TTL。静态值与 SpEL（`hardTtlSpEl`、`softTtlSpEl`）。SpEL 每次调用最多求值一次，仅在 miss/提升/刷新时                                 |
 | `@Intercept`      | M    | 通过触发模式（`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`）跳过方法体；fallback 优先级：`@Intercept.fallback()` → `@Fallback` → `peek()` |
 | `@Fallback`       | M    | 回退值（SpEL）或命名约定方法（`{methodName}Fallback`），被拦截/异常时调用                                                                      |
-| `@NullCaching`    | M    | 允许缓存 null 返回值（基于 sentinel，默认 `true`）                                                                                             |
-| `@SkipBroadcast`  | M    | 禁止跨实例 AMQP 同步消息（仅本地写）                                                                                                           |
-| `@SkipDetection`  | M    | 跳过 TopK 检测 + Worker 上报                                                                                                                   |
+| `@NullCaching`    | M    | null 缓存的 opt-out——null 结果默认缓存（短 TTL 哨兵）；`@NullCaching(false)` 禁止该方法的 null 缓存                                            |
+| `@SkipBroadcast`  | M    | 禁止跨实例 AMQP 同步消息（仅本地写/失效）                                                                                                      |
 | `@Preload`        | M    | 预膨胀 HeavyKeeper 计数（静态 `keys[]` 或动态 `keyExpr` SpEL）                                                                                 |
-| `@CacheCondition` | M    | SpEL `unless` — 条件满足时不缓存结果（使用 `#result` + 方法参数）                                                                              |
+| `@CacheCondition` | M    | SpEL `unless`，清除语义——结果不保留且已存在条目被失效（除非 `@SkipBroadcast`，否则广播）                                                       |
+| `@Tag`            | M    | 将 SpEL 解析的 key 送入检测/上报，不做缓存查找；`skipDetection`/`skipReport` 分别抑制一侧；`cacheName` 对齐 key 命名空间                       |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
@@ -442,15 +452,19 @@ public Order getOrder(Long id) { ... }
 @Intercept
 public String getFlashItem(String id) { ... }
 
-// 条件跳过缓存
+// 结果被禁用时清除缓存
 @Cacheable(cacheNames = "products", key = "#id")
 @CacheCondition(unless = "#result == null || #result.disable()")
 public Product getProduct(String id) { ... }
 
-// 跳过检测（静态配置）
-@Cacheable(cacheNames = "config", key = "#key")
-@SkipDetection
-public String getConfig(String key) { ... }
+// 显式拒绝缓存 null 结果
+@Cacheable(cacheNames = "maybe", key = "#id")
+@NullCaching(false)
+public Product findMaybe(String id) { ... }
+
+// 在同一命名空间中标记 key，不做缓存查找
+@Tag(value = "#id", cacheName = "products", skipReport = true)
+public void touchProduct(String id) { ... }
 
 // 仅本地写，不广播
 @CachePut(cacheNames = "local", key = "#id")

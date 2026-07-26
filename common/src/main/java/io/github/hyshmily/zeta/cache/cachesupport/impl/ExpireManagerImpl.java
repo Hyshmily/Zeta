@@ -278,15 +278,17 @@ public class ExpireManagerImpl implements ExpireManager {
   }
 
   /**
-   * Resolve effective hard TTL for hot keys: use the override value if
-   * positive, otherwise fall back to the configured hot-key hard TTL.
+   * Resolve effective hard TTL for hot keys: the configured hot-key TTL is
+   * the floor — a positive override may only raise it
+   * ({@code max(override, hotDefault)}), so promotion to HOT never shortens
+   * an entry's lifetime.
    *
-   * @param hardTtlMs hard TTL override ({@code 0} or negative uses default)
+   * @param hardTtlMs hard TTL override ({@code 0} or negative uses the hot default)
    * @return effective hot-key hard TTL duration in milliseconds
    */
   @Override
   public long resolveEffectiveHotHard(long hardTtlMs) {
-    return hardTtlMs > 0 ? hardTtlMs : getEffectiveHotHardTtlMs();
+    return hardTtlMs > 0 ? Math.max(hardTtlMs, getEffectiveHotHardTtlMs()) : getEffectiveHotHardTtlMs();
   }
 
   /**
@@ -322,15 +324,17 @@ public class ExpireManagerImpl implements ExpireManager {
   }
 
   /**
-   * Resolve effective soft TTL for hot keys: use the override value if
-   * positive, otherwise fall back to the configured hot-key soft TTL.
+   * Resolve effective soft TTL for hot keys: the configured hot-key TTL is
+   * the floor — a positive override may only raise it
+   * ({@code max(override, hotDefault)}), so promotion to HOT never shortens
+   * an entry's lifetime.
    *
-   * @param softTtlMs soft TTL override ({@code 0} or negative uses default)
+   * @param softTtlMs soft TTL override ({@code 0} or negative uses the hot default)
    * @return effective hot-key soft TTL duration in milliseconds
    */
   @Override
   public long resolveEffectiveHotSoft(long softTtlMs) {
-    return softTtlMs > 0 ? softTtlMs : getEffectiveHotSoftTtlMs();
+    return softTtlMs > 0 ? Math.max(softTtlMs, getEffectiveHotSoftTtlMs()) : getEffectiveHotSoftTtlMs();
   }
 
   /**

@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import jakarta.annotation.Nullable;
 import java.util.Objects;
 import java.util.concurrent.Callable;
@@ -30,6 +31,17 @@ import org.springframework.cache.support.AbstractValueAdaptingCache;
 /**
  * Spring {@link Cache} adapter that wraps the HotKey {@link Zeta} facade behind the
  * standard Spring caching abstraction.
+ *
+ * <p>This class is the <b>storage-policy enforcement point</b> (the <em>how</em>
+ * layer) of the annotation integration: it reads the per-invocation
+ * {@link CachePolicy} from {@link ZetaCacheContext} and translates it into the
+ * appropriate {@link Zeta} facade calls. It deliberately does <b>not</b> decide
+ * whether the intercepted method runs — that is the aspect's job.
+ *
+ * <p>All reads route through the soft-expire entry point, which transparently
+ * degrades to plain {@code computeIfAbsent} when soft-expire is globally
+ * disabled. Soft-expire is therefore governed solely by global configuration,
+ * never by the presence of a TTL override.
  */
 @Internal
 public class ZetaSpringCache extends AbstractValueAdaptingCache {
@@ -80,13 +92,22 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
     return null;
   }
 
+  /**
+   * {@inheritDoc}
+   *
+   * <p>Single entry point for {@code @Cacheable} reads: the resolved
+   * {@link CachePolicy} (TTL overrides, null-caching decision) flows into the
+   * atomic soft-expire compute path. TTL suppliers are evaluated lazily, so
+   * SpEL expressions cost nothing on a plain cache hit. A cached
+   * {@code null} (sentinel) surfaces as {@code null} without re-invoking the
+   * value loader.
+   */
   @Override
   @Nullable
   @SuppressWarnings("all")
   public <T> T get(@NonNull Object key, @NonNull Callable<T> valueLoader) {
     String prefixed = prefixedKey(key);
-    ZetaCacheContext cv = ZetaCacheContext.get();
-    boolean skipDetection = cv.isSkipDetection();
+    CachePolicy policy = ZetaCacheContext.get().current();
 
     Supplier<Object> loader = () -> {
       try {
@@ -96,40 +117,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
       }
     };
 
-    // Fast path: if value is already cached, return immediately without
-    // resolving SpEL TTL. On cache hit the existing entry already carries
-    // its own TTL; zero overrides mean "use defaults" in HotKeyCache.
-    var localCache = zeta.getLocalCache();
-    if (localCache != null) {
-      Object raw = localCache.getIfPresent(prefixed);
-      if (raw != null) {
-        if (raw instanceof CacheEntry entry) {
-          if (entry.getValue() == NullValue.INSTANCE) return null;
-          // skipDetection: return cached value without loading
-          if (skipDetection) {
-            return (T) fromStoreValue(entry.getValue());
-          }
-          // Non-null cached value on regular path: still call computeIfAbsent
-          // (for Worker reporting + local promotion) but with 0 TTL override
-          // so SpEL is never triggered.
-          Object result = zeta.computeIfAbsent(prefixed, loader, 0L, 0L, true);
-          return result != null ? (T) fromStoreValue(result) : null;
-        }
-        // Bare (non-CacheEntry) value
-        return (T) fromStoreValue(raw);
-      }
-    }
-
-    // Cache miss: resolve TTL (may trigger SpEL supplier) then load.
-    long hardTtlMs = cv.getHardTtlMs();
-    long softTtlMs = cv.getSoftTtlMs();
-    boolean hasTtlOverride = hardTtlMs > 0 || softTtlMs > 0;
-    boolean allowReport = !skipDetection;
-
-    Object result = hasTtlOverride
-      ? zeta.computeIfAbsentWithSoftExpire(prefixed, loader, hardTtlMs, softTtlMs, allowReport)
-      : zeta.computeIfAbsent(prefixed, loader, 0L, 0L, allowReport);
-
+    Object result = zeta.computeIfAbsentWithSoftExpire(prefixed, loader, policy, true);
     return result != null ? (T) fromStoreValue(result) : null;
   }
 
@@ -138,9 +126,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
     String prefixed = prefixedKey(key);
     Object storeValue = toStoreValue(value);
 
-    ZetaCacheContext cv = ZetaCacheContext.get();
-    boolean skipBroadcast = cv.isSkipBroadcast();
-
+    boolean skipBroadcast = ZetaCacheContext.get().current().skipBroadcast();
     if (skipBroadcast) {
       zeta.putLocal(prefixed, storeValue);
     } else {
@@ -151,8 +137,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
   @Override
   public void evict(@NonNull Object key) {
     String prefixed = prefixedKey(key);
-    ZetaCacheContext cv = ZetaCacheContext.get();
-    boolean skip = cv.isSkipBroadcast();
+    boolean skip = ZetaCacheContext.get().current().skipBroadcast();
     if (skip) {
       zeta.invalidate(prefixed, false);
     } else {

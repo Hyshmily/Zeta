@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.rule.Rule;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
@@ -131,6 +132,36 @@ public class Zeta implements DisposableBean {
     this.appHotKeyDetector = appHotKeyDetector;
     this.lockProvider = lockProvider;
     this.refreshFutures = new ConcurrentHashMap<>();
+  }
+
+  /**
+   * Tag a cache key as potentially hot, reporting it to the Worker without
+   * performing a cache read.
+   *
+   * <p>Updates the local HeavyKeeper sketch and enqueues the key for batch
+   * reporting to the Worker, exactly as {@link #get} would, but without
+   * touching the L1 cache or invoking any reader/loader.
+   *
+   * @param cacheKey the key to tag
+   */
+  public void tag(String cacheKey) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    hotKeyCache.tag(cacheKey);
+  }
+
+  /**
+   * Tag a cache key with fine-grained control over detection and reporting.
+   *
+   * <p>Unlike {@link #tag(String)}, this overload lets callers independently
+   * skip the local HeavyKeeper increment and/or the Worker report.
+   *
+   * @param cacheKey       the key to tag
+   * @param skipDetection  if {@code true}, skip the local HeavyKeeper count
+   * @param skipReport     if {@code true}, skip the Worker report
+   */
+  public void tag(String cacheKey, boolean skipDetection, boolean skipReport) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    hotKeyCache.tag(cacheKey, skipDetection, skipReport);
   }
 
   /**
@@ -342,6 +373,41 @@ public class Zeta implements DisposableBean {
     requireAppCache("computeIfAbsent");
     requireAppDetector("computeIfAbsent");
     return hotKeyCache.computeIfAbsentWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs, allowReport).orElse(null);
+  }
+
+  /**
+   * Truly atomic computeIfAbsent with soft-expire and an explicit
+   * {@link CachePolicy}. When soft-expire is globally disabled this call
+   * transparently degrades to plain {@link #computeIfAbsent}.
+   * <p>
+   * The policy's TTL suppliers are evaluated lazily — at most once per call,
+   * and only when an entry is created, promoted, renewed, or a background
+   * refresh is scheduled — so SpEL-based TTL expressions cost nothing on a
+   * plain cache hit. When {@link CachePolicy#nullCaching()} is {@code false},
+   * a {@code null} loader result leaves no cache entry, so the next call
+   * re-invokes the loader.
+   *
+   * @param cacheKey    the key to retrieve
+   * @param loader      the value supplier for cache misses / refreshes
+   * @param policy      the resolved per-invocation cache policy
+   * @param allowReport whether to allow reporting this access to the Worker
+   * @param <V>         the value type
+   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <V> V computeIfAbsentWithSoftExpire(
+    String cacheKey,
+    Supplier<V> loader,
+    CachePolicy policy,
+    boolean allowReport
+  ) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(loader, "loader must not be null");
+    Objects.requireNonNull(policy, "policy must not be null");
+    requireAppCache("computeIfAbsent");
+    requireAppDetector("computeIfAbsent");
+    return hotKeyCache.computeIfAbsentWithSoftExpire(cacheKey, loader, policy, allowReport).orElse(null);
   }
 
   /**
@@ -701,6 +767,54 @@ public class Zeta implements DisposableBean {
   }
 
   /**
+   * Get with an explicit {@link CachePolicy}, reporting to the Worker.
+   * Convenience shorthand for
+   * {@link #get(String, Supplier, CachePolicy, boolean) get(cacheKey, reader, policy, true)}.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses
+   * @param policy   the resolved per-invocation cache policy
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, CachePolicy policy) {
+    return get(cacheKey, reader, policy, true);
+  }
+
+  /**
+   * Get with an explicit {@link CachePolicy}. On this (non-atomic) path the
+   * policy's TTL suppliers are resolved eagerly; a valid {@code NullValue}
+   * sentinel is served as an empty hit without re-invoking the reader, and
+   * the access is still counted for hot-key detection. When
+   * {@link CachePolicy#nullCaching()} is {@code false}, a {@code null} reader
+   * result leaves no cache entry.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses
+   * @param policy   the resolved per-invocation cache policy
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> get(
+    String cacheKey,
+    Supplier<T> reader,
+    CachePolicy policy,
+    boolean isReportByThisTime
+  ) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(reader, "reader must not be null");
+    Objects.requireNonNull(policy, "policy must not be null");
+    requireAppCache("get");
+    requireAppDetector("get");
+    return hotKeyCache.get(cacheKey, reader, policy, isReportByThisTime);
+  }
+
+  /**
    * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}.
    *
    * @param cacheKeys the keys to retrieve
@@ -919,6 +1033,53 @@ public class Zeta implements DisposableBean {
     requireAppCache("getWithSoftExpire");
     requireAppDetector("getWithSoftExpire");
     return hotKeyCache.getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+  }
+
+  /**
+   * Get with soft-expire and an explicit {@link CachePolicy}, reporting to
+   * the Worker. Convenience shorthand for
+   * {@link #getWithSoftExpire(String, Supplier, CachePolicy, boolean)
+   * getWithSoftExpire(cacheKey, reader, policy, true)}.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses / refreshes
+   * @param policy   the resolved per-invocation cache policy
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, CachePolicy policy) {
+    return getWithSoftExpire(cacheKey, reader, policy, true);
+  }
+
+  /**
+   * Get with soft-expire and an explicit {@link CachePolicy}. Follows the
+   * same null-sentinel and null-caching contract as
+   * {@link #get(String, Supplier, CachePolicy, boolean)}; degrades to that
+   * method when soft-expire is globally disabled.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses / refreshes
+   * @param policy   the resolved per-invocation cache policy
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> getWithSoftExpire(
+    String cacheKey,
+    Supplier<T> reader,
+    CachePolicy policy,
+    boolean isReportByThisTime
+  ) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(reader, "reader must not be null");
+    Objects.requireNonNull(policy, "policy must not be null");
+    requireAppCache("getWithSoftExpire");
+    requireAppDetector("getWithSoftExpire");
+    return hotKeyCache.getWithSoftExpire(cacheKey, reader, policy, isReportByThisTime);
   }
 
   /**

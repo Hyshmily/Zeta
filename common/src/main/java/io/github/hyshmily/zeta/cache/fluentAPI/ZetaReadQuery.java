@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.cache.fluentAPI;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.rule.Rule;
 import java.util.ArrayList;
 import java.util.List;
@@ -156,8 +157,9 @@ public class ZetaReadQuery<T> {
   /**
    * Disable null-value caching.
    *
-   * <p>When the primary or fallback reader returns {@code null}, the value
-   * will not be cached.
+   * <p>When the primary reader returns {@code null}, no cache entry is
+   * created, so the next query re-invokes the reader. Fallback readers are
+   * likewise not cached when they return {@code null}.
    *
    * @return this query instance
    */
@@ -169,10 +171,11 @@ public class ZetaReadQuery<T> {
   /**
    * Enable null-value caching (default).
    *
-   * <p>When the primary or fallback reader returns {@code null}, a sentinel
-   * value ({@link NullValue#INSTANCE}) is cached so that subsequent reads
-   * for the same key return {@link Optional#empty()} without invoking the
-   * reader again.
+   * <p>When the primary reader returns {@code null}, a sentinel value
+   * ({@link NullValue#INSTANCE}) is cached with a short TTL
+   * ({@code zeta.local.null-value-ttl-seconds}) so that subsequent reads for
+   * the same key return {@link Optional#empty()} without invoking the reader
+   * again — until the sentinel expires.
    *
    * @return this query instance
    */
@@ -242,25 +245,20 @@ public class ZetaReadQuery<T> {
       throw new ZetaBlockedException("ZetaReadQuery", cacheKey);
     }
 
-    Supplier<Object> wrappedPrimary = () -> {
-      T val = primaryReader.get();
-      if (val == null) {
-        return isAllowNullCaching ? NullValue.INSTANCE : null;
-      }
-      return val;
-    };
+    // The primary reader returns the raw value: a null result is handled
+    // inside the cache layer, which stores a short-TTL NullValue sentinel
+    // (when null caching is allowed) or leaves no entry at all (when
+    // disallowed via notAllowNull()).
+    Supplier<Object> wrappedPrimary = () -> primaryReader.get();
+    CachePolicy policy = CachePolicy.of(hardTtlMs, softTtlMs, isAllowNullCaching, false);
 
     Optional<Object> result = switch (cacheMode) {
-      case GET -> zeta.get(cacheKey, wrappedPrimary, hardTtlMs, softTtlMs);
-      case GET_WITH_SOFT_EXPIRE -> zeta.getWithSoftExpire(cacheKey, wrappedPrimary, hardTtlMs, softTtlMs, true);
+      case GET -> zeta.get(cacheKey, wrappedPrimary, policy);
+      case GET_WITH_SOFT_EXPIRE -> zeta.getWithSoftExpire(cacheKey, wrappedPrimary, policy);
     };
 
     if (result.isPresent()) {
-      Object val = result.get();
-      if (val == NullValue.INSTANCE) {
-        return Optional.empty();
-      }
-      return Optional.of((T) val);
+      return Optional.of((T) result.get());
     }
 
     if (fallbacks != null) {

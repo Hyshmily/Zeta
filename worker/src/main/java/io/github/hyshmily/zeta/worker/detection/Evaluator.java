@@ -121,23 +121,64 @@ public class Evaluator {
 
     FastLaneRuleManager.FastLaneRule rule = fastLaneRuleManager.match(key);
     boolean isFastlane = rule != null && windowSum >= rule.threshold();
-    if (isFastlane) {
-      return stateMachine.evaluate(key, true, true, null, () -> detector.getWindowSum(key));
-    }
 
+    return isFastlane ? toFastlane(key) : toBayesianlane(key, count, windowSum);
+  }
+
+  /**
+   * Fast-lane path: promote unconditionally, bypassing all Bayesian gating.
+   *
+   * <p>Called when the key matched a fast-lane rule and the current window sum
+   * meets or exceeds the rule threshold. Delegates directly to {@link
+   * ZetaBayesianSM#evaluate} with {@code isFastlane=true}, which promotes the
+   * key to CONFIRMED_HOT without consulting the confidence estimator.
+   *
+   * @param key the cache key being evaluated
+   * @return a non-null {@link ZetaDecision} — {@code HOT} if promoted
+   */
+  public ZetaDecision toFastlane(String key) {
+    return stateMachine.evaluate(key, true, true, null, null);
+  }
+
+  /**
+   * Bayesian evaluation path: sliding-window sum, trend normalisation, EMA
+   * momentum, and confidence-gated state machine.
+   *
+   * <p>Assembles an {@link EvaluationContext} with all per-key metrics needed
+   * for the Bayesian posterior computation:
+   *
+   * <ul>
+   *   <li><b>windowSum</b> — exact count in the current sliding window
+   *       (primary observation)</li>
+   *   <li><b>CV</b> — coefficient of variation for dynamic likelihood std
+   *       adjustment</li>
+   *   <li><b>trendStrength</b> — ratio of current window sum to the mean of
+   *       the three preceding windows (upward/downward momentum)</li>
+   *   <li><b>EMA cmsCount</b> — per-key exponential moving average
+   *       ({@code cms = prev × CMS_ALPHA + count}) for gradual-decay
+   *       inertia</li>
+   *   <li><b>adjustedLogThreshold</b> — {@code log(threshold) - log(momentum)}
+   *       where {@code momentum = clamp(cms / windowSum, 0.1, 10.0)}.
+   *       Momentum &gt; 1 lowers the bar (sustained key stays HOT more
+   *       easily); momentum &lt; 1 raises it (burst spike requires stronger
+   *       evidence)</li>
+   * </ul>
+   *
+   * @param key       the cache key being evaluated
+   * @param count     the access count in this report batch
+   * @param windowSum the current sliding-window sum (pre-computed by caller)
+   * @return a non-null {@link ZetaDecision} — {@code HOT}, {@code COOL},
+   *         or {@code NONE}
+   */
+  public ZetaDecision toBayesianlane(String key, long count, long windowSum) {
     long threshold = detector.getThreshold();
     boolean isWindowHot = windowSum >= threshold;
 
     // Compute global traffic ratio for trend normalisation.
     // When global QPS doubles, a key that doubles is not trending — it is keeping pace.
-    double globalRatio = 1.0;
-    if (globalQpsEstimator != null) {
-      long globalTotal = globalQpsEstimator.getWindowTotal();
-      if (prevGlobalWindowTotal > 0) {
-        globalRatio = (double) globalTotal / prevGlobalWindowTotal;
-      }
-      prevGlobalWindowTotal = globalTotal;
-    }
+    long globalTotal = globalQpsEstimator != null ? Math.max(0, globalQpsEstimator.getWindowTotal()) : 0L;
+    double globalRatio = globalTotal / (prevGlobalWindowTotal > 0 ? prevGlobalWindowTotal : 1.0);
+    prevGlobalWindowTotal = globalTotal;
 
     WindowSumHistory hist = windowSumHistories.computeIfAbsent(key, k -> new WindowSumHistory());
     Double cv = hist.addAndGetCv(windowSum, globalRatio);

@@ -21,6 +21,16 @@ Zeta is a configurable, high-performance, low-cost lightweight distributed cache
 
 Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper probabilistic sketch and a remote Worker cluster running a sliding-window + Bayesian state machine pipeline — and automatically warms up the L1 cache based on the detection results.
 
+```java
+private final Zeta zeta;
+
+// Tag key in the same namespace key
+zeta.tag("product:123");
+
+// get key
+zeta.peek("product:123");
+```
+
 - Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency.
 
 - The Worker cluster aggregates access reports from all application instances and runs a two-path evaluation pipeline:
@@ -204,16 +214,16 @@ Default local configuration:
 
 **Feature configuration:**
 
-| Feature                  | How to Enable                                | Description                                                          |
-| ------------------------ | -------------------------------------------- | -------------------------------------------------------------------- |
-| Redis L2 Cache           | Add `RedisTemplate` Bean                     | Two-level cache, L2 fallback                                         |
-| Cross-instance Sync      | `zeta.sync.enabled=true`                     | RabbitMQ-based cache invalidation                                    |
-| Worker Listener          | `zeta.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker                               |
-| Worker Mode              | `zeta.worker.enabled=true`                   | Run a dedicated Worker node                                          |
+| Feature             | How to Enable                       | Description                            |
+| ------------------- | ----------------------------------- | -------------------------------------- |
+| Redis L2 Cache      | Add `RedisTemplate` Bean            | Two-level cache, L2 fallback           |
+| Cross-instance Sync | `zeta.sync.enabled=true`            | RabbitMQ-based cache invalidation      |
+| Worker Listener     | `zeta.worker-listener.enabled=true` | Receive HOT/COOL decisions from Worker |
+| Worker Mode         | `zeta.worker.enabled=true`          | Run a dedicated Worker node            |
 
-| Access Reporting         | `zeta.report.enabled=true` (default)         | Report access counts to Worker                                       |
-| Reporter Self-Protection | `zeta.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush                                  |
-| Spring Cache Integration | `zeta.spring-cache.enabled=true`             | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with Zeta detection |
+| Access Reporting | `zeta.report.enabled=true` (default) | Report access counts to Worker |
+| Reporter Self-Protection | `zeta.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush |
+| Spring Cache Integration | `zeta.spring-cache.enabled=true` | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with Zeta detection |
 
 See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 
@@ -337,8 +347,8 @@ zeta:
   worker:
     fast-lane:
       rules:
-        - key-pattern: "product:*"      # glob pattern
-          threshold: 500                 # sliding-window sum threshold
+        - key-pattern: "product:*" # glob pattern
+          threshold: 500 # sliding-window sum threshold
         - key-pattern: "flashsale:*"
           threshold: 1000
         - key-pattern: "news:breaking:*"
@@ -347,12 +357,12 @@ zeta:
 
 Or manage rules at runtime via actuator REST API (no restart needed):
 
-| Method   | Path                                              | Action               |
-| -------- | ------------------------------------------------- | -------------------- |
-| `GET`    | `/actuator/hotkey/fastlane`                       | List all rules       |
-| `POST`   | `/actuator/hotkey/fastlane`                       | Add rule             |
-| `PUT`    | `/actuator/hotkey/fastlane`                       | Update rule threshold |
-| `DELETE` | `/actuator/hotkey/fastlane/{pattern}`             | Remove rule          |
+| Method   | Path                                  | Action                |
+| -------- | ------------------------------------- | --------------------- |
+| `GET`    | `/actuator/hotkey/fastlane`           | List all rules        |
+| `POST`   | `/actuator/hotkey/fastlane`           | Add rule              |
+| `PUT`    | `/actuator/hotkey/fastlane`           | Update rule threshold |
+| `DELETE` | `/actuator/hotkey/fastlane/{pattern}` | Remove rule           |
 
 Example: `curl -X POST -H 'Content-Type: application/json' -d '{"keyPattern":"promo:*","threshold":300}' http://worker:8080/actuator/hotkey/fastlane`
 
@@ -400,18 +410,18 @@ Enable `zeta.spring-cache.enabled=true`. Standard `@Cacheable` / `@CachePut` / `
 public class MyApplication { ... }
 ```
 
-**Extension Annotations** (processed by `CacheExtensionAspect` at `HIGHEST_PRECEDENCE`):
+**Extension Annotations** (processed by `CacheExtensionAspect` at `HIGHEST_PRECEDENCE`; full combination matrix in [docs/ANNOTATION.md](docs/ANNOTATION.md)):
 
-| Annotation        | Target | Role on `@Cacheable`                                                                                                                                  |
-| ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@CacheTTL`       | M/T    | Override hard/soft TTL. Supports static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated per invocation.                                |
-| `@Intercept`      | M      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`); fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
-| `@Fallback`       | M      | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                                |
-| `@NullCaching`    | M      | Allow caching null return values (sentinel-based, default `true`)                                                                                     |
-| `@SkipBroadcast`  | M      | Suppress cross-instance AMQP sync messages (local-only write)                                                                                         |
-| `@SkipDetection`  | M      | Bypass TopK detection + Worker reporting for this method's keys                                                                                       |
-| `@Preload`        | M      | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL)                                                         |
-| `@CacheCondition` | M      | SpEL `unless` — skip caching result when expression evaluates true (uses `#result` + method params)                                                   |
+| Annotation        | Target | Role on `@Cacheable`                                                                                                                                            |
+| ----------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@CacheTTL`       | M/T    | Override hard/soft TTL. Static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated at most once per call, only on miss/promotion/refresh             |
+| `@Intercept`      | M      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`); fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()`           |
+| `@Fallback`       | M      | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                                          |
+| `@NullCaching`    | M      | Opt-out of null caching — null results are cached by default (short-TTL sentinel); `@NullCaching(false)` disables it for the method                             |
+| `@SkipBroadcast`  | M      | Suppress cross-instance AMQP sync messages (local-only write/evict)                                                                                             |
+| `@Preload`        | M      | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL)                                                                   |
+| `@CacheCondition` | M      | SpEL `unless` with purge semantics — result not kept AND any existing entry evicted (broadcast unless `@SkipBroadcast`)                                         |
+| `@Tag`            | M      | Feed a SpEL-resolved key into detection/reporting without a cache lookup; `skipDetection`/`skipReport` suppress each side; `cacheName` aligns the key namespace |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")
@@ -443,15 +453,19 @@ public Order getOrder(Long id) { ... }
 @Intercept
 public String getFlashItem(String id) { ... }
 
-// Skip caching null results conditionally
+// Purge the entry when the result is disabled
 @Cacheable(cacheNames = "products", key = "#id")
 @CacheCondition(unless = "#result == null || #result.disable()")
 public Product getProduct(String id) { ... }
 
-// Skip detection entirely (static config, no hot-key tracking needed)
-@Cacheable(cacheNames = "config", key = "#key")
-@SkipDetection
-public String getConfig(String key) { ... }
+// Explicitly refuse to cache null results for this method
+@Cacheable(cacheNames = "maybe", key = "#id")
+@NullCaching(false)
+public Product findMaybe(String id) { ... }
+
+// Tag a key into the same namespace without a cache lookup
+@Tag(value = "#id", cacheName = "products", skipReport = true)
+public void touchProduct(String id) { ... }
 
 // Local-only write, no broadcast
 @CachePut(cacheNames = "local", key = "#id")

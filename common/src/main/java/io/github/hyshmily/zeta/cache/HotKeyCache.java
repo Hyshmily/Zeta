@@ -28,6 +28,7 @@ import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.rule.Rule;
@@ -50,6 +51,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
@@ -277,6 +279,41 @@ public class HotKeyCache {
   }
 
   /**
+   * Tag a cache key as potentially hot, reporting it to the Worker without
+   * performing a cache read.
+   *
+   * <p>This is essentially a fire-and-forget hint: it updates the local
+   * HeavyKeeper sketch and enqueues the key for batch reporting to the
+   * Worker cluster, exactly as {@code get()} would, but without touching
+   * the L1 cache or invoking any reader/loader. Useful when the caller
+   * already has the value in hand (e.g. from a write path or an external
+   * source) and wants the hot-key detector and Worker to know about the
+   * access without a redundant cache lookup.
+   *
+   * @param cacheKey the key to tag
+   */
+  public void tag(String cacheKey) {
+    if (invalidCacheKey(cacheKey)) {
+      return;
+    }
+    dispatcher.report(cacheKey, false);
+  }
+
+  /**
+   * Tag a cache key with fine-grained control over detection and reporting.
+   *
+   * @param cacheKey       the key to tag
+   * @param skipDetection  if {@code true}, skip local HeavyKeeper increment
+   * @param skipReport     if {@code true}, skip Worker report
+   */
+  public void tag(String cacheKey, boolean skipDetection, boolean skipReport) {
+    if (invalidCacheKey(cacheKey)) {
+      return;
+    }
+    dispatcher.tag(cacheKey, skipDetection, skipReport);
+  }
+
+  /**
    * Look up a cached value without loading or triggering hot-key detection.
    * Unlike {@link #get}, this method never invokes the reader or SingleFlight.
    *
@@ -306,12 +343,56 @@ public class HotKeyCache {
    * @return an {@link Optional} containing the cached or loaded value
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
-  @SuppressWarnings("unchecked")
   public <T> Optional<T> get(
     String cacheKey,
     Supplier<T> reader,
     long hardTtlMs,
     long softTtlMs,
+    boolean isReportByThisTime
+  ) {
+    return get(cacheKey, reader, hardTtlMs, softTtlMs, true, isReportByThisTime);
+  }
+
+  /**
+   * Get with an explicit {@link CachePolicy}. The TTL suppliers are resolved
+   * eagerly on this (non-atomic) path — callers that need miss-only TTL
+   * evaluation (e.g. SpEL-based annotation TTLs) should use
+   * {@link #computeIfAbsentWithSoftExpire(String, Supplier, CachePolicy, boolean)}
+   * instead.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses
+   * @param policy   the resolved per-invocation cache policy
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, CachePolicy policy, boolean isReportByThisTime) {
+    Objects.requireNonNull(policy, "policy must not be null");
+    return get(
+      cacheKey,
+      reader,
+      policy.hardTtlMs().getAsLong(),
+      policy.softTtlMs().getAsLong(),
+      policy.nullCaching(),
+      isReportByThisTime
+    );
+  }
+
+  /**
+   * Internal get path carrying the null-caching decision. A valid
+   * {@link NullValue} sentinel is served as an empty hit (penetration
+   * protection — the reader is <b>not</b> re-invoked until the sentinel's
+   * short TTL expires) and the access is still counted for hot-key detection.
+   */
+  @SuppressWarnings("unchecked")
+  private <T> Optional<T> get(
+    String cacheKey,
+    Supplier<T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean nullCaching,
     boolean isReportByThisTime
   ) {
     String nk = normalize(cacheKey);
@@ -320,11 +401,25 @@ public class HotKeyCache {
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
 
-    return (Optional<T>) execute(nk, () ->
-      Optional.ofNullable(caffeineCache.getIfPresent(nk))
-        .flatMap(raw -> handleCacheHit(nk, raw, hardTtlMs, softTtlMs, skipReport))
-        .or(() -> loadAndCache(nk, reader, hardTtlMs, softTtlMs, skipReport))
-    );
+    return execute(nk, () -> {
+      Object raw = caffeineCache.getIfPresent(nk);
+      if (raw instanceof CacheEntry ce) {
+        if (!expireManager.invalidateIfIsLogicallyExpired(nk, raw)) {
+          T cached = (T) unwrapValue(ce.getValue(), nk);
+          if (cached == null) {
+            // Null-sentinel hit: serve the cached null without reloading and
+            // count the access so penetration-prone keys can still go hot.
+            dispatcher.report(nk, skipReport);
+            return Optional.empty();
+          }
+          return process(nk, raw, cached, hardTtlMs, softTtlMs, skipReport);
+        }
+      } else if (raw != null) {
+        // Defensive branch for bare (non-CacheEntry) values.
+        return process(nk, raw, (T) raw, hardTtlMs, softTtlMs, skipReport);
+      }
+      return loadAndCache(nk, reader, hardTtlMs, softTtlMs, nullCaching, skipReport);
+    });
   }
 
   /**
@@ -415,6 +510,53 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
+    return getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, true, isReportByThisTime);
+  }
+
+  /**
+   * Get with soft-expire and an explicit {@link CachePolicy}. The TTL
+   * suppliers are resolved eagerly on this (non-atomic) path — see
+   * {@link #get(String, Supplier, CachePolicy, boolean)} for the rationale.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses / refreshes
+   * @param policy   the resolved per-invocation cache policy
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> getWithSoftExpire(
+    String cacheKey,
+    Supplier<T> reader,
+    CachePolicy policy,
+    boolean isReportByThisTime
+  ) {
+    Objects.requireNonNull(policy, "policy must not be null");
+    return getWithSoftExpire(
+      cacheKey,
+      reader,
+      policy.hardTtlMs().getAsLong(),
+      policy.softTtlMs().getAsLong(),
+      policy.nullCaching(),
+      isReportByThisTime
+    );
+  }
+
+  /**
+   * Internal soft-expire get path carrying the null-caching decision. Serves
+   * valid {@link NullValue} sentinels as empty hits without reloading, exactly
+   * like {@link #get}.
+   */
+  @SuppressWarnings("unchecked")
+  private <T> Optional<T> getWithSoftExpire(
+    String cacheKey,
+    Supplier<T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean nullCaching,
+    boolean isReportByThisTime
+  ) {
     String nk = normalize(cacheKey);
     GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
@@ -423,14 +565,28 @@ public class HotKeyCache {
 
     if (isSoftExpireUnenabled()) {
       log.debug("getWithSoftExpire: soft expire not enabled, fallback to get()");
-      return get(nk, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+      return get(nk, reader, hardTtlMs, softTtlMs, nullCaching, isReportByThisTime);
     }
     Object raw = caffeineCache.getIfPresent(nk);
-    return execute(nk, () ->
-      Optional.ofNullable(raw)
-        .flatMap(v -> handleSoftExpire(nk, v, reader, hardTtlMs, softTtlMs, skipReport))
-        .or(() -> loadAndCache(nk, reader, hardTtlMs, softTtlMs, skipReport))
-    );
+    return execute(nk, () -> {
+      if (raw instanceof CacheEntry ce) {
+        if (!expireManager.invalidateIfIsLogicallyExpired(nk, raw)) {
+          T cached = (T) unwrapValue(ce.getValue(), nk);
+          if (cached == null) {
+            // Null-sentinel hit: serve the cached null without reloading and
+            // count the access so penetration-prone keys can still go hot.
+            dispatcher.report(nk, skipReport);
+            return Optional.empty();
+          }
+          refreshSoftExpire(nk, raw, reader, softTtlMs);
+          return process(nk, raw, cached, hardTtlMs, softTtlMs, skipReport);
+        }
+      } else if (raw != null) {
+        // Defensive branch for bare (non-CacheEntry) values.
+        return handleSoftExpire(nk, raw, reader, hardTtlMs, softTtlMs, skipReport);
+      }
+      return loadAndCache(nk, reader, hardTtlMs, softTtlMs, nullCaching, skipReport);
+    });
   }
 
   /**
@@ -593,13 +749,14 @@ public class HotKeyCache {
     Supplier<T> reader,
     long hardTtlMs,
     long softTtlMs,
+    boolean nullCaching,
     boolean skipReport
   ) {
     afterGuard(cacheKey);
     Optional<T> result = singleFlight.load(cacheKey, reader);
 
     if (result.isEmpty()) {
-      return mapEmpty(cacheKey);
+      return mapEmpty(cacheKey, nullCaching);
     }
     T value = result.get();
     return Optional.of(processLoaded(cacheKey, value, hardTtlMs, softTtlMs, skipReport));
@@ -635,7 +792,7 @@ public class HotKeyCache {
           Optional<T> opt = loaded.get(key);
           return opt
             .map(t -> processLoaded(key, t, hardTtlMs, softTtlMs, skipReports.get(key)))
-            .or(() -> mapEmpty(key));
+            .or(() -> mapEmpty(key, true));
         })
       );
     }
@@ -654,7 +811,7 @@ public class HotKeyCache {
    *         is written to L1 in both cases)
    */
   @SuppressWarnings("unchecked")
-  private <T> Optional<T> mapEmpty(String cacheKey) {
+  private <T> Optional<T> mapEmpty(String cacheKey, boolean nullCaching) {
     if (singleFlight.isBreakerOpen()) {
       Object stale = caffeineCache.getIfPresent(cacheKey);
 
@@ -664,7 +821,9 @@ public class HotKeyCache {
         return Optional.ofNullable(val);
       }
     }
-    builtNullValueEntry(cacheKey);
+    if (nullCaching) {
+      builtNullValueEntry(cacheKey);
+    }
     return Optional.empty();
   }
 
@@ -1413,12 +1572,38 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
+    return computeIfAbsent(cacheKey, reader, CachePolicy.of(hardTtlMs, softTtlMs, true, false), isReportByThisTime);
+  }
+
+  /**
+   * Policy-carrying variant of {@link #computeIfAbsent(String, Supplier, long, long, boolean)}.
+   * The policy's TTL suppliers are evaluated lazily — at most once, and only
+   * when an entry is created, promoted, renewed, or a soft-expire refresh is
+   * scheduled — so SpEL-based TTL expressions cost nothing on a plain hit.
+   * When {@link CachePolicy#nullCaching()} is {@code false}, a {@code null}
+   * loader result leaves no cache entry.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses
+   * @param policy   the resolved per-invocation cache policy
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached or loaded value
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> computeIfAbsent(
+    String cacheKey,
+    Supplier<T> reader,
+    CachePolicy policy,
+    boolean isReportByThisTime
+  ) {
+    Objects.requireNonNull(policy, "policy must not be null");
     String nk = normalize(cacheKey);
     GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
-    return execute(nk, () -> computeInLock(nk, reader, hardTtlMs, softTtlMs, skipReport, false));
+    return execute(nk, () -> computeInLock(nk, reader, policy, skipReport, false));
   }
 
   /**
@@ -1447,13 +1632,43 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
+    return computeIfAbsentWithSoftExpire(
+      cacheKey,
+      reader,
+      CachePolicy.of(hardTtlMs, softTtlMs, true, false),
+      isReportByThisTime
+    );
+  }
+
+  /**
+   * Policy-carrying variant of
+   * {@link #computeIfAbsentWithSoftExpire(String, Supplier, long, long, boolean)}.
+   * Lazy TTL evaluation and the null-caching opt-out follow the same contract
+   * as {@link #computeIfAbsent(String, Supplier, CachePolicy, boolean)}.
+   * Delegates to {@link #computeIfAbsent} when soft-expire is globally disabled.
+   *
+   * @param cacheKey the key to retrieve
+   * @param reader   the value supplier for cache misses / refreshes
+   * @param policy   the resolved per-invocation cache policy
+   * @param isReportByThisTime whether to reportToWorker this access to the Worker
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
+   * @throws ZetaBlockedException when the key matches a blacklist rule
+   */
+  public <T> Optional<T> computeIfAbsentWithSoftExpire(
+    String cacheKey,
+    Supplier<T> reader,
+    CachePolicy policy,
+    boolean isReportByThisTime
+  ) {
+    Objects.requireNonNull(policy, "policy must not be null");
     String nk = normalize(cacheKey);
     GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
-    if (isSoftExpireUnenabled()) return computeIfAbsent(nk, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+    if (isSoftExpireUnenabled()) return computeIfAbsent(nk, reader, policy, isReportByThisTime);
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
-    return execute(nk, () -> computeInLock(nk, reader, hardTtlMs, softTtlMs, skipReport, true));
+    return execute(nk, () -> computeInLock(nk, reader, policy, skipReport, true));
   }
 
   /**
@@ -1479,8 +1694,8 @@ public class HotKeyCache {
    *
    * @param cacheKey                    the key to retrieve
    * @param reader                      the value supplier for cache misses / refreshes
-   * @param hardTtlMs                   hard TTL override
-   * @param softTtlMs                   soft TTL override
+   * @param policy                      the resolved per-invocation cache policy
+   *                                    (lazy TTLs, null-caching decision)
    * @param skipReport                  whether to skip Worker reporting
    * @param triggerRefreshOnSoftExpire  whether to background-refresh on soft expire
    * @param <T>                         the value type
@@ -1490,17 +1705,24 @@ public class HotKeyCache {
   private <T> Optional<T> computeInLock(
     String cacheKey,
     Supplier<T> reader,
-    long hardTtlMs,
-    long softTtlMs,
+    CachePolicy policy,
     boolean skipReport,
     boolean triggerRefreshOnSoftExpire
   ) {
-    long effectiveHardTtl = expireManager.resolveEffectiveHardTtl(hardTtlMs);
-    long effectiveSoftTtl = expireManager.resolveEffectiveSoftTtl(softTtlMs);
-    long hotHardTtl = expireManager.resolveEffectiveHotHard(hardTtlMs);
-    long hotSoftTtl = expireManager.resolveEffectiveHotSoft(softTtlMs);
+    // Memoized lazy TTL suppliers: the (possibly SpEL-backed) expressions are
+    // evaluated at most once per call, and only when a branch below actually
+    // needs them — never on a plain NORMAL-entry hit.
+    LongSupplier rawHard = memoize(policy.hardTtlMs());
+    LongSupplier rawSoft = memoize(policy.softTtlMs());
     Object[] valueRef = { null };
     RuntimeException[] errorRef = { null };
+    boolean[] hitRef = { false };
+
+    long hotHardTtl = expireManager.resolveEffectiveHotHard(rawHard.getAsLong());
+    long hotSoftTtl = expireManager.resolveEffectiveHotSoft(rawSoft.getAsLong());
+
+    long hotHardTtlExpireAt = expireManager.computeHardExpireAt(hotHardTtl);
+    long hotSoftTtlExpireAt = expireManager.computeSoftExpireAt(hotSoftTtl);
 
     caffeineCache
       .asMap()
@@ -1509,9 +1731,12 @@ public class HotKeyCache {
           valueRef[0] = unwrapValue(ce.getValue(), cacheKey);
 
           if (!expireManager.isLogicallyExpired(ce)) {
+            hitRef[0] = true;
+
             if (ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
               long remaining = ce.getHardExpireAtMs() - TimeSource.currentTimeMillis();
               long totalTtl = ce.getHardTtlMs();
+
               if (totalTtl > 0 && remaining < totalTtl * 0.8) {
                 return expireManager.applyTtl(ce, hotHardTtl, hotSoftTtl);
               }
@@ -1519,14 +1744,14 @@ public class HotKeyCache {
               return ce.withTtlAndKeyState(
                 hotHardTtl,
                 hotSoftTtl,
-                expireManager.computeHardExpireAt(hotHardTtl),
-                expireManager.computeSoftExpireAt(hotSoftTtl),
+                hotHardTtlExpireAt,
+                hotSoftTtlExpireAt,
                 KeyState.HOT
               );
             }
 
             if (triggerRefreshOnSoftExpire && expireManager.isSoftExpired(ce)) {
-              expireManager.triggerBackgroundRefresh(k, reader, computeSoftTtlForRefresh(softTtlMs, ce));
+              expireManager.triggerBackgroundRefresh(k, reader, computeSoftTtlForRefresh(rawSoft.getAsLong(), ce));
             }
             return existing;
           }
@@ -1547,20 +1772,17 @@ public class HotKeyCache {
         }
 
         if (loaded == null) {
+          // Null-caching opt-out: leave no entry so the next call reloads.
+          if (!policy.nullCaching()) {
+            return null;
+          }
           return buildEntry(NullValue.INSTANCE, nullTtlMs(), 0L, KeyState.NORMAL, 0L, 0L);
         }
         valueRef[0] = loaded;
         if (hotKeyDetector.contains(k)) {
-          return buildEntry(loaded, hotHardTtl, hotSoftTtl, KeyState.HOT, effectiveHardTtl, effectiveSoftTtl);
+          return buildEntry(loaded, hotHardTtl, hotSoftTtl, KeyState.HOT, hotHardTtlExpireAt, hotSoftTtlExpireAt);
         }
-        return buildEntry(
-          loaded,
-          effectiveHardTtl,
-          effectiveSoftTtl,
-          KeyState.NORMAL,
-          effectiveHardTtl,
-          effectiveSoftTtl
-        );
+        return buildEntry(loaded, hotHardTtl, hotSoftTtl, KeyState.NORMAL, hotHardTtlExpireAt, hotSoftTtlExpireAt);
       });
 
     if (errorRef[0] != null) {
@@ -1574,10 +1796,41 @@ public class HotKeyCache {
 
     @SuppressWarnings("unchecked")
     T value = (T) valueRef[0];
-    if (value == null) return Optional.empty();
+    if (value == null) {
+      // Null-sentinel hit: the access is still counted for hot-key detection,
+      // aligning this path with #get so penetration-prone keys can go hot.
+      if (hitRef[0]) {
+        dispatcher.report(cacheKey, skipReport);
+      }
+      return Optional.empty();
+    }
 
     dispatcher.report(cacheKey, skipReport);
     return Optional.of(value);
+  }
+
+  /**
+   * Memoize a {@link LongSupplier} so the underlying (possibly SpEL-backed)
+   * expression evaluates at most once per {@link #computeInLock} call.
+   * Not thread-safe by design — each call operates on a single thread.
+   *
+   * @param supplier the supplier to memoize
+   * @return a supplier that caches its result after the first evaluation
+   */
+  private static LongSupplier memoize(LongSupplier supplier) {
+    return new LongSupplier() {
+      private boolean resolved;
+      private long value;
+
+      @Override
+      public long getAsLong() {
+        if (!resolved) {
+          value = supplier.getAsLong();
+          resolved = true;
+        }
+        return value;
+      }
+    };
   }
 
   /**
@@ -1667,6 +1920,7 @@ public class HotKeyCache {
       T[] oldValue = (T[]) new Object[1];
       long resolvedHardTtl = expireManager.resolveEffectiveHardTtl(hardTtlMs);
       long resolvedSoftTtl = expireManager.resolveEffectiveSoftTtl(softTtlMs);
+
       caffeineCache
         .asMap()
         .compute(nk, (k, existing) -> {

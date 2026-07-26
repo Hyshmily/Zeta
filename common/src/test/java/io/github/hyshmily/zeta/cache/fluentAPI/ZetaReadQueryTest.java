@@ -23,6 +23,7 @@ import static org.mockito.Mockito.*;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.rule.Rule;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -38,6 +39,15 @@ class ZetaReadQueryTest {
   void setUp() {
     zeta = mock(Zeta.class);
     query = new ZetaReadQuery<>(zeta, "test-key");
+  }
+
+  private static CachePolicy eqPolicy(long hardTtlMs, long softTtlMs, boolean nullCaching, boolean skipBroadcast) {
+    return argThat(p ->
+      p.hardTtlMs().getAsLong() == hardTtlMs
+        && p.softTtlMs().getAsLong() == softTtlMs
+        && p.nullCaching() == nullCaching
+        && p.skipBroadcast() == skipBroadcast
+    );
   }
 
   // ── Block rule ──
@@ -56,10 +66,10 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldReturnCachedValueInGetMode() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("cached"));
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.of("cached"));
     Optional<String> result = query.withPrimary(() -> "db").execute();
     assertThat(result).contains("cached");
-    verify(zeta).get(eq("test-key"), any(), eq(0L), eq(0L));
+    verify(zeta).get(eq("test-key"), any(), eqPolicy(0L, 0L, true, false));
   }
 
   // ── Cache hit (GET_WITH_SOFT_EXPIRE mode) ──
@@ -67,12 +77,12 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldReturnCachedValueInSoftExpireMode() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+    when(zeta.getWithSoftExpire(anyString(), any(), any(CachePolicy.class))).thenReturn(
       Optional.of("cached")
     );
     Optional<String> result = query.withPrimary(() -> "db", CacheMode.GET_WITH_SOFT_EXPIRE).execute();
     assertThat(result).contains("cached");
-    verify(zeta).getWithSoftExpire(eq("test-key"), any(), eq(0L), eq(0L), anyBoolean());
+    verify(zeta).getWithSoftExpire(eq("test-key"), any(), eqPolicy(0L, 0L, true, false));
   }
 
   // ── NullValue sentinel unwrapping ──
@@ -80,7 +90,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldUnwrapNullValueSentinel() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of(NullValue.INSTANCE));
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query.withPrimary(() -> null).execute();
     assertThat(result).isEmpty();
   }
@@ -90,7 +100,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldNotCacheNullWhenDisabled() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
       .notAllowNull()
@@ -103,7 +113,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldReturnEmptyForNullCached() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of(NullValue.INSTANCE));
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query.withPrimary(() -> null).execute();
     assertThat(result).isEmpty();
   }
@@ -113,7 +123,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldUseFallbackWhenCacheMiss() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
       .thenExecute(() -> "fallback")
@@ -127,7 +137,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldUseFallbackWithBroadcast() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
       .allowBroadcast()
@@ -142,7 +152,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldUseFirstNonNullFallback() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Supplier<String> fb1 = mock(Supplier.class);
     when(fb1.get()).thenReturn(null);
     Supplier<String> fb2 = () -> "fb2";
@@ -161,7 +171,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldCacheNullValueWhenFallbackNull() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
       .thenExecute(() -> null)
@@ -175,7 +185,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldCacheNullValueViaPutThroughWhenBroadcast() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
       .allowBroadcast()
@@ -190,7 +200,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldNotCacheNullFallbackWhenDisabled() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
       .notAllowNull()
@@ -206,7 +216,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldReturnDefaultWhenAllNull() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     String result = query
       .withPrimary(() -> null)
       .thenExecute(() -> null)
@@ -219,7 +229,7 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldReturnEmptyWhenAllReadersNull() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query.withPrimary(() -> null).execute();
     assertThat(result).isEmpty();
   }
@@ -229,7 +239,7 @@ class ZetaReadQueryTest {
   @Test
   void executeOrNull_shouldReturnNullWhenEmpty() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.empty());
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.empty());
     String result = query.withPrimary(() -> null).executeOrNull();
     assertThat(result).isNull();
   }
@@ -237,7 +247,7 @@ class ZetaReadQueryTest {
   @Test
   void executeOrNull_shouldReturnValueWhenCached() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("cached"));
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.of("cached"));
     String result = query.withPrimary(() -> "db").executeOrNull();
     assertThat(result).isEqualTo("cached");
   }
@@ -247,30 +257,30 @@ class ZetaReadQueryTest {
   @Test
   void execute_shouldPassTtlOverrides() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.of("v"));
     query
       .withPrimary(() -> "db")
       .withHardTtl(5000L)
       .withSoftTtl(500L)
       .execute();
-    verify(zeta).get(eq("test-key"), any(), eq(5000L), eq(500L));
+    verify(zeta).get(eq("test-key"), any(), eqPolicy(5000L, 500L, true, false));
   }
 
   @Test
   void execute_shouldPassTtlOverridesViaWithTtl() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.of("v"));
     query
       .withPrimary(() -> "db")
       .withTtl(10000L, 1000L)
       .execute();
-    verify(zeta).get(eq("test-key"), any(), eq(10000L), eq(1000L));
+    verify(zeta).get(eq("test-key"), any(), eqPolicy(10000L, 1000L, true, false));
   }
 
   @Test
   void execute_shouldInvokeWrappedPrimaryReader_whenMockInvokesSupplier() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenAnswer(invocation -> {
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenAnswer(invocation -> {
       Supplier<Object> reader = invocation.getArgument(1);
       Object val = reader.get();
       return val == NullValue.INSTANCE ? Optional.empty() : Optional.ofNullable(val);
@@ -284,7 +294,7 @@ class ZetaReadQueryTest {
   @Test
   void builder_shouldReturnSameInstance() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.get(anyString(), any(), anyLong(), anyLong())).thenReturn(Optional.of("v"));
+    when(zeta.get(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.of("v"));
     Supplier<String> fallback = () -> null;
     ZetaReadQuery<String> q = query
       .withPrimary(() -> "db")
@@ -303,8 +313,8 @@ class ZetaReadQueryTest {
   @Test
   void execute_primaryWithModeShouldRespectExplicitMode() {
     when(zeta.evaluateRule("test-key")).thenReturn(Rule.RuleAction.ALLOW);
-    when(zeta.getWithSoftExpire(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(Optional.of("v"));
+    when(zeta.getWithSoftExpire(anyString(), any(), any(CachePolicy.class))).thenReturn(Optional.of("v"));
     query.withPrimary(() -> "db", CacheMode.GET_WITH_SOFT_EXPIRE).execute();
-    verify(zeta).getWithSoftExpire(eq("test-key"), any(), eq(0L), eq(0L), anyBoolean());
+    verify(zeta).getWithSoftExpire(eq("test-key"), any(), eqPolicy(0L, 0L, true, false));
   }
 }

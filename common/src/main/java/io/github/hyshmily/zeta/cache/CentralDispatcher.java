@@ -78,6 +78,27 @@ public class CentralDispatcher {
   }
 
   /**
+   * Tag a cache key with fine-grained control over which operations are
+   * performed. Unlike {@link #report}, this method allows callers to
+   * independently skip the local HeavyKeeper count and/or the Worker
+   * report.
+   *
+   * @param cacheKey       the key to tag
+   * @param skipDetection  if {@code true}, skip the local HeavyKeeper
+   *                       increment
+   * @param skipReport     if {@code true}, skip the Worker report
+   */
+  public void tag(String cacheKey, boolean skipDetection, boolean skipReport) {
+    if (!skipDetection) {
+      hotKeyDetector.add(cacheKey);
+    }
+    if (!skipReport) {
+      // Detector buffer and reporter buffer are two independent aggregation paths
+      hotKeyReporter.ifPresent(r -> r.reportToWorker(cacheKey));
+    }
+  }
+
+  /**
    * Broadcast a sync operation to all peer instances.
    * <p>
    * The actual send method invoked on {@link CacheSyncPublisher} depends

@@ -23,15 +23,18 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongSupplier;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -129,7 +132,6 @@ public class CacheExtensionAspect {
     Fallback fallback,
     NullCaching nullCaching,
     SkipBroadcast skipBroadcast,
-    SkipDetection skipDetection,
     CacheCondition cacheCondition
   ) {}
 
@@ -137,6 +139,19 @@ public class CacheExtensionAspect {
    * Method-level cache for the resolved {@link AnnotationSet}.
    */
   private final Map<Method, AnnotationSet> annotationCache = new ConcurrentHashMap<>();
+
+  /**
+   * Methods whose {@code @Cacheable} annotation combination has already been
+   * validated (and warned about if problematic). Guards the once-per-method
+   * WARN contract of the lazy combination validator.
+   */
+  private final Set<Method> validatedReadMethods = ConcurrentHashMap.newKeySet();
+
+  /**
+   * Methods whose {@code @CachePut}/{@code @CacheEvict} annotation combination
+   * has already been validated. See {@link #validatedReadMethods}.
+   */
+  private final Set<Method> validatedWriteMethods = ConcurrentHashMap.newKeySet();
 
   /**
    * Token-bucket based QPS rate limiters, one per cache key.
@@ -166,15 +181,19 @@ public class CacheExtensionAspect {
    * The advice performs the following steps:
    * <ol>
    *   <li>Resolve the target method, cache name and key.</li>
-   *   <li>Collect all relevant extension annotations.</li>
+   *   <li>Collect all relevant extension annotations and validate their
+   *       combination (WARN once per method).</li>
    *   <li>Register preload keys if a {@link Preload} annotation is present.</li>
    *   <li>Apply interception logic ({@link Intercept}) – may return a
-   *       fallback value before the actual method is called.</li>
-   *   <li>Compute hard/soft TTL values and hot-key TTL (static or SpEL).</li>
-   *   <li>Push cache-control flags into {@link ZetaCacheContext}.</li>
+   *       fallback value before the actual method is called. Every
+   *       interception feeds the local TopK detector (without reporting to
+   *       the Worker) so intercepted hot keys cannot flap.</li>
+   *   <li>Build the immutable {@link CachePolicy} (lazy TTLs, null-caching,
+   *       broadcast flag) and push it into {@link ZetaCacheContext}.</li>
    *   <li>Proceed with the original method invocation.</li>
    *   <li>Optionally invalidate the cache entry if a {@link CacheCondition}
-   *       is not met after the invocation.</li>
+   *       is not met after the invocation (purge semantics; the invalidation
+   *       is broadcast unless {@link SkipBroadcast} is present).</li>
    *   <li>On exception, attempt fallback via {@link Fallback} or a dedicated
    *       fallback method.</li>
    * </ol>
@@ -202,8 +221,9 @@ public class CacheExtensionAspect {
     Fallback fallback = ann.fallback();
     NullCaching nullCaching = ann.nullCaching();
     SkipBroadcast skipBroadcast = ann.skipBroadcast();
-    SkipDetection skipDetection = ann.skipDetection();
     CacheCondition cacheCondition = ann.cacheCondition();
+
+    validateReadCombination(method, cacheable, ann);
 
     // Register preload keys so the local detector starts tracking them early.
     if (preload != null) {
@@ -216,11 +236,13 @@ public class CacheExtensionAspect {
       switch (intercept.type()) {
         case FORCE -> {
           // Force a fallback without even calling the original method.
+          notifyDetectorOnIntercept(prefixedKey);
           return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
         }
         case IS_LOCAL_HOT -> {
           // If the local detector has identified the key as a hot key, fall back.
           if (zeta.isLocalHotKey(prefixedKey)) {
+            notifyDetectorOnIntercept(prefixedKey);
             return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
           }
         }
@@ -236,6 +258,7 @@ public class CacheExtensionAspect {
                 .build()
             );
             if (!bucket.tryConsume(1)) {
+              notifyDetectorOnIntercept(prefixedKey);
               return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
             }
           }
@@ -251,6 +274,7 @@ public class CacheExtensionAspect {
                 int after = v.decrementAndGet();
                 return after == 0 ? null : v;
               });
+              notifyDetectorOnIntercept(prefixedKey);
               return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
             }
             needsDecrement = true; // must decrement in finally block
@@ -259,45 +283,27 @@ public class CacheExtensionAspect {
       }
     }
 
-    boolean allowNull = nullCaching != null && nullCaching.value();
+    boolean nullCachingEnabled = nullCaching == null || nullCaching.value();
     boolean skipBroadcastFlag = skipBroadcast != null;
-    boolean skipDetectionFlag = skipDetection != null;
-
-    boolean hasHardSpel = ttl != null && !ttl.hardTtlSpEl().isEmpty();
-    boolean hasSoftSpel = ttl != null && !ttl.softTtlSpEl().isEmpty();
 
     // Save the current context so we can restore it after the invocation.
-    ZetaCacheContext.ContextValues prev = ZetaCacheContext.get().snapshot();
+    CachePolicy prev = ZetaCacheContext.get().snapshot();
     try {
-      // Push cache parameters lazily: SpEL expressions are evaluated only
-      // on cache miss (when getHardTtlMs / getSoftTtlMs is actually called).
-      if (hasHardSpel || hasSoftSpel) {
-        ZetaCacheContext.get().applyLazy(
-          ttl.hardTtlMs(),
-          ttl.softTtlMs(),
-          hasHardSpel ? () -> resolveTtlValue(ttl.hardTtlMs(), ttl.hardTtlSpEl(), pjp, method) : null,
-          hasSoftSpel ? () -> resolveTtlValue(ttl.softTtlMs(), ttl.softTtlSpEl(), pjp, method) : null,
-          allowNull,
-          skipBroadcastFlag,
-          skipDetectionFlag
-        );
-      } else {
-        ZetaCacheContext.get().apply(
-          ttl != null ? ttl.hardTtlMs() : 0,
-          ttl != null ? ttl.softTtlMs() : 0,
-          allowNull,
-          skipBroadcastFlag,
-          skipDetectionFlag
-        );
-      }
+      // Push the resolved policy. TTL suppliers stay lazy: SpEL expressions
+      // are evaluated at most once, and only on miss / promotion / refresh —
+      // never on a plain cache hit. The policy is pushed unconditionally so
+      // nested @Cacheable invocations never observe an outer method's policy.
+      ZetaCacheContext.get().push(buildPolicy(ttl, nullCachingEnabled, skipBroadcastFlag, pjp, method));
 
       Object result = pjp.proceed();
 
-      // @CacheCondition: evaluate after proceed; invalidate the entry if condition fails.
+      // @CacheCondition: purge semantics — evaluate after proceed and evict
+      // the freshly stored entry (plus any stale one) when the condition
+      // holds. The invalidation is broadcast unless @SkipBroadcast is present.
       if (cacheCondition != null && !cacheCondition.unless().isEmpty()) {
         boolean shouldSkip = evaluateCacheCondition(cacheCondition.unless(), pjp, method, result);
         if (shouldSkip) {
-          zeta.invalidate(prefixedKey, false);
+          zeta.invalidate(prefixedKey, !skipBroadcastFlag);
         }
       }
 
@@ -318,6 +324,118 @@ public class CacheExtensionAspect {
         });
       }
       ZetaCacheContext.get().restore(prev);
+    }
+  }
+
+  /**
+   * Build the immutable {@link CachePolicy} for this invocation. Static TTL
+   * values and SpEL expressions are both wrapped as lazy suppliers; the
+   * underlying cache resolves them at most once and never on a plain hit.
+   *
+   * @param ttl               the resolved {@link CacheTTL} (may be {@code null})
+   * @param nullCachingEnabled whether {@code null} results may be cached
+   * @param skipBroadcastFlag  whether cross-instance sync is suppressed
+   * @param pjp               the join point (SpEL evaluation context)
+   * @param method            the intercepted method
+   * @return the policy for this invocation
+   */
+  private CachePolicy buildPolicy(
+    CacheTTL ttl,
+    boolean nullCachingEnabled,
+    boolean skipBroadcastFlag,
+    ProceedingJoinPoint pjp,
+    Method method
+  ) {
+    LongSupplier hardSupplier = ttl == null
+      ? () -> 0L
+      : () -> resolveTtlValue(ttl.hardTtlMs(), ttl.hardTtlSpEl(), pjp, method);
+    LongSupplier softSupplier = ttl == null
+      ? () -> 0L
+      : () -> resolveTtlValue(ttl.softTtlMs(), ttl.softTtlSpEl(), pjp, method);
+    return new CachePolicy(hardSupplier, softSupplier, nullCachingEnabled, skipBroadcastFlag);
+  }
+
+  /**
+   * Feed the local TopK detector when an {@link Intercept} rule triggers,
+   * without reporting to the Worker. Keeps the local frequency sketch
+   * accurate so an intercepted hot key sustains its hotness instead of
+   * decaying out of the TopK and flapping between intercepted/non-intercepted
+   * states.
+   *
+   * @param prefixedKey the fully qualified cache key
+   */
+  private void notifyDetectorOnIntercept(String prefixedKey) {
+    try {
+      zeta.notifyLocalDetector(prefixedKey);
+    } catch (RuntimeException e) {
+      log.debug("notifyLocalDetector failed for key={}: {}", prefixedKey, e.toString());
+    }
+  }
+
+  /**
+   * Lazy annotation-combination validator for {@code @Cacheable} methods.
+   * Runs at most once per method and logs a WARN for each meaningless or
+   * harmful combination (R1/R3/R4).
+   *
+   * @param method    the intercepted method
+   * @param cacheable the Spring {@link Cacheable} annotation
+   * @param ann       the aggregated extension annotations
+   */
+  private void validateReadCombination(Method method, Cacheable cacheable, AnnotationSet ann) {
+    if (!validatedReadMethods.add(method)) {
+      return;
+    }
+    if (
+      ann.intercept() != null &&
+      ann.intercept().type() == InterceptType.FORCE &&
+      (ann.ttl() != null || ann.nullCaching() != null || ann.cacheCondition() != null)
+    ) {
+      log.warn(
+        "[Zeta] {}: @Intercept(FORCE) makes @CacheTTL/@NullCaching/@CacheCondition no-ops — " +
+        "the method body never executes and nothing is ever cached.",
+        method
+      );
+    }
+    if (method.getAnnotation(Tag.class) != null) {
+      log.warn(
+        "[Zeta] {}: @Tag and @Cacheable on the same method double-count the key in the hot-key detector " +
+        "(both paths feed HeavyKeeper). Remove one of them, or set @Tag(skipDetection = true).",
+        method
+      );
+    }
+    if (ann.cacheCondition() != null && !cacheable.unless().isEmpty()) {
+      log.warn(
+        "[Zeta] {}: both Spring @Cacheable(unless) and @CacheCondition are present — double condition " +
+        "evaluation with different semantics (skip-write vs purge). Keep only one.",
+        method
+      );
+    }
+  }
+
+  /**
+   * Lazy annotation-combination validator for {@code @CachePut}/{@code @CacheEvict}
+   * methods. Runs at most once per method and warns when read-path
+   * annotations are present but silently ignored (R2).
+   *
+   * @param method the intercepted method
+   */
+  private void validateWriteCombination(Method method) {
+    if (!validatedWriteMethods.add(method)) {
+      return;
+    }
+    boolean hasReadOnlyAnnotation =
+      method.getAnnotation(CacheTTL.class) != null ||
+      method.getAnnotation(Intercept.class) != null ||
+      method.getAnnotation(Fallback.class) != null ||
+      method.getAnnotation(NullCaching.class) != null ||
+      method.getAnnotation(CacheCondition.class) != null ||
+      method.getAnnotation(Preload.class) != null;
+    if (hasReadOnlyAnnotation) {
+      log.warn(
+        "[Zeta] {}: read-path annotations (@CacheTTL/@Intercept/@Fallback/@NullCaching/@CacheCondition/@Preload) " +
+        "are ignored on @CachePut/@CacheEvict methods; only @SkipBroadcast applies there.",
+        method
+      );
     }
   }
 
@@ -420,6 +538,36 @@ public class CacheExtensionAspect {
   }
 
   /**
+   * Intercepts methods annotated with {@link Tag} to feed the cache key into
+   * the local HeavyKeeper sketch and optionally the Worker, without performing
+   * a cache lookup.
+   *
+   * <p>Controls detection and reporting via the {@link Tag#skipDetection} and
+   * {@link Tag#skipReport} attributes respectively. When {@link Tag#cacheName}
+   * is set, the resolved key is prefixed with {@code cacheName + separator} so
+   * it lands in the same key namespace as {@code @Cacheable} entries.
+   *
+   * @param pjp the join point
+   * @return the result of the original method invocation
+   * @throws Throwable if the underlying method throws
+   */
+  @Around("@annotation(io.github.hyshmily.zeta.annotation.Tag)")
+  public Object aroundTag(ProceedingJoinPoint pjp) throws Throwable {
+    Method method = resolveMethod(pjp);
+    Tag tag = method.getAnnotation(Tag.class);
+    if (tag == null) return pjp.proceed();
+
+    String key = resolveKey(pjp, tag.value(), method);
+    if (!tag.cacheName().isEmpty()) {
+      key = tag.cacheName() + properties.getSpringCache().getKeySeparator() + key;
+    }
+
+    zeta.tag(key, tag.skipDetection(), tag.skipReport());
+
+    return pjp.proceed();
+  }
+
+  /**
    * Intercepts methods annotated with {@link CachePut} or {@link CacheEvict}
    * and applies a potential {@link SkipBroadcast} flag so that cache updates
    * are not propagated unnecessarily.
@@ -439,7 +587,9 @@ public class CacheExtensionAspect {
   /**
    * Checks whether the intercepted method carries a {@link SkipBroadcast}
    * annotation, and if so, sets the corresponding flag in the thread-local
-   * {@link ZetaCacheContext} for the duration of the invocation.
+   * {@link ZetaCacheContext} for the duration of the invocation. Read-path
+   * annotations on the same method are validated (WARN once) since they are
+   * silently ignored here.
    *
    * @param pjp the join point
    * @return the result of the original method invocation
@@ -449,9 +599,10 @@ public class CacheExtensionAspect {
     Method method = resolveMethod(pjp);
     SkipBroadcast skipBroadcast = method.getAnnotation(SkipBroadcast.class);
     boolean skipBroadcastFlag = skipBroadcast != null;
-    ZetaCacheContext.ContextValues prev = ZetaCacheContext.get().snapshot();
+    validateWriteCombination(method);
+    CachePolicy prev = ZetaCacheContext.get().snapshot();
     try {
-      ZetaCacheContext.get().apply(0, 0, false, skipBroadcastFlag, false);
+      ZetaCacheContext.get().push(new CachePolicy(null, null, true, skipBroadcastFlag));
       return pjp.proceed();
     } finally {
       ZetaCacheContext.get().restore(prev);
@@ -669,7 +820,6 @@ public class CacheExtensionAspect {
       Fallback fallback = null;
       NullCaching nullCaching = null;
       SkipBroadcast skipBroadcast = null;
-      SkipDetection skipDetection = null;
       CacheCondition cacheCondition = null;
 
       for (Annotation a : m.getDeclaredAnnotations()) {
@@ -683,8 +833,6 @@ public class CacheExtensionAspect {
           nullCaching = n;
         } else if (a instanceof SkipBroadcast s) {
           skipBroadcast = s;
-        } else if (a instanceof SkipDetection s) {
-          skipDetection = s;
         } else if (a instanceof CacheCondition c) {
           cacheCondition = c;
         }
@@ -695,7 +843,7 @@ public class CacheExtensionAspect {
         ttl = m.getDeclaringClass().getAnnotation(CacheTTL.class);
       }
 
-      return new AnnotationSet(ttl, intercept, fallback, nullCaching, skipBroadcast, skipDetection, cacheCondition);
+      return new AnnotationSet(ttl, intercept, fallback, nullCaching, skipBroadcast, cacheCondition);
     });
   }
 }

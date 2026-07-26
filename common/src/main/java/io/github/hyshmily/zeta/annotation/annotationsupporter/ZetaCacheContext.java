@@ -16,52 +16,43 @@
 package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import jakarta.annotation.Nullable;
-import java.util.function.LongSupplier;
 
 /**
- * Thread-bound context for propagating per-invocation cache parameters from
- * {@code @Cacheable} companion aspects into {@link ZetaSpringCache}.
+ * Thread-bound transport for the per-invocation {@link CachePolicy}, carrying
+ * storage-side decisions from {@code CacheExtensionAspect} into
+ * {@link ZetaSpringCache}.
+ *
+ * <p>This class is a <b>dumb transport</b>: it holds exactly one immutable
+ * policy per thread and knows nothing about annotations, SpEL, or caching
+ * semantics. The aspect (the <em>whether</em> layer) builds and pushes the
+ * policy; {@link ZetaSpringCache} (the <em>how</em> layer) reads it.
  *
  * <p>Usage pattern (in aspect):
  *
  * <pre>{@code
- * ContextValues prev = ZetaCacheContext.get().snapshot();
+ * CachePolicy prev = ZetaCacheContext.get().snapshot();
  * try {
- *   ZetaCacheContext.get().apply(hardTtlMs, softTtlMs, allowNull, skipBroadcast, ...);
- *   // proceed to CacheInterceptor
+ *   ZetaCacheContext.get().push(policy);
+ *   // proceed to Spring's CacheInterceptor
  * } finally {
  *   ZetaCacheContext.get().restore(prev);
  * }
  * }</pre>
  *
+ * <p>The snapshot/restore pair makes nested {@code @Cacheable} invocations on
+ * the same thread safe: an inner method always sees its own policy (never the
+ * outer one), and the outer policy is restored afterwards.
+ *
  * @see ZetaSpringCache
+ * @see CachePolicy
  * @see NullValue
  */
 @Internal
 public final class ZetaCacheContext {
 
-  /**
-   * Immutable snapshot of all thread-bound cache parameters captured at a
-   * specific point in time by {@link #snapshot()}.
-   *
-   * @param hardTtlMs       hard TTL override in milliseconds (0 = use global default)
-   * @param softTtlMs       soft TTL override in milliseconds (0 = use global default)
-   * @param allowNull       whether {@code null} return values may be cached in L1
-   * @param skipBroadcast   whether to skip broadcasting sync messages to peers
-   * @param skipDetection   whether to skip hot-key detection and Worker reporting
-   */
-  public record ContextValues(
-    long hardTtlMs,
-    long softTtlMs,
-    boolean allowNull,
-    boolean skipBroadcast,
-    boolean skipDetection
-  ) {}
-
-  private static final ThreadLocal<ContextValues> HOLDER = new ThreadLocal<>();
-  private static final ThreadLocal<LongSupplier> HARD_TTL_SUPPLIER = new ThreadLocal<>();
-  private static final ThreadLocal<LongSupplier> SOFT_TTL_SUPPLIER = new ThreadLocal<>();
+  private static final ThreadLocal<CachePolicy> HOLDER = new ThreadLocal<>();
   private static final ZetaCacheContext INSTANCE = new ZetaCacheContext();
 
   private ZetaCacheContext() {}
@@ -76,125 +67,48 @@ public final class ZetaCacheContext {
   }
 
   /**
-   * Sets all cache parameters for the current thread's cache operation.
-   * If all parameters are at their default values, the thread-local context
-   * is cleared to avoid unnecessary storage.
+   * Pushes the given policy for the current thread's cache operation.
+   * A {@code null} policy clears the thread-local slot.
+   *
+   * @param policy the policy to install (may be {@code null} to clear)
    */
-  public void apply(
-    long hardTtlMs,
-    long softTtlMs,
-    boolean allowNull,
-    boolean skipBroadcast,
-    boolean skipDetection
-  ) {
-    HARD_TTL_SUPPLIER.remove();
-    SOFT_TTL_SUPPLIER.remove();
-    if (
-      hardTtlMs > 0 ||
-      softTtlMs > 0 ||
-      allowNull ||
-      skipBroadcast ||
-      skipDetection
-    ) {
-      HOLDER.set(
-        new ContextValues(hardTtlMs, softTtlMs, allowNull, skipBroadcast, skipDetection)
-      );
-    } else {
+  public void push(@Nullable CachePolicy policy) {
+    if (policy == null) {
       HOLDER.remove();
+    } else {
+      HOLDER.set(policy);
     }
   }
 
   /**
-   * Sets cache parameters with lazy SpEL evaluation. The suppliers are
-   * evaluated only when {@link #getHardTtlMs()} / {@link #getSoftTtlMs()}
-   * are actually called — which happens only on cache miss.
+   * Returns the current thread's policy, or the shared
+   * {@link CachePolicy#defaults() defaults} when none is active.
+   * Never returns {@code null}.
+   *
+   * @return the active policy, or defaults
    */
-  public void applyLazy(
-    long hardTtlMs,
-    long softTtlMs,
-    @Nullable LongSupplier hardTtlSupplier,
-    @Nullable LongSupplier softTtlSupplier,
-    boolean allowNull,
-    boolean skipBroadcast,
-    boolean skipDetection
-  ) {
-    if (hardTtlSupplier != null) HARD_TTL_SUPPLIER.set(hardTtlSupplier);
-    if (softTtlSupplier != null) SOFT_TTL_SUPPLIER.set(softTtlSupplier);
-    boolean hasStatic = hardTtlMs > 0 || softTtlMs > 0;
-    if (hasStatic || allowNull || skipBroadcast || skipDetection) {
-      HOLDER.set(
-        new ContextValues(hardTtlMs, softTtlMs, allowNull, skipBroadcast, skipDetection)
-      );
-    } else {
-      HOLDER.remove();
-    }
+  public CachePolicy current() {
+    CachePolicy policy = HOLDER.get();
+    return policy != null ? policy : CachePolicy.defaults();
   }
 
   /**
-   * Returns the current thread's context values, or {@code null} if no
-   * overrides are active.
+   * Captures the current thread's policy for later restoration.
+   *
+   * @return the active policy, or {@code null} when none is active
    */
   @Nullable
-  public ContextValues getValues() {
+  public CachePolicy snapshot() {
     return HOLDER.get();
   }
 
-  /** Returns the hard TTL override, or 0 if none is active. Lazily resolves SpEL on first call. */
-  public long getHardTtlMs() {
-    LongSupplier s = HARD_TTL_SUPPLIER.get();
-    if (s != null) {
-      long val = s.getAsLong();
-      HARD_TTL_SUPPLIER.remove();
-      return val;
-    }
-    ContextValues v = getValues();
-    return v != null ? v.hardTtlMs() : 0L;
-  }
-
-  /** Returns the soft TTL override, or 0 if none is active. Lazily resolves SpEL on first call. */
-  public long getSoftTtlMs() {
-    LongSupplier s = SOFT_TTL_SUPPLIER.get();
-    if (s != null) {
-      long val = s.getAsLong();
-      SOFT_TTL_SUPPLIER.remove();
-      return val;
-    }
-    ContextValues v = getValues();
-    return v != null ? v.softTtlMs() : 0L;
-  }
-
-  /** Returns whether null-value caching is enabled. */
-  public boolean isAllowNull() {
-    ContextValues v = getValues();
-    return v != null && v.allowNull();
-  }
-
-  /** Returns whether broadcast sync messages are suppressed. */
-  public boolean isSkipBroadcast() {
-    ContextValues v = getValues();
-    return v != null && v.skipBroadcast();
-  }
-
-  /** Returns whether hot-key detection and Worker reporting are skipped. */
-  public boolean isSkipDetection() {
-    ContextValues v = getValues();
-    return v != null && v.skipDetection();
-  }
-
-  /** Captures a snapshot of the current thread's context values for later restoration. */
-  @Nullable
-  public ContextValues snapshot() {
-    return getValues();
-  }
-
-  /** Restores a previously captured snapshot. */
-  public void restore(@Nullable ContextValues snapshot) {
-    HARD_TTL_SUPPLIER.remove();
-    SOFT_TTL_SUPPLIER.remove();
-    if (snapshot != null) {
-      HOLDER.set(snapshot);
-    } else {
-      HOLDER.remove();
-    }
+  /**
+   * Restores a previously captured snapshot. A {@code null} snapshot clears
+   * the thread-local slot.
+   *
+   * @param snapshot the snapshot to restore (may be {@code null})
+   */
+  public void restore(@Nullable CachePolicy snapshot) {
+    push(snapshot);
   }
 }

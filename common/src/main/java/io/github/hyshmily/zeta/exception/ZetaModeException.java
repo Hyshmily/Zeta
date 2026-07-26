@@ -41,7 +41,7 @@ import lombok.Getter;
  * </ul>
  *
  * @see Zeta#isApp()
- * @see Zeta#isWorker()
+ * @see Zeta#isAppOnly()
  */
 @Getter
 public class ZetaModeException extends ZetaContextException {

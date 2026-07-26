@@ -1602,8 +1602,8 @@ class ZetaCacheTest {
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
       CacheEntry entry = (CacheEntry) raw;
-      assertThat(entry.getHardTtlMs()).isEqualTo(80000L);
-      assertThat(entry.getSoftTtlMs()).isEqualTo(8000L);
+      assertThat(entry.getHardTtlMs()).isEqualTo(3_600_000L);
+      assertThat(entry.getSoftTtlMs()).isEqualTo(300_000L);
       assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
     }
 
