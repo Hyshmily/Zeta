@@ -43,7 +43,7 @@ Zeta / HotKeyCache
 | Annotation | Target | Operations | Summary |
 | --- | --- | --- | --- |
 | `@CacheTTL` | M/T | `@Cacheable` | Override hard/soft TTL. Static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated at most once per call, only on miss/promotion/refresh. Class-level annotation acts as fallback for all methods |
-| `@Intercept` | M | `@Cacheable` | Skip method body via trigger mode (`IS_LOCAL_HOT` / `FORCE` / `QPS` / `CONCURRENT_THREADS`); fallback via `@Intercept.fallback()` → `@Fallback` → `peek()`. On interception the local detector is incremented (no Worker report) |
+| `@Intercept` | M | `@Cacheable` | Skip method body via trigger mode (`IS_LOCAL_HOT` / `FORCE` / `QPS` / `CONCURRENT_THREADS`). Mode-specific config through nested annotations: `@Intercept.QpsConfig` (`threshold`, `blockDurationMs`) and `@Intercept.ConcurrentConfig` (`threshold`). Fallback via `@Intercept.fallback()` → `@Fallback` → `peek()`. On interception the local detector is incremented (no Worker report) |
 | `@Fallback` | M | `@Cacheable` | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked / intercepted / exception |
 | `@NullCaching` | M | `@Cacheable` | **Opt-out**: null results are cached by default (short-TTL sentinel, penetration protection); `@NullCaching(false)` disables caching for that method |
 | `@SkipBroadcast` | M | all three | Suppress cross-instance AMQP sync messages (local-only write/evict, and local-only `@CacheCondition` purge) |
@@ -131,6 +131,7 @@ For a given read operation:
 | R2 | read-path annotations on `@CachePut`/`@CacheEvict` | only `@SkipBroadcast` applies there |
 | R3 | `@Tag` + `@Cacheable` on one method | double-counting the key in HeavyKeeper |
 | R4 | `@CacheCondition` + Spring `unless=` on one method | double evaluation, different semantics |
+| R5 | `@Intercept(blockDurationMs=...)` with `type` ≠ `QPS` | blockDurationMs is silently ignored outside QPS mode |
 
 ---
 
@@ -148,14 +149,19 @@ public Product getProduct(String id) { ... }
 @CacheTTL(hardTtlSpEl = "#id.startsWith('vip') ? 600000 : 60000")
 public User findUser(String id) { ... }
 
-// Rate limiting with SpEL fallback
+// Rate limiting with SpEL fallback (nested @Intercept.QpsConfig)
 @Cacheable("orders")
-@Intercept(type = InterceptType.QPS, qps = 500, fallback = "'throttled'")
+@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 500), fallback = "'throttled'")
 public Order getOrder(String id) { ... }
 
-// Concurrency guard
+// Rate limiting with block duration (5s cooling-off after breach)
+@Cacheable("flash-sale")
+@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 100, blockDurationMs = 5000))
+public Item getFlashItem(String id) { ... }
+
+// Concurrency guard (nested @Intercept.ConcurrentConfig)
 @Cacheable("reports")
-@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrentThreads = 10, fallback = "'busy'")
+@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrent = @Intercept.ConcurrentConfig(threshold = 10), fallback = "'busy'")
 public Report getReport(String id) { ... }
 
 // Preload known flash-sale keys (stable hot from the start)

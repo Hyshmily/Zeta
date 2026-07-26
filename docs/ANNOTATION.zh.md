@@ -43,7 +43,7 @@ Zeta / HotKeyCache
 | 注解 | 目标 | 生效操作 | 说明 |
 | --- | --- | --- | --- |
 | `@CacheTTL` | 方法/类 | `@Cacheable` | 覆盖硬/软 TTL。支持静态值与 SpEL（`hardTtlSpEl`、`softTtlSpEl`）。SpEL 每次调用最多求值一次，仅在 miss/提升/刷新时。类级注解作为所有方法的回退 |
-| `@Intercept` | 方法 | `@Cacheable` | 按触发模式（`IS_LOCAL_HOT` / `FORCE` / `QPS` / `CONCURRENT_THREADS`）跳过方法体；兜底优先级：`@Intercept.fallback()` → `@Fallback` → `peek()`。拦截时递增本地探测器（不上报 Worker） |
+| `@Intercept` | 方法 | `@Cacheable` | 按触发模式（`IS_LOCAL_HOT` / `FORCE` / `QPS` / `CONCURRENT_THREADS`）跳过方法体。模式专属配置通过嵌套注解：`@Intercept.QpsConfig`（`threshold`、`blockDurationMs`）和 `@Intercept.ConcurrentConfig`（`threshold`）。兜底优先级：`@Intercept.fallback()` → `@Fallback` → `peek()`。拦截时递增本地探测器（不上报 Worker） |
 | `@Fallback` | 方法 | `@Cacheable` | 被封锁/拦截/异常时的兜底值（SpEL）或命名约定方法（`{方法名}Fallback`） |
 | `@NullCaching` | 方法 | `@Cacheable` | **opt-out**：null 结果默认缓存（短 TTL 哨兵，防穿透）；`@NullCaching(false)` 禁止该方法的 null 缓存 |
 | `@SkipBroadcast` | 方法 | 全部三种 | 禁止跨实例 AMQP 同步消息（仅本地写/失效，`@CacheCondition` 清除也仅本地） |
@@ -129,6 +129,7 @@ Zeta / HotKeyCache
 | R2 | `@CachePut`/`@CacheEvict` 上的读路径注解 | 那里只有 `@SkipBroadcast` 生效 |
 | R3 | 同方法 `@Tag` + `@Cacheable` | key 在 HeavyKeeper 中被双重计数 |
 | R4 | 同方法 `@CacheCondition` + Spring `unless=` | 双重评估，语义不同 |
+| R5 | `@Intercept(blockDurationMs=...)` 且 `type` ≠ `QPS` | blockDurationMs 在非 QPS 模式下静默忽略 |
 
 ---
 
@@ -146,14 +147,19 @@ public Product getProduct(String id) { ... }
 @CacheTTL(hardTtlSpEl = "#id.startsWith('vip') ? 600000 : 60000")
 public User findUser(String id) { ... }
 
-// QPS 限流 + SpEL 兜底
+// QPS 限流 + SpEL 兜底（嵌套 @Intercept.QpsConfig）
 @Cacheable("orders")
-@Intercept(type = InterceptType.QPS, qps = 500, fallback = "'throttled'")
+@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 500), fallback = "'throttled'")
 public Order getOrder(String id) { ... }
 
-// 并发守卫
+// QPS 限流 + 冷却封锁（超限后冷却 5s）
+@Cacheable("flash-sale")
+@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 100, blockDurationMs = 5000))
+public Item getFlashItem(String id) { ... }
+
+// 并发守卫（嵌套 @Intercept.ConcurrentConfig）
 @Cacheable("reports")
-@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrentThreads = 10, fallback = "'busy'")
+@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrent = @Intercept.ConcurrentConfig(threshold = 10), fallback = "'busy'")
 public Report getReport(String id) { ... }
 
 // 预加载秒杀热 key（一开始就稳定为热）

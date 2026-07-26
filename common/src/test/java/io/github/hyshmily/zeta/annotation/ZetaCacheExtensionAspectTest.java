@@ -187,19 +187,19 @@ class ZetaCacheExtensionAspectTest {
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Intercept(type = InterceptType.QPS, qps = 5)
+    @Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 5))
     public String findQpsIntercepted(String id) {
       return "result-" + id;
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Intercept(type = InterceptType.QPS, qps = 5, fallback = "'qps-fallback'")
+    @Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 5), fallback = "'qps-fallback'")
     public String findQpsInterceptedWithSpelFallback(String id) {
       return "result-" + id;
     }
 
     @Cacheable(cacheNames = "test", key = "#p0")
-    @Intercept(type = InterceptType.CONCURRENT_THREADS, concurrentThreads = 2)
+    @Intercept(type = InterceptType.CONCURRENT_THREADS, concurrent = @Intercept.ConcurrentConfig(threshold = 2))
     public String findConcurrentThreadsIntercepted(String id) {
       return "result-" + id;
     }

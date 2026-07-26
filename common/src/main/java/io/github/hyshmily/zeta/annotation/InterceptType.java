@@ -39,14 +39,30 @@ public enum InterceptType {
 
   /**
    * Intercept when the per-key request rate exceeds the configured
-   * {@link Intercept#qps()} threshold. Uses a sliding-window counter
-   * (10 buckets, 1-second window) per unique key.
+   * {@link Intercept#qps()} threshold.
+   *
+   * <p>The implementation uses a two-layer check:
+   * <ol>
+   *   <li><b>Block table</b> (if
+   *       {@link Intercept.QpsConfig#blockDurationMs()} > 0) — a Caffeine-backed
+   *       in-memory cache stores the absolute unblock timestamp per key.
+   *       Requests hitting a still-blocked key are fast-rejected without
+   *       consuming tokens.</li>
+   *   <li><b>Bucket4j token bucket</b> — a greedy-refill token bucket with
+   *       capacity = {@code threshold} and refill rate = {@code threshold}/s.
+   *       When tokens are exhausted, the key enters the block table (if
+   *       configured) and the request is intercepted.</li>
+   * </ol>
+   *
+   * <p>During the block period no tokens are consumed from the bucket, so the
+   * bucket continues to refill. When the block expires the bucket is at (or
+   * near) full capacity, preventing post-block thundering-herd.
    */
   QPS,
 
   /**
    * Intercept when the per-key concurrent thread count exceeds the
-   * configured {@link Intercept#concurrentThreads()} threshold.
+   * configured {@link Intercept.ConcurrentConfig#threshold()} threshold.
    * The counter increments before method execution and decrements
    * in a {@code finally} block, ensuring accurate live count.
    */

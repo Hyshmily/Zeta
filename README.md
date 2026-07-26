@@ -415,7 +415,7 @@ public class MyApplication { ... }
 | Annotation        | Target | Role on `@Cacheable`                                                                                                                                            |
 | ----------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@CacheTTL`       | M/T    | Override hard/soft TTL. Static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated at most once per call, only on miss/promotion/refresh             |
-| `@Intercept`      | M      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`); fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()`           |
+| `@Intercept`      | M      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`). Mode-specific config via nested `@Intercept.QpsConfig` (`threshold`, `blockDurationMs`) and `@Intercept.ConcurrentConfig` (`threshold`). Fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
 | `@Fallback`       | M      | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                                          |
 | `@NullCaching`    | M      | Opt-out of null caching — null results are cached by default (short-TTL sentinel); `@NullCaching(false)` disables it for the method                             |
 | `@SkipBroadcast`  | M      | Suppress cross-instance AMQP sync messages (local-only write/evict)                                                                                             |
@@ -435,15 +435,20 @@ public User getUser(Long id) { ... }
 @Intercept
 public User getUserVip(Long id) { ... }
 
-// QPS rate-limit interception
+// QPS rate-limit interception (nested @Intercept.QpsConfig)
 @Cacheable(cacheNames = "products", key = "#id")
-@Intercept(type = InterceptType.QPS, qps = 500, fallback = "'throttled'")
+@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 500), fallback = "'throttled'")
 @Fallback
 public Product getProduct(String id) { ... }
 
-// Concurrent threads interception
+// QPS rate-limit with block duration (5s cooling-off after breach)
+@Cacheable(cacheNames = "flash-sale", key = "#id")
+@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 100, blockDurationMs = 5000))
+public Item getFlashItem(String id) { ... }
+
+// Concurrent threads interception (nested @Intercept.ConcurrentConfig)
 @Cacheable(cacheNames = "orders", key = "#id")
-@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrentThreads = 10, fallback = "'busy'")
+@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrent = @Intercept.ConcurrentConfig(threshold = 10), fallback = "'busy'")
 @Fallback
 public Order getOrder(Long id) { ... }
 

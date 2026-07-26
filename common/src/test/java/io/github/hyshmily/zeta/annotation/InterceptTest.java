@@ -41,4 +41,25 @@ class InterceptTest {
     assertThat(retention).isNotNull();
     assertThat(retention.value()).isEqualTo(RetentionPolicy.RUNTIME);
   }
+
+  @Test
+  @DisplayName("QpsConfig threshold default is 0")
+  void qpsThresholdDefaultIsZero() throws Exception {
+    int threshold = (int) Intercept.QpsConfig.class.getMethod("threshold").getDefaultValue();
+    assertThat(threshold).isZero();
+  }
+
+  @Test
+  @DisplayName("QpsConfig blockDurationMs default is 0")
+  void qpsBlockDurationMsDefaultIsZero() throws Exception {
+    long blockMs = (long) Intercept.QpsConfig.class.getMethod("blockDurationMs").getDefaultValue();
+    assertThat(blockMs).isZero();
+  }
+
+  @Test
+  @DisplayName("ConcurrentConfig threshold default is 0")
+  void concurrentThresholdDefaultIsZero() throws Exception {
+    int threshold = (int) Intercept.ConcurrentConfig.class.getMethod("threshold").getDefaultValue();
+    assertThat(threshold).isZero();
+  }
 }

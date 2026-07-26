@@ -85,6 +85,8 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
   private volatile boolean shutdown;
 
+  private final int eagerSwapThreshold;
+
   /**
    * Creates a buffered counter that flushes aggregated counts to the given consumer.
    * Creates its own single-thread scheduler with default parameters ({@value DEFAULT_MAX_BUFFER_SIZE}
@@ -137,6 +139,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     this.maxBufferSize = maxBufferSize;
     this.flushIntervalMs = flushIntervalMs;
     this.eagerSwapRatio = eagerSwapRatio;
+    eagerSwapThreshold = (int) (maxBufferSize * eagerSwapRatio);
     this.active = new AtomicReference<>(new CounterBuffer());
     this.flushQueue = new ConcurrentLinkedQueue<>();
     this.ownsScheduler = ownsScheduler;
@@ -163,8 +166,8 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     CounterBuffer buffer = active.get();
     buffer.add(key, delta);
 
-    if (buffer.size() >= maxBufferSize * eagerSwapRatio) {
-      trySwitch();
+    if (buffer.size() >= eagerSwapThreshold) {
+      trySwap(buffer);
     }
   }
 
@@ -198,15 +201,22 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * overhead is O(total standby keys) and occurs on the hot path only when the
    * queue is persistently backed up — i.e. switch rate > flush rate.
    */
-  private void trySwitch() {
-    CounterBuffer newBuffer = new CounterBuffer();
-    CounterBuffer oldBuffer = active.getAndSet(newBuffer);
-    if (oldBuffer != null) {
-      if (flushQueue.size() >= MAX_STANDBY_BUFFERS) {
-        compactFlushQueue();
-      }
-      flushQueue.offer(oldBuffer);
+  private void trySwap(CounterBuffer buffer) {
+    if (buffer != active.get() || !active.compareAndSet(buffer, new CounterBuffer())) {
+      return; // another thread already swapped
     }
+
+    if (flushQueue.size() >= MAX_STANDBY_BUFFERS) {
+      CounterBuffer oldest = flushQueue.poll();
+      if (oldest != null) {
+        drainBuffer(oldest);
+      }
+    }
+
+    if (flushQueue.size() >= MAX_STANDBY_BUFFERS) {
+      compactFlushQueue();
+    }
+    flushQueue.offer(buffer);
   }
 
   /**
@@ -222,7 +232,11 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     while ((buf = flushQueue.poll()) != null) {
       buf.drain().forEach(driver::add);
     }
-    log.warn("Flush queue compacted, standby buffer now has {} keys", driver.size());
+    log.warn(
+      "BufferedCounter flush queue compacted: {} buffers merged into one with {} keys",
+      MAX_STANDBY_BUFFERS,
+      driver.size()
+    );
     flushQueue.offer(driver);
   }
 
@@ -290,11 +304,11 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     }
 
     for (int i = 0; i < 3; i++) {
-      trySwitch();
-      flushStandby();
       if (active.get().isEmpty() && flushQueue.isEmpty()) {
         break;
       }
+      trySwap(active.get());
+      flushStandby();
     }
   }
 

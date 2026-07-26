@@ -159,6 +159,18 @@ public class CacheExtensionAspect {
   private final Cache<String, Bucket> qpsBuckets = Caffeine.newBuilder().maximumSize(100_000).build();
 
   /**
+   * QPS block table: cache key → absolute unblock timestamp (millis).
+   * Used together with {@link Intercept#blockDurationMs()} to enforce a
+   * mandatory cooling-off period after a QPS breach. The Caffeine TTL
+   * (5 minutes) is a safety net — the actual block duration is driven by
+   * the stored timestamp comparison.
+   */
+  private final Cache<String, Long> qpsBlockTable = Caffeine.newBuilder()
+      .expireAfterWrite(Duration.ofMinutes(5))
+      .maximumSize(100_000)
+      .build();
+
+  /**
    * Atomic counters for tracking concurrent thread usage per cache key.
    */
   private final ConcurrentHashMap<String, AtomicInteger> concurrentCounters = new ConcurrentHashMap<>();
@@ -247,9 +259,22 @@ public class CacheExtensionAspect {
           }
         }
         case QPS -> {
-          // Token-bucket rate limiting per key.
-          int qpsThreshold = intercept.qps();
+          int qpsThreshold = intercept.qps().threshold();
+          long blockMs = intercept.qps().blockDurationMs();
           if (qpsThreshold > 0) {
+            // Layer 1: block table — fast reject without consuming tokens
+            if (blockMs > 0) {
+              Long unblockTime = qpsBlockTable.getIfPresent(prefixedKey);
+              if (unblockTime != null) {
+                if (System.currentTimeMillis() < unblockTime) {
+                  notifyDetectorOnIntercept(prefixedKey);
+                  return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
+                }
+                // Block expired — evict and fall through to tryConsume
+                qpsBlockTable.invalidate(prefixedKey);
+              }
+            }
+            // Layer 2: token bucket — normal rate limiting
             Bucket bucket = qpsBuckets.get(prefixedKey, k ->
               Bucket.builder()
                 .addLimit(
@@ -258,6 +283,10 @@ public class CacheExtensionAspect {
                 .build()
             );
             if (!bucket.tryConsume(1)) {
+              // First breach → enter block table if configured
+              if (blockMs > 0) {
+                qpsBlockTable.put(prefixedKey, System.currentTimeMillis() + blockMs);
+              }
               notifyDetectorOnIntercept(prefixedKey);
               return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
             }
@@ -265,7 +294,7 @@ public class CacheExtensionAspect {
         }
         case CONCURRENT_THREADS -> {
           // Limit the number of concurrent threads executing the original method for this key.
-          int maxThreads = intercept.concurrentThreads();
+          int maxThreads = intercept.concurrent().threshold();
           if (maxThreads > 0) {
             AtomicInteger counter = concurrentCounters.computeIfAbsent(prefixedKey, k -> new AtomicInteger(0));
             if (counter.incrementAndGet() > maxThreads) {
@@ -401,6 +430,13 @@ public class CacheExtensionAspect {
         "[Zeta] {}: @Tag and @Cacheable on the same method double-count the key in the hot-key detector " +
         "(both paths feed HeavyKeeper). Remove one of them, or set @Tag(skipDetection = true).",
         method
+      );
+    }
+    if (ann.intercept() != null && ann.intercept().qps().blockDurationMs() > 0
+        && ann.intercept().type() != InterceptType.QPS) {
+      log.warn(
+        "[Zeta] {}: @Intercept(blockDurationMs={}) 仅在 QPS 模式下生效，当前 type={}",
+        method, ann.intercept().qps().blockDurationMs(), ann.intercept().type()
       );
     }
     if (ann.cacheCondition() != null && !cacheable.unless().isEmpty()) {

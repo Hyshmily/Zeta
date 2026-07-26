@@ -414,7 +414,7 @@ public class MyApplication { ... }
 | 注解              | 目标 | 在 `@Cacheable` 上的作用                                                                                                                       |
 | ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `@CacheTTL`       | M/T  | 覆盖硬/软 TTL。静态值与 SpEL（`hardTtlSpEl`、`softTtlSpEl`）。SpEL 每次调用最多求值一次，仅在 miss/提升/刷新时                                 |
-| `@Intercept`      | M    | 通过触发模式（`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`）跳过方法体；fallback 优先级：`@Intercept.fallback()` → `@Fallback` → `peek()` |
+| `@Intercept`      | M    | 通过触发模式（`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`）跳过方法体。模式专属配置通过嵌套 `@Intercept.QpsConfig`（`threshold`、`blockDurationMs`）和 `@Intercept.ConcurrentConfig`（`threshold`）。fallback 优先级：`@Intercept.fallback()` → `@Fallback` → `peek()` |
 | `@Fallback`       | M    | 回退值（SpEL）或命名约定方法（`{methodName}Fallback`），被拦截/异常时调用                                                                      |
 | `@NullCaching`    | M    | null 缓存的 opt-out——null 结果默认缓存（短 TTL 哨兵）；`@NullCaching(false)` 禁止该方法的 null 缓存                                            |
 | `@SkipBroadcast`  | M    | 禁止跨实例 AMQP 同步消息（仅本地写/失效）                                                                                                      |
@@ -434,15 +434,20 @@ public User getUser(Long id) { ... }
 @Intercept
 public User getUserVip(Long id) { ... }
 
-// QPS 限流拦截
+// QPS 限流拦截（嵌套 @Intercept.QpsConfig）
 @Cacheable(cacheNames = "products", key = "#id")
-@Intercept(type = InterceptType.QPS, qps = 500, fallback = "'throttled'")
+@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 500), fallback = "'throttled'")
 @Fallback
 public Product getProduct(String id) { ... }
 
-// 并发线程数限流
+// QPS 限流 + 冷却封锁（超限后冷却 5s）
+@Cacheable(cacheNames = "flash-sale", key = "#id")
+@Intercept(type = InterceptType.QPS, qps = @Intercept.QpsConfig(threshold = 100, blockDurationMs = 5000))
+public Item getFlashItem(String id) { ... }
+
+// 并发线程数限流（嵌套 @Intercept.ConcurrentConfig）
 @Cacheable(cacheNames = "orders", key = "#id")
-@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrentThreads = 10, fallback = "'busy'")
+@Intercept(type = InterceptType.CONCURRENT_THREADS, concurrent = @Intercept.ConcurrentConfig(threshold = 10), fallback = "'busy'")
 @Fallback
 public Order getOrder(Long id) { ... }
 
