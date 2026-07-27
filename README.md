@@ -17,29 +17,29 @@
 
 Zeta is a configurable, high-performance, low-cost lightweight distributed cache and preheating framework, designed to solve cluster-wide distributed consistent caching problems for arbitrary sudden hotspot data at minimal cost, fully decoupling business code from distributed coordination infrastructure via Redis and RabbitMQ.
 
-### Local-Distributed Collaborative Detection
+### Detection
 
-Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper probabilistic sketch and a remote Worker cluster running a sliding-window + Bayesian state machine pipeline — and automatically warms up the L1 cache based on the detection results.
+Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper probabilistic sketch and a remote Worker cluster's sliding-window + Bayesian state machine pipeline.
 
 ```java
 private final Zeta zeta;
 
-// Tag key in the same namespace key
+// Tag key in the same namespace
 zeta.tag("product:123");
 
 // get key
 zeta.peek("product:123");
 ```
 
+- The double-buffered counter (`BufferedCounter`) batches high-frequency increments: the active `ConcurrentHashMap<String, LongAdder>` is CAS-swapped when it reaches 80% capacity, with up to 3 backup buffers queued, and a background thread flushes into `HeavyKeeper` every 500ms.
+
 - Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency.
 
-- The Worker cluster aggregates access reports from all application instances and runs a two-path evaluation pipeline:
-  - **FastLane path**: For keys matching user-configured glob rules (e.g. `product:*`), the sliding-window sum is compared directly against the rule's threshold. When the threshold is met, the key is promoted to `CONFIRMED_HOT` immediately — no Bayesian confidence gating, no confirm windows. End-to-end latency: **~60ms** (P99). Designed for flash-sale product IDs, breaking-news slugs, and any key where false positives are tolerable.
-  - **Bayesian path**: For all other keys, sliding-window frequency analysis combined with a Bayesian confidence state machine (Normal-Normal conjugate posterior with per-key evidence accumulation) produces HOT/COOL decisions. Promotion latency depends on traffic intensity: a strongly hot key (well above threshold) reaches CONFIRMED_HOT in **~50–150ms**, while a borderline key (near-threshold) may require multiple evaluation windows or may never reach HIGH confidence — a deliberate trade-off prioritizing a low false-positive rate over guaranteed promotion speed.
+- `KeyReporter` aggregates local counts through a second BufferedCounter (50ms flush, 100k key cap), then passes them through a CPU-BBR rate limiter (CPU threshold 80%, sliding window 10s/100 buckets) before batch-reporting to RabbitMQ via `DirectExchange` with routing key `report.{appName}.{nodeId}`.
 
-- The reporting path is protected by a BBR congestion control algorithm that automatically throttles based on CPU load, preventing burst traffic from overwhelming the channel.
-
-- Each cache entry (CacheEntry) carries two orthogonal version numbers — dataVersion and decisionVersion — and a KeyState marking its lifecycle state (HOT/COOL/NORMAL). Worker decisions override local promotions via a monotonically increasing decisionVersion, ensuring cluster-wide consistency.
+- The Worker cluster aggregates access reports from all application instances and runs a **two-path evaluation pipeline**:
+  - **FastLane**: For keys matching user-configured glob rules (e.g. `product:*`), the sliding-window sum is compared directly against the rule's threshold. When the threshold is met, the key is promoted to `CONFIRMED_HOT` immediately — no Bayesian confidence gating, no confirm windows. Under default configuration, end-to-end latency: **~60ms (P99)**.
+  - **Bayesian path**: For all other keys, sliding-window frequency analysis combined with a Bayesian confidence state machine (Normal-Normal conjugate posterior with per-key evidence accumulation) produces decisions: `HIGH (≥0.95)` → `CONFIRMED_HOT` broadcasts HOT; `MEDIUM ([0.80, 0.95))` → `CANDIDATE_HOT` accumulates evidence; `LOW (<0.80)` → retention strategy (first 2 occurrences with `hotStreak=confirmCount-1` fast re-evaluation, 3rd occurrence full reset). Promotion latency depends on traffic intensity: a strongly hot key (well above threshold) reaches CONFIRMED_HOT in **~50–150ms**, while a borderline key (near-threshold) may require multiple evaluation windows.
 
 ### Multi-Node Cache Coherency
 

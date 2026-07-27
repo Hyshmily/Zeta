@@ -17,9 +17,9 @@
 
 Zeta 是一款可配置、高性能、低成本的轻量级分布式缓存与预热框架, 致力于以极低的成本解决集群维度对任意突发性的、无法预先感知的热点数据分布式一致性缓存问题,通过 Redis 和 RabbitMQ 将业务代码与整个分布式协调基础设施完全解耦。
 
-### 本地+分布式协作检测
+### 检测
 
-Zeta 提供双级热键检测——本地进程内 HeavyKeeper 概率草图和远程 Worker 集群的滑动窗口 + 贝叶斯状态机管线——并基于检测结果自动预热 L1 缓存。
+Zeta 提供双级热键检测——本地进程内 HeavyKeeper 概率草图和远程 Worker 集群的滑动窗口 + 贝叶斯状态机管线。
 
 ```java
 private final Zeta zeta;
@@ -31,15 +31,15 @@ zeta.tag("product:123");
 zeta.peek("product:123");
 ```
 
+- 双重缓冲计数器（`BufferedCounter`）批量聚合高频增量：`ConcurrentHashMap<String, LongAdder>` 活跃缓冲区达 80% 容量时 CAS 切换，最多 3 个备用缓冲区排队，后台线程每 500ms 刷入 `HeavyKeeper`
+
 - 每个应用实例运行一个本地 TopK 草图，跟踪高频访问的键。当键进入本地 TopK 集合时，其 L1 Caffeine 缓存的 TTL 会自动延长——无需等待 Worker 响应。L1 未命中时由 SingleFlight 机制合并同 key 并发请求，避免缓存击穿。同时支持软过期——在硬 TTL 到达之前，软 TTL 过期的条目可返回陈值并触发后台异步刷新，保障响应速度。
 
+- `KeyReporter` 将本地计数经第二套 BufferedCounter（50ms 刷新，10 万键上限）聚合后，经 CPU-BBR 速率限制器（CPU 阈值 80%，滑动窗口 10s/100 桶）判定是否放行，通过 `DirectExchange` 批量上报至 RabbitMQ，路由键 `report.{appName}.{nodeId}`
+
 - Worker 集群聚合所有应用实例的访问报告，运行**双路径评估管线**：
-  - **快车道（FastLane）**：对匹配用户配置的 glob 规则的 key（如 `product:*`），滑动窗口求和直接与规则阈值比较。达标即提升为 `CONFIRMED_HOT`——无贝叶斯置信度门控、无确认窗口。默认参数设定下,全链路端到端延迟：**~60ms（P99）**。适用于秒杀商品 ID、突发新闻 slug 等可容忍误报的场景。
-  - **贝叶斯路径**：对所有其他 key，滑动窗口频率分析结合贝叶斯置信度状态机（Normal-Normal 共轭后验 + 逐 key 证据累积）产生 HOT/COOL 决策。提升延迟取决于流量强度：强热点 key（远超阈值）在 **~50–150ms** 内达到 CONFIRMED_HOT；边界 key（接近阈值）可能需要多轮评估窗口，甚至可能永远达不到 HIGH 置信度——这是为了优先保障低误报率而有意为之的设计取舍。
-
-- 上报路径内置 BBR 拥塞控制算法，根据 CPU 负载自动降速，防止突发流量打垮通道。
-
-- 每个缓存条目（CacheEntry）携带 dataVersion 与 decisionVersion 两个正交版本号，KeyState 标记其生命周期状态（HOT/COOL/NORMAL）。 Worker 决策通过单调递增的 decisionVersion 覆盖本地提升结果，确保集群一致性。
+  - **快车道（FastLane）**：对匹配用户配置的 glob 规则的 key（如 `product:*`），滑动窗口求和直接与规则阈值比较。达标即提升为 `CONFIRMED_HOT`——无贝叶斯置信度门控、无确认窗口。默认参数设定下,全链路端到端延迟：**~60ms（P99）**。
+  - **贝叶斯路径**：对所有其他 key，滑动窗口频率分析结合贝叶斯置信度状态机（Normal-Normal 共轭后验 + 逐 key 证据累积）产生决策:`HIGH（≥0.95）` → `CONFIRMED_HOT` 广播 HOT；`MEDIUM（[0.80, 0.95)）` → `CANDIDATE_HOT` 积累证据；`LOW（<0.80）` → 保留策略（前 2 次 `hotStreak=confirmCount-1` 快速重评，第 3 次完全重置）。提升延迟取决于流量强度：强热点 key（远超阈值）在 **~50–150ms** 内达到 CONFIRMED_HOT；边界 key（接近阈值）可能需要多轮评估窗口。
 
 ### 多节点缓存一致性
 
