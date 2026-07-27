@@ -108,7 +108,12 @@ public class GlobalQpsEstimator {
           slice.set(0);
         }
       } else if (elapsedSlices > 0) {
-        int clearStart = (currentIndex + (int) elapsedSlices) % length;
+        // Invariant: length == 2 * windowSize (doubled circular buffer).
+        // Same invariant as SlidingWindowDetector.addCount: stale slices that
+        // have rolled outside the new summation range are the elapsedSlices
+        // oldest slots of the previous window, starting at:
+        //   (currentIndex + windowSize - elapsedSlices + length) % length
+        int clearStart = (currentIndex + windowSize - (int) elapsedSlices + length) % length;
         for (int i = 0; i < elapsedSlices; i++) {
           slices[(clearStart + i) % length].set(0);
         }

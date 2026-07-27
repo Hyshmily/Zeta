@@ -425,8 +425,9 @@ class WorkerAutoConfigurationTest {
       return org.mockito.Mockito.mock(RabbitTemplate.class);
     }
 
-    @Bean
-    ConnectionFactory connectionFactory() {
+    @Bean("rabbitConnectionFactory")
+    @org.springframework.context.annotation.Primary
+    ConnectionFactory rabbitConnectionFactory() {
       return org.mockito.Mockito.mock(ConnectionFactory.class);
     }
 

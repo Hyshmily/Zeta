@@ -27,13 +27,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Evaluation pipeline (two paths):
  *
  * <ol>
- *   <li><b>Fast-lane path:</b> If the key matches a configured fast-lane rule,
- *       the rule's threshold is compared directly against the sliding-window
- *       sum. On a match, the key is promoted to {@code CONFIRMED_HOT}
- *       immediately via {@link ZetaBayesianSM#fastlane}, bypassing all
- *       Bayesian confidence gating. Below threshold, the evaluation returns
- *       {@code NONE} — stale eviction ({@link ZetaBayesianSM#evictStale})
- *       handles the eventual COOL broadcast for previously-promoted keys.</li>
+ *   <li><b>Fast-lane path:</b> If the key matches a configured fast-lane rule
+ *       and the sliding-window sum meets the threshold, the key is promoted to
+ *       {@code CONFIRMED_HOT} immediately via {@link ZetaBayesianSM#fastlane},
+ *       bypassing all Bayesian confidence gating. Below the fast-lane threshold
+ *       the evaluation falls through to the Bayesian path — the same standard
+ *       cooling pipeline used for non-fast-lane keys.</li>
  *   <li><b>Bayesian path:</b> For non-matching keys, the standard two-stage
  *       pipeline runs: sliding-window sum → Bayesian confidence-gated
  *       state machine.</li>
@@ -82,7 +81,7 @@ public class Evaluator {
   private final GlobalQpsEstimator globalQpsEstimator;
 
   /** Previous snapshot of {@link GlobalQpsEstimator#getWindowTotal} for ratio computation. */
-  private long prevGlobalWindowTotal;
+  private volatile long prevGlobalWindowTotal;
 
   /**
    * Constructs the evaluator with the given dependencies.
@@ -129,15 +128,14 @@ public class Evaluator {
    * Fast-lane path: promote unconditionally, bypassing all Bayesian gating.
    *
    * <p>Called when the key matched a fast-lane rule and the current window sum
-   * meets or exceeds the rule threshold. Delegates directly to {@link
-   * ZetaBayesianSM#evaluate} with {@code isFastlane=true}, which promotes the
-   * key to CONFIRMED_HOT without consulting the confidence estimator.
+   * meets or exceeds the rule threshold. Promotes the key to CONFIRMED_HOT
+   * without consulting the confidence estimator.
    *
    * @param key the cache key being evaluated
    * @return a non-null {@link ZetaDecision} — {@code HOT} if promoted
    */
   public ZetaDecision toFastlane(String key) {
-    return stateMachine.evaluate(key, true, true, null, null);
+    return stateMachine.evaluate(key, true, true, EvaluationContext.FASTLANE, () -> 0L);
   }
 
   /**
@@ -200,7 +198,7 @@ public class Evaluator {
     double rawLogThresh = Math.log(Math.max(threshold, 1.0));
     double adjustedLogThresh = rawLogThresh - Math.log(momentum);
     EvaluationContext ctx = new EvaluationContext(
-      (long) Math.min(cms, Long.MAX_VALUE),
+      (long) cms,
       windowSum,
       threshold,
       cv,
@@ -222,6 +220,10 @@ public class Evaluator {
   public void evictStale(long staleAfterMs) {
     long now = System.currentTimeMillis();
     windowSumHistories.values().removeIf(h -> now - h.lastAccessTime > staleAfterMs);
+    // EMA only decays on evaluate(); apply periodic decay to all entries so inactive
+    // keys eventually fall below 1.0 and are removed. For active keys this adds one
+    // extra 0.98x tick per 30s cycle -- negligible against 600+ evaluation ticks.
+    cmsCounts.replaceAll((k, v) -> v * CMS_ALPHA);
     cmsCounts.values().removeIf(v -> v < 1.0);
   }
 

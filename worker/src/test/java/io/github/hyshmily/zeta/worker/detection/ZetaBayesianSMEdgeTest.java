@@ -61,7 +61,7 @@ class ZetaBayesianSMEdgeTest {
   private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null, 0.0);
 
   private static ZetaBayesianSM machineWith(int confirm, int cool, int grace) {
-    return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(confirm, cool, grace, EVAL, 2.3026);
+    return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(confirm, cool, grace, EVAL, 2.3026, Long.MAX_VALUE);
   }
 
   @Test
@@ -268,7 +268,7 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackToPreviousState_nonExistentKey_shouldNotThrow() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    StateSnapshot snapshot = new StateSnapshot("never-added", "CONFIRMED_HOT", 3, 0);
+    StateSnapshot snapshot = new StateSnapshot("never-added", "CONFIRMED_HOT", 3, 0, 2.3026, 0.0, 0);
     assertThatCode(() -> m.rollbackToPreviousState("never-added", snapshot)).doesNotThrowAnyException();
   }
 
@@ -300,7 +300,7 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackToPreviousState_withInvalidStateName_shouldThrow() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0);
+    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, 2.3026, 0.0, 0);
     assertThatThrownBy(() -> m.rollbackToPreviousState("key", bad)).isInstanceOf(IllegalArgumentException.class);
   }
 

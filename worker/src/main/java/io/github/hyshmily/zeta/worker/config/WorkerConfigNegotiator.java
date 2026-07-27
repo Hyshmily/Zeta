@@ -15,14 +15,17 @@
  */
 package io.github.hyshmily.zeta.worker.config;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE;
+
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
+import io.github.hyshmily.zeta.worker.rule.FastLaneRulesMessage;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -31,11 +34,20 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  * Listens for heartbeat-based config updates from peer Workers and applies them
  * if the received config timestamp is newer than the local one.
  *
+ * <p>The config queue carries two message types, demultiplexed by the
+ * {@code type} header:
+ * <ul>
+ *   <li>{@code WORKER_HB} — state-machine config gossip (confirm/cool/grace
+ *       counts), applied when the embedded timestamp is newer (ADR-0003).</li>
+ *   <li>{@code FASTLANE_RULES} — full fast-lane rule set with a wall-clock
+ *       version, applied last-writer-wins via
+ *       {@link FastLaneRuleManager#replaceAll} (ADR-0025).</li>
+ * </ul>
+ *
  * <p>On startup, waits up to 3 seconds for the first heartbeat to arrive.
  * If none is received, the Worker continues with the values from
  * {@link io.github.hyshmily.zeta.worker.config.WorkerProperties} — this can happen when all other Workers are down.
  */
-@RequiredArgsConstructor
 @Slf4j
 public class WorkerConfigNegotiator {
 
@@ -45,14 +57,50 @@ public class WorkerConfigNegotiator {
   private final AtomicLong configTimestampCounter;
   /** Unique identifier for this Worker node, used in queue names and heartbeat identification. */
   private final String nodeId;
+  /** Fast-lane rule manager receiving gossiped rule sets; may be {@code null} (rules gossip disabled). */
+  private final FastLaneRuleManager fastLaneRuleManager;
   private final CountDownLatch startupLatch = new CountDownLatch(1);
 
   /**
-   * Waits for the first heartbeat from a peer Worker.
+   * Compatibility constructor without fast-lane rules gossip (rules messages
+   * are silently skipped). Prefer {@link #WorkerConfigNegotiator(ZetaBayesianSM, AtomicLong, String, FastLaneRuleManager)}.
    *
-   * <p>If a heartbeat with a valid config arrives within 3 seconds the
-   * config is applied synchronously.  Otherwise, a warning is logged and
-   * the Worker proceeds with configured defaults.
+   * @param stateMachine           the worker's state machine
+   * @param configTimestampCounter the shared config-change timestamp counter
+   * @param nodeId                 unique identifier for this Worker node
+   */
+  public WorkerConfigNegotiator(ZetaBayesianSM stateMachine, AtomicLong configTimestampCounter, String nodeId) {
+    this(stateMachine, configTimestampCounter, nodeId, null);
+  }
+
+  /**
+   * Full constructor with fast-lane rules gossip support.
+   *
+   * @param stateMachine           the worker's state machine
+   * @param configTimestampCounter the shared config-change timestamp counter
+   * @param nodeId                 unique identifier for this Worker node
+   * @param fastLaneRuleManager    the rule manager receiving gossiped rule sets (may be {@code null})
+   */
+  public WorkerConfigNegotiator(
+    ZetaBayesianSM stateMachine,
+    AtomicLong configTimestampCounter,
+    String nodeId,
+    FastLaneRuleManager fastLaneRuleManager
+  ) {
+    this.stateMachine = stateMachine;
+    this.configTimestampCounter = configTimestampCounter;
+    this.nodeId = nodeId;
+    this.fastLaneRuleManager = fastLaneRuleManager;
+  }
+
+  /**
+   * Waits up to 3 seconds for the first heartbeat from a peer Worker.
+   *
+   * <p>The waiting thread simply counts down the latch when a valid config
+   * heartbeat arrives via the async {@link #onHeartbeat} listener.  Config
+   * is applied asynchronously by the listener; if no heartbeat arrives
+   * within 3 seconds, a warning is logged and the Worker proceeds with
+   * configured defaults.
    */
   @PostConstruct
   void syncOnStartup() {
@@ -70,17 +118,61 @@ public class WorkerConfigNegotiator {
   }
 
   /**
-   * Processes an incoming heartbeat message from a peer Worker and applies
-   * its state-machine config if the embedded timestamp is newer.
+   * Processes an incoming message from the config queue and dispatches on the
+   * {@code type} header: heartbeat config gossip ({@code WORKER_HB}) or
+   * fast-lane rules gossip ({@code FASTLANE_RULES}).
    *
-   * @param msg the raw AMQP heartbeat message
+   * @param msg the raw AMQP message
    */
   @RabbitListener(queues = "#{@workerConfigQueue.name}", containerFactory = "workerConfigListenerContainerFactory")
   public void onHeartbeat(Message msg) {
     try {
-      doOnHeartbeat(msg);
+      doOnMessage(msg);
     } catch (Exception e) {
       log.warn("Uncaught exception in onHeartbeat config negotiation, discarding message to prevent requeue loop", e);
+    }
+  }
+
+  private void doOnMessage(Message msg) {
+    if (msg == null || msg.getMessageProperties() == null) {
+      return;
+    }
+    if (FastLaneRulesMessage.TYPE.equals(msg.getMessageProperties().getHeader(HEADER_TYPE))) {
+      doOnRulesMessage(msg);
+      return;
+    }
+    doOnHeartbeat(msg);
+  }
+
+  /**
+   * Applies a gossiped fast-lane rule set last-writer-wins (ADR-0025).
+   *
+   * <p>Same-millisecond ties are broken by nodeId lexicographic order so that
+   * simultaneous edits on two Workers converge deterministically. A tie-win
+   * message whose content already equals the local set is skipped to avoid
+   * needlessly invalidating the match cache on every periodic rebroadcast.
+   */
+  private void doOnRulesMessage(Message msg) {
+    if (fastLaneRuleManager == null) {
+      return;
+    }
+    FastLaneRulesMessage rulesMsg = FastLaneRulesMessage.from(msg);
+    if (rulesMsg == null || rulesMsg.nodeId().equals(nodeId)) {
+      return;
+    }
+
+    long remote = rulesMsg.rulesVersion();
+    long local = fastLaneRuleManager.getRulesVersion();
+    boolean newer = remote > local;
+    boolean tieWin = remote == local && rulesMsg.nodeId().compareTo(nodeId) > 0;
+    if (newer || (tieWin && !rulesMsg.rules().equals(fastLaneRuleManager.getRules()))) {
+      fastLaneRuleManager.replaceAll(rulesMsg.rules(), remote);
+      log.info(
+        "Applied fast-lane rules gossip from {}: version={}, rules={}",
+        rulesMsg.nodeId(),
+        remote,
+        rulesMsg.rules().size()
+      );
     }
   }
 
@@ -100,9 +192,22 @@ public class WorkerConfigNegotiator {
       return;
     }
 
-    stateMachine.setConfirmCount(hb.configConfirmCount());
-    stateMachine.setCoolCount(hb.configCoolCount());
-    stateMachine.setPreCoolGraceCount(hb.configGraceCount());
+    int cc = hb.configConfirmCount();
+    int gc = hb.configCoolCount();
+    int pgc = hb.configGraceCount();
+    if (cc <= 0 || pgc <= 0 || gc <= pgc) {
+      log.warn(
+        "Ignoring malformed config from {}: confirmCount={}, coolCount={}, preCoolGraceCount={}",
+        hb.workerId(),
+        cc,
+        gc,
+        pgc
+      );
+      return;
+    }
+    stateMachine.setConfirmCount(cc);
+    stateMachine.setCoolCount(gc);
+    stateMachine.setPreCoolGraceCount(pgc);
 
     configTimestampCounter.set(remoteTs);
 

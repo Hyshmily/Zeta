@@ -123,6 +123,16 @@ import lombok.extern.slf4j.Slf4j;
  *       with no broadcast (regardless of confidence)</li>
  *   <li><b>Fast-lane revive:</b> PRE_COOLING + fastlane → CONFIRMED_HOT
  *       with broadcast (unlike silent revive, fastlane always broadcasts)</li>
+ *   <li><b>Periodic HOT rebroadcast (ADR-0024):</b> while a key stays in
+ *       CONFIRMED_HOT, a HOT decision is re-emitted at most once per
+ *       {@code rebroadcastIntervalMs} (default 10 s) — recovering HOT
+ *       broadcasts lost in flight (ADR-0007 fire-and-forget) and replacing
+ *       the fast-lane every-evaluation emission that caused steady-state
+ *       broadcast amplification. Stamps are optimistic ({@code lastBroadcastAt}
+ *       at decision time); a failed send rolls the stamp back to 0 via
+ *       {@link #rollbackToPreviousState}, so the next evaluation retries
+ *       immediately. COOL is never rebroadcast — a lost COOL fails in the
+ *       lenient direction (bounded by hard TTL and stale eviction).</li>
  *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs every
  *       {@code evict-interval-ms} (default 20 min) and scans for keys whose
  *       {@code lastUpdateTime} exceeds the configured stale threshold.
@@ -188,6 +198,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    * Constructs the state machine with the given lifecycle thresholds and
    * the Bayesian confidence evaluator that gates every state transition.
    *
+   * <p>Compatibility constructor: uses {@link #DEFAULT_REBROADCAST_INTERVAL_MS}
+   * as the periodic HOT rebroadcast interval (ADR-0024).
+   *
    * @param confirmCount        consecutive hot windows to promote COLD → CONFIRMED_HOT
    * @param coolCount           total consecutive cold windows for full cool-down
    * @param preCoolGraceCount   cold windows before entering PRE_COOLING
@@ -202,12 +215,49 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     ConfidenceEvaluator confidenceEvaluator,
     double priorMean
   ) {
+    this(confirmCount, coolCount, preCoolGraceCount, confidenceEvaluator, priorMean, DEFAULT_REBROADCAST_INTERVAL_MS);
+  }
+
+  /**
+   * Constructs the state machine with the given lifecycle thresholds, the
+   * Bayesian confidence evaluator, and the periodic HOT rebroadcast interval.
+   *
+   * @param confirmCount           consecutive hot windows to promote COLD → CONFIRMED_HOT
+   * @param coolCount              total consecutive cold windows for full cool-down
+   * @param preCoolGraceCount      cold windows before entering PRE_COOLING
+   * @param confidenceEvaluator    the Bayesian confidence evaluator (must not be {@code null})
+   * @param priorMean              the global prior mean (log scale); used as the initial
+   *                               posterior mean for new keys
+   * @param rebroadcastIntervalMs  minimum interval between periodic HOT rebroadcasts
+   *                               for a key that stays in {@code CONFIRMED_HOT} (ADR-0024)
+   */
+  public ZetaBayesianSM(
+    int confirmCount,
+    int coolCount,
+    int preCoolGraceCount,
+    ConfidenceEvaluator confidenceEvaluator,
+    double priorMean,
+    long rebroadcastIntervalMs
+  ) {
     this.confirmCount = confirmCount;
     this.coolCount = coolCount;
     this.preCoolGraceCount = preCoolGraceCount;
     this.confidenceEvaluator = confidenceEvaluator;
     this.priorMean = priorMean;
+    this.rebroadcastIntervalMs = rebroadcastIntervalMs;
   }
+
+  /**
+   * Default interval between periodic HOT rebroadcasts for a continuously hot
+   * key (10 s). Used by the 5-arg compatibility constructor. See ADR-0024.
+   */
+  static final long DEFAULT_REBROADCAST_INTERVAL_MS = 10_000L;
+
+  /**
+   * Minimum interval between periodic HOT rebroadcasts of the same key.
+   * Bounds fast-lane steady-state emission and recovers lost HOT broadcasts.
+   */
+  private final long rebroadcastIntervalMs;
 
   /** Number of consecutive hot windows required to promote COLD → CONFIRMED_HOT. */
   @Getter
@@ -238,6 +288,10 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    * quickly re-evaluate during burst traffic. After N consecutive LOWs, a
    * full reset (hotStreak = 0) breaks the 2↔3 oscillation for borderline
    * keys that persistently fail Bayesian confidence but stay above threshold.
+   *
+   * <p>When {@code confirmCount == 1} the retention strategy sets hotStreak = 0,
+   * which is functionally identical to a full reset — the "quick re-evaluation"
+   * benefit only materialises when {@code confirmCount > 1}.
    */
   private static final int MAX_LOW_RESETS = 2;
 
@@ -326,7 +380,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         state = KeyState.builder().posteriorMean(priorMean).accumulatedPrecision(0.0).build();
         states.put(key, state);
       } else {
-        snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
+        snapShot = new StateSnapshot(
+          key,
+          state.currentState.name(),
+          state.hotStreak,
+          state.coolStreak,
+          state.posteriorMean,
+          state.accumulatedPrecision,
+          state.lowResetCount
+        );
       }
       state.lastUpdateTime = System.currentTimeMillis();
 
@@ -337,7 +399,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       boolean hot = isHotThisWindow || (windowSumSupplier.getAsLong() >= ctx.threshold());
       return hot ? evaluateHot(key, state, ctx, snapShot) : evaluateCold(key, state, ctx, snapShot);
     } catch (Exception e) {
-      log.warn("Unexpected StateMachine Exception for key {}", key, e);
+      log.debug("Unexpected StateMachine Exception for key {}", key, e);
       // Rollback to pre-mutation snapshot to prevent half-modified KeyState.
       // hotStreak/coolStreak may have been incremented before the failure,
       // leaving the key in an inconsistent state for subsequent evaluations.
@@ -410,6 +472,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
           case HIGH -> {
             state.currentState = CONFIRMED_HOT;
             state.lowResetCount = 0;
+            state.lastBroadcastAt = System.currentTimeMillis();
             log.info("State transition: COLD -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
             return ZetaDecision.hot(key, snapShot);
           }
@@ -451,6 +514,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         if (pr.level() == ConfidenceLevel.HIGH) {
           state.currentState = CONFIRMED_HOT;
           state.lowResetCount = 0;
+          state.lastBroadcastAt = System.currentTimeMillis();
 
           log.info("State transition: CANDIDATE_HOT -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
           return ZetaDecision.hot(key, snapShot);
@@ -465,6 +529,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         return ZetaDecision.none(key, snapShot);
       }
       default -> {
+        // CONFIRMED_HOT + hot window: previously always NONE, so a HOT broadcast
+        // lost in flight (ADR-0007 fire-and-forget) was never recovered. Re-emit
+        // at most once per rebroadcastIntervalMs (ADR-0024).
+        long now = System.currentTimeMillis();
+        if (now - state.lastBroadcastAt >= rebroadcastIntervalMs) {
+          state.lastBroadcastAt = now;
+          log.debug("Periodic HOT rebroadcast: key={}", key);
+          return ZetaDecision.hot(key, snapShot);
+        }
         return ZetaDecision.none(key, snapShot);
       }
     }
@@ -591,29 +664,46 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    * <p>Three cases:
    * <ul>
    *   <li><b>State is null</b> — create a new KeyState, mark CONFIRMED_HOT,
-   *       set hotStreak to confirmCount, store in the map.</li>
+   *       set hotStreak to confirmCount, stamp {@code lastBroadcastAt}, store
+   *       in the map, and return a HOT decision.</li>
    *   <li><b>State exists, not CONFIRMED_HOT</b> — use toBuilder to promote
-   *       to CONFIRMED_HOT, reset coolStreak, update lastUpdateTime, and
-   *       write back to the map.</li>
-   *   <li><b>State exists, already CONFIRMED_HOT</b> — simply refresh
-   *       lastUpdateTime to keep stale eviction at bay.</li>
+   *       to CONFIRMED_HOT, reset coolStreak, stamp {@code lastBroadcastAt},
+   *       and write back to the map; returns a HOT decision.</li>
+   *   <li><b>State exists, already CONFIRMED_HOT</b> — refresh
+   *       {@code lastUpdateTime} to keep stale eviction at bay, then debounce:
+   *       returns a HOT decision at most once per {@code rebroadcastIntervalMs}
+   *       (ADR-0024), otherwise NONE. Previously this case returned HOT on
+   *       every evaluation, causing one broadcast per report per App —
+   *       steady-state amplification absorbed only by the broadcaster's
+   *       100 ms debounce cache.</li>
    * </ul>
    *
    * @param state the current KeyState for this key (may be {@code null})
    * @param key   the cache key
-   * @return a HOT decision with a pre-mutation snapshot for rollback
+   * @return a HOT decision with a pre-mutation snapshot for rollback, or NONE
+   *         when the periodic rebroadcast is still within its interval
    */
   private ZetaDecision fastlane(KeyState state, String key) {
     StateSnapshot snapShot;
+    long now = System.currentTimeMillis();
 
     if (state == null) {
       state = KeyState.builder()
         .currentState(CONFIRMED_HOT)
         .hotStreak(confirmCount)
-        .lastUpdateTime(System.currentTimeMillis())
+        .lastUpdateTime(now)
+        .lastBroadcastAt(now)
         .build();
       states.put(key, state);
-      snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
+      snapShot = new StateSnapshot(
+        key,
+        state.currentState.name(),
+        state.hotStreak,
+        state.coolStreak,
+        state.posteriorMean,
+        state.accumulatedPrecision,
+        state.lowResetCount
+      );
 
       log.info("Fast-lane promotion: key={} state={}", key, state);
       return ZetaDecision.hot(key, snapShot);
@@ -626,16 +716,42 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         .hotStreak(Math.max(state.hotStreak, confirmCount))
         .coolStreak(0)
         .lowResetCount(0)
-        .lastUpdateTime(System.currentTimeMillis())
+        .lastUpdateTime(now)
+        .lastBroadcastAt(now)
         .build();
       states.put(key, state);
-    } else {
-      state.lastUpdateTime = System.currentTimeMillis();
+
+      log.info("Fast-lane promotion: key={} state={}", key, state);
+      snapShot = new StateSnapshot(
+        key,
+        state.currentState.name(),
+        state.hotStreak,
+        state.coolStreak,
+        state.posteriorMean,
+        state.accumulatedPrecision,
+        state.lowResetCount
+      );
+      return ZetaDecision.hot(key, snapShot);
     }
 
-    log.info("Fast-lane promotion: key={} state={}", key, state);
-    snapShot = new StateSnapshot(key, state.currentState.name(), state.hotStreak, state.coolStreak);
-    return ZetaDecision.hot(key, snapShot);
+    // Already CONFIRMED_HOT — refresh liveness, then apply the rebroadcast
+    // interval debounce (ADR-0024).
+    state.lastUpdateTime = now;
+    snapShot = new StateSnapshot(
+      key,
+      state.currentState.name(),
+      state.hotStreak,
+      state.coolStreak,
+      state.posteriorMean,
+      state.accumulatedPrecision,
+      state.lowResetCount
+    );
+    if (now - state.lastBroadcastAt >= rebroadcastIntervalMs) {
+      state.lastBroadcastAt = now;
+      log.debug("Fast-lane periodic HOT rebroadcast: key={}", key);
+      return ZetaDecision.hot(key, snapShot);
+    }
+    return ZetaDecision.none(key, snapShot);
   }
 
   /**
@@ -711,7 +827,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         if (lock.tryLock()) {
           try {
             KeyState state = states.get(key);
-            if (state != null && now - state.lastUpdateTime > staleAfterMs) {
+            if (
+              state != null && now - state.lastUpdateTime > staleAfterMs && now - state.lastBroadcastAt > staleAfterMs
+            ) {
               if (state.currentState == CONFIRMED_HOT || state.currentState == PRE_COOLING) {
                 // handle the key can not be evicted silently,
                 // we need to broadcast COOL to the app if the key is still HOT or PRE_COOLING
@@ -743,7 +861,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       if (keyState == null) {
         return null;
       }
-      return new StateSnapshot(key, keyState.currentState.name(), keyState.hotStreak, keyState.coolStreak);
+      return new StateSnapshot(
+        key,
+        keyState.currentState.name(),
+        keyState.hotStreak,
+        keyState.coolStreak,
+        keyState.posteriorMean,
+        keyState.accumulatedPrecision,
+        keyState.lowResetCount
+      );
     } finally {
       lock.unlock();
     }
@@ -769,10 +895,16 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         return;
       }
 
-      KeyState keyState = states.computeIfAbsent(key, k -> KeyState.builder().build());
+      KeyState keyState = states.computeIfAbsent(key, k -> KeyState.builder().posteriorMean(priorMean).build());
       keyState.currentState = State.valueOf(previousState.currentState());
       keyState.hotStreak = previousState.hotStreak();
       keyState.coolStreak = previousState.coolStreak();
+      keyState.posteriorMean = previousState.posteriorMean();
+      keyState.accumulatedPrecision = previousState.accumulatedPrecision();
+      keyState.lowResetCount = previousState.lowResetCount();
+      // Clear the broadcast stamp so the next evaluation retries the (failed)
+      // broadcast immediately instead of waiting out the rebroadcast interval.
+      keyState.lastBroadcastAt = 0L;
     } finally {
       lock.unlock();
     }
@@ -785,6 +917,12 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    */
   @Override
   public void rollbackToPreviousState(StateSnapshot previousState) {
+    if (previousState == null) {
+      log.warn(
+        "rollbackToPreviousState called with null snapshot — ignoring. Use two-arg overload with explicit key to reset."
+      );
+      return;
+    }
     rollbackToPreviousState(previousState.key(), previousState);
   }
 
@@ -839,5 +977,13 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     /** Last evaluation timestamp (epoch millis). Volatile for lock-free reads. */
     @Builder.Default
     volatile long lastUpdateTime = System.currentTimeMillis();
+
+    /**
+     * Last time a HOT broadcast was emitted for this key (epoch millis); 0 = never.
+     * Stamped optimistically at decision time and reset to 0 on broadcast-failure
+     * rollback so the next evaluation retries immediately (ADR-0024).
+     */
+    @Builder.Default
+    volatile long lastBroadcastAt = 0L;
   }
 }

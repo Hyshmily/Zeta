@@ -72,6 +72,9 @@ zeta:
   # local 参数全部走默认值，无需显式配置
 
   # —— 可选功能，按需取消注释 ——
+  # App上报worker
+  #report:
+  #  enabled: false
 
   # 跨实例缓存同步（需 spring-boot-starter-amqp + spring-boot-starter-data-redis）
   # sync:
@@ -212,16 +215,15 @@ java -jar worker/target/zeta-worker-1.1.55.jar
 
 **功能配置：**
 
-| 功能            | 启用方式                            | 说明                         |
-| --------------- | ----------------------------------- | ---------------------------- |
-| Redis 二级缓存  | 添加 `RedisTemplate` Bean           | 两级缓存，L2 兜底            |
-| 跨实例同步      | `zeta.sync.enabled=true`            | 基于 RabbitMQ 的缓存失效     |
-| Worker Listener | `zeta.worker-listener.enabled=true` | 接收 Worker 的 HOT/COOL 决策 |
-| Worker 模式     | `zeta.worker.enabled=true`          | 运行专用 Worker 节点         |
-
-| 访问上报 | `zeta.report.enabled=true`（默认） | 向 Worker 上报访问次数 |
-| Reporter 自我保护 | `zeta.local.reporter.enabled=true`（默认） | Reporter 刷盘的 BBR 背压保护 |
-| Spring Cache 集成 | `zeta.spring-cache.enabled=true` | `@Cacheable` / `@CachePut` / `@CacheEvict` 融合 Zeta 热点检测 |
+| 功能              | 启用方式                                   | 说明                                                          |
+| ----------------- | ------------------------------------------ | ------------------------------------------------------------- |
+| Redis 二级缓存    | 添加 `RedisTemplate` Bean                  | 两级缓存，L2 兜底                                             |
+| 跨实例同步        | `zeta.sync.enabled=true`                   | 基于 RabbitMQ 的缓存失效                                      |
+| Worker Listener   | `zeta.worker-listener.enabled=true`        | 接收 Worker 的 HOT/COOL 决策                                  |
+| Worker 模式       | `zeta.worker.enabled=true`                 | 运行专用 Worker 节点                                          |
+| 访问上报          | `zeta.report.enabled=true`（默认）         | 向 Worker 上报访问次数                                        |
+| Reporter 自我保护 | `zeta.local.reporter.enabled=true`（默认） | Reporter 刷盘的 BBR 背压保护                                  |
+| Spring Cache 集成 | `zeta.spring-cache.enabled=true`           | `@Cacheable` / `@CachePut` / `@CacheEvict` 融合 Zeta 热点检测 |
 
 完整属性参考见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
 
@@ -411,16 +413,16 @@ public class MyApplication { ... }
 
 **扩展注解**（由 `CacheExtensionAspect` 以 `HIGHEST_PRECEDENCE` 优先级处理；完整组合矩阵见 [docs/ANNOTATION.zh.md](docs/ANNOTATION.zh.md)）：
 
-| 注解              | 目标 | 在 `@Cacheable` 上的作用                                                                                                                       |
-| ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@CacheTTL`       | M/T  | 覆盖硬/软 TTL。静态值与 SpEL（`hardTtlSpEl`、`softTtlSpEl`）。SpEL 每次调用最多求值一次，仅在 miss/提升/刷新时                                 |
+| 注解              | 目标 | 在 `@Cacheable` 上的作用                                                                                                                                                                                                                                                     |
+| ----------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@CacheTTL`       | M/T  | 覆盖硬/软 TTL。静态值与 SpEL（`hardTtlSpEl`、`softTtlSpEl`）。SpEL 每次调用最多求值一次，仅在 miss/提升/刷新时                                                                                                                                                               |
 | `@Intercept`      | M    | 通过触发模式（`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`）跳过方法体。模式专属配置通过嵌套 `@Intercept.QpsConfig`（`threshold`、`blockDurationMs`）和 `@Intercept.ConcurrentConfig`（`threshold`）。fallback 优先级：`@Intercept.fallback()` → `@Fallback` → `peek()` |
-| `@Fallback`       | M    | 回退值（SpEL）或命名约定方法（`{methodName}Fallback`），被拦截/异常时调用                                                                      |
-| `@NullCaching`    | M    | null 缓存的 opt-out——null 结果默认缓存（短 TTL 哨兵）；`@NullCaching(false)` 禁止该方法的 null 缓存                                            |
-| `@SkipBroadcast`  | M    | 禁止跨实例 AMQP 同步消息（仅本地写/失效）                                                                                                      |
-| `@Preload`        | M    | 预膨胀 HeavyKeeper 计数（静态 `keys[]` 或动态 `keyExpr` SpEL）                                                                                 |
-| `@CacheCondition` | M    | SpEL `unless`，清除语义——结果不保留且已存在条目被失效（除非 `@SkipBroadcast`，否则广播）                                                       |
-| `@Tag`            | M    | 将 SpEL 解析的 key 送入检测/上报，不做缓存查找；`skipDetection`/`skipReport` 分别抑制一侧；`cacheName` 对齐 key 命名空间                       |
+| `@Fallback`       | M    | 回退值（SpEL）或命名约定方法（`{methodName}Fallback`），被拦截/异常时调用                                                                                                                                                                                                    |
+| `@NullCaching`    | M    | null 缓存的 opt-out——null 结果默认缓存（短 TTL 哨兵）；`@NullCaching(false)` 禁止该方法的 null 缓存                                                                                                                                                                          |
+| `@SkipBroadcast`  | M    | 禁止跨实例 AMQP 同步消息（仅本地写/失效）                                                                                                                                                                                                                                    |
+| `@Preload`        | M    | 预膨胀 HeavyKeeper 计数（静态 `keys[]` 或动态 `keyExpr` SpEL）                                                                                                                                                                                                               |
+| `@CacheCondition` | M    | SpEL `unless`，清除语义——结果不保留且已存在条目被失效（除非 `@SkipBroadcast`，否则广播）                                                                                                                                                                                     |
+| `@Tag`            | M    | 将 SpEL 解析的 key 送入检测/上报，不做缓存查找；`skipDetection`/`skipReport` 分别抑制一侧；`cacheName` 对齐 key 命名空间                                                                                                                                                     |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")

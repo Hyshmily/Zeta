@@ -192,6 +192,18 @@ class ReportConsumerTest {
   }
 
   @Test
+  void broadcastFailure_withNullSnapshot_shouldResetKeyNotThrow() {
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("newKey", 100L));
+    when(keyEvaluator.evaluate("newKey", 100L)).thenReturn(ZetaDecision.hot("newKey", null));
+    when(broadcaster.broadcastHot("newKey")).thenReturn(false);
+
+    consumer.onReport(message);
+
+    verify(stateMachine).rollbackToPreviousState(eq("newKey"), isNull());
+    verify(broadcaster).broadcastHot("newKey");
+  }
+
+  @Test
   void broadcastCoolSuccess_shouldNotRollback() {
     ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("coolKey", 1L));
     when(keyEvaluator.evaluate("coolKey", 1L)).thenReturn(ZetaDecision.cool("coolKey", null));

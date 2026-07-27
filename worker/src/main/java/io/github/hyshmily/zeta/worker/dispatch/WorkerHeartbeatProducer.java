@@ -27,7 +27,6 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.*;
@@ -83,6 +82,9 @@ public class WorkerHeartbeatProducer {
   private final SnowflakeIdGenerator snowflakeIdGenerator;
   /** Handle for the scheduled heartbeat task. */
   private ScheduledFuture<?> heartbeatTask;
+
+  /** Timestamp of the last ERROR log for heartbeat send failure (rate-limiting). */
+  private long lastErrorLogMs;
 
   private static final String EPOCH_REDIS_KEY_PREFIX = "zeta:worker:epoch:";
 
@@ -276,9 +278,15 @@ public class WorkerHeartbeatProducer {
     // between processes on the same host sharing the same workerId (e.g. K8s rolling
     // update where old and new Pods briefly coexist).
     synchronized (WorkerHeartbeatProducer.class) {
-      try (FileChannel channel = FileChannel.open(
-             path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
-           FileLock lock = channel.lock()) {
+      try (
+        FileChannel channel = FileChannel.open(
+          path,
+          StandardOpenOption.CREATE,
+          StandardOpenOption.READ,
+          StandardOpenOption.WRITE
+        );
+        FileLock lock = channel.lock()
+      ) {
         long prev = 0L;
         long size = channel.size();
         if (size > 0) {
@@ -394,7 +402,11 @@ public class WorkerHeartbeatProducer {
       );
       rabbitTemplate.send(heartbeatExchange, KEY_HEARTBEAT + workerId, hb.toMessage());
     } catch (Exception e) {
-      log.error("Scheduled sendHeartbeat failed", e);
+      long now = System.currentTimeMillis();
+      if (now - lastErrorLogMs > 60_000L) {
+        log.warn("Scheduled sendHeartbeat failed (rate-limited, next WARN in 60s)", e);
+        lastErrorLogMs = now;
+      }
     }
   }
 }

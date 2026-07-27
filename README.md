@@ -73,6 +73,9 @@ zeta:
   # local parameters all use defaults, no explicit config needed
 
   # —— Optional features, uncomment as needed ——
+  # App report to worker
+  #report:
+  #  enabled: false
 
   # Cross-instance cache sync (requires spring-boot-starter-amqp + spring-boot-starter-data-redis)
   # sync:
@@ -214,16 +217,15 @@ Default local configuration:
 
 **Feature configuration:**
 
-| Feature             | How to Enable                       | Description                            |
-| ------------------- | ----------------------------------- | -------------------------------------- |
-| Redis L2 Cache      | Add `RedisTemplate` Bean            | Two-level cache, L2 fallback           |
-| Cross-instance Sync | `zeta.sync.enabled=true`            | RabbitMQ-based cache invalidation      |
-| Worker Listener     | `zeta.worker-listener.enabled=true` | Receive HOT/COOL decisions from Worker |
-| Worker Mode         | `zeta.worker.enabled=true`          | Run a dedicated Worker node            |
-
-| Access Reporting | `zeta.report.enabled=true` (default) | Report access counts to Worker |
-| Reporter Self-Protection | `zeta.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush |
-| Spring Cache Integration | `zeta.spring-cache.enabled=true` | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with Zeta detection |
+| Feature                  | How to Enable                                | Description                                                          |
+| ------------------------ | -------------------------------------------- | -------------------------------------------------------------------- |
+| Redis L2 Cache           | Add `RedisTemplate` Bean                     | Two-level cache, L2 fallback                                         |
+| Cross-instance Sync      | `zeta.sync.enabled=true`                     | RabbitMQ-based cache invalidation                                    |
+| Worker Listener          | `zeta.worker-listener.enabled=true`          | Receive HOT/COOL decisions from Worker                               |
+| Worker Mode              | `zeta.worker.enabled=true`                   | Run a dedicated Worker node                                          |
+| Access Reporting         | `zeta.report.enabled=true` (default)         | Report access counts to Worker                                       |
+| Reporter Self-Protection | `zeta.local.reporter.enabled=true` (default) | BBR backpressure for Reporter flush                                  |
+| Spring Cache Integration | `zeta.spring-cache.enabled=true`             | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with Zeta detection |
 
 See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 
@@ -412,16 +414,16 @@ public class MyApplication { ... }
 
 **Extension Annotations** (processed by `CacheExtensionAspect` at `HIGHEST_PRECEDENCE`; full combination matrix in [docs/ANNOTATION.md](docs/ANNOTATION.md)):
 
-| Annotation        | Target | Role on `@Cacheable`                                                                                                                                            |
-| ----------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@CacheTTL`       | M/T    | Override hard/soft TTL. Static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated at most once per call, only on miss/promotion/refresh             |
+| Annotation        | Target | Role on `@Cacheable`                                                                                                                                                                                                                                                                           |
+| ----------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@CacheTTL`       | M/T    | Override hard/soft TTL. Static values and SpEL (`hardTtlSpEl`, `softTtlSpEl`). SpEL evaluated at most once per call, only on miss/promotion/refresh                                                                                                                                            |
 | `@Intercept`      | M      | Skip method body via trigger mode (`IS_LOCAL_HOT`/`FORCE`/`QPS`/`CONCURRENT_THREADS`). Mode-specific config via nested `@Intercept.QpsConfig` (`threshold`, `blockDurationMs`) and `@Intercept.ConcurrentConfig` (`threshold`). Fallback via `@Intercept.fallback()`, `@Fallback`, or `peek()` |
-| `@Fallback`       | M      | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                                          |
-| `@NullCaching`    | M      | Opt-out of null caching — null results are cached by default (short-TTL sentinel); `@NullCaching(false)` disables it for the method                             |
-| `@SkipBroadcast`  | M      | Suppress cross-instance AMQP sync messages (local-only write/evict)                                                                                             |
-| `@Preload`        | M      | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL)                                                                   |
-| `@CacheCondition` | M      | SpEL `unless` with purge semantics — result not kept AND any existing entry evicted (broadcast unless `@SkipBroadcast`)                                         |
-| `@Tag`            | M      | Feed a SpEL-resolved key into detection/reporting without a cache lookup; `skipDetection`/`skipReport` suppress each side; `cacheName` aligns the key namespace |
+| `@Fallback`       | M      | Fallback value (SpEL) or convention method (`{methodName}Fallback`) when blocked/intercepted/exception                                                                                                                                                                                         |
+| `@NullCaching`    | M      | Opt-out of null caching — null results are cached by default (short-TTL sentinel); `@NullCaching(false)` disables it for the method                                                                                                                                                            |
+| `@SkipBroadcast`  | M      | Suppress cross-instance AMQP sync messages (local-only write/evict)                                                                                                                                                                                                                            |
+| `@Preload`        | M      | Pre-inflate HeavyKeeper counts for known hot keys (static `keys[]` or dynamic `keyExpr` SpEL)                                                                                                                                                                                                  |
+| `@CacheCondition` | M      | SpEL `unless` with purge semantics — result not kept AND any existing entry evicted (broadcast unless `@SkipBroadcast`)                                                                                                                                                                        |
+| `@Tag`            | M      | Feed a SpEL-resolved key into detection/reporting without a cache lookup; `skipDetection`/`skipReport` suppress each side; `cacheName` aligns the key namespace                                                                                                                                |
 
 ```java
 @Cacheable(cacheNames = "users", key = "#id")

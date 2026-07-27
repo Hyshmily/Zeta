@@ -148,7 +148,7 @@ public class ZetaAmqpAutoConfiguration {
      * Zeta's JSON serialization is isolated from the application's own message
      * converter — see bidirectional-converter-pollution issue (P1-5.1).
      *
-     * @param connectionFactory the shared RabbitMQ connection factory
+     * @param connectionFactory the data-plane (Boot default) RabbitMQ connection factory
      * @param converter         the Zeta JSON message converter
      * @return a new {@link RabbitTemplate} with Zeta's JSON converter
      */
@@ -156,7 +156,7 @@ public class ZetaAmqpAutoConfiguration {
     @Bean("zetaReportRabbitTemplate")
     @ConditionalOnMissingBean(name = "zetaReportRabbitTemplate")
     public RabbitTemplate zetaReportRabbitTemplate(
-      ConnectionFactory connectionFactory,
+      @Qualifier("rabbitConnectionFactory") ConnectionFactory connectionFactory,
       @Qualifier("zetaReportMessageConverter") MessageConverter converter
     ) {
       RabbitTemplate t = new RabbitTemplate(connectionFactory);
@@ -343,13 +343,15 @@ public class ZetaAmqpAutoConfiguration {
      * Isolated from the container-level shared template to avoid
      * MessageConverter cross-contamination (see issue P1-5.1).
      *
-     * @param connectionFactory the shared RabbitMQ connection factory
+     * @param connectionFactory the data-plane (Boot default) RabbitMQ connection factory
      * @return a new {@link RabbitTemplate} instance
      */
     @Bean("zetaSyncRabbitTemplate")
     @ConditionalOnMissingBean(name = "zetaSyncRabbitTemplate")
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
-    public RabbitTemplate zetaSyncRabbitTemplate(ConnectionFactory connectionFactory) {
+    public RabbitTemplate zetaSyncRabbitTemplate(
+      @Qualifier("rabbitConnectionFactory") ConnectionFactory connectionFactory
+    ) {
       return new RabbitTemplate(connectionFactory);
     }
 
@@ -778,6 +780,23 @@ public class ZetaAmqpAutoConfiguration {
    * is one extra connection per node — negligible for the cross‑circuit survivability
    * gained (standard practice: K8s health endpoint on separate port, Kafka controller
    * listener, etc.).
+   *
+   * <p><b>Final channel mapping (ADR-0010 addendum, 2026-07):</b>
+   * <ul>
+   *   <li><b>Control plane</b> (this factory): app heartbeat consumption, verify
+   *       PING/PONG, worker heartbeat producer, worker config gossip.</li>
+   *   <li><b>Data plane</b> (Boot {@code rabbitConnectionFactory}): report publish/consume,
+   *       cache-sync publish/consume, worker decision consume, worker HOT/COOL broadcast.</li>
+   * </ul>
+   *
+   * <p><b>Why {@code @Primary} is kept:</b> removing it would leave two
+   * non-primary {@code ConnectionFactory} candidates, causing Spring Boot's
+   * {@code RabbitTemplate} ({@code @ConditionalOnSingleCandidate}) to silently
+   * back off. Downstream code injecting {@code RabbitTemplate} would then resolve
+   * to {@code zetaReportRabbitTemplate} and inherit its JSON message converter —
+   * a silent format change for the consumer's own messages. {@code @Primary} here
+   * preserves single-candidate resolution for unqualified injections; all Zeta
+   * data-plane beans instead qualify explicitly for {@code rabbitConnectionFactory}.
    */
   @Configuration
   static class HeartbeatConnectionConfiguration {

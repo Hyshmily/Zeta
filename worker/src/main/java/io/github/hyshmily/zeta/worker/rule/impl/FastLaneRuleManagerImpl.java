@@ -21,28 +21,57 @@ import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Concurrent, cache-backed implementation of {@link FastLaneRuleManager}.
  *
- * <p>Rules are stored in a {@link ConcurrentHashMap} keyed by pattern string.
- * Key-to-rule lookups ({@link #match}) are accelerated by a Caffeine cache
+ * <p>Rules are stored in a {@link ConcurrentHashMap} keyed by pattern string
+ * and mirrored in a {@link java.util.concurrent.CopyOnWriteArrayList} for
+ * insertion-order iteration. When multiple patterns match the same key, the
+ * earliest-added rule wins.
+ *
+ * <p>Key-to-rule lookups ({@link #match}) are accelerated by a Caffeine cache
  * with a 30-second TTL, ensuring repeated evaluations of the same key are
- * O(1) amortised. The cache is invalidated on every write operation
- * ({@link #addRule}, {@link #removeRule}, {@link #updateRule}) so changes
- * are visible immediately.
+ * O(1) amortised. Negative results (no match) are cached via a sentinel so
+ * non-fast-lane keys also benefit from O(1) amortised lookup. The cache is
+ * invalidated on every write operation ({@link #addRule}, {@link #removeRule},
+ * {@link #updateRule}, {@link #replaceAll}) so changes are visible immediately.
+ *
+ * <p><b>Versioning (ADR-0025):</b> the rule set carries a wall-clock version
+ * ({@code System.currentTimeMillis()} of the last local mutation; {@code 0}
+ * for YAML-loaded initial rules). Mutations stamp the version;
+ * {@link #replaceAll} applies a gossiped snapshot only when its version is
+ * newer-or-equal, giving last-writer-wins convergence across Workers.
  *
  * <p>Glob matching ({@code *} / {@code ?}) is used to compare cache keys
  * against rule patterns. See {@link #matchGlob} for the exact semantics.
  *
- * <p>Thread-safe. All mutations are atomic; reads from the cache are
- * Caffeine-internal and lock-free.
+ * <p>Thread-safe. All mutations (local CRUD and gossip replace) are
+ * {@code synchronized} — they are rare (operator-driven or once per gossip
+ * interval) and must update the map, the ordered list, the version, and the
+ * match cache atomically. Reads via {@link #match} stay Caffeine-internal
+ * and lock-free.
  */
 public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
 
+  /** Sentinel for negative lookups — Caffeine does not cache null. */
+  private static final FastLaneRule NO_MATCH = new FastLaneRule("", -1);
+
   /** Registered rules, keyed by {@link FastLaneRule#keyPattern()}. */
   private final ConcurrentHashMap<String, FastLaneRule> rules = new ConcurrentHashMap<>();
+
+  /** Insertion-ordered list for ordered iteration in {@link #match}. */
+  private final CopyOnWriteArrayList<FastLaneRule> orderedRules = new CopyOnWriteArrayList<>();
+
+  /**
+   * Wall-clock version of the current rule set (ms since epoch). {@code 0}
+   * for YAML-loaded initial rules. Stamped on every local mutation and on
+   * every applied gossip snapshot. Written under the intrinsic lock,
+   * read via {@link #getRulesVersion()} (volatile).
+   */
+  private volatile long rulesVersion = 0L;
 
   /**
    * Caffeine cache from evaluated cache key to the matched rule.
@@ -65,6 +94,7 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
     if (initialRules != null) {
       for (FastLaneRule rule : initialRules) {
         rules.put(rule.keyPattern(), rule);
+        orderedRules.add(rule);
       }
     }
   }
@@ -73,14 +103,21 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    * Add or replace a fast-lane rule.
    *
    * <p>The match cache is invalidated so that subsequent {@link #match} calls
-   * reflect the new rule set.
+   * reflect the new rule set. Stamps the gossip version (ADR-0025).
    *
    * @param keyPattern the glob-style key pattern to match
    * @param threshold  the sliding-window sum threshold
    */
   @Override
-  public void addRule(String keyPattern, long threshold) {
-    rules.put(keyPattern, new FastLaneRule(keyPattern, threshold));
+  public synchronized void addRule(String keyPattern, long threshold) {
+    FastLaneRule rule = new FastLaneRule(keyPattern, threshold);
+    FastLaneRule old = rules.put(keyPattern, rule);
+    if (old == null) {
+      orderedRules.add(rule);
+    } else {
+      orderedRules.replaceAll(r -> r.keyPattern().equals(keyPattern) ? rule : r);
+    }
+    rulesVersion = System.currentTimeMillis();
     matchCache.invalidateAll();
   }
 
@@ -91,9 +128,13 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    * @return {@code true} if a rule was actually removed
    */
   @Override
-  public boolean removeRule(String keyPattern) {
+  public synchronized boolean removeRule(String keyPattern) {
     boolean removed = rules.remove(keyPattern) != null;
-    if (removed) matchCache.invalidateAll();
+    if (removed) {
+      orderedRules.removeIf(r -> r.keyPattern().equals(keyPattern));
+      rulesVersion = System.currentTimeMillis();
+      matchCache.invalidateAll();
+    }
     return removed;
   }
 
@@ -108,10 +149,56 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    * @return {@code true} if the rule existed and was updated
    */
   @Override
-  public boolean updateRule(String keyPattern, long threshold) {
+  public synchronized boolean updateRule(String keyPattern, long threshold) {
     boolean updated = rules.computeIfPresent(keyPattern, (k, v) -> new FastLaneRule(k, threshold)) != null;
-    if (updated) matchCache.invalidateAll();
+    if (updated) {
+      FastLaneRule rule = new FastLaneRule(keyPattern, threshold);
+      orderedRules.replaceAll(r -> r.keyPattern().equals(keyPattern) ? rule : r);
+      rulesVersion = System.currentTimeMillis();
+      matchCache.invalidateAll();
+    }
     return updated;
+  }
+
+  /**
+   * Current version of the rule set for gossip merge (ADR-0025).
+   *
+   * @return wall-clock milliseconds of the last local mutation or applied
+   *         gossip snapshot; {@code 0} for never-mutated YAML-loaded rules
+   */
+  @Override
+  public long getRulesVersion() {
+    return rulesVersion;
+  }
+
+  /**
+   * Atomically replace the entire rule set with a gossiped snapshot.
+   *
+   * <p>Last-writer-wins merge (ADR-0025): applied only when {@code version}
+   * is newer than or equal to the current version (equal allowed for
+   * idempotent re-delivery; same-version conflicts between different nodes
+   * are pre-filtered by the receiver's nodeId tie-break). The incoming list
+   * order is preserved so every Worker resolves overlapping patterns to the
+   * same winning rule. The match cache is invalidated on application.
+   *
+   * @param newRules the complete replacement rule set (may be empty = clear all)
+   * @param version  the gossiped rule set version
+   */
+  @Override
+  public synchronized void replaceAll(List<FastLaneRule> newRules, long version) {
+    if (version < rulesVersion) {
+      return;
+    }
+    rules.clear();
+    orderedRules.clear();
+    if (newRules != null) {
+      for (FastLaneRule rule : newRules) {
+        rules.put(rule.keyPattern(), rule);
+        orderedRules.add(rule);
+      }
+    }
+    rulesVersion = version;
+    matchCache.invalidateAll();
   }
 
   /**
@@ -121,26 +208,28 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    */
   @Override
   public List<FastLaneRule> getRules() {
-    return new ArrayList<>(rules.values());
+    return new ArrayList<>(orderedRules);
   }
 
   /**
    * Find the first fast-lane rule whose pattern matches the given cache key.
    *
-   * <p>Results are cached in Caffeine for 30 seconds so repeated lookups
-   * for the same key avoid O(n) glob scanning.
+   * <p>Results (including negative results via sentinel) are cached in
+   * Caffeine for 30 seconds so repeated lookups for the same key avoid
+   * O(n) glob scanning.
    *
    * @param key the cache key to test
    * @return the matching rule, or {@code null} if no rule matches
    */
   @Override
   public FastLaneRule match(String key) {
-    return matchCache.get(key, k -> {
-      for (FastLaneRule rule : rules.values()) {
+    FastLaneRule r = matchCache.get(key, k -> {
+      for (FastLaneRule rule : orderedRules) {
         if (matchGlob(k, rule.keyPattern())) return rule;
       }
-      return null;
+      return NO_MATCH;
     });
+    return r == NO_MATCH ? null : r;
   }
 
   /**

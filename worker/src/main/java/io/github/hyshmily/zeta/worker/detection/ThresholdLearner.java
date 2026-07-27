@@ -81,8 +81,9 @@ public class ThresholdLearner implements Runnable {
       }
       long windowMs = (long) detector.getWindowSize() * detector.getTimeMillisPerSlice();
       long newThreshold = (long) (smoothedQps * properties.getGlobalQpsDynamicThreshold().getHotThresholdRatio() * (windowMs / 1000.0));
-      // Clamp: dynamic threshold never below the configured static floor
-      newThreshold = Math.max(properties.getThreshold().getHotThreshold(), newThreshold);
+      // Clamp: hard floor of 10 (documented noise guard), overridable upward by config
+      long floor = Math.max(10L, properties.getThreshold().getHotThreshold());
+      newThreshold = Math.max(floor, newThreshold);
 
       long oldThreshold = detector.getThreshold();
 

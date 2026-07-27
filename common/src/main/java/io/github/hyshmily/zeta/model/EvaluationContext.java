@@ -20,6 +20,9 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 /**
  * Aggregated observation data fed into Bayesian confidence evaluation.
  *
+ * <p>A {@link #FASTLANE} sentinel is provided for the fast-lane path where
+ * no actual evaluation context is needed.
+ *
  * <p>Carries all the per-key metrics needed by the state machine to compute
  * a Bayesian posterior: the sliding-window sum (recent frequency, primary
  * observation), the HeavyKeeper sketch estimate (global frequency, secondary),
@@ -49,4 +52,7 @@ public record EvaluationContext(
   public EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv, double trendStrength) {
     this(cmsCount, windowSum, threshold, cv, Math.log(Math.max(threshold, 1.0)), Math.log(Math.max(threshold, 1.0)), trendStrength);
   }
+
+  /** Sentinel for fast-lane evaluation where no Bayesian context is needed. */
+  public static final EvaluationContext FASTLANE = new EvaluationContext(0L, 0L, 0L, null, 0.0, 0.0, 0.0);
 }

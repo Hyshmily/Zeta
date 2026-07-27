@@ -22,6 +22,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -29,6 +30,7 @@ import org.junit.jupiter.api.Test;
  * different keys, delayed submission, graceful close, backpressure rejection, executor rejection recovery, and key
  * cleanup.
  */
+@Tag("performance")
 class PerKeyOrderedDispatcherTest {
 
   private ScheduledExecutorService executor;

@@ -70,6 +70,8 @@ public interface ZetaConstants {
     String HEADER_VERIFY_PONG = "PONG";
     /** Rule set version (rulesVersion). */
     String HEADER_RULES_VERSION = "rulesVersion";
+    /** Fast-lane rule set version for Worker-to-Worker rules gossip (ADR-0025). */
+    String HEADER_FASTLANE_RULES_VERSION = "fastlaneRulesVersion";
     /** Snowflake message ID for end-to-end tracing. */
     String HEADER_MESSAGE_ID = "messageId";
   }
@@ -98,6 +100,12 @@ public interface ZetaConstants {
     String KEY_REPORT = "reportToWorker.";
     /** Prefix for heartbeat messages from workers to apps. */
     String KEY_HEARTBEAT = "heartbeat.";
+    /**
+     * Routing key for Worker-to-Worker fast-lane rules gossip on the heartbeat
+     * exchange (ADR-0025). Deliberately outside {@code heartbeat.*} so the
+     * messages are not fanned out to App-side heartbeat queues.
+     */
+    String KEY_FASTLANE_RULES = "fastlane.rules";
     /** Queue name prefix for reportToWorker queues (appended with app name). */
     String QUEUE_PREFIX_REPORT = "zeta.reportToWorker.";
   }

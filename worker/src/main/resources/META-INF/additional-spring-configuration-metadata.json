@@ -43,6 +43,18 @@
       "defaultValue": 50
     },
     {
+      "name": "zeta.worker.report-queue.max-length",
+      "type": "java.lang.Long",
+      "description": "Maximum messages buffered in the report queue before drop-head applies.",
+      "defaultValue": 10000
+    },
+    {
+      "name": "zeta.worker.report-queue.message-ttl-ms",
+      "type": "java.lang.Long",
+      "description": "Per-message TTL (ms). Reports sitting unconsumed longer than this are discarded by the broker.",
+      "defaultValue": 60000
+    },
+    {
       "name": "zeta.worker.sliding-window.duration-ms",
       "type": "java.lang.Long",
       "description": "Sliding window duration in milliseconds for QPS tracking.",
@@ -99,8 +111,14 @@
     {
       "name": "zeta.worker.state-machine.evict-interval-ms",
       "type": "java.lang.Long",
-      "description": "Interval in ms for evicting stale sliding-window and state-machine state.",
-      "defaultValue": 30000
+      "description": "Staleness threshold — a key is evicted after this many ms without any report. Default = 2 × coolDurationMs = 20 minutes.",
+      "defaultValue": 1200000
+    },
+    {
+      "name": "zeta.worker.state-machine.rebroadcast-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Minimum interval (ms) between periodic HOT rebroadcasts. Recovers lost broadcasts (fire-and-forget). Default 10 s; minimum 1 s.",
+      "defaultValue": 10000
     },
     {
       "name": "zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance",
@@ -125,36 +143,6 @@
       "type": "java.lang.Long",
       "description": "Interval in milliseconds between dynamic threshold recalculations.",
       "defaultValue": 60000
-    },
-    {
-      "name": "zeta.worker.heavy-keeper.top-k",
-      "type": "java.lang.Integer",
-      "description": "Worker-side HeavyKeeper Top-K capacity.",
-      "defaultValue": 100
-    },
-    {
-      "name": "zeta.worker.heavy-keeper.width",
-      "type": "java.lang.Integer",
-      "description": "Worker-side Count-Min Sketch width.",
-      "defaultValue": 20000
-    },
-    {
-      "name": "zeta.worker.heavy-keeper.depth",
-      "type": "java.lang.Integer",
-      "description": "Worker-side Count-Min Sketch depth.",
-      "defaultValue": 10
-    },
-    {
-      "name": "zeta.worker.heavy-keeper.decay",
-      "type": "java.lang.Double",
-      "description": "Worker-side HeavyKeeper decay factor.",
-      "defaultValue": 0.9
-    },
-    {
-      "name": "zeta.worker.heavy-keeper.min-count",
-      "type": "java.lang.Integer",
-      "description": "Worker-side minimum frequency count.",
-      "defaultValue": 10
     },
     {
       "name": "zeta.worker.heartbeat.ping-interval-ms",
@@ -199,34 +187,10 @@
       "defaultValue": 100
     },
     {
-      "name": "zeta.worker.persistence.enabled",
-      "type": "java.lang.Boolean",
-      "description": "Enable periodic TopK snapshot to Redis (opt-in).",
-      "defaultValue": false
-    },
-    {
-      "name": "zeta.worker.persistence.persist-interval-ms",
+      "name": "zeta.worker.fast-lane.gossip-interval-ms",
       "type": "java.lang.Long",
-      "description": "Interval in milliseconds between TopK snapshots.",
-      "defaultValue": 30000
-    },
-    {
-      "name": "zeta.worker.persistence.top-k-count",
-      "type": "java.lang.Integer",
-      "description": "Number of top keys to persist per snapshot.",
-      "defaultValue": 100
-    },
-    {
-      "name": "zeta.worker.persistence.redis-key-prefix",
-      "type": "java.lang.String",
-      "description": "Redis key prefix; final key = prefix + appName + ':' + nodeId.",
-      "defaultValue": "zeta:topk:worker:"
-    },
-    {
-      "name": "zeta.worker.persistence.ttl-days",
-      "type": "java.lang.Integer",
-      "description": "TTL in days for persisted TopK data in Redis.",
-      "defaultValue": 3
+      "description": "Interval (ms) between periodic full-set rule gossip broadcasts to peer Workers.",
+      "defaultValue": 60000
     }
   ]
 }

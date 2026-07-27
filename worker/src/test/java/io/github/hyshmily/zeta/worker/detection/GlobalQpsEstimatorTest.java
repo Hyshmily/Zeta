@@ -147,4 +147,32 @@ class GlobalQpsEstimatorTest {
     long total = estimator.getWindowTotal();
     assertThat(total).isEqualTo(125);
   }
+
+  /**
+   * Verifies that after filling the entire 2W buffer and then experiencing a
+   * gap of 2..W-1 slices, stale data from the "other half" is not included in
+   * the window total.
+   *
+   * <p>The broken formula ({@code currentIndex + elapsedSlices}) cleared
+   * far-ahead slots instead of the stale-zone slots about to re-enter the
+   * window, inflating the sum by ~2.3×.
+   */
+  @Test
+  void addTotal_shouldNotIncludeStaleDataAfterMultiSliceGap() throws InterruptedException {
+    GlobalQpsEstimator estimator = new GlobalQpsEstimator(1000, 5);
+    // Fill all 2W=10 buffer slots with non-zero values
+    for (int i = 0; i < 10; i++) {
+      estimator.addTotal(100);
+      Thread.sleep(200);
+    }
+    // Gap of 800ms = 4 slices (0 < 4 < W=5)
+    Thread.sleep(800);
+    // New data — the gap has shifted the window by 4 slices
+    estimator.addTotal(50);
+
+    long total = estimator.getWindowTotal();
+    // The broken formula included stale slots → ≥350.
+    // Correct formula: new 50 + ~1-2 valid pre-gap values ≈ 150-250.
+    assertThat(total).isLessThan(300);
+  }
 }

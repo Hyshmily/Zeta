@@ -30,6 +30,7 @@ import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
+import io.github.hyshmily.zeta.worker.rule.FastLaneRulesBroadcaster;
 import io.github.hyshmily.zeta.worker.rule.impl.FastLaneRuleManagerImpl;
 import jakarta.annotation.PostConstruct;
 import java.util.List;
@@ -46,7 +47,6 @@ import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -54,7 +54,6 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 
@@ -135,6 +134,7 @@ public class WorkerAutoConfiguration {
    * @return a new {@link SlidingWindowDetector} instance
    */
   @Bean
+  @ConditionalOnMissingBean
   public SlidingWindowDetector slidingWindowDetector(WorkerProperties properties) {
     long threshold = properties.getThreshold().getHotThreshold();
     if (threshold <= 0) {
@@ -154,6 +154,7 @@ public class WorkerAutoConfiguration {
    * @return a new {@link BayesianConfidenceEstimator} instance
    */
   @Bean
+  @ConditionalOnMissingBean
   public BayesianConfidenceEstimator bayesianConfidenceEstimator(WorkerProperties properties) {
     WorkerProperties.Bayesian cfg = properties.getBayesian();
     return new BayesianConfidenceEstimator(cfg.getPriorMean(), cfg.getPriorStd(), cfg.getLikelihoodStd());
@@ -166,6 +167,7 @@ public class WorkerAutoConfiguration {
    * @return a new {@link ConfidenceEvaluator} instance
    */
   @Bean
+  @ConditionalOnMissingBean
   public ConfidenceEvaluator confidenceEvaluator(BayesianConfidenceEstimator estimator) {
     return new ConfidenceEvaluator(estimator);
   }
@@ -179,13 +181,15 @@ public class WorkerAutoConfiguration {
    * @return a new {@link ZetaBayesianSM} instance
    */
   @Bean
+  @ConditionalOnMissingBean
   public ZetaBayesianSM hotKeyStateMachine(WorkerProperties properties, ConfidenceEvaluator confidenceEvaluator) {
     return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(
       properties.getConfirmWindows(),
       properties.getCoolWindows(),
       properties.getPreCoolGraceWindows(),
       confidenceEvaluator,
-      properties.getBayesian().getPriorMean()
+      properties.getBayesian().getPriorMean(),
+      properties.getStateMachine().getRebroadcastIntervalMs()
     );
   }
 
@@ -193,6 +197,7 @@ public class WorkerAutoConfiguration {
    * Bayesian key evaluator (always present) with integrated fast-lane support.
    */
   @Bean
+  @ConditionalOnMissingBean
   public FastLaneRuleManager fastLaneRuleManager(WorkerProperties properties) {
     List<FastLaneRuleManager.FastLaneRule> rules = properties
       .getFastLane()
@@ -204,6 +209,7 @@ public class WorkerAutoConfiguration {
   }
 
   @Bean
+  @ConditionalOnMissingBean
   public Evaluator keyEvaluator(
     SlidingWindowDetector detector,
     ZetaBayesianSM stateMachine,
@@ -223,6 +229,7 @@ public class WorkerAutoConfiguration {
    * @return a new {@link ReportConsumer} instance
    */
   @Bean
+  @ConditionalOnMissingBean
   public ReportConsumer reportConsumer(
     Evaluator evaluator,
     WorkerBroadcaster broadcaster,
@@ -242,6 +249,7 @@ public class WorkerAutoConfiguration {
    * @return a new {@link WorkerBroadcaster} instance
    */
   @Bean
+  @ConditionalOnMissingBean
   public WorkerBroadcaster workerBroadcaster(
     RabbitTemplate rabbitTemplate,
     WorkerProperties properties,
@@ -266,10 +274,20 @@ public class WorkerAutoConfiguration {
    * decision broadcasts. Both app and worker declare this exchange so that it
    * exists regardless of startup order.
    *
+   * <p><b>Note on fanout + routing key:</b> As a fanout exchange, RabbitMQ
+   * ignores the routing key entirely and delivers every message to all bound
+   * queues. The routing key set by {@link WorkerBroadcaster} ({@code send.}
+   * + appName) is purely decorative. If multiple appName clusters share the
+   * same broker, every app queue bound to this exchange receives every
+   * decision — there is no per-appName isolation at the exchange level.
+   * Per-appName filtering must be implemented by the receiver (e.g. by
+   * checking the message headers).
+   *
    * @param properties worker configuration providing the broadcast exchange name
    * @return a durable, non-auto-delete {@link FanoutExchange}
    */
   @Bean
+  @ConditionalOnMissingBean
   public FanoutExchange broadcastExchange(WorkerProperties properties) {
     return new FanoutExchange(properties.getMessaging().getBroadcastExchange(), true, false);
   }
@@ -282,6 +300,7 @@ public class WorkerAutoConfiguration {
    * @return a durable, non-auto-delete {@link DirectExchange}
    */
   @Bean
+  @ConditionalOnMissingBean
   public DirectExchange reportExchange(WorkerProperties properties) {
     return new DirectExchange(properties.getMessaging().getReportExchange(), true, false);
   }
@@ -292,7 +311,14 @@ public class WorkerAutoConfiguration {
    * guaranteeing that a key always lands on the same Worker.
    *
    * <p>The queue has a 7-day idle expiry ({@code x-expires}) since shard queues
-   * are fixed-count and long-lived.
+   * are fixed-count and long-lived. Backlog guardrails ({@code x-max-length}
+   * with {@code drop-head} overflow, plus {@code x-message-ttl}) prevent
+   * unbounded broker-side accumulation when consumption stalls; dropped reports
+   * are tolerated per ADR-0007 (fire-and-forget, next cycle self-heals).
+   *
+   * <p><b>Upgrade note:</b> {@code x-*} arguments cannot be altered on an
+   * existing queue — delete the old queue before rolling out this version,
+   * otherwise re-declaration fails with PRECONDITION_FAILED.
    *
    * @param properties worker configuration providing the routing app name
    * @return a durable {@link Queue} with the shard-specific name
@@ -300,7 +326,12 @@ public class WorkerAutoConfiguration {
   @Bean
   public Queue reportQueue(WorkerProperties properties) {
     String queueName = ZetaConstants.Routing.QUEUE_PREFIX_REPORT + properties.getRouting().getAppName() + "." + nodeId;
-    return QueueBuilder.durable(queueName).withArgument("x-expires", 604_800_000).build();
+    return QueueBuilder.durable(queueName)
+      .withArgument("x-expires", 604_800_000)
+      .withArgument("x-max-length", properties.getReportQueue().getMaxLength())
+      .withArgument("x-overflow", "drop-head")
+      .withArgument("x-message-ttl", properties.getReportQueue().getMessageTtlMs())
+      .build();
   }
 
   /**
@@ -319,13 +350,14 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Auto-delete queue for receiving heartbeat-based config updates from
-   * peer Workers.
+   * Auto-delete queue for receiving gossip from peer Workers.
    *
    * <p>Each Worker declares its own queue named
    * {@code zeta.worker.config.<nodeId>}, which is automatically removed
-   * when the Worker disconnects.  The queue is bound to the
-   * {@code heartbeatExchange} with routing key {@code heartbeat.*}.
+   * when the Worker disconnects.  The queue carries two message types,
+   * demultiplexed by the {@code type} header in {@link WorkerConfigNegotiator}:
+   * state-machine config gossip (bound via {@code heartbeat.*}, ADR-0003) and
+   * fast-lane rules gossip (bound via {@code fastlane.rules}, ADR-0025).
    *
    * @return a non-durable, auto-delete {@link Queue} unique to this Worker node
    */
@@ -345,6 +377,72 @@ public class WorkerAutoConfiguration {
   @Bean
   public Binding workerConfigBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
     return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with(ZetaConstants.Routing.KEY_HEARTBEAT + "*");
+  }
+
+  /**
+   * Binds the per-Worker config queue to the heartbeat exchange with the
+   * routing key {@code fastlane.rules} for fast-lane rules gossip (ADR-0025).
+   * Kept outside {@code heartbeat.*} so rule sets are not fanned out to
+   * App-side heartbeat queues.
+   *
+   * @param workerConfigQueue the per-Worker config queue to bind
+   * @param heartbeatExchange the heartbeat topic exchange
+   * @return a {@link Binding} for the fast-lane rules gossip routing key
+   */
+  @Bean
+  public Binding fastLaneRulesBinding(Queue workerConfigQueue, TopicExchange heartbeatExchange) {
+    return BindingBuilder.bind(workerConfigQueue).to(heartbeatExchange).with(ZetaConstants.Routing.KEY_FASTLANE_RULES);
+  }
+
+  /**
+   * Publishes the full fast-lane rule set to peer Workers over the
+   * control-plane (heartbeat-dedicated) connection (ADR-0025).
+   *
+   * @param rabbitTemplate        the heartbeat-dedicated RabbitMQ template
+   * @param properties            worker configuration providing the heartbeat exchange name
+   * @param fastLaneRuleManager   the rule manager supplying the current set and version
+   * @param snowflakeIdGenerator  the trace-ID generator
+   * @return a new {@link FastLaneRulesBroadcaster} instance
+   */
+  @Bean
+  public FastLaneRulesBroadcaster fastLaneRulesBroadcaster(
+    @Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate,
+    WorkerProperties properties,
+    FastLaneRuleManager fastLaneRuleManager,
+    SnowflakeIdGenerator snowflakeIdGenerator
+  ) {
+    return new FastLaneRulesBroadcaster(
+      rabbitTemplate,
+      properties.getMessaging().getHeartbeatExchange(),
+      nodeId,
+      fastLaneRuleManager,
+      snowflakeIdGenerator
+    );
+  }
+
+  /**
+   * Schedules the periodic full-set fast-lane rules gossip (ADR-0025).
+   * A fresh or partitioned Worker converges within one gossip interval even
+   * if an immediate post-mutation broadcast was lost.
+   *
+   * @param broadcaster the rules gossip broadcaster
+   * @param properties  worker configuration providing the gossip interval
+   * @param scheduler   the shared worker scheduler
+   * @return a placeholder {@link Runnable} bean that keeps the scheduled task alive
+   */
+  @Bean
+  public Runnable fastLaneRulesGossipTask(
+    FastLaneRulesBroadcaster broadcaster,
+    WorkerProperties properties,
+    @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
+  ) {
+    try {
+      long interval = properties.getFastLane().getGossipIntervalMs();
+      scheduler.scheduleAtFixedRate(broadcaster::broadcastNow, interval, interval, TimeUnit.MILLISECONDS);
+    } catch (Exception e) {
+      log.error("Failed to schedule fast-lane rules gossip task; rules will only propagate on local mutation.", e);
+    }
+    return (Runnable) () -> {};
   }
 
   /**
@@ -469,6 +567,7 @@ public class WorkerAutoConfiguration {
    * @return a new {@link GlobalQpsEstimator} instance
    */
   @Bean
+  @ConditionalOnMissingBean
   public GlobalQpsEstimator globalQpsEstimator(WorkerProperties properties) {
     return new GlobalQpsEstimator(
       properties.getSlidingWindow().getDurationMs(),
@@ -488,6 +587,7 @@ public class WorkerAutoConfiguration {
    * @return a new {@link ThresholdLearner} instance
    */
   @Bean
+  @ConditionalOnMissingBean
   public ThresholdLearner thresholdLearner(
     GlobalQpsEstimator estimator,
     SlidingWindowDetector detector,
@@ -538,7 +638,7 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   public SimpleRabbitListenerContainerFactory reportListenerContainerFactory(
-    ConnectionFactory connectionFactory,
+    @Qualifier("rabbitConnectionFactory") ConnectionFactory connectionFactory,
     @Qualifier("reportMessageConverter") MessageConverter reportMessageConverter,
     WorkerProperties properties
   ) {
@@ -554,8 +654,9 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Listens for heartbeat-based config updates from peer Workers and applies
-   * them if the received config timestamp is newer than the local one.
+   * Listens for gossip from peer Workers and applies it: state-machine config
+   * when the embedded timestamp is newer (ADR-0003), and fast-lane rule sets
+   * last-writer-wins by wall-clock version (ADR-0025).
    *
    * <p>On startup, waits up to 3 seconds for the first heartbeat to arrive.
    * If none is received, the Worker continues with the values from
@@ -563,14 +664,16 @@ public class WorkerAutoConfiguration {
    *
    * @param stateMachine           the worker's state machine
    * @param configTimestampCounter the shared config-change timestamp counter
+   * @param fastLaneRuleManager    the rule manager receiving gossiped rule sets
    * @return a new {@link WorkerConfigNegotiator} instance
    */
   @Bean
   public WorkerConfigNegotiator workerConfigNegotiator(
     ZetaBayesianSM stateMachine,
-    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter
+    @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter,
+    FastLaneRuleManager fastLaneRuleManager
   ) {
-    return new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId);
+    return new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId, fastLaneRuleManager);
   }
 
   /**
@@ -583,10 +686,10 @@ public class WorkerAutoConfiguration {
    * @param learner    the threshold learner to schedule
    * @param properties worker configuration for the recalculation interval
    * @param scheduler  the shared worker scheduler
-   * @return a placeholder {@link Object} bean that keeps the scheduled task alive
+   * @return a placeholder {@link Runnable} bean that keeps the scheduled task alive
    */
   @Bean
-  public Object thresholdLearningTask(
+  public Runnable thresholdLearningTask(
     ThresholdLearner learner,
     WorkerProperties properties,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
@@ -601,7 +704,7 @@ public class WorkerAutoConfiguration {
     } catch (Exception e) {
       log.error("Failed to schedule threshold learning task; dynamic threshold " + "adjustment will not run.", e);
     }
-    return new Object(); // placeholder bean
+    return (Runnable) () -> {};
   }
 
   /**
@@ -640,9 +743,7 @@ public class WorkerAutoConfiguration {
    * @return a new {@link VerifyConsumer} instance for this Worker node
    */
   @Bean
-  public VerifyConsumer verifyConsumer(
-    @Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate
-  ) {
+  public VerifyConsumer verifyConsumer(@Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate) {
     return new VerifyConsumer(rabbitTemplate, nodeId);
   }
 

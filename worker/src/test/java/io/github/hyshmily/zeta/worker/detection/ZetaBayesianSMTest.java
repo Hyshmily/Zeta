@@ -57,6 +57,14 @@ class ZetaBayesianSMTest {
   }
 
   @Test
+  void defaultEvaluateOverload_shouldDelegate() {
+    io.github.hyshmily.zeta.detection.ZetaBayesianSM iface = machine;
+    assertThat(iface.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(iface.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(iface.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+  }
+
+  @Test
   void coldToHot_requiresConfirmCountConsecutiveHotWindows() {
     assertThat(machine.evaluate("key", false, false, CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(machine.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);

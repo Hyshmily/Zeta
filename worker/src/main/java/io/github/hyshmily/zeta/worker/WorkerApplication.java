@@ -17,7 +17,6 @@ package io.github.hyshmily.zeta.worker;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Entry point for the standalone HotKey Worker server.
@@ -27,7 +26,6 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * HOT/COOL decisions back to all connected apps via RabbitMQ.
  */
 @SpringBootApplication
-@EnableScheduling
 public class WorkerApplication {
 
   /** Default constructor. */

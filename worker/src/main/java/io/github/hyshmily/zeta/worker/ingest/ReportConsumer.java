@@ -24,12 +24,10 @@ import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 import lombok.Builder;
 import lombok.extern.slf4j.Slf4j;
@@ -72,7 +70,7 @@ public class ReportConsumer {
   /** Per-key lifecycle state machine. */
   private final ZetaBayesianSM stateMachine;
 
-  /** Staleness threshold in milliseconds. Package-visible for testing. */
+  /** Staleness threshold in milliseconds. */
   long stalenessThresholdMs = 5000L;
 
   /** Max keys per chunk for parallel processing. Beyond this, keys are split into chunks. */
@@ -111,17 +109,16 @@ public class ReportConsumer {
     }
   }
 
-  @SuppressWarnings("all")
   private void doOnReport(ReportMessage message) {
     long now = currentTimeMillis();
+    Map<String, Long> keyCounts = message.counts();
     log.debug(
-      "Processing report: appName={}, keys={}, counts={}, age={}ms",
+      "Processing report: appName={}, keys={}, age={}ms",
       message.appName(),
-      message.counts().size(),
-      message.counts(),
+      keyCounts.size(),
       now - message.timestamp()
     );
-    LongAdder totalQps = new LongAdder();
+    long totalQps = 0L;
 
     // Discard reports that are more than 5 seconds old.
     // Guards against delayed or re‑delivered messages that would
@@ -135,7 +132,6 @@ public class ReportConsumer {
       return;
     }
 
-    Map<String, Long> keyCounts = message.counts();
     if (keyCounts.isEmpty()) return;
 
     List<Map.Entry<String, Long>> entries = new ArrayList<>(keyCounts.entrySet());
@@ -147,85 +143,75 @@ public class ReportConsumer {
 
       // Accumulate broadcasts during processing; drain serially after the
       // per-key evaluation loop to avoid blocking AMQP channel write locks.
-      Queue<Report> pendingBroadcasts = new ConcurrentLinkedQueue<>();
+      ArrayDeque<Report> pendingBroadcasts = new ArrayDeque<>();
 
       // Process each key sequentially on the consumer thread.  8 concurrent
       // consumers already provide sufficient parallelism; intra-chunk
       // parallelisation would amplify stripe-lock contention for no gain.
       for (Map.Entry<String, Long> entry : chunk) {
         try {
-            String key = entry.getKey();
-            long count = entry.getValue();
+          String key = entry.getKey();
+          long count = entry.getValue();
 
-            totalQps.add(count);
+          totalQps += count;
 
-            ZetaDecision decision = evaluator.evaluate(key, count);
-            if (decision.type() != ZetaDecision.DecisionType.NONE) {
-              log.debug(
-                "BayesianEvaluator decision: key={}, type={}, snapshot={}",
-                key,
-                decision.type(),
-                decision.snapShot()
-              );
-            }
-            StateSnapshot previousState = decision.snapShot();
-
-            switch (decision.type()) {
-              case HOT -> {
-                // A new hot key has been confirmed. Pre-allocate a decision
-                // version and enqueue to send; actual AMQP send happens
-                // on the consumer thread after the per-key loop completes.
-                if (
-                  pendingBroadcasts.add(
-                    Report.builder()
-                      .task(() -> broadcaster.broadcastHot(key))
-                      .snapShot(decision.snapShot())
-                      .build()
-                  )
-                ) {
-                  // markConfirmed handled by TopKValidator (removed — use Baysian state machine as sole authority)
-                } else {
-                  stateMachine.rollbackToPreviousState(key, previousState);
-                  log.warn("Failed to enqueue HOT broadcast for key={}, rolling back state to {}", key, previousState);
-                }
-              }
-              case COOL -> {
-                if (
-                  pendingBroadcasts.add(
-                    Report.builder()
-                      .task(() -> broadcaster.broadcastCool(key))
-                      .snapShot(decision.snapShot())
-                      .build()
-                  )
-                ) {
-                  // markCooled handled by TopKValidator (removed — use Baysian state machine as sole authority)
-                } else {
-                  stateMachine.rollbackToPreviousState(key, previousState);
-                  log.warn("Failed to enqueue COOL broadcast for key={}, rolling back state to {}", key, previousState);
-                }
-              }
-              case NONE -> {
-                // No state transition occurred – the key remains in its
-                // current lifecycle stage.  Nothing to do.
-              }
-            }
-          } catch (Exception e) {
-            log.error(
-              "Error processing reportToWorker entry: appName={}, key={}, count={}",
-              message.appName(),
-              entry.getKey(),
-              entry.getValue(),
-              e
+          ZetaDecision decision = evaluator.evaluate(key, count);
+          if (decision.type() != ZetaDecision.DecisionType.NONE) {
+            log.debug(
+              "BayesianEvaluator decision: key={}, type={}, snapshot={}",
+              key,
+              decision.type(),
+              decision.snapShot()
             );
           }
+          StateSnapshot previousState = decision.snapShot();
+
+          switch (decision.type()) {
+            case HOT ->
+              // A new hot key has been confirmed. Pre-allocate a decision
+              // version and enqueue to send; actual AMQP send happens
+              // on the consumer thread after the per-key loop completes.
+              pendingBroadcasts.add(
+                Report.builder()
+                  .key(key)
+                  .task(() -> broadcaster.broadcastHot(key))
+                  .snapShot(decision.snapShot())
+                  .build()
+              );
+            case COOL -> pendingBroadcasts.add(
+              Report.builder()
+                .key(key)
+                .task(() -> broadcaster.broadcastCool(key))
+                .snapShot(decision.snapShot())
+                .build()
+            );
+            case NONE -> {
+              // No state transition occurred – the key remains in its
+              // current lifecycle stage.  Nothing to do.
+            }
+          }
+        } catch (Exception e) {
+          log.error(
+            "Error processing reportToWorker entry: appName={}, key={}, count={}",
+            message.appName(),
+            entry.getKey(),
+            entry.getValue(),
+            e
+          );
         }
+      }
       processReport(pendingBroadcasts, message, chunkStart, totalKeys);
     }
 
-    globalQpsEstimator.addTotal(totalQps.sum());
+    globalQpsEstimator.addTotal(totalQps);
   }
 
-  private void processReport(Queue<Report> pendingBroadcasts, ReportMessage message, int chunkStart, int totalKeys) {
+  private void processReport(
+    ArrayDeque<Report> pendingBroadcasts,
+    ReportMessage message,
+    int chunkStart,
+    int totalKeys
+  ) {
     // Drain pending broadcasts serially on the consumer thread, consistent
     // with the sequential in-chunk evaluation above.  Per ADR-0007, lost
     // messages are tolerated by the next periodic cycle.
@@ -236,7 +222,7 @@ public class ReportConsumer {
       if (Boolean.TRUE.equals(r.task().get())) {
         drainedCount++;
       } else {
-        stateMachine.rollbackToPreviousState(r.snapShot());
+        stateMachine.rollbackToPreviousState(r.key(), r.snapShot());
       }
     }
 
@@ -253,5 +239,5 @@ public class ReportConsumer {
   }
 
   @Builder
-  record Report(Supplier<Boolean> task, StateSnapshot snapShot) {}
+  record Report(String key, Supplier<Boolean> task, StateSnapshot snapShot) {}
 }

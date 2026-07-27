@@ -89,4 +89,30 @@ public interface FastLaneRuleManager {
    * @return the matching rule, or {@code null} if no rule matches
    */
   FastLaneRule match(String key);
+
+  /**
+   * Current version of the rule set for gossip merge (ADR-0025).
+   *
+   * <p>Wall-clock milliseconds of the last local mutation; {@code 0} for
+   * YAML-loaded initial rules that were never mutated at runtime.
+   *
+   * @return the current rule set version
+   */
+  default long getRulesVersion() {
+    return 0L;
+  }
+
+  /**
+   * Atomically replace the entire rule set with a gossiped snapshot.
+   *
+   * <p>Last-writer-wins merge: the replacement is applied only when
+   * {@code version} is newer than (or equal to, for idempotent re-delivery)
+   * {@link #getRulesVersion()}. Implementations must invalidate any match
+   * caches on application. The default implementation is a no-op so existing
+   * custom implementations remain source-compatible.
+   *
+   * @param rules   the complete replacement rule set (may be empty = clear all)
+   * @param version the gossiped rule set version
+   */
+  default void replaceAll(List<FastLaneRule> rules, long version) {}
 }

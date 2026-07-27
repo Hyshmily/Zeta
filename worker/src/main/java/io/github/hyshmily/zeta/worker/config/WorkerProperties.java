@@ -65,6 +65,35 @@ public class WorkerProperties {
     private int prefetchCount = 50;
   }
 
+  /**
+   * Broker-side backlog guardrails for the per-shard report queue.
+   *
+   * <p>The queue is durable; without a length cap a stalled consumer (GC storm,
+   * lock contention) lets reports pile up unboundedly and pressures broker memory.
+   * Lost reports are tolerated by design (ADR-0007), so the queue drops the
+   * <em>oldest</em> messages first, keeping the freshest statistical signal.
+   *
+   * <p><b>Deployment note:</b> {@code x-*} queue arguments cannot be altered on an
+   * existing queue. Upgrading from a version without these arguments requires
+   * deleting the old queue first (drain traffic → delete queue → start new version),
+   * otherwise RabbitAdmin re-declaration fails with PRECONDITION_FAILED.
+   */
+  @Data
+  public static class ReportQueue {
+
+    /** Maximum number of messages buffered in the report queue before drop-head applies. */
+    @Min(1)
+    private long maxLength = 10_000;
+
+    /**
+     * Per-message TTL (ms) inside the report queue. Reports sitting unconsumed
+     * for this long are discarded by the broker — they are stale anyway (the
+     * consumer discards anything older than 5 s).
+     */
+    @Min(1000)
+    private long messageTtlMs = 60_000;
+  }
+
   /** Sliding-window parameters for local qps tracking. Default constructor. */
   @Data
   public static class SlidingWindow {
@@ -102,6 +131,15 @@ public class WorkerProperties {
      * Default = 2 × coolDurationMs = 20 minutes.
      */
     private long evictIntervalMs = 1_200_000;
+
+    /**
+     * Minimum interval (ms) between periodic HOT rebroadcasts for a key that
+     * stays in {@code CONFIRMED_HOT}. Recovers lost HOT broadcasts (ADR-0007
+     * fire-and-forget) and caps fast-lane steady-state emission to one HOT
+     * decision per interval (ADR-0024). Default 10 s; minimum 1 s.
+     */
+    @Min(1000)
+    private long rebroadcastIntervalMs = 10_000;
   }
 
   /** Dynamic threshold adaptation based on global qps changes. Default constructor. */
@@ -137,6 +175,14 @@ public class WorkerProperties {
     private boolean enabled = false;
 
     private List<FastLaneRule> rules = new ArrayList<>();
+
+    /**
+     * Interval (ms) between periodic full-set rule gossip broadcasts to peer
+     * Workers (ADR-0025). A fresh or partitioned Worker converges within one
+     * interval; local mutations additionally broadcast immediately. Default 60 s.
+     */
+    @Min(1000)
+    private long gossipIntervalMs = 60_000;
   }
 
   /** A single fast-lane rule: key pattern + threshold. */
@@ -157,6 +203,9 @@ public class WorkerProperties {
 
   @Valid
   private ReportConsumer reportConsumer = new ReportConsumer();
+
+  @Valid
+  private ReportQueue reportQueue = new ReportQueue();
 
   @Valid
   private SlidingWindow slidingWindow = new SlidingWindow();

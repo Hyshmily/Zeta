@@ -79,15 +79,16 @@ import lombok.extern.slf4j.Slf4j;
  * @see ThresholdLearner
  * @see WorkerAutoConfiguration.EvictStaleTask
  */
-@Getter
 @Setter
 @Slf4j
 public class SlidingWindowDetector {
 
   /** Number of time slices that form one complete window. */
+  @Getter
   private final int windowSize;
 
   /** Duration of a single time slice, in milliseconds. */
+  @Getter
   private final long timeMillisPerSlice;
 
   /**
@@ -96,6 +97,7 @@ public class SlidingWindowDetector {
    * runtime (e.g. through JMX, a configuration refresh, or the
    * {@link ThresholdLearner}) because it is declared {@code volatile}.
    */
+  @Getter
   private volatile long threshold;
 
   /**
@@ -174,15 +176,15 @@ public class SlidingWindowDetector {
         }
       } else if (elapsedSlices > 0) {
         // Invariant: length == 2 * windowSize (doubled circular buffer).
-        // The previous write was at (currentIndex - elapsedSlices) mod length.
-        // Stale slices that have rolled outside the new summation range
-        //   [currentIndex - windowSize + 1, currentIndex]
-        // are the elapsedSlices oldest slots of the previous window, starting at:
-        //   (currentIndex - elapsedSlices - windowSize + 1 + length) % length
-        //   = (currentIndex + windowSize - elapsedSlices + length) % length
-        // This stale region and the summation range are separated by the
-        // doubled-buffer gap of length/2 slots — guaranteeing zero overlap.
-        // Changing the buffer multiplier (e.g., from 2× to 3×) invalidates this.
+        // sum range = [currentIndex - windowSize + 1, currentIndex]
+        // To avoid reading garbage when the window slides forward by
+        // `elapsedSlices` slots, we pre-clear the slots that the *next*
+        // sum range will read but that still carry old data.
+        // The stale start is shifted 1 slot earlier than the natural boundary
+        // ((currentIndex - elapsedSlices - windowSize + 1 + length) % length)
+        // so that clearing covers (elapsedSlices - 1) of the truly stale
+        // slots plus the 1 "guard" slot between the old clear region and the
+        // new sum range — the "W-1 pre-clear" invariant.
         int clearStart = (currentIndex + windowSize - (int) elapsedSlices + length) % length;
         for (int i = 0; i < elapsedSlices; i++) {
           slices.set((clearStart + i) % length, 0);

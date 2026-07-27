@@ -39,7 +39,6 @@
 | `putThrough(key, value, writer, hardTtlMs, softTtlMs)`                           | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                                    |
 | `isLocalHotKey(cacheKey)`                                                        | 检查 key 是否在 L1 中为 HOT 状态（O(1)）                                                                                                                                                       |
 | `areLocalHotKeys(Collection)`                                                    | 批量检查——返回 `Map<String, Boolean>` 的所有给定 key 的本地热点状态                                                                                                                            |
-
 | `notifyLocalDetector(cacheKey)`                                                  | 触发本地 HotKeyDetector 追踪指定 key，无需执行完整缓存读取。被 `@Intercept` 用于在方法体被跳过时保持 TopK 准确。                                                                               |
 | `notifyLocalDetector(cacheKey, count)`                                           | 使用自定义增量通知本地探测器，通过缓冲计数器路由                                                                                                                                               |
 | `notifyLocalDetector(Map)`                                                       | 批量通知本地探测器，多个 key → 计数条目，通过缓冲计数器路由                                                                                                                                    |
@@ -66,7 +65,6 @@
 | `returnLocalTopNHotKeys(n)`                                                      | 从本地探测器返回前 N 个热点 key，按频率排序                                                                                                                                                    |
 | `returnLocalExpelledHotKeys()`                                                   | 获取应用端被挤出的热点 key 队列；由内部定时器周期性清空                                                                                                                                        |
 | `returnLocalTotalDataStreams()`                                                  | 经过应用端 HeavyKeeper 的累计读取数                                                                                                                                                            |
-
 | `tryLock(key, expire, unit)`                                                     | 使用默认重试次数获取分布式锁；返回 `AutoReleaseLock` 或失败时返回 `null`                                                                                                                       |
 | `tryLock(key, expire, unit, lockCount, inquiryCount, unlockCount)`               | 同上，带显式重试次数（负值回退到配置默认值）                                                                                                                                                   |
 | `tryLockAndRun(key, expire, unit, action)`                                       | 便捷方法——获取锁、执行操作、释放锁；锁获取成功且操作完成时返回 `true`                                                                                                                          |
@@ -259,49 +257,55 @@
 
 ### Worker 节点（`zeta.worker.*`）
 
+| 属性                                                               | 默认值                         | 说明                                                                                                                                                |
+| ------------------------------------------------------------------ | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.worker.enabled`                                              | `false`                        | 启用 Worker 模式（必须显式设为 true）                                                                                                               |
+| **`zeta.worker.routing.*`**                                        |                                | **路由**                                                                                                                                            |
+| `zeta.worker.routing.app-name`                                     | `"default"`                    | 逻辑应用名（租户区分）                                                                                                                              |
+| **`zeta.worker.messaging.*`**                                      |                                | **消息**                                                                                                                                            |
+| `zeta.worker.messaging.report-exchange`                            | `zeta.reportToWorker.exchange` | App 报告消息的直接交换机                                                                                                                            |
+| `zeta.worker.messaging.broadcast-exchange`                         | `zeta.send.exchange`           | HOT/COOL 广播的交换机（Worker 使用路由键发布；可能需要与 worker-listener.exchange-name 对齐）                                                       |
+| `zeta.worker.messaging.heartbeat-exchange`                         | `zeta.heartbeat.exchange`      | epoch 驱动结构化心跳的 Topic 交换机（必须与 App 端 `zeta.local.heartbeat.exchange-name` 一致）                                                      |
+| **`zeta.worker.report-consumer.*`**                                |                                | **上报消费者**                                                                                                                                      |
+| `zeta.worker.report-consumer.concurrent-consumers`                 | `8`                            | 上报队列的并发消费者数，最小为 1                                                                                                                    |
+| `zeta.worker.report-consumer.prefetch-count`                       | `50`                           | 每个消费者的预取数，平衡吞吐量与内存压力                                                                                                            |
+| **`zeta.worker.report-queue.*`**                                   |                                | **上报队列积压护栏**                                                                                                                                |
+| `zeta.worker.report-queue.max-length`                              | `10000`                        | 每分片上报队列的最大缓冲消息数；超出后 broker 丢弃最旧消息（`drop-head`），保留最新统计信号。消费停滞时保护 broker 内存；丢失的上报按 ADR-0007 容忍 |
+| `zeta.worker.report-queue.message-ttl-ms`                          | `60000`                        | 队列内单条消息的 TTL（毫秒）；超时由 broker 丢弃（消费端本就丢弃超过 5 秒的数据）                                                                   |
+| **`zeta.worker.sliding-window.*`**                                 |                                | **滑动窗口**                                                                                                                                        |
+| `zeta.worker.sliding-window.duration-ms`                           | `1000`                         | 滑动窗口时长（毫秒）                                                                                                                                |
+| `zeta.worker.sliding-window.slices`                                | `10`                           | 每个窗口的时间片数                                                                                                                                  |
+| **`zeta.worker.threshold.*`**                                      |                                | **热点阈值**                                                                                                                                        |
+| `zeta.worker.threshold.hot-threshold`                              | `1000`                         | 绝对热点阈值；`≤0` = 使用比例阈值                                                                                                                   |
+| `zeta.worker.threshold.hot-threshold-ratio`                        | `0.01`                         | 热点阈值占估计全局 QPS 的比例（1%）                                                                                                                 |
+| **`zeta.worker.state-machine.*`**                                  |                                | **状态机**                                                                                                                                          |
+| `zeta.worker.state-machine.sm-duration-ms`                         | `500`                          | 状态机时间片窗口时长（毫秒），独立于滑动窗口。每片 = sm-duration-ms / sm-slices                                                                     |
+| `zeta.worker.state-machine.sm-slices`                              | `10`                           | 状态机窗口内的时间片数                                                                                                                              |
+| `zeta.worker.state-machine.confirm-duration-ms`                    | `50`                           | HOT 确认总时长。confirmCount = ceil(confirm-duration-ms / slice-ms)                                                                                 |
+| `zeta.worker.state-machine.cool-duration-ms`                       | `600000`                       | key 持续低于阈值才确认 COLD 的时长                                                                                                                  |
+| `zeta.worker.state-machine.pre-cool-grace-ms`                      | `60000`                        | COOL 结束时的宽限期，允许静默恢复                                                                                                                   |
+| `zeta.worker.state-machine.evict-interval-ms`                      | `30000`                        | 过期状态擦除间隔（毫秒）；建议 >= cool-duration-ms \* 2 以免过早擦除冷却中的 key                                                                    |
+| `zeta.worker.state-machine.rebroadcast-interval-ms`                | `10000`                        | key 持续处于 CONFIRMED_HOT 时周期性重播 HOT 决策的最小间隔（毫秒）；用于恢复丢失的 HOT 广播并抑制 fast-lane 稳态放大（ADR-0024）。最小 1000         |
+| **`zeta.worker.global-qps-dynamic-threshold.*`**                   |                                | **动态阈值（全局 QPS）**                                                                                                                            |
+| `zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms` | `60000`                        | 动态阈值重新计算的时间间隔                                                                                                                          |
+| `zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance`    | `0.5`                          | 触发阈值更新的 QPS 变化容忍度（±50%）                                                                                                               |
+| `zeta.worker.global-qps-dynamic-threshold.learning-period-ms`      | `30000`                        | QPS 估算的学习周期                                                                                                                                  |
+| `zeta.worker.global-qps-dynamic-threshold.hot-threshold-ratio`     | `0.01`                         | 热阈值占估计全局 QPS 的比例                                                                                                                         |
+| **`zeta.worker.bayesian.*`**                                       |                                | **贝叶斯置信度估计**                                                                                                                                |
+| `zeta.worker.bayesian.prior-mean`                                  | `2.3026`                       | 对数频率分布的先验均值（ln(10)——每个窗口≈10次访问的 key 为中性）                                                                                    |
+| `zeta.worker.bayesian.prior-std`                                   | `2.0`                          | 先验标准差；越大越依赖观测数据，越小越锚定先验                                                                                                      |
+| `zeta.worker.bayesian.likelihood-std`                              | `0.8`                          | 基础似然标准差；由滑动窗口和的变异系数（CV）动态调整，实现流量自适应的置信度估计                                                                    |
+| **`zeta.worker.fast-lane.*`**                                      |                                | **快速通道规则（绕过贝叶斯门控）**                                                                                                                  |
+| `zeta.worker.fast-lane.enabled`                                    | `false`                        | 绕过贝叶斯状态机，仅基于滑动窗口阈值广播                                                                                                            |
+| `zeta.worker.fast-lane.rules`                                      | `[]`                           | 快速通道规则列表（key 模式 + 阈值）                                                                                                                 |
+| `zeta.worker.fast-lane.rules[].key-pattern`                        | `""`                           | 快速通道规则的 key 模式                                                                                                                             |
+| `zeta.worker.fast-lane.rules[].threshold`                          | `100`                          | 快速通道规则的计数阈值；匹配的 key 超过此值立即提升                                                                                                 |
+| `zeta.worker.fast-lane.gossip-interval-ms`                         | `60000`                        | 向对端 Worker 周期性全量广播快速通道规则集的间隔（毫秒）（ADR-0025）；本地变更会立即广播。最小 1000                                                 |
+| **`zeta.worker.heartbeat.*`**                                      |                                | **心跳**                                                                                                                                            |
+| `zeta.worker.heartbeat.ping-interval-ms`                           | `1000`                         | 结构化心跳发送间隔（毫秒）                                                                                                                          |
 
-| 属性                                                               | 默认值                         | 说明                                                                                           |
-| ------------------------------------------------------------------ | ------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `zeta.worker.enabled`                                              | `false`                        | 启用 Worker 模式（必须显式设为 true）                                                          |
-| **`zeta.worker.routing.*`**                                        |                                | **路由**                                                                                       |
-| `zeta.worker.routing.app-name`                                     | `"default"`                    | 逻辑应用名（租户区分）                                                                         |
-| **`zeta.worker.messaging.*`**                                      |                                | **消息**                                                                                       |
-| `zeta.worker.messaging.report-exchange`                            | `zeta.reportToWorker.exchange` | App 报告消息的直接交换机                                                                       |
-| `zeta.worker.messaging.broadcast-exchange`                         | `zeta.send.exchange`           | HOT/COOL 广播的交换机（Worker 使用路由键发布；可能需要与 worker-listener.exchange-name 对齐）  |
-| `zeta.worker.messaging.heartbeat-exchange`                         | `zeta.heartbeat.exchange`      | epoch 驱动结构化心跳的 Topic 交换机（必须与 App 端 `zeta.local.heartbeat.exchange-name` 一致） |
-| **`zeta.worker.report-consumer.*`**                                |                                | **上报消费者**                                                                                 |
-| `zeta.worker.report-consumer.concurrent-consumers`                 | `8`                            | 上报队列的并发消费者数，最小为 1                                                               |
-| `zeta.worker.report-consumer.prefetch-count`                       | `50`                           | 每个消费者的预取数，平衡吞吐量与内存压力                                                       |
-| **`zeta.worker.sliding-window.*`**                                 |                                | **滑动窗口**                                                                                   |
-| `zeta.worker.sliding-window.duration-ms`                           | `1000`                         | 滑动窗口时长（毫秒）                                                                           |
-| `zeta.worker.sliding-window.slices`                                | `10`                           | 每个窗口的时间片数                                                                             |
-| **`zeta.worker.threshold.*`**                                      |                                | **热点阈值**                                                                                   |
-| `zeta.worker.threshold.hot-threshold`                              | `1000`                         | 绝对热点阈值；`≤0` = 使用比例阈值                                                              |
-| `zeta.worker.threshold.hot-threshold-ratio`                        | `0.01`                         | 热点阈值占估计全局 QPS 的比例（1%）                                                            |
-| **`zeta.worker.state-machine.*`**                                  |                                | **状态机**                                                                                     |
-| `zeta.worker.state-machine.sm-duration-ms`                         | `500`                          | 状态机时间片窗口时长（毫秒），独立于滑动窗口。每片 = sm-duration-ms / sm-slices                |
-| `zeta.worker.state-machine.sm-slices`                              | `10`                           | 状态机窗口内的时间片数                                                                         |
-| `zeta.worker.state-machine.confirm-duration-ms`                    | `50`                           | HOT 确认总时长。confirmCount = ceil(confirm-duration-ms / slice-ms)                            |
-| `zeta.worker.state-machine.cool-duration-ms`                       | `600000`                       | key 持续低于阈值才确认 COLD 的时长                                                             |
-| `zeta.worker.state-machine.pre-cool-grace-ms`                      | `60000`                        | COOL 结束时的宽限期，允许静默恢复                                                              |
-| `zeta.worker.state-machine.evict-interval-ms`                      | `30000`                        | 过期状态擦除间隔（毫秒）；建议 >= cool-duration-ms \* 2 以免过早擦除冷却中的 key               |
-| **`zeta.worker.global-qps-dynamic-threshold.*`**                   |                                | **动态阈值（全局 QPS）**                                                                       |
-| `zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms` | `60000`                        | 动态阈值重新计算的时间间隔                                                                     |
-| `zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance`    | `0.5`                          | 触发阈值更新的 QPS 变化容忍度（±50%）                                                          |
-| `zeta.worker.global-qps-dynamic-threshold.learning-period-ms`      | `30000`                        | QPS 估算的学习周期                                                                             |
-| `zeta.worker.global-qps-dynamic-threshold.hot-threshold-ratio`     | `0.01`                         | 热阈值占估计全局 QPS 的比例                                                                    |
+> **升级注意——上报队列参数：** `x-max-length` / `x-overflow` / `x-message-ttl` 为不可变队列参数。从不含这些参数的旧版本升级时，需先删除旧的 `zeta.reportToWorker.<appName>.<nodeId>` 队列再启动新版本（先摘流量 → 删队列 → 启动新版），否则 RabbitAdmin 重新声明将报 `PRECONDITION_FAILED`。
 
-| **`zeta.worker.bayesian.*`** | | **贝叶斯置信度估计** |
-| `zeta.worker.bayesian.prior-mean` | `2.3026` | 对数频率分布的先验均值（ln(10)——每个窗口≈10次访问的 key 为中性） |
-| `zeta.worker.bayesian.prior-std` | `2.0` | 先验标准差；越大越依赖观测数据，越小越锚定先验 |
-| `zeta.worker.bayesian.likelihood-std` | `0.8` | 基础似然标准差；由滑动窗口和的变异系数（CV）动态调整，实现流量自适应的置信度估计 |
-| **`zeta.worker.fast-lane.*`** | | **快速通道规则（绕过贝叶斯门控）** |
-| `zeta.worker.fast-lane.enabled` | `false` | 绕过贝叶斯状态机，仅基于滑动窗口阈值广播 |
-| `zeta.worker.fast-lane.rules` | `[]` | 快速通道规则列表（key 模式 + 阈值） |
-| `zeta.worker.fast-lane.rules[].key-pattern` | `""` | 快速通道规则的 key 模式 |
-| `zeta.worker.fast-lane.rules[].threshold` | `100` | 快速通道规则的计数阈值；匹配的 key 超过此值立即提升 |
-| **`zeta.worker.heartbeat.*`** | | **心跳** |
-| `zeta.worker.heartbeat.ping-interval-ms` | `1000` | 结构化心跳发送间隔（毫秒） |
 ## 模块说明
 
 | 模块                                                   | 依赖                                                                                   | 自动配置条件                                                                                                                                                 |

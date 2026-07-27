@@ -28,6 +28,7 @@ import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
 import java.lang.reflect.Method;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.DisplayName;
@@ -161,8 +162,13 @@ class WorkerApplicationTest {
       return Mockito.mock(RabbitTemplate.class);
     }
 
-    @Bean
-    ConnectionFactory connectionFactory() {
+    @Bean("rabbitConnectionFactory")
+    ConnectionFactory rabbitConnectionFactory() {
+      return Mockito.mock(ConnectionFactory.class);
+    }
+
+    @Bean("zetaHeartbeatConnectionFactory")
+    ConnectionFactory zetaHeartbeatConnectionFactory() {
       return Mockito.mock(ConnectionFactory.class);
     }
 
@@ -174,6 +180,11 @@ class WorkerApplicationTest {
     @Bean("hotKeyScheduler")
     ScheduledExecutorService hotKeyScheduler() {
       return Executors.newSingleThreadScheduledExecutor();
+    }
+
+    @Bean
+    SnowflakeIdGenerator snowflakeIdGenerator() {
+      return Mockito.mock(SnowflakeIdGenerator.class);
     }
   }
 }

@@ -28,3 +28,20 @@ Rule 6 reflects that `decisionVersion` counters are local per Worker and not com
 ## Other Details
 
 `ClusterHealthView` uses majority quorum (`alive >= total/2 + 1`) for cluster health, `readyToServe=false` guards cold-start Workers, and on-demand verification via Direct reply-to probes only suspected Workers instead of polling. The config queue re-binds from broadcast exchange to heartbeat exchange (`heartbeat.*`), carrying configTimestamp for peer config gossip. This eliminates false-positive timeouts, provides immediate restart detection, and requires no external registry.
+
+## 2026-07-27 Addendum: Transport Isolation Repair — `@Primary` Kept, Data Plane Explicitly Qualified
+
+The original design called for dual-queue isolation "extended to the transport layer" (separate TCP connections for control-plane vs data-plane traffic). An audit found the isolation was never actually delivered: `zetaHeartbeatConnectionFactory` is annotated `@Primary`, so every unqualified `ConnectionFactory` injection point resolved to the heartbeat connection — including the data-plane `zetaReportRabbitTemplate`, `zetaSyncRabbitTemplate`, and the Worker's `reportListenerContainerFactory`. All traffic multiplexed over the "dedicated" control connection while Boot's `rabbitConnectionFactory` sat idle.
+
+**Decision:** keep `@Primary` on `zetaHeartbeatConnectionFactory`, and qualify all Zeta-owned data-plane injection points explicitly for `rabbitConnectionFactory` (aligning with the pre-existing precedent in `workerListenerContainer` and `syncListenerContainer`).
+
+Removing `@Primary` was considered and rejected: with two non-primary `ConnectionFactory` candidates, Spring Boot's `RabbitTemplate` (`@ConditionalOnSingleCandidate`) silently backs off, and downstream code injecting `RabbitTemplate` would then resolve to `@Primary zetaReportRabbitTemplate` — silently inheriting its JSON message converter for the consumer's own messages. `@Primary` on the heartbeat factory preserves single-candidate resolution for unqualified injections (no downstream breakage); explicit qualifiers route Zeta's own traffic correctly.
+
+**Final channel mapping:**
+
+| Plane | Connection factory | Traffic |
+| ----- | ------------------ | ------- |
+| Control | `zetaHeartbeatConnectionFactory` | App heartbeat consumption, verify PING/PONG, Worker heartbeat producer, Worker config gossip (incl. fast-lane rules gossip, ADR-0025) |
+| Data | `rabbitConnectionFactory` (Boot) | Report publish/consume, cache-sync publish/consume, Worker decision consume, Worker HOT/COOL broadcast |
+
+**Operational note:** `@Qualifier("rabbitConnectionFactory")` relies on Spring Boot's default bean name. If a consuming application defines its own `ConnectionFactory` bean (causing Boot to back off), these injection points fail fast at startup with an explicit `NoSuchBeanDefinitionException` — acceptable, since silent mis-routing is worse than a loud startup failure.

@@ -33,4 +33,12 @@ import lombok.experimental.Accessors;
  */
 @Accessors(fluent = true)
 @Builder
-public record StateSnapshot(String key, String currentState, int hotStreak, int coolStreak) {}
+public record StateSnapshot(
+  String key,
+  String currentState,
+  int hotStreak,
+  int coolStreak,
+  double posteriorMean,
+  double accumulatedPrecision,
+  int lowResetCount
+) {}
