@@ -89,7 +89,8 @@ zeta:
   # worker-listener:
   #   enabled: true
   # sync:
-  #   enabled: true     # worker-listener depends on hotKeyRedisLoader Bean
+  #   enabled: true     # worker-listener depends on hotKeyRedisLoader (CacheLoader) Bean
+  #                     # Customize: implement CacheLoader -> @Bean (see "Customizing Data Source" below)
 
   # Consistent hashing is enabled by default (dynamic Worker routing via heartbeat)
   # local:
@@ -398,6 +399,124 @@ The Worker module (`zeta-worker`) declares the broadcast exchange (`zeta.send.ex
 **PING/PONG Verification Is Auxiliary**
 
 The `WorkerHeartbeatVerifier` periodically sends PING messages to Workers that appear **not alive** (heartbeat timeout > `heartbeat.timeout-ms`, default 10s). Transient failures at startup are expected and safe — the first PING may arrive before the Worker's verify queue is ready. The primary heartbeat path (Worker → `zeta.heartbeat.exchange` → App heartbeat queue) is the authoritative mechanism for HealthView updates and RingManager routing.
+
+**Customizing the Data Source for HOT Promotion**
+
+When the Worker broadcasts a HOT decision for a key, the app-side `WorkerListener` loads the authoritative value via `CacheLoader.load(key)` before promoting the entry to L1 with extended TTL. The default implementation reads from Redis (`RedisCacheLoader`).
+
+To use an alternative data source (database, remote service, etc.), implement the `CacheLoader` interface:
+
+```java
+@Bean
+@ConditionalOnMissingBean(CacheLoader.class)
+public CacheLoader dbCacheLoader(YourRepository repo) {
+  return new CacheLoader() {
+    @Override
+    public Object load(String cacheKey) {
+      // Parse entity type from key convention, e.g. "User:123"
+      // → table "users", id=123; then query DB and return serialized value
+    }
+  };
+}
+```
+
+`@ConditionalOnMissingBean` ensures your bean replaces the default `RedisCacheLoader`. Both `WorkerListener.handleHot()` and `CacheSyncListener.handleRefresh()` consume values through this interface — no other wiring changes needed.
+
+**Observing Broadcast Decisions with Hooks**
+
+Implement `WorkerDecisionHook` and/or `SyncHook` to observe broadcast outcomes without modifying core logic:
+
+```java
+@Bean
+public WorkerDecisionHook myMonitorHook() {
+  return new WorkerDecisionHook() {
+    @Override
+    public void afterHotPromotion(String cacheKey, WorkerMessage wm, CacheEntry entry) {
+      metrics.counter("hot.promotion").increment();
+    }
+
+    @Override
+    public void onHotSkipped(String cacheKey, WorkerMessage wm, HotSkipReason reason) {
+      log.warn("HOT skipped for {}: {}", cacheKey, reason);
+    }
+  };
+}
+```
+
+| Hook                 | Method               | When                                            |
+| -------------------- | -------------------- | ----------------------------------------------- |
+| `WorkerDecisionHook` | `afterHotPromotion`  | Key promoted to HOT with extended TTL           |
+| `WorkerDecisionHook` | `afterCoolDowngrade` | Key reverted to normal TTL                      |
+| `WorkerDecisionHook` | `onHotSkipped`       | HOT skipped (throttled / stale / no value)      |
+| `WorkerDecisionHook` | `onCoolSkipped`      | COOL skipped (no entry in L1)                   |
+| `SyncHook`           | `afterRefresh`       | Key refreshed from data store by peer broadcast |
+| `SyncHook`           | `afterInvalidate`    | Key evicted from L1 by peer broadcast           |
+| `SyncHook`           | `onRefreshSkipped`   | REFRESH skipped (version stale / value missing) |
+
+All methods are `default` no-ops — implement only what you need. Exceptions from a hook are caught and logged individually; they never interrupt other hooks or the broadcast handler. Multiple hook beans are supported and run in iteration order.
+
+**Replacing the Default Broadcast Processing Logic**
+
+For full control over how HOT/COOL decisions or cache-sync messages are processed, implement the strategy interface and expose it as a `@Bean` with `@ConditionalOnMissingBean`:
+
+```java
+@Bean
+@ConditionalOnMissingBean(WorkerDecisionHandler.class)
+public WorkerDecisionHandler myHandler() {
+  return new WorkerDecisionHandler() {
+    @Override
+    public void handleHot(WorkerMessage wm) {
+      // Custom HOT logic — replaces Redis load, DCL, compute, etc.
+    }
+
+    @Override
+    public void handleCool(WorkerMessage wm) {
+      // Custom COOL logic — replaces TTL reset, key state change, etc.
+    }
+  };
+}
+```
+
+| Interface               | Methods                                                                                 | Replaces                                                                                    |
+| ----------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `WorkerDecisionHandler` | `handleHot`, `handleCool`                                                               | `WorkerListener`'s default HOT/COOL processing (Redis-backed, SRE-limited, version-guarded) |
+| `SyncDecisionHandler`   | `handleRefresh`, `handleLocalInvalidate`, `handleLocalInvalidateAll`, `handleRulesSync` | `CacheSyncListener`'s default sync processing                                               |
+| `Evaluator`             | `evaluate`, `evictStale` (default no-op)                                                | Worker's hot-key detection pipeline (fast-lane + Bayesian confidence state machine)         |
+
+The default implementations (`DefaultWorkerDecisionHandler`, `DefaultSyncDecisionHandler`) still invoke any registered `WorkerDecisionHook` / `SyncHook` beans. Custom implementations may choose to invoke hooks or not.
+
+Two approaches are available for `Evaluator` — **full replacement** or **wrapping** the default logic:
+
+```java
+// Approach 1: Full replacement — completely bypass the default evaluation pipeline.
+// No sliding window, CV, EMA, or Bayesian gating.
+@Bean
+@ConditionalOnMissingBean(Evaluator.class)
+public Evaluator myEvaluator() {
+  return (key, count) -> {
+    if (key.startsWith("priority:")) return ZetaDecision.hot(key, null);
+    return ZetaDecision.none(key, null);
+  };
+}
+```
+
+```java
+// Approach 2: Wrap the default — run the default evaluation, then add side effects.
+@Bean
+public Evaluator wrappedEvaluator(DefaultEvaluator delegate) {
+  return new Evaluator() {
+    @Override
+    public ZetaDecision evaluate(String key, long count) {
+      ZetaDecision decision = delegate.evaluate(key, count);
+      metrics.counter("eval." + decision.type().name()).increment();
+      return decision;
+    }
+    // evictStale is default no-op — not needed here
+  };
+}
+```
+
+Note: when wrapping, you must NOT use `@ConditionalOnMissingBean` (otherwise your wrapper prevents itself from being created). Inject the `DefaultEvaluator` as a dependency and measure/extend selectively.
 
 ## Spring Cache Integration
 

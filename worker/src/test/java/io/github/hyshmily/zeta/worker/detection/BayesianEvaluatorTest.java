@@ -37,7 +37,7 @@ class BayesianEvaluatorTest {
 
   @BeforeEach
   void setUp() {
-    evaluator = new Evaluator(detector, stateMachine, new FastLaneRuleManagerImpl(List.of()), null);
+    evaluator = new DefaultEvaluator(detector, stateMachine, new FastLaneRuleManagerImpl(List.of()), null);
   }
 
   @Nested
@@ -147,7 +147,7 @@ class BayesianEvaluatorTest {
       FastLaneRuleManager ruleManager = new FastLaneRuleManagerImpl(
         List.of(new FastLaneRuleManager.FastLaneRule("hot:*", 500))
       );
-      fastLaneEvaluator = new Evaluator(detector, stateMachine, ruleManager, null);
+      fastLaneEvaluator = new DefaultEvaluator(detector, stateMachine, ruleManager, null);
     }
 
     @Test

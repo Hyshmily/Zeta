@@ -32,9 +32,12 @@ import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -55,21 +58,26 @@ class CacheSyncListenerTest {
   private Channel channel;
   private ScheduledExecutorService scheduler;
   private RuleMatcher ruleMatcher;
+  private ExpireManagerImpl expireManager;
 
   @BeforeEach
   void setUp() throws IOException {
     cache = Caffeine.newBuilder().maximumSize(100).build();
-    CacheLoader redisLoader = k -> "refreshed";
     CacheSyncProperties properties = new CacheSyncProperties();
     properties.setWarmupJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
     ruleMatcher = mock(RuleMatcher.class);
 
-    listener = new CacheSyncListener(cache, redisLoader, properties, scheduler, expireManager, ruleMatcher);
+    SyncDecisionHandler handler = handler(k -> "refreshed");
+    listener = new CacheSyncListener(properties, scheduler, handler);
     listener.init();
     channel = mock(Channel.class);
+  }
+
+  private SyncDecisionHandler handler(CacheLoader loader) {
+    return new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, Collections.emptyList());
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
@@ -153,19 +161,10 @@ class CacheSyncListenerTest {
   @Test
   void handleSyncMessage_withRefreshAndNullRedisValue_shouldLogAndReturn() throws IOException {
     cache.put("key1", entry(1, false, 0));
-    CacheLoader nullLoader = k -> null;
     CacheSyncProperties properties = new CacheSyncProperties();
     properties.setWarmupJitterMs(0);
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    CacheSyncListener nullListener = new CacheSyncListener(
-      cache,
-      nullLoader,
-      properties,
-      scheduler,
-      expireManager,
-      ruleMatcher
-    );
+    SyncDecisionHandler h = handler(k -> null);
+    CacheSyncListener nullListener = new CacheSyncListener(properties, scheduler, h);
     nullListener.init();
 
     nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
@@ -261,21 +260,12 @@ class CacheSyncListenerTest {
    */
   @Test
   void handleSyncMessage_withRefreshAndRedisException_shouldAck() throws IOException {
-    CacheLoader failingLoader = k -> {
-      throw new RuntimeException("Redis down");
-    };
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    CacheSyncListener failingListener = new CacheSyncListener(
-      cache,
-      failingLoader,
-      props,
-      scheduler,
-      expireManager,
-      ruleMatcher
+    SyncDecisionHandler h = handler(
+      k -> { throw new RuntimeException("Redis down"); }
     );
+    CacheSyncListener failingListener = new CacheSyncListener(props, scheduler, h);
     failingListener.init();
 
     cache.put("key1", entry(1, false, 0));
@@ -330,19 +320,10 @@ class CacheSyncListenerTest {
   @Test
   void handleSyncMessage_withRefreshOnStringValueAndNullLoaderReturn_shouldPreserve()
     throws IOException, InterruptedException {
-    CacheLoader nullLoader = k -> null;
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    CacheSyncListener nullListener = new CacheSyncListener(
-      cache,
-      nullLoader,
-      props,
-      scheduler,
-      expireManager,
-      ruleMatcher
-    );
+    SyncDecisionHandler h = handler(k -> null);
+    CacheSyncListener nullListener = new CacheSyncListener(props, scheduler, h);
     nullListener.init();
 
     cache.put("key1", entry(5, false, 0));

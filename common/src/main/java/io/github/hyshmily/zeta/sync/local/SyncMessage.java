@@ -17,7 +17,7 @@ package io.github.hyshmily.zeta.sync.local;
 
 import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
@@ -51,17 +51,36 @@ import org.springframework.amqp.core.Message;
  * <p>Each message carries a {@code dataVersion} and {@code isVersionDegraded} flag
  * to enable the 4-case degraded comparison in {@link VersionGuard#shouldSkipForSync}.
  *
+ * @param id                message trace identifier — Snowflake ID from the publishing instance;
+ *                          time-sortable, globally unique; 0L if the header was missing
+ *                          or non-numeric (one warning logged on first occurrence)
  * @param cacheKey          the affected cache key (for single-key operations) or
- *                          the serialized payload (for batch / rules-sync types)
- * @param type              the operation type: {@link #TYPE_INVALIDATE},
+ *                          the serialized payload (for batch / rules-sync types);
+ *                          UTF-8 decoded from AMQP body bytes
+ * @param type              the operation type, one of: {@link #TYPE_INVALIDATE},
  *                          {@link #TYPE_REFRESH}, {@link #TYPE_INVALIDATE_ALL},
- *                          or {@link #TYPE_RULES_SYNC}
- * @param version           the {@code dataVersion} at which the operation occurred;
- *                          see {@link VersionController#nextVersion}
+ *                          or {@link #TYPE_RULES_SYNC}; read from AMQP header
+ *                          {@link ZetaConstants.Amqp#HEADER_TYPE}
+ * @param version           the application-level {@code dataVersion} at which the operation
+ *                          occurred; monotonically increasing integer allocated by
+ *                          {@link VersionController#nextVersion} (Redis INCR in normal mode,
+ *                          {@code Long.MIN_VALUE + SnowflakeId} in degraded mode);
+ *                          used by {@link VersionGuard#shouldSkipForSync} for the 4-case
+ *                          degraded comparison matrix; VERSION_DEFAULT (0) on deserialization
+ *                          failure
  * @param isVersionDegraded whether the {@code dataVersion} was obtained in degraded mode
- *                          (node-local counter fallback, indicating Redis was unavailable)
- * @param rulesVersion      the rules version for {@code TYPE_RULES_SYNC} messages;
- *                          {@link ZetaConstants.Version#VERSION_DEFAULT} (0) for other types
+ *                          (node-local Snowflake fallback, indicating Redis was unavailable);
+ *                          defaults to {@code false} if the AMQP header is missing;
+ *                          affects the 4-case degraded comparison in
+ *                          {@link VersionGuard#shouldSkipForSync}:
+ *                          <ul>
+ *                            <li>normal beats degraded (incoming degraded on normal entry → skip)</li>
+ *                            <li>both degraded → numeric comparison</li>
+ *                          </ul>
+ * @param rulesVersion      the rule-set version for {@code TYPE_RULES_SYNC} messages;
+ *                          monotonically increasing wall-clock version for LWW merge;
+ *                          {@link ZetaConstants.Version#VERSION_DEFAULT} (0) for all other types;
+ *                          receivers call {@code RuleMatcher.syncRules(cacheKey, rulesVersion)}
  */
 @Slf4j
 @Internal

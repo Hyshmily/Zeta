@@ -21,6 +21,7 @@ import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
+import io.github.hyshmily.zeta.worker.detection.DefaultEvaluator;
 import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
@@ -216,7 +217,7 @@ public class WorkerAutoConfiguration {
     FastLaneRuleManager fastLaneRuleManager,
     GlobalQpsEstimator globalQpsEstimator
   ) {
-    return new Evaluator(detector, stateMachine, fastLaneRuleManager, globalQpsEstimator);
+    return new DefaultEvaluator(detector, stateMachine, fastLaneRuleManager, globalQpsEstimator);
   }
 
   /**

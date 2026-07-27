@@ -22,7 +22,11 @@ import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
@@ -135,24 +139,31 @@ class DistributedSyncTest {
     return entry(5, false, dv, nodeId, epoch, KeyState.HOT);
   }
 
+  private SyncDecisionHandler syncHandler(CacheLoader loader) {
+    ZetaProperties ttlConfig = new ZetaProperties();
+    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    return new DefaultSyncDecisionHandler(cache, loader, expire, ruleMatcher, List.of());
+  }
+
   private CacheSyncListener createListener(CacheLoader loader) {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    CacheSyncListener l = new CacheSyncListener(cache, loader, props, scheduler, expire, ruleMatcher);
+    CacheSyncListener l = new CacheSyncListener(props, scheduler, syncHandler(loader));
     l.init();
     return l;
+  }
+
+  private WorkerDecisionHandler workerHandler(CacheLoader loader, SreRateLimiterImpl limiter) {
+    ZetaProperties ttlConfig = new ZetaProperties();
+    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    return new DefaultWorkerDecisionHandler(cache, loader, expire, limiter, null, List.of());
   }
 
   private WorkerListener createWorkerListener(CacheLoader loader, SreRateLimiterImpl limiter) {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setWarmupJitterMs(0);
-    // Disable SRE if not provided
     props.getSre().setEnabled(limiter != null);
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    WorkerListener l = new WorkerListener(cache, loader, props, scheduler, expire, limiter);
+    WorkerListener l = new WorkerListener(props, scheduler, workerHandler(loader, limiter));
     l.init();
     return l;
   }

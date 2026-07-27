@@ -35,6 +35,12 @@ import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.local.SyncHook;
+import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHook;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
@@ -408,33 +414,42 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
+     * Default {@link SyncDecisionHandler} that performs Redis-backed REFRESH,
+     * version-guarded INVALIDATE, batch INVALIDATE_ALL, and RULES_SYNC.
+     */
+    @Bean
+    @ConditionalOnMissingBean(SyncDecisionHandler.class)
+    public SyncDecisionHandler defaultSyncDecisionHandler(
+      Cache<String, Object> hotLocalCache,
+      CacheLoader hotKeyRedisLoader,
+      ExpireManager expireManager,
+      RuleMatcher ruleMatcher,
+      ObjectProvider<SyncHook> syncHookProvider
+    ) {
+      return new DefaultSyncDecisionHandler(
+        hotLocalCache,
+        hotKeyRedisLoader,
+        expireManager,
+        ruleMatcher,
+        syncHookProvider.stream().toList()
+      );
+    }
+
+    /**
      * Create the sync listener that handles incoming INVALIDATE/REFRESH messages from peers.
      *
-     * @param hotLocalCache       the L1 Caffeine cache
-     * @param hotKeyRedisLoader   the function for loading values from Redis
      * @param properties          the cache sync configuration properties
-     * @param expireManager       the cache expiry manager
-     * @param ruleMatcher         the rule matcher for key matching
+     * @param decisionHandler     the strategy for processing sync messages
      * @return a new {@link CacheSyncListener} instance
      */
     @Bean
     @ConditionalOnMissingBean
     public CacheSyncListener cacheSyncListener(
-      Cache<String, Object> hotLocalCache,
-      CacheLoader hotKeyRedisLoader,
       CacheSyncProperties properties,
       @Qualifier("hotKeySyncScheduler") ScheduledExecutorService syncScheduler,
-      ExpireManager expireManager,
-      RuleMatcher ruleMatcher
+      SyncDecisionHandler decisionHandler
     ) {
-      return new CacheSyncListener(
-        hotLocalCache,
-        hotKeyRedisLoader,
-        properties,
-        syncScheduler,
-        expireManager,
-        ruleMatcher
-      );
+      return new CacheSyncListener(properties, syncScheduler, decisionHandler);
     }
 
     /**
@@ -603,47 +618,51 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Create the listener that processes HOT/COOL decisions send by the Worker.
-     *
-     * @param hotLocalCache               the L1 Caffeine cache
-     * @param hotKeyRedisLoader           the function for loading values from Redis
-     * @param properties                  the Worker listener configuration properties
-     * @param expireManager               the cache expiry manager
-     * @param sreRateLimiterProvider      optional provider for the SRE rate limiter
-     * @param stringRedisTemplate         Redis template for version tracking
-     * @param zetaProperties              global zeta properties (provides versionKeyTtlMinutes)
-     * @param snowflakeIdGenerator        Snowflake ID generator for degraded versions
-     * @param hotKeyRedisTemplateProvider optional provider for the Redis template
-     * @return a new {@link WorkerListener} instance
+     * Default {@link WorkerDecisionHandler} that performs Redis-backed HOT promotion
+     * and COOL downgrade with SRE rate limiting and version guarding.
      */
     @Bean
-    @ConditionalOnMissingBean
-    public WorkerListener workerListener(
+    @ConditionalOnMissingBean(WorkerDecisionHandler.class)
+    public WorkerDecisionHandler defaultWorkerDecisionHandler(
       Cache<String, Object> hotLocalCache,
       CacheLoader hotKeyRedisLoader,
-      WorkerListenerProperties properties,
-      @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
       ExpireManager expireManager,
       ObjectProvider<SreRateLimiterImpl> sreRateLimiterProvider,
       StringRedisTemplate stringRedisTemplate,
       ZetaProperties zetaProperties,
       SnowflakeIdGenerator snowflakeIdGenerator,
-      ObjectProvider<StringRedisTemplate> hotKeyRedisTemplateProvider
+      ObjectProvider<WorkerDecisionHook> workerDecisionHookProvider
     ) {
       VersionController vc = new VersionControllerImpl(
         Optional.ofNullable(stringRedisTemplate),
         zetaProperties.getVersionKeyTtlMinutes(),
         snowflakeIdGenerator
       );
-      return new WorkerListener(
+      return new DefaultWorkerDecisionHandler(
         hotLocalCache,
         hotKeyRedisLoader,
-        properties,
-        workerSchedScheduler,
         expireManager,
         sreRateLimiterProvider.getIfAvailable(),
-        vc
+        vc,
+        workerDecisionHookProvider.stream().toList()
       );
+    }
+
+    /**
+     * Create the listener that processes HOT/COOL decisions send by the Worker.
+     *
+     * @param properties          the Worker listener configuration properties
+     * @param decisionHandler     the strategy for processing HOT/COOL decisions
+     * @return a new {@link WorkerListener} instance
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public WorkerListener workerListener(
+      WorkerListenerProperties properties,
+      @Qualifier("hotKeyWorkerSchedScheduler") ScheduledExecutorService workerSchedScheduler,
+      WorkerDecisionHandler decisionHandler
+    ) {
+      return new WorkerListener(properties, workerSchedScheduler, decisionHandler);
     }
 
     /**

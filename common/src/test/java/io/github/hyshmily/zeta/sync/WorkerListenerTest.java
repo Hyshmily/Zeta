@@ -29,12 +29,15 @@ import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
+import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -54,19 +57,24 @@ class WorkerListenerTest {
   private WorkerListener listener;
   private Channel channel;
   private ScheduledExecutorService scheduler;
+  private ExpireManagerImpl expireManager;
 
   @BeforeEach
   void setUp() throws IOException {
     cache = Caffeine.newBuilder().maximumSize(100).build();
-    CacheLoader redisLoader = k -> "refreshed";
     WorkerListenerProperties properties = new WorkerListenerProperties();
     properties.setWarmupJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    listener = new WorkerListener(cache, redisLoader, properties, scheduler, expireManager, null);
+    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    WorkerDecisionHandler handler = handler(k -> "refreshed", null);
+    listener = new WorkerListener(properties, scheduler, handler);
     listener.init();
     channel = mock(Channel.class);
+  }
+
+  private WorkerDecisionHandler handler(CacheLoader loader, SreRateLimiterImpl limiter) {
+    return new DefaultWorkerDecisionHandler(cache, loader, expireManager, limiter, null, Collections.emptyList());
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
@@ -134,9 +142,8 @@ class WorkerListenerTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    WorkerListener throttled = new WorkerListener(cache, k -> "v", props, sched, expireManager, limiter);
+    WorkerDecisionHandler h = handler(k -> "v", limiter);
+    WorkerListener throttled = new WorkerListener(props, sched, h);
     throttled.init();
 
     cache.put("key1", hotEntry());
@@ -163,9 +170,8 @@ class WorkerListenerTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    WorkerListener nullLoader = new WorkerListener(cache, k -> null, props, sched, expireManager, null);
+    WorkerDecisionHandler h = handler(k -> null, null);
+    WorkerListener nullLoader = new WorkerListener(props, sched, h);
     nullLoader.init();
 
     nullLoader.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
@@ -199,18 +205,11 @@ class WorkerListenerTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    WorkerListener failingLoader = new WorkerListener(
-      cache,
-      k -> {
-        throw new RuntimeException("Redis down");
-      },
-      props,
-      sched,
-      expireManager,
+    WorkerDecisionHandler h = handler(
+      k -> { throw new RuntimeException("Redis down"); },
       null
     );
+    WorkerListener failingLoader = new WorkerListener(props, sched, h);
     failingLoader.init();
 
     failingLoader.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
@@ -334,9 +333,8 @@ class WorkerListenerTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
-    ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManagerImpl expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    WorkerListener throttled = new WorkerListener(cache, k -> "fresh", props, sched, expireManager, limiter);
+    WorkerDecisionHandler h = handler(k -> "fresh", limiter);
+    WorkerListener throttled = new WorkerListener(props, sched, h);
     throttled.init();
 
     cache.put("key1", entry(1, false, 0));

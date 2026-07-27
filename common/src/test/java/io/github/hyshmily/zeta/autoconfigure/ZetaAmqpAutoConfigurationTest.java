@@ -37,6 +37,8 @@ import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
+import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
@@ -247,20 +249,14 @@ class ZetaAmqpAutoConfigurationTest {
    */
   @Test
   void cacheSyncListenerIsCreatedWithRequiredDependencies() {
-    Cache<String, Object> localCache = mock(Cache.class);
-    CacheLoader redisLoader = mock(CacheLoader.class);
     CacheSyncProperties props = new CacheSyncProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
-    ExpireManager expireManager = mock(ExpireManager.class);
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
     CacheSyncListener listener = config.cacheSyncListener(
-      localCache,
-      redisLoader,
       props,
       scheduler,
-      expireManager,
-      mock(RuleMatcher.class)
+      mock(SyncDecisionHandler.class)
     );
 
     assertThat(listener).isNotNull();
@@ -372,26 +368,12 @@ class ZetaAmqpAutoConfigurationTest {
     CacheLoader redisLoader = mock(CacheLoader.class);
     WorkerListenerProperties props = new WorkerListenerProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
-    ExpireManager expireManager = mock(ExpireManager.class);
-
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    ObjectProvider<SreRateLimiterImpl> sreProvider = mock(ObjectProvider.class);
-    StringRedisTemplate stringRedisTemplate = mock(StringRedisTemplate.class);
-    ZetaProperties zetaProperties = new ZetaProperties();
-    SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator();
-    ObjectProvider<StringRedisTemplate> redisProvider = mock(ObjectProvider.class);
     WorkerListener listener = config.workerListener(
-      localCache,
-      redisLoader,
       props,
       scheduler,
-      expireManager,
-      sreProvider,
-      stringRedisTemplate,
-      zetaProperties,
-      snowflakeIdGenerator,
-      redisProvider
+      mock(WorkerDecisionHandler.class)
     );
 
     assertThat(listener).isNotNull();

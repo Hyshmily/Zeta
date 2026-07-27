@@ -88,7 +88,8 @@ zeta:
   # worker-listener:
   #   enabled: true
   # sync:
-  #   enabled: true     # worker-listener 依赖 hotKeyRedisLoader Bean
+  #   enabled: true     # worker-listener 依赖 hotKeyRedisLoader (CacheLoader) Bean
+  #                     # 自定义: 实现 CacheLoader -> @Bean（见下方"自定义数据源"说明）
 
   # 一致性哈希默认开启（通过心跳实现动态 Worker 路由）
   # local:
@@ -397,6 +398,124 @@ Worker 模块（`zeta-worker`）已将广播 exchange（默认 `zeta.send.exchan
 **PING/PONG 验证是辅助手段**
 
 `WorkerHeartbeatVerifier` 定期向**非存活**状态（心跳超时超过 `heartbeat.timeout-ms`，默认 10s）的 Worker 发送 PING。启动时的瞬态失败是预期的且安全的——首次 PING 可能在 Worker 的 verify 队列就绪前发出。主心跳路径（Worker → `zeta.heartbeat.exchange` → App 心跳队列）是 HealthView 更新和 RingManager 路由的权威机制。
+
+**自定义 HOT 提升的数据源**
+
+当 Worker 广播某个 key 的 HOT 决策时，App 侧的 `WorkerListener` 会通过 `CacheLoader.load(key)` 加载权威值，然后将该 entry 以扩展 TTL 提升到 L1。默认实现从 Redis 读取（`RedisCacheLoader`）。
+
+要使用其他数据源（数据库、远程服务等），实现 `CacheLoader` 接口即可：
+
+```java
+@Bean
+@ConditionalOnMissingBean(CacheLoader.class)
+public CacheLoader dbCacheLoader(YourRepository repo) {
+  return new CacheLoader() {
+    @Override
+    public Object load(String cacheKey) {
+      // 从 key 命名约定解析实体类型，如 "User:123"
+      // → 表 "users"，id=123；查询数据库并返回序列化后的值
+    }
+  };
+}
+```
+
+`@ConditionalOnMissingBean` 确保你的 Bean 替换默认的 `RedisCacheLoader`。`WorkerListener.handleHot()` 和 `CacheSyncListener.handleRefresh()` 都通过此接口获取值——无需其他配置变更。
+
+**通过 Hook 观察广播决策**
+
+实现 `WorkerDecisionHook` 或 `SyncHook` 接口来观察广播处理结果，而无需修改核心逻辑：
+
+```java
+@Bean
+public WorkerDecisionHook myMonitorHook() {
+  return new WorkerDecisionHook() {
+    @Override
+    public void afterHotPromotion(String cacheKey, WorkerMessage wm, CacheEntry entry) {
+      metrics.counter("hot.promotion").increment();
+    }
+
+    @Override
+    public void onHotSkipped(String cacheKey, WorkerMessage wm, HotSkipReason reason) {
+      log.warn("HOT 跳过 {}：{}", cacheKey, reason);
+    }
+  };
+}
+```
+
+| Hook                 | 方法                 | 触发时机                            |
+| -------------------- | -------------------- | ----------------------------------- |
+| `WorkerDecisionHook` | `afterHotPromotion`  | Key 被提升为 HOT（扩展 TTL）        |
+| `WorkerDecisionHook` | `afterCoolDowngrade` | Key 恢复为普通 TTL                  |
+| `WorkerDecisionHook` | `onHotSkipped`       | HOT 被跳过（限流/版本过旧/无值）    |
+| `WorkerDecisionHook` | `onCoolSkipped`      | COOL 被跳过（L1 中无对应 entry）    |
+| `SyncHook`           | `afterRefresh`       | 因对端广播而从数据源刷新 key        |
+| `SyncHook`           | `afterInvalidate`    | 因对端广播而从 L1 移除 key          |
+| `SyncHook`           | `onRefreshSkipped`   | REFRESH 被跳过（版本过旧/值不存在） |
+
+所有方法都是 `default` 空实现，只需实现需要的即可。单个 hook 抛异常不影响其他 hook 和广播处理。多个 hook Bean 按序执行。
+
+**替换默认的广播处理逻辑**
+
+如需完全控制 HOT/COOL 决策或缓存同步消息的处理方式，实现策略接口并将 Bean 暴露为 `@ConditionalOnMissingBean`：
+
+```java
+@Bean
+@ConditionalOnMissingBean(WorkerDecisionHandler.class)
+public WorkerDecisionHandler myHandler() {
+  return new WorkerDecisionHandler() {
+    @Override
+    public void handleHot(WorkerMessage wm) {
+      // 自定义 HOT 逻辑——替代 Redis 加载、DCL、compute 等
+    }
+
+    @Override
+    public void handleCool(WorkerMessage wm) {
+      // 自定义 COOL 逻辑——替代 TTL 重置、key 状态变更等
+    }
+  };
+}
+```
+
+| 接口                    | 方法                                                                                    | 替换的默认行为                                                          |
+| ----------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `WorkerDecisionHandler` | `handleHot`, `handleCool`                                                               | `WorkerListener` 的默认 HOT/COOL 处理（Redis 加载、SRE 限流、版本守卫） |
+| `SyncDecisionHandler`   | `handleRefresh`, `handleLocalInvalidate`, `handleLocalInvalidateAll`, `handleRulesSync` | `CacheSyncListener` 的默认缓存同步处理                                  |
+| `Evaluator`             | `evaluate`, `evictStale`（default 空实现）                                              | Worker 的热点检测管线（快车道 + 贝叶斯置信度状态机）                    |
+
+`DefaultWorkerDecisionHandler`、`DefaultSyncDecisionHandler` 仍然会调用已注册的 `WorkerDecisionHook` / `SyncHook` Bean。自定义实现可以选择是否调用 hook。
+
+`Evaluator` 支持两种方式——**完全替换**或**包装默认实现**：
+
+```java
+// 方式 1：完全替换——完全绕过默认评估管线。
+// 不涉及滑动窗口、CV、EMA、贝叶斯门控。
+@Bean
+@ConditionalOnMissingBean(Evaluator.class)
+public Evaluator myEvaluator() {
+  return (key, count) -> {
+    if (key.startsWith("priority:")) return ZetaDecision.hot(key, null);
+    return ZetaDecision.none(key, null);
+  };
+}
+```
+
+```java
+// 方式 2：包装默认实现——先跑默认评估，再附加副作用。
+@Bean
+public Evaluator wrappedEvaluator(DefaultEvaluator delegate) {
+  return new Evaluator() {
+    @Override
+    public ZetaDecision evaluate(String key, long count) {
+      ZetaDecision decision = delegate.evaluate(key, count);
+      metrics.counter("eval." + decision.type().name()).increment();
+      return decision;
+    }
+    // evictStale 是 default 空实现——这里不需要重写
+  };
+}
+```
+
+注意：包装时**不能**加 `@ConditionalOnMissingBean`（否则你的包装器阻止自己创建）。直接将 `DefaultEvaluator` 注入为依赖，选择性地测量或扩展。
 
 ## Spring Cache 集成
 

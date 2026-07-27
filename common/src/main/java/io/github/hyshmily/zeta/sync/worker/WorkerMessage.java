@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.sync.worker;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.*;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
@@ -41,15 +41,27 @@ import org.springframework.amqp.core.Message;
  * The Worker simply skips send entirely if {@code Redis GET} fails during a HOT
  * decision, preventing degraded decision propagation.
  *
+ * @param id              message trace identifier — Snowflake ID from the originating Worker;
+ *                        time-sortable, globally unique across all Workers and app instances
+ *                        (1b reserved + 41b timestamp + 10b workerId + 12b sequence);
+ *                        0L if the header was missing or non-numeric
  * @param cacheKey        the affected cache key; must not be null
  * @param type            the decision type, one of {@link #TYPE_HOT} or {@link #TYPE_COOL}
- * @param decisionVersion the Worker-local decision version (monotonically increasing
- *                        {@code AtomicLong}); used for idempotent ordering on the receiver
+ * @param decisionVersion the Worker-local decision version, monotonically increasing
+ *                        {@link java.util.concurrent.atomic.AtomicLong}; used for idempotent
+ *                        ordering on the receiver (higher version wins);
+ *                        combined with {@code nodeId + epoch} for Worker-level version
+ *                        partitioning — see {@link VersionGuard} and ADR-0010;
+ *                        0L on deserialization failure
  * @param timestamp       reserved for future use; always {@code 0L} for HOT/COOL decisions
- * @param nodeId          the originating Worker's node identity; used by receivers for
- *                        per-Worker version partitioning (see {@link VersionGuard}) — ADR-0010
- * @param epoch           the originating Worker's restart generation counter; receivers
- *                        unconditionally accept decisions from a higher epoch (see ADR-0010)
+ * @param nodeId          the originating Worker's node identity string; used by receivers for
+ *                        per-Worker version partitioning (see {@link VersionGuard});
+ *                        {@code null} if the header was missing — ADR-0010
+ * @param epoch           the originating Worker's restart generation counter, incremented on
+ *                        every Worker restart via Redis INCR (with local file fallback);
+ *                        receivers unconditionally accept decisions from a higher epoch,
+ *                        overriding any version comparison — ADR-0010;
+ *                        0L on deserialization failure
  */
 @Slf4j
 @Internal

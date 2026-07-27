@@ -48,12 +48,13 @@ public class ReportPublisher {
    */
   public void publish(String target, ReportMessage message) {
     String routingKey = KEY_REPORT + appName + "." + target;
-
     try {
       rabbitTemplate.convertAndSend(reportExchange, routingKey, message);
     } catch (AmqpException e) {
-      throw e;
+      throw new AmqpException("Failed to publish report", e);
     }
-    log.debug("Published reportToWorker: target={}, keys={}", target, message.counts().size());
+    if (message.counts().size() >= 100) {
+      log.debug("Published reportToWorker: target={}, routingKey={}, message={}", target, routingKey, message);
+    }
   }
 }
