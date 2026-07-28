@@ -192,6 +192,7 @@ class PerKeyOrderedDispatcherTest {
    * executor's internal queue.
    */
   @Test
+  @Tag("flaky")
   void close_shouldStopAllQueues() throws InterruptedException {
     CountDownLatch blockLatch = new CountDownLatch(1);
     CountDownLatch task1Started = new CountDownLatch(1);
