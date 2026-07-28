@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.github.hyshmily.zeta.Internal;
@@ -27,10 +30,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.TransactionSupport;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
-import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.model.CachePolicy;
-import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.model.ZetaCacheStats;
+import io.github.hyshmily.zeta.model.*;
 import io.github.hyshmily.zeta.rule.Rule;
 import io.github.hyshmily.zeta.rule.Rule.RuleAction;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
@@ -41,10 +41,6 @@ import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.Nullable;
-import lombok.Builder;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.Executor;
@@ -53,9 +49,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
-
-import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
+import lombok.Builder;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Core orchestration class for hot-key caching.
@@ -110,16 +106,6 @@ public class HotKeyCache {
    */
   private long nullTtlMs() {
     return TimeUnit.SECONDS.toMillis(zetaProperties.getNullValueTtlSeconds());
-  }
-
-  /**
-   * Whether soft-expire (stale-while-revalidate) is globally disabled.
-   * Extracted to a method for the same field-ordering reason as {@link #nullTtlMs}.
-   *
-   * @return {@code true} when soft expire is disabled
-   */
-  private boolean isSoftExpireUnenabled() {
-    return !expireManager.isSoftExpireEnabled();
   }
 
   @Builder
@@ -510,7 +496,15 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
-    return getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, true, isReportByThisTime);
+    return getWithSoftExpire(
+      cacheKey,
+      reader,
+      hardTtlMs,
+      softTtlMs,
+      true,
+      StalePolicy.SOFT_REFRESH,
+      isReportByThisTime
+    );
   }
 
   /**
@@ -539,6 +533,7 @@ public class HotKeyCache {
       policy.hardTtlMs().getAsLong(),
       policy.softTtlMs().getAsLong(),
       policy.nullCaching(),
+      policy.stalePolicy(),
       isReportByThisTime
     );
   }
@@ -548,13 +543,14 @@ public class HotKeyCache {
    * valid {@link NullValue} sentinels as empty hits without reloading, exactly
    * like {@link #get}.
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   private <T> Optional<T> getWithSoftExpire(
     String cacheKey,
     Supplier<T> reader,
     long hardTtlMs,
     long softTtlMs,
     boolean nullCaching,
+    StalePolicy stalePolicy,
     boolean isReportByThisTime
   ) {
     String nk = normalize(cacheKey);
@@ -563,10 +559,6 @@ public class HotKeyCache {
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
 
-    if (isSoftExpireUnenabled()) {
-      log.debug("getWithSoftExpire: soft expire not enabled, fallback to get()");
-      return get(nk, reader, hardTtlMs, softTtlMs, nullCaching, isReportByThisTime);
-    }
     Object raw = caffeineCache.getIfPresent(nk);
     return execute(nk, () -> {
       if (raw instanceof CacheEntry ce) {
@@ -578,12 +570,23 @@ public class HotKeyCache {
             dispatcher.report(nk, skipReport);
             return Optional.empty();
           }
-          refreshSoftExpire(nk, raw, reader, softTtlMs);
+
+          switch (stalePolicy) {
+            case RETURN -> {
+            }
+            case REVALIDATE -> {
+              if (expireManager.isSoftExpired(ce)) {
+                caffeineCache.invalidate(nk);
+                return loadAndCache(nk, reader, hardTtlMs, softTtlMs, nullCaching, skipReport);
+              }
+            }
+            case SOFT_REFRESH -> refreshSoftExpire(nk, raw, reader, softTtlMs);
+          }
           return process(nk, raw, cached, hardTtlMs, softTtlMs, skipReport);
         }
       } else if (raw != null) {
         // Defensive branch for bare (non-CacheEntry) values.
-        return handleSoftExpire(nk, raw, reader, hardTtlMs, softTtlMs, skipReport);
+        return handleSoftExpire(nk, raw, reader, hardTtlMs, softTtlMs, stalePolicy, skipReport);
       }
       return loadAndCache(nk, reader, hardTtlMs, softTtlMs, nullCaching, skipReport);
     });
@@ -610,10 +613,6 @@ public class HotKeyCache {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
-    if (isSoftExpireUnenabled()) {
-      return get(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime);
-    }
-
     List<String> misses = new ArrayList<>();
     Map<String, Optional<T>> results = new LinkedHashMap<>();
     Map<String, Boolean> skipReports = new HashMap<>();
@@ -630,7 +629,15 @@ public class HotKeyCache {
 
       Optional<T> hit = execute(key, () ->
         Optional.ofNullable(raw).flatMap(v ->
-          handleSoftExpire(key, v, () -> reader.apply(key), hardTtlMs, softTtlMs, skipReports.get(key))
+          handleSoftExpire(
+            key,
+            v,
+            () -> reader.apply(key),
+            hardTtlMs,
+            softTtlMs,
+            StalePolicy.SOFT_REFRESH,
+            skipReports.get(key)
+          )
         )
       );
       if (hit.isPresent()) {
@@ -651,14 +658,22 @@ public class HotKeyCache {
     Supplier<T> reader,
     long hardTtlMs,
     long softTtlMs,
+    StalePolicy stalePolicy,
     boolean skipReport
   ) {
     if (expireManager.invalidateIfIsLogicallyExpired(cacheKey, raw)) {
       return Optional.empty();
     }
+
+    if (stalePolicy == StalePolicy.REVALIDATE && raw instanceof CacheEntry ce && expireManager.isSoftExpired(ce)) {
+      return Optional.empty();
+    }
+
     @SuppressWarnings("unchecked")
     T cached = raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue(), cacheKey) : (T) raw;
-    refreshSoftExpire(cacheKey, raw, reader, softTtlMs);
+    if (stalePolicy == StalePolicy.SOFT_REFRESH) {
+      refreshSoftExpire(cacheKey, raw, reader, softTtlMs);
+    }
     return process(cacheKey, raw, cached, hardTtlMs, softTtlMs, skipReport);
   }
 
@@ -1603,7 +1618,7 @@ public class HotKeyCache {
     if (g == null) return Optional.empty();
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
-    return execute(nk, () -> computeInLock(nk, reader, policy, skipReport, false));
+    return execute(nk, () -> computeInLock(nk, reader, policy, skipReport));
   }
 
   /**
@@ -1665,10 +1680,9 @@ public class HotKeyCache {
     String nk = normalize(cacheKey);
     GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
-    if (isSoftExpireUnenabled()) return computeIfAbsent(nk, reader, policy, isReportByThisTime);
 
     boolean skipReport = isSkipReport(g.isSkipReport, isReportByThisTime);
-    return execute(nk, () -> computeInLock(nk, reader, policy, skipReport, true));
+    return execute(nk, () -> computeInLock(nk, reader, policy, skipReport));
   }
 
   /**
@@ -1692,23 +1706,16 @@ public class HotKeyCache {
    * is returned (graceful degradation).  Otherwise, the error is
    * re-thrown after the compute completes.
    *
-   * @param cacheKey                    the key to retrieve
-   * @param reader                      the value supplier for cache misses / refreshes
-   * @param policy                      the resolved per-invocation cache policy
-   *                                    (lazy TTLs, null-caching decision)
-   * @param skipReport                  whether to skip Worker reporting
-   * @param triggerRefreshOnSoftExpire  whether to background-refresh on soft expire
-   * @param <T>                         the value type
+   * @param cacheKey   the key to retrieve
+   * @param reader     the value supplier for cache misses / refreshes
+   * @param policy     the resolved per-invocation cache policy
+   *                   (lazy TTLs, null-caching decision, stale policy)
+   * @param skipReport whether to skip Worker reporting
+   * @param <T>        the value type
    * @return the cached or loaded value, or empty when the reader returned {@code null}
    */
   @SuppressWarnings("all")
-  private <T> Optional<T> computeInLock(
-    String cacheKey,
-    Supplier<T> reader,
-    CachePolicy policy,
-    boolean skipReport,
-    boolean triggerRefreshOnSoftExpire
-  ) {
+  private <T> Optional<T> computeInLock(String cacheKey, Supplier<T> reader, CachePolicy policy, boolean skipReport) {
     // Memoized lazy TTL suppliers: the (possibly SpEL-backed) expressions are
     // evaluated at most once per call, and only when a branch below actually
     // needs them — never on a plain NORMAL-entry hit.
@@ -1750,10 +1757,25 @@ public class HotKeyCache {
               );
             }
 
-            if (triggerRefreshOnSoftExpire && expireManager.isSoftExpired(ce)) {
-              expireManager.triggerBackgroundRefresh(k, reader, computeSoftTtlForRefresh(rawSoft.getAsLong(), ce));
+            if (expireManager.isSoftExpired(ce)) {
+              switch (policy.stalePolicy()) {
+                case RETURN -> {
+                  return existing;
+                }
+                case SOFT_REFRESH -> expireManager.triggerBackgroundRefresh(
+                  k,
+                  reader,
+                  computeSoftTtlForRefresh(rawSoft.getAsLong(), ce)
+                );
+                case REVALIDATE -> {
+                  hitRef[0] = false;
+                  valueRef[0] = null; // prevent stale value leak on null-reader path
+                }
+              }
+              if (policy.stalePolicy() != StalePolicy.REVALIDATE) return existing;
+            } else {
+              return existing;
             }
-            return existing;
           }
         }
 

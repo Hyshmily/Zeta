@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.zeta.worker.ingest;
 
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
-
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
@@ -24,14 +22,17 @@ import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
+import lombok.Builder;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
-import lombok.Builder;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.rabbit.annotation.RabbitListener;
+
+import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 /**
  * Worker‑side message consumer that receives batched per‑key access counts
@@ -164,7 +165,6 @@ public class ReportConsumer {
               decision.snapShot()
             );
           }
-          StateSnapshot previousState = decision.snapShot();
 
           switch (decision.type()) {
             case HOT ->

@@ -28,9 +28,6 @@ import org.jspecify.annotations.Nullable;
  * Each has a normal-key and hot-key variant, with an optional override taking precedence over the default.
  */
 public interface ExpireManager {
-  /** Whether any soft TTL is configured (normal or hot). */
-  boolean isSoftExpireEnabled();
-
   /**
    * Check whether a {@link CacheEntry} has logically expired based on its
    * {@code hardExpireAtMs}.  Entries with {@code hardExpireAtMs == Long.MAX_VALUE}

@@ -64,7 +64,6 @@ management:
     ],
 
     // ── TTL 配置 ──
-    "softExpireEnabled": true,      // 是否全局启用软过期
     "hardTtlMs": 300000,            // 有效硬 TTL——普通 key（毫秒）
     "softTtlMs": 30000,             // 有效软 TTL——普通 key（毫秒）
     "hotHardTtlMs": 3600000,        // 有效硬 TTL——热 key（毫秒）

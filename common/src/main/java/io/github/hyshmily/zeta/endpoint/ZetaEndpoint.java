@@ -189,7 +189,6 @@ public class ZetaEndpoint {
     }
 
     if (expireManager != null) {
-      local.put("softExpireEnabled", expireManager.isSoftExpireEnabled());
       local.put("hardTtlMs", expireManager.getEffectiveHardTtlMs());
       local.put("softTtlMs", expireManager.getEffectiveSoftTtlMs());
       local.put("hotHardTtlMs", expireManager.getEffectiveHotHardTtlMs());

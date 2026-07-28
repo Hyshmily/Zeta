@@ -34,10 +34,10 @@ import lombok.extern.slf4j.Slf4j;
  * Deduplicates concurrent in-flight loads for the same key.
  * <p>
  * Only the first caller executes the supplier; subsequent callers wait for
- * the same {@link CompletableFuture}. On normal completion, the future
- * remains cached (TTL-based expiry via {@code expireAfterWrite}) so
- * late-arriving callers reuse the result without re-execution. On timeout or
- * exception, the entry is evicted immediately to allow a subsequent retry.
+ * the same {@link CompletableFuture}. On normal completion, the entry is
+ * evicted immediately — the caller has the result and Caffeine holds the
+ * value. On timeout or exception, the entry is evicted immediately to allow
+ * a subsequent retry.
  * <p>
  * The internal dedup cache is bounded by {@code maxSize} (LRU eviction) and
  * entries expire after the configured {@code ttlSec} seconds from write.
@@ -126,6 +126,7 @@ public class SingleFlightImpl implements SingleFlight {
     try {
       T result = (T) future.join();
       circuitBreaker.onSuccess();
+      inflightLoads.invalidate(cacheKey);
       return Optional.ofNullable(result);
     } catch (CompletionException e) {
       if (e.getCause() instanceof TimeoutException) {
@@ -174,6 +175,7 @@ public class SingleFlightImpl implements SingleFlight {
       try {
         T result = (T) future.join();
         circuitBreaker.onSuccess();
+        inflightLoads.invalidate(key);
         results.put(key, Optional.ofNullable(result));
       } catch (CompletionException e) {
         log.warn("singleflight join failed: key={}", key, e);

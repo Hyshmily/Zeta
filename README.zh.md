@@ -261,25 +261,58 @@ User user = zeta
   .executeOrNull();
 ```
 
+**标记操作**（不读缓存，仅喂检测）
+
+```java
+// K. tag — 标记 key 为可能热点，不执行缓存读取
+zeta.tag("product:456"); // 更新本地 TopK + 加入 Worker 报告队列
+
+// L. tag 精细控制
+zeta.tag("product:456", true, false); // 跳过检测，仍上报到 Worker
+zeta.tag("product:456", false, true); // 本地检测，跳过 Worker 上报
+```
+
+**CachePolicy API**（显式策略对象，per-invocation 控制）
+
+```java
+// P. get 带 CachePolicy — 延迟 TTL 求值、空值缓存、陈旧策略
+CachePolicy policy = CachePolicy.of(30_000L, 10_000L, true, true, StalePolicy.SOFT_REFRESH);
+
+Optional<User> user = zeta.get("user:123", userRepo::findById, policy);
+
+// Q. computeIfAbsentWithSoftExpire 带 CachePolicy
+User user = zeta.computeIfAbsentWithSoftExpire(
+  "user:123",
+  () -> loadUser(123),
+  CachePolicy.of(60_000L, 30_000L, false, false),
+  true
+); // allowReport
+```
+
 **写操作**
 
 ```java
-// F. putThrough — 写穿透 + 广播
+// R. putThrough — 写穿透 + 广播
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
-// G. invalidateAfterPut — 变异后失效（集合类型）
+// S. putThrough 带广播控制
+zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue), false); // 跳过广播
+
+// T. putThrough 带显式硬 TTL
+zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue), 60_000L);
+
+// U. invalidateAfterPut — 变异后失效（集合类型）
 zeta.invalidateAfterPut(key, () -> redisTemplate.opsForSet().add(key, members));
 
-// H. putLocal — 仅本地写，不广播、不 bump 版本
+// V. putLocal — 仅本地写，不广播、不 bump 版本
 zeta.putLocal("user:123", cachedValue, hardTtlMs, softTtlMs); // 指定 TTL
 
-// I. refresh — 本地驱逐后加载并缓存
+// W. refresh — 本地驱逐后加载并缓存
 zeta.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // 带 TTL 覆盖
 
-// J. 流式写 API
+// X. 流式写 API
 zeta.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
 zeta.write("user:42").putBeforeInvalidate(dbMutation);
-zeta.write("user:42").invalidate();
 ```
 
 **自定义 per-entry TTL**
@@ -314,18 +347,6 @@ zeta.putThrough("weather:" + city, weatherData,
 
 > [!TIP]
 > per-call TTL 语义：传入 `0` 表示使用该 key 状态的配置默认值。彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：向 `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` 传入 `hardTtlMs = Long.MAX_VALUE`，entry 永久驻留 Caffeine。此用法受 Caffeine `Expiry` JavaDoc 明确支持：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
-
-**原子操作**
-
-基于 CAS 风格的无锁条件更新：
-
-```java
-// compareAndSet — 当前值匹配时原子替换
-boolean ok = zeta.compareAndSet("user:123", oldValue, newValue);
-
-// compareAndInvalidate — 当前值匹配时失效
-boolean ok = zeta.compareAndInvalidate("user:123", staleValue);
-```
 
 两个操作均为委托模式：调用方负责在 CAS 成功后重新读取或写入。无 L2 锁——守卫条件是调用时刻 L1 缓存 entry 的当前值。条件匹配且操作应用时返回 `true`，否则返回 `false`。
 

@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.StalePolicy;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -381,7 +382,7 @@ public class CacheExtensionAspect {
     LongSupplier softSupplier = ttl == null
       ? () -> 0L
       : () -> resolveTtlValue(ttl.softTtlMs(), ttl.softTtlSpEl(), pjp, method);
-    return new CachePolicy(hardSupplier, softSupplier, nullCachingEnabled, skipBroadcastFlag);
+    return new CachePolicy(hardSupplier, softSupplier, nullCachingEnabled, skipBroadcastFlag, StalePolicy.SOFT_REFRESH);
   }
 
   /**
@@ -638,7 +639,7 @@ public class CacheExtensionAspect {
     validateWriteCombination(method);
     CachePolicy prev = ZetaCacheContext.get().snapshot();
     try {
-      ZetaCacheContext.get().push(new CachePolicy(null, null, true, skipBroadcastFlag));
+      ZetaCacheContext.get().push(new CachePolicy(null, null, true, skipBroadcastFlag, StalePolicy.SOFT_REFRESH));
       return pjp.proceed();
     } finally {
       ZetaCacheContext.get().restore(prev);

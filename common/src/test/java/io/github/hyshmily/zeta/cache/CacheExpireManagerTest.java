@@ -50,14 +50,6 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that isSoftExpireEnabled delegates to the ZetaProperties configuration.
-   */
-  @Test
-  void isSoftExpireEnabled_shouldDelegateToConfig() {
-    assertThat(expireManager.isSoftExpireEnabled()).isTrue();
-  }
-
-  /**
    * Verifies that computeHardExpireAt with a positive TTL returns a timestamp in the future.
    */
   @Test
@@ -105,17 +97,6 @@ class CacheExpireManagerTest {
   @Test
   void getEffectiveHotSoftTtlMs_shouldReturnConfigValue() {
     assertThat(expireManager.getEffectiveHotSoftTtlMs()).isEqualTo(300_000L);
-  }
-
-  /**
-   * Verifies that isSoftExpired throws IllegalStateException when soft-expire is disabled in config.
-   */
-  @Test
-  void isSoftExpired_whenDisabled_shouldThrow() {
-    ttlConfig.setDefaultSoftTtlMs(0);
-    ttlConfig.setDefaultHotSoftTtlMs(0);
-    ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
-    assertThatThrownBy(() -> disabled.isSoftExpired("key")).isInstanceOf(IllegalStateException.class);
   }
 
   /**
@@ -206,19 +187,6 @@ class CacheExpireManagerTest {
     ttlConfig.setDefaultHotSoftTtlMs(0);
     ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
     assertThat(disabled.computeSoftExpireAt(0)).isZero();
-  }
-
-  /**
-   * Verifies that triggerBackgroundRefresh does nothing when soft-expire is disabled.
-   */
-  @Test
-  void triggerBackgroundRefresh_whenDisabled_shouldNotExecute() {
-    ttlConfig.setDefaultSoftTtlMs(0);
-    ttlConfig.setDefaultHotSoftTtlMs(0);
-    caffeineCache.put("key", "plain-value");
-    ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
-    disabled.triggerBackgroundRefresh("key", () -> "should-not-run", 1_000);
-    assertThat(caffeineCache.getIfPresent("key")).isEqualTo("plain-value");
   }
 
   /**
@@ -728,17 +696,6 @@ class CacheExpireManagerTest {
         long diff = expireAt - TimeSource.currentTimeMillis();
         assertThat(diff).isBetween(5_000L, 15_000L);
       });
-  }
-
-  /**
-   * Verifies that toSoftExpireTimestamp with a disabled config returns zero regardless of ratio.
-   */
-  @Test
-  void toSoftExpireTimestamp_withDisabledAndCustomRatio_shouldReturnZero() {
-    ttlConfig.setDefaultSoftTtlMs(0);
-    ttlConfig.setDefaultHotSoftTtlMs(0);
-    ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
-    assertThat(disabled.toSoftExpireTimestamp(10_000, 0.5)).isZero();
   }
 
   /**

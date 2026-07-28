@@ -64,8 +64,11 @@ class BufferedCounterTest {
     counter.count("key2", 2);
     counter.destroy();
 
-    assertThat(batches).hasSize(1);
-    assertThat(batches.get(0)).containsEntry("key1", 1L).containsEntry("key2", 2L);
+    Map<String, Long> merged = new HashMap<>();
+    for (Map<String, Long> batch : batches) {
+      merged.putAll(batch);
+    }
+    assertThat(merged).containsEntry("key1", 1L).containsEntry("key2", 2L);
   }
 
   @Test

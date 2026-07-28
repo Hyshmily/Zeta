@@ -64,7 +64,6 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
     ],
 
     // ── TTL configuration ──
-    "softExpireEnabled": true,      // Soft-expire (stale-while-revalidate) enabled
     "hardTtlMs": 300000,            // Effective hard TTL — normal keys (ms)
     "softTtlMs": 30000,             // Effective soft TTL — normal keys (ms)
     "hotHardTtlMs": 3600000,        // Effective hard TTL — hot keys (ms)

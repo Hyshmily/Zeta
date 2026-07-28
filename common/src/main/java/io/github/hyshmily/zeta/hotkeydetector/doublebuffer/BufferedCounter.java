@@ -17,15 +17,16 @@ package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.InitializingBean;
+
+import javax.security.auth.Destroyable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
-import javax.security.auth.Destroyable;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.InitializingBean;
 
 /**
  * Double-buffered counter that aggregates high-frequency single-key increments
@@ -39,7 +40,7 @@ import org.springframework.beans.factory.InitializingBean;
  * into the downstream consumer (see {@link #flushStandby()}).
  *
  * <p><b>Eager swap:</b> When the active buffer exceeds 80 % of
- * {@link #DEFAULT_MAX_BUFFER_SIZE}, the buffers are swapped eagerly to prevent any
+ * {@link #DEFAULT_MAX_CEIL_SIZE}, the buffers are swapped eagerly to prevent any
  * single buffer from growing unbounded under a traffic spike. The hot path
  * (the {@code count} call) remains lock-free — it only does an atomic
  * {@code getAndSet} on the active reference.
@@ -57,7 +58,7 @@ import org.springframework.beans.factory.InitializingBean;
 public class BufferedCounter implements InitializingBean, Destroyable {
 
   /** Default maximum distinct keys in one buffer before forced swap ({@value}). */
-  private static final int DEFAULT_MAX_BUFFER_SIZE = 10_000;
+  private static final int DEFAULT_MAX_CEIL_SIZE = 10_000;
 
   /** Default flush interval in milliseconds ({@value}). */
   private static final long DEFAULT_FLUSH_INTERVAL_MS = 500;
@@ -65,13 +66,17 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   /** Default eager swap ratio ({@value}). */
   private static final double DEFAULT_EAGER_SWAP_RATIO = 0.8;
 
-  private final int maxBufferSize;
+  /** Maximum number of standby buffers ({@value}). */
+  private static final int MAXS_CEILS = 64;
+
+  private final int ceilMaxCapacity;
 
   private final long flushIntervalMs;
 
-  private final double eagerSwapRatio;
+  /** Active hash bucket count (power of 2); volatile for count() visibility on expand/shrink. */
+  private volatile int ceilCount = 8;
 
-  private final AtomicReference<CounterBuffer> active;
+  private final AtomicReference<CounterBuffer>[] activeCeils;
 
   private final ConcurrentLinkedQueue<CounterBuffer> flushQueue;
 
@@ -83,19 +88,28 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
   private static final int MAX_STANDBY_BUFFERS = 3;
 
+  /** Counter of ceil-swap events across all ceils, used as load signal for adjust. */
+  private final LongAdder swapCounter = new LongAdder();
+
+  /** Number of flush cycles accumulated in the current sample window. */
+  private int sampleWindows;
+
+  /** Accumulated swap counts within the sample window (read+reset from swapCounter each flush). */
+  private int sampleHits;
+
   private volatile boolean shutdown;
 
   private final int eagerSwapThreshold;
 
   /**
    * Creates a buffered counter that flushes aggregated counts to the given consumer.
-   * Creates its own single-thread scheduler with default parameters ({@value DEFAULT_MAX_BUFFER_SIZE}
+   * Creates its own single-thread scheduler with default parameters ({@value DEFAULT_MAX_CEIL_SIZE}
    * max keys, {@value DEFAULT_FLUSH_INTERVAL_MS} ms interval, {@value DEFAULT_EAGER_SWAP_RATIO} swap ratio).
    *
    * @param batchConsumer callback receiving the aggregated key-count map on each flush
    */
   public BufferedCounter(Consumer<Map<String, Long>> batchConsumer) {
-    this(batchConsumer, DEFAULT_MAX_BUFFER_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, true, null);
+    this(batchConsumer, DEFAULT_MAX_CEIL_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, true, null);
   }
 
   /**
@@ -105,42 +119,46 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * @param scheduler     the shared scheduler (not shut down on destroy)
    */
   public BufferedCounter(Consumer<Map<String, Long>> batchConsumer, ScheduledExecutorService scheduler) {
-    this(batchConsumer, DEFAULT_MAX_BUFFER_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, false, scheduler);
+    this(batchConsumer, DEFAULT_MAX_CEIL_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, false, scheduler);
   }
 
   /**
    * Creates a buffered counter with custom parameters and an externally provided shared scheduler.
    *
    * @param batchConsumer   callback receiving the aggregated key-count map on each flush
-   * @param maxBufferSize   maximum distinct keys in one buffer before forced eager swap
+   * @param ceilMaxCapacity   maximum distinct keys in one buffer before forced eager swap
    * @param flushIntervalMs fixed delay between consecutive flushes in milliseconds
    * @param eagerSwapRatio  fraction of {@code maxBufferSize} that triggers an eager buffer swap (0.0 – 1.0)
    * @param scheduler       the shared scheduler (not shut down on destroy)
    */
   public BufferedCounter(
     Consumer<Map<String, Long>> batchConsumer,
-    int maxBufferSize,
+    int ceilMaxCapacity,
     long flushIntervalMs,
     double eagerSwapRatio,
     ScheduledExecutorService scheduler
   ) {
-    this(batchConsumer, maxBufferSize, flushIntervalMs, eagerSwapRatio, false, scheduler);
+    this(batchConsumer, ceilMaxCapacity, flushIntervalMs, eagerSwapRatio, false, scheduler);
   }
 
+  @SuppressWarnings("unchecked")
   private BufferedCounter(
     Consumer<Map<String, Long>> batchConsumer,
-    int maxBufferSize,
+    int ceilMaxCapacity,
     long flushIntervalMs,
     double eagerSwapRatio,
     boolean ownsScheduler,
     ScheduledExecutorService scheduler
   ) {
     this.batchConsumer = batchConsumer;
-    this.maxBufferSize = maxBufferSize;
+    this.ceilMaxCapacity = ceilMaxCapacity;
     this.flushIntervalMs = flushIntervalMs;
-    this.eagerSwapRatio = eagerSwapRatio;
-    eagerSwapThreshold = (int) (maxBufferSize * eagerSwapRatio);
-    this.active = new AtomicReference<>(new CounterBuffer());
+    eagerSwapThreshold = (int) (ceilMaxCapacity * eagerSwapRatio);
+
+    this.activeCeils = new AtomicReference[MAXS_CEILS];
+    for (int i = 0; i < MAXS_CEILS; i++) {
+      this.activeCeils[i] = new AtomicReference<>(new CounterBuffer());
+    }
     this.flushQueue = new ConcurrentLinkedQueue<>();
     this.ownsScheduler = ownsScheduler;
     this.scheduler = ownsScheduler
@@ -163,11 +181,14 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     if (shutdown) {
       return;
     }
-    CounterBuffer buffer = active.get();
-    buffer.add(key, delta);
 
-    if (buffer.size() >= eagerSwapThreshold) {
-      trySwap(buffer);
+    int idx = key.hashCode() & (ceilCount - 1);
+    CounterBuffer seg = activeCeils[idx].get();
+    seg.add(key, delta);
+
+    if (seg.size() >= eagerSwapThreshold) {
+      trySwap(idx, seg);
+      swapCounter.increment(); // signal for ceil-count adjust
     }
   }
 
@@ -177,7 +198,11 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * @return number of distinct keys in the active buffer
    */
   public long estimatedSizeOfKeysCount() {
-    return active.get().size();
+    int count = 0;
+    for (int i = 0; i < ceilCount; i++) {
+      count += activeCeils[i].get().size();
+    }
+    return count;
   }
 
   /**
@@ -185,7 +210,9 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * After this call both buffers are empty and ready for reuse.
    */
   public void clear() {
-    active.getAndSet(new CounterBuffer()).drain();
+    for (int i = 0; i < ceilCount; i++) {
+      activeCeils[i].getAndSet(new CounterBuffer()).drain();
+    }
     CounterBuffer buf;
     while ((buf = flushQueue.poll()) != null) {
       buf.drain();
@@ -201,8 +228,8 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * overhead is O(total standby keys) and occurs on the hot path only when the
    * queue is persistently backed up — i.e. switch rate > flush rate.
    */
-  private void trySwap(CounterBuffer buffer) {
-    if (buffer != active.get() || !active.compareAndSet(buffer, new CounterBuffer())) {
+  private void trySwap(int idx, CounterBuffer buffer) {
+    if (buffer != activeCeils[idx].get() || !activeCeils[idx].compareAndSet(buffer, new CounterBuffer())) {
       return; // another thread already swapped
     }
 
@@ -213,41 +240,37 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       }
     }
 
-    if (flushQueue.size() >= MAX_STANDBY_BUFFERS) {
-      compactFlushQueue();
-    }
     flushQueue.offer(buffer);
-  }
-
-  /**
-   * Drain every buffer in the standby queue and merge all counts into the
-   * oldest one, then re-enqueue it. After compaction only one standby buffer
-   * remains, freeing queue slots for subsequent switches.
-   */
-  private void compactFlushQueue() {
-    CounterBuffer driver = flushQueue.poll();
-    if (driver == null) return;
-
-    CounterBuffer buf;
-    while ((buf = flushQueue.poll()) != null) {
-      buf.drain().forEach(driver::add);
-    }
-    log.warn(
-      "BufferedCounter flush queue compacted: {} buffers merged into one with {} keys",
-      MAX_STANDBY_BUFFERS,
-      driver.size()
-    );
-    flushQueue.offer(driver);
   }
 
   private void flushStandby() {
     try {
-      CounterBuffer flushedActive = active.getAndSet(new CounterBuffer());
-      drainBuffer(flushedActive);
-
+      // Drain standby queue first — these are buffers eagerly swapped on the hot path
       CounterBuffer buf;
       while ((buf = flushQueue.poll()) != null) {
         drainBuffer(buf);
+      }
+
+      // Sample swap events since last flush; window = current ceilCount
+      int current = ceilCount;
+      sampleWindows++;
+      sampleHits += (int) swapCounter.sumThenReset();
+
+      // Adjust ceil count if sample window is complete
+      if (sampleWindows >= current) {
+        double hitRatio = (double) sampleHits / current;
+        if (hitRatio >= 0.75 && current < MAXS_CEILS) {
+          ceilCount = current << 1; // expand: more than 75% of flushes had swaps
+        } else if (hitRatio < 0.25 && current > 1) {
+          ceilCount = current >> 1; // shrink: fewer than 25%
+        }
+        sampleWindows = 0;
+        sampleHits = 0;
+      }
+
+      // Drain active ceils (respects the updated ceilCount after expand/shrink)
+      for (int i = 0; i < ceilCount; i++) {
+        drainBuffer(activeCeils[i].getAndSet(new CounterBuffer()));
       }
     } catch (Exception e) {
       log.error("Scheduled flushStandby failed", e);
@@ -303,12 +326,12 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       }
     }
 
-    for (int i = 0; i < 3; i++) {
-      if (active.get().isEmpty() && flushQueue.isEmpty()) {
-        break;
-      }
-      trySwap(active.get());
-      flushStandby();
+    for (int i = 0; i < ceilCount; i++) {
+      drainBuffer(activeCeils[i].getAndSet(new CounterBuffer()));
+    }
+    CounterBuffer buf;
+    while ((buf = flushQueue.poll()) != null) {
+      drainBuffer(buf);
     }
   }
 
@@ -321,7 +344,11 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * @return saturation ratio in the {@code [0, 1+)} range
    */
   public double activeBufferSaturation() {
-    return (double) active.get().size() / maxBufferSize;
+    int totalSize = 0;
+    for (int i = 0; i < ceilCount; i++) {
+      totalSize += activeCeils[i].get().size();
+    }
+    return (double) totalSize / (ceilMaxCapacity * ceilCount);
   }
 
   private static class CounterBuffer {

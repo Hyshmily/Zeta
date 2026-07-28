@@ -122,7 +122,6 @@ class ZetaEndpointTest {
     when(KeyReporter.dispatcherExpired()).thenReturn(2L);
     when(KeyReporter.dispatcherDropped()).thenReturn(1L);
     when(KeyReporter.getPendingKeyCount()).thenReturn(5L);
-    when(expireManager.isSoftExpireEnabled()).thenReturn(true);
     when(expireManager.getEffectiveHardTtlMs()).thenReturn(300000L);
     when(expireManager.getEffectiveSoftTtlMs()).thenReturn(30000L);
     when(expireManager.getEffectiveHotHardTtlMs()).thenReturn(3600000L);
@@ -156,7 +155,6 @@ class ZetaEndpointTest {
     assertThat(local).containsEntry("reportQueueFullCount", 1L);
     assertThat(local).containsEntry("reportPendingKeys", 5L);
     assertThat(local).containsKey("rules");
-    assertThat(local).containsEntry("softExpireEnabled", true);
     assertThat(local).containsEntry("hardTtlMs", 300000L);
     assertThat(local).containsEntry("softTtlMs", 30000L);
     assertThat(local).containsEntry("hotHardTtlMs", 3600000L);
@@ -331,7 +329,6 @@ class ZetaEndpointTest {
   void localSection_shouldSkipRefreshPoolWhenLimiterNull() {
     mockTopK(hotKeyDetector, List.of(), 0L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
-    when(expireManager.isSoftExpireEnabled()).thenReturn(true);
     when(expireManager.getEffectiveHardTtlMs()).thenReturn(300000L);
     when(expireManager.getEffectiveSoftTtlMs()).thenReturn(30000L);
     when(expireManager.getEffectiveHotHardTtlMs()).thenReturn(3600000L);
@@ -340,7 +337,6 @@ class ZetaEndpointTest {
     ZetaEndpoint ep = endpointWithAll();
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");
-    assertThat(local).containsEntry("softExpireEnabled", true);
     assertThat(local).doesNotContainKey("refreshPoolAvailable");
   }
 

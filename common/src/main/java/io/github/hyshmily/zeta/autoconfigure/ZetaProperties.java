@@ -191,15 +191,6 @@ public class ZetaProperties {
     return hotSoftTtlMs > 0 ? hotSoftTtlMs : defaultHotSoftTtlMs;
   }
 
-  /**
-   * Whether any soft TTL is configured (normal or hot).
-   *
-   * @return {@code true} if either normal or hot key soft TTL is enabled
-   */
-  public boolean isSoftExpireEnabled() {
-    return effectiveSoftTtlMs() > 0 || effectiveHotSoftTtlMs() > 0;
-  }
-
   /** Jitter ratio (0.0–1.0) applied to TTLs — e.g. 0.1 means ±10% random offset. */
   @Min(0)
   @Max(1)

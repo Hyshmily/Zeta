@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.model;
 
+import io.github.hyshmily.zeta.model.StalePolicy;
 import java.util.function.LongSupplier;
 
 /**
@@ -48,19 +49,22 @@ import java.util.function.LongSupplier;
  *                     sentinel entry
  * @param skipBroadcast whether cross-instance sync messages are suppressed for
  *                     write/evict operations (ignored on read paths)
+ * @param stalePolicy  what to do when the cached entry is soft-expired
+ *                     (stale); defaults to {@link StalePolicy#SOFT_REFRESH}
  */
 public record CachePolicy(
     LongSupplier hardTtlMs,
     LongSupplier softTtlMs,
     boolean nullCaching,
-    boolean skipBroadcast
+    boolean skipBroadcast,
+    StalePolicy stalePolicy
 ) {
 
   /** Shared zero supplier for "no TTL override". */
   private static final LongSupplier ZERO = () -> 0L;
 
   /** Singleton carrying all-default semantics. */
-  private static final CachePolicy DEFAULTS = new CachePolicy(ZERO, ZERO, true, false);
+  private static final CachePolicy DEFAULTS = new CachePolicy(ZERO, ZERO, true, false, StalePolicy.SOFT_REFRESH);
 
   /**
    * Compact constructor: {@code null} suppliers are normalized to a zero
@@ -69,6 +73,7 @@ public record CachePolicy(
   public CachePolicy {
     if (hardTtlMs == null) hardTtlMs = ZERO;
     if (softTtlMs == null) softTtlMs = ZERO;
+    if (stalePolicy == null) stalePolicy = StalePolicy.SOFT_REFRESH;
   }
 
   /**
@@ -92,6 +97,22 @@ public record CachePolicy(
    * @return a new policy instance
    */
   public static CachePolicy of(long hardTtlMs, long softTtlMs, boolean nullCaching, boolean skipBroadcast) {
-    return new CachePolicy(() -> hardTtlMs, () -> softTtlMs, nullCaching, skipBroadcast);
+    return of(hardTtlMs, softTtlMs, nullCaching, skipBroadcast, StalePolicy.SOFT_REFRESH);
+  }
+
+  /**
+   * Builds a policy from static TTL values and an explicit stale policy.
+   * The values are wrapped into constant suppliers; the lazy-evaluation
+   * contract is unaffected.
+   *
+   * @param hardTtlMs     hard TTL override (0 = use configured default)
+   * @param softTtlMs     soft TTL override (0 = use configured default)
+   * @param nullCaching   whether {@code null} loader results may be cached
+   * @param skipBroadcast whether to suppress cross-instance sync messages
+   * @param stalePolicy   what to do on soft-expire (stale) entries
+   * @return a new policy instance
+   */
+  public static CachePolicy of(long hardTtlMs, long softTtlMs, boolean nullCaching, boolean skipBroadcast, StalePolicy stalePolicy) {
+    return new CachePolicy(() -> hardTtlMs, () -> softTtlMs, nullCaching, skipBroadcast, stalePolicy);
   }
 }

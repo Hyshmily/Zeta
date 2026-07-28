@@ -51,11 +51,8 @@ public class ExpireManagerImpl implements ExpireManager {
   private final Executor executor;
   /** TTL configuration providing normal and hot-key TTL values. */
   private final ZetaProperties ttlConfig;
-  /** Whether soft expire (stale-while-revalidate) is enabled (cached from config at construction).*/
-  private final boolean softExpireEnabled;
-  /** Semaphore limiting concurrent background refresh operations (null if soft expire disabled). */
-  // null when soft expire is disabled; always guarded by softExpireEnabled check
-  private final Semaphore refreshLimiter;
+  /** Semaphore limiting concurrent background refresh operations. */
+  private Semaphore refreshLimiter;
   /** Per-key dedup for background refreshes — prevents concurrent refresh for the same key. */
   private final ConcurrentHashMap<String, CompletableFuture<?>> pendingRefreshes = new ConcurrentHashMap<>();
   /** Compressor for L1 cache values. */
@@ -127,8 +124,7 @@ public class ExpireManagerImpl implements ExpireManager {
     this.executor = executor;
     this.ttlConfig = ttlConfig;
     this.compressor = compressor;
-    this.softExpireEnabled = ttlConfig.isSoftExpireEnabled();
-    this.refreshLimiter = initRefreshLimiter(refreshMaxPools);
+    initRefreshLimiter(refreshMaxPools);
     this.defaultTtlJitterRatio = ttlConfig.getTtlJitterRatio();
   }
 
@@ -147,14 +143,13 @@ public class ExpireManagerImpl implements ExpireManager {
     this.executor = executor;
     this.ttlConfig = ttlConfig;
     this.compressor = compressor;
-    this.softExpireEnabled = ttlConfig.isSoftExpireEnabled();
-    this.refreshLimiter = initRefreshLimiter(refreshMaxPools);
+    initRefreshLimiter(refreshMaxPools);
     this.defaultTtlJitterRatio = defaultTtlJitterRatio;
   }
 
-  private Semaphore initRefreshLimiter(int refreshMaxPools) {
+  private void initRefreshLimiter(int refreshMaxPools) {
     int effectiveRefreshMaxPools = refreshMaxPools > 0 ? refreshMaxPools : 100;
-    return softExpireEnabled ? new Semaphore(effectiveRefreshMaxPools) : null;
+    this.refreshLimiter = new Semaphore(effectiveRefreshMaxPools);
   }
 
   /**
@@ -232,16 +227,13 @@ public class ExpireManagerImpl implements ExpireManager {
 
   /**
    * Soft expire timestamp from an explicit TTL duration.
-   * Falls back to the normal-key default if {@code softTtlMs <= 0}. Returns 0 if soft expire is disabled.
+   * Falls back to the normal-key default if {@code softTtlMs <= 0}.
    *
    * @param softTtlMs the soft TTL duration in milliseconds (&lt;= 0 uses configured default)
-   * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
+   * @return absolute epoch-ms timestamp for soft expiry, or 0 if TTL is non-positive
    */
   @Override
   public long computeSoftExpireAt(long softTtlMs) {
-    if (!isSoftExpireEnabled()) {
-      return 0L;
-    }
     return toSoftExpireTimestamp(resolveEffectiveSoftTtl(softTtlMs));
   }
 
@@ -666,10 +658,10 @@ public class ExpireManagerImpl implements ExpireManager {
   /**
    * Convert a soft TTL duration (ms) to an absolute epoch-ms expiration timestamp.
    * Applies configurable jitter (default ±5%) to prevent cache stampedes.
-   * Returns 0 if soft expire is disabled or the TTL is non-positive.
+   * Returns 0 if the TTL is non-positive.
    *
    * @param softTtlMs the soft TTL duration in milliseconds
-   * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
+   * @return absolute epoch-ms timestamp for soft expiry, or 0 if TTL is non-positive
    */
   @Override
   public long toSoftExpireTimestamp(long softTtlMs) {
@@ -679,15 +671,15 @@ public class ExpireManagerImpl implements ExpireManager {
   /**
    * Convert a soft TTL duration (ms) to an absolute epoch-ms expiration timestamp
    * using the given jitter ratio instead of the configured default.
-   * Returns 0 if soft expire is disabled. Propagates {@link Long#MAX_VALUE} unchanged.
+   * Returns 0 if the TTL is non-positive. Propagates {@link Long#MAX_VALUE} unchanged.
    *
    * @param softTtlMs      the soft TTL duration in milliseconds
    * @param ttlJitterRatio the jitter ratio to apply (0.0–1.0)
-   * @return absolute epoch-ms timestamp for soft expiry, or 0 if disabled
+   * @return absolute epoch-ms timestamp for soft expiry, or 0 if TTL is non-positive
    */
   @Override
   public long toSoftExpireTimestamp(long softTtlMs, double ttlJitterRatio) {
-    if (!isSoftExpireEnabled() || softTtlMs <= 0) {
+    if (softTtlMs <= 0) {
       return 0L;
     }
     if (softTtlMs == Long.MAX_VALUE) {
@@ -702,13 +694,9 @@ public class ExpireManagerImpl implements ExpireManager {
    * Check whether the given key's soft TTL has expired.
    *
    * @return {@code true} if the entry's soft TTL has expired or the entry is absent
-   * @throws IllegalStateException if soft expire is disabled
    */
   @Override
   public boolean isSoftExpired(Object cacheEntry) {
-    if (!isSoftExpireEnabled()) {
-      throw new IllegalStateException("ExpireManager soft expire is disabled, isSoftExpired() should not be called");
-    }
     if (cacheEntry instanceof CacheEntry ce) {
       long expireAt = ce.getSoftExpireAtMs();
       return expireAt <= 0 || expireAt < TimeSource.currentTimeMillis();
@@ -737,9 +725,6 @@ public class ExpireManagerImpl implements ExpireManager {
   @Override
   @SuppressWarnings("java:S1181")
   public void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs) {
-    if (!isSoftExpireEnabled()) {
-      return;
-    }
     pendingRefreshes.compute(cacheKey, (k, existing) -> {
       // If there is already an in-flight refresh for this key, keep the
       // existing future and do nothing.
