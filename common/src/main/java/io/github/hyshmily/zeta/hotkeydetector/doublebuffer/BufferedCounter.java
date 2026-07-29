@@ -17,38 +17,33 @@ package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.InitializingBean;
-
-import javax.security.auth.Destroyable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
+import javax.security.auth.Destroyable;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.InitializingBean;
 
 /**
  * Double-buffered counter that aggregates high-frequency single-key increments
  * and flushes them in batch to a downstream consumer.
  *
- * <p><b>Design:</b> One active {@link CounterBuffer} accepts incoming
- * {@link #count(String, long)} calls via a lock-free {@code ConcurrentHashMap}.
- * When the buffer is saturated the active reference is atomically swapped and
- * the old buffer is enqueued into a {@link ConcurrentLinkedQueue}. A scheduled
- * flusher periodically drains both the swapped-out active buffer and the queue
- * into the downstream consumer (see {@link #flushStandby()}).
+ * <p><b>Design:</b> 64 hash-indexed slots, each with an active
+ * {@link CounterBuffer} accepting incoming {@link #count(String, long)} calls.
+ * When a buffer exceeds the eager-swap threshold the thread that detects it
+ * atomically swaps in a fresh buffer and enqueues the old one for async
+ * draining.  A per-slot <em>spill</em> buffer catches concurrent {@code add()}
+ * calls during the swap window so no thread performs a wasted CAS — losers
+ * redirect into the spill, and the winner drains it back into the new active
+ * buffer.  A scheduled flusher drains all queues and active buffers every
+ * {@code flushIntervalMs}.
  *
- * <p><b>Eager swap:</b> When the active buffer exceeds 80 % of
- * {@link #DEFAULT_MAX_CEIL_SIZE}, the buffers are swapped eagerly to prevent any
- * single buffer from growing unbounded under a traffic spike. The hot path
- * (the {@code count} call) remains lock-free — it only does an atomic
- * {@code getAndSet} on the active reference.
- *
- * <p><b>Lifecycle:</b> Implements {@link InitializingBean} to start the
- * periodic flush scheduler, and {@link Destroyable} to perform a final drain
- * on shutdown. The scheduler is either self-created (and owned) or externally
- * provided (shared), controlling whether {@link #destroy()} shuts it down.
+ * <p><b>Safety net:</b> Every flush cycle also drains any leftover spill
+ * buffers, bounding worst-case spill data delay to {@code flushIntervalMs}.
  *
  * <p>Thread-safe. All public methods can be called concurrently from
  * multiple threads.
@@ -57,80 +52,74 @@ import java.util.function.Consumer;
 @Internal
 public class BufferedCounter implements InitializingBean, Destroyable {
 
-  /** Default maximum distinct keys in one buffer before forced swap ({@value}). */
   private static final int DEFAULT_MAX_CEIL_SIZE = 10_000;
 
-  /** Default flush interval in milliseconds ({@value}). */
   private static final long DEFAULT_FLUSH_INTERVAL_MS = 500;
 
-  /** Default eager swap ratio ({@value}). */
-  private static final double DEFAULT_EAGER_SWAP_RATIO = 0.8;
+  private static final double DEFAULT_EAGER_SWAP_RATIO = 0.75;
 
-  /** Maximum number of standby buffers ({@value}). */
+  /** Fixed slot array size — never changes, only {@link #ceilCount} limits which slots are live. */
   private static final int MAXS_CEILS = 64;
 
   private final int ceilMaxCapacity;
 
   private final long flushIntervalMs;
 
-  /** Active hash bucket count (power of 2); volatile for count() visibility on expand/shrink. */
+  /**
+   * Number of live hash slots (power of 2, 8..64).
+   * Only slots {@code [0, ceilCount)} receive traffic; higher indices are
+   * orphaned after a shrink and must be drained by iterating up to MAXS_CEILS.
+   */
   private volatile int ceilCount = 8;
 
+  /** Active buffer per slot — each is a lock-free ConcurrentHashMap-based counter. */
   private final AtomicReference<CounterBuffer>[] activeCeils;
 
+  /**
+   * Per-slot spill buffer, normally {@code null}.
+   * Non-null only while a swap is in progress: the thread that sets it wins
+   * the right to swap the active buffer; all other threads sees spill != null
+   * and redirect their {@code add()} into it.  The winner drains the spill
+   * back into the new active after the swap completes.
+   */
+  private final AtomicReference<CounterBuffer>[] spillCeils;
+
+  /**
+   * Queue of old active buffers awaiting async drain by {@link #flushStandby()}.
+   * Using a queue decouples the hot-path swap from the downstream consumer
+   * (which may block, e.g. on RabbitMQ publish).
+   */
   private final ConcurrentLinkedQueue<CounterBuffer> flushQueue;
 
+  /** Downstream consumer receiving aggregated {@code Map<key, count>} snapshots. */
   private final Consumer<Map<String, Long>> batchConsumer;
 
   private final ScheduledExecutorService scheduler;
 
+  /** {@code true} if this instance created its own scheduler and must shut it down on destroy. */
   private final boolean ownsScheduler;
 
-  private static final int MAX_STANDBY_BUFFERS = 3;
-
-  /** Counter of ceil-swap events across all ceils, used as load signal for adjust. */
+  /** Tracks how many eager swaps occurred since the last flush. */
   private final LongAdder swapCounter = new LongAdder();
 
-  /** Number of flush cycles accumulated in the current sample window. */
+  /** Number of flush cycles accumulated in the current sampling window. */
   private int sampleWindows;
 
-  /** Accumulated swap counts within the sample window (read+reset from swapCounter each flush). */
+  /** Sum of swap counts across flushes in the current window. */
   private int sampleHits;
 
   private volatile boolean shutdown;
 
   private final int eagerSwapThreshold;
 
-  /**
-   * Creates a buffered counter that flushes aggregated counts to the given consumer.
-   * Creates its own single-thread scheduler with default parameters ({@value DEFAULT_MAX_CEIL_SIZE}
-   * max keys, {@value DEFAULT_FLUSH_INTERVAL_MS} ms interval, {@value DEFAULT_EAGER_SWAP_RATIO} swap ratio).
-   *
-   * @param batchConsumer callback receiving the aggregated key-count map on each flush
-   */
   public BufferedCounter(Consumer<Map<String, Long>> batchConsumer) {
     this(batchConsumer, DEFAULT_MAX_CEIL_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, true, null);
   }
 
-  /**
-   * Creates a buffered counter with an externally provided shared scheduler and default parameters.
-   *
-   * @param batchConsumer callback receiving the aggregated key-count map on each flush
-   * @param scheduler     the shared scheduler (not shut down on destroy)
-   */
   public BufferedCounter(Consumer<Map<String, Long>> batchConsumer, ScheduledExecutorService scheduler) {
     this(batchConsumer, DEFAULT_MAX_CEIL_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, false, scheduler);
   }
 
-  /**
-   * Creates a buffered counter with custom parameters and an externally provided shared scheduler.
-   *
-   * @param batchConsumer   callback receiving the aggregated key-count map on each flush
-   * @param ceilMaxCapacity   maximum distinct keys in one buffer before forced eager swap
-   * @param flushIntervalMs fixed delay between consecutive flushes in milliseconds
-   * @param eagerSwapRatio  fraction of {@code maxBufferSize} that triggers an eager buffer swap (0.0 – 1.0)
-   * @param scheduler       the shared scheduler (not shut down on destroy)
-   */
   public BufferedCounter(
     Consumer<Map<String, Long>> batchConsumer,
     int ceilMaxCapacity,
@@ -156,8 +145,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     eagerSwapThreshold = (int) (ceilMaxCapacity * eagerSwapRatio);
 
     this.activeCeils = new AtomicReference[MAXS_CEILS];
+    this.spillCeils = new AtomicReference[MAXS_CEILS];
     for (int i = 0; i < MAXS_CEILS; i++) {
       this.activeCeils[i] = new AtomicReference<>(new CounterBuffer());
+      this.spillCeils[i] = new AtomicReference<>(null);
     }
     this.flushQueue = new ConcurrentLinkedQueue<>();
     this.ownsScheduler = ownsScheduler;
@@ -167,15 +158,17 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * Record one or more accesses for the given key into the active buffer.
+   * Record one or more accesses for the given key.
    *
-   * <p>This is the hot path — it performs a lock-free update on the active
-   * {@link CounterBuffer}. If the active buffer exceeds 80 % capacity
-   * after this increment, an eager swap is triggered to keep the buffer
-   * from overflowing before the next scheduled flush.
+   * <p><b>Fast path (no swap in progress):</b> hash → active buffer → add.
+   * Every 64th call checks {@code size()} and triggers an eager swap if
+   * the buffer is near capacity.
+   *
+   * <p><b>Spill path (swap in progress):</b> hash → spill buffer → add.
+   * The swap winner will drain the spill and merge it back.
    *
    * @param key   the accessed key (must not be {@code null})
-   * @param delta the number of accesses to reportToWorker (must be positive)
+   * @param delta the number of accesses (must be positive)
    */
   public void count(String key, long delta) {
     if (shutdown) {
@@ -183,19 +176,26 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     }
 
     int idx = key.hashCode() & (ceilCount - 1);
+    CounterBuffer spill = spillCeils[idx].get();
+    if (spill != null) {
+      spill.add(key, delta);
+      return;
+    }
+
     CounterBuffer seg = activeCeils[idx].get();
     seg.add(key, delta);
 
-    if (seg.size() >= eagerSwapThreshold) {
+    // Sampled size check (1/64 calls) to decide if we need an eager swap
+    if (seg.shouldCheckSize() && seg.size() >= eagerSwapThreshold) {
       trySwap(idx, seg);
-      swapCounter.increment(); // signal for ceil-count adjust
+      swapCounter.increment();
     }
   }
 
   /**
-   * Return an approximate count of distinct keys request in the active buffer.
+   * Return an approximate count of distinct keys in the active buffer.
    *
-   * @return number of distinct keys in the active buffer
+   * @return number of distinct keys in the currently-active buffers
    */
   public long estimatedSizeOfKeysCount() {
     int count = 0;
@@ -206,13 +206,22 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * Drain all remaining counts from both buffers without calling the consumer.
-   * After this call both buffers are empty and ready for reuse.
+   * Drain all remaining counts from all buffers without calling the consumer.
+   * After this call all buffers are empty and ready for reuse.
    */
   public void clear() {
+    // Active buffers (live slots only — orphaned above ceilCount are empty)
     for (int i = 0; i < ceilCount; i++) {
       activeCeils[i].getAndSet(new CounterBuffer()).drain();
     }
+    // Spill buffers (safety net: drain all 64 slots)
+    for (int i = 0; i < MAXS_CEILS; i++) {
+      CounterBuffer sp = spillCeils[i].getAndSet(null);
+      if (sp != null) {
+        sp.drain();
+      }
+    }
+    // Flush queue
     CounterBuffer buf;
     while ((buf = flushQueue.poll()) != null) {
       buf.drain();
@@ -220,56 +229,142 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * Try to switch the active buffer with a new one and move the old one to standby for flushing.
+   * Atomically swap a saturated active buffer for a fresh one, using a
+   * per-slot spill buffer so that concurrent callers redirect rather than
+   * waste a CAS.
    *
-   * <p>If the standby queue is full, all enqueued buffers are compacted into one
-   * (the oldest) and the rest are drained and merged into it.  This preserves all
-   * counts, reclaims queue slots, and avoids discarding entire buffers.  The
-   * overhead is O(total standby keys) and occurs on the hot path only when the
-   * queue is persistently backed up — i.e. switch rate > flush rate.
+   * <p><b>Protocol (5 phases):</b>
+   * <ol>
+   *   <li>{@code stale-check} — verify {@code buffer} is still the active
+   *       reference (another thread may have already swapped).
+   *   <li>{@code install-spill} — CAS the spill slot from {@code null} to a
+   *       new empty buffer.  If this fails, another thread owns the swap.
+   *   <li>{@code swap-active} — CAS the active slot from {@code buffer} to
+   *       a fresh buffer.  If this fails, drain the spill into the winner's
+   *       current active and return.
+   *   <li>{@code enqueue-old} — offer the replaced active buffer to the
+   *       flush queue for async consumption.
+   *   <li>{@code drain-merge} — drain the spill into the new active buffer
+   *       with a bounded number of passes.  If the retry limit is exceeded
+   *       the spill is forwarded to the flush queue instead.  Otherwise,
+   *       CAS-clear the spill reference; on success, a second drain catches
+   *       any {@code add()} that raced during the window.
+   * </ol>
    */
   private void trySwap(int idx, CounterBuffer buffer) {
-    if (buffer != activeCeils[idx].get() || !activeCeils[idx].compareAndSet(buffer, new CounterBuffer())) {
-      return; // another thread already swapped
+    if (buffer != activeCeils[idx].get()) {
+      return;
     }
 
-    if (flushQueue.size() >= MAX_STANDBY_BUFFERS) {
-      CounterBuffer oldest = flushQueue.poll();
-      if (oldest != null) {
-        drainBuffer(oldest);
-      }
+    CounterBuffer spill = new CounterBuffer();
+    if (!spillCeils[idx].compareAndSet(null, spill)) {
+      return; // another thread owns the swap for this slot
+    }
+
+    CounterBuffer newBuf = new CounterBuffer();
+    if (!activeCeils[idx].compareAndSet(buffer, newBuf)) {
+      // Lost: someone else swapped active while we were setting up spill.
+      // Merge spill into the winner's current active and clean up.
+      CounterBuffer curActive = activeCeils[idx].get();
+      spill.drainInto(curActive);
+      spillCeils[idx].set(null);
+      return;
     }
 
     flushQueue.offer(buffer);
+
+    if (!drainInTo(spill, newBuf)) {
+      // drain failed to complete in a reasonable number of passes, so we leave the spill
+      if (spillCeils[idx].compareAndSet(spill, null)) {
+        //if CAS successfully cleared, we can safely offer the spill to flushQueue for async draining
+        flushQueue.offer(spill);
+      }
+      return;
+    }
+    // CAS-clear spill to signal flusher this slot is done.
+    // Only on success (we still own the spill) do we drain again to catch
+    // any add() that raced in between the first drain and the CAS clear.
+    // On failure the flusher has already taken ownership via getAndSet(null)
+    // and will drain the buffer itself — we must not touch spill again.
+    if (spillCeils[idx].compareAndSet(spill, null)) {
+      drainInTo(spill, newBuf);
+    }
   }
 
+  /**
+   * Repeatedly drain {@code source} into {@code target} using
+   * {@link CounterBuffer#drainInto(CounterBuffer)}, stopping when the buffer
+   * is empty or the retry limit is reached.
+   *
+   * <p>Multiple passes are necessary because {@link CounterBuffer#drainInto}
+   * calls {@link LongAdder#sumThenReset()} — a concurrent {@code add()} that
+   * arrives <em>after</em> the reset would be stranded in the next pass.
+   *
+   * @return {@code true} if the buffer was fully drained, {@code false} if
+   *         the retry limit was exceeded (caller should fall back to the
+   *         flush queue)
+   */
+  private boolean drainInTo(CounterBuffer source, CounterBuffer target) {
+    int attempts = 0;
+    while (source.drainInto(target)) {
+      // loop until source has no non-zero counters,or reach the limit.
+      if (++attempts >= ((MAXS_CEILS << 3) / ceilCount)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Periodic flush scheduled by {@link #afterPropertiesSet()}.
+   *
+   * <p><b>Order matters:</b>
+   * <ol>
+   *   <li>Drain all <b>spill</b> buffers first (safety net for swap races;
+   *       see {@link #trySwap(int, CounterBuffer)} phase 5-6 window).
+   *   <li>Drain the <b>flush queue</b> (old active buffers from prior swaps).
+   *   <li>Sample swap events and <b>auto-tune ceilCount</b>.
+   *   <li>Drain all <b>active</b> ceils (including orphaned slots after a shrink).
+   * </ol>
+   *
+   * <p>Steps 1 and 2 are repeated identically in {@link #destroy()} and
+   * {@link #clear()} to ensure the same three sources are exhausted.
+   */
   private void flushStandby() {
     try {
-      // Drain standby queue first — these are buffers eagerly swapped on the hot path
+      // Spills may still hold data if a swap completed between the last
+      // drainInto call and the CAS clear.  getAndSet(null) atomically
+      // claims the spill so no swap winner races us.
+      for (int i = 0; i < MAXS_CEILS; i++) {
+        CounterBuffer sp = spillCeils[i].getAndSet(null);
+        if (sp != null) {
+          drainBuffer(sp);
+        }
+      }
+
       CounterBuffer buf;
       while ((buf = flushQueue.poll()) != null) {
         drainBuffer(buf);
       }
 
-      // Sample swap events since last flush; window = current ceilCount
       int current = ceilCount;
       sampleWindows++;
       sampleHits += (int) swapCounter.sumThenReset();
 
-      // Adjust ceil count if sample window is complete
       if (sampleWindows >= current) {
         double hitRatio = (double) sampleHits / current;
         if (hitRatio >= 0.75 && current < MAXS_CEILS) {
           ceilCount = current << 1; // expand: more than 75% of flushes had swaps
-        } else if (hitRatio < 0.25 && current > 1) {
+        } else if (hitRatio < 0.25 && current > 8) {
           ceilCount = current >> 1; // shrink: fewer than 25%
         }
         sampleWindows = 0;
         sampleHits = 0;
       }
 
-      // Drain active ceils (respects the updated ceilCount after expand/shrink)
-      for (int i = 0; i < ceilCount; i++) {
+      // Must iterate MAXS_CEILS, not ceilCount, because previously-active
+      // indices above a shrunk ceilCount would be orphaned and leak memory.
+      for (int i = 0; i < MAXS_CEILS; i++) {
         drainBuffer(activeCeils[i].getAndSet(new CounterBuffer()));
       }
     } catch (Exception e) {
@@ -277,8 +372,12 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     }
   }
 
+  /**
+   * Drain a single buffer into the downstream consumer.
+   * No-op if the buffer is empty.
+   */
   private void drainBuffer(CounterBuffer buf) {
-    if (!buf.isEmpty()) {
+    if (buf.size() != 0) {
       Map<String, Long> snapshot = buf.drain();
       if (!snapshot.isEmpty()) {
         batchConsumer.accept(snapshot);
@@ -286,10 +385,6 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     }
   }
 
-  /**
-   * Start the periodic flush scheduler.  Called by the Spring container
-   * after all bean properties have been set.
-   */
   @Override
   public void afterPropertiesSet() {
     try {
@@ -304,11 +399,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * Perform a final drain of any remaining buffered counts and shut down
-   * the scheduler only if owned (self-created). For a shared scheduler
-   * the task is simply cancelled.
+   * Final drain of all three buffer sources and scheduler shutdown.
    *
-   * <p>Called by the Spring container during context close.
+   * <p>The drain order mirrors {@link #flushStandby()}:
+   * active ceils → spill ceils → flush queue.
    */
   @Override
   public void destroy() {
@@ -326,9 +420,17 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       }
     }
 
-    for (int i = 0; i < ceilCount; i++) {
+    // Active ceils (all 64, not just ceilCount — prevent leak from shrink orphans)
+    // Spill ceils (safety net: drain any orphaned spill data)
+    for (int i = 0; i < MAXS_CEILS; i++) {
       drainBuffer(activeCeils[i].getAndSet(new CounterBuffer()));
+      CounterBuffer sp = spillCeils[i].getAndSet(null);
+      if (sp != null) {
+        drainBuffer(sp);
+      }
     }
+
+    // Flush queue
     CounterBuffer buf;
     while ((buf = flushQueue.poll()) != null) {
       drainBuffer(buf);
@@ -337,9 +439,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
   /**
    * Returns the ratio of the active buffer's current distinct-key count
-   * to {@code maxBufferSize}. A value {@code >= 0.8} (the default
-   * {@code eagerSwapRatio}) indicates the buffer is close to triggering
-   * an eager swap.
+   * to the total capacity across all live ceils.
    *
    * @return saturation ratio in the {@code [0, 1+)} range
    */
@@ -351,69 +451,84 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     return (double) totalSize / (ceilMaxCapacity * ceilCount);
   }
 
+  /**
+   * A simple key→counter wrapper around {@link ConcurrentHashMap}.
+   *
+   * <p>Not thread-safe in the general sense — instances are expected to be
+   * written by {@link #add(String, long)} and then {@link #drain()}ed once by
+   * a single thread (the swap winner or the flusher), after which the instance
+   * is discarded.
+   */
   private static class CounterBuffer {
 
+    /** Key→counter storage.  Package-visible for spill-merge in the outer class. */
     private final ConcurrentHashMap<String, LongAdder> counters = new ConcurrentHashMap<>();
 
-    /** Reusable result map — avoids allocation on every drain cycle. */
-    private Map<String, Long> reusableResult;
-
     /**
-     * Record one or more accesses for the given key in this buffer.
-     *
-     * @param key   the accessed key
-     * @param delta the number of accesses to reportToWorker
+     * Loose sampling counter: incremented on every {@link #add(String, long)}.
+     * Only {@link #shouldCheckSize()} reads it; the value itself is approximate
+     * (wraps around at Integer.MAX_VALUE harmlessly).
      */
+    private final AtomicInteger addCounter = new AtomicInteger();
+
+    /** Record one or more accesses for the given key. */
     public void add(String key, long delta) {
       counters.computeIfAbsent(key, k -> new LongAdder()).add(delta);
+      addCounter.getAndIncrement();
     }
 
     /**
-     * Return the number of distinct keys held in this buffer.
+     * Drain all non-zero counters from this buffer directly into {@code target},
+     * skipping the intermediate HashMap allocation.
      *
-     * @return the number of distinct keys
+     * @return {@code true} if any non-zero values were transferred
      */
+    boolean drainInto(CounterBuffer target) {
+      boolean nonEmpty = false;
+
+      for (var entry : counters.entrySet()) {
+        long val = entry.getValue().sumThenReset();
+        if (val > 0) {
+          target.counters.computeIfAbsent(entry.getKey(), k -> new LongAdder()).add(val);
+          nonEmpty = true;
+        }
+      }
+      return nonEmpty;
+    }
+
+    /**
+     * Returns {@code true} once every ~64 calls so that the hot-path caller
+     * can skip the more expensive {@link #size()} check the other 63 times.
+     */
+    public boolean shouldCheckSize() {
+      return (addCounter.get() & 63) == 0;
+    }
+
+    /** Number of distinct keys held in this buffer.  Cost: O(NCPU) volatile reads. */
     public int size() {
       return counters.size();
     }
 
     /**
-     * Return whether this buffer holds no entries.
+     * Atomically snapshot all non-zero counters and reset them to zero.
      *
-     * @return {@code true} if the buffer is empty
-     */
-    public boolean isEmpty() {
-      return size() == 0;
-    }
-
-    /**
-     * Atomically drain all counters and return a snapshot of the accumulated
-     * counts. Each LongAdder is zeroed ({@code sumThenReset}),
-     * but the key entries remain in the map ({@code size()} unchanged).
-     * The caller must discard this instance after draining — it is not
-     * reused in place.
-     *
-     * <p>The returned map is reused between calls to reduce GC pressure.
-     * The caller must not retain a reference beyond the synchronous
-     * {@code batchConsumer.accept()} callback.
-     *
-     * @return a map of keys to their accumulated counts, never {@code null}
+     * <p>Keys remain in the map (and their LongAdders are reused) so that
+     * concurrent {@code add()} calls do not race with structural removal.
+     * The caller must discard this instance after calling {@code drain()}
+     * — it is not reused in place.
      */
     public Map<String, Long> drain() {
-      Map<String, LongAdder> oldCounters = counters;
-
-      if (reusableResult == null) {
-        reusableResult = new HashMap<>(oldCounters.size());
-      } else {
-        reusableResult.clear();
+      Map<String, Long> result = new HashMap<>(counters.size());
+      if (counters.isEmpty()) {
+        return result;
       }
-      oldCounters.forEach((key, adder) -> {
+      counters.forEach((key, adder) -> {
         long val = adder.sumThenReset();
         if (val > 0) {
-          reusableResult.put(key, val);
+          result.put(key, val);
         }
       });
-      return reusableResult;
+      return result;
     }
   }
 }
