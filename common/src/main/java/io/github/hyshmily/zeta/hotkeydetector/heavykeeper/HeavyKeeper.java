@@ -90,10 +90,9 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p><b>Memory-for-accuracy/performance trade-offs applied here:</b>
  * <ul>
- *   <li>Enlarged decay lookup table ({@link #LOOKUP_TABLE_SIZE} = 65 536) so
- *       hot keys with large counters no longer fall through to the clamped
- *       {@code decay^255} entry — decay probabilities stay accurate up to
- *       65k counts, with a {@link Math#pow} fallback beyond.</li>
+ *   <li>Decay uses a constant per-unit survival probability with a Binomial
+ *       batch of {@code cur} trials, replacing the previous {@code decay^cur}
+ *       formula that made high-count slots effectively immortal.</li>
  *   <li>Per-key {@link SlotLoc} cache ({@link #locCache}) memoises the
  *       Murmur3 fingerprint and pre-computed bucket indices per key, eliminating
  *       the hash + UTF-8 encode + {@code floorMod} cost on the hot path for
@@ -118,9 +117,6 @@ import lombok.extern.slf4j.Slf4j;
 @Internal
 public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
-  /** Pre-computed decay probability lookup table size ({@value}). */
-  private static final int LOOKUP_TABLE_SIZE = 65536;
-
   /**
    * Slot sum threshold above which soft heavy protection kicks in.
    * Slots with {@code slotSums[index] > PROTECTION_THRESHOLD} have their
@@ -137,21 +133,20 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   private static final double MAX_DECAY_RATIO = 0.25;
 
   /**
-   * Minimum increment threshold for the batch-decay fast path. When
-   * {@code increment > BATCH_DECAY_THRESHOLD}, the decay count is
-   * approximated directly from the Binomial expectation and variance
-   * instead of invoking {@link #sampleBinomial}, saving the normal /
-   * Poisson approximation overhead on large increments.
+   * Minimum {@code cur} threshold for the batch-decay fast path. When
+   * {@code cur > BATCH_DECAY_THRESHOLD}, the survival count is
+   * approximated via Gaussian (Binomial expectation and variance) instead
+   * of invoking {@link #sampleBinomial}, saving the exact-sampling overhead.
    */
   private static final int BATCH_DECAY_THRESHOLD = 64;
 
   /**
-   * Increment threshold above which stochastic sampling is replaced by direct
-   * expected-value rounding. When {@code increment > DIRECT_DECAY_THRESHOLD}
+   * {@code cur} threshold above which stochastic sampling is replaced by direct
+   * expected-value rounding. When {@code cur > DIRECT_DECAY_THRESHOLD}
    * (2²⁰ ≈ 1 million), the Binomial variance is negligible relative to the
-   * expectation — the random fluctuation is &lt;0.1% of the decay count — so
-   * {@code (long) Math.round(increment * decayProb)} is used directly,
-   * eliminating random-number generation overhead on huge increments.
+   * expectation — the random fluctuation is &lt;0.1% of the survival count — so
+   * {@code Math.round(cur * survivalProb)} is used directly,
+   * eliminating random-number generation overhead on huge slot sums.
    */
   private static final long DIRECT_DECAY_THRESHOLD = 1 << 20;
 
@@ -172,10 +167,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   @Getter
   private final int minCount;
 
-  /** Pre-computed decay probabilities: {@code decay^i} for {@code i in [0, LOOKUP_TABLE_SIZE)}. */
-  private final double[] lookupTable;
-  /** Pre-computed {@code Math.log(decay)} for numerical fallback when {@code cur >= LOOKUP_TABLE_SIZE}. */
-  private final double logDecay;
+  /** Constant per-unit survival probability ({@code decay}) for collision decay. */
+  private final double survivalProb;
   /**
    * Per-slot fingerprint values (lower 32 bits of 64-bit Murmur3) for collision
    * verification in the Count-Min Sketch. Using 32-bit truncation saves 50%
@@ -336,11 +329,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     this.windowCount = windowCount;
     this.windowStride = windowCount;
 
-    this.lookupTable = new double[LOOKUP_TABLE_SIZE];
-    for (int i = 0; i < LOOKUP_TABLE_SIZE; i++) {
-      lookupTable[i] = Math.pow(decay, i);
-    }
-    this.logDecay = Math.log(decay);
+    this.survivalProb = decay;
 
     int totalSlots = depth * width;
     int stripes = Math.min(2048, Math.max(64, totalSlots >> 4));
@@ -693,20 +682,26 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     long maxCount
   ) {
     ThreadLocalRandom rng = ThreadLocalRandom.current();
-    double decayProb = (cur < LOOKUP_TABLE_SIZE) ? lookupTable[(int) cur] : Math.exp(cur * logDecay);
+    // Constant per-unit survival probability.  Each of the cur existing units
+    // independently survives the collision with probability decay, so the
+    // number of surviving units is Binomial(cur, decay).  This replaces the
+    // previous decay^cur formula which was only valid for a single sequential
+    // decrement and made high-cur slots effectively immortal.
+    double survivalProb = this.survivalProb;
 
-    long decays;
-    if (increment > DIRECT_DECAY_THRESHOLD) {
-      decays = Math.round(increment * decayProb);
-    } else if (increment > BATCH_DECAY_THRESHOLD) {
-      double expected = increment * decayProb;
-      double variance = expected * (1.0 - decayProb);
+    long survivals;
+    if (cur > DIRECT_DECAY_THRESHOLD) {
+      survivals = Math.round(cur * survivalProb);
+    } else if (cur > BATCH_DECAY_THRESHOLD) {
+      double expected = cur * survivalProb;
+      double variance = expected * (1.0 - survivalProb);
       double noise = Math.sqrt(variance) * rng.nextGaussian();
-      decays = Math.round(expected + noise);
-      decays = Math.max(0, Math.min(decays, increment));
+      survivals = Math.round(expected + noise);
+      survivals = Math.max(0, Math.min(survivals, cur));
     } else {
-      decays = sampleBinomial(increment, decayProb, rng);
+      survivals = sampleBinomial(cur, survivalProb, rng);
     }
+    long decays = cur - survivals;
 
     if (cur > PROTECTION_THRESHOLD) {
       long maxDecays = Math.max(1, (long) (cur * MAX_DECAY_RATIO));
