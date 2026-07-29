@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.StalePolicy;
 import io.github.hyshmily.zeta.rule.Rule;
 import java.util.ArrayList;
 import java.util.List;
@@ -250,11 +251,13 @@ public class ZetaReadQuery<T> {
     // (when null caching is allowed) or leaves no entry at all (when
     // disallowed via notAllowNull()).
     Supplier<Object> wrappedPrimary = () -> primaryReader.get();
-    CachePolicy policy = CachePolicy.of(hardTtlMs, softTtlMs, isAllowNullCaching, false);
+    CachePolicy policy = CachePolicy.of(
+      wrappedPrimary, hardTtlMs, softTtlMs, isAllowNullCaching, true, StalePolicy.SOFT_REFRESH
+    );
 
     Optional<Object> result = switch (cacheMode) {
-      case GET -> zeta.get(cacheKey, wrappedPrimary, policy);
-      case GET_WITH_SOFT_EXPIRE -> zeta.getWithSoftExpire(cacheKey, wrappedPrimary, policy);
+      case GET -> zeta.get(cacheKey, policy);
+      case GET_WITH_SOFT_EXPIRE -> zeta.getWithSoftExpire(cacheKey, policy);
     };
 
     if (result.isPresent()) {

@@ -233,8 +233,11 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
+  @SuppressWarnings("unchecked")
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader) {
-    return computeIfAbsent(cacheKey, loader, 0L, 0L, true);
+    return (V) computeIfAbsent(cacheKey, CachePolicy.of(loader, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)).orElse(
+      null
+    );
   }
 
   /**
@@ -249,8 +252,12 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
+  @SuppressWarnings("unchecked")
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs) {
-    return computeIfAbsent(cacheKey, loader, hardTtlMs, 0L, true);
+    return (V) computeIfAbsent(
+      cacheKey,
+      CachePolicy.of(loader, hardTtlMs, 0L, true, true, StalePolicy.SOFT_REFRESH)
+    ).orElse(null);
   }
 
   /**
@@ -265,66 +272,32 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
+  @SuppressWarnings("unchecked")
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
-    return computeIfAbsent(cacheKey, loader, hardTtlMs, softTtlMs, true);
+    return (V) computeIfAbsent(
+      cacheKey,
+      CachePolicy.of(loader, hardTtlMs, softTtlMs, true, true, StalePolicy.SOFT_REFRESH)
+    ).orElse(null);
   }
 
   /**
-   * Truly atomic computeIfAbsent with explicit hard and soft TTLs.
+   * Compute-if-absent with an explicit {@link CachePolicy}.  The policy carries
+   * the reader, TTLs, null-caching decision, and report-allow flag — all
+   * parameters that were previously spread across a long parameter list.
    *
-   * @param cacheKey  the key to retrieve
-   * @param loader    the value supplier for cache misses
-   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
-   * @param softTtlMs soft TTL override (0 = use configured default)
-   * @param <V>       the value type
-   * @return the cached or loaded value, or {@code null} if the loader returned {@code null}
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @param cacheKey the key to retrieve
+   * @param policy   the resolved per-invocation cache policy (carries reader,
+   *                 TTLs, null-caching, stale-policy, and report-allow flag)
+   * @param <T>      the value type
+   * @return an {@link Optional} containing the cached or loaded value
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
-  public <V> V computeIfAbsent(
-    String cacheKey,
-    Supplier<V> loader,
-    long hardTtlMs,
-    long softTtlMs,
-    boolean allowReport
-  ) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(loader, "loader must not be null");
-    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
-    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
+  @SuppressWarnings("all")
+  public <T> Optional<T> computeIfAbsent(String cacheKey, CachePolicy policy) {
+    Objects.requireNonNull(policy, "policy must not be null");
     requireAppCache("computeIfAbsent");
     requireAppDetector("computeIfAbsent");
-    return hotKeyCache.computeIfAbsent(cacheKey, loader, hardTtlMs, softTtlMs, allowReport).orElse(null);
-  }
-
-  /**
-   * Truly atomic computeIfAbsent with soft-expire, controlling all parameters.
-   * All other convenience overloads funnel through this method.
-   */
-  public <V> V computeIfAbsentWithSoftExpire(
-    String cacheKey,
-    Supplier<V> loader,
-    long hardTtlMs,
-    long softTtlMs,
-    boolean nullCaching,
-    StalePolicy stalePolicy,
-    boolean allowReport
-  ) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(loader, "loader must not be null");
-    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
-    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
-    Objects.requireNonNull(stalePolicy, "stalePolicy must not be null");
-    requireAppCache("computeIfAbsent");
-    requireAppDetector("computeIfAbsent");
-    return hotKeyCache
-      .computeIfAbsentWithSoftExpire(
-        cacheKey,
-        loader,
-        CachePolicy.of(hardTtlMs, softTtlMs, nullCaching, false, stalePolicy),
-        allowReport
-      )
-      .orElse(null);
+    return hotKeyCache.computeIfAbsent(cacheKey, policy);
   }
 
   /**
@@ -332,8 +305,12 @@ public class Zeta implements DisposableBean {
    * configuration (no TTL override, null caching enabled,
    * {@link StalePolicy#SOFT_REFRESH}, reporting enabled).
    */
+  @SuppressWarnings("unchecked")
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader) {
-    return computeIfAbsentWithSoftExpire(cacheKey, loader, 0L, 0L, true, StalePolicy.SOFT_REFRESH, true);
+    return (V) computeIfAbsentWithSoftExpire(
+      cacheKey,
+      CachePolicy.of(loader, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
+    ).orElse(null);
   }
 
   /**
@@ -345,8 +322,12 @@ public class Zeta implements DisposableBean {
    * @param <V>       the value type
    * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
    */
+  @SuppressWarnings("unchecked")
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long softTtlMs) {
-    return computeIfAbsentWithSoftExpire(cacheKey, loader, 0L, softTtlMs, true, StalePolicy.SOFT_REFRESH, true);
+    return (V) computeIfAbsentWithSoftExpire(
+      cacheKey,
+      CachePolicy.of(loader, 0L, softTtlMs, true, true, StalePolicy.SOFT_REFRESH)
+    ).orElse(null);
   }
 
   /**
@@ -359,94 +340,12 @@ public class Zeta implements DisposableBean {
    * @param <V>       the value type
    * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
    */
+  @SuppressWarnings("unchecked")
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
-    return computeIfAbsentWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs, true, StalePolicy.SOFT_REFRESH, true);
-  }
-
-  /**
-   * Truly atomic computeIfAbsent with soft-expire and explicit stale policy.
-   *
-   * @param cacheKey    the key to retrieve
-   * @param loader      the value supplier for cache misses / refreshes
-   * @param stalePolicy what to do on soft-expire
-   * @param <V>         the value type
-   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
-   */
-  public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, StalePolicy stalePolicy) {
-    return computeIfAbsentWithSoftExpire(cacheKey, loader, 0L, 0L, true, stalePolicy, true);
-  }
-
-  /**
-   * Truly atomic computeIfAbsent with soft-expire, explicit hard/soft TTLs, and reporting control.
-   *
-   * @param cacheKey    the key to retrieve
-   * @param loader      the value supplier for cache misses / refreshes
-   * @param hardTtlMs   hard TTL override (0 = use configured default)
-   * @param softTtlMs   soft TTL override (0 = use configured default)
-   * @param allowReport whether to allow reporting this access to the Worker
-   * @param <V>         the value type
-   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
-   */
-  public <V> V computeIfAbsentWithSoftExpire(
-    String cacheKey,
-    Supplier<V> loader,
-    long hardTtlMs,
-    long softTtlMs,
-    boolean allowReport
-  ) {
-    return computeIfAbsentWithSoftExpire(
+    return (V) computeIfAbsentWithSoftExpire(
       cacheKey,
-      loader,
-      hardTtlMs,
-      softTtlMs,
-      true,
-      StalePolicy.SOFT_REFRESH,
-      allowReport
-    );
-  }
-
-  /**
-   * Truly atomic computeIfAbsent with soft-expire, explicit hard/soft TTLs, and stale policy.
-   *
-   * @param cacheKey    the key to retrieve
-   * @param loader      the value supplier for cache misses / refreshes
-   * @param hardTtlMs   hard TTL override (0 = use configured default)
-   * @param softTtlMs   soft TTL override (0 = use configured default)
-   * @param stalePolicy what to do on soft-expire
-   * @param <V>         the value type
-   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
-   */
-  public <V> V computeIfAbsentWithSoftExpire(
-    String cacheKey,
-    Supplier<V> loader,
-    long hardTtlMs,
-    long softTtlMs,
-    StalePolicy stalePolicy
-  ) {
-    return computeIfAbsentWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs, true, stalePolicy, true);
-  }
-
-  /**
-   * Truly atomic computeIfAbsent with soft-expire, explicit hard/soft TTLs, stale policy, and reporting control.
-   *
-   * @param cacheKey    the key to retrieve
-   * @param loader      the value supplier for cache misses / refreshes
-   * @param hardTtlMs   hard TTL override (0 = use configured default)
-   * @param softTtlMs   soft TTL override (0 = use configured default)
-   * @param stalePolicy what to do on soft-expire
-   * @param allowReport whether to allow reporting this access to the Worker
-   * @param <V>         the value type
-   * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
-   */
-  public <V> V computeIfAbsentWithSoftExpire(
-    String cacheKey,
-    Supplier<V> loader,
-    long hardTtlMs,
-    long softTtlMs,
-    StalePolicy stalePolicy,
-    boolean allowReport
-  ) {
-    return computeIfAbsentWithSoftExpire(cacheKey, loader, hardTtlMs, softTtlMs, true, stalePolicy, allowReport);
+      CachePolicy.of(loader, hardTtlMs, softTtlMs, true, true, StalePolicy.SOFT_REFRESH)
+    ).orElse(null);
   }
 
   /**
@@ -459,33 +358,22 @@ public class Zeta implements DisposableBean {
    * refresh is scheduled — so SpEL-based TTL expressions cost nothing on a
    * plain cache hit. When {@link CachePolicy#nullCaching()} is {@code false},
    * a {@code null} loader result leaves no cache entry, so the next call
-   * re-invokes the loader.
+   * re-invokes the loader. The policy also carries the reader and the
+   * report-allow flag, consolidating all per-invocation parameters.
    *
-   * @param cacheKey    the key to retrieve
-   * @param loader      the value supplier for cache misses / refreshes
-   * @param policy      the resolved per-invocation cache policy
-   * @param allowReport whether to allow reporting this access to the Worker
-   * @param <V>         the value type
+   * @param cacheKey the key to retrieve
+   * @param policy   the resolved per-invocation cache policy (carries reader,
+   *                 TTLs, null-caching, stale-policy, and report-allow flag)
+   * @param <T>      the value type
    * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
-  public <V> V computeIfAbsentWithSoftExpire(
-    String cacheKey,
-    Supplier<V> loader,
-    CachePolicy policy,
-    boolean allowReport
-  ) {
+  public <T> Optional<T> computeIfAbsentWithSoftExpire(String cacheKey, CachePolicy policy) {
     Objects.requireNonNull(policy, "policy must not be null");
-    return computeIfAbsentWithSoftExpire(
-      cacheKey,
-      loader,
-      policy.hardTtlMs().getAsLong(),
-      policy.softTtlMs().getAsLong(),
-      policy.nullCaching(),
-      policy.stalePolicy(),
-      allowReport
-    );
+    requireAppCache("computeIfAbsentWithSoftExpire");
+    requireAppDetector("computeIfAbsentWithSoftExpire");
+    return hotKeyCache.computeIfAbsentWithSoftExpire(cacheKey, policy);
   }
 
   /**
@@ -580,6 +468,7 @@ public class Zeta implements DisposableBean {
    * @return the previous value, or empty if none existed
    * @throws ZetaBlockedException when the key matches a blocklist rule
    */
+  @SuppressWarnings("all")
   public <T> Optional<T> getAndSet(String cacheKey, Object newValue, long hardTtlMs, long softTtlMs) {
     Assert.hasText(cacheKey, "cacheKey must not be empty");
     Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
@@ -746,28 +635,11 @@ public class Zeta implements DisposableBean {
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader) {
-    return get(cacheKey, reader, 0L, 0L, true);
+    return get(cacheKey, CachePolicy.of(reader, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
   }
 
   /**
-   * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
-   * with explicit reportToWorker control.
-   *
-   * @param cacheKey           the key to retrieve
-   * @param reader             the value supplier for cache misses
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
-   * @param <T>                the value type
-   * @return an {@link Optional} containing the cached or loaded value
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   * @throws ZetaBlockedException when the key matches a blacklist rule
-   */
-  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, boolean isReportByThisTime) {
-    return get(cacheKey, reader, 0L, 0L, isReportByThisTime);
-  }
-
-  /**
-   * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
-   * with explicit hard TTL.
+   * Get with explicit hard TTL.
    *
    * @param cacheKey  the key to retrieve
    * @param reader    the value supplier for cache misses
@@ -778,29 +650,11 @@ public class Zeta implements DisposableBean {
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs) {
-    return get(cacheKey, reader, hardTtlMs, 0L, true);
+    return get(cacheKey, CachePolicy.of(reader, hardTtlMs, 0L, true, true, StalePolicy.SOFT_REFRESH));
   }
 
   /**
-   * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
-   * with explicit hard TTL and reportToWorker control.
-   *
-   * @param cacheKey           the key to retrieve
-   * @param reader             the value supplier for cache misses
-   * @param hardTtlMs          hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
-   * @param <T>                the value type
-   * @return an {@link Optional} containing the cached or loaded value
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   * @throws ZetaBlockedException when the key matches a blacklist rule
-   */
-  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, boolean isReportByThisTime) {
-    return get(cacheKey, reader, hardTtlMs, 0L, isReportByThisTime);
-  }
-
-  /**
-   * Convenience shorthand for {@link #get(String, Supplier, long, long, boolean) get(cacheKey, reader, ...)}
-   * with explicit hard and soft TTLs.
+   * Get with explicit hard and soft TTLs.
    *
    * @param cacheKey  the key to retrieve
    * @param reader    the value supplier for cache misses
@@ -812,53 +666,7 @@ public class Zeta implements DisposableBean {
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
   public <T> Optional<T> get(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
-    return get(cacheKey, reader, hardTtlMs, softTtlMs, true);
-  }
-
-  /**
-   * Get with explicit TTL overrides.
-   * Pass 0 to use the configured default for that TTL type.
-   *
-   * @param cacheKey  the key to retrieve
-   * @param reader    the value supplier for cache misses
-   * @param hardTtlMs hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry — no hard TTL eviction)
-   * @param softTtlMs soft TTL override (0 = use configured default)
-   * @param <T>       the value type
-   * @return an {@link Optional} containing the cached or loaded value
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   * @throws ZetaBlockedException when the key matches a blacklist rule
-   */
-  public <T> Optional<T> get(
-    String cacheKey,
-    Supplier<T> reader,
-    long hardTtlMs,
-    long softTtlMs,
-    boolean isReportByThisTime
-  ) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(reader, "reader must not be null");
-    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
-    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
-    requireAppCache("get");
-    requireAppDetector("get");
-    return hotKeyCache.get(cacheKey, reader, hardTtlMs, softTtlMs, isReportByThisTime);
-  }
-
-  /**
-   * Get with an explicit {@link CachePolicy}, reporting to the Worker.
-   * Convenience shorthand for
-   * {@link #get(String, Supplier, CachePolicy, boolean) get(cacheKey, reader, policy, true)}.
-   *
-   * @param cacheKey the key to retrieve
-   * @param reader   the value supplier for cache misses
-   * @param policy   the resolved per-invocation cache policy
-   * @param <T>      the value type
-   * @return an {@link Optional} containing the cached or loaded value
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   * @throws ZetaBlockedException when the key matches a blacklist rule
-   */
-  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, CachePolicy policy) {
-    return get(cacheKey, reader, policy, true);
+    return get(cacheKey, CachePolicy.of(reader, hardTtlMs, softTtlMs, true, true, StalePolicy.SOFT_REFRESH));
   }
 
   /**
@@ -867,24 +675,23 @@ public class Zeta implements DisposableBean {
    * sentinel is served as an empty hit without re-invoking the reader, and
    * the access is still counted for hot-key detection. When
    * {@link CachePolicy#nullCaching()} is {@code false}, a {@code null} reader
-   * result leaves no cache entry.
+   * result leaves no cache entry. The policy also carries the reader and the
+   * report-allow flag.
    *
    * @param cacheKey the key to retrieve
-   * @param reader   the value supplier for cache misses
-   * @param policy   the resolved per-invocation cache policy
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
+   * @param policy   the resolved per-invocation cache policy (carries reader,
+   *                 TTLs, null-caching, and report-allow flag)
    * @param <T>      the value type
    * @return an {@link Optional} containing the cached or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
-  public <T> Optional<T> get(String cacheKey, Supplier<T> reader, CachePolicy policy, boolean isReportByThisTime) {
+  public <T> Optional<T> get(String cacheKey, CachePolicy policy) {
     Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(reader, "reader must not be null");
     Objects.requireNonNull(policy, "policy must not be null");
     requireAppCache("get");
     requireAppDetector("get");
-    return hotKeyCache.get(cacheKey, reader, policy, isReportByThisTime);
+    return hotKeyCache.get(cacheKey, policy);
   }
 
   /**
@@ -899,26 +706,6 @@ public class Zeta implements DisposableBean {
    */
   public <T> Map<String, Optional<T>> get(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader) {
     return get(cacheKeys, reader, 0L, 0L, true);
-  }
-
-  /**
-   * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}
-   * with explicit reportToWorker control.
-   *
-   * @param cacheKeys          the keys to retrieve
-   * @param reader             the value function for cache misses
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
-   * @param <T>                the value type
-   * @return a map of key → loaded or cached value (never {@code null})
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   * @throws ZetaBlockedException when any key matches a blacklist rule
-   */
-  public <T> Map<String, Optional<T>> get(
-    Iterable<String> cacheKeys,
-    Function<? super String, ? extends T> reader,
-    boolean isReportByThisTime
-  ) {
-    return get(cacheKeys, reader, 0L, 0L, isReportByThisTime);
   }
 
   /**
@@ -939,28 +726,6 @@ public class Zeta implements DisposableBean {
     long hardTtlMs
   ) {
     return get(cacheKeys, reader, hardTtlMs, 0L, true);
-  }
-
-  /**
-   * Convenience shorthand for {@link #get(Iterable, Function, long, long, boolean) get(cacheKeys, reader, ...)}
-   * with explicit hard TTL and reportToWorker control.
-   *
-   * @param cacheKeys          the keys to retrieve
-   * @param reader             the value function for cache misses
-   * @param hardTtlMs          hard TTL override (0 = use configured default; {@link Long#MAX_VALUE} for permanent entry)
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
-   * @param <T>                the value type
-   * @return a map of key → loaded or cached value (never {@code null})
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   * @throws ZetaBlockedException when any key matches a blacklist rule
-   */
-  public <T> Map<String, Optional<T>> get(
-    Iterable<String> cacheKeys,
-    Function<? super String, ? extends T> reader,
-    long hardTtlMs,
-    boolean isReportByThisTime
-  ) {
-    return get(cacheKeys, reader, hardTtlMs, 0L, isReportByThisTime);
   }
 
   /**
@@ -986,7 +751,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Batch variant of {@link #get(String, Supplier, long, long, boolean)}.
+   * Batch variant of {@link #get(String, CachePolicy)}.
    * All keys share the same explicit TTL overrides.
    *
    * @param cacheKeys  the keys to retrieve
@@ -1017,33 +782,6 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Get with soft-expire, controlling all parameters directly.
-   */
-  public <T> Optional<T> getWithSoftExpire(
-    String cacheKey,
-    Supplier<T> reader,
-    long hardTtlMs,
-    long softTtlMs,
-    boolean nullCaching,
-    StalePolicy stalePolicy,
-    boolean isReportByThisTime
-  ) {
-    Assert.hasText(cacheKey, "cacheKey must not be empty");
-    Objects.requireNonNull(reader, "reader must not be null");
-    Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
-    Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
-    Objects.requireNonNull(stalePolicy, "stalePolicy must not be null");
-    requireAppCache("getWithSoftExpire");
-    requireAppDetector("getWithSoftExpire");
-    return hotKeyCache.getWithSoftExpire(
-      cacheKey,
-      reader,
-      CachePolicy.of(hardTtlMs, softTtlMs, nullCaching, false, stalePolicy),
-      isReportByThisTime
-    );
-  }
-
-  /**
    * Get with soft-expire using all-default configuration.
    *
    * @param cacheKey the key to retrieve
@@ -1052,7 +790,7 @@ public class Zeta implements DisposableBean {
    * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader) {
-    return getWithSoftExpire(cacheKey, reader, 0L, 0L, true, StalePolicy.SOFT_REFRESH, true);
+    return getWithSoftExpire(cacheKey, CachePolicy.of(reader, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
   }
 
   /**
@@ -1065,7 +803,7 @@ public class Zeta implements DisposableBean {
    * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long softTtlMs) {
-    return getWithSoftExpire(cacheKey, reader, 0L, softTtlMs, true, StalePolicy.SOFT_REFRESH, true);
+    return getWithSoftExpire(cacheKey, CachePolicy.of(reader, 0L, softTtlMs, true, true, StalePolicy.SOFT_REFRESH));
   }
 
   /**
@@ -1079,158 +817,33 @@ public class Zeta implements DisposableBean {
    * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    */
   public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, long hardTtlMs, long softTtlMs) {
-    return getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, true, StalePolicy.SOFT_REFRESH, true);
-  }
-
-  /**
-   * Get with soft-expire and explicit reporting control.
-   *
-   * @param cacheKey           the key to retrieve
-   * @param reader             the value supplier for cache misses / refreshes
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
-   * @param <T>                the value type
-   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
-   */
-  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, boolean isReportByThisTime) {
-    return getWithSoftExpire(cacheKey, reader, 0L, 0L, true, StalePolicy.SOFT_REFRESH, isReportByThisTime);
-  }
-
-  /**
-   * Get with soft-expire and explicit stale policy.
-   *
-   * @param cacheKey    the key to retrieve
-   * @param reader      the value supplier for cache misses / refreshes
-   * @param stalePolicy what to do on soft-expire
-   * @param <T>         the value type
-   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
-   */
-  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, StalePolicy stalePolicy) {
-    return getWithSoftExpire(cacheKey, reader, 0L, 0L, true, stalePolicy, true);
-  }
-
-  /**
-   * Get with soft-expire, explicit hard/soft TTL overrides, and reporting control.
-   *
-   * @param cacheKey           the key to retrieve
-   * @param reader             the value supplier for cache misses / refreshes
-   * @param hardTtlMs          hard TTL override (0 = use configured default)
-   * @param softTtlMs          soft TTL override (0 = use configured default)
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
-   * @param <T>                the value type
-   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
-   */
-  public <T> Optional<T> getWithSoftExpire(
-    String cacheKey,
-    Supplier<T> reader,
-    long hardTtlMs,
-    long softTtlMs,
-    boolean isReportByThisTime
-  ) {
     return getWithSoftExpire(
       cacheKey,
-      reader,
-      hardTtlMs,
-      softTtlMs,
-      true,
-      StalePolicy.SOFT_REFRESH,
-      isReportByThisTime
+      CachePolicy.of(reader, hardTtlMs, softTtlMs, true, true, StalePolicy.SOFT_REFRESH)
     );
   }
 
   /**
-   * Get with soft-expire, explicit hard/soft TTL overrides, and stale policy.
-   *
-   * @param cacheKey    the key to retrieve
-   * @param reader      the value supplier for cache misses / refreshes
-   * @param hardTtlMs   hard TTL override (0 = use configured default)
-   * @param softTtlMs   soft TTL override (0 = use configured default)
-   * @param stalePolicy what to do on soft-expire
-   * @param <T>         the value type
-   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
-   */
-  public <T> Optional<T> getWithSoftExpire(
-    String cacheKey,
-    Supplier<T> reader,
-    long hardTtlMs,
-    long softTtlMs,
-    StalePolicy stalePolicy
-  ) {
-    return getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, true, stalePolicy, true);
-  }
-
-  /**
-   * Get with soft-expire, explicit hard/soft TTL overrides, stale policy, and reporting control.
-   *
-   * @param cacheKey           the key to retrieve
-   * @param reader             the value supplier for cache misses / refreshes
-   * @param hardTtlMs          hard TTL override (0 = use configured default)
-   * @param softTtlMs          soft TTL override (0 = use configured default)
-   * @param stalePolicy        what to do on soft-expire
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
-   * @param <T>                the value type
-   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
-   */
-  public <T> Optional<T> getWithSoftExpire(
-    String cacheKey,
-    Supplier<T> reader,
-    long hardTtlMs,
-    long softTtlMs,
-    StalePolicy stalePolicy,
-    boolean isReportByThisTime
-  ) {
-    return getWithSoftExpire(cacheKey, reader, hardTtlMs, softTtlMs, true, stalePolicy, isReportByThisTime);
-  }
-
-  /**
-   * Get with soft-expire and an explicit {@link CachePolicy}, reporting to Worker.
+   * Get with soft-expire and an explicit {@link CachePolicy}. Serves valid
+   * {@code NullValue} sentinels as empty hits without reloading. The policy
+   * carries the reader, TTLs, null-caching, stale-policy, and report-allow
+   * flag — all per-invocation parameters consolidated in a single object.
    *
    * @param cacheKey the key to retrieve
-   * @param reader   the value supplier for cache misses / refreshes
-   * @param policy   the resolved per-invocation cache policy (TTL, null-caching, stale-policy)
+   * @param policy   the resolved per-invocation cache policy (carries reader,
+   *                 TTLs, null-caching, stale-policy, and report-allow flag)
    * @param <T>      the value type
    * @return an {@link Optional} containing the cached (possibly stale) or loaded value
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
-  public <T> Optional<T> getWithSoftExpire(String cacheKey, Supplier<T> reader, CachePolicy policy) {
-    return getWithSoftExpire(
-      cacheKey,
-      reader,
-      policy.hardTtlMs().getAsLong(),
-      policy.softTtlMs().getAsLong(),
-      policy.nullCaching(),
-      policy.stalePolicy(),
-      true
-    );
-  }
-
-  /**
-   * Get with soft-expire and an explicit {@link CachePolicy} with explicit reporting control.
-   *
-   * @param cacheKey           the key to retrieve
-   * @param reader             the value supplier for cache misses / refreshes
-   * @param policy             the resolved per-invocation cache policy (TTL, null-caching, stale-policy)
-   * @param isReportByThisTime whether to reportToWorker this access to the Worker
-   * @param <T>                the value type
-   * @return an {@link Optional} containing the cached (possibly stale) or loaded value
-   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
-   * @throws ZetaBlockedException when the key matches a blacklist rule
-   */
-  public <T> Optional<T> getWithSoftExpire(
-    String cacheKey,
-    Supplier<T> reader,
-    CachePolicy policy,
-    boolean isReportByThisTime
-  ) {
-    return getWithSoftExpire(
-      cacheKey,
-      reader,
-      policy.hardTtlMs().getAsLong(),
-      policy.softTtlMs().getAsLong(),
-      policy.nullCaching(),
-      policy.stalePolicy(),
-      isReportByThisTime
-    );
+  @SuppressWarnings("all")
+  public <T> Optional<T> getWithSoftExpire(String cacheKey, CachePolicy policy) {
+    Assert.hasText(cacheKey, "cacheKey must not be empty");
+    Objects.requireNonNull(policy, "policy must not be null");
+    requireAppCache("getWithSoftExpire");
+    requireAppDetector("getWithSoftExpire");
+    return hotKeyCache.getWithSoftExpire(cacheKey, policy);
   }
 
   /**
@@ -1317,7 +930,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Batch variant of {@link #getWithSoftExpire(String, Supplier, long, long, boolean)}.
+   * Batch variant of {@link #getWithSoftExpire(String, CachePolicy)}.
    * All keys share the same explicit TTL overrides.
    *
    * @param cacheKeys  the keys to retrieve
@@ -1808,7 +1421,8 @@ public class Zeta implements DisposableBean {
     ScheduledFuture<?> prev = refreshFutures.put(
       key,
       getScheduler().scheduleWithFixedDelay(
-        () -> getWithSoftExpire(key, supplier, hardTtlMs, softTtlMs, true),
+        () ->
+          getWithSoftExpire(key, CachePolicy.of(supplier, hardTtlMs, softTtlMs, true, true, StalePolicy.SOFT_REFRESH)),
         intervalMs,
         intervalMs,
         TimeUnit.MILLISECONDS

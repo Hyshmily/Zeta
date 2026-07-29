@@ -32,7 +32,9 @@ import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.model.KeyState;
+import io.github.hyshmily.zeta.model.StalePolicy;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.Rule.RuleAction;
@@ -206,7 +208,7 @@ class ZetaCacheTest {
   @Test
   void get_shouldReturnCachedValueOnHit() {
     caffeineCache.put("key1", "rawValue");
-    assertThat(hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true)).contains("rawValue");
+    assertThat(hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("rawValue");
   }
 
   /**
@@ -216,7 +218,7 @@ class ZetaCacheTest {
   void get_shouldLoadAndCacheOnMiss() {
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loadedValue"));
 
-    Optional<String> result = hotKeyCache.get("key1", () -> "loadedValue", 0L, 0L, true);
+    Optional<String> result = hotKeyCache.get("key1", CachePolicy.of(() -> "loadedValue", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
     assertThat(result).contains("loadedValue");
     assertThat(caffeineCache.getIfPresent("key1")).isNotNull();
   }
@@ -226,8 +228,8 @@ class ZetaCacheTest {
    */
   @Test
   void get_shouldReturnEmptyForInvalidKey() {
-    assertThat(hotKeyCache.get(null, () -> "v", 0L, 0L, true)).isEmpty();
-    assertThat(hotKeyCache.get("", () -> "v", 0L, 0L, true)).isEmpty();
+    assertThat(hotKeyCache.get(null, CachePolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).isEmpty();
+    assertThat(hotKeyCache.get("", CachePolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).isEmpty();
   }
 
   /**
@@ -277,7 +279,7 @@ class ZetaCacheTest {
   @Test
   void get_shouldThrowZeta() {
     hotKeyCache.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.get("secret", () -> "db", 0L, 0L, true)).isInstanceOf(
+    assertThatThrownBy(() -> hotKeyCache.get("secret", CachePolicy.of(() -> "db", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).isInstanceOf(
       ZetaBlockedException.class
     );
   }
@@ -288,7 +290,7 @@ class ZetaCacheTest {
   @Test
   void getWithSoftExpire_shouldThrowZeta() {
     hotKeyCache.addBlacklist("secret");
-    assertThatThrownBy(() -> hotKeyCache.getWithSoftExpire("secret", () -> "db", 0L, 0L, true)).isInstanceOf(
+    assertThatThrownBy(() -> hotKeyCache.getWithSoftExpire("secret", CachePolicy.of(() -> "db", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).isInstanceOf(
       ZetaBlockedException.class
     );
   }
@@ -324,7 +326,7 @@ class ZetaCacheTest {
       CacheCompressor.NONE
     );
 
-    assertThat(cache.getWithSoftExpire("key", () -> "loaded", 0L, 0L, true)).contains("loaded");
+    assertThat(cache.getWithSoftExpire("key", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("loaded");
   }
 
   /**
@@ -349,7 +351,7 @@ class ZetaCacheTest {
         .build()
     );
 
-    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "should-not-load", 0L, 0L, true)).contains("cached");
+    assertThat(hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "should-not-load", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("cached");
   }
 
   /**
@@ -376,7 +378,7 @@ class ZetaCacheTest {
     );
 
     // Should return stale value immediately (stale-while-revalidate)
-    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 0L, true)).contains("stale");
+    assertThat(hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("stale");
   }
 
   /**
@@ -686,7 +688,7 @@ class ZetaCacheTest {
         .build()
     );
 
-    assertThat(hotKeyCache.getWithSoftExpire("no-reportToWorker", () -> "fresh", 0L, 0L, true)).contains("v");
+    assertThat(hotKeyCache.getWithSoftExpire("no-reportToWorker", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("v");
   }
 
   // ── get with logically expired entry ──
@@ -711,15 +713,15 @@ class ZetaCacheTest {
     );
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
 
-    assertThat(hotKeyCache.get("expired", () -> "fresh", 0L, 0L, true)).contains("fresh");
+    assertThat(hotKeyCache.get("expired", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("fresh");
   }
 
   // ── getWithSoftExpire: invalid key ──
 
   @Test
   void getWithSoftExpire_withInvalidKey_shouldReturnEmpty() {
-    assertThat(hotKeyCache.getWithSoftExpire(null, () -> "v", 0L, 0L, true)).isEmpty();
-    assertThat(hotKeyCache.getWithSoftExpire("", () -> "v", 0L, 0L, true)).isEmpty();
+    assertThat(hotKeyCache.getWithSoftExpire(null, CachePolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).isEmpty();
+    assertThat(hotKeyCache.getWithSoftExpire("", CachePolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).isEmpty();
   }
 
   // ── getWithSoftExpire: expired entry triggers reload ──
@@ -744,7 +746,7 @@ class ZetaCacheTest {
     );
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
 
-    assertThat(hotKeyCache.getWithSoftExpire("expired", () -> "fresh", 0L, 0L, true)).contains("fresh");
+    assertThat(hotKeyCache.getWithSoftExpire("expired", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("fresh");
   }
 
   // ── getWithSoftExpire: cache miss (no entry) triggers loadAndCache ──
@@ -753,7 +755,7 @@ class ZetaCacheTest {
   void getWithSoftExpire_withCacheMiss_shouldLoad() {
     when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loaded"));
 
-    assertThat(hotKeyCache.getWithSoftExpire("missing", () -> "loaded", 0L, 0L, true)).contains("loaded");
+    assertThat(hotKeyCache.getWithSoftExpire("missing", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("loaded");
   }
 
   // ── unWhitelist with invalid key ──
@@ -771,7 +773,7 @@ class ZetaCacheTest {
   @Test
   void getWithSoftExpire_withNonCacheEntryRawValue_returnsRaw() {
     caffeineCache.put("raw", "bare-string");
-    assertThat(hotKeyCache.getWithSoftExpire("raw", () -> "fresh", 0L, 0L, true)).contains("bare-string");
+    assertThat(hotKeyCache.getWithSoftExpire("raw", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("bare-string");
   }
 
   // ── getWithSoftExpire with NORMAL entry and soft expired ──
@@ -795,7 +797,7 @@ class ZetaCacheTest {
         .build()
     );
 
-    Optional<String> result = hotKeyCache.getWithSoftExpire("normal", () -> "fresh", 0L, 0L, true);
+    Optional<String> result = hotKeyCache.getWithSoftExpire("normal", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
     assertThat(result).contains("stale");
   }
@@ -1119,7 +1121,7 @@ class ZetaCacheTest {
   void get_withNoReportRule_shouldReturnCached() {
     hotKeyCache.addWhitelist("no-reportToWorker");
     caffeineCache.put("no-reportToWorker", "v");
-    assertThat(hotKeyCache.get("no-reportToWorker", () -> "fresh", 0L, 0L, true)).contains("v");
+    assertThat(hotKeyCache.get("no-reportToWorker", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("v");
   }
 
   // ── getWithSoftExpire with TTL override ──
@@ -1142,7 +1144,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 500L, true)).contains("cached");
+    assertThat(hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 500L, true, true, StalePolicy.SOFT_REFRESH))).contains("cached");
   }
 
   // ── putThrough with TTL overrides ──
@@ -1185,7 +1187,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    assertThat(hotKeyCache.getWithSoftExpire("key", () -> "fresh", 10000L, 500L, true)).contains("cached");
+    assertThat(hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 10000L, 500L, true, true, StalePolicy.SOFT_REFRESH))).contains("cached");
   }
 
   // ── broadcastAllLocalRulesManually (no publisher) ──
@@ -1263,7 +1265,7 @@ class ZetaCacheTest {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(singleFlight.load(eq("key1"), any())).thenReturn(Optional.of("value"));
 
-      Optional<String> result = hotKeyCache.get("key1", () -> "value", 0L, 0L, true);
+      Optional<String> result = hotKeyCache.get("key1", CachePolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       assertThat(result).contains("value");
       Object raw = caffeineCache.getIfPresent("key1");
@@ -1298,7 +1300,7 @@ class ZetaCacheTest {
         return Optional.ofNullable(reader.get());
       });
 
-      Optional<String> result = hotKeyCache.get("key1", () -> "newValue", 0L, 0L, true);
+      Optional<String> result = hotKeyCache.get("key1", CachePolicy.of(() -> "newValue", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       assertThat(result).contains("newValue");
       Object raw = caffeineCache.getIfPresent("key1");
@@ -1328,7 +1330,7 @@ class ZetaCacheTest {
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 0L, true);
+      hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -1355,7 +1357,7 @@ class ZetaCacheTest {
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 9999L, true);
+      hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 9999L, true, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -1383,7 +1385,7 @@ class ZetaCacheTest {
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
+      hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1413,7 +1415,7 @@ class ZetaCacheTest {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(healthView.isClusterHealthy()).thenReturn(false);
 
-      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
+      hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1443,7 +1445,7 @@ class ZetaCacheTest {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(healthView.isClusterHealthy()).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
+      hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1527,7 +1529,7 @@ class ZetaCacheTest {
       when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("value"));
       when(hotKeyDetector.contains("key1")).thenReturn(false);
 
-      hotKeyCache.get("key1", () -> "value", 50000L, 5000L, true);
+      hotKeyCache.get("key1", CachePolicy.of(() -> "value", 50000L, 5000L, true, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1557,7 +1559,7 @@ class ZetaCacheTest {
           .build()
       );
 
-      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 0L, true);
+      hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -1585,7 +1587,7 @@ class ZetaCacheTest {
       );
       when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
 
-      hotKeyCache.getWithSoftExpire("key", () -> "fresh", 0L, 0L, true);
+      hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
@@ -1597,7 +1599,7 @@ class ZetaCacheTest {
       when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("hot-value"));
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "hot-value", 80000L, 8000L, true);
+      hotKeyCache.get("key1", CachePolicy.of(() -> "hot-value", 80000L, 8000L, true, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("key1");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1614,7 +1616,7 @@ class ZetaCacheTest {
       when(singleFlight.load(eq("noreport-hot"), any())).thenReturn(Optional.of("value"));
       when(hotKeyDetector.contains("noreport-hot")).thenReturn(true);
 
-      hotKeyCache.get("noreport-hot", () -> "value", 0L, 0L, true);
+      hotKeyCache.get("noreport-hot", CachePolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("noreport-hot");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1628,7 +1630,7 @@ class ZetaCacheTest {
       when(singleFlight.load(eq("noreport-normal"), any())).thenReturn(Optional.of("value"));
       when(hotKeyDetector.contains("noreport-normal")).thenReturn(false);
 
-      hotKeyCache.get("noreport-normal", () -> "value", 0L, 0L, true);
+      hotKeyCache.get("noreport-normal", CachePolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       Object raw = caffeineCache.getIfPresent("noreport-normal");
       assertThat(raw).isInstanceOf(CacheEntry.class);
@@ -1657,7 +1659,7 @@ class ZetaCacheTest {
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
+      hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isGreaterThan(originalExpireAt);
@@ -1685,7 +1687,7 @@ class ZetaCacheTest {
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
+      hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isEqualTo(futureExpireAt);
@@ -1712,7 +1714,7 @@ class ZetaCacheTest {
       );
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
-      hotKeyCache.get("key1", () -> "loaded", 0L, 0L, true);
+      hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
       assertThat(entry.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
@@ -1743,7 +1745,7 @@ class ZetaCacheTest {
         return Optional.ofNullable(reader.get());
       });
 
-      Optional<String> result = hotKeyCache.get("key1", () -> "newValue", 0L, 0L, true);
+      Optional<String> result = hotKeyCache.get("key1", CachePolicy.of(() -> "newValue", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       assertThat(result).contains("newValue");
       Object raw = caffeineCache.getIfPresent("key1");

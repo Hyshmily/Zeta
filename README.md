@@ -234,6 +234,17 @@ See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 
 See [CONFIG.md](docs/CONFIG.md) for the full property reference.
 
+**Tag Operations** (feed detection without cache read)
+
+```java
+// K. tag — mark a key as potentially hot, no cache read
+zeta.tag("product:456"); // updates local TopK + enqueues Worker report
+
+// L. tag with fine-grained control
+zeta.tag("product:456", true, false); // skip detection, still report to Worker
+zeta.tag("product:456", false, true); // detect locally, skip Worker report
+```
+
 **Read Operations**
 
 ```java
@@ -261,17 +272,6 @@ User user = zeta
   .withSoftTtl(10_000)
   .allowBroadcast()
   .executeOrNull();
-```
-
-**Tag Operations** (feed detection without cache read)
-
-```java
-// K. tag — mark a key as potentially hot, no cache read
-zeta.tag("product:456"); // updates local TopK + enqueues Worker report
-
-// L. tag with fine-grained control
-zeta.tag("product:456", true, false); // skip detection, still report to Worker
-zeta.tag("product:456", false, true); // detect locally, skip Worker report
 ```
 
 **CachePolicy API** (explicit policy object for per-invocation control)
@@ -337,10 +337,6 @@ zeta.putThrough("weather:" + city, weatherData,
     () -> redisTemplate.opsForValue().set("weather:" + city, weatherData),
     TimeUnit.SECONDS.toMillis(30), 0);
 
-// registerRefresh / updateRefresh — scheduled background refresh (softTtlMs = interval)
-  zeta.registerRefresh("user:123", () -> loadUser(123), 300_000L, 60_000L);  // every 60s
-  zeta.updateRefresh("user:123", () -> loadUser(123), 300_000L, 30_000L);    // change to 30s
-  zeta.unregisterRefresh("user:123");                                         // stop
 ```
 
 > [!NOTE]

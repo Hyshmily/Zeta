@@ -216,7 +216,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
    *   <li>The cached value, {@code dataVersion}, degradation flag, and
    *       {@code decisionVersion} are all preserved — the data remains available.</li>
    *   <li>The hard TTL is reset to the normal value (from
-   *       {@link CacheEntry#getNormalHardTtlMs()}).</li>
+   *       {@code normalHardTtlMs}).</li>
    *   <li>Soft expiration is fully disabled (both {@code softTtlMs} and
    *       {@code softExpireAtMs} set to {@code 0L}), so the entry stops being
    *       proactively refreshed.</li>

@@ -232,6 +232,17 @@ java -jar worker/target/zeta-worker-1.1.55.jar
 
 完整属性参考见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
 
+**标记操作**（不读缓存，仅喂检测）
+
+```java
+// K. tag — 标记 key 为可能热点，不执行缓存读取
+zeta.tag("product:456"); // 更新本地 TopK + 加入 Worker 报告队列
+
+// L. tag 精细控制
+zeta.tag("product:456", true, false); // 跳过检测，仍上报到 Worker
+zeta.tag("product:456", false, true); // 本地检测，跳过 Worker 上报
+```
+
 **读操作**
 
 ```java
@@ -259,17 +270,6 @@ User user = zeta
   .withSoftTtl(10_000)
   .allowBroadcast()
   .executeOrNull();
-```
-
-**标记操作**（不读缓存，仅喂检测）
-
-```java
-// K. tag — 标记 key 为可能热点，不执行缓存读取
-zeta.tag("product:456"); // 更新本地 TopK + 加入 Worker 报告队列
-
-// L. tag 精细控制
-zeta.tag("product:456", true, false); // 跳过检测，仍上报到 Worker
-zeta.tag("product:456", false, true); // 本地检测，跳过 Worker 上报
 ```
 
 **CachePolicy API**（显式策略对象，per-invocation 控制）
@@ -334,11 +334,6 @@ Optional<String> shopJson = zeta.get("shop:" + shopId,
 zeta.putThrough("weather:" + city, weatherData,
     () -> redisTemplate.opsForValue().set("weather:" + city, weatherData),
     TimeUnit.SECONDS.toMillis(30), 0);
-
-//  registerRefresh / updateRefresh — 定时后台刷新（softTtlMs = 间隔）
-  zeta.registerRefresh("user:123", () -> loadUser(123), 300_000L, 60_000L);  // 每 60s
-  zeta.updateRefresh("user:123", () -> loadUser(123), 300_000L, 30_000L);    // 改为 30s
-  zeta.unregisterRefresh("user:123");                                         // 停止
 
 ```
 

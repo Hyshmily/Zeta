@@ -117,8 +117,14 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
       }
     };
 
-    Object result = zeta.computeIfAbsentWithSoftExpire(prefixed, loader, policy, true);
-    return result != null ? (T) fromStoreValue(result) : null;
+    CachePolicy fullPolicy = new CachePolicy(
+      policy.hardTtlMs(), policy.softTtlMs(),
+      policy.nullCaching(), policy.skipBroadcast(),
+      policy.stalePolicy(), loader, policy.reportEnabled()
+    );
+    return zeta.computeIfAbsentWithSoftExpire(prefixed, fullPolicy)
+      .map(v -> (T) fromStoreValue(v))
+      .orElse(null);
   }
 
   @Override

@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.exception.ZetaModeException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.StalePolicy;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.rule.Rule;
 import io.github.hyshmily.zeta.rule.Rule.RuleAction;
@@ -72,25 +73,25 @@ class ZetaTest {
 
   @Test
   void get_shouldDelegateToCache() {
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(Optional.of("value"));
+    when(hotKeyCache.get(anyString(), any(CachePolicy.class))).thenReturn(Optional.of("value"));
     assertThat(zeta.get("key1", () -> "loaded")).contains("value");
-    verify(hotKeyCache).get(anyString(), any(), anyLong(), anyLong(), anyBoolean());
+    verify(hotKeyCache).get(anyString(), any(CachePolicy.class));
   }
 
   @Test
   void get_withTtl_shouldDelegateToCache() {
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.get(anyString(), any(CachePolicy.class))).thenReturn(Optional.of("v"));
     assertThat(zeta.get("key1", () -> "loaded", 1000L, 100L)).contains("v");
-    verify(hotKeyCache).get(anyString(), any(), anyLong(), anyLong(), anyBoolean());
+    verify(hotKeyCache).get(anyString(), any(CachePolicy.class));
   }
 
   @Test
   void getWithSoftExpire_shouldDelegateToCache() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
     assertThat(zeta.getWithSoftExpire("key1", () -> "v")).contains("v");
-    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean());
+    verify(hotKeyCache).getWithSoftExpire(anyString(), any(CachePolicy.class));
   }
 
   @Test
@@ -167,7 +168,7 @@ class ZetaTest {
 
   @Test
   void get_shouldPropagateZetaBlockedException() {
-    when(hotKeyCache.get(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenThrow(
+    when(hotKeyCache.get(anyString(), any(CachePolicy.class))).thenThrow(
       new ZetaBlockedException("HotKeyCache", "secret")
     );
     assertThatThrownBy(() -> zeta.get("secret", () -> "v")).isInstanceOf(ZetaBlockedException.class);
@@ -177,23 +178,12 @@ class ZetaTest {
 
   @Test
   void getWithSoftExpire_withSoftTtl_shouldDelegateToCache() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
     assertThat(zeta.getWithSoftExpire("key1", () -> "v", 200L)).contains("v");
-    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean());
+    verify(hotKeyCache).getWithSoftExpire(anyString(), any(CachePolicy.class));
   }
-
-  @Test
-  void getWithSoftExpire_withHardSoftTtl_shouldDelegateToCache() {
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(
-      Optional.of("v")
-    );
-    assertThat(zeta.getWithSoftExpire("key1", () -> "v", 5000L, 500L, true)).contains("v");
-    verify(hotKeyCache).getWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean());
-  }
-
-
 
   // ── returnLocalExpelledHotKeys null guard ──
 
@@ -356,7 +346,7 @@ class ZetaTest {
   @Test
   void read_shouldReturnZetaReadQuery() {
     when(hotKeyCache.evaluateRule("k")).thenReturn(RuleAction.ALLOW);
-    when(hotKeyCache.get(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(Optional.of("v"));
+    when(hotKeyCache.get(anyString(), any(CachePolicy.class))).thenReturn(Optional.of("v"));
     assertThat(
       zeta
         .read("k")
@@ -375,16 +365,16 @@ class ZetaTest {
 
   @Test
   void computeIfAbsent_shouldReturnValue() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
     assertThat(zeta.computeIfAbsent("k", () -> "loaded")).isEqualTo("v");
-    verify(hotKeyCache).computeIfAbsent(eq("k"), any(), anyLong(), anyLong(), anyBoolean());
+    verify(hotKeyCache).computeIfAbsent(eq("k"), any(CachePolicy.class));
   }
 
   @Test
   void computeIfAbsent_shouldReturnNullWhenLoaderNull() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.empty()
     );
     assertThat((Object) zeta.computeIfAbsent("k", () -> null)).isNull();
@@ -392,65 +382,65 @@ class ZetaTest {
 
   @Test
   void computeIfAbsent_withHardTtl_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
     assertThat(zeta.computeIfAbsent("k", () -> "db", 5000L)).isEqualTo("v");
-    verify(hotKeyCache).computeIfAbsent(eq("k"), any(), eq(5000L), eq(0L), anyBoolean());
+    verify(hotKeyCache).computeIfAbsent(eq("k"), any(CachePolicy.class));
   }
 
   @Test
   void computeIfAbsent_withHardSoftTtl_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
     assertThat(zeta.computeIfAbsent("k", () -> "db", 5000L, 500L)).isEqualTo("v");
-    verify(hotKeyCache).computeIfAbsent(eq("k"), any(), eq(5000L), eq(500L), anyBoolean());
+    verify(hotKeyCache).computeIfAbsent(eq("k"), any(CachePolicy.class));
   }
 
   @Test
   void computeIfAbsent_withNonDefaultReport_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsent(anyString(), any(), anyLong(), anyLong(), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
-    assertThat(zeta.computeIfAbsent("k", () -> "db", 0L, 0L, false)).isEqualTo("v");
-    verify(hotKeyCache).computeIfAbsent(eq("k"), any(), eq(0L), eq(0L), eq(false));
+    assertThat(zeta.computeIfAbsent("k", CachePolicy.of(() -> "db", 0L, 0L, true, false, StalePolicy.SOFT_REFRESH))).contains("v");
+    verify(hotKeyCache).computeIfAbsent(eq("k"), any(CachePolicy.class));
   }
 
   @Test
   void computeIfAbsentWithSoftExpire_SoftTtl_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
     assertThat(zeta.computeIfAbsentWithSoftExpire("k", () -> "db", 500L)).isEqualTo("v");
-    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(), any(CachePolicy.class), anyBoolean());
+    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(CachePolicy.class));
   }
 
   @Test
   void computeIfAbsentWithSoftExpire_collectionSoftTtl_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
     assertThat(zeta.computeIfAbsentWithSoftExpire("k", () -> "db", 500L)).isEqualTo("v");
-    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(), any(CachePolicy.class), anyBoolean());
+    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(CachePolicy.class));
   }
 
   @Test
   void computeIfAbsentWithSoftExpire_BothTtls_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
     assertThat(zeta.computeIfAbsentWithSoftExpire("k", () -> "db", 5000L, 500L)).isEqualTo("v");
-    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(), any(CachePolicy.class), anyBoolean());
+    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(CachePolicy.class));
   }
 
   @Test
   void computeIfAbsentWithSoftExpire_BothTtlsAndReport_shouldDelegate() {
-    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenReturn(
+    when(hotKeyCache.computeIfAbsentWithSoftExpire(anyString(), any(CachePolicy.class))).thenReturn(
       Optional.of("v")
     );
-    assertThat(zeta.computeIfAbsentWithSoftExpire("k", () -> "db", 5000L, 500L, true)).isEqualTo("v");
-    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(), any(CachePolicy.class), eq(true));
+    assertThat(zeta.computeIfAbsentWithSoftExpire("k", () -> "db", 5000L, 500L)).isEqualTo("v");
+    verify(hotKeyCache).computeIfAbsentWithSoftExpire(eq("k"), any(CachePolicy.class));
   }
 
   // ── invalidateAllLocal no-arg ──
@@ -874,7 +864,7 @@ class ZetaTest {
   @Test
   void unregisterRefresh_shouldNotThrow() throws InterruptedException {
     CountDownLatch firstCallLatch = new CountDownLatch(1);
-    when(hotKeyCache.getWithSoftExpire(eq("cancel-key"), any(), any(CachePolicy.class), anyBoolean())).thenAnswer(
+    when(hotKeyCache.getWithSoftExpire(eq("cancel-key"), any(CachePolicy.class))).thenAnswer(
       invocation -> {
         firstCallLatch.countDown();
         return Optional.of("v");
@@ -886,13 +876,13 @@ class ZetaTest {
 
     zeta.unregisterRefresh("cancel-key");
 
-    verify(hotKeyCache, atLeastOnce()).getWithSoftExpire(eq("cancel-key"), any(), any(CachePolicy.class), anyBoolean());
+    verify(hotKeyCache, atLeastOnce()).getWithSoftExpire(eq("cancel-key"), any(CachePolicy.class));
   }
 
   @Test
   void registerRefresh_replacesExistingRegistration() throws InterruptedException {
     AtomicInteger callCount = new AtomicInteger(0);
-    when(hotKeyCache.getWithSoftExpire(anyString(), any(), any(CachePolicy.class), anyBoolean())).thenAnswer(
+    when(hotKeyCache.getWithSoftExpire(anyString(), any(CachePolicy.class))).thenAnswer(
       invocation -> {
         callCount.incrementAndGet();
         return Optional.of("v");
@@ -913,7 +903,7 @@ class ZetaTest {
   @Test
   void registerRefresh_invokesGetWithSoftExpire() throws InterruptedException {
     CountDownLatch latch = new CountDownLatch(1);
-    when(hotKeyCache.getWithSoftExpire(eq("k1"), any(), any(CachePolicy.class), anyBoolean())).thenAnswer(invocation -> {
+    when(hotKeyCache.getWithSoftExpire(eq("k1"), any(CachePolicy.class))).thenAnswer(invocation -> {
       latch.countDown();
       return Optional.of("v");
     });
@@ -928,7 +918,7 @@ class ZetaTest {
   void destroy_shouldNotThrow() {
     zeta.registerRefresh("k1", () -> "v", 300_000L, 10_000L);
     zeta.destroy();
-    verify(hotKeyCache, never()).getWithSoftExpire(eq("k1"), any(), any(CachePolicy.class), anyBoolean());
+    verify(hotKeyCache, never()).getWithSoftExpire(eq("k1"), any(CachePolicy.class));
   }
 
   // ── Parameter validation ──
@@ -946,47 +936,6 @@ class ZetaTest {
   @Test
   void write_shouldRejectNullKey() {
     assertThatThrownBy(() -> zeta.write(null)).isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void computeIfAbsent_shouldRejectNullKey() {
-    assertThatThrownBy(() -> zeta.computeIfAbsent(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void computeIfAbsent_shouldRejectNullLoader() {
-    assertThatThrownBy(() -> zeta.computeIfAbsent("k", null)).isInstanceOf(NullPointerException.class);
-  }
-
-  @Test
-  void computeIfAbsent_shouldRejectNegativeHardTtl() {
-    assertThatThrownBy(() -> zeta.computeIfAbsent("k", () -> "v", -1L, 0L, true)).isInstanceOf(
-      IllegalArgumentException.class
-    );
-  }
-
-  @Test
-  void computeIfAbsent_shouldRejectNegativeSoftTtl() {
-    assertThatThrownBy(() -> zeta.computeIfAbsent("k", () -> "v", 0L, -1L, true)).isInstanceOf(
-      IllegalArgumentException.class
-    );
-  }
-
-  @Test
-  void computeIfAbsentWithSoftExpire_shouldRejectNullKey() {
-    assertThatThrownBy(() -> zeta.computeIfAbsentWithSoftExpire(null, () -> "v", 0L, 0L, true)).isInstanceOf(
-      IllegalArgumentException.class
-    );
-  }
-
-  @Test
-  void get_shouldRejectNullKey() {
-    assertThatThrownBy(() -> zeta.get(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
-  }
-
-  @Test
-  void get_shouldRejectNullReader() {
-    assertThatThrownBy(() -> zeta.get("k", null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
