@@ -115,6 +115,25 @@ class SnowflakeIdGeneratorTest {
     }
   }
 
+  /**
+   * Verifies that {@code Long.MIN_VALUE + snowflakeId} never overflows to
+   * positive — a critical invariant for the degraded version path (ADR-0019).
+   *
+   * <p>Snowflake uses 1 sign bit + 63 data bits, so the max ID is {@code 2^63-1}
+   * ({@link Long#MAX_VALUE}). Adding {@link Long#MIN_VALUE} yields {@code -1}.
+   * If a future refactoring widens the data bits beyond 63, this test fails.
+   */
+  @Test
+  void degradedVersionInvariantShouldHold() {
+    long maxSnowflakeId = Long.MAX_VALUE;
+    assertThat(Long.MIN_VALUE + maxSnowflakeId).isNegative();
+
+    var gen = new SnowflakeIdGenerator(3, 255);
+    for (int i = 0; i < 100_000; i++) {
+      assertThat(Long.MIN_VALUE + gen.nextId()).isNegative();
+    }
+  }
+
   @Test
   void defaultConstructorShouldWork() {
     var gen = new SnowflakeIdGenerator();

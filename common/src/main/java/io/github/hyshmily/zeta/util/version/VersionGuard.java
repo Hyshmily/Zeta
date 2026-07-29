@@ -34,10 +34,12 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <ul>
  *   <li><b>{@link #shouldSkipForWorker}</b> — Compares {@code decisionVersion}
- *       from Worker HOT/COOL broadcasts. Degraded entries (created during a
- *       Redis outage) unconditionally accept incoming decisions, providing a
- *       safety net against Worker restarts that reset the {@code AtomicLong}
- *       counter (see ADR-0008, ADR-0009).</li>
+ *       from Worker HOT/COOL broadcasts. Uses epoch (Worker incarnation,
+ *       ADR-0010) and nodeId for cross-restart and cross-Worker ordering.
+ *       Unlike {@code shouldSkipForSync}, the Worker-path guard does not
+ *       consider the {@code isVersionDegraded} flag: the epoch mechanism
+ *       already provides the safety net during Redis outages, and the
+ *       degraded flag belongs to the {@code dataVersion} domain only.</li>
  *   <li><b>{@link #shouldSkipForSync}</b> — Compares {@code dataVersion}
  *       from application-level data-mutation broadcasts. Uses a 4-case degraded
  *       comparison matrix:
@@ -69,8 +71,7 @@ public final class VersionGuard {
    * WorkerListener guard with epoch and node-id awareness.
    * <p>Decision logic:
    * <ol>
-   *   <li>No existing entry → accept (return false)</li>
-   *   <li>Existing entry is degraded → accept unconditionally (safety net)</li>
+   * <li>No existing entry → accept (return false)</li>
    *   <li>Incoming epoch &gt; existing epoch → accept unconditionally
    *       (Worker restart detected — ADR-0010)</li>
    *   <li>Incoming epoch &lt; existing epoch → skip (stale incarnation message)</li>
@@ -96,23 +97,19 @@ public final class VersionGuard {
     if (existing == null) {
       return false;
     }
-    if (existing.isVersionDegraded()) {
-      return false;
-    }
 
     if (incomingEpoch > existing.getDecisionEpoch()) {
       return false;
     }
     if (incomingEpoch < existing.getDecisionEpoch()) {
-      // Detect severe epoch rollback (e.g., timestamp-space fallback → Redis INCR
-      // without floor guard). This is a "Worker incarnation failed" strong signal.
-      if (existing.getDecisionEpoch() - incomingEpoch > 1_000_000_000L) {
-        log.warn(
-          "Severe epoch rollback detected: existing={}, incoming={}, nodeId={} — " +
-            "Worker incarnation change likely lost, decisions for this key will be skipped",
-          existing.getDecisionEpoch(), incomingEpoch, incomingNodeId
-        );
-      }
+      // Stale message from an old Worker incarnation — the epoch comparison
+      // already ensures correct ordering regardless of magnitude.
+      log.debug(
+        "Epoch rollback: existing={}, incoming={}, nodeId={} — skipping stale message",
+        existing.getDecisionEpoch(),
+        incomingEpoch,
+        incomingNodeId
+      );
       return true;
     }
 
@@ -124,63 +121,6 @@ public final class VersionGuard {
     // accept unconditionally.  Counter values are not comparable across
     // Workers; convergence happens via the next epoch.
     return false;
-  }
-
-  /**
-   * WorkerListener guard for use inside an atomic {@code compute} block: the caller
-   * already holds the existing entry reference, so no redundant {@code getIfPresent}
-   * is needed.
-   *
-   * <p>Returns {@code false} (accept) for any of the following:
-   * <ul>
-   *   <li>No existing entry ({@code null})</li>
-   *   <li>Existing entry is degraded ({@code isVersionDegraded == true}) —
-   *       yields to any incoming decision, even one with a lower version,
-   *       because the degraded entry was written during a Redis outage</li>
-   * </ul>
-   *
-   * Otherwise, skips when the existing entry's {@code decisionVersion} is
-   * {@code >=} the incoming version.
-   *
-   * @param existing                 the existing cache entry; may be {@code null}
-   * @param incomingDecisionVersion  the decision version from the incoming Worker message;
-   *                                 must be non-negative in normal operation
-   * @return {@code true} if the incoming message should be skipped, {@code false}
-   *         if the decision should be applied
-   */
-  public static boolean shouldSkipForWorker(CacheEntry existing, long incomingDecisionVersion) {
-    if (existing == null) {
-      return false;
-    }
-    if (existing.isVersionDegraded()) {
-      return false;
-    }
-    return existing.getDecisionVersion() >= incomingDecisionVersion;
-  }
-
-  /**
-   * WorkerListener guard with a cache-level fast path using legacy 3-argument signature.
-   * Delegates to the 5-argument overload with {@code null} node ID and {@code 0} epoch.
-   *
-   * <p><b>Deprecated:</b> The fixed {@code null, 0} delegation means this overload
-   * always skips any entry that has been written by a Worker (epoch &ge; 1). Use the
-   * 5-argument overload with explicit {@code nodeId} and {@code epoch} instead.
-   *
-   * @param cache                    the local Caffeine L1 cache; must not be null
-   * @param cacheKey                 the cache key to look up; must not be null
-   * @param incomingDecisionVersion  the decision version from the incoming Worker message
-   * @return {@code true} if the incoming message should be skipped (existing entry
-   *         is already up-to-date); {@code false} if the decision may need to be applied
-   * @deprecated epoch-unaware — do not use for new code; prefer
-   *             {@link #shouldSkipForWorker(Cache, String, long, String, long)}
-   */
-  @Deprecated
-  public static boolean shouldSkipForWorker(
-    Cache<String, Object> cache,
-    String cacheKey,
-    long incomingDecisionVersion
-  ) {
-    return shouldSkipForWorker(cache, cacheKey, incomingDecisionVersion, null, 0);
   }
 
   /**

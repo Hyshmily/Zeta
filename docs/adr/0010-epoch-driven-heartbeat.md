@@ -17,13 +17,26 @@ The epoch is initialized once in `WorkerAutoConfiguration.workerEpochCounter()` 
 `shouldSkipForWorker()` applies the following ordered rules:
 
 1. **No existing entry** → accept
-2. **Existing entry degraded** → accept unconditionally (safety net)
-3. **Incoming epoch &gt; existing epoch** → accept unconditionally (Worker restart)
-4. **Incoming epoch &lt; existing epoch** → skip (stale incarnation)
-5. **Same epoch, same nodeId** → normal ordering via `decisionVersion`
-6. **Same epoch, different nodeId** → accept unconditionally (last-writer-wins)
+2. **Incoming epoch &gt; existing epoch** → accept unconditionally (Worker restart)
+3. **Incoming epoch &lt; existing epoch** → skip (stale incarnation)
+4. **Same epoch, same nodeId** → normal ordering via `decisionVersion`
+5. **Same epoch, different nodeId** → accept unconditionally (last-writer-wins)
 
-Rule 6 reflects that `decisionVersion` counters are local per Worker and not comparable across Workers. When two Workers share the same epoch (extremely rare — only via fallback paths), cross-Worker unconditional accept converges via the next heartbeat epoch. The App's Local TopK (ADR-0001) provides a safety net during the convergence window.
+Rule 5 reflects that `decisionVersion` counters are local per Worker and not comparable across Workers. When two Workers share the same epoch (extremely rare — only via fallback paths), cross-Worker unconditional accept converges via the next heartbeat epoch. The App's Local TopK (ADR-0001) provides a safety net during the convergence window.
+
+### Degraded Entry Handling (Removed from Worker Path)
+
+A previous version of this ADR specified rule 2 ("existing entry degraded → accept unconditionally"). This rule was removed because it conflated the orthogonal `dataVersion` and `decisionVersion` version spaces (ADR-0008). The `isVersionDegraded` flag reflects whether the `dataVersion` was generated from a local counter during Redis outage — it has no bearing on `decisionVersion` ordering.
+
+Rules 2–5 above already provide complete coverage for the scenarios the degraded check was meant to protect:
+
+| Scenario | Guard |
+|---|---|
+| Worker restarted, entry has stale decision metadata | Rule 2 (higher epoch → accept) |
+| First Worker contact on a locally-written entry | Rule 5 (different/null nodeId → accept) |
+| Same Worker, same incarnation | Rule 4 (`decisionVersion` comparison) |
+
+The degraded flag is still used by `shouldSkipForSync()` (the `dataVersion` path) where its 4-case comparison matrix correctly distinguishes normal vs degraded data versions.
 
 ## Other Details
 

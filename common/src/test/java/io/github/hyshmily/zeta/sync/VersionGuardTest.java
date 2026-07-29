@@ -92,12 +92,14 @@ class VersionGuardTest {
   }
 
   /**
-   * Verifies that a worker decision is never skipped when the existing entry is degraded.
+   * Verifies that a worker decision is not skipped when the existing entry's
+   * decisionVersion is lower than the incoming, regardless of degraded flag.
+   * The degraded flag (dataVersion domain) is irrelevant to decision ordering.
    */
   @Test
-  void shouldSkipForWorker_existingDegraded_shouldNotSkip() {
+  void shouldSkipForWorker_degradedEntry_lowerDecisionVersion_shouldNotSkip() {
     cache.put("key", entry(5, true, 0));
-    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 10)).isFalse();
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 10, null, 0)).isFalse();
   }
 
   /**
@@ -106,7 +108,7 @@ class VersionGuardTest {
   @Test
   void shouldSkipForWorker_existingNormalLowerVersion_shouldNotSkip() {
     cache.put("key", entry(5, false, 3));
-    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 5)).isFalse();
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 5, null, 0)).isFalse();
   }
 
   /**
@@ -115,8 +117,8 @@ class VersionGuardTest {
   @Test
   void shouldSkipForWorker_existingNormalEqualOrHigherVersion_shouldSkip() {
     cache.put("key", entry(5, false, 5));
-    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 4)).isTrue();
-    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 5)).isTrue();
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 4, null, 0)).isTrue();
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 5, null, 0)).isTrue();
   }
 
   /**
@@ -124,7 +126,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_noExistingEntry_shouldNotSkip() {
-    assertThat(VersionGuard.shouldSkipForWorker(cache, "missing", 1)).isFalse();
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "missing", 1, null, 0)).isFalse();
   }
 
   /**
@@ -153,11 +155,11 @@ class VersionGuardTest {
   }
 
   /**
-   * Verifies the CacheEntry-overload shouldSkipForWorker with null existing entry returns false.
+   * Verifies the 4-argument shouldSkipForWorker with null existing entry returns false.
    */
   @Test
   void shouldSkipForWorker_cacheEntryOverload_withNull_shouldNotSkip() {
-    assertThat(VersionGuard.shouldSkipForWorker(null, 1)).isFalse();
+    assertThat(VersionGuard.shouldSkipForWorker(null, 1, null, 0)).isFalse();
   }
 
   /**
@@ -166,7 +168,7 @@ class VersionGuardTest {
   @Test
   void shouldSkipForWorker_existingNormalEqualVersion_shouldSkip() {
     cache.put("key", entry(5, false, 10));
-    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 10)).isTrue();
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 10, null, 0)).isTrue();
   }
 
   /**
@@ -185,7 +187,7 @@ class VersionGuardTest {
   @Test
   void shouldSkipForWorker_withNonCacheEntryInCache_shouldNotSkip() {
     cache.put("key", "not-a-cache-entry");
-    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 1)).isFalse();
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 1, null, 0)).isFalse();
   }
 
   /**
@@ -209,12 +211,64 @@ class VersionGuardTest {
   }
 
   /**
-   * Verifies that a degraded existing entry unconditionally accepts the incoming decision.
+   * Verifies that a degraded existing entry with a higher decisionVersion
+   * correctly rejects a stale incoming decision — the degraded flag does
+   * not bypass decisionVersion ordering (orthogonal version spaces).
    */
   @Test
-  void shouldSkipForWorker_withEpoch_existingDegraded_shouldNotSkip() {
+  void shouldSkipForWorker_withEpoch_degradedEntry_higherExistingDv_shouldSkip() {
     CacheEntry degraded = entry(5, true, 50).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
-    assertThat(VersionGuard.shouldSkipForWorker(degraded, 1, "W1", 1)).isFalse();
+    assertThat(VersionGuard.shouldSkipForWorker(degraded, 1, "W1", 1)).isTrue();
+  }
+
+  /**
+   * Verifies that a degraded existing entry with a LOWER decisionVersion
+   * accepts a legitimate higher incoming decision (same epoch, same nodeId).
+   */
+  @Test
+  void shouldSkipForWorker_withEpoch_degradedEntry_lowerExistingDv_shouldNotSkip() {
+    CacheEntry degraded = entry(5, true, 3).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    assertThat(VersionGuard.shouldSkipForWorker(degraded, 5, "W1", 1)).isFalse();
+  }
+
+  /**
+   * Verifies that a degraded entry accepts a higher-epoch message (Worker restart).
+   * The degraded flag does not block epoch-based restart detection.
+   */
+  @Test
+  void shouldSkipForWorker_withEpoch_degradedEntry_higherEpoch_shouldNotSkip() {
+    CacheEntry existing = entry(5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 2)).isFalse();
+  }
+
+  /**
+   * Verifies that a degraded entry skips a lower-epoch message (stale incarnation).
+   * The degraded flag does not bypass epoch ordering.
+   */
+  @Test
+  void shouldSkipForWorker_withEpoch_degradedEntry_lowerEpoch_shouldSkip() {
+    CacheEntry existing = entry(5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(2).build();
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 1)).isTrue();
+  }
+
+  /**
+   * Verifies that a degraded entry accepts a cross-Worker handoff (different nodeId).
+   * The degraded flag does not block last-writer-wins convergence.
+   */
+  @Test
+  void shouldSkipForWorker_withEpoch_degradedEntry_differentNodeId_shouldNotSkip() {
+    CacheEntry existing = entry(5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W2", 1)).isFalse();
+  }
+
+  /**
+   * Verifies that a degraded entry with no Worker history (epoch=0, nodeId=null, dv=0)
+   * accepts the first Worker message — the different-nodeId branch handles this.
+   */
+  @Test
+  void shouldSkipForWorker_degradedEntry_noWorkerHistory_firstContact_shouldNotSkip() {
+    CacheEntry existing = entry(5, true, 0);
+    assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 0)).isFalse();
   }
 
   /**
@@ -284,16 +338,6 @@ class VersionGuardTest {
     CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
     // Same epoch, different nodeId → accept unconditionally
     assertThat(VersionGuard.shouldSkipForWorker(existing, 101, "W2", 1)).isFalse();
-  }
-
-  /**
-   * Verifies that the old overload (without nodeId/epoch) delegates correctly with null/0 defaults.
-   */
-  @Test
-  void shouldSkipForWorker_oldOverload_shouldDelegate() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId(null).decisionEpoch(0).build();
-    // Without nodeId/epoch: cross-Worker comparison gives false positive (skip)
-    assertThat(VersionGuard.shouldSkipForWorker(existing, 50)).isTrue();
   }
 
   // ── Cache-level shouldSkipForWorker with epoch (P0-2) ──
