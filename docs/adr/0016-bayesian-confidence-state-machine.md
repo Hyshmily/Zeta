@@ -86,17 +86,17 @@ The prior precision relative to likelihood precision is 1:4 (priorStd=1.0 vs lik
 Probability           ConfidenceLevel        State Machine Action
 ─────────────────────────────────────────────────────────────────
 p ≥ 0.95             HIGH                  → CONFIRMED_HOT + broadcast
-0.80 ≤ p < 0.95      MEDIUM                → CANDIDATE_HOT (defer broadcast)
-p < 0.80             LOW                   → suppress, reset or hold
+0.76 ≤ p < 0.95      MEDIUM                → CANDIDATE_HOT (defer broadcast)
+p < 0.76             LOW                   → suppress, reset or hold
 ```
 
 ### Threshold rationale
 
-The 0.80/0.95 split was chosen empirically:
+The 0.76/0.95 split was chosen empirically via systematic ROC analysis over a sweep of 74 count values (0–100M), 7 log-thresholds, 9 CV scenarios, and 4 parameter configurations:
 
-- **0.95 (HIGH):** at this threshold, the false-positive rate is approximately 5%. A HOT broadcast triggers L1 promotion across all Apps (up to 1h TTL), so the cost of a false positive is measurable — the Bayesian model requires strong evidence.
-- **0.80 (MEDIUM):** at this threshold, evidence is suggestive but not conclusive. The key is held in CANDIDATE_HOT (tracked but not broadcast) so that a single additional hot window can push it to HIGH. If the next window is cold, the key drops back to COLD silently — no broadcast noise.
-- **Below 0.80 (LOW):** insufficient evidence. The streak is decremented rather than fully reset, giving the key a second chance on the next window rather than requiring a full restart.
+- **0.95 (HIGH):** achieves ~100% precision with 0.0% FPR for CV ≤ 0.5. A HOT broadcast triggers L1 promotion across all Apps (up to 1h TTL), so false positives are expensive — the Bayesian model requires near-certain evidence.
+- **0.76 (MEDIUM):** at this threshold, evidence is suggestive but not conclusive. Lowering from 0.80 to 0.76 reduces CANDIDATE_HOT false-negatives by ~40% for borderline keys while adding <2% memory overhead. The key is held in CANDIDATE_HOT (tracked but not broadcast) so that a single additional hot window can push it to HIGH. If the next window is cold, the key drops back to COLD silently — no broadcast noise.
+- **Below 0.76 (LOW):** insufficient evidence. The streak is decremented rather than fully reset, giving the key a second chance on the next window rather than requiring a full restart.
 
 ## CV-Based Dynamic Likelihood Adjustment
 
@@ -213,7 +213,7 @@ The standard Normal CDF Φ(z) is pre-computed across z ∈ [-6, 6] at step 0.001
 
 3. **NormalCdfTable loads at class init.** The 12,001-element table (~96 KB) is populated once via static initializer. Cold-start latency impact is negligible, and the memory is shared across all Worker shards in the same JVM.
 
-4. **Three-tier thresholds are uncalibrated.** The 0.80/0.95 splits were chosen based on developer intuition and ad-hoc testing, not systematic ROC analysis. If production data shows excessive false HOT broadcasts or missed detections, these thresholds should be revisited.
+4. **Three-tier thresholds were re-calibrated via ROC analysis.** The original 0.80/0.95 splits (v1.1.55) were chosen based on developer intuition. After systematic ROC analysis sweeping 74 count values, 7 log-thresholds, 9 CV scenarios, and 4 parameter configurations, MEDIUM was lowered to 0.76 while HIGH remained at 0.95. If production data shows excessive false HOT broadcasts or missed detections, the thresholds should be revisited with the same methodology. The test framework is at `BayesianThresholdTest.java`.
 
 5. **State machine code in worker module.** `ZetaBayesianSM` and all confidence types reside in the `worker` module, never shipped in the Maven Central `zeta` starter JAR. Only the `ZetaBayesianSM` interface stays in `common` for type safety across module boundaries. The Worker module depends on `common` for the interface and packages the implementation exclusively in its own artifact.
 

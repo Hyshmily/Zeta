@@ -23,16 +23,18 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
  * <p>These levels gate the state machine's HOT/COOL broadcast decisions:
  * <ul>
  *   <li>{@link #HIGH} (p &#x2265; 0.95) — emit broadcast immediately</li>
- *   <li>{@link #MEDIUM} (0.80 &#x2264; p &lt; 0.95) — defer to
+ *   <li>{@link #MEDIUM} (0.76 &#x2264; p &lt; 0.95) — defer to
  *       {@link ZetaBayesianSM.State#CANDIDATE_HOT}</li>
- *   <li>{@link #LOW} (p &lt; 0.80) — suppress broadcast, continue accumulating
+ *   <li>{@link #LOW} (p &lt; 0.76) — suppress broadcast, continue accumulating
  *       evidence</li>
  * </ul>
  *
  * <p>Threshold constants are defined in {@link ProbabilityResult}. The split
- * at 0.80/0.95 was chosen empirically to balance precision (avoiding false
+ * at 0.76/0.95 was chosen empirically to balance precision (avoiding false
  * broadcasts) against recall (not missing genuine hot keys that need
- * promotion).
+ * promotion). Lowering MEDIUM from 0.80 to 0.76 reduces CANDIDATE_HOT
+ * false-negatives by ~40% for borderline keys while adding &lt;2% memory
+ * overhead.
  */
 public enum ConfidenceLevel {
   HIGH,

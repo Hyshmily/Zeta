@@ -1638,7 +1638,7 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("processLocalHotkeyIfNeeded should extend HOT entry expiry when past 20% TTL")
+    @DisplayName("processLocalHotkeyIfNeeded should extend HOT entry expiry when past 75% TTL")
     void processLocalHotkeyIfNeeded_shouldExtendHotExpiry() {
       long originalExpireAt = System.currentTimeMillis() + 5_000;
       caffeineCache.put(
@@ -1666,7 +1666,7 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("processLocalHotkeyIfNeeded should NOT extend HOT entry when within first 80%")
+    @DisplayName("processLocalHotkeyIfNeeded should NOT extend HOT entry when within first 25%")
     void processLocalHotkeyIfNeeded_shouldNotExtendWithinFirstHalf() {
       long futureExpireAt = System.currentTimeMillis() + 120_000;
       caffeineCache.put(

@@ -683,7 +683,7 @@ public class HotKeyCache {
   }
 
   /**
-   * Batch variant of {@link #loadAndCache(String, Supplier, long, long, boolean, boolean)}.
+   * Batch variant of {@link #`loadAndCache(String, Supplier, long, long, boolean, boolean)}.
    * Submits all keys to SingleFlight in a single pass, then processes each loaded
    * value through {@link #processLoaded} and calls {@link #mapEmpty} for absent results.
    *
@@ -875,11 +875,11 @@ public class HotKeyCache {
 
   /**
    * Process a cache hit for local hot-key management: if the entry is already
-   * HOT and more than 20% of its TTL has elapsed, extend its expiry window;
+   * HOT and more than 75% of its TTL has elapsed, extend its expiry window;
    * otherwise promote eligible non-hot entries (NORMAL or COOL-when-all-dead)
    * to HOT if the local TopK now considers them hot.
    * <p>
-   * HOT entries that are still within their first half are left untouched —
+   * HOT entries that are still within their first quarter are left untouched —
    * no need to re-insert the same state.
    *
    * @param cacheKey  the key to promote
@@ -904,7 +904,7 @@ public class HotKeyCache {
   }
 
   /**
-   * Extend the expiry of a HOT entry if more than 20% of its TTL has elapsed.
+   * Extend the expiry of a HOT entry if more than 75% of its TTL has elapsed.
    *
    * @return {@code true} if the entry was extended
    */
@@ -912,7 +912,7 @@ public class HotKeyCache {
     long remainingTtl = ce.getHardExpireAtMs() - TimeSource.currentTimeMillis();
     long totalTtl = ce.getHardTtlMs();
 
-    if (totalTtl > 0 && remainingTtl < totalTtl * 0.8) {
+    if (totalTtl > 0 && remainingTtl < totalTtl * 0.25) {
       expireManager.extendExpiry(cacheKey, hardTtlMs, softTtlMs);
       return true;
     }
@@ -1509,7 +1509,7 @@ public class HotKeyCache {
    * <p>
    * On a fresh miss: loads via {@code reader}, promotes to HOT if
    * the local TopK detects the key, otherwise stores as NORMAL.
-   * On a hit: extends expiry when the entry is already HOT (20% threshold
+   * On a hit: extends expiry when the entry is already HOT (75% threshold
    * refresh, aligned with {@link #extendHotKeyExpiryIfNeeded}) or when
    * the key is in TopK and eligible for promotion.
    * When {@code triggerRefreshOnSoftExpire} is set and the entry is
@@ -1558,13 +1558,12 @@ public class HotKeyCache {
           if (!expireManager.isLogicallyExpired(ce)) {
             hitRef[0] = true;
 
-            if (ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
-              long remaining = ce.getHardExpireAtMs() - TimeSource.currentTimeMillis();
-              long totalTtl = ce.getHardTtlMs();
-
-              if (totalTtl > 0 && remaining < totalTtl * 0.8) {
-                return expireManager.applyTtl(ce, hotHardTtl, hotSoftTtl);
-              }
+            if (
+              ce.getKeyState() == KeyState.HOT &&
+              ce.getHardExpireAtMs() != Long.MAX_VALUE &&
+              extendHotKeyExpiryIfNeeded(k, ce, hotHardTtl, hotSoftTtl)
+            ) {
+              return ce;
             } else if (isPromotableState(ce) && hotKeyDetector.contains(k)) {
               return ce.withTtlAndKeyState(
                 hotHardTtl,
