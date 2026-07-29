@@ -21,11 +21,8 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
@@ -211,15 +208,38 @@ public class SingleFlightImpl implements SingleFlight {
   }
 
   /**
-   * Submit a reader supplier to the async executor, automatically wrapping
-   * circuit breaker callbacks around the execution.
+   * Submit a reader supplier to the async executor with timeout.
+   * Wraps the executor to capture the running thread reference, so timeout
+   * can interrupt it via {@link Thread#interrupt()}, preventing thread-pool
+   * starvation from timed-out-but-still-running tasks.
+   * <p>
+   * Uses {@link CompletableFuture#supplyAsync} internally so that exception
+   * propagation (including {@link Error}) matches CompletableFuture's
+   * standard {@code encodeThrowable} semantics.
    *
    * @param reader the supplier to execute asynchronously
-   * @return a {@link CompletableFuture} that will complete with the result or timeout
+   * @return a {@link CompletableFuture} that will complete with the result
+   *         or a {@link TimeoutException}
    */
   private CompletableFuture<Object> submitReader(Supplier<Object> reader) {
-    return CompletableFuture.supplyAsync(reader, executor)
-        .orTimeout(timeoutSeconds, TimeUnit.SECONDS);
+    AtomicReference<Thread> runningThread = new AtomicReference<>();
+    Executor wrapped = task ->
+      executor.execute(() -> {
+        runningThread.set(Thread.currentThread());
+        task.run();
+      });
+
+    CompletableFuture<Object> future = CompletableFuture.supplyAsync(reader, wrapped);
+    future.orTimeout(timeoutSeconds, TimeUnit.SECONDS);
+    future.whenComplete((r, ex) -> {
+      if (ex instanceof TimeoutException) {
+        Thread t = runningThread.get();
+        if (t != null) {
+          t.interrupt();
+        }
+      }
+    });
+    return future;
   }
 
   /**

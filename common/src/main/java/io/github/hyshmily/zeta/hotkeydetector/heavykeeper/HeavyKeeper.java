@@ -561,9 +561,9 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    *
    * <p>The TopK membership counts are then halved (binary decay) under the
    * {@link #admissionLock} via {@link #decayMembership()}, and members whose
-   * halved count drops to zero are dropped silently (they are not reported to
-   * {@link #expelled()}). This mirrors the original heap semantics and keeps
-   * the downstream expulsion stream consistent. Lock order is
+   * halved count drops to zero are enqueued to {@link #expelled()} alongside
+   * admission-evicted entries, so consumers of {@link #expelled()} have a
+   * complete view of all TopK departures. Lock order is
    * <i>sketch stripes → admissionLock</i>, identical to the admission path,
    * so no deadlock is possible with concurrent {@link #addDirect} callers.
    *
@@ -730,7 +730,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       int off = base + w;
       long wv = windows[off];
       if (wv > 0) {
-        long sub = (wv / cur) * decays + (wv % cur) * decays / cur;
+        long sub = (wv / cur) * decays + ((wv % cur) * decays) / cur;
         long newVal = Math.max(0, wv - sub);
         totalSubtracted += wv - newVal;
         windows[off] = newVal;
@@ -772,6 +772,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * raises the count between {@code get()} and {@code compareAndSet}, the
    * CAS fails and the loop retries with the now-higher value.
    */
+  @SuppressWarnings("all")
   private void decayMembership() {
     admissionLock.lock();
     try {
@@ -788,6 +789,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
           halved = prev >> 1;
         } while (!n.count.compareAndSet(prev, halved));
         if (halved == 0) {
+          // Double-check: admit() fast-path (lock-free accumulateAndGet)
+          // may have raised the count between our CAS(1→0) and here.
+          // If so, keep the member — don't lose a hot key to a TOCTOU race.
+          if (n.count.get() > 0) {
+            continue;
+          }
           if (dropped == null) {
             dropped = new ArrayList<>();
           }
@@ -798,6 +805,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         for (String key : dropped) {
           members.remove(key);
           locCache.remove(key); // decay-dropped — evict fingerprint cache
+          expelledQueue.offer(new Item(key, 0L));
         }
       }
       minPqCount = members.isEmpty() ? 0L : findMinMember().count();
