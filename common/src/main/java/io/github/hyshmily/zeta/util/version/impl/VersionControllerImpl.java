@@ -159,7 +159,7 @@ public class VersionControllerImpl implements VersionController {
   @Override
   public VersionResult fallbackVersion() {
     fallbackVersionCounter.incrementAndGet();
-    long version = Long.MIN_VALUE + snowflakeIdGenerator.nextId();
+    long version = Long.MIN_VALUE | snowflakeIdGenerator.nextId();
     return new VersionResult(version, true);
   }
 

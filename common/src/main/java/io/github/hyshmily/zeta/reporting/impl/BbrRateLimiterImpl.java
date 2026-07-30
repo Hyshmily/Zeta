@@ -15,13 +15,14 @@
  */
 package io.github.hyshmily.zeta.reporting.impl;
 
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
-
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
+
 import java.util.concurrent.atomic.AtomicLong;
+
+import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 /**
  * BBR (Bottleneck Bandwidth and Round-trip) adaptive rate limiter.
@@ -274,7 +275,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
       return maxPassMinRtField.maxPassCache.updateAndGet(c -> Math.max(1, (long) (c * 0.99)));
     }
     final long observed = max;
-    maxPassMinRtField.maxPassCache.updateAndGet(c -> (c + observed) / 2);
+    maxPassMinRtField.maxPassCache.updateAndGet(c -> (c + observed) >> 1);
     return max;
   }
 
@@ -293,7 +294,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
       return maxPassMinRtField.minRtCache.get();
     }
     final long observed = min;
-    maxPassMinRtField.minRtCache.updateAndGet(c -> (c + observed) / 2);
+    maxPassMinRtField.minRtCache.updateAndGet(c -> (c + observed) >> 1);
     return min;
   }
 

@@ -166,7 +166,7 @@ public class ConsistentHashRing {
     // Find the first index where hashes[i] >= hashKey (insertion point).
     int startIdx = binarySearch(hashes, hashKey);
     if (startIdx < 0) {
-      startIdx = -(startIdx + 1);
+      startIdx = ~startIdx;
       // Wraparound to the beginning of the ring.
       if (startIdx == len) {
         startIdx = 0;
@@ -180,7 +180,7 @@ public class ConsistentHashRing {
       if (isAlive.test(physicalNode)) {
         return physicalNode;
       }
-      idx = (idx + 1) % len; // circular advancement
+      if (++idx >= len) idx = 0; // circular advancement
       if (++probes > MAX_PROBES) {
         log.warn(
           "Exhausted {} probes in consistent hash ring for key '{}', " +
@@ -255,6 +255,6 @@ public class ConsistentHashRing {
         return mid; // exact match
       }
     }
-    return -(low + 1); // insertion point
+    return ~low; // insertion point
   }
 }

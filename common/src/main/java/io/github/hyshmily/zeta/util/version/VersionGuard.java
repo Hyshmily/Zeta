@@ -183,20 +183,10 @@ public final class VersionGuard {
 
     boolean existingDegraded = existing.isVersionDegraded();
 
-    // Both normal
-    if (!existingDegraded && !incomingDegraded) {
+    if (existingDegraded == incomingDegraded) {
       return existing.getDataVersion() >= incomingDataVersion;
     }
-    // Existing normal, incoming degraded — normal wins
-    if (!existingDegraded) {
-      return true;
-    }
-    // Both degraded
-    if (incomingDegraded) {
-      return existing.getDataVersion() >= incomingDataVersion;
-    }
-    // Existing degraded, incoming normal — normal overwrites
-    return false;
+    return incomingDegraded;
   }
 
   /**

@@ -20,6 +20,7 @@ import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Twitter-Snowflake style ID generator producing 64-bit, time-sortable, cluster-unique IDs.
@@ -142,7 +143,7 @@ public class SnowflakeIdGenerator {
       }
     } else {
       sequence = randomSequence
-          ? (long) (Math.random() * (SEQUENCE_MASK + 1))
+          ? ThreadLocalRandom.current().nextInt() & SEQUENCE_MASK
           : 0L;
     }
 

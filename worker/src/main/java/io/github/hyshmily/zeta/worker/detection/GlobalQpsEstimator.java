@@ -49,6 +49,9 @@ public class GlobalQpsEstimator {
   /** Number of time slices that form one complete sliding window. */
   private final int windowSize;
 
+  /** Bitmask for circular buffer index (length - 1, where length is a power of two). */
+  private final int lengthMask;
+
   /** Duration of a single time slice in milliseconds. */
   private final long timeMillisPerSlice;
 
@@ -72,9 +75,14 @@ public class GlobalQpsEstimator {
     if (windowDurationMs < slices) throw new IllegalArgumentException(
       "windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero"
     );
-    this.windowSize = slices;
-    this.timeMillisPerSlice = windowDurationMs / slices;
-    this.slices = new AtomicLong[slices * 2];
+    int aligned = slices;
+    if ((aligned & (aligned - 1)) != 0) {
+      aligned = Integer.highestOneBit(aligned - 1) << 1;
+    }
+    this.windowSize = aligned;
+    this.lengthMask = (aligned << 1) - 1;
+    this.timeMillisPerSlice = windowDurationMs / aligned;
+    this.slices = new AtomicLong[aligned * 2];
     for (int i = 0; i < this.slices.length; i++) {
       this.slices[i] = new AtomicLong(0);
     }
@@ -96,8 +104,7 @@ public class GlobalQpsEstimator {
 
   public synchronized void addTotal(long totalCount) {
     long now = System.currentTimeMillis();
-    int currentIndex = (int) ((now / timeMillisPerSlice) % slices.length);
-    int length = slices.length;
+    int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
 
     // Detect infrequent-call gap: if more than windowSize slices elapsed,
     // all previously written data is stale — reset the entire buffer.
@@ -113,9 +120,9 @@ public class GlobalQpsEstimator {
         // have rolled outside the new summation range are the elapsedSlices
         // oldest slots of the previous window, starting at:
         //   (currentIndex + windowSize - elapsedSlices + length) % length
-        int clearStart = (currentIndex + windowSize - (int) elapsedSlices + length) % length;
+        int clearStart = (currentIndex + windowSize - (int) elapsedSlices) & lengthMask;
         for (int i = 0; i < elapsedSlices; i++) {
-          slices[(clearStart + i) % length].set(0);
+          slices[(clearStart + i) & lengthMask].set(0);
         }
       }
     }
@@ -136,10 +143,10 @@ public class GlobalQpsEstimator {
    */
   public long getWindowTotal() {
     long now = System.currentTimeMillis();
-    int currentIndex = (int) ((now / timeMillisPerSlice) % slices.length);
+    int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
     long sum = 0;
     for (int i = 0; i < windowSize; i++) {
-      int idx = (currentIndex - i + slices.length) % slices.length;
+      int idx = (currentIndex - i) & lengthMask;
       sum += slices[idx].get();
     }
     return sum;

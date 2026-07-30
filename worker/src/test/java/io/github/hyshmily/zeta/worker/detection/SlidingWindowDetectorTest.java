@@ -14,8 +14,8 @@ class SlidingWindowDetectorTest {
   @Test
   void shouldConstructWithValidParameters() {
     SlidingWindowDetector detector = new SlidingWindowDetector(1000, 10, 500);
-    assertThat(detector.getWindowSize()).isEqualTo(10);
-    assertThat(detector.getTimeMillisPerSlice()).isEqualTo(100);
+    assertThat(detector.getWindowSize()).isEqualTo(16);
+    assertThat(detector.getTimeMillisPerSlice()).isEqualTo(62);
     assertThat(detector.getThreshold()).isEqualTo(500);
   }
 

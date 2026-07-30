@@ -104,7 +104,7 @@ class WorkerAutoConfigurationTest {
   void slidingWindowDetectorHasCorrectDefaults() {
     runner.run(ctx -> {
       SlidingWindowDetector detector = ctx.getBean(SlidingWindowDetector.class);
-      assertThat(detector.getWindowSize()).isEqualTo(10);
+      assertThat(detector.getWindowSize()).isEqualTo(16);
       assertThat(detector.getThreshold()).isEqualTo(1000);
     });
   }

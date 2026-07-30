@@ -1589,6 +1589,7 @@ public class HotKeyCache {
                   valueRef[0] = null; // prevent stale value leak on null-reader path
                 }
               }
+              // recheck and return existing if the policy is not REVALIDATE and intercept.
               if (policy.stalePolicy() != StalePolicy.REVALIDATE) return existing;
             } else {
               return existing;

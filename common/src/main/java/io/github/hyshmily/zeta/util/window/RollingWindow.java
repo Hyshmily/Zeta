@@ -47,6 +47,7 @@ public final class RollingWindow {
 
   private final AtomicLongArray buckets;
   private final int windowSize;
+  private final int windowMask;
   private final long bucketDurationMs;
 
   private static final class WindowField extends RwPadding.WindowRef {}
@@ -68,9 +69,14 @@ public final class RollingWindow {
    *                         precise bucket boundaries
    */
   public RollingWindow(int windowSize, long windowDurationMs) {
-    this.windowSize = windowSize;
-    this.bucketDurationMs = windowDurationMs / windowSize;
-    this.buckets = new AtomicLongArray(windowSize);
+    int aligned = windowSize;
+    if ((aligned & (aligned - 1)) != 0) {
+      aligned = Integer.highestOneBit(aligned - 1) << 1;
+    }
+    this.windowSize = aligned;
+    this.windowMask = aligned - 1;
+    this.bucketDurationMs = windowDurationMs / aligned;
+    this.buckets = new AtomicLongArray(aligned);
     windowField.windowStart = System.currentTimeMillis();
   }
 
@@ -194,7 +200,7 @@ public final class RollingWindow {
 
       int steps = (int) Math.min(elapsed / bucketDurationMs, windowSize);
       for (int i = 0; i < steps; i++) {
-        windowField.currentBucket = (windowField.currentBucket + 1) % windowSize;
+        windowField.currentBucket = (windowField.currentBucket + 1) & windowMask;
         buckets.set(windowField.currentBucket, 0);
       }
       windowField.windowStart += steps * bucketDurationMs;

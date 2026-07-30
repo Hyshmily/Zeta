@@ -49,8 +49,9 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class DefaultEvaluator implements Evaluator {
 
-  /** Number of recent window sums retained for CV computation. */
-  private static final int CV_HISTORY_SIZE = 20;
+  /** Number of recent window sums retained for CV computation. Must be a power of two. */
+  private static final int CV_HISTORY_SIZE = 32;
+  private static final int CV_HISTORY_MASK = CV_HISTORY_SIZE - 1;
 
   /** Sliding-window detector shared with the evaluation pipeline. */
   private final SlidingWindowDetector detector;
@@ -278,7 +279,7 @@ public class DefaultEvaluator implements Evaluator {
     synchronized Double addAndGetCv(long windowSum, double globalRatio) {
       lastAccessTime = System.currentTimeMillis();
       buffer[writeIndex] = windowSum;
-      writeIndex = (writeIndex + 1) % CV_HISTORY_SIZE;
+      writeIndex = (writeIndex + 1) & CV_HISTORY_MASK;
       if (count < CV_HISTORY_SIZE) {
         count++;
       }
@@ -292,7 +293,7 @@ public class DefaultEvaluator implements Evaluator {
         double sum = 0;
         int samples = 0;
         for (int i = 2; i <= 4; i++) {
-          double prev = buffer[(writeIndex - i + CV_HISTORY_SIZE) % CV_HISTORY_SIZE];
+          double prev = buffer[(writeIndex - i) & CV_HISTORY_MASK];
           if (prev > 0) {
             sum += prev;
             samples++;

@@ -87,6 +87,9 @@ public class SlidingWindowDetector {
   @Getter
   private final int windowSize;
 
+  /** Bitmask for circular buffer index (length - 1, where length is a power of two). */
+  private final int lengthMask;
+
   /** Duration of a single time slice, in milliseconds. */
   @Getter
   private final long timeMillisPerSlice;
@@ -131,8 +134,13 @@ public class SlidingWindowDetector {
     if (windowDurationMs < slices) throw new IllegalArgumentException(
       "windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero"
     );
-    this.windowSize = slices;
-    this.timeMillisPerSlice = windowDurationMs / slices;
+    int aligned = slices;
+    if ((aligned & (aligned - 1)) != 0) {
+      aligned = Integer.highestOneBit(aligned - 1) << 1;
+    }
+    this.windowSize = aligned;
+    this.lengthMask = (aligned << 1) - 1;
+    this.timeMillisPerSlice = windowDurationMs / aligned;
     this.threshold = threshold;
   }
 
@@ -160,8 +168,7 @@ public class SlidingWindowDetector {
       slices = windows.computeIfAbsent(key, k -> new AtomicLongArray(windowSize * 2));
     }
 
-    int currentIndex = (int) ((now / timeMillisPerSlice) % slices.length());
-    int length = slices.length();
+    int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
 
     // Detect infrequent-call gap: if more than windowSize slices elapsed,
     // all previously written data is stale — reset the entire buffer.
@@ -171,7 +178,7 @@ public class SlidingWindowDetector {
     if (prevTs > 0) {
       long elapsedSlices = (now - prevTs) / timeMillisPerSlice;
       if (elapsedSlices >= windowSize) {
-        for (int i = 0; i < length; i++) {
+        for (int i = 0; i < slices.length(); i++) {
           slices.set(i, 0);
         }
       } else if (elapsedSlices > 0) {
@@ -185,9 +192,9 @@ public class SlidingWindowDetector {
         // so that clearing covers (elapsedSlices - 1) of the truly stale
         // slots plus the 1 "guard" slot between the old clear region and the
         // new sum range — the "W-1 pre-clear" invariant.
-        int clearStart = (currentIndex + windowSize - (int) elapsedSlices + length) % length;
+        int clearStart = (currentIndex + windowSize - (int) elapsedSlices) & lengthMask;
         for (int i = 0; i < elapsedSlices; i++) {
-          slices.set((clearStart + i) % length, 0);
+          slices.set((clearStart + i) & lengthMask, 0);
         }
       }
     }
@@ -195,7 +202,7 @@ public class SlidingWindowDetector {
     long sum = 0;
     slices.addAndGet(currentIndex, count);
     for (int i = 0; i < windowSize; i++) {
-      int idx = (currentIndex - i + length) % length;
+      int idx = (currentIndex - i) & lengthMask;
       sum += slices.get(idx);
     }
     return sum;
@@ -217,11 +224,10 @@ public class SlidingWindowDetector {
     AtomicLongArray slices = windows.get(key);
     if (slices == null) return 0L;
     long now = System.currentTimeMillis();
-    int length = slices.length();
-    int currentIndex = (int) ((now / timeMillisPerSlice) % length);
+    int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
     long sum = 0L;
     for (int i = 0; i < windowSize; i++) {
-      sum += slices.get((currentIndex - i + length) % length);
+      sum += slices.get((currentIndex - i) & lengthMask);
     }
     return sum;
   }

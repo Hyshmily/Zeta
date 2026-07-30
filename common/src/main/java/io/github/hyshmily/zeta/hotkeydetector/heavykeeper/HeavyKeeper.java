@@ -192,6 +192,9 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   /** {@code totalSlots * windowCount} — precomputed stride used for window indexing. */
   private final int windowStride;
 
+  /** Bitmask for window index when windowCount is a power of two ({@code windowCount - 1}). */
+  private final int windowMask;
+
   /** Number of time windows per sketch slot (ring buffer depth). */
   @Getter
   private final int windowCount;
@@ -322,12 +325,19 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       log.info("Auto-aligned width from {} to {} to enable bitmask optimization", original, width);
     }
 
+    if ((windowCount & (windowCount - 1)) != 0) {
+      int original = windowCount;
+      windowCount = Integer.highestOneBit(windowCount - 1) << 1;
+      log.info("Auto-aligned windowCount from {} to {} to enable bitmask optimization", original, windowCount);
+    }
+
     this.k = k;
     this.width = width;
     this.depth = depth;
     this.minCount = minCount;
     this.windowCount = windowCount;
     this.windowStride = windowCount;
+    this.windowMask = windowCount - 1;
 
     this.survivalProb = decay;
 
@@ -567,7 +577,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    */
   @Override
   public void fading() {
-    int nextAw = Math.floorMod(epoch.get() + 1, windowCount);
+    int nextAw = (int) ((epoch.get() + 1) & windowMask);
     rotateSketchWindows(nextAw);
     epoch.incrementAndGet();
     decayMembership();
@@ -625,7 +635,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         // so this read always targets a window that rotateSketchWindows has
         // already passed (or has not yet reached), making the two operations
         // disjoint per window.
-        int active = Math.floorMod(epoch.get(), windowCount);
+        int active = (int) (epoch.get() & windowMask);
 
         long cur = slotSums[index];
         if (cur == 0) {
