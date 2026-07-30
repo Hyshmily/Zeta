@@ -129,7 +129,7 @@ See [CONFIG.md](docs/CONFIG.md)
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>zeta</artifactId>
-  <version>1.1.55</version>
+  <version>1.1.56</version>
 </dependency>
 ```
 
@@ -146,7 +146,7 @@ See [CONFIG.md](docs/CONFIG.md)
 <dependency>
     <groupId>io.github.hyshmily</groupId>
     <artifactId>zeta</artifactId>
-    <version>1.1.55</version>
+ <version>1.1.56</version>
 </dependency>
 ```
 
@@ -164,7 +164,7 @@ See [CONFIG.md](docs/CONFIG.md)
 <dependency>
   <groupId>io.github.hyshmily</groupId>
   <artifactId>zeta</artifactId>
-  <version>1.1.55</version>
+  <version>1.1.56</version>
 </dependency>
 ```
 
@@ -202,14 +202,14 @@ docker run -d --name zeta-worker -p 8080:8080 \
   -e SPRING_RABBITMQ_HOST=rabbitmq \
   -e SPRING_DATA_REDIS_HOST=redis \
   -e ZETA_WORKER_ENABLED=true \
-  ghcr.io/hyshmily/zeta-worker:1.1.55
+  ghcr.io/hyshmily/zeta-worker:1.1.56
 ```
 
 **Run JAR directly** (no Docker):
 
 ```bash
 mvn clean package -pl worker
-java -jar worker/target/zeta-worker-1.1.55.jar
+java -jar worker/target/zeta-worker-1.1.56.jar
 ```
 
 ### 2. Configuration
