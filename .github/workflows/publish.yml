@@ -1,9 +1,13 @@
-name: Publish to GitHub Packages
+name: Publish
 
 on:
-  release:
-    types: [created, published]
+  push:
+    tags: ['v*']
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -20,9 +24,27 @@ jobs:
           java-version: "17"
           distribution: "temurin"
           cache: maven
+          server-id: central
+          server-username: MAVEN_CENTRAL_USERNAME
+          server-password: MAVEN_CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
       - name: Build all JARs
         run: mvn clean package -DskipTests --no-transfer-progress
+
+      - name: Publish common to Maven Central
+        run: mvn deploy -pl common -P release -DskipTests -Dmaven.deploy.skip=true --no-transfer-progress
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Publish common to GitHub Packages
+        continue-on-error: true
+        run: mvn deploy -pl common -DskipTests -Dmaven.deploy.skip=false --no-transfer-progress
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Package release zip & tar.gz
         run: |
@@ -31,21 +53,17 @@ jobs:
           mkdir -p "${PKDIR}/lib"
           mkdir -p "${PKDIR}/docker"
           cp worker/target/zeta-worker-*.jar "${PKDIR}/lib/"
-          cp worker/Dockerfile worker/docker-compose.yml "${PKDIR}/docker/"
+          cp worker/Dockerfile worker/docker-compose.yml "${PKDIR}/docker/" || true
           cp -r docs "${PKDIR}/"
           cp README.md README.zh.md LICENSE "${PKDIR}/"
           (cd packaging && zip -r "../zeta-worker-${VER}.zip" "zeta-worker-${VER}")
           (cd packaging && tar czf "../zeta-worker-${VER}.tar.gz" "zeta-worker-${VER}")
 
-      - name: Publish common to GitHub Packages
-        continue-on-error: true
-        run: mvn deploy -pl common -DskipTests --no-transfer-progress
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload JARs and packages to Release
+      - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
+          name: Zeta ${{ github.ref_name }}
+          generate_release_notes: true
           files: |
             common/target/zeta-*.jar
             common/target/zeta-*-sources.jar
