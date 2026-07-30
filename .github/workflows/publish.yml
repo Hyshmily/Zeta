@@ -38,6 +38,7 @@ jobs:
           (cd packaging && tar czf "../zeta-worker-${VER}.tar.gz" "zeta-worker-${VER}")
 
       - name: Publish common to GitHub Packages
+        continue-on-error: true
         run: mvn deploy -pl common -DskipTests --no-transfer-progress
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
