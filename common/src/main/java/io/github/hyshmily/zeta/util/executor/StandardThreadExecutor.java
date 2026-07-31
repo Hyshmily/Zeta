@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.util.executor;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.Getter;
@@ -94,6 +95,12 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
   @Override
   protected void afterExecute(@NonNull Runnable r, Throwable t) {
     submittedTasksCount.decrementAndGet();
+    if (t != null) {
+      // Report task failures through the injectable exception-handler chain (WARN log by
+      // default). The throwable is intentionally NOT swallowed: the worker-thread replacement
+      // remains the ThreadPoolExecutor's own responsibility.
+      ZetaExceptionHandler.handleException("StandardThreadExecutor task failed", t);
+    }
   }
 
   public int getSubmittedTasksCount() {

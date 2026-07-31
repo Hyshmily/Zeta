@@ -16,7 +16,10 @@
 package io.github.hyshmily.zeta.sync.dispatcher;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -41,14 +44,30 @@ import lombok.extern.slf4j.Slf4j;
  * );
  * }</pre>
  *
+ * <p><b>Batched consumption.</b> Tasks of the same key are consumed in batches of at most
+ * {@code maxTasksPerCycle} per underlying-executor submission. A burst of same-key traffic
+ * (e.g. a batch of broadcast messages) therefore occupies a single pool slot instead of one
+ * submission per task. Once a key has consumed {@code maxTasksPerCycle} tasks in a row it
+ * yields back to the executor so that other keys can progress — a busy key can never
+ * monopolise the pool.
+ *
+ * <p><b>Atomic single-queue design.</b> Each key is represented by at most one {@link KeyWorker}
+ * in the map. Submitting and consuming both go through a single atomic
+ * {@link ConcurrentHashMap#compute(Object, java.util.function.BiFunction)} call: the worker is
+ * created together with its first task (atomically deciding whether it must be started), and an
+ * idle worker removes itself by returning {@code null}. Because the start decision is part of
+ * the atomic insertion, there is no window in which a worker can be orphaned — eliminating the
+ * running-flag re-verification and retry loop of earlier designs.
+ *
  * <p><b>Backpressure:</b> Each key's queue is bounded by {@code maxQueuePerKey}.
  * When the limit is reached, excess submissions are silently counted as rejected
  * (exposed via Micrometer).
  *
  * <p><b>Executor rejection recovery:</b> If the underlying executor rejects a task
- * via {@link RejectedExecutionException}, the task is returned to the head of its
- * key queue, the running flag is cleared, and a delayed retry is scheduled for the
- * head of the queue — self-healing without depending on future submissions.
+ * via {@link RejectedExecutionException}, the tasks remain queued in their {@link KeyWorker}
+ * (the batch is only granted while executing on the executor thread, so a rejected submission
+ * never loses tasks), and a delayed retry re-drives the worker — self-healing without
+ * depending on future submissions.
  *
  * <p>This class is thread-safe.
  */
@@ -58,21 +77,42 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
 
   private static final int DEFAULT_MAX_QUEUE_PER_KEY = 1024;
 
-  private final ConcurrentHashMap<Object, KeyQueue> queues = new ConcurrentHashMap<>();
+  /**
+   * Maximum number of tasks a single key may consume before the worker yields back to the
+   * executor, giving other keys a chance to run. Trades throughput (larger batches, fewer pool
+   * submissions) against fairness (a busy key must eventually let other keys progress).
+   */
+  private static final int DEFAULT_MAX_TASKS_PER_CYCLE = 64;
+
+  /** Delay before re-driving a worker whose submission was rejected by the executor. */
+  private static final long REJECTION_RETRY_DELAY_MS = 200;
+
+  private final ConcurrentHashMap<Object, KeyWorker> queues = new ConcurrentHashMap<>();
   private final ScheduledExecutorService executor;
   private final String name;
   private final int maxQueuePerKey;
+  private final int maxTasksPerCycle;
 
   private volatile boolean closed = false;
 
   public PerKeyOrderedDispatcher(ScheduledExecutorService executor, String name) {
-    this(executor, name, DEFAULT_MAX_QUEUE_PER_KEY);
+    this(executor, name, DEFAULT_MAX_QUEUE_PER_KEY, DEFAULT_MAX_TASKS_PER_CYCLE);
   }
 
   public PerKeyOrderedDispatcher(ScheduledExecutorService executor, String name, int maxQueuePerKey) {
+    this(executor, name, maxQueuePerKey, DEFAULT_MAX_TASKS_PER_CYCLE);
+  }
+
+  public PerKeyOrderedDispatcher(
+    ScheduledExecutorService executor,
+    String name,
+    int maxQueuePerKey,
+    int maxTasksPerCycle
+  ) {
     this.executor = executor;
     this.name = name;
     this.maxQueuePerKey = maxQueuePerKey;
+    this.maxTasksPerCycle = maxTasksPerCycle;
   }
 
   /**
@@ -108,7 +148,7 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
    * in FIFO order. If the dispatcher is closed, the task is silently dropped.
    * If the key's pending queue is full, the task is rejected (dropped without execution).
    * <p>If the underlying executor rejects a task via {@link RejectedExecutionException},
-   * the task is returned to the head of its key queue and a delayed retry is scheduled
+   * the task remains queued and a delayed retry re-drives the worker
    * (self-healing, does not depend on future submissions).</p>
    */
   public void submit(Object key, Runnable task) {
@@ -116,166 +156,189 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
       return;
     }
 
-    // Loop to recover from the race where scheduleNext removes a queue from the map
-    // right after we obtained it and marked it as running (see scheduleNext).
-    while (true) {
-      KeyQueue kq = queues.computeIfAbsent(key, k -> new KeyQueue(key));
-      // Try to mark this key as running. If successful, we must execute the task directly.
-      if (kq.tryMarkRunning()) {
-        // Re-verify that this queue is still in the map. If scheduleNext removed it
-        // concurrently (pollAndCheck returned null, isRunning returned false, and remove
-        // happened between our computeIfAbsent and tryMarkRunning), we have an orphan queue
-        // that would never be scheduled again. Reset it and retry.
-        if (queues.get(key) == kq) {
-          runTask(key, kq, task);
-          return;
-        }
-        kq.clearAndStop();
-        continue;
+    // Single atomic compute: creates the worker together with its first task, or enqueues into
+    // the existing worker. The start decision is made atomically with the insertion, so there
+    // is no window in which the worker can be orphaned (a queue whose owner never re-runs it) —
+    // the running-flag re-verification and retry loop of earlier designs is not needed.
+    boolean[] startWorker = { false };
+    KeyWorker worker = queues.compute(key, (k, existing) -> {
+      if (existing == null) {
+        startWorker[0] = true;
+        return new KeyWorker(key, task);
       }
       // Key is already being processed, try to enqueue.
-      if (!kq.enqueue(task, maxQueuePerKey)) {
+      if (!existing.enqueue(task, maxQueuePerKey)) {
         log.warn("[{}] Task queue full for key {}. Task rejected.", name, key);
       }
-      return;
+      return existing;
+    });
+
+    // Must run execute outside of compute: the executor call may reject (or block), and the
+    // map bin lock must not be held while invoking it.
+    if (startWorker[0]) {
+      executeWorker(worker);
     }
   }
 
-  private void runTask(Object key, KeyQueue kq, Runnable task) {
+  /**
+   * Submits the worker to the underlying executor. The worker's next batch is only granted
+   * once it runs on an executor thread, so if this submission is rejected the tasks are still
+   * safely held by the worker — nothing is lost.
+   * <p>If the executor rejects the submission, a delayed retry re-drives the same worker
+   * (self-healing, does not depend on future submissions).</p>
+   */
+  private void executeWorker(KeyWorker worker) {
     try {
-      executor.execute(() -> {
-        try {
-          if (closed) {
-            return;
-          }
-          task.run();
-        } catch (Exception e) {
-          log.warn("[{}] Task execution failed for key {}", name, key, e);
-        } finally {
-          scheduleNext(key, kq);
-        }
-      });
+      executor.execute(() -> runCycle(worker));
     } catch (RejectedExecutionException e) {
-      kq.returnToFrontAndStop(task);
       // Self-healing retry: do not rely on future submissions to re-trigger.
       try {
         executor.schedule(
-            () -> {
-              if (!closed && kq.tryMarkRunning()) {
-                Runnable head = kq.pollAndCheck();
-                if (head != null) {
-                  runTask(key, kq, head);
-                }
-              }
-            },
-            200,
-            TimeUnit.MILLISECONDS);
+          () -> {
+            if (!closed) {
+              executeWorker(worker);
+            }
+          },
+          REJECTION_RETRY_DELAY_MS,
+          TimeUnit.MILLISECONDS
+        );
       } catch (RejectedExecutionException ignored) {
         // Executor is shutting down; close() handles cleanup.
       }
     }
   }
 
-  private void scheduleNext(Object key, KeyQueue kq) {
+  /**
+   * Runs one batch of tasks for a worker on the executor thread: grant the batch atomically,
+   * execute every task (an exception in one task must not kill the batch), then submit the
+   * worker again for the next batch — a single pool slot per {@code maxTasksPerCycle} tasks.
+   */
+  @SuppressWarnings("java:S1181")
+  // catching Throwable is deliberate: an Error in one task must not strand
+  // the remaining tasks of the key (the JDK would let it kill the worker thread)
+  private void runCycle(KeyWorker worker) {
     if (closed) {
-      kq.clearAndStop();
-      queues.remove(key, kq);
+      queues.remove(worker.key, worker);
       return;
     }
-    Runnable next = kq.pollAndCheck();
-    if (next == null) {
-      // No more tasks, but the queue might already be empty; we need to remove if idle.
-      if (!kq.isRunning()) {
-        queues.remove(key, kq);
-      }
-    } else {
-      runTask(key, kq, next);
+    List<Runnable> batch = grantBatch(worker);
+    if (batch.isEmpty()) {
+      // The worker was replaced or removed concurrently (e.g. close() cleared the map while
+      // the batch was being granted); nothing to run.
+      return;
     }
+    for (Runnable task : batch) {
+      if (closed) {
+        // Dispatcher was closed mid-batch; remaining tasks must never run.
+        queues.remove(worker.key, worker);
+        return;
+      }
+      try {
+        task.run();
+      } catch (Throwable t) {
+        // Route through the injectable exception-handler chain (WARN log by default) and keep
+        // consuming the batch — one failing task must not strand the remaining tasks of the key.
+        ZetaExceptionHandler.handleException("[" + name + "] Task execution failed for key " + worker.key, t);
+      }
+    }
+    // Continuation: submit the next batch. If rejected (shutting down), executeWorker schedules
+    // a retry or lets close() clean up.
+    executeWorker(worker);
+  }
+
+  /**
+   * Atomically grants the next batch of tasks for the worker — up to {@code maxTasksPerCycle}
+   * of its first task plus queued tasks. If the worker has nothing left, it is removed from the
+   * map (returning {@code null} from {@code compute}) so that a future submission creates a
+   * fresh worker; if the map entry no longer belongs to this worker, the grant is skipped.
+   *
+   * @param worker the worker to grant tasks from
+   * @return the granted batch; empty if the worker was replaced or removed concurrently
+   */
+  private List<Runnable> grantBatch(KeyWorker worker) {
+    List<Runnable> batch = new ArrayList<>(maxTasksPerCycle);
+    queues.compute(worker.key, (k, v) -> {
+      // Only touch our own worker. If the entry was replaced or removed (e.g. by close()),
+      // leave the batch empty and do not disturb the current entry.
+      if (v != worker) {
+        return v;
+      }
+      Runnable first = worker.firstTask;
+      worker.firstTask = null;
+      if (first == null && (worker.queue == null || worker.queue.isEmpty())) {
+        // No more tasks; the worker is idle and must be removed from the map so a future
+        // submission creates a fresh worker instead of enqueueing into a dead one.
+        return null;
+      }
+      if (first != null) {
+        batch.add(first);
+      }
+      while (worker.queue != null && !worker.queue.isEmpty() && batch.size() < maxTasksPerCycle) {
+        batch.add(worker.queue.poll());
+      }
+      return worker;
+    });
+    return batch;
   }
 
   @Override
   public void close() {
     closed = true;
-    for (KeyQueue kq : queues.values()) {
-      kq.clearAndStop();
-    }
+    // Clearing the map makes every in-flight runCycle see an empty grant (or a per-task
+    // closed check) and self-remove; queued tasks are dropped without executing.
     queues.clear();
   }
 
   /**
-   * Internal queue for a single key, guarded by its own intrinsic lock.
+   * Internal state of a single key. At most one worker exists per key in the map, and it is
+   * the map entry itself that encodes "running": while the worker is in the map, submissions
+   * enqueue into it; when it has consumed everything, it removes itself.
+   *
+   * <p>The first task is stored separately from the queue so that the common single-task case
+   * never allocates the {@link ArrayDeque} at all.
    */
-  private static class KeyQueue {
+  private static final class KeyWorker {
+
+    private static final int INITIAL_QUEUE_SIZE = 8;
 
     final Object key;
-    final ArrayDeque<Runnable> queue = new ArrayDeque<>();
-    volatile boolean running = false;
-
-    KeyQueue(Object key) {
-      this.key = key;
-    }
-
     /**
-     * Attempts to mark this key as running. If it was already running,
-     * returns false; otherwise sets running to true and returns true.
+     * First task, stored separately from the queue so that the common single-task case never
+     * allocates the {@link ArrayDeque} at all. Accessed only while holding the map bin lock
+     * (i.e. inside {@code queues.compute(...)}) or during construction (safe publication via
+     * the {@code ConcurrentHashMap}), so it deliberately needs no {@code volatile}.
      */
-    synchronized boolean tryMarkRunning() {
-      if (running) {
-        return false;
-      }
-      running = true;
-      return true;
+    Runnable firstTask;
+    /**
+     * Queued tasks behind {@link #firstTask}. Only accessed while holding the map bin lock
+     * (i.e. inside {@code queues.compute(...)}), so no additional synchronization is needed.
+     */
+    ArrayDeque<Runnable> queue;
+
+    KeyWorker(Object key, Runnable firstTask) {
+      this.key = key;
+      this.firstTask = firstTask;
     }
 
     /**
-     * Enqueues a task if the queue is not full. Must only be called when
-     * {@link #running} is true (i.e., after a false return from tryMarkRunning).
+     * Enqueues a task behind the current {@link #firstTask}. Must only be called while holding
+     * the map bin lock (inside {@code compute}). The capacity check counts only queued tasks —
+     * the task currently being executed (or waiting as {@code firstTask}) does not count
+     * against {@code maxSize}.
      *
      * @param task    the task to enqueue
      * @param maxSize maximum allowed queue size
      * @return true if the task was enqueued, false if the queue is full
      */
-    synchronized boolean enqueue(Runnable task, int maxSize) {
+    boolean enqueue(Runnable task, int maxSize) {
+      if (queue == null) {
+        queue = new ArrayDeque<>(INITIAL_QUEUE_SIZE);
+      }
       if (queue.size() >= maxSize) {
         return false;
       }
       queue.addLast(task);
       return true;
-    }
-
-    /**
-     * Polls the next task from the queue. If the queue becomes empty,
-     * resets the running flag to false.
-     *
-     * @return the next Runnable, or null if the queue is empty
-     */
-    synchronized Runnable pollAndCheck() {
-      Runnable next = queue.pollFirst();
-      if (next == null) {
-        running = false;
-      }
-      return next;
-    }
-
-    /**
-     * Clears the queue and stops running. Used when the dispatcher is closed.
-     */
-    synchronized void clearAndStop() {
-      queue.clear();
-      running = false;
-    }
-
-    /**
-     * Returns a task to the front of the queue and resets the running flag.
-     * Used when the executor rejects a task.
-     */
-    synchronized void returnToFrontAndStop(Runnable task) {
-      queue.addFirst(task);
-      running = false;
-    }
-
-    synchronized boolean isRunning() {
-      return running;
     }
   }
 }

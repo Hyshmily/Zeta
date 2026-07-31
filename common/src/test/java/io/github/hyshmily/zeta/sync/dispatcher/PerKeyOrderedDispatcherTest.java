@@ -270,7 +270,168 @@ class PerKeyOrderedDispatcherTest {
     assertThat(queues).doesNotContainKey("key1");
   }
 
+  /**
+   * Verifies that a burst of same-key tasks is consumed in batches: a single underlying-executor
+   * submission drives up to {@code maxTasksPerCycle} tasks, instead of one submission per task.
+   */
+  @Test
+  void submit_sameKeyBurst_shouldBatch() throws InterruptedException {
+    CountingExecutor countingExecutor = new CountingExecutor(4);
+    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test");
+
+    int taskCount = 32;
+    CountDownLatch done = new CountDownLatch(taskCount);
+    try {
+      for (int i = 0; i < taskCount; i++) {
+        batchingDispatcher.submit("key", done::countDown);
+      }
+      assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+      // One submission starts the worker, one continuation drains the rest — far fewer than
+      // one submission per task (the pre-batching behaviour would need 32+ submissions).
+      assertThat(countingExecutor.getSubmissionCount()).isLessThanOrEqualTo(4);
+    } finally {
+      batchingDispatcher.close();
+      countingExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that a key yields back to the executor after {@code maxTasksPerCycle} tasks,
+   * splitting a large burst into multiple batches.
+   */
+  @Test
+  void submit_maxTasksPerCycle_shouldSplitBatches() throws InterruptedException {
+    CountingExecutor countingExecutor = new CountingExecutor(4);
+    PerKeyOrderedDispatcher batchingDispatcher =
+      new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcherTest.DEFAULT_MAX_QUEUE, 8);
+
+    int taskCount = 20;
+    CountDownLatch done = new CountDownLatch(taskCount);
+    try {
+      for (int i = 0; i < taskCount; i++) {
+        batchingDispatcher.submit("key", done::countDown);
+      }
+      assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+      // 20 tasks at 8 per cycle → 3 batches (8 + 8 + 4): initial submission + 2 continuations.
+      assertThat(countingExecutor.getSubmissionCount()).isBetween(3, 5);
+    } finally {
+      batchingDispatcher.close();
+      countingExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that batching preserves the strict per-key FIFO order across batch boundaries.
+   */
+  @Test
+  void submit_batch_shouldPreserveFifoOrder() throws InterruptedException {
+    CountingExecutor countingExecutor = new CountingExecutor(4);
+    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test");
+
+    int taskCount = 70;
+    CountDownLatch done = new CountDownLatch(taskCount);
+    var executionOrder = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
+    try {
+      for (int i = 0; i < taskCount; i++) {
+        int expected = i;
+        batchingDispatcher.submit("key", () -> {
+          executionOrder.add(expected);
+          done.countDown();
+        });
+      }
+      assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(executionOrder).containsExactlyElementsOf(java.util.stream.IntStream.range(0, taskCount).boxed().toList());
+    } finally {
+      batchingDispatcher.close();
+      countingExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that a task throwing {@link Throwable} inside a batch does not kill the batch:
+   * the remaining tasks of the key still execute.
+   */
+  @Test
+  void taskThrowable_shouldNotKillBatch() throws InterruptedException {
+    CountingExecutor countingExecutor = new CountingExecutor(4);
+    PerKeyOrderedDispatcher batchingDispatcher =
+      new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcherTest.DEFAULT_MAX_QUEUE, 8);
+
+    int taskCount = 4;
+    CountDownLatch survivors = new CountDownLatch(taskCount - 1);
+    try {
+      batchingDispatcher.submit("key", () -> {
+        throw new Error("boom");
+      });
+      for (int i = 0; i < taskCount - 1; i++) {
+        batchingDispatcher.submit("key", survivors::countDown);
+      }
+      assertThat(survivors.await(5, TimeUnit.SECONDS)).isTrue();
+    } finally {
+      batchingDispatcher.close();
+      countingExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that when the executor rejects the initial submission, the delayed retry re-drives
+   * the worker and all tasks run in strict submission order (FIFO, task1 before task2).
+   */
+  @Test
+  void runTask_withRejectedExecution_shouldRetryAndPreserveFifo() throws InterruptedException {
+    ScheduledExecutorService rejectingExec = new SingleShotRejectingExecutor();
+    PerKeyOrderedDispatcher rejectingDispatcher = new PerKeyOrderedDispatcher(rejectingExec, "rejecting");
+
+    CountDownLatch done = new CountDownLatch(2);
+    var executionOrder = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
+    try {
+      rejectingDispatcher.submit("key", () -> {
+        executionOrder.add(1);
+        done.countDown();
+      });
+      rejectingDispatcher.submit("key", () -> {
+        executionOrder.add(2);
+        done.countDown();
+      });
+
+      assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(executionOrder).containsExactly(1, 2);
+    } finally {
+      rejectingDispatcher.close();
+      rejectingExec.shutdownNow();
+    }
+  }
+
   // ── Helper classes ──────────────────────────────────────────
+
+  /**
+   * Package-visible copy of the dispatcher's default per-key queue bound, used by batch tests
+   * that construct a dispatcher with a custom {@code maxTasksPerCycle}.
+   */
+  static final int DEFAULT_MAX_QUEUE = 1024;
+
+  /**
+   * A {@link ScheduledThreadPoolExecutor} that counts every {@link #execute(Runnable)} call,
+   * used to verify batched consumption.
+   */
+  private static class CountingExecutor extends ScheduledThreadPoolExecutor {
+
+    private final AtomicInteger submissions = new AtomicInteger(0);
+
+    CountingExecutor(int corePoolSize) {
+      super(corePoolSize);
+    }
+
+    @Override
+    public void execute(Runnable command) {
+      submissions.incrementAndGet();
+      super.execute(command);
+    }
+
+    int getSubmissionCount() {
+      return submissions.get();
+    }
+  }
 
   /**
    * A {@link ScheduledThreadPoolExecutor} that throws {@link RejectedExecutionException} on its first

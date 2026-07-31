@@ -50,7 +50,14 @@
     <testcontainers.version>1.21.4</testcontainers.version>
     <jacoco.version>0.8.13</jacoco.version>
     <skipITs>true</skipITs>
-
+    <!--
+      JUnit tags excluded from surefire runs (CI and local `mvn test`):
+      `flaky` = known-unreliable tests, `performance` = timing-sensitive / benchmark-style tests.
+      Override locally to re-enable, e.g. `mvn test -Dzeta.surefire.excludedGroups=flaky`.
+      Note: surefire's own `-DexcludedGroups` user property cannot override the value wired into
+      the plugin configuration, which is why this indirection exists.
+    -->
+    <zeta.surefire.excludedGroups>flaky,performance</zeta.surefire.excludedGroups>
   </properties>
 
   <dependencyManagement>

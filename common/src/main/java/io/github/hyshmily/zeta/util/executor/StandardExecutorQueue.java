@@ -52,13 +52,20 @@ public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
   /**
    * Attempt to forcibly insert a task after a rejected execution, as a last resort.
    *
+   * <p>The termination check covers every non-RUNNING pool state ({@link
+   * java.util.concurrent.ThreadPoolExecutor#isShutdown()} is already {@code true} for all of
+   * them); {@code isTerminating()} is an additional guard for the shutdown-transition window.
+   * Rejecting here is deliberate: once the pool is shutting down, a task queued through this
+   * fallback would be drained at best, or silently left unexecuted at worst, so failing fast
+   * lets the caller's rejection handler decide.
+   *
    * @param o the task to insert
    * @return {@code true} if the task was accepted
    * @throws RejectedExecutionException if the executor is shut down
    */
   public boolean force(@NonNull Runnable o) {
     StandardThreadExecutor executor = executorRef.get();
-    if (executor.isShutdown()) {
+    if (executor.isShutdown() || executor.isTerminating()) {
       throw new RejectedExecutionException("Executor is shut down, cannot force task into queue");
     }
     return super.offer(o);
