@@ -138,7 +138,7 @@
 | `zeta.local.queue-capacity`           | `10000`                        | 报告分发器队列容量（内部有界队列）                                                                                                                                                          |
 | `zeta.local.queue-offer-timeout-ms`   | `100`                          | 报告队列写入超时（毫秒）——阻塞此时长后丢弃                                                                                                                                                  |
 | `zeta.local.consumer-count`           | `0`                            | 报告消费者线程数；0 = 自动（max(4, availableProcessors / 2)）                                                                                                                               |
-| `zeta.local.scheduler-pool-size`      | `8`                            | Zeta 共享调度器线程池大小（定时任务）                                                                                                                                                       |
+| `zeta.local.scheduler-pool-size`      | `8`                            | Zeta 共享调度器线程池大小（定时任务）。任务不会重叠执行；即使某次执行抛异常也仅记录 WARN 并继续调度下一次，不会中断周期任务。                                                                                                                                                       |
 | `zeta.local.expected-worker-count`    | `0`                            | 期望的 Worker 节点数，用于基于仲裁的健康检查；0 = 动态发现（收到首个心跳前始终不健康）                                                                                                      |
 
 ### 心跳配置（`zeta.local.heartbeat.*`）

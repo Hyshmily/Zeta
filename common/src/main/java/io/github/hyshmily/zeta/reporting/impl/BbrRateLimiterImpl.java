@@ -43,11 +43,6 @@ import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 @Internal
 public class BbrRateLimiterImpl implements BbrRateLimiter {
 
-  private static final long DEFAULT_WINDOW_MS = 10_000;
-  private static final int DEFAULT_BUCKETS = 100;
-  private static final int DEFAULT_CPU_THRESHOLD = 800; // 0–1000 scale, 800 = 80 %
-  private static final long DEFAULT_COOLDOWN_MS = 1_000;
-
   private final SystemLoadMonitor cpuMonitor;
   private final int cpuThreshold; // 0–1000
   private final long cooldownMs;
@@ -77,16 +72,6 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
 
   private final AtomicLong totalPassed = new AtomicLong(0);
   private final AtomicLong totalDropped = new AtomicLong(0);
-
-  /**
-   * @deprecated Use {@link #BbrRateLimiterImpl(io.github.hyshmily.zeta.util.SystemLoadMonitor, int, long, int, long)}
-   *     for explicit configuration of threshold, window, buckets, and cooldown.
-   */
-  @Deprecated
-  @SuppressWarnings("DeprecatedIsStillUsed")
-  public BbrRateLimiterImpl(SystemLoadMonitor cpuMonitor) {
-    this(cpuMonitor, DEFAULT_CPU_THRESHOLD, DEFAULT_WINDOW_MS, DEFAULT_BUCKETS, DEFAULT_COOLDOWN_MS);
-  }
 
   /**
    * Constructs a BBR rate limiter with explicit configuration.

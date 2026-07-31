@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -153,7 +154,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     this.flushQueue = new ConcurrentLinkedQueue<>();
     this.ownsScheduler = ownsScheduler;
     this.scheduler = ownsScheduler
-      ? Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-buffered-counter-flusher"))
+      ? new SafeScheduledExecutorService(1, new ZetaThreadFactory("zeta-buffered-counter-flusher"))
       : scheduler;
   }
 

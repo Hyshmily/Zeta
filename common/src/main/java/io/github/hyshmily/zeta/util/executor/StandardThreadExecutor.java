@@ -16,7 +16,6 @@
 package io.github.hyshmily.zeta.util.executor;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.Getter;
@@ -44,42 +43,22 @@ import org.jspecify.annotations.NonNull;
 @Internal
 public class StandardThreadExecutor extends ThreadPoolExecutor {
 
-  private static final int DEFAULT_MIN_THREADS = 20;
-  private static final int DEFAULT_MAX_THREADS = 200;
-  private static final long DEFAULT_MAX_IDLE_TIME_MS = 60_000;
-
   private final AtomicInteger submittedTasksCount = new AtomicInteger(0);
 
   @Getter
   private final int maxSubmittedTaskCount;
 
-  public StandardThreadExecutor() {
-    this(DEFAULT_MIN_THREADS, DEFAULT_MAX_THREADS);
-  }
-
-  public StandardThreadExecutor(int coreThreads, int maxThreads) {
-    this(coreThreads, maxThreads, maxThreads);
-  }
-
-  public StandardThreadExecutor(int coreThreads, int maxThreads, int queueCapacity) {
-    this(coreThreads, maxThreads, DEFAULT_MAX_IDLE_TIME_MS, TimeUnit.MILLISECONDS, queueCapacity);
-  }
-
-  public StandardThreadExecutor(int coreThreads, int maxThreads, long keepAliveTime, TimeUnit unit, int queueCapacity) {
-    this(coreThreads, maxThreads, keepAliveTime, unit, queueCapacity, new ZetaThreadFactory("zeta-standard-executor-"));
-  }
-
-  public StandardThreadExecutor(
-    int coreThreads,
-    int maxThreads,
-    long keepAliveTime,
-    TimeUnit unit,
-    int queueCapacity,
-    ThreadFactory threadFactory
-  ) {
-    this(coreThreads, maxThreads, keepAliveTime, unit, queueCapacity, threadFactory, new AbortPolicy());
-  }
-
+  /**
+   * Creates a new {@code StandardThreadExecutor}.
+   *
+   * @param coreThreads    the number of core threads
+   * @param maxThreads     the maximum number of threads
+   * @param keepAliveTime  the time to keep idle threads alive
+   * @param unit           the time unit for {@code keepAliveTime}
+   * @param queueCapacity  the capacity of the task queue
+   * @param threadFactory  the factory to create new threads
+   * @param handler        the handler to use when execution is rejected
+   */
   public StandardThreadExecutor(
     int coreThreads,
     int maxThreads,

@@ -20,6 +20,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTB
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -198,7 +199,7 @@ public class WorkerHeartbeatProducer {
     SnowflakeIdGenerator snowflakeIdGenerator
   ) {
     long epoch = initEpochFromLocalFile(workerId);
-    var scheduler = Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-producer"));
+    var scheduler = new SafeScheduledExecutorService(1, new ZetaThreadFactory("zeta-hb-producer"));
     return new WorkerHeartbeatProducer(
       rabbitTemplate,
       heartbeatExchange,

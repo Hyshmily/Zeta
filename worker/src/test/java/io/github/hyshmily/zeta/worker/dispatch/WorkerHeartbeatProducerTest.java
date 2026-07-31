@@ -26,10 +26,10 @@ import static org.mockito.Mockito.anyLong;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -269,19 +269,18 @@ class WorkerHeartbeatProducerTest {
   /** {@code start()} schedules the heartbeat task at fixed rate. */
   @Test
   void start_shouldScheduleHeartbeatAtFixedRate() {
-    var schedulerMock = mock(ScheduledExecutorService.class);
-    try (var executorsMock = mockStatic(Executors.class)) {
-      executorsMock.when(() -> Executors.newSingleThreadScheduledExecutor(any())).thenReturn(schedulerMock);
-
+    try (var construction = mockConstruction(SafeScheduledExecutorService.class)) {
       var producer = newProducer();
       producer.start();
 
+      var schedulerMock = construction.constructed().get(0);
       verify(schedulerMock).scheduleAtFixedRate(
         any(Runnable.class),
         eq(PING_INTERVAL_MS),
         eq(PING_INTERVAL_MS),
         eq(TimeUnit.MILLISECONDS)
       );
+      producer.stop();
     }
   }
 
@@ -302,14 +301,12 @@ class WorkerHeartbeatProducerTest {
    */
   @Test
   void stop_shouldCancelHeartbeatTaskWhenRunning() {
-    var schedulerMock = mock(ScheduledExecutorService.class);
-    when(schedulerMock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any())).thenReturn(
-      mock(ScheduledFuture.class)
-    );
-
-    try (var executorsMock = mockStatic(Executors.class)) {
-      executorsMock.when(() -> Executors.newSingleThreadScheduledExecutor(any())).thenReturn(schedulerMock);
-
+    try (var construction = mockConstruction(
+      SafeScheduledExecutorService.class,
+      (mock, context) ->
+        when(mock.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any()))
+          .thenReturn(mock(ScheduledFuture.class))
+    )) {
       var producer = newProducer();
       producer.start();
       // heartbeatTask is now non-null; stop() must cancel it and shut down

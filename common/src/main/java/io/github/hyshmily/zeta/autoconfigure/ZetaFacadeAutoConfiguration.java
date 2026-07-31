@@ -30,9 +30,9 @@ import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import jakarta.annotation.PostConstruct;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
@@ -67,11 +67,13 @@ public class ZetaFacadeAutoConfiguration {
   /**
    * Shared scheduler for all periodic tasks (flush, monitor, heartbeat, persist, etc.).
    * Pool size configurable via {@code zeta.scheduler-pool-size} (default 4).
+   * Wrapped in a {@link SafeScheduledExecutorService} so a throwing periodic task never
+   * kills the cadence of the shared scheduler.
    */
   @Bean("hotKeyScheduler")
   @ConditionalOnMissingBean(name = "hotKeyScheduler")
   public ScheduledExecutorService hotKeyScheduler() {
-    return Executors.newScheduledThreadPool(
+    return new SafeScheduledExecutorService(
       properties.getSchedulerPoolSize(),
       new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER)
     );

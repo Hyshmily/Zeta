@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerState;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import lombok.extern.slf4j.Slf4j;
 
 import java.lang.invoke.MethodHandles;
@@ -28,7 +29,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -63,7 +63,7 @@ import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 @Internal
 public class CircuitBreakerImpl implements CircuitBreaker {
 
-  private static final ScheduledExecutorService SCHEDULER = new ScheduledThreadPoolExecutor(
+  private static final ScheduledExecutorService SCHEDULER = new SafeScheduledExecutorService(
     Runtime.getRuntime().availableProcessors(),
     r -> {
       Thread t = new Thread(r, "zeta-cb");

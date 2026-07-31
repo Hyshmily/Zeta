@@ -18,9 +18,9 @@ package io.github.hyshmily.zeta.util.impl;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -54,13 +54,6 @@ public class SystemLoadMonitorImpl implements SystemLoadMonitor {
   private final AtomicBoolean running = new AtomicBoolean(false);
   private ScheduledFuture<?> flushTask;
 
-  /** @deprecated Use {@link #SystemLoadMonitorImpl(long, double)} for explicit configuration. */
-  @Deprecated
-  @SuppressWarnings("DeprecatedIsStillUsed")
-  public SystemLoadMonitorImpl() {
-    this(DEFAULT_POLL_MS, DEFAULT_DECAY);
-  }
-
   /**
    * Creates a CPU load monitor with the given polling interval and EMA decay factor.
    * Creates its own scheduler (deprecated, prefer shared scheduler).
@@ -71,12 +64,7 @@ public class SystemLoadMonitorImpl implements SystemLoadMonitor {
    *                       values outside (0, 1) fall back to the default (0.95)
    */
   public SystemLoadMonitorImpl(long pollIntervalMs, double decay) {
-    this(
-      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-cpu-monitor")),
-      pollIntervalMs,
-      decay,
-      true
-    );
+    this(new SafeScheduledExecutorService(1, new ZetaThreadFactory("zeta-cpu-monitor")), pollIntervalMs, decay, true);
   }
 
   /**

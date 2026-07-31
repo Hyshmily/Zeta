@@ -32,6 +32,7 @@ import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
+import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import java.util.*;
@@ -1383,7 +1384,7 @@ public class Zeta implements DisposableBean {
       synchronized (this) {
         s = refreshScheduler;
         if (s == null) {
-          s = Executors.newScheduledThreadPool(2, new ZetaThreadFactory("zeta-refresh"));
+          s = new SafeScheduledExecutorService(2, new ZetaThreadFactory("zeta-refresh"));
           refreshScheduler = s;
         }
       }

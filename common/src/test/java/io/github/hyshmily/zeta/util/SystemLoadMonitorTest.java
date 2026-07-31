@@ -18,13 +18,6 @@ class SystemLoadMonitorTest {
   private static final double DEFAULT_DECAY = 0.95;
 
   @Test
-  void deprecatedConstructor_shouldDelegateToFullConstructor() {
-    SystemLoadMonitor monitor = new SystemLoadMonitorImpl();
-    assertThat(monitor.getCpuLoadEMA()).isEqualTo(0.0);
-    monitor.stop();
-  }
-
-  @Test
   void constructor_shouldClampNonPositivePollInterval() throws Exception {
     Field pollField = SystemLoadMonitorImpl.class.getDeclaredField("pollIntervalMs");
     pollField.setAccessible(true);
@@ -144,13 +137,6 @@ class SystemLoadMonitorTest {
   }
 
   @Test
-  void getCpuLoadRaw_shouldReturnClampedValue() {
-    SystemLoadMonitor monitor = new SystemLoadMonitorImpl();
-    assertThat(monitor.getCpuLoadRaw()).isBetween(0.0, 1.0);
-    monitor.stop();
-  }
-
-  @Test
   void threadSafety_concurrentReads_shouldNotCorruptEma() throws Exception {
     SystemLoadMonitor monitor = new SystemLoadMonitorImpl(10, 0.5);
     monitor.start();
@@ -237,13 +223,6 @@ class SystemLoadMonitorTest {
   void getCpuLoadEMA_beforeSample_shouldReturnZero() {
     SystemLoadMonitor monitor = new SystemLoadMonitorImpl(100, 0.5);
     assertThat(monitor.getCpuLoadEMA()).isEqualTo(0.0);
-    monitor.stop();
-  }
-
-  @Test
-  void getCpuLoadRaw_shouldReturnValueInRange() {
-    SystemLoadMonitor monitor = new SystemLoadMonitorImpl();
-    assertThat(monitor.getCpuLoadRaw()).isBetween(0.0, 1.0);
     monitor.stop();
   }
 

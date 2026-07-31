@@ -54,19 +54,6 @@ class BbrRateLimiterTest {
     limiter = new BbrRateLimiterImpl(cpuMonitor, CPU_THRESHOLD, WINDOW_MS, BUCKETS, COOLDOWN_MS);
   }
 
-  // ── Constructor ──
-
-  @Test
-  void deprecatedConstructor_shouldDelegateToFullConstructor() {
-    BbrRateLimiter l = new BbrRateLimiterImpl(cpuMonitor);
-    when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.99);
-    assertThat(l.tryAcquire()).isTrue();
-    l.onEnqueue();
-    assertThat(l.getInFlight()).isEqualTo(1);
-    l.onSuccess(10);
-    assertThat(l.getTotalPassed()).isEqualTo(1);
-  }
-
   // ── tryAcquire – CPU below threshold (permissive) ──
 
   @Test
