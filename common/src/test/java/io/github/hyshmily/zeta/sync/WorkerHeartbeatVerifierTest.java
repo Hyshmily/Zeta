@@ -41,7 +41,7 @@ class WorkerHeartbeatVerifierTest {
   @BeforeEach
   void setUp() {
     rabbitTemplate = mock(RabbitTemplate.class);
-    healthView = spy(new HealthViewImpl(3, 500_000, 99));
+    healthView = spy(new HealthViewImpl(500_000, 99));
     healthView.onHeartbeat(hb("w1", true));
     healthView.onHeartbeat(hb("w2", false));
     healthView.onHeartbeat(hb("w3", false));
@@ -70,9 +70,7 @@ class WorkerHeartbeatVerifierTest {
     ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
     verify(rabbitTemplate).sendAndReceive(eq(""), eq("zeta.verify.ping.w2"), captor.capture());
     Message sent = captor.getValue();
-    assertThat((String) sent.getMessageProperties().getHeader(HEADER_VERIFY_TYPE)).isEqualTo(
-      HEADER_VERIFY_PING
-    );
+    assertThat((String) sent.getMessageProperties().getHeader(HEADER_VERIFY_TYPE)).isEqualTo(HEADER_VERIFY_PING);
     assertThat((String) sent.getMessageProperties().getHeader(HEADER_VERIFY_APP_INSTANCE)).isEqualTo("test-app");
     assertThat(sent.getMessageProperties().getReplyTo()).isEqualTo("amq.rabbitmq.reply-to");
   }
@@ -114,7 +112,7 @@ class WorkerHeartbeatVerifierTest {
 
   @Test
   void shouldReturnEarlyWhenNoSuspectedWorkers() {
-    HealthView emptyView = new HealthViewImpl(3, 5000, 99);
+    HealthView emptyView = new HealthViewImpl(5000, 99);
     WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
       rabbitTemplate,
       emptyView,

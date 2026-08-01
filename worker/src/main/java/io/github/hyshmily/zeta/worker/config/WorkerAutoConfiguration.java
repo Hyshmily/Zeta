@@ -227,6 +227,7 @@ public class WorkerAutoConfiguration {
    * @param broadcaster       publishes HOT and COOL decisions to all application instances
    * @param globalQpsEstimator the global qps estimator tracking overall throughput
    * @param stateMachine      the per-key lifecycle state machine
+   * @param properties        worker configuration providing the optional staleness filter
    * @return a new {@link ReportConsumer} instance
    */
   @Bean
@@ -235,9 +236,16 @@ public class WorkerAutoConfiguration {
     Evaluator evaluator,
     WorkerBroadcaster broadcaster,
     GlobalQpsEstimator globalQpsEstimator,
-    ZetaBayesianSM stateMachine
+    ZetaBayesianSM stateMachine,
+    WorkerProperties properties
   ) {
-    return new ReportConsumer(evaluator, broadcaster, globalQpsEstimator, stateMachine);
+    return new ReportConsumer(
+      evaluator,
+      broadcaster,
+      globalQpsEstimator,
+      stateMachine,
+      properties.getReportConsumer().getStalenessThresholdMs()
+    );
   }
 
   /**

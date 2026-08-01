@@ -49,12 +49,12 @@ import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import java.time.Duration;
 import io.github.hyshmily.zeta.util.impl.SystemLoadMonitorImpl;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -278,7 +278,6 @@ public class ZetaAmqpAutoConfiguration {
         ringManager,
         healthViewProvider.getIfAvailable(() ->
           new HealthViewImpl(
-            properties.getExpectedWorkerCount(),
             properties.getHeartbeat().getTimeoutMs(),
             properties.getHeartbeat().getDegradeAfterFailures()
           )

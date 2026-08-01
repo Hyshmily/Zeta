@@ -15,14 +15,13 @@
  */
 package io.github.hyshmily.zeta.reporting.impl;
 
+import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
+
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
-
 import java.util.concurrent.atomic.AtomicLong;
-
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 /**
  * BBR (Bottleneck Bandwidth and Round-trip) adaptive rate limiter.
@@ -94,8 +93,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     }
     long duration = windowMs / bucketCount;
     if (duration <= 0) {
-      throw new IllegalArgumentException(
-        "windowMs(" + windowMs + ") must be >= bucketCount(" + bucketCount + ")");
+      throw new IllegalArgumentException("windowMs(" + windowMs + ") must be >= bucketCount(" + bucketCount + ")");
     }
     this.cpuMonitor = cpuMonitor;
     this.cpuThreshold = cpuThreshold;
@@ -118,6 +116,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
    *
    * @return {@code true} if the flush is allowed
    */
+  @Override
   public boolean tryAcquire() {
     synchronized (bucketLock) {
       tick();
@@ -135,6 +134,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   }
 
   /** Record one unit of in-flight work (batch enqueued). */
+  @Override
   public void onEnqueue() {
     inFlightField.value.incrementAndGet();
   }
@@ -147,6 +147,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
    *
    * @param rtMs round-trip time in milliseconds
    */
+  @Override
   public void onSuccess(long rtMs) {
     synchronized (bucketLock) {
       tick();
@@ -159,6 +160,7 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   }
 
   /** Record a dropped flush from the consumer (stale/failed batch — was enqueued, so decrement inFlight). */
+  @Override
   public void onConsumerDrop() {
     dropTimeMinFlightField.lastDropTime = currentTimeMillis();
     totalDropped.incrementAndGet();
@@ -181,32 +183,38 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
    * permanently inflate the concurrency budget even after the traffic pattern changes. The 0.99
    * factor means the budget halves every ~69 empty-window reads (~3.5 s at 50 ms flush intervals).
    */
+  @Override
   public void onGateDrop() {
     totalDropped.incrementAndGet();
   }
 
   /** Total flush cycles that passed the limiter. */
+  @Override
   public long getTotalPassed() {
     return totalPassed.get();
   }
 
   /** Total flush cycles that were dropped by the limiter. */
+  @Override
   public long getTotalDropped() {
     return totalDropped.get();
   }
 
   /** Current number of in-flight (enqueued but not yet published) batches. */
+  @Override
   public long getInFlight() {
     return inFlightField.value.get();
   }
 
   /** Dynamically adjust the min concurrency floor to match the number of active Worker nodes.
    *  Called automatically each flush cycle by {@code HotKeyReporter}. */
+  @Override
   public void setMinInFlight(int count) {
     dropTimeMinFlightField.minInFlight = Math.max(1, count);
   }
 
   /** Current computed max concurrency limit. */
+  @Override
   public long getCurrentMaxInFlight() {
     synchronized (bucketLock) {
       tick();

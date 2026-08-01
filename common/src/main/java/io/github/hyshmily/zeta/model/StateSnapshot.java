@@ -28,6 +28,13 @@ import lombok.experimental.Accessors;
  * {@code key} field enables the single-argument overload of
  * {@link ZetaBayesianSM#rollbackToPreviousState(ZetaBayesianSM.StateSnapshot)}.
  *
+ * <p>{@code mutationSeq} is the per-key evaluation epoch carried by the
+ * snapshot: it is bumped at the start of every evaluation that mutates the
+ * state, and the rollback applies only while the live state still carries the
+ * same epoch (no later evaluation advanced it). This prevents a stale
+ * rollback from clobbering concurrently-advanced state across the Worker's
+ * parallel report consumers.
+ *
  * <p>Fluent accessors ({@code key()}, {@code currentState()}, etc.) preserve
  * the same API as the previous {@code record} representation.
  */
@@ -40,5 +47,6 @@ public record StateSnapshot(
   int coolStreak,
   double posteriorMean,
   double accumulatedPrecision,
-  int lowResetCount
+  int lowResetCount,
+  long mutationSeq
 ) {}

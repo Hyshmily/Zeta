@@ -28,6 +28,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import lombok.Builder;
 import lombok.extern.slf4j.Slf4j;
@@ -51,8 +52,13 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  *       a {@code COOL} message.</li>
  * </ol>
  *
- * <p>Messages older than 5 seconds are silently discarded to prevent stale
- * data from distorting the sliding‑window view.
+ * <p>Optional staleness filter: when {@code stalenessThresholdMs > 0}, reports
+ * whose age ({@code now - timestamp}) exceeds the threshold are dropped.
+ * The filter is disabled by default ({@code 0}): the report queue's
+ * {@code x-message-ttl} bounds staleness broker-side, and a cross-host
+ * wall-clock comparison cannot distinguish a genuinely delayed report from
+ * an App whose clock lags behind the Worker — an App clock skew of more
+ * than the threshold would otherwise silently blind that instance.
  *
  * <p>Because clients use consistent‑hash routing, every reportToWorker for a given
  * key always reaches the same worker, guaranteeing correct per‑key state
@@ -70,8 +76,20 @@ public class ReportConsumer {
   /** Per-key lifecycle state machine. */
   private final ZetaBayesianSM stateMachine;
 
-  /** Staleness threshold in milliseconds. */
-  long stalenessThresholdMs = 5000L;
+  /**
+   * Optional staleness filter threshold in milliseconds; {@code 0} disables
+   * the filter (default). When enabled, only a positive age exceeding the
+   * threshold drops a report — a negative age (reporter clock ahead) always
+   * passes, since it cannot be distinguished from a healthy fast report.
+   */
+  private final long stalenessThresholdMs;
+
+  /**
+   * Total count of reports dropped by the staleness filter, used to
+   * rate-limit the WARN log so a skewing instance becomes visible without
+   * flooding the log on the hot path.
+   */
+  private final AtomicLong staleDroppedCount = new AtomicLong();
 
   /** Max keys per chunk for parallel processing. Beyond this, keys are split into chunks. */
   private static final int CHUNK_SIZE = 1000;
@@ -83,12 +101,14 @@ public class ReportConsumer {
     Evaluator evaluator,
     WorkerBroadcaster broadcaster,
     GlobalQpsEstimator globalQpsEstimator,
-    ZetaBayesianSM stateMachine
+    ZetaBayesianSM stateMachine,
+    long stalenessThresholdMs
   ) {
     this.evaluator = evaluator;
     this.broadcaster = broadcaster;
     this.globalQpsEstimator = globalQpsEstimator;
     this.stateMachine = stateMachine;
+    this.stalenessThresholdMs = stalenessThresholdMs;
   }
 
   /**
@@ -109,6 +129,7 @@ public class ReportConsumer {
     }
   }
 
+  @SuppressWarnings("all")
   private void doOnReport(ReportMessage message) {
     long now = currentTimeMillis();
     Map<String, Long> keyCounts = message.counts();
@@ -122,16 +143,21 @@ public class ReportConsumer {
 
     long totalQps = 0L;
 
-    // Discard reports that are more than 5 seconds old.
-    // Guards against delayed or re‑delivered messages that would
-    // feed outdated counts into the sliding window.
-    if (now - message.timestamp() > stalenessThresholdMs) {
-      log.debug(
-        "Stale reportToWorker message, skip: appName={}, age={}ms",
-        message.appName(),
-        now - message.timestamp()
-      );
-      return;
+    // Optional staleness filter, disabled by default (threshold 0) — the
+    // queue's x-message-ttl bounds staleness broker-side, and a cross-host
+    // wall-clock comparison cannot tell a delayed report from an App whose
+    // clock lags the Worker. When enabled, only a positive age beyond the
+    // threshold is dropped; a negative age (reporter clock ahead) passes.
+    if (stalenessThresholdMs > 0) {
+      long age = now - message.timestamp();
+      if (age > stalenessThresholdMs) {
+        long dropped = staleDroppedCount.incrementAndGet();
+        if (dropped == 1 || (dropped & 100) == 0) {
+          staleDroppedCount.set(1);
+          log.warn("Stale report dropped: appName={}, age={}ms, totalDropped={}", message.appName(), age, dropped);
+        }
+        return;
+      }
     }
 
     if (keyCounts.isEmpty()) return;

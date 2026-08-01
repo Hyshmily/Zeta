@@ -30,6 +30,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
+import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.CachePolicy;
@@ -50,6 +51,7 @@ import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -293,6 +295,104 @@ class ZetaCacheTest {
     assertThatThrownBy(() -> hotKeyCache.getWithSoftExpire("secret", CachePolicy.of(() -> "db", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).isInstanceOf(
       ZetaBlockedException.class
     );
+  }
+
+  @Test
+  void execute_shouldRouteSwallowedExceptionToConfiguredHandler() {
+    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+    AtomicInteger calls = new AtomicInteger();
+    ZetaExceptionHandler.setDefaultExceptionHandler(t -> calls.incrementAndGet());
+    try {
+      assertThat(
+        hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
+      ).isEmpty();
+      assertThat(calls.get()).isEqualTo(1);
+    } finally {
+      ZetaExceptionHandler.setDefaultExceptionHandler(null);
+    }
+  }
+
+  // ── failOnError: distinguishing a failing data source from a missing key ──
+
+  @Test
+  void get_withFailOnError_shouldPropagateReaderFailure() {
+    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+
+    assertThatThrownBy(() -> hotKeyCache.get("key1", CachePolicy.of(() -> "loaded").withFailOnError()))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
+  }
+
+  @Test
+  void get_default_shouldSwallowReaderFailureAsMiss() {
+    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+
+    assertThat(hotKeyCache.get("key1", CachePolicy.of(() -> "loaded"))).isEmpty();
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
+  }
+
+  @Test
+  void get_withFailOnError_nullResult_shouldStillCacheNullValue() {
+    when(singleFlight.load(anyString(), any())).thenReturn(Optional.empty());
+
+    assertThat(hotKeyCache.get("key1", CachePolicy.of(() -> null).withFailOnError())).isEmpty();
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isNotNull();
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) raw).getValue()).isEqualTo(NullValue.INSTANCE);
+  }
+
+  @Test
+  void computeIfAbsent_withFailOnError_shouldPropagateAndPreserveExistingEntry() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("old")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(System.currentTimeMillis() - 1000)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    assertThatThrownBy(() ->
+      hotKeyCache.computeIfAbsent(
+        "key1",
+        CachePolicy.of(() -> {
+          throw new IllegalStateException("boom");
+        }).withFailOnError()
+      )
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
+    assertThat(caffeineCache.getIfPresent("key1")).isNotNull();
+  }
+
+  @Test
+  void getAll_withFailOnError_shouldPropagateReaderFailure() {
+    when(singleFlight.load(any(Iterable.class), any(), anyBoolean()))
+      .thenThrow(new IllegalStateException("boom"));
+
+    assertThatThrownBy(() -> hotKeyCache.get(List.of("a", "b"), k -> "v", 0L, 0L, true, true))
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
+  }
+
+  @Test
+  void getAll_default_shouldSwallowPerKeyFailure() {
+    when(singleFlight.load(any(Iterable.class), any(), anyBoolean()))
+      .thenReturn(Map.of("a", Optional.of("v"), "b", Optional.<String>empty()));
+
+    Map<String, Optional<String>> result = hotKeyCache.get(List.of("a", "b"), k -> "v", 0L, 0L, true, false);
+
+    assertThat(result).containsEntry("a", Optional.of("v")).containsEntry("b", Optional.empty());
   }
 
   /**
@@ -1451,6 +1551,98 @@ class ZetaCacheTest {
       assertThat(raw).isInstanceOf(CacheEntry.class);
       CacheEntry entry = (CacheEntry) raw;
       assertThat(entry.getKeyState()).isEqualTo(KeyState.COOL);
+    }
+
+    @Test
+    @DisplayName("processLocalHotkeyIfNeeded should skip promote for non-member NORMAL entry via lock-free pre-check")
+    void processLocalHotkeyIfNeeded_shouldSkipPromoteForNonMemberNormal() {
+      caffeineCache.put(
+        "key1",
+        CacheEntry.builder()
+          .value("v")
+          .dataVersion(1)
+          .isVersionDegraded(false)
+          .decisionVersion(0)
+          .hardTtlMs(300_000)
+          .hardExpireAtMs(Long.MAX_VALUE)
+          .softTtlMs(30_000)
+          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .keyState(KeyState.NORMAL)
+          .normalHardTtlMs(300_000)
+          .normalSoftTtlMs(30_000)
+          .build()
+      );
+      when(hotKeyDetector.contains("key1")).thenReturn(false);
+
+      assertThat(
+        hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
+      ).contains("v");
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+      assertThat(entry.getHardTtlMs()).isEqualTo(300_000L);
+    }
+
+    @Test
+    @DisplayName("promote should NOT promote when TopK membership revoked between pre-check and compute (TOCTOU guard)")
+    void promote_shouldNotPromoteWhenMembershipRevokedBetweenPreCheckAndCompute() {
+      caffeineCache.put(
+        "key1",
+        CacheEntry.builder()
+          .value("v")
+          .dataVersion(1)
+          .isVersionDegraded(false)
+          .decisionVersion(0)
+          .hardTtlMs(300_000)
+          .hardExpireAtMs(Long.MAX_VALUE)
+          .softTtlMs(30_000)
+          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .keyState(KeyState.NORMAL)
+          .normalHardTtlMs(300_000)
+          .normalSoftTtlMs(30_000)
+          .build()
+      );
+      // First contains() = lock-free pre-check (passes), second = TOCTOU guard inside compute (fails)
+      when(hotKeyDetector.contains("key1")).thenReturn(true, false);
+
+      hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+    }
+
+    @Test
+    @DisplayName("promote should preserve a concurrently-replaced bare value instead of deleting it")
+    void promote_shouldPreserveBareValueReplacedDuringProcessing() {
+      caffeineCache.put(
+        "key1",
+        CacheEntry.builder()
+          .value("v")
+          .dataVersion(1)
+          .isVersionDegraded(false)
+          .decisionVersion(0)
+          .hardTtlMs(300_000)
+          .hardExpireAtMs(Long.MAX_VALUE)
+          .softTtlMs(30_000)
+          .softExpireAtMs(System.currentTimeMillis() + 60_000)
+          .keyState(KeyState.NORMAL)
+          .normalHardTtlMs(300_000)
+          .normalSoftTtlMs(30_000)
+          .build()
+      );
+      // Simulate a concurrent raw write replacing the CacheEntry with a bare value
+      // between the lock-free pre-check and the promote compute.
+      when(hotKeyDetector.contains(anyString()))
+        .thenAnswer(invocation -> {
+          caffeineCache.put("key1", "bareValue");
+          return true;
+        });
+
+      assertThat(
+        hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
+      ).contains("v");
+
+      assertThat(caffeineCache.getIfPresent("key1")).isEqualTo("bareValue");
     }
 
     @Test

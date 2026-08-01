@@ -45,7 +45,6 @@ import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
@@ -59,6 +58,7 @@ import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * Tests for {@link ZetaAmqpAutoConfiguration}.
@@ -253,11 +253,7 @@ class ZetaAmqpAutoConfigurationTest {
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheSyncListener listener = config.cacheSyncListener(
-      props,
-      scheduler,
-      mock(SyncDecisionHandler.class)
-    );
+    CacheSyncListener listener = config.cacheSyncListener(props, scheduler, mock(SyncDecisionHandler.class));
 
     assertThat(listener).isNotNull();
   }
@@ -370,11 +366,7 @@ class ZetaAmqpAutoConfigurationTest {
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    WorkerListener listener = config.workerListener(
-      props,
-      scheduler,
-      mock(WorkerDecisionHandler.class)
-    );
+    WorkerListener listener = config.workerListener(props, scheduler, mock(WorkerDecisionHandler.class));
 
     assertThat(listener).isNotNull();
   }
@@ -663,7 +655,7 @@ class ZetaAmqpAutoConfigurationTest {
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     ZetaProperties properties = new ZetaProperties();
     RingManager ringManager = new RingManagerImpl(150);
-    HealthView customHealthView = new HealthViewImpl(3, 5000, 2);
+    HealthView customHealthView = new HealthViewImpl(5000, 2);
 
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
     when(healthViewProvider.getIfAvailable(any())).thenReturn(customHealthView);

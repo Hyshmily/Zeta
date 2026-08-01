@@ -50,7 +50,7 @@ class ReportConsumerTest {
 
   @BeforeEach
   void setUp() {
-    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine);
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 0L);
   }
 
   @Test
@@ -81,11 +81,35 @@ class ReportConsumerTest {
   }
 
   @Test
-  void shouldSkipStaleMessages() {
+  void shouldSkipStaleMessagesWhenFilterEnabled() {
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 5000L);
     ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
     consumer.onReport(message);
 
     verify(keyEvaluator, never()).evaluate(anyString(), anyLong());
+  }
+
+  @Test
+  void shouldProcessOldMessageWhenFilterDisabledByDefault() {
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
+    when(keyEvaluator.evaluate("key", 1L)).thenReturn(ZetaDecision.none("key", null));
+
+    consumer.onReport(message);
+
+    verify(keyEvaluator).evaluate("key", 1L);
+    verify(globalQpsEstimator).addTotal(1L);
+  }
+
+  @Test
+  void shouldProcessMessageWhenReporterClockAhead() {
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 5000L);
+    ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis() + 10_000, Map.of("key", 1L));
+    when(keyEvaluator.evaluate("key", 1L)).thenReturn(ZetaDecision.none("key", null));
+
+    consumer.onReport(message);
+
+    verify(keyEvaluator).evaluate("key", 1L);
+    verify(globalQpsEstimator).addTotal(1L);
   }
 
   @Test
@@ -133,7 +157,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldProcessMessageUnderStalenessBoundary() {
-    consumer.stalenessThresholdMs = 100_000L;
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 100_000L);
     long now = System.currentTimeMillis();
     ReportMessage message = new ReportMessage(0L, "testApp", now - 1, Map.of("key", 1L));
     when(keyEvaluator.evaluate("key", 1L)).thenReturn(ZetaDecision.none("key", null));

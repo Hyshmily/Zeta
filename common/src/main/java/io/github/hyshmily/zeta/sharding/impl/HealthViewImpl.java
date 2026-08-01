@@ -35,10 +35,11 @@ import lombok.extern.slf4j.Slf4j;
  * every known Worker by ID with its epoch (restart counter), heartbeat timestamps,
  * readiness flag, decision version high-water mark, and verification failure count.
  *
- * <p><b>Health judgment:</b> The cluster is considered healthy when a strict majority
- * ({@code > knownWorkerCount / 2}) of Workers are alive (ready, not stale, and within
- * the heartbeat timeout window). When the cluster becomes unhealthy, the system may
- * enter graceful degradation mode (see ADR-0009).
+ * <p><b>Health judgment:</b> The cluster is considered healthy when at least one
+ * third of the Workers observed via heartbeats (rounded up, minimum 1) are alive
+ * (ready, not stale, and within the heartbeat timeout window). When the cluster
+ * becomes unhealthy, the system may enter graceful degradation mode
+ * (see ADR-0021 and ADR-0028).
  *
  * <p><b>Restart detection:</b> When a Worker's epoch in a new heartbeat exceeds the
  * stored epoch, a new {@link WorkerHealthRecord} is created — all state from the
@@ -60,9 +61,6 @@ public class HealthViewImpl implements HealthView {
   /** Per-Worker health records keyed by Worker ID. Thread-safe via {@link ConcurrentHashMap}. */
   private final ConcurrentMap<String, WorkerHealthRecord> records = new ConcurrentHashMap<>();
 
-  @Getter
-  private volatile int knownWorkerCount;
-
   private final long heartbeatTimeoutMs;
   private final int degradeAfterFailures;
 
@@ -72,32 +70,9 @@ public class HealthViewImpl implements HealthView {
   @Getter
   private volatile long lastAnyHeartbeatTime;
 
-  public HealthViewImpl(int knownWorkerCount, long heartbeatTimeoutMs, int degradeAfterFailures) {
-    this.knownWorkerCount = knownWorkerCount;
+  public HealthViewImpl(long heartbeatTimeoutMs, int degradeAfterFailures) {
     this.heartbeatTimeoutMs = heartbeatTimeoutMs;
     this.degradeAfterFailures = degradeAfterFailures;
-  }
-
-  /**
-   * Updates the expected Worker count for majority-quorum health calculations.
-   * <p>Called during initialization (from configuration) and dynamically
-   * when the ring is reconciled from observed heartbeats.
-   * <p>If the new count is 0, the cluster is considered healthy when at least
-   * one alive Worker is observed. If the new count is greater than the previous, the quorum threshold
-   * adjusts accordingly.
-   *
-   * @param count the new expected Worker count; must be {@code >= 0}
-   */
-  public void setKnownWorkerCount(int count) {
-    if (count < 0) {
-      log.warn("Invalid knownWorkerCount {}, ignoring update", count);
-      return;
-    }
-    int old = this.knownWorkerCount;
-    this.knownWorkerCount = count;
-    if (old == 0 && count > 0) {
-      log.info("knownWorkerCount updated from 0 to {}; cluster health check now active", count);
-    }
   }
 
   /**
@@ -118,6 +93,7 @@ public class HealthViewImpl implements HealthView {
    *
    * @param hb the incoming heartbeat message; must not be null
    */
+  @Override
   public void onHeartbeat(WorkerHeartbeatMessage hb) {
     records.compute(hb.workerId(), (id, existing) -> {
       long now = System.currentTimeMillis();
@@ -159,6 +135,7 @@ public class HealthViewImpl implements HealthView {
    *
    * @param workerId the Worker that responded with a PONG; must not be null
    */
+  @Override
   public void recordPong(String workerId) {
     records.computeIfPresent(workerId, (id, r) -> {
       r.lastHeartbeatTime = System.currentTimeMillis();
@@ -181,6 +158,8 @@ public class HealthViewImpl implements HealthView {
    *
    * @param workerId the Worker that failed active verification; must not be null
    */
+  @Override
+  @SuppressWarnings("all")
   public void markVerificationFailed(String workerId) {
     records.computeIfPresent(workerId, (id, r) -> {
       r.verifyFailures++;
@@ -197,6 +176,7 @@ public class HealthViewImpl implements HealthView {
    * @param workerId the Worker to query; must not be null
    * @return the failure count, or 0 if the Worker is not tracked
    */
+  @Override
   public int getVerifyFailures(String workerId) {
     WorkerHealthRecord r = records.get(workerId);
     return r != null ? r.verifyFailures : 0;
@@ -207,13 +187,13 @@ public class HealthViewImpl implements HealthView {
    *
    * @param workerId the Worker to remove; must not be null
    */
+  @Override
   public void removeRecord(String workerId) {
     records.remove(workerId);
   }
 
   /**
-   * Returns whether the cluster is currently considered healthy based on majority
-   * of known Workers being alive.
+   * Returns whether the cluster is currently considered healthy.
    *
    * <p>A Worker is considered alive when all three conditions hold:
    * <ul>
@@ -222,22 +202,22 @@ public class HealthViewImpl implements HealthView {
    *   <li>Time since last heartbeat {@code < heartbeatTimeoutMs}</li>
    * </ul>
    *
-   * <p>The cluster is healthy when the count of alive Workers is strictly greater
-   * than {@code knownWorkerCount / 2} (simple majority).
+   * <p>The cluster is healthy when the count of alive Workers is at least the
+   * minimum threshold. When {@code minAliveWorkers} is not configured ({@code <= 0}),
+   * the threshold is one third of the observed Worker count (rounded up, minimum 1),
+   * where the observed count is the set of Workers ever seen via heartbeats and not
+   * yet confirmed dead. This intentionally accepts a single surviving Worker as a
+   * healthy cluster (see ADR-0028): degradation is triggered only when fewer than
+   * one third of the observed Workers remain alive.
    *
-   * <p>When {@code knownWorkerCount == 0} (no expected count configured), the
-   * cluster is considered healthy if at least one alive Worker is observed via
-   * heartbeats. This provides backward compatibility for deployments that rely
-   * on dynamic Worker discovery rather than a fixed expected count.
-   *
-   * @return {@code true} if a strict majority of known Workers are alive and ready;
-   *         {@code false} if no Workers are configured or too few are alive
+   * @return {@code true} if the minimum alive Worker threshold is met;
+   *         {@code false} otherwise
    */
+  @Override
   public boolean isClusterHealthy() {
     int minAlive = minAliveWorkers;
-
     if (minAlive <= 0) {
-      minAlive = knownWorkerCount / 2 + 1;
+      minAlive = Math.max(1, (records.size() + 2) / 3);
     }
     long aliveCount = records
       .values()
@@ -252,6 +232,7 @@ public class HealthViewImpl implements HealthView {
    *
    * @return a set of alive Worker IDs, never {@code null}
    */
+  @Override
   public Set<String> getAliveWorkerIds() {
     return records
       .values()
@@ -266,6 +247,7 @@ public class HealthViewImpl implements HealthView {
    *
    * @return a set of all known Worker IDs, never {@code null}
    */
+  @Override
   public Set<String> getAllWorkerIds() {
     return records.values().stream().map(WorkerHealthRecord::getWorkerId).collect(Collectors.toSet());
   }

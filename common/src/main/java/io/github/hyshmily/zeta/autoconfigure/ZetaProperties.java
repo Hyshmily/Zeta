@@ -100,17 +100,6 @@ public class ZetaProperties {
   @Min(1)
   private int schedulerPoolSize = 8;
 
-  /**
-   * Expected number of Worker nodes in the cluster.
-   * <p>Used by {@link ClusterHealthView} for majority-quorum health checks.
-   * If set to 0 (default), the cluster is always considered unhealthy until
-   * Worker heartbeats dynamically update the count.
-   * <p>For production deployments with a fixed Worker count, set this to
-   * the expected number of Worker instances for accurate health detection.
-   */
-  @Min(0)
-  private int expectedWorkerCount = 0;
-
   /** Capacity of the expelled-key queue in HeavyKeeper. */
   @Min(1)
   private int expelledQueueCapacity = 50_000;
@@ -366,8 +355,13 @@ public class ZetaProperties {
     /** Max backoff (ms) for per-Worker exponential backoff between verification probes. */
     private long verifyMaxBackoffMs = 600_000;
     /**
-     * Minimum alive workers for cluster health. 0 = use majority formula (knownWorkerCount / 2 + 1).
-     * Set to a positive value to override the default majority threshold.
+     * Minimum alive workers for cluster health.
+     * <p>0 (default) = derived threshold: one third of the observed Worker count,
+     * rounded up, with a floor of 1 (e.g. 3 Workers observed → 1 alive is healthy;
+     * 5 observed → 2 alive; 9 observed → 3 alive). A single surviving Worker is
+     * intentionally accepted as a healthy cluster — see ADR-0028.
+     * <p>Set to a positive value to override the derived threshold with an
+     * absolute alive count.
      */
     private int minAliveWorkers;
   }

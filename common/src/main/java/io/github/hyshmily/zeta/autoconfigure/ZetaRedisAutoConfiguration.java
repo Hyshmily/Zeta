@@ -152,7 +152,6 @@ public class ZetaRedisAutoConfiguration {
       properties,
       healthViewProvider.getIfAvailable(() ->
         new HealthViewImpl(
-          properties.getExpectedWorkerCount(),
           properties.getHeartbeat().getTimeoutMs(),
           properties.getHeartbeat().getDegradeAfterFailures()
         )

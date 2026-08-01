@@ -773,13 +773,44 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
+    return get(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime, false);
+  }
+
+  /**
+   * Batch variant of {@link #get(Iterable, Function, long, long, boolean)} with
+   * an explicit failure policy: when {@code failOnError} is {@code true}, the
+   * first reader failure aborts the whole batch and propagates to the caller
+   * (distinguishing a failing data source from absent keys), instead of being
+   * swallowed as per-key misses.
+   *
+   * @param cacheKeys  the keys to retrieve
+   * @param reader     the value function for cache misses
+   * @param hardTtlMs  hard TTL override (0 = use configured default;
+   *                   {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs  soft TTL override (0 = use configured default)
+   * @param isReportByThisTime  whether to reportToWorker this access to the Worker
+   * @param failOnError whether the first reader failure propagates instead of being swallowed
+   * @param <T>        the value type
+   * @return a map of key → loaded or cached value (never {@code null})
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when any key matches a blacklist rule
+   * @throws RuntimeException the first reader failure cause when {@code failOnError} is {@code true}
+   */
+  public <T> Map<String, Optional<T>> get(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean isReportByThisTime,
+    boolean failOnError
+  ) {
     Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Objects.requireNonNull(reader, "reader must not be null");
     Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
     Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     requireAppCache("get");
     requireAppDetector("get");
-    return hotKeyCache.get(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+    return hotKeyCache.get(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime, failOnError);
   }
 
   /**
@@ -952,13 +983,43 @@ public class Zeta implements DisposableBean {
     long softTtlMs,
     boolean isReportByThisTime
   ) {
+    return getWithSoftExpire(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime, false);
+  }
+
+  /**
+   * Batch variant of {@link #getWithSoftExpire(Iterable, Function, long, long, boolean)}
+   * with an explicit failure policy: when {@code failOnError} is {@code true},
+   * the first reader failure aborts the whole batch and propagates to the
+   * caller instead of being swallowed as per-key misses.
+   *
+   * @param cacheKeys  the keys to retrieve
+   * @param reader     the value function for cache misses / refreshes
+   * @param hardTtlMs  hard TTL override (0 = use configured default;
+   *                   {@link Long#MAX_VALUE} for pure logical expiry)
+   * @param softTtlMs  soft TTL override (0 = use configured default)
+   * @param isReportByThisTime  whether to reportToWorker this access to the Worker
+   * @param failOnError whether the first reader failure propagates instead of being swallowed
+   * @param <T>        the value type
+   * @return a map of key → cached (possibly stale) or loaded value
+   * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
+   * @throws ZetaBlockedException when any key matches a blacklist rule
+   * @throws RuntimeException the first reader failure cause when {@code failOnError} is {@code true}
+   */
+  public <T> Map<String, Optional<T>> getWithSoftExpire(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean isReportByThisTime,
+    boolean failOnError
+  ) {
     Objects.requireNonNull(cacheKeys, "cacheKeys must not be null");
     Objects.requireNonNull(reader, "reader must not be null");
     Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
     Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
     requireAppCache("getWithSoftExpire");
     requireAppDetector("getWithSoftExpire");
-    return hotKeyCache.getWithSoftExpire(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime);
+    return hotKeyCache.getWithSoftExpire(cacheKeys, reader, hardTtlMs, softTtlMs, isReportByThisTime, failOnError);
   }
 
   /**

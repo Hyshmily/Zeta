@@ -33,7 +33,7 @@ class ClusterHealthViewTest {
 
   @BeforeEach
   void setUp() {
-    view = new HealthViewImpl(3, 5000, 2);
+    view = new HealthViewImpl(5000, 2);
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, long epoch, boolean ready) {
@@ -136,21 +136,39 @@ class ClusterHealthViewTest {
   // ── isClusterHealthy ──
 
   @Test
-  void shouldReturnFalseWhenKnownWorkerCountIsZero() {
-    HealthView emptyView = new HealthViewImpl(0, 5000, 2);
-    assertThat(emptyView.isClusterHealthy()).isFalse();
+  void shouldReturnFalseWhenNoWorkersObserved() {
+    assertThat(view.isClusterHealthy()).isFalse();
   }
 
   @Test
-  void shouldReturnTrueWhenMajorityIsAlive() {
+  void shouldReturnTrueWhenObservedWorkersAreAlive() {
     view.onHeartbeat(hb("w1", 1, true));
     view.onHeartbeat(hb("w2", 1, true));
     assertThat(view.isClusterHealthy()).isTrue();
   }
 
+  /**
+   * Verifies the core ADR-0028 semantics: with 3 observed Workers, a single
+   * surviving Worker is considered a healthy cluster (one third, minimum 1).
+   */
   @Test
-  void shouldReturnFalseWhenOnlyMinorityIsAlive() {
+  void shouldReturnTrueWhenSingleWorkerOfThreeIsAlive() {
     view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w2", 1, true));
+    view.onHeartbeat(hb("w3", 1, true));
+    view.markVerificationFailed("w2");
+    view.markVerificationFailed("w2");
+    view.markVerificationFailed("w3");
+    view.markVerificationFailed("w3");
+    assertThat(view.getAliveWorkerIds()).containsExactly("w1");
+    assertThat(view.isClusterHealthy()).isTrue();
+  }
+
+  @Test
+  void shouldReturnFalseWhenNoObservedWorkerIsAlive() {
+    view.onHeartbeat(hb("w1", 1, true));
+    view.markVerificationFailed("w1");
+    view.markVerificationFailed("w1");
     assertThat(view.isClusterHealthy()).isFalse();
   }
 
@@ -164,79 +182,66 @@ class ClusterHealthViewTest {
     assertThat(view.isClusterHealthy()).isTrue();
     view.markVerificationFailed("w2");
     view.markVerificationFailed("w2");
+    // 1 of 3 alive = one third (floor 1) → still healthy
+    assertThat(view.isClusterHealthy()).isTrue();
+    view.markVerificationFailed("w3");
+    view.markVerificationFailed("w3");
     assertThat(view.isClusterHealthy()).isFalse();
   }
 
   /**
-   * Verifies that setKnownWorkerCount transitions from 0 to a positive value,
-   * enabling majority-quorum health checks.
+   * Verifies the one-third threshold is rounded up: with 7 observed Workers the
+   * threshold is ceil(7/3) = 3, so 3 alive is healthy and 2 alive is not.
    */
   @Test
-  void setKnownWorkerCount_fromZeroToPositive_switchesToMajorityQuorum() {
-    HealthView view = new HealthViewImpl(0, 5000, 2);
+  void isClusterHealthy_oneThirdThresholdRoundedUp() {
+    for (int i = 1; i <= 7; i++) {
+      view.onHeartbeat(hb("w" + i, 1, true));
+    }
+    for (int i = 4; i <= 7; i++) {
+      view.markVerificationFailed("w" + i);
+      view.markVerificationFailed("w" + i);
+    }
+    assertThat(view.getAliveWorkerIds()).hasSize(3);
+    assertThat(view.isClusterHealthy()).isTrue();
+    view.markVerificationFailed("w3");
+    view.markVerificationFailed("w3");
+    assertThat(view.getAliveWorkerIds()).hasSize(2);
+    assertThat(view.isClusterHealthy()).isFalse();
+  }
+
+  /**
+   * Verifies that minAliveWorkers overrides the derived one-third threshold.
+   */
+  @Test
+  void minAliveWorkers_shouldOverrideDerivedThreshold() {
+    view.setMinAliveWorkers(3);
     view.onHeartbeat(hb("w1", 1, true));
     view.onHeartbeat(hb("w2", 1, true));
-    view.onHeartbeat(hb("w3", 1, true));
-
-    // Before set: fallback mode (at least 1 alive)
-    assertThat(view.isClusterHealthy()).isTrue();
-
-    // After set to 3: majority quorum of 3 requires 2 alive
-    view.setKnownWorkerCount(3);
-    assertThat(view.isClusterHealthy()).isTrue();
-
-    // One worker dies: 2 alive >= 2 (3/2+1 = 2) → still healthy
-    view.markVerificationFailed("w1");
-    view.markVerificationFailed("w1");
-    assertThat(view.isClusterHealthy()).isTrue();
-
-    // Two workers die: 1 alive < 2 → unhealthy
-    view.markVerificationFailed("w2");
-    view.markVerificationFailed("w2");
     assertThat(view.isClusterHealthy()).isFalse();
-  }
-
-  /**
-   * Verifies that setKnownWorkerCount with a negative value is silently ignored.
-   */
-  @Test
-  void setKnownWorkerCount_withNegativeValue_shouldIgnore() {
-    HealthView view = new HealthViewImpl(3, 5000, 2);
-    view.onHeartbeat(hb("w1", 1, true));
-    view.onHeartbeat(hb("w2", 1, true));
     view.onHeartbeat(hb("w3", 1, true));
-
-    view.setKnownWorkerCount(-1);
-    // knownWorkerCount should still be 3
-    assertThat(view.getKnownWorkerCount()).isEqualTo(3);
     assertThat(view.isClusterHealthy()).isTrue();
   }
 
   /**
-   * Verifies that setKnownWorkerCount with 0 re-enables fallback mode.
+   * Verifies that with observed alive Workers the cluster is healthy
+   * (records-derived threshold).
    */
   @Test
-  void setKnownWorkerCount_toZero_shouldRevertToFallbackMode() {
-    view.onHeartbeat(hb("w1", 1, true));
-
-    // With knownWorkerCount=3 and only 1 alive, cluster is unhealthy
-    assertThat(view.isClusterHealthy()).isFalse();
-
-    // Reset to 0: fallback mode, 1 alive → healthy
-    view.setKnownWorkerCount(0);
-    assertThat(view.isClusterHealthy()).isTrue();
+  void isClusterHealthy_withAliveWorkersObserved_shouldReturnTrue() {
+    HealthView empty = new HealthViewImpl(5000, 2);
+    empty.onHeartbeat(hb("w1", 1, true));
+    empty.onHeartbeat(hb("w2", 1, true));
+    assertThat(empty.isClusterHealthy()).isTrue();
   }
 
   /**
-   * Verifies that getKnownWorkerCount returns the last value set.
+   * Verifies that with NO observed alive Workers the cluster is unhealthy.
    */
   @Test
-  void getKnownWorkerCount_shouldReturnCurrentValue() {
-    assertThat(view.getKnownWorkerCount()).isEqualTo(3);
-    view.setKnownWorkerCount(5);
-    assertThat(view.getKnownWorkerCount()).isEqualTo(5);
-    view.setKnownWorkerCount(0);
-    assertThat(view.getKnownWorkerCount()).isZero();
+  void isClusterHealthy_withNoObservedAliveWorkers_shouldReturnFalse() {
+    HealthView empty = new HealthViewImpl(5000, 2);
+    assertThat(empty.isClusterHealthy()).isFalse();
   }
 
   // ── getAliveWorkerIds ──
@@ -371,38 +376,6 @@ class ClusterHealthViewTest {
     assertThat(r.isAlive(5000)).isFalse();
   }
 
-  /**
-   * Verifies that when knownWorkerCount is 0 and at least one worker is alive,
-   * the cluster is considered healthy (fallback detection).
-   */
-  @Test
-  void isClusterHealthy_withZeroKnownWorkersAndAliveWorkers_shouldReturnTrue() {
-    HealthView empty = new HealthViewImpl(0, 5000, 2);
-    empty.onHeartbeat(hb("w1", 1, true));
-    empty.onHeartbeat(hb("w2", 1, true));
-    assertThat(empty.isClusterHealthy()).isTrue();
-  }
-
-  /**
-   * Verifies that when knownWorkerCount is 0 and NO workers are alive,
-   * the cluster is considered unhealthy.
-   */
-  @Test
-  void isClusterHealthy_withZeroKnownWorkersAndNoAliveWorkers_shouldReturnFalse() {
-    HealthView empty = new HealthViewImpl(0, 5000, 2);
-    assertThat(empty.isClusterHealthy()).isFalse();
-  }
-
-  /**
-   * Verifies that isClusterHealthy with exactly majority alive returns true.
-   */
-  @Test
-  void isClusterHealthy_exactMajority_shouldReturnTrue() {
-    view.onHeartbeat(hb("w1", 1, true));
-    view.onHeartbeat(hb("w2", 1, true));
-    assertThat(view.isClusterHealthy()).isTrue();
-  }
-
   /** An alternative to the private hbWithHwm method in this file. */
   @Test
   void shouldHandleHeartbeatForSingleWorker() {
@@ -424,6 +397,10 @@ class ClusterHealthViewTest {
     assertThat(view.isClusterHealthy()).isTrue();
     view.markVerificationFailed("w2");
     view.markVerificationFailed("w2");
+    // 1 of 3 alive = one third (floor 1) → still healthy
+    assertThat(view.isClusterHealthy()).isTrue();
+    view.markVerificationFailed("w3");
+    view.markVerificationFailed("w3");
     assertThat(view.isClusterHealthy()).isFalse();
     view.recordPong("w1");
     view.onHeartbeat(hb("w1", 1, true));

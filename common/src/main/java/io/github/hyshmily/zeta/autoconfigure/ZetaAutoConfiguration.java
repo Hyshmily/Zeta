@@ -254,7 +254,12 @@ public class ZetaAutoConfiguration {
     Optional<CacheSyncPublisher> syncPublisher,
     ZetaProperties properties
   ) {
-    return new BroadcastBuffer(hotKeyScheduler, syncPublisher, properties.getSync().getFlushDelayMs(), properties.getSync().getMaxDeferMs());
+    return new BroadcastBuffer(
+      hotKeyScheduler,
+      syncPublisher,
+      properties.getSync().getFlushDelayMs(),
+      properties.getSync().getMaxDeferMs()
+    );
   }
 
   /**
@@ -319,7 +324,6 @@ public class ZetaAutoConfiguration {
       properties,
       healthViewProvider.getIfAvailable(() ->
         new HealthViewImpl(
-          properties.getExpectedWorkerCount(),
           properties.getHeartbeat().getTimeoutMs(),
           properties.getHeartbeat().getDegradeAfterFailures()
         )

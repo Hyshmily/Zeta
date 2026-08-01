@@ -112,7 +112,7 @@ zeta:
 # 无需静态分片配置——只需增加机器即可,建议本地App优先部署再启动worker
 ```
 
-**集群健康阈值** — `expected-worker-count: 0`（动态模式，默认）时，`min-alive-workers: 0` 等价于 **有 1 个存活即健康**。`expected-worker-count: N`（固定模式）时，使用多数派公式 `N/2 + 1`。设置 `min-alive-workers` 可覆盖任意模式。详见 `docs/CONFIG.md`。`
+**集群健康阈值** — 默认（`min-alive-workers: 0`）时，观测到至少 **三分之一的 Worker 存活**（向上取整，下限 1）即健康：如观测 3 台→1 台存活即健康；观测 5 台→2 台；观测 9 台→3 台。单幸存 Worker 有意视为健康（见 ADR-0028）。设置 `min-alive-workers: N` 可要求绝对存活数。详见 `docs/CONFIG.md`。
 
 **全部参数）**
 参考[CONFIG.zh.md](docs/CONFIG.zh.md)
@@ -354,7 +354,7 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 | App-only    | `false`（默认）  | `HotKeyCache`、TopK、reporter、actuator、sync                        |
 | Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `ZetaModeException`） |
 
-**Worker 集群健康：** 设置 `zeta.local.expected-worker-count` 为生产环境期望的 Worker 数量。当设置 >0 时，`ClusterHealthView` 使用多数仲裁（`> expectedWorkerCount / 2`）作为健康 Worker 数量的阈值；当为 0（默认）时，集群在收到至少一个心跳之前始终被视为不健康。这实现了对部分 Worker 故障的精确检测和优雅降级决策。
+**Worker 集群健康：** 观测到至少三分之一的 Worker 存活（向上取整，下限 1）即健康——如观测 3 台→1 台存活即健康；观测 9 台→3 台。单幸存 Worker 有意视为健康集群：Worker 侧上报流量已压缩，幸存者可承担集群服务；仅当观测 Worker 存活数不足三分之一时才触发降级（本地 COOL→HOT 接管）。可通过 `zeta.local.heartbeat.min-alive-workers: N` 设置绝对最小值（见 ADR-0028）。
 
 **快车道（FastLane，立即提升旁路）：** FastLane 是一条绕过贝叶斯置信度门控的评估路径。匹配用户配置的 glob 规则的 key（如 `product:*`），只要滑动窗口计数达到规则阈值，立即提升为 `CONFIRMED_HOT`——无需确认窗口、无需置信度评分、无需连续计数累积。全链路端到端延迟：**~60ms（P99）**。
 

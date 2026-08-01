@@ -43,6 +43,12 @@
       "defaultValue": 50
     },
     {
+      "name": "zeta.worker.report-consumer.staleness-threshold-ms",
+      "type": "java.lang.Long",
+      "description": "Optional consumer-side staleness filter (ms); 0 disables it — staleness is then bounded by the queue's x-message-ttl instead of a cross-host wall-clock comparison. When enabled, only a positive age (now - timestamp) beyond the threshold drops a report; a negative age (reporter clock ahead) always passes.",
+      "defaultValue": 0
+    },
+    {
       "name": "zeta.worker.report-queue.max-length",
       "type": "java.lang.Long",
       "description": "Maximum messages buffered in the report queue before drop-head applies.",

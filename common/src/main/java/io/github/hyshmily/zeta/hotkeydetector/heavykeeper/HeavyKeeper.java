@@ -776,6 +776,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * approach never loses concurrent writes — if a concurrent accumulate
    * raises the count between {@code get()} and {@code compareAndSet}, the
    * CAS fails and the loop retries with the now-higher value.
+   *
+   * <p><b>Bounded residual race:</b> the first-loop double-check keeps the
+   * dropped list small, and the final decision is re-made atomically at
+   * removal time (see below). A lock-free fast-path bump landing between the
+   * final count read and the mapping removal (a sub-microsecond window) is
+   * still possible; such a key is re-admitted on its next {@link #addDirect}
+   * — a self-healing, bounded transient, not a permanent loss.
    */
   @SuppressWarnings("all")
   private void decayMembership() {
@@ -808,9 +815,15 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       }
       if (dropped != null) {
         for (String key : dropped) {
-          members.remove(key);
-          locCache.remove(key); // decay-dropped — evict fingerprint cache
-          expelledQueue.offer(new Item(key, 0L));
+          // Atomic check-and-remove: the lock-free admit fast path can revive
+          // count after the first-loop double-check read 0, so the final
+          // decision must be re-made at removal time inside the map's per-key
+          // critical section. A count raised to > 0 keeps the member — the
+          // revive is never lost to a stale decision.
+          if (members.compute(key, (k, node) -> node != null && node.count.get() > 0 ? node : null) == null) {
+            locCache.remove(key); // decay-dropped — evict fingerprint cache
+            expelledQueue.offer(new Item(key, 0L));
+          }
         }
       }
       minPqCount = members.isEmpty() ? 0L : findMinMember().count();

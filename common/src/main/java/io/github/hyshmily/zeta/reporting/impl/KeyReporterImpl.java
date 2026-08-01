@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.zeta.reporting.impl;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.TOPK_INCR;
+import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
+
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.BufferedCounter;
 import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
@@ -25,17 +28,13 @@ import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-
-import static io.github.hyshmily.zeta.constants.ZetaConstants.TOPK_INCR;
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Periodically aggregates per-key access counts and publishes them
@@ -117,6 +116,14 @@ public class KeyReporterImpl implements KeyReporter {
   /** The reportToWorker dispatcher instance; created on start(). */
   private ReportDispatcher dispatcher;
 
+  private static final int ROUTING_QUEUE_CAPACITY = 8;
+
+  /** Record the number of routing tasks dropped due to queue overflow. */
+  private final AtomicLong routingDropCounter = new AtomicLong(0);
+
+  /* Records whether the last error during publish has been logged.*/
+  private final AtomicBoolean lastPublishErrorLogged = new AtomicBoolean(false);
+
   /**
    * Creates a new reporter that periodically flushes access counts to RabbitMQ.
    *
@@ -153,7 +160,21 @@ public class KeyReporterImpl implements KeyReporter {
     this.ringManager = ringManager;
     this.healthView = healthView;
     this.snowflakeIdGenerator = snowflakeIdGenerator;
-    this.routingExecutor = Executors.newSingleThreadExecutor(new ZetaThreadFactory("zeta-report-routing"));
+    this.routingExecutor = new ThreadPoolExecutor(
+      1,
+      1,
+      0L,
+      TimeUnit.MILLISECONDS,
+      new ArrayBlockingQueue<>(ROUTING_QUEUE_CAPACITY),
+      new ZetaThreadFactory("zeta-report-routing"),
+      (r, executor) -> {
+        long dropped = routingDropCounter.incrementAndGet();
+        if ((dropped & 100) == 0 || dropped == 1) {
+          routingDropCounter.set(1);
+          log.warn("routing queue full, dropping report batch; totalDropped={}", dropped);
+        }
+      }
+    );
     this.reportBufferedCounter = new BufferedCounter(
       this::onFlush,
       MAX_BUFFER_SIZE,
@@ -490,7 +511,15 @@ public class KeyReporterImpl implements KeyReporter {
 
     ReportDispatcher() {
       this.consumers = Executors.newFixedThreadPool(consumerCount, new ZetaThreadFactory("zeta-report-consumer"));
-      this.publishTimeoutExecutor = Executors.newCachedThreadPool(new ZetaThreadFactory("zeta-report-publish-tmo"));
+      this.publishTimeoutExecutor = new ThreadPoolExecutor(
+        Math.max(2, consumerCount),
+        Math.max(4, consumerCount * 2),
+        60L,
+        TimeUnit.SECONDS,
+        new ArrayBlockingQueue<>(Math.max(16, consumerCount * 8)),
+        new ZetaThreadFactory("zeta-report-publish-tmo"),
+        new ThreadPoolExecutor.AbortPolicy()
+      );
     }
 
     /**
@@ -677,33 +706,38 @@ public class KeyReporterImpl implements KeyReporter {
         final ShardBatch fb = batch;
         final long dequeueTime = currentTimeMillis();
         final BbrRateLimiterImpl capturedLimiter = limiter;
-        CompletableFuture.runAsync(
-          () -> {
-            reportPublisher.publish(
-              fb.target(),
-              new ReportMessage(snowflakeIdGenerator.nextId(), appName, fb.timestamp(), fb.counts())
-            );
-          },
-          publishTimeoutExecutor
-        )
-          .orTimeout(PUBLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-          .whenComplete((ok, ex) -> {
-            if (ex != null) {
-              log.error(
-                "Failed to publish reportToWorker batch for target={}, keys={}",
+        try {
+          CompletableFuture.runAsync(
+            () ->
+              reportPublisher.publish(
                 fb.target(),
-                fb.counts().size(),
-                ex
-              );
-              if (capturedLimiter != null) {
-                capturedLimiter.onConsumerDrop();
+                new ReportMessage(snowflakeIdGenerator.nextId(), appName, fb.timestamp(), fb.counts())
+              ),
+            publishTimeoutExecutor
+          )
+            .orTimeout(PUBLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .whenComplete((ok, ex) -> {
+              if (ex != null) {
+                if (lastPublishErrorLogged.compareAndSet(false, true)) {
+                  log.error(
+                    "Failed to publish report batch for target={}, keys={}",
+                    fb.target(),
+                    fb.counts().size(),
+                    ex
+                  );
+                  scheduler.schedule(() -> lastPublishErrorLogged.set(false), 10, TimeUnit.SECONDS);
+                }
+                if (capturedLimiter != null) capturedLimiter.onConsumerDrop();
+              } else if (capturedLimiter != null) {
+                // Use only publish time (dequeue → completion), not queue wait,
+                // so that backpressure-driven queue buildup does not inflate minRT.
+                capturedLimiter.onSuccess(currentTimeMillis() - dequeueTime);
               }
-            } else if (capturedLimiter != null) {
-              // Use only publish time (dequeue → completion), not queue wait,
-              // so that backpressure-driven queue buildup does not inflate minRT.
-              capturedLimiter.onSuccess(currentTimeMillis() - dequeueTime);
-            }
-          });
+            });
+        } catch (RejectedExecutionException ree) {
+          droppedCount.incrementAndGet();
+          if (capturedLimiter != null) capturedLimiter.onConsumerDrop();
+        }
       }
     }
   }

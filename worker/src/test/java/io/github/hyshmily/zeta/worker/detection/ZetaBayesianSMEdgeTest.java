@@ -234,7 +234,7 @@ class ZetaBayesianSMEdgeTest {
   }
 
   @Test
-  void rollbackToPreviousState_shouldRestoreState() {
+  void rollbackToPreviousState_afterReset_shouldNotResurrectEvictedState() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
@@ -246,9 +246,7 @@ class ZetaBayesianSMEdgeTest {
     assertThat(m.getStateSnapshot("key")).isNull();
 
     m.rollbackToPreviousState("key", snapshot);
-    StateSnapshot restored = m.getStateSnapshot("key");
-    assertThat(restored.currentState()).isEqualTo("CONFIRMED_HOT");
-    assertThat(restored.hotStreak()).isEqualTo(3);
+    assertThat(m.getStateSnapshot("key")).isNull();
 
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
   }
@@ -268,23 +266,28 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackToPreviousState_nonExistentKey_shouldNotThrow() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    StateSnapshot snapshot = new StateSnapshot("never-added", "CONFIRMED_HOT", 3, 0, 2.3026, 0.0, 0);
+    StateSnapshot snapshot = new StateSnapshot("never-added", "CONFIRMED_HOT", 3, 0, 2.3026, 0.0, 0, 0);
     assertThatCode(() -> m.rollbackToPreviousState("never-added", snapshot)).doesNotThrowAnyException();
   }
 
   @Test
-  void rollbackToPreviousState_fromCold_shouldRestore() {
+  void rollbackToPreviousState_shouldSkipWhenStateAdvancedSinceSnapshot() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
-    StateSnapshot snap = m.getStateSnapshot("key");
-    assertThat(snap.currentState()).isEqualTo("COLD");
-    m.reset("key");
-    m.rollbackToPreviousState("key", snap);
-    assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("COLD");
+    ZetaDecision d = m.evaluate("key", true, false, CTX);
+    assertThat(d.type()).isEqualTo(DecisionType.NONE);
+    assertThat(d.snapShot()).isNotNull();
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
+
+    m.rollbackToPreviousState("key", d.snapShot());
+
+    StateSnapshot after = m.getStateSnapshot("key");
+    assertThat(after.hotStreak()).isEqualTo(3);
+    assertThat(after.mutationSeq()).isEqualTo(2);
   }
 
   @Test
-  void rollbackToPreviousState_fromPreCooling_shouldRestore() {
+  void rollbackToPreviousState_fromPreCooling_shouldSkipWhenAdvanced() {
     ZetaBayesianSM m = machineWith(1, 5, 2);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.HOT);
     assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
@@ -292,15 +295,23 @@ class ZetaBayesianSMEdgeTest {
     assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
     StateSnapshot snap = m.getStateSnapshot("key");
     assertThat(snap.currentState()).isEqualTo("PRE_COOLING");
-    m.reset("key");
+
+    assertThat(m.evaluate("key", false, false, COLD_CTX).type()).isEqualTo(DecisionType.NONE);
+
     m.rollbackToPreviousState("key", snap);
-    assertThat(m.getStateSnapshot("key").currentState()).isEqualTo("PRE_COOLING");
+
+    StateSnapshot after = m.getStateSnapshot("key");
+    assertThat(after.currentState()).isEqualTo("PRE_COOLING");
+    assertThat(after.coolStreak()).isEqualTo(snap.coolStreak() + 1);
+    assertThat(after.mutationSeq()).isEqualTo(4);
   }
 
   @Test
   void rollbackToPreviousState_withInvalidStateName_shouldThrow() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, 2.3026, 0.0, 0);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, 2.3026, 0.0, 0, 1);
     assertThatThrownBy(() -> m.rollbackToPreviousState("key", bad)).isInstanceOf(IllegalArgumentException.class);
   }
 

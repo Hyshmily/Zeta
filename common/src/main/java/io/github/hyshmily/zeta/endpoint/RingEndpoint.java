@@ -97,7 +97,7 @@ public class RingEndpoint {
     result.put("key", key);
     HealthView view = healthViewProvider.getIfAvailable();
     if (view == null) {
-      view = new HealthViewImpl(0, 0, 0);
+      view = new HealthViewImpl(0, 0);
     }
     result.put("nodeId", ringManager.routeNode(key, view));
     return result;

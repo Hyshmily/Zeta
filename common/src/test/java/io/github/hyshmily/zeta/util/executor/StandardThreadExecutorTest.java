@@ -24,6 +24,7 @@ import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.Test;
  * the {@code submittedTasksCount} accounting, the {@link StandardExecutorQueue#force}
  * fallback, and the rejection path.
  */
+@Tag("performance")
 class StandardThreadExecutorTest {
 
   private StandardThreadExecutor newExecutor(int core, int max, int queueCapacity) {
@@ -41,13 +43,8 @@ class StandardThreadExecutorTest {
     });
   }
 
-  private StandardThreadExecutor newExecutor(
-    int core,
-    int max,
-    int queueCapacity,
-    RejectedExecutionHandler handler
-  ) {
-    var executor = new StandardThreadExecutor(
+  private StandardThreadExecutor newExecutor(int core, int max, int queueCapacity, RejectedExecutionHandler handler) {
+    return new StandardThreadExecutor(
       core,
       max,
       60L,
@@ -60,7 +57,6 @@ class StandardThreadExecutorTest {
       },
       handler
     );
-    return executor;
   }
 
   @Test

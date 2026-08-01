@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.zeta.model;
 
-import io.github.hyshmily.zeta.model.StalePolicy;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -57,23 +56,34 @@ import java.util.function.Supplier;
  *                      carries its own loader separately)
  * @param reportEnabled whether to allow reporting this access to the Worker
  *                      for hot-key detection
+ * @param failOnError   whether read-path failures (loader exceptions) propagate
+ *                      to the caller instead of being swallowed as a cache miss;
+ *                      {@code false} preserves the default resilient behavior
  */
 public record CachePolicy(
-    LongSupplier hardTtlMs,
-    LongSupplier softTtlMs,
-    boolean nullCaching,
-    boolean skipBroadcast,
-    StalePolicy stalePolicy,
-    Supplier<?> reader,
-    boolean reportEnabled
+  LongSupplier hardTtlMs,
+  LongSupplier softTtlMs,
+  boolean nullCaching,
+  boolean skipBroadcast,
+  StalePolicy stalePolicy,
+  Supplier<?> reader,
+  boolean reportEnabled,
+  boolean failOnError
 ) {
-
   /** Shared zero supplier for "no TTL override". */
   private static final LongSupplier ZERO = () -> 0L;
 
   /** Singleton carrying all-default semantics. */
-  private static final CachePolicy DEFAULTS =
-    new CachePolicy(ZERO, ZERO, true, false, StalePolicy.SOFT_REFRESH, null, true);
+  private static final CachePolicy DEFAULTS = new CachePolicy(
+    ZERO,
+    ZERO,
+    true,
+    false,
+    StalePolicy.SOFT_REFRESH,
+    null,
+    true,
+    false
+  );
 
   /**
    * Compact constructor: {@code null} suppliers are normalized to a zero
@@ -88,7 +98,8 @@ public record CachePolicy(
   /**
    * Convenience constructor for the annotation layer and other callers that
    * manage the reader and reporting separately. Delegates to the canonical
-   * constructor with {@code reader = null} and {@code reportEnabled = true}.
+   * constructor with {@code reader = null}, {@code reportEnabled = true} and
+   * {@code failOnError = false}.
    */
   public CachePolicy(
     LongSupplier hardTtlMs,
@@ -97,7 +108,37 @@ public record CachePolicy(
     boolean skipBroadcast,
     StalePolicy stalePolicy
   ) {
-    this(hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, null, true);
+    this(hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, null, true, false);
+  }
+
+  /**
+   * Builds a policy from a reader and all-default semantics: no TTL override,
+   * null caching enabled, reporting enabled, failures swallowed. Combine with
+   * {@link #withFailOnError()} to make read-path loader failures propagate to
+   * the caller — that is the recommended way to distinguish a missing key
+   * (empty result, still cached as a {@code NullValue} sentinel) from a
+   * failing data source (thrown exception).
+   *
+   * @param reader the value supplier for cache misses / refreshes
+   * @param <T>    the value type
+   * @return a new policy instance
+   */
+  public static <T> CachePolicy of(Supplier<T> reader) {
+    return new CachePolicy(ZERO, ZERO, true, false, StalePolicy.SOFT_REFRESH, reader, true, false);
+  }
+
+  /**
+   * Returns a copy of this policy with {@link #failOnError()} set to
+   * {@code true}: any {@link RuntimeException} on the read path (loader
+   * exceptions, internal failures) propagates to the caller instead of being
+   * swallowed as a cache miss. A {@code null} loader result is unaffected —
+   * it is still an empty result with {@code NullValue} sentinel caching, so
+   * "no data" stays distinguishable from "data source failed".
+   *
+   * @return a new policy instance with fail-fast semantics
+   */
+  public CachePolicy withFailOnError() {
+    return new CachePolicy(hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, true);
   }
 
   /**
@@ -136,8 +177,23 @@ public record CachePolicy(
    * @param stalePolicy   what to do on soft-expire (stale) entries
    * @return a new policy instance
    */
-  public static CachePolicy of(long hardTtlMs, long softTtlMs, boolean nullCaching, boolean skipBroadcast, StalePolicy stalePolicy) {
-    return new CachePolicy(() -> hardTtlMs, () -> softTtlMs, nullCaching, skipBroadcast, stalePolicy, null, true);
+  public static CachePolicy of(
+    long hardTtlMs,
+    long softTtlMs,
+    boolean nullCaching,
+    boolean skipBroadcast,
+    StalePolicy stalePolicy
+  ) {
+    return new CachePolicy(
+      () -> hardTtlMs,
+      () -> softTtlMs,
+      nullCaching,
+      skipBroadcast,
+      stalePolicy,
+      null,
+      true,
+      false
+    );
   }
 
   /**
@@ -165,6 +221,15 @@ public record CachePolicy(
     boolean reportEnabled,
     StalePolicy stalePolicy
   ) {
-    return new CachePolicy(() -> hardTtlMs, () -> softTtlMs, nullCaching, false, stalePolicy, reader, reportEnabled);
+    return new CachePolicy(
+      () -> hardTtlMs,
+      () -> softTtlMs,
+      nullCaching,
+      false,
+      stalePolicy,
+      reader,
+      reportEnabled,
+      false
+    );
   }
 }

@@ -145,12 +145,6 @@
       "defaultValue": 50000
     },
     {
-      "name": "zeta.local.expected-worker-count",
-      "type": "java.lang.Integer",
-      "description": "Expected number of Worker nodes for quorum-based health checks; 0 = dynamic discovery.",
-      "defaultValue": 0
-    },
-    {
       "name": "zeta.local.decay-period",
       "type": "java.lang.Integer",
       "description": "Deprecated: decay period in seconds (no longer used).",
@@ -367,7 +361,7 @@
     {
       "name": "zeta.local.heartbeat.min-alive-workers",
       "type": "java.lang.Integer",
-      "description": "Minimum alive Workers for cluster health; 0 = use majority formula (knownWorkerCount / 2 + 1).",
+      "description": "Minimum alive Workers for cluster health; 0 = one third of observed Workers, rounded up, minimum 1 (ADR-0028).",
       "defaultValue": 0
     },
     {

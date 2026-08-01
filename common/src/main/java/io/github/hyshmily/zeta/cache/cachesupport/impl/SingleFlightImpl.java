@@ -31,10 +31,10 @@ import lombok.extern.slf4j.Slf4j;
  * Deduplicates concurrent in-flight loads for the same key.
  * <p>
  * Only the first caller executes the supplier; subsequent callers wait for
- * the same {@link CompletableFuture}. On normal completion, the entry is
- * evicted immediately — the caller has the result and Caffeine holds the
- * value. On timeout or exception, the entry is evicted immediately to allow
- * a subsequent retry.
+ * the same {@link CompletableFuture}. On normal completion, the future
+ * remains cached (TTL-based expiry) so that late-arriving callers reuse the
+ * completed result (see ADR-0002). On timeout or exception, the entry is
+ * evicted immediately to allow a subsequent retry.
  * <p>
  * The internal dedup cache is bounded by {@code maxSize} (LRU eviction) and
  * entries expire after the configured {@code ttlSec} seconds from write.
@@ -123,7 +123,9 @@ public class SingleFlightImpl implements SingleFlight {
     try {
       T result = (T) future.join();
       circuitBreaker.onSuccess();
-      inflightLoads.invalidate(cacheKey);
+      // ADR-0002 catch-only semantics: keep the completed future cached until
+      // expireAfterWrite(ttlSec) naturally evicts it, so late-arriving callers
+      // reuse the result instead of re-running the supplier.
       return Optional.ofNullable(result);
     } catch (CompletionException e) {
       if (e.getCause() instanceof TimeoutException) {
@@ -145,6 +147,20 @@ public class SingleFlightImpl implements SingleFlight {
   @SuppressWarnings("all")
   @Override
   public <T> Map<String, Optional<T>> load(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader) {
+    return load(cacheKeys, reader, false);
+  }
+
+  /**
+   * Batch variant with an explicit failure policy — see
+   * {@link SingleFlight#load(Iterable, Function, boolean)} for the contract.
+   */
+  @SuppressWarnings("all")
+  @Override
+  public <T> Map<String, Optional<T>> load(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    boolean failOnError
+  ) {
     List<String> keys = new ArrayList<>();
     cacheKeys.forEach(keys::add);
     if (keys.isEmpty()) {
@@ -172,9 +188,21 @@ public class SingleFlightImpl implements SingleFlight {
       try {
         T result = (T) future.join();
         circuitBreaker.onSuccess();
-        inflightLoads.invalidate(key);
+        // ADR-0002 catch-only semantics: keep the completed future cached until
+        // expireAfterWrite(ttlSec) naturally evicts it (late callers reuse).
         results.put(key, Optional.ofNullable(result));
       } catch (CompletionException e) {
+        if (failOnError) {
+          // Fail-fast batch: mirror the single-key flow — record CB failure on
+          // timeout, then handleFailure invalidates the dedup future and
+          // rethrows the cause (timeouts/interrupts still resolve to empty).
+          if (e.getCause() instanceof TimeoutException) {
+            circuitBreaker.onFailure(e.getCause());
+          }
+          handleFailure(key, e);
+          results.put(key, Optional.empty());
+          continue;
+        }
         log.warn("singleflight join failed: key={}", key, e);
 
         if (e.getCause() instanceof TimeoutException) {

@@ -11,7 +11,7 @@ Promote rebroadcasting to a first-class state-machine semantic: **broadcast on t
 1. **`KeyState.lastBroadcastAt`** (volatile long, epoch millis, 0 = never) records when the last HOT broadcast for the key was emitted.
 2. **Transition broadcasts** (COLD→HIGH, CANDIDATE_HOT→HIGH, fast-lane promotion) stamp `lastBroadcastAt = now` when returning the HOT decision.
 3. **Steady-state branches rebroadcast**: the `evaluateHot` `default` branch (CONFIRMED_HOT + hot window, previously always `NONE`) and the `fastlane()` already-CONFIRMED_HOT branch now return HOT only when `now - lastBroadcastAt >= rebroadcastIntervalMs` (default **10 s**, `zeta.worker.state-machine.rebroadcast-interval-ms`, min 1 s), stamping on emission; otherwise they return `NONE`. This simultaneously fixes the fast-lane amplification (I5) and the lost-HOT unrecoverability (D1).
-4. **Rollback clears the stamp**: `rollbackToPreviousState(key, snapshot)` (invoked when an AMQP send fails) sets `lastBroadcastAt = 0`, so the next evaluation window retries immediately. Stamping is optimistic (at decision time); stamping and rollback both run inside the per-key striped lock, so no race exists.
+4. **Rollback clears the stamp**: `rollbackToPreviousState(key, snapshot)` (invoked when an AMQP send fails) sets `lastBroadcastAt = 0`, so the next evaluation window retries immediately. Stamping is optimistic (at decision time). The rollback carries a per-key `mutationSeq` guard (see C10 fix): a snapshot rolls back only while no later evaluation advanced the state — with the Worker's parallel report consumers, a stale rollback would clobber concurrently-advanced state; when it is skipped, the periodic rebroadcast (rule 3) retries the failed decision instead.
 
 **Explicitly excluded:**
 

@@ -78,4 +78,32 @@ public interface SingleFlight {
    *         keys whose suppliers threw or timed out are absent from values
    */
   <T> Map<String, Optional<T>> load(Iterable<String> cacheKeys, Function<? super String, ? extends T> reader);
+
+  /**
+   * Batch variant of {@link #load(Iterable, Function)} with an explicit
+   * failure policy.
+   * <p>
+   * When {@code failOnError} is {@code false} (the default), the behavior is
+   * identical to {@link #load(Iterable, Function)}: per-key failures are
+   * swallowed (the key is absent from the result) so one failing key does not
+   * sink the whole batch. When {@code true}, the first reader failure aborts
+   * the collection and propagates to the caller — already-completed results
+   * are discarded, and the failed key's dedup future is evicted so a retry
+   * re-runs the reader. Timeouts and circuit-breaker interception still
+   * resolve to an empty result in both modes.
+   *
+   * @param cacheKeys   the keys to load
+   * @param reader      function that returns a value for each key (called on executor threads)
+   * @param failOnError whether the first reader failure propagates instead of being swallowed
+   * @param <T>         the value type
+   * @return map of key to loaded value, preserving iteration order of {@code cacheKeys}
+   * @throws RuntimeException the reader failure cause when {@code failOnError} is {@code true}
+   */
+  default <T> Map<String, Optional<T>> load(
+    Iterable<String> cacheKeys,
+    Function<? super String, ? extends T> reader,
+    boolean failOnError
+  ) {
+    return load(cacheKeys, reader);
+  }
 }

@@ -23,12 +23,6 @@ import java.util.Set;
  * {@link WorkerHeartbeatMessage} broadcasts from all Worker nodes.
  */
 public interface HealthView {
-  /** Get the known Worker count. */
-  int getKnownWorkerCount();
-
-  /** Set the known Worker count. */
-  void setKnownWorkerCount(int count);
-
   /** Get the timestamp of the last heartbeat from any Worker. */
   long getLastAnyHeartbeatTime();
 
@@ -47,10 +41,17 @@ public interface HealthView {
   /** Remove all records for a Worker. */
   void removeRecord(String workerId);
 
-  /** Set the minimum number of alive workers for cluster health. */
+  /**
+   * Set the minimum number of alive workers for cluster health.
+   * When {@code <= 0}, the threshold is one third of the observed Worker count
+   * (rounded up, minimum 1) — see {@link #isClusterHealthy()}.
+   */
   void setMinAliveWorkers(int minAliveWorkers);
 
-  /** Whether the cluster is considered healthy (> half of known Workers alive). */
+  /**
+   * Whether the cluster is considered healthy (at least the minimum alive threshold;
+   * by default one third of observed Workers, minimum 1).
+   */
   boolean isClusterHealthy();
 
   /** Get the IDs of Workers currently considered alive. */

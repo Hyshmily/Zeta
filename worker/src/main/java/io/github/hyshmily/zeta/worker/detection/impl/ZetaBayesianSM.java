@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.zeta.worker.detection.impl;
 
-import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
-
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.model.EvaluationContext;
@@ -25,16 +23,19 @@ import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceLevel;
 import io.github.hyshmily.zeta.worker.confidence.ProbabilityResult;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
-import lombok.Builder;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
+
+import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -131,8 +132,12 @@ import lombok.extern.slf4j.Slf4j;
  *       broadcast amplification. Stamps are optimistic ({@code lastBroadcastAt}
  *       at decision time); a failed send rolls the stamp back to 0 via
  *       {@link #rollbackToPreviousState}, so the next evaluation retries
- *       immediately. COOL is never rebroadcast — a lost COOL fails in the
- *       lenient direction (bounded by hard TTL and stale eviction).</li>
+ *       immediately. The rollback is guarded by a per-key {@code mutationSeq}
+ *       epoch carried in the snapshot: it applies only while no later
+ *       evaluation advanced the state — a concurrent consumer's progression is
+ *       never clobbered, and the periodic rebroadcast retries instead. COOL is
+ *       never rebroadcast — a lost COOL fails in the lenient direction (bounded
+ *       by hard TTL and stale eviction).</li>
  *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs every
  *       {@code evict-interval-ms} (default 20 min) and scans for keys whose
  *       {@code lastUpdateTime} exceeds the configured stale threshold.
@@ -380,6 +385,10 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         state = KeyState.builder().posteriorMean(priorMean).accumulatedPrecision(0.0).build();
         states.put(key, state);
       } else {
+        // Bump the evaluation epoch BEFORE taking the snapshot: the snapshot
+        // then carries this evaluation's epoch, so a rollback of its decision
+        // is valid only while no later evaluation has advanced the state.
+        state.mutationSeq++;
         snapShot = new StateSnapshot(
           key,
           state.currentState.name(),
@@ -387,7 +396,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
           state.coolStreak,
           state.posteriorMean,
           state.accumulatedPrecision,
-          state.lowResetCount
+          state.lowResetCount,
+          state.mutationSeq
         );
       }
       state.lastUpdateTime = System.currentTimeMillis();
@@ -399,7 +409,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       boolean hot = isHotThisWindow || (windowSumSupplier.getAsLong() >= ctx.threshold());
       return hot ? evaluateHot(key, state, ctx, snapShot) : evaluateCold(key, state, ctx, snapShot);
     } catch (Exception e) {
-      log.debug("Unexpected StateMachine Exception for key {}", key, e);
+      log.warn("Unexpected StateMachine Exception for key {}", key, e);
       // Rollback to pre-mutation snapshot to prevent half-modified KeyState.
       // hotStreak/coolStreak may have been incremented before the failure,
       // leaving the key in an inconsistent state for subsequent evaluations.
@@ -694,7 +704,10 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         .lastUpdateTime(now)
         .lastBroadcastAt(now)
         .build();
+
       states.put(key, state);
+      state.mutationSeq++;
+
       snapShot = new StateSnapshot(
         key,
         state.currentState.name(),
@@ -702,7 +715,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         state.coolStreak,
         state.posteriorMean,
         state.accumulatedPrecision,
-        state.lowResetCount
+        state.lowResetCount,
+        state.mutationSeq
       );
 
       log.info("Fast-lane promotion: key={} state={}", key, state);
@@ -719,9 +733,10 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         .lastUpdateTime(now)
         .lastBroadcastAt(now)
         .build();
-      states.put(key, state);
 
-      log.info("Fast-lane promotion: key={} state={}", key, state);
+      states.put(key, state);
+      state.mutationSeq++;
+
       snapShot = new StateSnapshot(
         key,
         state.currentState.name(),
@@ -729,7 +744,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         state.coolStreak,
         state.posteriorMean,
         state.accumulatedPrecision,
-        state.lowResetCount
+        state.lowResetCount,
+        state.mutationSeq
       );
       return ZetaDecision.hot(key, snapShot);
     }
@@ -737,6 +753,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     // Already CONFIRMED_HOT — refresh liveness, then apply the rebroadcast
     // interval debounce (ADR-0024).
     state.lastUpdateTime = now;
+    state.mutationSeq++;
+
     snapShot = new StateSnapshot(
       key,
       state.currentState.name(),
@@ -744,10 +762,12 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       state.coolStreak,
       state.posteriorMean,
       state.accumulatedPrecision,
-      state.lowResetCount
+      state.lowResetCount,
+      state.mutationSeq
     );
     if (now - state.lastBroadcastAt >= rebroadcastIntervalMs) {
       state.lastBroadcastAt = now;
+
       log.debug("Fast-lane periodic HOT rebroadcast: key={}", key);
       return ZetaDecision.hot(key, snapShot);
     }
@@ -861,6 +881,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       if (keyState == null) {
         return null;
       }
+
       return new StateSnapshot(
         key,
         keyState.currentState.name(),
@@ -868,7 +889,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         keyState.coolStreak,
         keyState.posteriorMean,
         keyState.accumulatedPrecision,
-        keyState.lowResetCount
+        keyState.lowResetCount,
+        keyState.mutationSeq
       );
     } finally {
       lock.unlock();
@@ -878,6 +900,16 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   /**
    * Rolls back the per-key state to its previous value after a send
    * failure, allowing the next evaluation window to re-emit the decision.
+   *
+   * <p>The rollback is applied only when the live state still carries the
+   * snapshot's {@code mutationSeq} — i.e. no later evaluation advanced the
+   * state since the snapshot was taken. With the Worker's parallel report
+   * consumers, a stale rollback would otherwise clobber concurrently-advanced
+   * state (e.g. reverting a PRE_COOLING progression back to the pre-HOT
+   * snapshot); in that case the rollback is skipped and the periodic HOT
+   * rebroadcast (ADR-0024) retries the failed decision instead. A key whose
+   * state was evicted or reset in the meantime is left alone (never
+   * resurrected), matching the same no-op.
    *
    * @param key           the key whose state machine should be rolled back
    * @param previousState the snapshot returned by an earlier
@@ -895,7 +927,22 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         return;
       }
 
-      KeyState keyState = states.computeIfAbsent(key, k -> KeyState.builder().posteriorMean(priorMean).build());
+      KeyState keyState = states.get(key);
+      if (keyState == null) {
+        log.debug("rollback skipped: state already evicted for key={}", key);
+        return;
+      }
+
+      if (keyState.mutationSeq != previousState.mutationSeq()) {
+        log.debug(
+          "rollback skipped: state advanced since snapshot (seq {} -> {}), key={}",
+          previousState.mutationSeq(),
+          keyState.mutationSeq,
+          key
+        );
+        return;
+      }
+
       keyState.currentState = State.valueOf(previousState.currentState());
       keyState.hotStreak = previousState.hotStreak();
       keyState.coolStreak = previousState.coolStreak();
@@ -985,5 +1032,17 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
      */
     @Builder.Default
     volatile long lastBroadcastAt = 0L;
+
+    /**
+     * Evaluation epoch, bumped at the start of every evaluation that mutates
+     * this key's state (normal path and fast-lane). Snapshots carry the epoch
+     * of the evaluation that produced them; a rollback is applied only while
+     * the live state still carries the snapshot's epoch — i.e. no later
+     * evaluation advanced the state. Guards against a stale rollback
+     * clobbering concurrently-advanced state across the Worker's parallel
+     * report consumers. Read/written exclusively under the per-key lock.
+     */
+    @Builder.Default
+    long mutationSeq = 0L;
   }
 }

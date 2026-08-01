@@ -114,7 +114,7 @@ zeta:
 # Recommended: deploy local App first, then start Workers
 ```
 
-**Cluster health threshold** — when `expected-worker-count: 0` (dynamic mode, default), `min-alive-workers: 0` means **1 alive Worker is healthy**. When `expected-worker-count: N` (fixed mode), uses majority formula `N/2 + 1`. Setting `min-alive-workers` overrides either mode. See `docs/CONFIG.md` for details.
+**Cluster health threshold** — by default (`min-alive-workers: 0`), the cluster is healthy when at least **one third of observed Workers** are alive (rounded up, minimum 1): e.g. 3 observed Workers → 1 alive is healthy; 5 observed → 2 alive; 9 observed → 3 alive. A single surviving Worker is intentionally treated as healthy (see ADR-0028). Set `min-alive-workers: N` to require an absolute number of alive Workers. See `docs/CONFIG.md` for details.
 
 **All parameters:**
 See [CONFIG.md](docs/CONFIG.md)
@@ -356,7 +356,7 @@ Worker mode provides cluster-wide hotspot detection via dedicated nodes. App ins
 | App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                             |
 | Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `ZetaModeException`) |
 
-**Worker Cluster Health:** Set `zeta.local.expected-worker-count` to the expected number of Workers in production. When set >0, `ClusterHealthView` uses majority quorum (`> expectedWorkerCount / 2`) as the healthy Worker threshold; when 0 (default), the cluster is considered unhealthy until at least one heartbeat is received. This enables precise detection of partial Worker failures and graceful degradation decisions.
+**Worker Cluster Health:** The cluster is healthy when at least one third of the Workers observed via heartbeats are alive (rounded up, minimum 1) — e.g. 3 Workers observed → 1 alive is healthy; 9 observed → 3 alive. A single surviving Worker is intentionally treated as a healthy cluster: Worker-side report traffic is compressed and the survivor can serve the cluster; degradation (local COOL→HOT takeover) triggers only when fewer than one third of observed Workers remain. Set `zeta.local.heartbeat.min-alive-workers: N` for an absolute minimum (see ADR-0028).
 
 **FastLane (Immediate Promotion Bypass):** FastLane is an evaluation path that bypasses the Bayesian confidence gating entirely. Keys matching user-configured glob rules (e.g. `product:*`) are promoted to `CONFIRMED_HOT` as soon as the sliding-window sum reaches the rule's threshold — no confirm windows, no confidence scoring, no streak counting. End-to-end latency: **~60ms** (P99).
 

@@ -63,6 +63,19 @@ public class WorkerProperties {
     private int concurrentConsumers = 8;
 
     private int prefetchCount = 50;
+
+    /**
+     * Optional consumer-side staleness filter (ms). {@code 0} disables the
+     * filter — staleness is then bounded by the queue's {@code x-message-ttl}
+     * ({@link ReportQueue#messageTtlMs}) instead, avoiding a cross-host
+     * wall-clock comparison between App and Worker (an App clock lag beyond
+     * the threshold would otherwise silently blind that instance). When
+     * enabled, only a positive age ({@code now - timestamp}) beyond the
+     * threshold drops a report; a negative age (reporter clock ahead) always
+     * passes.
+     */
+    @Min(0)
+    private long stalenessThresholdMs = 0L;
   }
 
   /**
@@ -88,7 +101,8 @@ public class WorkerProperties {
     /**
      * Per-message TTL (ms) inside the report queue. Reports sitting unconsumed
      * for this long are discarded by the broker — they are stale anyway (the
-     * consumer discards anything older than 5 s).
+     * consumer-side staleness filter is disabled by default, see
+     * {@link io.github.hyshmily.zeta.worker.ingest.ReportConsumer#stalenessThresholdMs}).
      */
     @Min(1000)
     private long messageTtlMs = 60_000;

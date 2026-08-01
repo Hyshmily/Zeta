@@ -77,7 +77,7 @@ class ZetaReporterTest {
     scheduler = Executors.newSingleThreadScheduledExecutor();
     testPublisher = new TestReportPublisher();
     ringManager = new RingManagerImpl(150);
-    healthView = new HealthViewImpl(3, 30000, 3);
+    healthView = new HealthViewImpl(30000, 3);
     reporter = new KeyReporterImpl(
       testPublisher,
       scheduler,

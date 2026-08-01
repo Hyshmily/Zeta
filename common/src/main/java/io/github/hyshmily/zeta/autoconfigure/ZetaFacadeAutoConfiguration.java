@@ -35,6 +35,7 @@ import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import jakarta.annotation.PostConstruct;
 import java.util.concurrent.ScheduledExecutorService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -60,6 +61,7 @@ import org.springframework.context.annotation.Bean;
 @Internal
 @AutoConfiguration
 @RequiredArgsConstructor
+@Slf4j
 public class ZetaFacadeAutoConfiguration {
 
   private final ZetaProperties properties;
@@ -109,11 +111,16 @@ public class ZetaFacadeAutoConfiguration {
   @ConditionalOnMissingBean
   public HealthView clusterHealthView(ZetaProperties properties) {
     HealthView view = new HealthViewImpl(
-      properties.getExpectedWorkerCount(),
       properties.getHeartbeat().getTimeoutMs(),
       properties.getHeartbeat().getDegradeAfterFailures()
     );
     view.setMinAliveWorkers(properties.getHeartbeat().getMinAliveWorkers());
+    if (properties.getHeartbeat().getMinAliveWorkers() <= 0) {
+      log.warn(
+        "zeta.heartbeat.min-alive-workers is not configured; cluster health threshold defaults to one third of " +
+          "observed Workers (minimum 1). A single surviving Worker is treated as a healthy cluster — see ADR-0028."
+      );
+    }
     return view;
   }
 

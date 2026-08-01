@@ -23,6 +23,7 @@ import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
@@ -132,6 +133,58 @@ class DefaultWorkerDecisionHandlerTest {
     verify(hook).onHotSkipped(eq("missing"), any(), eq(HotSkipReason.VALUE_NOT_FOUND));
   }
 
+  /**
+   * Verifies the Redis-outage fallback (ADR-0008): when the loader fails and the
+   * L1 entry is a normal (non-degraded) entry, its value is used for promotion.
+   */
+  @Test
+  void handleHot_redisDown_shouldPromoteFromNormalL1Entry() {
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));
+
+    handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+
+    verify(hook).afterHotPromotion(eq("key1"), any(), any());
+    CacheEntry promoted = (CacheEntry) cache.getIfPresent("key1");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(promoted.getValue()).isEqualTo("v");
+  }
+
+  /**
+   * Verifies that the Redis-outage fallback still accepts degraded L1 entries.
+   */
+  @Test
+  void handleHot_redisDown_shouldPromoteFromDegradedL1Entry() {
+    CacheEntry degraded = entry(1, KeyState.NORMAL).toBuilder().isVersionDegraded(true).build();
+    cache.put("key1", degraded);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));
+
+    handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+
+    verify(hook).afterHotPromotion(eq("key1"), any(), any());
+  }
+
+  /**
+   * Verifies that a {@link NullValue} sentinel is not granted the HOT TTL even
+   * when Redis is down — there is nothing of value to promote.
+   */
+  @Test
+  void handleHot_redisDown_shouldSkipNullValueSentinel() {
+    CacheEntry nullEntry = entry(1, KeyState.NORMAL).toBuilder().value(NullValue.INSTANCE).build();
+    cache.put("key1", nullEntry);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));
+
+    handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+
+    verify(hook).onHotSkipped(eq("key1"), any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    CacheEntry unchanged = (CacheEntry) cache.getIfPresent("key1");
+    assertThat(unchanged.getKeyState()).isEqualTo(KeyState.NORMAL);
+  }
+
   @Test
   void handleCool_shouldInvokeAfterCoolDowngradeHook() {
     cache.put("key1", entry(5, KeyState.HOT));
@@ -171,12 +224,25 @@ class DefaultWorkerDecisionHandlerTest {
     cache.put("key1", entry(1, KeyState.NORMAL));
     AtomicInteger count = new AtomicInteger(0);
     WorkerDecisionHook failingHook = new WorkerDecisionHook() {
-      @Override public void afterHotPromotion(String k, WorkerMessage wm, CacheEntry e) { throw new RuntimeException("fail"); }
+      @Override
+      public void afterHotPromotion(String k, WorkerMessage wm, CacheEntry e) {
+        throw new RuntimeException("fail");
+      }
     };
     WorkerDecisionHook countingHook = new WorkerDecisionHook() {
-      @Override public void afterHotPromotion(String k, WorkerMessage wm, CacheEntry e) { count.incrementAndGet(); }
+      @Override
+      public void afterHotPromotion(String k, WorkerMessage wm, CacheEntry e) {
+        count.incrementAndGet();
+      }
     };
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(failingHook, countingHook));
+    handler = new DefaultWorkerDecisionHandler(
+      cache,
+      loader,
+      expireManager,
+      null,
+      null,
+      List.of(failingHook, countingHook)
+    );
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
 
@@ -186,10 +252,13 @@ class DefaultWorkerDecisionHandlerTest {
   @Test
   void customHandler_shouldReplaceDefaultBehavior() {
     WorkerDecisionHandler custom = new WorkerDecisionHandler() {
-      @Override public void handleHot(WorkerMessage wm) {
+      @Override
+      public void handleHot(WorkerMessage wm) {
         cache.put(wm.cacheKey(), "custom-hot");
       }
-      @Override public void handleCool(WorkerMessage wm) {
+
+      @Override
+      public void handleCool(WorkerMessage wm) {
         cache.put(wm.cacheKey(), "custom-cool");
       }
     };

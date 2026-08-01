@@ -22,6 +22,7 @@
 | `get(key, reader)`                                                               | 从 L1 或 L2 reader 读取；每次访问触发本地 TopK 追踪 + App→Worker 上报；热点 key 提升到 L1（使用热点 TTL），普通 key 使用普通 TTL                                                               |
 | `get(key, reader, hardTtlMs, softTtlMs)`                                         | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                                    |
 | `get(key, CachePolicy)`                                                          | 带解析后的 per-invocation CachePolicy 读取（延迟 TTL 求值）                                                                                                                                     |
+| `CachePolicy.of(reader).withFailOnError()`                                       | 快速失败读：loader/内部失败以异常形式抛给调用方，而不是被吞成 miss，使"数据源故障"与"key 不存在"可区分。loader 返回 null 仍是空结果（缓存为 NullValue 哨兵）。批量：`get(cacheKeys, reader, hardTtlMs, softTtlMs, report, failOnError)` |
 | `getWithSoftExpire(key, reader)`                                                 | 软失效——返回过期旧值+触发异步刷新；每次访问触发本地 TopK 追踪 + App→Worker 上报；根据 key 状态使用全局默认 TTL                                                                                 |
 | `getWithSoftExpire(key, reader, softTtlMs)`                                      | 同上，带 per-call 软 TTL 覆盖（毫秒）                                                                                                                                                          |
 | `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)`                           | 同上，同时带 per-entry 硬 TTL 和 per-call 软 TTL 覆盖（毫秒）                                                                                                                                  |
@@ -139,7 +140,6 @@
 | `zeta.local.queue-offer-timeout-ms`   | `100`                          | 报告队列写入超时（毫秒）——阻塞此时长后丢弃                                                                                                                                                  |
 | `zeta.local.consumer-count`           | `0`                            | 报告消费者线程数；0 = 自动（max(4, availableProcessors / 2)）                                                                                                                               |
 | `zeta.local.scheduler-pool-size`      | `8`                            | Zeta 共享调度器线程池大小（定时任务）。任务不会重叠执行；某次执行抛异常时通过可注入的 `ZetaExceptionHandler` 链上报（默认 WARN 日志）并继续调度下一次，不会中断周期任务。`scheduleAtFixedRate` 为相位锚定语义：跳过错过的拍子（无漂移、无补跑突发——见 ADR-0027）。                                                                                                                                                       |
-| `zeta.local.expected-worker-count`    | `0`                            | 期望的 Worker 节点数，用于基于仲裁的健康检查；0 = 动态发现（收到首个心跳前始终不健康）                                                                                                      |
 
 ### 心跳配置（`zeta.local.heartbeat.*`）
 
@@ -151,7 +151,7 @@
 | `zeta.local.heartbeat.ping-timeout-ms`        | `3000`                    | PING/PONG 验证探针超时（毫秒）                                           |
 | `zeta.local.heartbeat.degrade-after-failures` | `3`                       | 连续 PING 失败次数超过此值后降级该 Worker（按指数退避重试）              |
 | `zeta.local.heartbeat.verify-max-backoff-ms`  | `600000`                  | 单 Worker 指数退避最大间隔（毫秒，10 分钟）                              |
-| `zeta.local.heartbeat.min-alive-workers`      | `0`                       | 集群健康所需最小存活 Worker 数；0=使用多数派公式（knownWorkerCount/2+1） |
+| `zeta.local.heartbeat.min-alive-workers`      | `0`                       | 集群健康所需最小存活 Worker 数；0（默认）= 推导阈值：观测 Worker 数的三分之一，向上取整，下限 1（如观测 3 台→1 台存活即健康；观测 5 台→2 台；观测 9 台→3 台）。单幸存 Worker 有意视为健康——见 ADR-0028。设为正数以绝对存活数覆盖 |
 
 > **连接隔离：** 心跳（生产者 + PING/PONG 验证）使用**专用的 `CachingConnectionFactory`**（`zetaHeartbeatConnectionFactory`）和**专用的 `RabbitTemplate`**（`zetaVerifyRabbitTemplate` / `zetaHeartbeatRabbitTemplate`），与数据面（report、broadcast、sync）完全隔离。防止数据面拥塞或 broker 流控延迟心跳投递——心跳 TCP 连接拥有独立于数据面流量的 channel 池。代价是每节点多一条 TCP 连接。
 
@@ -274,9 +274,10 @@
 | **`zeta.worker.report-consumer.*`**                                |                                | **上报消费者**                                                                                                                                      |
 | `zeta.worker.report-consumer.concurrent-consumers`                 | `8`                            | 上报队列的并发消费者数，最小为 1                                                                                                                    |
 | `zeta.worker.report-consumer.prefetch-count`                       | `50`                           | 每个消费者的预取数，平衡吞吐量与内存压力                                                                                                            |
+| `zeta.worker.report-consumer.staleness-threshold-ms`                | `0`                            | 可选的消费端陈旧过滤（毫秒）；`0` 表示禁用——陈旧性改由队列 `x-message-ttl` 兜底，避免跨主机墙钟比较。启用时仅丢弃超过阈值的正向年龄报告；负年龄（上报端时钟超前）始终放行 |
 | **`zeta.worker.report-queue.*`**                                   |                                | **上报队列积压护栏**                                                                                                                                |
 | `zeta.worker.report-queue.max-length`                              | `10000`                        | 每分片上报队列的最大缓冲消息数；超出后 broker 丢弃最旧消息（`drop-head`），保留最新统计信号。消费停滞时保护 broker 内存；丢失的上报按 ADR-0007 容忍 |
-| `zeta.worker.report-queue.message-ttl-ms`                          | `60000`                        | 队列内单条消息的 TTL（毫秒）；超时由 broker 丢弃（消费端本就丢弃超过 5 秒的数据）                                                                   |
+| `zeta.worker.report-queue.message-ttl-ms`                          | `60000`                        | 队列内单条消息的 TTL（毫秒）；超时由 broker 丢弃。消费端陈旧过滤默认禁用（见 `staleness-threshold-ms`）                                               |
 | **`zeta.worker.sliding-window.*`**                                 |                                | **滑动窗口**                                                                                                                                        |
 | `zeta.worker.sliding-window.duration-ms`                           | `1000`                         | 滑动窗口时长（毫秒）                                                                                                                                |
 | `zeta.worker.sliding-window.slices`                                | `10`                           | 每个窗口的时间片数；自动向上对齐到 2 的幂以实现位运算索引优化                                                                                        |

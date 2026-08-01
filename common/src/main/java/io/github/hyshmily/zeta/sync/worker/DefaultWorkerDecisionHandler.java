@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.sync.worker;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
@@ -103,7 +104,8 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
    *   <li><b>DCL check 1:</b> Fast-path version guard ({@link VersionGuard#shouldSkipForWorker})
    *       against the existing L1 entry. If a newer decision is already present, this is a no-op.</li>
    *   <li><b>Redis fetch:</b> Loads the authoritative value from Redis. If Redis is
-   *       unavailable, falls back to the existing degraded L1 entry value (if any).</li>
+   *       unavailable, falls back to the existing L1 entry value (any entry —
+   *       degraded or not; {@code NullValue} sentinels excluded).</li>
    *   <li><b>DCL check 2:</b> Second version guard inside the atomic {@code compute} to
    *       prevent overwriting a newer decision that arrived during the Redis fetch.</li>
    *   <li><b>Write:</b> Replaces the entry with a new {@link CacheEntry} in
@@ -111,7 +113,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
    *       TTLs, and recording the Worker's {@code decisionVersion}.</li>
    * </ol>
    *
-   * <p>If no value is available from Redis <em>and</em> no degraded entry exists in L1,
+   * <p>If no value is available from Redis <em>and</em> no usable entry exists in L1,
    * the promotion is aborted — there is nothing to cache.
    *
    * @param wm the Worker message containing the HOT decision; must not be null
@@ -137,7 +139,12 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     Object value = Optional.ofNullable(loadFromRedis(wm))
       .or(() ->
         Optional.ofNullable(caffeineCache.getIfPresent(cacheKey))
-          .filter(ce -> ce instanceof CacheEntry c && c.isVersionDegraded())
+          // Redis outage fallback: any existing L1 entry value is promotable —
+          // get() serves these values regardless of the degraded flag, so the
+          // HOT promotion must not be stricter than the read path (ADR-0008).
+          // NullValue sentinels are excluded: a 10s null marker does not deserve
+          // the 1h HOT TTL.
+          .filter(ce -> ce instanceof CacheEntry c && c.getValue() != null && !(c.getValue() instanceof NullValue))
           .map(ce -> ((CacheEntry) ce).getValue())
       )
       .orElse(null);
@@ -291,8 +298,8 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
    * <p>
    * Any exception thrown by the {@code redisLoader} (connection timeout, Redis
    * outage, serialization error) is caught and logged at WARN level. The caller
-   * is responsible for falling back to the degraded entry value when this method
-   * returns {@code null}.
+   * is responsible for falling back to the existing L1 entry value when this
+   * method returns {@code null}.
    *
    * @param wm the Worker message containing the cache key to load; must not be null
    * @return the value from Redis, or {@code null} if the key is absent or the
@@ -302,7 +309,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     try {
       return redisLoader.load(wm.cacheKey());
     } catch (Exception e) {
-      log.warn("handleHot: Redis load failed for key={}, trying degraded entry", wm.cacheKey(), e);
+      log.warn("handleHot: Redis load failed for key={}, trying L1 entry fallback", wm.cacheKey(), e);
       return null;
     }
   }

@@ -33,7 +33,7 @@ class RingManagerTest {
   @Test
   void reconcile_withSameNodes_shouldNotRebuild() {
     RingManager manager = new RingManagerImpl(10);
-    HealthView healthView = new HealthViewImpl(3, 30000, 3);
+    HealthView healthView = new HealthViewImpl(30000, 3);
     registerAlive(healthView, "a");
     registerAlive(healthView, "b");
     registerAlive(healthView, "c");
@@ -49,7 +49,7 @@ class RingManagerTest {
   @Test
   void reconcile_withDifferentNodes_shouldRebuild() {
     RingManager manager = new RingManagerImpl(10);
-    HealthView healthView = new HealthViewImpl(3, 30000, 3);
+    HealthView healthView = new HealthViewImpl(30000, 3);
     registerAlive(healthView, "a");
     registerAlive(healthView, "b");
     manager.reconcileFromHealthView(healthView);
@@ -66,7 +66,7 @@ class RingManagerTest {
   @Test
   void routeNode_shouldRouteToCorrectNode() {
     RingManager manager = new RingManagerImpl(10);
-    HealthView healthView = new HealthViewImpl(2, 30000, 3);
+    HealthView healthView = new HealthViewImpl(30000, 3);
     registerAlive(healthView, "target-a");
     registerAlive(healthView, "target-b");
     manager.reconcileFromHealthView(healthView);
@@ -78,7 +78,7 @@ class RingManagerTest {
   @Test
   void getNode_ForSharding_withEmptyRing_shouldReturnNull() {
     RingManager manager = new RingManagerImpl(10);
-    assertThat(manager.routeNode("any-key", new HealthViewImpl(0, 30000, 3))).isNull();
+    assertThat(manager.routeNode("any-key", new HealthViewImpl(30000, 3))).isNull();
   }
 
   @Test
@@ -90,7 +90,7 @@ class RingManagerTest {
   @Test
   void nodeCount_shouldReturnCorrectCount() {
     RingManager manager = new RingManagerImpl(10);
-    HealthView healthView = new HealthViewImpl(3, 30000, 3);
+    HealthView healthView = new HealthViewImpl(30000, 3);
     registerAlive(healthView, "a");
     registerAlive(healthView, "b");
     registerAlive(healthView, "c");
@@ -101,7 +101,7 @@ class RingManagerTest {
   @Test
   void routeNode_withNullKey_shouldThrow() {
     RingManager manager = new RingManagerImpl(10);
-    HealthView hv = new HealthViewImpl(1, 30000, 3);
+    HealthView hv = new HealthViewImpl(30000, 3);
     registerAlive(hv, "worker-1");
     manager.reconcileFromHealthView(hv);
     assertThatNullPointerException().isThrownBy(() -> manager.routeNode(null, hv));
@@ -124,7 +124,7 @@ class RingManagerTest {
   @Test
   void reconcileFromHealthView_shouldInvokeOnRingReconciled() {
     RingManager manager = new RingManagerImpl(10);
-    HealthView healthView = new HealthViewImpl(3, 30000, 3);
+    HealthView healthView = new HealthViewImpl(30000, 3);
 
     final int[] capturedCount = { -1 };
     manager.setOnRingReconciled(count -> capturedCount[0] = count);
@@ -140,7 +140,7 @@ class RingManagerTest {
   @Test
   void reconcileFromHealthView_withSameNodes_shouldNotInvokeOnRingReconciled() {
     RingManager manager = new RingManagerImpl(10);
-    HealthView healthView = new HealthViewImpl(1, 30000, 3);
+    HealthView healthView = new HealthViewImpl(30000, 3);
     registerAlive(healthView, "a");
 
     final int[] invocationCount = { 0 };
@@ -157,7 +157,7 @@ class RingManagerTest {
     RingManager manager = new RingManagerImpl(10);
     manager.setOnRingReconciled(null);
 
-    HealthView healthView = new HealthViewImpl(1, 30000, 3);
+    HealthView healthView = new HealthViewImpl(30000, 3);
     registerAlive(healthView, "a");
 
     manager.reconcileFromHealthView(healthView);

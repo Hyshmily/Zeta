@@ -96,25 +96,6 @@ class ZetaPropertiesTest {
   }
 
   /**
-   * Verifies that expectedWorkerCount defaults to 0 (dynamic discovery mode).
-   */
-  @Test
-  void expectedWorkerCount_shouldDefaultToZero() {
-    ZetaProperties p = props();
-    assertThat(p.getExpectedWorkerCount()).isZero();
-  }
-
-  /**
-   * Verifies that expectedWorkerCount returns the configured value when set.
-   */
-  @Test
-  void expectedWorkerCount_shouldReturnConfiguredValue() {
-    ZetaProperties p = props();
-    p.setExpectedWorkerCount(5);
-    assertThat(p.getExpectedWorkerCount()).isEqualTo(5);
-  }
-
-  /**
    * Verifies the default values for the ConsistentHashing nested config.
    */
   @Test

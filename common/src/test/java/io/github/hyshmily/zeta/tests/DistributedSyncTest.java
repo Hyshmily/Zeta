@@ -717,7 +717,7 @@ class DistributedSyncTest {
     @BeforeEach
     void init() {
       rt = mock(RabbitTemplate.class);
-      healthView = spy(new HealthViewImpl(3, 500_000, 99));
+      healthView = spy(new HealthViewImpl(500_000, 99));
       healthView.onHeartbeat(hb("w1", true));
       healthView.onHeartbeat(hb("w2", false));
       healthView.onHeartbeat(hb("w3", false));
@@ -1172,7 +1172,7 @@ class DistributedSyncTest {
     void computeBackoff_attempt1() throws Exception {
       WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
         mock(RabbitTemplate.class),
-        spy(new HealthViewImpl(3, 5000, 99)),
+        spy(new HealthViewImpl(5000, 99)),
         "app",
         new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000)
       );
@@ -1185,7 +1185,7 @@ class DistributedSyncTest {
     void computeBackoff_attempt2() throws Exception {
       WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
         mock(RabbitTemplate.class),
-        spy(new HealthViewImpl(3, 5000, 99)),
+        spy(new HealthViewImpl(5000, 99)),
         "app",
         new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000)
       );
@@ -1198,7 +1198,7 @@ class DistributedSyncTest {
     void computeBackoff_attempt4() throws Exception {
       WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
         mock(RabbitTemplate.class),
-        spy(new HealthViewImpl(3, 5000, 99)),
+        spy(new HealthViewImpl(5000, 99)),
         "app",
         new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000)
       );
@@ -1212,7 +1212,7 @@ class DistributedSyncTest {
     void computeBackoff_capped() throws Exception {
       WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
         mock(RabbitTemplate.class),
-        spy(new HealthViewImpl(3, 5000, 99)),
+        spy(new HealthViewImpl(5000, 99)),
         "app",
         new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 5000)
       );

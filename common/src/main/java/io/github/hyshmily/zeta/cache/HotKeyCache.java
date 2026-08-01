@@ -29,6 +29,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.TransactionSupport;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
+import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.*;
 import io.github.hyshmily.zeta.rule.Rule;
@@ -246,19 +247,35 @@ public class HotKeyCache {
 
   /**
    * Execute a cache operation with standardized error handling: {@link ZetaBlockedException}
-   * is rethrown, all other {@link RuntimeException} are logged and swallowed.
+   * is rethrown, all other {@link RuntimeException} are logged and swallowed —
+   * unless {@code failOnError} is set, in which case they propagate to the
+   * caller so a failing data source stays distinguishable from a missing key.
+   * <p>
+   * When no {@code failOnError} is requested and a handler is installed via
+   * {@link ZetaExceptionHandler} (thread-local, inheritable, or default), the
+   * failure is routed to it first — the chain never throws, so the read path
+   * stays operational. Without a handler, the ERROR log remains the only
+   * signal; the chain's WARN fallback is not used here to avoid duplicate
+   * logging alongside the ERROR line below.
    *
-   * @param cacheKey the key being accessed (used in the error log)
-   * @param action   the cache operation to execute
-   * @param <T>      the value type
+   * @param cacheKey    the key being accessed (used in the error log)
+   * @param failOnError whether {@link RuntimeException}s propagate instead of being swallowed
+   * @param action      the cache operation to execute
+   * @param <T>         the value type
    * @return the result of {@code action}, or {@link Optional#empty()} on error
    */
-  private <T> Optional<T> execute(String cacheKey, Supplier<Optional<T>> action) {
+  private <T> Optional<T> execute(String cacheKey, boolean failOnError, Supplier<Optional<T>> action) {
     try {
       return action.get();
     } catch (ZetaBlockedException e) {
       throw e;
     } catch (RuntimeException e) {
+      if (failOnError) {
+        throw e;
+      }
+      if (ZetaExceptionHandler.getExceptionHandler() != null) {
+        ZetaExceptionHandler.handleException("HotKeyCache read failed for key " + cacheKey, e);
+      }
       log.error("HotKeyCache internal error for key={}, returning empty to keep caller operational", cacheKey, e);
       return Optional.empty();
     }
@@ -310,7 +327,7 @@ public class HotKeyCache {
   public <T> Optional<T> peek(String cacheKey) {
     String nk = normalize(cacheKey);
     if (preGuard(nk) == null) return Optional.empty();
-    return execute(nk, () ->
+    return execute(nk, false, () ->
       Optional.ofNullable(caffeineCache.getIfPresent(nk)).map(raw ->
         raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue(), cacheKey) : (T) raw
       )
@@ -350,7 +367,7 @@ public class HotKeyCache {
     long softTtlMs = policy.softTtlMs().getAsLong();
     boolean nullCaching = policy.nullCaching();
 
-    return execute(nk, () -> {
+    return execute(nk, policy.failOnError(), () -> {
       Object raw = caffeineCache.getIfPresent(nk);
       if (raw instanceof CacheEntry ce) {
         if (!expireManager.invalidateIfIsLogicallyExpired(nk, raw)) {
@@ -386,7 +403,8 @@ public class HotKeyCache {
     Function<? super String, ? extends T> reader,
     long hardTtlMs,
     long softTtlMs,
-    boolean isSkipReports
+    boolean isSkipReports,
+    boolean failOnError
   ) {
     List<String> misses = new ArrayList<>();
     Map<String, Optional<T>> results = new LinkedHashMap<>();
@@ -400,7 +418,7 @@ public class HotKeyCache {
       }
       skipReports.put(key, isSkipReport(g.isSkipReport, isSkipReports));
 
-      Optional<T> cached = execute(key, () ->
+      Optional<T> cached = execute(key, failOnError, () ->
         Optional.ofNullable(caffeineCache.getIfPresent(key)).flatMap(raw ->
           handleCacheHit(key, raw, hardTtlMs, softTtlMs, skipReports.get(key))
         )
@@ -413,7 +431,7 @@ public class HotKeyCache {
     }
     if (misses.isEmpty()) return results;
 
-    results.putAll(loadAndCache(misses, reader, hardTtlMs, softTtlMs, skipReports));
+    results.putAll(loadAndCache(misses, reader, hardTtlMs, softTtlMs, skipReports, failOnError));
     return results;
   }
 
@@ -468,7 +486,7 @@ public class HotKeyCache {
     StalePolicy stalePolicy = policy.stalePolicy();
 
     Object raw = caffeineCache.getIfPresent(nk);
-    return execute(nk, () -> {
+    return execute(nk, policy.failOnError(), () -> {
       if (raw instanceof CacheEntry ce) {
         if (!expireManager.invalidateIfIsLogicallyExpired(nk, raw)) {
           T cached = (T) unwrapValue(ce.getValue(), nk);
@@ -516,7 +534,8 @@ public class HotKeyCache {
     Function<? super String, ? extends T> reader,
     long hardTtlMs,
     long softTtlMs,
-    boolean isReportByThisTime
+    boolean isReportByThisTime,
+    boolean failOnError
   ) {
     List<String> misses = new ArrayList<>();
     Map<String, Optional<T>> results = new LinkedHashMap<>();
@@ -532,7 +551,7 @@ public class HotKeyCache {
       skipReports.put(key, isSkipReport(g.isSkipReport, isReportByThisTime));
       Object raw = caffeineCache.getIfPresent(key);
 
-      Optional<T> hit = execute(key, () ->
+      Optional<T> hit = execute(key, failOnError, () ->
         Optional.ofNullable(raw).flatMap(v ->
           handleSoftExpire(
             key,
@@ -553,7 +572,7 @@ public class HotKeyCache {
     }
     if (misses.isEmpty()) return results;
 
-    results.putAll(loadAndCache(misses, reader, hardTtlMs, softTtlMs, skipReports));
+    results.putAll(loadAndCache(misses, reader, hardTtlMs, softTtlMs, skipReports, failOnError));
     return results;
   }
 
@@ -692,6 +711,9 @@ public class HotKeyCache {
    * @param hardTtlMs   hard TTL override (0 = use configured default)
    * @param softTtlMs   soft TTL override (0 = use configured default)
    * @param skipReports map of key → whether to skip Worker reporting
+   * @param failOnError whether the first reader failure propagates instead of
+   *                    being swallowed as a miss (see
+   *                    {@link SingleFlight#load(Iterable, Function, boolean)})
    * @param <T>         the value type
    * @return a map of key → loaded or empty result, preserving input order
    */
@@ -700,15 +722,16 @@ public class HotKeyCache {
     Function<? super String, ? extends T> reader,
     long hardTtlMs,
     long softTtlMs,
-    Map<String, Boolean> skipReports
+    Map<String, Boolean> skipReports,
+    boolean failOnError
   ) {
-    Map<String, Optional<T>> loaded = singleFlight.load(cacheKeys, reader);
+    Map<String, Optional<T>> loaded = singleFlight.load(cacheKeys, reader, failOnError);
     Map<String, Optional<T>> results = new LinkedHashMap<>();
 
     for (String key : cacheKeys) {
       results.put(
         key,
-        execute(key, () -> {
+        execute(key, failOnError, () -> {
           Optional<T> opt = loaded.get(key);
           return opt
             .map(t -> processLoaded(key, t, hardTtlMs, softTtlMs, skipReports.get(key)))
@@ -881,6 +904,12 @@ public class HotKeyCache {
    * <p>
    * HOT entries that are still within their first quarter are left untouched —
    * no need to re-insert the same state.
+   * <p>
+   * Non-hot entries first pass a lock-free {@link HotKeyDetector#contains}
+   * membership probe on the caller thread; only TopK members reach
+   * {@link #promote}'s {@code compute}, which acquires the Caffeine bin lock.
+   * This keeps the long-tail NORMAL hit path free of bin-lock serialisation —
+   * the probe is re-verified inside the {@code compute} lambda as a TOCTOU guard.
    *
    * @param cacheKey  the key to promote
    * @param raw       the raw cached value (maybe a {@link CacheEntry} or a bare object)
@@ -894,6 +923,9 @@ public class HotKeyCache {
         return extendHotKeyExpiryIfNeeded(cacheKey, ce, hardTtlMs, softTtlMs);
       }
       if (ce.getValue() == NullValue.INSTANCE || ce.getValue() instanceof NullValue) {
+        return false;
+      }
+      if (!hotKeyDetector.contains(cacheKey)) {
         return false;
       }
       if (isPromotableState(ce)) {
@@ -941,16 +973,13 @@ public class HotKeyCache {
    * @param hotSoft  the hot-entry soft TTL
    */
   private boolean promote(String cacheKey, long hotHard, long hotSoft) {
-    boolean[] promoted = { false };
-    caffeineCache
+    Object result = caffeineCache
       .asMap()
       .compute(cacheKey, (k, existing) -> {
         if (existing instanceof CacheEntry entry) {
           if (!isPromotableState(entry) || !hotKeyDetector.contains(k)) {
             return existing;
           }
-
-          promoted[0] = true;
           return entry.withTtlAndKeyState(
             hotHard,
             hotSoft,
@@ -959,9 +988,11 @@ public class HotKeyCache {
             KeyState.HOT
           );
         }
-        return null;
+        return existing;
       });
-    return promoted[0];
+    // Promotion detection without a mutable holder: only a transitioned entry
+    // carries KeyState.HOT. A missing (null) or bare existing value maps to false.
+    return result instanceof CacheEntry entry && entry.getKeyState() == KeyState.HOT;
   }
 
   /**
@@ -1476,7 +1507,7 @@ public class HotKeyCache {
     if (g == null) return Optional.empty();
 
     boolean skipReport = isSkipReport(g.isSkipReport, policy.reportEnabled());
-    return execute(nk, () -> computeInLock(nk, policy, skipReport));
+    return execute(nk, policy.failOnError(), () -> computeInLock(nk, policy, skipReport));
   }
 
   /**
@@ -1499,7 +1530,7 @@ public class HotKeyCache {
     if (g == null) return Optional.empty();
 
     boolean skipReport = isSkipReport(g.isSkipReport, policy.reportEnabled());
-    return execute(nk, () -> computeInLock(nk, policy, skipReport));
+    return execute(nk, policy.failOnError(), () -> computeInLock(nk, policy, skipReport));
   }
 
   /**
@@ -1545,6 +1576,9 @@ public class HotKeyCache {
 
     long hotHardTtl = expireManager.resolveEffectiveHotHard(rawHard.getAsLong());
     long hotSoftTtl = expireManager.resolveEffectiveHotSoft(rawSoft.getAsLong());
+
+    long normalHardTtl = expireManager.resolveEffectiveHardTtl(rawHard.getAsLong());
+    long normalSoftTtl = expireManager.resolveEffectiveSoftTtl(rawSoft.getAsLong());
 
     long hotHardTtlExpireAt = expireManager.computeHardExpireAt(hotHardTtl);
     long hotSoftTtlExpireAt = expireManager.computeSoftExpireAt(hotSoftTtl);
@@ -1601,6 +1635,11 @@ public class HotKeyCache {
         try {
           loaded = reader.get();
         } catch (RuntimeException e) {
+          if (policy.failOnError()) {
+            // Fail-fast: propagate to execute, which rethrows. The compute
+            // lambda aborts, so a pre-existing entry is left untouched.
+            throw e;
+          }
           errorRef[0] = e;
           // Circuit breaker fallback: return stale entry if available (graceful degradation)
           if (singleFlight.isBreakerOpen() && existing instanceof CacheEntry ce) {
@@ -1620,9 +1659,9 @@ public class HotKeyCache {
         }
         valueRef[0] = loaded;
         if (hotKeyDetector.contains(k)) {
-          return buildEntry(loaded, hotHardTtl, hotSoftTtl, KeyState.HOT, hotHardTtlExpireAt, hotSoftTtlExpireAt);
+          return buildEntry(loaded, hotHardTtl, hotSoftTtl, KeyState.HOT, normalHardTtl, normalSoftTtl);
         }
-        return buildEntry(loaded, hotHardTtl, hotSoftTtl, KeyState.NORMAL, hotHardTtlExpireAt, hotSoftTtlExpireAt);
+        return buildEntry(loaded, normalHardTtl, normalSoftTtl, KeyState.NORMAL, normalHardTtl, normalSoftTtl);
       });
 
     if (errorRef[0] != null) {
@@ -1704,7 +1743,7 @@ public class HotKeyCache {
     GuardReport g = preGuard(nk);
     if (g == null) return false;
 
-    return execute(nk, () -> {
+    return execute(nk, false, () -> {
       boolean[] replaced = { false };
       caffeineCache
         .asMap()
@@ -1755,7 +1794,7 @@ public class HotKeyCache {
     GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
 
-    return execute(nk, () -> {
+    return execute(nk, false, () -> {
       @SuppressWarnings("unchecked")
       T[] oldValue = (T[]) new Object[1];
       long resolvedHardTtl = expireManager.resolveEffectiveHardTtl(hardTtlMs);
@@ -1810,7 +1849,7 @@ public class HotKeyCache {
     GuardReport g = preGuard(nk);
     if (g == null) return false;
 
-    return execute(nk, () -> {
+    return execute(nk, false, () -> {
       boolean[] invalidated = { false };
       caffeineCache
         .asMap()
@@ -1877,7 +1916,7 @@ public class HotKeyCache {
     String nk = normalize(cacheKey);
     if (preGuard(nk) == null) return false;
 
-    return execute(nk, () -> {
+    return execute(nk, false, () -> {
       long effectiveHard = expireManager.resolveEffectiveHardTtl(hardTtlMs);
       long effectiveSoft = expireManager.resolveEffectiveSoftTtl(softTtlMs);
       boolean[] written = { false };

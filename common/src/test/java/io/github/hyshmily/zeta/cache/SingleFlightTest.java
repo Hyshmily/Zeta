@@ -503,4 +503,73 @@ class SingleFlightTest {
       .containsEntry("fail", Optional.empty())
       .containsEntry("c", Optional.of("val-c"));
   }
+
+  /**
+   * Verifies that fail-on-error collection loading propagates the first
+   * reader failure to the caller instead of swallowing it as a miss.
+   */
+  @Test
+  void loadCollection_failOnError_shouldPropagateReaderFailure() {
+    assertThatThrownBy(() ->
+      singleFlight.load(
+        List.of("a", "fail", "c"),
+        key -> {
+          if ("fail".equals(key)) {
+            throw new RuntimeException("intentional failure");
+          }
+          return "val-" + key;
+        },
+        true
+      )
+    )
+      .isInstanceOf(RuntimeException.class)
+      .hasMessage("intentional failure");
+  }
+
+  /**
+   * Verifies that fail-on-error collection loading still evicts the failed
+   * key's dedup future, so a subsequent load retries the reader.
+   */
+  @Test
+  void loadCollection_failOnError_shouldAllowRetryAfterFailure() {
+    assertThatThrownBy(() ->
+      singleFlight.load(
+        List.of("fail-key"),
+        key -> {
+          throw new RuntimeException("intentional failure");
+        },
+        true
+      )
+    )
+      .isInstanceOf(RuntimeException.class)
+      .hasMessage("intentional failure");
+
+    Map<String, Optional<String>> retry = singleFlight.load(List.of("fail-key"), key -> "recovered-" + key, true);
+    assertThat(retry).containsEntry("fail-key", Optional.of("recovered-fail-key"));
+  }
+
+  /**
+   * Verifies that fail-on-error collection loading respects the circuit
+   * breaker: an open breaker still resolves every key to empty without
+   * invoking the reader or throwing.
+   */
+  @Test
+  void loadCollection_failOnError_whenBreakerOpen_shouldReturnEmptyForAllKeys() {
+    ZetaProperties.CircuitBreaker cfg = new ZetaProperties.CircuitBreaker();
+    cfg.setEnabled(true);
+    cfg.setFailThreshold(0.1);
+    cfg.setRequestVolumeThreshold(1);
+    CircuitBreakerImpl breaker = new CircuitBreakerImpl(cfg);
+    breaker.onFailure();
+    SingleFlight sf = new SingleFlightImpl(1000, 10, 5, executor, breaker);
+
+    Map<String, Optional<String>> result = sf.load(
+      List.of("x", "y"),
+      key -> {
+        throw new AssertionError("reader must not be called");
+      },
+      true
+    );
+    assertThat(result).hasSize(2).containsEntry("x", Optional.empty()).containsEntry("y", Optional.empty());
+  }
 }
