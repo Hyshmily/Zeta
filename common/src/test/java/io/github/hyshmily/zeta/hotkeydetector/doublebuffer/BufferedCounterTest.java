@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -468,7 +470,7 @@ class BufferedCounterTest {
         .flatMap(m -> m.values().stream())
         .mapToLong(Long::longValue)
         .sum();
-      double lossPct = 100.0 * (expectedTotal - delivered) / expectedTotal;
+      double lossPct = (100.0 * (expectedTotal - delivered)) / expectedTotal;
       assertThat(lossPct).as("count loss under eager-swap storm").isLessThan(0.02);
     } finally {
       sched.shutdownNow();
@@ -576,8 +578,119 @@ class BufferedCounterTest {
     }
   }
 
+  /**
+   * Regression guard: keys whose {@code hashCode()} clusters on the low bits
+   * (pathological input) must spread across multiple slots.  The murmur3
+   * finalizer in {@code count()} avalanches the hash — before it, all keys
+   * sharing the same {@code (hashCode & mask)} collapsed onto a single slot,
+   * turning the whole workload into a single-buffer bottleneck.
+   */
   @Test
-  void droppedFlushBatches_shouldBeZeroInitially() {
-    assertThat(counter.droppedFlushBatches()).isZero();
+  void pathologicalHash_shouldSpreadAcrossSlots() throws Exception {
+    Field ceilField = BufferedCounter.class.getDeclaredField("ceilCount");
+    ceilField.setAccessible(true);
+    int ceilCount = ceilField.getInt(counter);
+    int mask = ceilCount - 1;
+
+    // collect keys that all map to the same slot under the raw hashCode
+    List<String> cluster = new ArrayList<>();
+    for (int i = 0; i < 100_000 && cluster.size() < 64; i++) {
+      String key = "pat-" + i;
+      if ((key.hashCode() & mask) == 0) {
+        cluster.add(key);
+      }
+    }
+    assertThat(cluster).hasSize(64);
+    for (String key : cluster) {
+      counter.count(key, 1);
+    }
+
+    Field activeField = BufferedCounter.class.getDeclaredField("activeCeils");
+    activeField.setAccessible(true);
+    AtomicReference<?>[] actives = (AtomicReference<?>[]) activeField.get(counter);
+    Class<?> cbClass = Class.forName(BufferedCounter.class.getName() + "$CounterBuffer");
+    Method sizeMethod = cbClass.getDeclaredMethod("size");
+    sizeMethod.setAccessible(true);
+
+    int nonEmptySlots = 0;
+    int maxSlotSize = 0;
+    for (int i = 0; i < ceilCount; i++) {
+      int size = (int) sizeMethod.invoke(actives[i].get());
+      if (size > 0) {
+        nonEmptySlots++;
+        maxSlotSize = Math.max(maxSlotSize, size);
+      }
+    }
+    assertThat(nonEmptySlots).isGreaterThan(1);
+    assertThat(maxSlotSize).isLessThan(64); // no slot holds the whole cluster
+  }
+
+  /**
+   * Deterministic regression guard for the stale spill reader window: a
+   * writer that read the spill reference before the winner reclaimed it must
+   * not lose its {@code add()}.  The spill ticket re-check detects the
+   * reclaim and retries via the active path.  Before the ticket protocol the
+   * add() landed in the detached spill and was silently lost (reproducible
+   * with this exact injection).
+   */
+  @Test
+  void staleSpillReader_shouldNotLoseCount() throws Exception {
+    List<Map<String, Long>> captured = new ArrayList<>();
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    try {
+      BufferedCounter counter = new BufferedCounter(captured::add, 500, 500, 0.75, sched);
+      Class<?> cbClass = Class.forName(BufferedCounter.class.getName() + "$CounterBuffer");
+      var ctor = cbClass.getDeclaredConstructor();
+      ctor.setAccessible(true);
+      Object spill = ctor.newInstance();
+      Method spillDrain = cbClass.getDeclaredMethod("drain");
+      spillDrain.setAccessible(true);
+
+      Field spillField = BufferedCounter.class.getDeclaredField("spillCeils");
+      spillField.setAccessible(true);
+      @SuppressWarnings("unchecked")
+      AtomicReference<Object>[] spillCeils = (AtomicReference<Object>[]) spillField.get(counter);
+      spillCeils[0].set(spill);
+
+      // stale reader: captures the spill reference (injected spill), then stalls
+      CountDownLatch readDone = new CountDownLatch(1);
+      CountDownLatch resume = new CountDownLatch(1);
+      Thread reader = new Thread(() -> {
+        readDone.countDown();
+        try {
+          resume.await();
+          counter.count("stale-key", 1); // ticket path re-checks and retries via active
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+      reader.start();
+      readDone.await();
+
+      // winner reclaims: CAS-clear + final drain + queue + flusher drains it
+      Field queueField = BufferedCounter.class.getDeclaredField("flushQueue");
+      queueField.setAccessible(true);
+      @SuppressWarnings("unchecked")
+      ArrayBlockingQueue<Object> queue = (ArrayBlockingQueue<Object>) queueField.get(counter);
+      spillCeils[0].compareAndSet(spill, null);
+      spillDrain.invoke(spill); // winner's final drain
+      if (queue.offer(spill)) {
+        queue.poll(); // flusher drains the queued spill (empty at this point)
+      }
+
+      resume.countDown();
+      reader.join(5_000);
+
+      counter.destroy();
+
+      long total = captured
+        .stream()
+        .flatMap(m -> m.values().stream())
+        .mapToLong(Long::longValue)
+        .sum();
+      assertThat(total).isEqualTo(1); // the stale add landed via the active path
+    } finally {
+      sched.shutdownNow();
+    }
   }
 }

@@ -16,8 +16,6 @@
 
 package io.github.hyshmily.zeta.worker.detection;
 
-import java.util.concurrent.atomic.AtomicLong;
-
 /**
  * A sliding‑window based estimator of the overall qps (queries per second)
  * across all keys in the current shard.
@@ -31,7 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * to call from multiple consumer threads concurrently.  The read-only methods
  * ({@link #getWindowTotal}, {@link #getQps}) may be called concurrently
  * without blocking; a stale-but-consistent snapshot is acceptable — the
- * {@code AtomicLong} array guarantees individual element visibility.
+ * padded volatile slice fields guarantee individual element visibility.
  *
  *
  * <p><b>Known limitation — per‑shard only:</b> This estimator only sees
@@ -55,9 +53,17 @@ public class GlobalQpsEstimator {
   /** Duration of a single time slice in milliseconds. */
   private final long timeMillisPerSlice;
 
-  /** Doubled circular buffer of per-slice aggregate counters.
-   *  Pre-initialised to zero-valued {@link AtomicLong} instances. */
-  private final AtomicLong[] slices;
+  /**
+   * Doubled circular buffer of per-slice aggregate counters.
+   * Each slice is a {@link QpsSlice} with the counter embedded and padded onto its own
+   * cache line, preventing false sharing between the writer (single, under the
+   * {@code addTotal} monitor) and the lock-free readers.
+   */
+  private final QpsSlice[] slices;
+
+  private long lastAddTotalTime;
+
+  private static final class QpsSlice extends QpsPadding.SliceRef {}
 
   /**
    * Creates a global qps estimator with a sliding window partitioned into the
@@ -82,9 +88,9 @@ public class GlobalQpsEstimator {
     this.windowSize = aligned;
     this.lengthMask = (aligned << 1) - 1;
     this.timeMillisPerSlice = windowDurationMs / aligned;
-    this.slices = new AtomicLong[aligned * 2];
+    this.slices = new QpsSlice[aligned * 2];
     for (int i = 0; i < this.slices.length; i++) {
-      this.slices[i] = new AtomicLong(0);
+      this.slices[i] = new QpsSlice();
     }
   }
 
@@ -100,8 +106,6 @@ public class GlobalQpsEstimator {
    * @param totalCount the total number of access counts across all keys in
    *                   the batch; must be non-negative
    */
-  private long lastAddTotalTime;
-
   public synchronized void addTotal(long totalCount) {
     long now = System.currentTimeMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
@@ -111,8 +115,8 @@ public class GlobalQpsEstimator {
     if (lastAddTotalTime > 0) {
       long elapsedSlices = (now - lastAddTotalTime) / timeMillisPerSlice;
       if (elapsedSlices >= windowSize) {
-        for (AtomicLong slice : slices) {
-          slice.set(0);
+        for (QpsSlice slice : slices) {
+          slice.value = 0;
         }
       } else if (elapsedSlices > 0) {
         // Invariant: length == 2 * windowSize (doubled circular buffer).
@@ -122,13 +126,13 @@ public class GlobalQpsEstimator {
         //   (currentIndex + windowSize - elapsedSlices + length) % length
         int clearStart = (currentIndex + windowSize - (int) elapsedSlices) & lengthMask;
         for (int i = 0; i < elapsedSlices; i++) {
-          slices[(clearStart + i) & lengthMask].set(0);
+          slices[(clearStart + i) & lengthMask].value = 0;
         }
       }
     }
     lastAddTotalTime = now;
 
-    slices[currentIndex].addAndGet(totalCount);
+    slices[currentIndex].value += totalCount;
   }
 
   /**
@@ -147,7 +151,7 @@ public class GlobalQpsEstimator {
     long sum = 0;
     for (int i = 0; i < windowSize; i++) {
       int idx = (currentIndex - i) & lengthMask;
-      sum += slices[idx].get();
+      sum += slices[idx].value;
     }
     return sum;
   }
@@ -168,5 +172,51 @@ public class GlobalQpsEstimator {
     long total = getWindowTotal();
     double windowSeconds = (windowSize * timeMillisPerSlice) / 1000.0;
     return total / windowSeconds;
+  }
+}
+
+final class QpsPadding {
+
+  private QpsPadding() {}
+
+  @SuppressWarnings("all")
+  abstract static class PadLead {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+  }
+
+  /**
+   * A single slice counter with the {@code volatile long} embedded directly in the padded
+   * holder (unlike a referenced {@code AtomicLong}, which would live in an unpadded heap
+   * object). Lead and trailing padding keep the field more than a cache line away from any
+   * other slice's counter, eliminating false sharing between the single synchronized writer
+   * and the lock-free readers.
+   */
+  @SuppressWarnings("all")
+  abstract static class SliceRef extends PadLead {
+
+    volatile long value;
+
+    byte a0, a1, a2, a3, a4, a5, a6, a7;
+    byte a8, a9, a10, a11, a12, a13, a14, a15;
+    byte a16, a17, a18, a19, a20, a21, a22, a23;
+    byte a24, a25, a26, a27, a28, a29, a30, a31;
+    byte a32, a33, a34, a35, a36, a37, a38, a39;
+    byte a40, a41, a42, a43, a44, a45, a46, a47;
+    byte a48, a49, a50, a51, a52, a53, a54, a55;
   }
 }

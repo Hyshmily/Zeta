@@ -20,8 +20,12 @@ import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
@@ -42,6 +46,14 @@ import org.springframework.beans.factory.InitializingBean;
  * redirect into the spill, and the winner drains it back into the new active
  * buffer.  A scheduled flusher drains all queues and active buffers every
  * {@code flushIntervalMs}.
+ *
+ * <p><b>Spill ticket protocol:</b> spill writers hold a per-slot ticket for
+ * the duration of their {@code add()}; reclaimers (swap winner, flusher,
+ * destroy) wait for tickets to drain before their final drain, so no
+ * in-flight {@code add()} can be stranded in a detached spill.  Writers
+ * re-check the spill reference after taking the ticket and retry via the
+ * active path if the spill was recycled in between.  The hot path never
+ * touches the ticket counters.
  *
  * <p><b>Safety net:</b> Every flush cycle also drains any leftover spill
  * buffers, bounding worst-case spill data delay to {@code flushIntervalMs}.
@@ -89,8 +101,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * width matches the expected thread contention from the start, instead of
    * waiting for the saturation-triggered auto-tuner to expand it.
    */
-  private volatile int ceilCount =
-    Math.max(8, Integer.highestOneBit(Math.min(64, Runtime.getRuntime().availableProcessors() << 1)));
+  private volatile int ceilCount = Math.max(
+    8,
+    Integer.highestOneBit(Math.min(64, Runtime.getRuntime().availableProcessors() << 1))
+  );
 
   /** Active buffer per slot — each is a lock-free ConcurrentHashMap-based counter. */
   private final AtomicReference<CounterBuffer>[] activeCeils;
@@ -103,6 +117,23 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * back into the new active after the swap completes.
    */
   private final AtomicReference<CounterBuffer>[] spillCeils;
+
+  /**
+   * Per-slot in-flight spill writer count (ticket protocol).
+   *
+   * <p>A writer increments before {@code add()} into the spill and decrements
+   * after; a reclaiming thread ({@link #trySwap(int, CounterBuffer)} winner,
+   * the flusher, or {@link #destroy()}) waits for this to reach zero before
+   * its final drain.  This proves no in-flight {@code add()} can be stranded
+   * in a detached spill — the stale-reader window where an {@code add()}
+   * lands after the reclaiming drain is closed by the writer's re-check
+   * (the reference is re-read after the ticket is taken, and a recycled
+   * spill redirects the writer to the active path).
+   *
+   * <p>Only the spill path touches this array; the hot path (no swap in
+   * progress) never does.
+   */
+  private final AtomicIntegerArray spillCeilReaders;
 
   /**
    * Bounded queue of old active buffers awaiting async drain by {@link #flushStandby()}.
@@ -171,7 +202,15 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     double eagerSwapRatio,
     ScheduledExecutorService scheduler
   ) {
-    this(batchConsumer, ceilMaxCapacity, flushIntervalMs, eagerSwapRatio, false, scheduler, DEFAULT_FLUSH_QUEUE_CAPACITY);
+    this(
+      batchConsumer,
+      ceilMaxCapacity,
+      flushIntervalMs,
+      eagerSwapRatio,
+      false,
+      scheduler,
+      DEFAULT_FLUSH_QUEUE_CAPACITY
+    );
   }
 
   /**
@@ -213,6 +252,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
     this.activeCeils = new AtomicReference[MAXS_CEILS];
     this.spillCeils = new AtomicReference[MAXS_CEILS];
+    this.spillCeilReaders = new AtomicIntegerArray(MAXS_CEILS);
     for (int i = 0; i < MAXS_CEILS; i++) {
       this.activeCeils[i] = new AtomicReference<>(new CounterBuffer());
       this.spillCeils[i] = new AtomicReference<>(null);
@@ -231,21 +271,38 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * Every 64th call checks {@code size()} and triggers an eager swap if
    * the buffer is near capacity.
    *
-   * <p><b>Spill path (swap in progress):</b> hash → spill buffer → add.
-   * The swap winner will drain the spill and merge it back.
+   * <p><b>Spill path (swap in progress):</b> take the slot ticket, add to
+   * the spill, release the ticket.  The ticket lets a reclaiming thread
+   * prove no writer is in flight before its final drain; the writer
+   * re-checks the spill reference after taking the ticket and retries via
+   * the active path if the spill was recycled in between — closing the
+   * stale-reader window where an {@code add()} lands in a detached spill.
    *
    * @param key   the accessed key (must not be {@code null})
    * @param delta the number of accesses (must be positive)
    */
+  @SuppressWarnings("all")
   public void count(String key, long delta) {
     if (shutdown) {
       return;
     }
 
-    int idx = key.hashCode() & (ceilCount - 1);
-    CounterBuffer spill = spillCeils[idx].get();
-    if (spill != null) {
+    int idx = mixHash(key.hashCode()) & (ceilCount - 1);
+    for (;;) {
+      CounterBuffer spill = spillCeils[idx].get();
+      if (spill == null) {
+        break; // fast path
+      }
+
+      spillCeilReaders.incrementAndGet(idx);
+      if (spillCeils[idx].get() != spill) {
+        // recycled between the read and the ticket — retry the whole path
+        spillCeilReaders.decrementAndGet(idx);
+        continue;
+      }
+
       spill.add(key, delta);
+      spillCeilReaders.decrementAndGet(idx);
       return;
     }
 
@@ -257,6 +314,31 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       trySwap(idx, seg);
       swapCounter.increment();
     }
+  }
+
+  /**
+   * MurmurHash3 32-bit finalizer (avalanche).
+   *
+   * <p>Mixes {@link String#hashCode()} so that keys whose hashes cluster on
+   * the low bits (e.g. short numeric suffixes) spread evenly across slots,
+   * instead of collapsing the whole workload onto one slot.  Cost is a few
+   * integer ops (~1-2 ns) on the hot path.
+   *
+   * <p>Note: this defends against <em>distribution</em> attacks (low-bit
+   * clustering), not against deliberately equal hash codes — identical
+   * {@code hashCode()} values still map identically, which is the same
+   * defense level as {@code ConcurrentHashMap}'s own spread.
+   *
+   * @param h the raw {@code String.hashCode()} value
+   * @return the avalanched hash
+   */
+  private static int mixHash(int h) {
+    h ^= h >>> 16;
+    h *= 0x85ebca6b;
+    h ^= h >>> 13;
+    h *= 0xc2b2ae35;
+    h ^= h >>> 16;
+    return h;
   }
 
   /**
@@ -335,9 +417,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     CounterBuffer newBuf = new CounterBuffer();
     if (!activeCeils[idx].compareAndSet(buffer, newBuf)) {
       // Lost: someone else swapped active while we were setting up spill.
-      // Merge spill into the winner's current active and clean up.
-      CounterBuffer curActive = activeCeils[idx].get();
-      spill.drainInto(curActive);
+      // Merge spill into the winner's current active and clean up.  Writers
+      // that already ticketed this spill must finish before the merge.
+      waitSpillCeilReaders(idx);
+      spill.drainInto(activeCeils[idx].get());
       spillCeils[idx].set(null);
       return;
     }
@@ -348,6 +431,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       // drain failed to complete in a reasonable number of passes, so we leave the spill
       if (spillCeils[idx].compareAndSet(spill, null)) {
         //if CAS successfully cleared, we can safely offer the spill to flushQueue for async draining
+        waitSpillCeilReaders(idx);
         enqueueOrDrop(spill);
       }
       return;
@@ -358,6 +442,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     // On failure the flusher has already taken ownership via getAndSet(null)
     // and will drain the buffer itself — we must not touch spill again.
     if (spillCeils[idx].compareAndSet(spill, null)) {
+      // Ticket protocol: wait for in-flight spill writers to finish before
+      // the final drain, proving no add() can land after it.  On timeout the
+      // enqueueOrDrop fallback below still catches stragglers.
+      waitSpillCeilReaders(idx);
       drainInTo(spill, newBuf);
       // Safety net: an add() that read the spill reference before the CAS
       // clear but lands after the final drain would be stranded in a detached
@@ -368,12 +456,32 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   }
 
   /**
+   * Bounded spin until no in-flight spill writer remains for the slot.
+   *
+   * <p>The spin is bounded so a reclaiming thread cannot be starved forever
+   * by a continuous stream of spill writers.  On timeout the caller still
+   * forwards the spill to the flush queue ({@link #enqueueOrDrop(CounterBuffer)}),
+   * which the flusher drains on the next cycle — the ticket tightens the
+   * window but the queue remains the ultimate fallback.
+   *
+   * @param idx the slot whose spill writers to wait for
+   */
+  private void waitSpillCeilReaders(int idx) {
+    for (int spins = 0; spins < 200_000 && spillCeilReaders.get(idx) != 0; spins++) {
+      Thread.onSpinWait();
+    }
+  }
+
+  /**
    * Offer a batch to the bounded flush queue, dropping it (and counting the
    * drop) when the queue is full.
    *
    * <p>Dropping is the bounded-queue safety valve: a stalled consumer cannot
-   * grow heap unboundedly.  The dropped batch is the oldest data, which is
-   * consistent with the library's acceptable-loss philosophy (ADR-0013).
+   * grow heap unboundedly.  The batch dropped is the <em>newest</em> one
+   * (the {@code offer} that failed) — older batches already queued are
+   * preserved and delivered first.  This is consistent with the library's
+   * acceptable-loss philosophy (ADR-0013): bounded memory is guaranteed,
+   * and the loss is observable via {@link #droppedFlushBatches()}.
    *
    * @param buf buffer awaiting async drain
    */
@@ -405,6 +513,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * calls {@link LongAdder#sumThenReset()} — a concurrent {@code add()} that
    * arrives <em>after</em> the reset would be stranded in the next pass.
    *
+   * <p>After 8 passes the winner yields the core instead of hot-spinning —
+   * during a swap storm the spill is continuously refilled, and a bounded
+   * backoff keeps the swap winner from burning CPU for little progress.
+   *
    * @return {@code true} if the buffer was fully drained, {@code false} if
    *         the retry limit was exceeded (caller should fall back to the
    *         flush queue)
@@ -415,6 +527,9 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       // loop until source has no non-zero counters,or reach the limit.
       if (++attempts >= ((MAXS_CEILS << 3) / ceilCount)) {
         return false;
+      }
+      if (attempts > 8) {
+        Thread.yield(); // bounded backoff instead of hot-spinning
       }
     }
     return true;
@@ -446,10 +561,12 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       Map<String, Long> merged = null;
       // Spills may still hold data if a swap completed between the last
       // drainInto call and the CAS clear.  getAndSet(null) atomically
-      // claims the spill so no swap winner races us.
+      // claims the spill so no swap winner races us; new writers see null
+      // and go to the active path, and we wait for already-ticketed writers.
       for (int i = 0; i < MAXS_CEILS; i++) {
         CounterBuffer sp = spillCeils[i].getAndSet(null);
         if (sp != null) {
+          waitSpillCeilReaders(i);
           merged = mergeDrain(merged, sp);
         }
       }
@@ -561,10 +678,13 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
     // Active ceils (all 64, not just ceilCount — prevent leak from shrink orphans)
     // Spill ceils (safety net: drain any orphaned spill data)
+    // shutdown=true already makes count() no-op, so ticketed writers are only
+    // those already in flight; wait for them so no add() is stranded.
     for (int i = 0; i < MAXS_CEILS; i++) {
       drainBuffer(activeCeils[i].getAndSet(new CounterBuffer()));
       CounterBuffer sp = spillCeils[i].getAndSet(null);
       if (sp != null) {
+        waitSpillCeilReaders(i);
         drainBuffer(sp);
       }
     }

@@ -36,6 +36,14 @@ import org.jspecify.annotations.NonNull;
  *   <li>Returns {@code true} when idle threads exist (submitted count &le; pool size).</li>
  * </ul>
  *
+ * <p><b>Single-snapshot decision:</b> each counter ({@code submittedTasksCount}, pool size)
+ * is read exactly once per {@code offer()} call, and the pool-size comparison reuses the
+ * same snapshot — the previous formulation read them independently, leaving a TOCTOU window
+ * in which the two values could be observed from different instants. {@code maximumPoolSize}
+ * is snapshotted when the executor is attached ({@link #setStandardThreadExecutor}) and is
+ * assumed stable for the executor's lifetime (no runtime {@code setMaximumPoolSize}),
+ * removing a third volatile read from the hot path.
+ *
  * <p>Unlike a standard {@link java.util.concurrent.LinkedBlockingQueue}, this queue has no
  * capacity limit — the upper bound on in-flight tasks is enforced by
  * {@link StandardThreadExecutor#maxSubmittedTaskCount}.
@@ -45,8 +53,15 @@ public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
 
   private final AtomicReference<StandardThreadExecutor> executorRef = new AtomicReference<>();
 
+  /**
+   * Snapshot of the executor's maximum pool size, taken when the executor is attached.
+   * Stable for the lifetime of the executor (see class Javadoc).
+   */
+  private volatile int maxPoolSize;
+
   public void setStandardThreadExecutor(StandardThreadExecutor executor) {
     this.executorRef.set(executor);
+    this.maxPoolSize = executor.getMaximumPoolSize();
   }
 
   /**
@@ -74,23 +89,22 @@ public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
   @Override
   public boolean offer(@NonNull Runnable o) {
     StandardThreadExecutor executor = executorRef.get();
+    // Single-snapshot decision: read each volatile counter exactly once. Pool size is read
+    // after the submitted count so the comparison always uses the freshest thread count.
+    int submitted = executor.getSubmittedTasksCount();
     int poolSize = executor.getPoolSize();
-    int maxPoolSize = executor.getMaximumPoolSize();
-
-    if (poolSize == maxPoolSize) {
-      return super.offer(o);
-    }
 
     // idle threads available — queue the task
-    if (executor.getSubmittedTasksCount() <= poolSize) {
+    if (submitted <= poolSize) {
       return super.offer(o);
     }
 
-    // force thread creation
+    // saturated and room to grow — force thread creation
     if (poolSize < maxPoolSize) {
       return false;
     }
 
+    // at maximum size — queue
     return super.offer(o);
   }
 }
