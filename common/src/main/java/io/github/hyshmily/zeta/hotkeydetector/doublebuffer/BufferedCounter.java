@@ -70,8 +70,13 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    * Number of live hash slots (power of 2, 8..64).
    * Only slots {@code [0, ceilCount)} receive traffic; higher indices are
    * orphaned after a shrink and must be drained by iterating up to MAXS_CEILS.
+   *
+   * <p>Initialized from the CPU count (capped at MAXS_CEILS) so that the hash
+   * width matches the expected thread contention from the start, instead of
+   * waiting for the saturation-triggered auto-tuner to expand it.
    */
-  private volatile int ceilCount = 8;
+  private volatile int ceilCount =
+    Math.max(8, Integer.highestOneBit(Math.min(64, Runtime.getRuntime().availableProcessors() << 1)));
 
   /** Active buffer per slot — each is a lock-free ConcurrentHashMap-based counter. */
   private final AtomicReference<CounterBuffer>[] activeCeils;
@@ -249,7 +254,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    *       with a bounded number of passes.  If the retry limit is exceeded
    *       the spill is forwarded to the flush queue instead.  Otherwise,
    *       CAS-clear the spill reference; on success, a second drain catches
-   *       any {@code add()} that raced during the window.
+   *       any {@code add()} that raced during the window, and the spill is
+   *       then forwarded to the flush queue as a safety net so that a still
+   *       later {@code add()} is drained by the next flush cycle instead of
+   *       being stranded in a detached buffer.
    * </ol>
    */
   private void trySwap(int idx, CounterBuffer buffer) {
@@ -289,6 +297,11 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     // and will drain the buffer itself — we must not touch spill again.
     if (spillCeils[idx].compareAndSet(spill, null)) {
       drainInTo(spill, newBuf);
+      // Safety net: an add() that read the spill reference before the CAS
+      // clear but lands after the final drain would be stranded in a detached
+      // buffer.  Queueing the spill lets the flusher catch it next cycle
+      // (an empty buffer is a no-op there).
+      flushQueue.offer(spill);
     }
   }
 
@@ -328,24 +341,31 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    *   <li>Drain all <b>active</b> ceils (including orphaned slots after a shrink).
    * </ol>
    *
+   * <p>All three sources are merged into a single snapshot delivered to the
+   * consumer <b>once per cycle</b>.  Single-shot delivery keeps the consumer
+   * call rate bounded (at most one call per flush interval, regardless of the
+   * number of live slots) — a burst of per-buffer deliveries would otherwise
+   * overflow downstream bounded queues (e.g. the reporter routing executor).
+   *
    * <p>Steps 1 and 2 are repeated identically in {@link #destroy()} and
    * {@link #clear()} to ensure the same three sources are exhausted.
    */
   private void flushStandby() {
     try {
+      Map<String, Long> merged = null;
       // Spills may still hold data if a swap completed between the last
       // drainInto call and the CAS clear.  getAndSet(null) atomically
       // claims the spill so no swap winner races us.
       for (int i = 0; i < MAXS_CEILS; i++) {
         CounterBuffer sp = spillCeils[i].getAndSet(null);
         if (sp != null) {
-          drainBuffer(sp);
+          merged = mergeDrain(merged, sp);
         }
       }
 
       CounterBuffer buf;
       while ((buf = flushQueue.poll()) != null) {
-        drainBuffer(buf);
+        merged = mergeDrain(merged, buf);
       }
 
       int current = ceilCount;
@@ -366,11 +386,38 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       // Must iterate MAXS_CEILS, not ceilCount, because previously-active
       // indices above a shrunk ceilCount would be orphaned and leak memory.
       for (int i = 0; i < MAXS_CEILS; i++) {
-        drainBuffer(activeCeils[i].getAndSet(new CounterBuffer()));
+        merged = mergeDrain(merged, activeCeils[i].getAndSet(new CounterBuffer()));
+      }
+
+      if (merged != null && !merged.isEmpty()) {
+        batchConsumer.accept(merged);
       }
     } catch (Exception e) {
       log.error("Scheduled flushStandby failed", e);
     }
+  }
+
+  /**
+   * Drain {@code buf} into the merged snapshot and return it.
+   *
+   * <p>The same key may legitimately appear in more than one drained buffer
+   * (e.g. after a shrink re-hashes keys onto fewer slots), so values are
+   * summed.
+   *
+   * @param merged current snapshot, or {@code null}
+   * @param buf    buffer to drain (empty buffers are a no-op)
+   * @return the merged snapshot, or {@code null} if no non-zero counts yet
+   */
+  private Map<String, Long> mergeDrain(Map<String, Long> merged, CounterBuffer buf) {
+    Map<String, Long> snapshot = buf.drain();
+    if (snapshot.isEmpty()) {
+      return merged;
+    }
+    if (merged == null) {
+      return snapshot;
+    }
+    snapshot.forEach((key, val) -> merged.merge(key, val, Long::sum));
+    return merged;
   }
 
   /**

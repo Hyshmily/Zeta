@@ -417,4 +417,87 @@ class BufferedCounterTest {
     }
     assertThat(counter.activeBufferSaturation()).isNotNegative();
   }
+
+  /**
+   * Regression guard: an eager-swap storm (many concurrent keys saturating a
+   * small-capacity buffer) must not lose counts.  Before the spill safety-net
+   * queue (spill offered to the flush queue after the winner's final drain),
+   * in-flight {@code add()} calls landing in a reclaimed spill were silently
+   * dropped at ~0.04% under this exact workload.
+   */
+  @Test
+  void swapStorm_shouldNotLoseCounts() throws Exception {
+    int threadCount = 32;
+    int incrementsPerThread = 50_000;
+    long expectedTotal = (long) threadCount * incrementsPerThread;
+    String[] keys = new String[8000];
+    for (int i = 0; i < keys.length; i++) {
+      keys[i] = "k-" + (i * 131_071);
+    }
+    List<Map<String, Long>> captured = new ArrayList<>();
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    try {
+      BufferedCounter storm = new BufferedCounter(captured::add, 500, 500, 0.75, sched);
+      ExecutorService pool = Executors.newFixedThreadPool(threadCount);
+      CountDownLatch start = new CountDownLatch(1);
+      CountDownLatch done = new CountDownLatch(threadCount);
+      ThreadLocalRandom rnd = ThreadLocalRandom.current();
+      for (int i = 0; i < threadCount; i++) {
+        pool.submit(() -> {
+          try {
+            start.await();
+            for (int j = 0; j < incrementsPerThread; j++) {
+              storm.count(keys[rnd.nextInt(keys.length)], 1);
+            }
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          } finally {
+            done.countDown();
+          }
+        });
+      }
+      start.countDown();
+      assertThat(done.await(30, TimeUnit.SECONDS)).isTrue();
+      pool.shutdown();
+      storm.destroy();
+
+      long delivered = captured
+        .stream()
+        .flatMap(m -> m.values().stream())
+        .mapToLong(Long::longValue)
+        .sum();
+      double lossPct = 100.0 * (expectedTotal - delivered) / expectedTotal;
+      assertThat(lossPct).as("count loss under eager-swap storm").isLessThan(0.02);
+    } finally {
+      sched.shutdownNow();
+    }
+  }
+
+  /**
+   * Regression guard: each flush cycle must deliver exactly one merged
+   * snapshot to the consumer.  Per-buffer delivery produced bursts of consumer
+   * calls (up to MAXS_CEILS per cycle) that overflowed bounded downstream
+   * queues — e.g. the reporter routing executor — silently dropping counts
+   * once more hash slots were live.
+   */
+  @Test
+  void flush_shouldDeliverOneMergedSnapshotPerCycle() throws Exception {
+    List<Map<String, Long>> captured = new ArrayList<>();
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    try {
+      BufferedCounter mergedCounter = new BufferedCounter(captured::add, 100_000, 50, 0.75, sched);
+      mergedCounter.afterPropertiesSet();
+      for (int i = 0; i < 1000; i++) {
+        mergedCounter.count("bulk-" + i, 1);
+      }
+      Thread.sleep(700);
+
+      assertThat(captured).hasSize(1);
+      assertThat(captured.get(0)).hasSize(1000);
+      long total = captured.get(0).values().stream().mapToLong(Long::longValue).sum();
+      assertThat(total).isEqualTo(1000);
+    } finally {
+      sched.shutdownNow();
+    }
+  }
 }
