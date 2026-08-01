@@ -18,12 +18,14 @@ package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -499,5 +501,83 @@ class BufferedCounterTest {
     } finally {
       sched.shutdownNow();
     }
+  }
+
+  /**
+   * Regression guard: the bounded flush queue must cap memory growth when the
+   * downstream consumer stalls.  Overflow batches are dropped and counted by
+   * {@code droppedFlushBatches()} instead of growing the queue unboundedly
+   * (the previous unbounded {@code ConcurrentLinkedQueue} accumulated ~300 MB
+   * under this workload).
+   */
+  @Test
+  void flushQueueFull_shouldDropAndCount() throws Exception {
+    AtomicLong consumed = new AtomicLong();
+    Consumer<Map<String, Long>> slow = m -> {
+      try {
+        Thread.sleep(20);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      consumed.addAndGet(m.values().stream().mapToLong(Long::longValue).sum());
+    };
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    try {
+      int queueCapacity = 16;
+      BufferedCounter storm = new BufferedCounter(slow, 500, 200, 0.75, sched, queueCapacity);
+      storm.afterPropertiesSet();
+      Field qField = BufferedCounter.class.getDeclaredField("flushQueue");
+      qField.setAccessible(true);
+      @SuppressWarnings("unchecked")
+      ArrayBlockingQueue<Object> queue = (ArrayBlockingQueue<Object>) qField.get(storm);
+
+      String[] keys = new String[40_000];
+      for (int i = 0; i < keys.length; i++) {
+        keys[i] = "k-" + (i * 131_071);
+      }
+      int threads = 8;
+      int perThread = 50_000;
+      long expected = (long) threads * perThread;
+      ExecutorService pool = Executors.newFixedThreadPool(threads);
+      CountDownLatch start = new CountDownLatch(1);
+      CountDownLatch done = new CountDownLatch(threads);
+      ThreadLocalRandom rnd = ThreadLocalRandom.current();
+      for (int i = 0; i < threads; i++) {
+        pool.submit(() -> {
+          try {
+            start.await();
+            for (int j = 0; j < perThread; j++) {
+              storm.count(keys[rnd.nextInt(keys.length)], 1);
+            }
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          } finally {
+            done.countDown();
+          }
+        });
+      }
+      start.countDown();
+      assertThat(done.await(30, TimeUnit.SECONDS)).isTrue();
+      pool.shutdown();
+
+      int peak = queue.size();
+      for (int i = 0; i < 20; i++) {
+        peak = Math.max(peak, queue.size());
+        Thread.sleep(50);
+      }
+      storm.destroy();
+
+      assertThat(peak).isLessThanOrEqualTo(queueCapacity);
+      assertThat(storm.droppedFlushBatches()).isPositive();
+      assertThat(consumed.get()).isPositive();
+      assertThat(consumed.get()).isLessThan(expected);
+    } finally {
+      sched.shutdownNow();
+    }
+  }
+
+  @Test
+  void droppedFlushBatches_shouldBeZeroInitially() {
+    assertThat(counter.droppedFlushBatches()).isZero();
   }
 }

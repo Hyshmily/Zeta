@@ -46,6 +46,12 @@ import org.springframework.beans.factory.InitializingBean;
  * <p><b>Safety net:</b> Every flush cycle also drains any leftover spill
  * buffers, bounding worst-case spill data delay to {@code flushIntervalMs}.
  *
+ * <p><b>Bounded flush queue:</b> the async drain queue has a fixed capacity
+ * ({@link #DEFAULT_FLUSH_QUEUE_CAPACITY} by default).  When a stalled
+ * consumer fills it, incoming batches are dropped and counted via
+ * {@link #droppedFlushBatches()} instead of growing heap unboundedly —
+ * bounded memory at the price of bounded count loss (ADR-0013).
+ *
  * <p>Thread-safe. All public methods can be called concurrently from
  * multiple threads.
  */
@@ -58,6 +64,14 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   private static final long DEFAULT_FLUSH_INTERVAL_MS = 500;
 
   private static final double DEFAULT_EAGER_SWAP_RATIO = 0.75;
+
+  /**
+   * Default capacity of the bounded flush queue.
+   * Bounding the queue protects against unbounded memory growth when the
+   * downstream consumer stalls; overflow batches are dropped and counted
+   * (see {@link #droppedFlushBatches()}).
+   */
+  private static final int DEFAULT_FLUSH_QUEUE_CAPACITY = 1024;
 
   /** Fixed slot array size — never changes, only {@link #ceilCount} limits which slots are live. */
   private static final int MAXS_CEILS = 64;
@@ -91,11 +105,19 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   private final AtomicReference<CounterBuffer>[] spillCeils;
 
   /**
-   * Queue of old active buffers awaiting async drain by {@link #flushStandby()}.
+   * Bounded queue of old active buffers awaiting async drain by {@link #flushStandby()}.
    * Using a queue decouples the hot-path swap from the downstream consumer
    * (which may block, e.g. on RabbitMQ publish).
+   *
+   * <p>The queue is bounded so a stalled consumer cannot grow heap
+   * unboundedly: when the queue is full, the incoming batch is dropped and
+   * counted by {@link #flushDropCounter} (consistent with the library's
+   * acceptable-loss philosophy, ADR-0013).
    */
-  private final ConcurrentLinkedQueue<CounterBuffer> flushQueue;
+  private final ArrayBlockingQueue<CounterBuffer> flushQueue;
+
+  /** Number of batches dropped because the flush queue was full (bounded-queue safety valve). */
+  private final LongAdder flushDropCounter = new LongAdder();
 
   /** Downstream consumer receiving aggregated {@code Map<key, count>} snapshots. */
   private final Consumer<Map<String, Long>> batchConsumer;
@@ -119,11 +141,27 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   private final int eagerSwapThreshold;
 
   public BufferedCounter(Consumer<Map<String, Long>> batchConsumer) {
-    this(batchConsumer, DEFAULT_MAX_CEIL_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, true, null);
+    this(
+      batchConsumer,
+      DEFAULT_MAX_CEIL_SIZE,
+      DEFAULT_FLUSH_INTERVAL_MS,
+      DEFAULT_EAGER_SWAP_RATIO,
+      true,
+      null,
+      DEFAULT_FLUSH_QUEUE_CAPACITY
+    );
   }
 
   public BufferedCounter(Consumer<Map<String, Long>> batchConsumer, ScheduledExecutorService scheduler) {
-    this(batchConsumer, DEFAULT_MAX_CEIL_SIZE, DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_EAGER_SWAP_RATIO, false, scheduler);
+    this(
+      batchConsumer,
+      DEFAULT_MAX_CEIL_SIZE,
+      DEFAULT_FLUSH_INTERVAL_MS,
+      DEFAULT_EAGER_SWAP_RATIO,
+      false,
+      scheduler,
+      DEFAULT_FLUSH_QUEUE_CAPACITY
+    );
   }
 
   public BufferedCounter(
@@ -133,7 +171,29 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     double eagerSwapRatio,
     ScheduledExecutorService scheduler
   ) {
-    this(batchConsumer, ceilMaxCapacity, flushIntervalMs, eagerSwapRatio, false, scheduler);
+    this(batchConsumer, ceilMaxCapacity, flushIntervalMs, eagerSwapRatio, false, scheduler, DEFAULT_FLUSH_QUEUE_CAPACITY);
+  }
+
+  /**
+   * Full constructor with explicit flush queue capacity.
+   *
+   * @param batchConsumer     downstream consumer receiving merged snapshots
+   * @param ceilMaxCapacity   max distinct keys per slot before eager swap
+   * @param flushIntervalMs   periodic flush interval
+   * @param eagerSwapRatio    saturation ratio triggering an eager swap
+   * @param scheduler         scheduler for the periodic flusher (not shut down by this instance)
+   * @param flushQueueCapacity bounded capacity of the flush queue; overflow batches are
+   *                          dropped and counted by {@link #droppedFlushBatches()}
+   */
+  public BufferedCounter(
+    Consumer<Map<String, Long>> batchConsumer,
+    int ceilMaxCapacity,
+    long flushIntervalMs,
+    double eagerSwapRatio,
+    ScheduledExecutorService scheduler,
+    int flushQueueCapacity
+  ) {
+    this(batchConsumer, ceilMaxCapacity, flushIntervalMs, eagerSwapRatio, false, scheduler, flushQueueCapacity);
   }
 
   @SuppressWarnings("unchecked")
@@ -143,7 +203,8 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     long flushIntervalMs,
     double eagerSwapRatio,
     boolean ownsScheduler,
-    ScheduledExecutorService scheduler
+    ScheduledExecutorService scheduler,
+    int flushQueueCapacity
   ) {
     this.batchConsumer = batchConsumer;
     this.ceilMaxCapacity = ceilMaxCapacity;
@@ -156,7 +217,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       this.activeCeils[i] = new AtomicReference<>(new CounterBuffer());
       this.spillCeils[i] = new AtomicReference<>(null);
     }
-    this.flushQueue = new ConcurrentLinkedQueue<>();
+    this.flushQueue = new ArrayBlockingQueue<>(Math.max(1, flushQueueCapacity));
     this.ownsScheduler = ownsScheduler;
     this.scheduler = ownsScheduler
       ? new SafeScheduledExecutorService(1, new ZetaThreadFactory("zeta-buffered-counter-flusher"))
@@ -249,7 +310,8 @@ public class BufferedCounter implements InitializingBean, Destroyable {
    *       a fresh buffer.  If this fails, drain the spill into the winner's
    *       current active and return.
    *   <li>{@code enqueue-old} — offer the replaced active buffer to the
-   *       flush queue for async consumption.
+   *       flush queue for async consumption (dropped and counted if the
+   *       bounded queue is full).
    *   <li>{@code drain-merge} — drain the spill into the new active buffer
    *       with a bounded number of passes.  If the retry limit is exceeded
    *       the spill is forwarded to the flush queue instead.  Otherwise,
@@ -280,13 +342,13 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       return;
     }
 
-    flushQueue.offer(buffer);
+    enqueueOrDrop(buffer);
 
     if (!drainInTo(spill, newBuf)) {
       // drain failed to complete in a reasonable number of passes, so we leave the spill
       if (spillCeils[idx].compareAndSet(spill, null)) {
         //if CAS successfully cleared, we can safely offer the spill to flushQueue for async draining
-        flushQueue.offer(spill);
+        enqueueOrDrop(spill);
       }
       return;
     }
@@ -301,8 +363,37 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       // clear but lands after the final drain would be stranded in a detached
       // buffer.  Queueing the spill lets the flusher catch it next cycle
       // (an empty buffer is a no-op there).
-      flushQueue.offer(spill);
+      enqueueOrDrop(spill);
     }
+  }
+
+  /**
+   * Offer a batch to the bounded flush queue, dropping it (and counting the
+   * drop) when the queue is full.
+   *
+   * <p>Dropping is the bounded-queue safety valve: a stalled consumer cannot
+   * grow heap unboundedly.  The dropped batch is the oldest data, which is
+   * consistent with the library's acceptable-loss philosophy (ADR-0013).
+   *
+   * @param buf buffer awaiting async drain
+   */
+  private void enqueueOrDrop(CounterBuffer buf) {
+    if (!flushQueue.offer(buf)) {
+      flushDropCounter.increment();
+    }
+  }
+
+  /**
+   * Return the number of batches dropped because the flush queue was full.
+   *
+   * <p>A non-zero value indicates the downstream consumer is not keeping up;
+   * those counts were lost (bounded-queue safety valve).  See
+   * {@link #enqueueOrDrop(CounterBuffer)}.
+   *
+   * @return cumulative dropped batch count
+   */
+  public long droppedFlushBatches() {
+    return flushDropCounter.sum();
   }
 
   /**
