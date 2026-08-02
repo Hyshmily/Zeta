@@ -16,7 +16,6 @@
 package io.github.hyshmily.zeta.util.window;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.Test;
@@ -128,9 +127,15 @@ class RollingWindowTest {
 
   @Test
   void timeAdvance_beyondFullWindow_shouldZeroAllBuckets() throws InterruptedException {
-    RollingWindow w = new RollingWindow(1, 100);
+    // A 1-bucket window is fragile here: tick() drains at most one step per call
+    // (steps capped at windowSize), so a sleep overshoot of >= 1 bucket can land
+    // the final rotation between add() and sum() and zero the fresh value.
+    // A 10-bucket window with a sleep just over the full window drains the whole
+    // ring in a single tick and leaves < 1 bucket of slack (~950ms overshoot
+    // tolerance), keeping the boundary out of the add/sum pair.
+    RollingWindow w = new RollingWindow(10, 1000);
     w.add(10);
-    Thread.sleep(200);
+    Thread.sleep(1050);
     assertEquals(0, w.sum());
     w.add(30);
     assertEquals(30, w.sum());

@@ -220,12 +220,12 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Truly atomic computeIfAbsent — the check, load, and store are one
-   * indivisible operation backed by Caffeine's {@code asMap().computeIfAbsent()}.
-   * <p>
-   * Unlike the old {@link #get} path which does a TOCTOU-prone
-   * getIfPresent → load → compute chain, this method guarantees that
-   * the loader function runs at most once per key.
+   * Per-key compute-if-absent. The hit side (state checks, HOT renewal,
+   * promotion, stale-policy handling) runs atomically inside one Caffeine
+   * {@code asMap().compute()}; on a miss the loader runs <i>outside</i> the
+   * bin lock via SingleFlight — deduped, timeout-bounded, and
+   * circuit-breaker protected (ADR-0030) — and the loaded value is stored by
+   * a short second compute. A plain cache hit never invokes the loader.
    *
    * @param cacheKey the key to retrieve
    * @param loader   the value supplier for cache misses
@@ -242,7 +242,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Truly atomic computeIfAbsent with explicit hard TTL.
+   * Per-key compute-if-absent with explicit hard TTL.
    *
    * @param cacheKey  the key to retrieve
    * @param loader    the value supplier for cache misses
@@ -262,7 +262,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Truly atomic computeIfAbsent with explicit hard and soft TTLs.
+   * Per-key compute-if-absent with explicit hard and soft TTLs.
    *
    * @param cacheKey  the key to retrieve
    * @param loader    the value supplier for cache misses
@@ -302,7 +302,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Truly atomic computeIfAbsent with soft-expire, using all-default
+   * Per-key compute-if-absent with soft-expire, using all-default
    * configuration (no TTL override, null caching enabled,
    * {@link StalePolicy#SOFT_REFRESH}, reporting enabled).
    */
@@ -315,7 +315,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Truly atomic computeIfAbsent with soft-expire and explicit soft TTL override.
+   * Per-key compute-if-absent with soft-expire and explicit soft TTL override.
    *
    * @param cacheKey  the key to retrieve
    * @param loader    the value supplier for cache misses / refreshes
@@ -332,7 +332,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Truly atomic computeIfAbsent with soft-expire and explicit hard/soft TTL overrides.
+   * Per-key compute-if-absent with soft-expire and explicit hard/soft TTL overrides.
    *
    * @param cacheKey  the key to retrieve
    * @param loader    the value supplier for cache misses / refreshes
@@ -350,7 +350,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Truly atomic computeIfAbsent with soft-expire and an explicit
+   * Per-key compute-if-absent with soft-expire and an explicit
    * {@link CachePolicy}. When soft-expire is globally disabled this call
    * transparently degrades to plain {@link #computeIfAbsent}.
    * <p>

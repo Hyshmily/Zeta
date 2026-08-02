@@ -28,8 +28,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
@@ -276,6 +278,51 @@ class SingleFlightTest {
       return "too-late";
     });
     assertThat(result).isEmpty();
+  }
+
+  /**
+   * Verifies that a timed-out task does not poison its pool thread: the next
+   * task reusing that thread must not inherit the timeout interrupt flag.
+   * The slow task responds the way a real loader often does — re-applies the
+   * interrupt flag after the timeout interrupt — so without the
+   * exit-time flag clearing, the reused thread would start the next task in
+   * interrupted state and its I/O would fail immediately.
+   */
+  @Test
+  void timeoutInterrupt_shouldNotPoisonReusedPoolThread() throws InterruptedException {
+    ExecutorService singleThread = Executors.newSingleThreadExecutor();
+    try {
+      SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, singleThread, disabledBreaker);
+      CountDownLatch slowTaskDone = new CountDownLatch(1);
+
+      // Task A: interrupted by the 1s timeout, re-applies the interrupt flag,
+      // then finishes late.
+      shortTimeout.load("poison-key", () -> {
+        try {
+          Thread.sleep(3000);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        slowTaskDone.countDown();
+        return "too-late";
+      });
+      assertThat(slowTaskDone.await(5, TimeUnit.SECONDS)).isTrue();
+
+      // Give the pool thread a moment to return to the pool.
+      Thread.sleep(200);
+
+      // Task B runs on the same (only) pool thread and must start clean.
+      AtomicBoolean taskBInterrupted = new AtomicBoolean(true);
+      CountDownLatch taskBDone = new CountDownLatch(1);
+      singleThread.execute(() -> {
+        taskBInterrupted.set(Thread.currentThread().isInterrupted());
+        taskBDone.countDown();
+      });
+      assertThat(taskBDone.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(taskBInterrupted.get()).isFalse();
+    } finally {
+      singleThread.shutdownNow();
+    }
   }
 
   /**

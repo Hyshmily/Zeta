@@ -60,7 +60,7 @@
 
 - **L1** — Caffeine cache, App-local. First lookup target.
 - **L2** — Optional Redis cache (or any backend via the `Supplier<T>` reader). Async fallback on L1 miss.
-- **Report** — Per-key frequency count sent from App to Worker via AMQP. Aggregated locally (Caffeine, 30s, 100k max) before batching.
+- **Report** — Per-key frequency count sent from App to Worker via AMQP. Aggregated locally in a 64-slot double-buffered counter (`BufferedCounter`, 100k max keys) before batching; flushed every `zeta.local.report-interval-ms` (default 50ms).
 - **Broadcast** — AMQP exchange `zeta.send.exchange` for cross-instance sync (cache values, HOT/COOL decisions) and Worker-to-App decision delivery.
 - **putLocal** — Local-only L1 write without version bump, broadcast, hot-key detection, or reporting. Preserves existing entry metadata. Useful for fallback caching and cache pre-warming.
 - **Fluent Read API** — `ZetaReadQuery` returned by `hotKey.read(key)`. Builder

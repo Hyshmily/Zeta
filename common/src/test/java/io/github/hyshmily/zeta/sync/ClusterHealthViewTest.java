@@ -244,6 +244,38 @@ class ClusterHealthViewTest {
     assertThat(empty.isClusterHealthy()).isFalse();
   }
 
+  /**
+   * Verifies the TTL safety net: a state change that does not go through a
+   * mutation hook (heartbeat timeout is time-driven) is reflected once the
+   * cached judgment's TTL elapses. Uses a small heartbeat timeout and cache
+   * TTL to keep the test fast.
+   */
+  @Test
+  void isClusterHealthy_shouldRefreshCacheAfterTtl() throws InterruptedException {
+    HealthView fast = new HealthViewImpl(300, 2, 100);
+    fast.onHeartbeat(hb("w1", 1, true));
+    assertThat(fast.isClusterHealthy()).isTrue();
+
+    // w1's heartbeat expires (300ms); the TTL safety net (100ms) forces a
+    // recomputation that sees the timeout.
+    Thread.sleep(500);
+    assertThat(fast.isClusterHealthy()).isFalse();
+  }
+
+  /**
+   * Verifies that mutation hooks invalidate the cached judgment immediately:
+   * a state change is reflected without waiting for the cache TTL.
+   */
+  @Test
+  void isClusterHealthy_mutationHook_shouldReflectChangeImmediately() {
+    HealthView fast = new HealthViewImpl(300_000, 2, 100_000);
+    fast.onHeartbeat(hb("w1", 1, true));
+    assertThat(fast.isClusterHealthy()).isTrue();
+    // Same TTL window, but the removal hook invalidates the cache.
+    fast.removeRecord("w1");
+    assertThat(fast.isClusterHealthy()).isFalse();
+  }
+
   // ── getAliveWorkerIds ──
 
   @Test

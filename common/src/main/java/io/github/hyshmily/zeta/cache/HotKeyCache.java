@@ -485,8 +485,11 @@ public class HotKeyCache {
     boolean nullCaching = policy.nullCaching();
     StalePolicy stalePolicy = policy.stalePolicy();
 
-    Object raw = caffeineCache.getIfPresent(nk);
+    // The cache read lives inside the lambda, like get()/peek(): the
+    // isWorkerManaged / isSoftExpired decisions are made on the freshest
+    // possible snapshot instead of a value captured before execute().
     return execute(nk, policy.failOnError(), () -> {
+      Object raw = caffeineCache.getIfPresent(nk);
       if (raw instanceof CacheEntry ce) {
         if (!expireManager.invalidateIfIsLogicallyExpired(nk, raw)) {
           T cached = (T) unwrapValue(ce.getValue(), nk);
@@ -1535,24 +1538,34 @@ public class HotKeyCache {
 
   /**
    * Shared body for {@link #computeIfAbsent} and
-   * {@link #computeIfAbsentWithSoftExpire}.  Runs inside
-   * Caffeine's {@code asMap().compute()} for per-key atomicity.
+   * {@link #computeIfAbsentWithSoftExpire}.  Caffeine's
+   * {@code asMap().compute()} is used only for the fast hit path —
+   * see ADR-0030.
    * <p>
-   * On a fresh miss: loads via {@code reader}, promotes to HOT if
-   * the local TopK detects the key, otherwise stores as NORMAL.
-   * On a hit: extends expiry when the entry is already HOT (75% threshold
-   * refresh, aligned with {@link #extendHotKeyExpiryIfNeeded}) or when
-   * the key is in TopK and eligible for promotion.
-   * When {@code triggerRefreshOnSoftExpire} is set and the entry is
-   * soft-expired, a background refresh is triggered and the stale
-   * value is returned.
-   *
-   * <p><b>Reader exception safety:</b> If the reader throws inside the
-   * compute lock, the exception is caught to avoid propagating through
-   * {@link java.util.concurrent.ConcurrentHashMap#compute}.  When the
-   * circuit breaker is open and a stale entry exists, the stale value
-   * is returned (graceful degradation).  Otherwise, the error is
-   * re-thrown after the compute completes.
+   * <b>In-lock (fast) path:</b> the compute callback performs state checks
+   * and pure TTL re-computation only: unwrap the value, renew HOT expiry at
+   * the 75% threshold, promote TopK members to HOT, and apply the stale
+   * policy (RETURN / SOFT_REFRESH / REVALIDATE).  No user code and no I/O
+   * runs under the bin lock, so a slow reader cannot stall unrelated keys
+   * in the same hash bin.
+   * <p>
+   * <b>Lock-free load path:</b> on a true miss or a hard-expired entry the
+   * compute returns {@code null}; a REVALIDATE soft-expiry keeps the stale
+   * entry in L1.  Either way the reader is invoked <i>outside</i> the lock
+   * via {@link SingleFlight#load}, inheriting its dedup, timeout, and
+   * circuit-breaker protection, then the loaded value is stored by a short
+   * second compute through {@link #processLoaded} / {@link #loadCacheEntry}
+   * — the same machinery as the {@code get} read path.
+   * <p>
+   * <b>Reader exception safety:</b> a failing reader rethrows when
+   * {@code failOnError} is set (the pre-existing entry is left untouched);
+   * otherwise the error is logged and the call resolves to empty.  When the
+   * circuit breaker is open, a kept stale entry is still serveable
+   * (graceful degradation, ADR-0021); hard-expired entries are never served.
+   * <p>
+   * <b>Lazy TTL:</b> the TTL suppliers are evaluated at most once per call
+   * and only when an entry is created, promoted, renewed, or a soft-expire
+   * refresh is scheduled — never on a plain NORMAL-entry hit (ADR-0023).
    *
    * @param cacheKey   the key to retrieve
    * @param policy     the resolved per-invocation cache policy (carries reader,
@@ -1571,17 +1584,9 @@ public class HotKeyCache {
     LongSupplier rawHard = memoize(policy.hardTtlMs());
     LongSupplier rawSoft = memoize(policy.softTtlMs());
     Object[] valueRef = { null };
-    RuntimeException[] errorRef = { null };
     boolean[] hitRef = { false };
-
-    long hotHardTtl = expireManager.resolveEffectiveHotHard(rawHard.getAsLong());
-    long hotSoftTtl = expireManager.resolveEffectiveHotSoft(rawSoft.getAsLong());
-
-    long normalHardTtl = expireManager.resolveEffectiveHardTtl(rawHard.getAsLong());
-    long normalSoftTtl = expireManager.resolveEffectiveSoftTtl(rawSoft.getAsLong());
-
-    long hotHardTtlExpireAt = expireManager.computeHardExpireAt(hotHardTtl);
-    long hotSoftTtlExpireAt = expireManager.computeSoftExpireAt(hotSoftTtl);
+    boolean[] refreshRef = { false };
+    CacheEntry[] refreshEntryRef = { null };
 
     caffeineCache
       .asMap()
@@ -1592,18 +1597,28 @@ public class HotKeyCache {
           if (!expireManager.isLogicallyExpired(ce)) {
             hitRef[0] = true;
 
-            if (
-              ce.getKeyState() == KeyState.HOT &&
-              ce.getHardExpireAtMs() != Long.MAX_VALUE &&
-              extendHotKeyExpiryIfNeeded(k, ce, hotHardTtl, hotSoftTtl)
-            ) {
-              return ce;
+            // HOT renewal: extend the expiry window when more than 75% of the
+            // TTL has elapsed. Done inline as a pure TTL re-computation so the
+            // compute lock is held only for fast, I/O-free work.
+            if (ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
+              long remainingTtl = ce.getHardExpireAtMs() - TimeSource.currentTimeMillis();
+              long totalTtl = ce.getHardTtlMs();
+
+              if (totalTtl > 0 && remainingTtl < totalTtl * 0.25) {
+                long hotHardTtl = expireManager.resolveEffectiveHotHard(rawHard.getAsLong());
+                long hotSoftTtl = expireManager.resolveEffectiveHotSoft(rawSoft.getAsLong());
+
+                return expireManager.applyTtl(ce, hotHardTtl, hotSoftTtl);
+              }
             } else if (isPromotableState(ce) && hotKeyDetector.contains(k)) {
+              long hotHardTtl = expireManager.resolveEffectiveHotHard(rawHard.getAsLong());
+              long hotSoftTtl = expireManager.resolveEffectiveHotSoft(rawSoft.getAsLong());
+
               return ce.withTtlAndKeyState(
                 hotHardTtl,
                 hotSoftTtl,
-                hotHardTtlExpireAt,
-                hotSoftTtlExpireAt,
+                expireManager.computeHardExpireAt(hotHardTtl),
+                expireManager.computeSoftExpireAt(hotSoftTtl),
                 KeyState.HOT
               );
             }
@@ -1613,79 +1628,89 @@ public class HotKeyCache {
                 case RETURN -> {
                   return existing;
                 }
-                case SOFT_REFRESH -> expireManager.triggerBackgroundRefresh(
-                  k,
-                  reader,
-                  computeSoftTtlForRefresh(rawSoft.getAsLong(), ce)
-                );
+                case SOFT_REFRESH -> {
+                  // Trigger the background refresh outside the compute lock
+                  // (see below); the caller already receives the stale value.
+                  refreshRef[0] = true;
+                  refreshEntryRef[0] = ce;
+                  return existing;
+                }
                 case REVALIDATE -> {
                   hitRef[0] = false;
-                  valueRef[0] = null; // prevent stale value leak on null-reader path
+                  valueRef[0] = null; // prevent stale value leak on the load path
+                  // Keep the stale entry in L1: it powers the circuit-breaker
+                  // fallback and lets the next call retry after a failed load.
+                  return existing;
                 }
               }
-              // recheck and return existing if the policy is not REVALIDATE and intercept.
               if (policy.stalePolicy() != StalePolicy.REVALIDATE) return existing;
             } else {
               return existing;
             }
           }
         }
-
-        T loaded;
-        try {
-          loaded = reader.get();
-        } catch (RuntimeException e) {
-          if (policy.failOnError()) {
-            // Fail-fast: propagate to execute, which rethrows. The compute
-            // lambda aborts, so a pre-existing entry is left untouched.
-            throw e;
-          }
-          errorRef[0] = e;
-          // Circuit breaker fallback: return stale entry if available (graceful degradation)
-          if (singleFlight.isBreakerOpen() && existing instanceof CacheEntry ce) {
-            valueRef[0] = unwrapValue(ce.getValue(), cacheKey);
-            log.debug("CB open, returning stale entry in computeInLock for key={}", cacheKey);
-            return existing;
-          }
-          return null; // Remove entry from cache on reader failure
-        }
-
-        if (loaded == null) {
-          // Null-caching opt-out: leave no entry so the next call reloads.
-          if (!policy.nullCaching()) {
-            return null;
-          }
-          return buildEntry(NullValue.INSTANCE, nullTtlMs(), 0L, KeyState.NORMAL, 0L, 0L);
-        }
-        valueRef[0] = loaded;
-        if (hotKeyDetector.contains(k)) {
-          return buildEntry(loaded, hotHardTtl, hotSoftTtl, KeyState.HOT, normalHardTtl, normalSoftTtl);
-        }
-        return buildEntry(loaded, normalHardTtl, normalSoftTtl, KeyState.NORMAL, normalHardTtl, normalSoftTtl);
+        return null; // true miss or hard-expired: remove, load outside the lock
       });
 
-    if (errorRef[0] != null) {
-      log.error(
-        "computeInLock reader failed for key={}, returning empty to keep caller operational",
-        cacheKey,
-        errorRef[0]
-      );
-      return Optional.empty();
-    }
-
-    @SuppressWarnings("unchecked")
-    T value = (T) valueRef[0];
-    if (value == null) {
-      // Null-sentinel hit: the access is still counted for hot-key detection,
-      // aligning this path with #get so penetration-prone keys can go hot.
-      if (hitRef[0]) {
-        dispatcher.report(cacheKey, skipReport);
+    if (hitRef[0]) {
+      // The hit side is fully resolved in the compute above; only the
+      // side-effectful parts (background refresh trigger, Worker report)
+      // run outside the lock.
+      if (refreshRef[0]) {
+        expireManager.triggerBackgroundRefresh(
+          cacheKey,
+          reader,
+          computeSoftTtlForRefresh(rawSoft.getAsLong(), refreshEntryRef[0])
+        );
       }
-      return Optional.empty();
+
+      dispatcher.report(cacheKey, skipReport);
+
+      @SuppressWarnings("unchecked")
+      T value = (T) valueRef[0];
+      if (value == null) {
+        // Null-sentinel hit: the access is still counted for hot-key detection,
+        // aligning this path with #get so penetration-prone keys can go hot.
+        return Optional.empty();
+      }
+      return Optional.of(value);
     }
 
-    dispatcher.report(cacheKey, skipReport);
-    return Optional.of(value);
+    // Lock-free load path, mirroring loadAndCache: SingleFlight provides
+    // dedup, timeout, and circuit-breaker protection; the reader never runs
+    // under the Caffeine bin lock, so a slow upstream cannot stall unrelated
+    // keys in the same hash bin (ADR-0030). The result is written by a short
+    // second compute via processLoaded/loadCacheEntry.
+    long rawHardTtl = rawHard.getAsLong();
+    long rawSoftTtl = rawSoft.getAsLong();
+    try {
+      Optional<T> loaded = singleFlight.load(cacheKey, reader);
+      return loaded
+        .map(t -> processLoaded(cacheKey, t, rawHardTtl, rawSoftTtl, skipReport))
+        .or(() -> mapEmpty(cacheKey, policy.nullCaching()));
+    } catch (RuntimeException e) {
+      if (policy.failOnError()) {
+        // Fail-fast: propagate to the caller (see ADR-0029). The pre-existing
+        // entry was left untouched — the compute either kept it (REVALIDATE)
+        // or removed a hard-expired/missing one.
+        throw e;
+      }
+      // Circuit breaker fallback: a soft-expired REVALIDATE entry was kept in
+      // L1, so it is still serveable during an upstream outage (graceful
+      // degradation, ADR-0021).
+      if (singleFlight.isBreakerOpen()) {
+        Object stale = caffeineCache.getIfPresent(cacheKey);
+        if (stale instanceof CacheEntry ce) {
+          @SuppressWarnings("unchecked")
+          T val = (T) unwrapValue(ce.getValue(), cacheKey);
+
+          log.debug("CB open, returning stale entry in computeInLock for key={}", cacheKey);
+          return Optional.ofNullable(val);
+        }
+      }
+      log.error("computeInLock reader failed for key={}, returning empty to keep caller operational", cacheKey, e);
+      return Optional.empty();
+    }
   }
 
   /**

@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -241,6 +242,16 @@ public class SingleFlightImpl implements SingleFlight {
    * can interrupt it via {@link Thread#interrupt()}, preventing thread-pool
    * starvation from timed-out-but-still-running tasks.
    * <p>
+   * <b>Interrupt safety:</b> the captured thread reference is cleared and a
+   * {@code stillRunning} latch is lowered when the task finishes, so a
+   * timeout that arrives after completion never interrupts a reused pool
+   * thread running an unrelated task. The interrupt flag left behind by a
+   * timed-out task (which may ignore the interrupt, or re-interrupt itself
+   * from a {@code catch (InterruptedException)}) is also cleared on task
+   * exit, so the next task on the same pool thread starts clean. Threads are
+   * never exposed outside this class, so the only source of the flag is our
+   * own timeout machinery.
+   * <p>
    * Uses {@link CompletableFuture#supplyAsync} internally so that exception
    * propagation (including {@link Error}) matches CompletableFuture's
    * standard {@code encodeThrowable} semantics.
@@ -249,18 +260,34 @@ public class SingleFlightImpl implements SingleFlight {
    * @return a {@link CompletableFuture} that will complete with the result
    *         or a {@link TimeoutException}
    */
+  @SuppressWarnings("")
   private CompletableFuture<Object> submitReader(Supplier<Object> reader) {
     AtomicReference<Thread> runningThread = new AtomicReference<>();
+    AtomicBoolean stillRunning = new AtomicBoolean(true);
     Executor wrapped = task ->
       executor.execute(() -> {
         runningThread.set(Thread.currentThread());
-        task.run();
+        try {
+          task.run();
+        } finally {
+          // Task finished: forbid any late timeout interrupt (the captured
+          // thread reference may be reused for an unrelated task) and clear
+          // the interrupt flag so the next task on this pool thread starts
+          // clean. The flag can only have come from our own timeout
+          // machinery — threads are never exposed outside this class.
+          stillRunning.set(false);
+          runningThread.set(null);
+          Thread.interrupted();
+        }
       });
 
     CompletableFuture<Object> future = CompletableFuture.supplyAsync(reader, wrapped);
     future.orTimeout(timeoutSeconds, TimeUnit.SECONDS);
     future.whenComplete((r, ex) -> {
-      if (ex instanceof TimeoutException) {
+      // The latch makes "interrupt" and "task finished" race exactly once:
+      // finished → no interrupt; timeout first → interrupt the thread while
+      // it is still executing this task (runningThread was cleared on exit).
+      if (ex instanceof TimeoutException && stillRunning.getAndSet(false)) {
         Thread t = runningThread.get();
         if (t != null) {
           t.interrupt();

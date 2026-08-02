@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.worker.detection.impl;
 
+import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
+
 import com.google.common.util.concurrent.Striped;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.model.EvaluationContext;
@@ -23,19 +25,16 @@ import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceLevel;
 import io.github.hyshmily.zeta.worker.confidence.ProbabilityResult;
-import lombok.Builder;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.extern.slf4j.Slf4j;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
-
-import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Per-key state machine that governs hot-key lifecycle transitions on the
@@ -141,11 +140,15 @@ import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
  *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs every
  *       {@code evict-interval-ms} (default 20 min) and scans for keys whose
  *       {@code lastUpdateTime} exceeds the configured stale threshold.
- *       Any key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
- *       the {@code onCoolEvict} callback to broadcast COOL to all app
- *       instances, then removes the key from the state map. This is the
- *       safety net that cleans up keys left in HOT state after the
- *       worker has stopped receiving reports (e.g. the app instance died
+ *       Stale keys are removed from the state map under the per-key lock;
+ *       any removed key that was in CONFIRMED_HOT or PRE_COOLING state at
+ *       eviction then triggers the {@code onCoolEvict} callback to broadcast
+ *       COOL to all app instances. Callbacks run outside the per-key lock
+ *       (a slow AMQP publish must not stall eviction) and are isolated from
+ *       the removal: a failed callback leaves the key evicted, and the
+ *       broadcast is skipped if the key was re-evaluated in the meantime.
+ *       This is the safety net that cleans up keys left in HOT state after
+ *       the worker has stopped receiving reports (e.g. the app instance died
  *       or the network partition healed).</li>
  * </ul>
  *
@@ -162,7 +165,9 @@ import static io.github.hyshmily.zeta.detection.ZetaBayesianSM.State.*;
  * <b>top</b> of the global lock hierarchy (see ADR-0017):
  * <ol>
  *   <li><b>State machine per-key ({@code keyLocks})</b> — held for the
- *       duration of {@link #evaluate}.</li>
+ *       duration of {@link #evaluate} and for the removal section of
+ *       {@link #evictStale}. The eviction COOL-broadcast callback runs
+ *       <em>outside</em> these locks (I/O must never sit under a lock).</li>
  *   <li>HeavyKeeper sketch stripes — never held inside this class.</li>
  *   <li>HeavyKeeper admission — never held inside this class.</li>
  * </ol>
@@ -822,6 +827,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    * re-verifies staleness before removing. If the lock is contended
    * the key is preserved until the next cycle.
    *
+   * <p>Phase 3 broadcasts COOL for the evicted hot keys <em>outside</em> the
+   * per-key lock, so a slow AMQP publish cannot stall eviction of other keys
+   * or evaluations sharing the same stripe. Callbacks are per-key isolated:
+   * a throwing callback aborts neither the remaining keys nor the enclosing
+   * eviction cycle, and state cleanup is unaffected by broadcast failure (a
+   * lost COOL fails lenient — Apps hold the hot TTL until hard expiry, see
+   * ADR-0024). If a key is re-evaluated between removal and broadcast, the
+   * COOL is skipped — its fresh state re-broadcasts HOT on its own.
+   *
    * @param staleAfterMs maximum idle time in milliseconds before a key is evicted
    */
   @Override
@@ -841,6 +855,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     // removing.  tryLock() avoids blocking on actively-evaluated keys — if
     // the lock is contended, the key is being accessed right now and should
     // be kept alive until the next eviction cycle.
+    List<String> evictedHotKeys = new ArrayList<>();
     if (!candidates.isEmpty()) {
       for (String key : candidates) {
         Lock lock = keyLocks.get(key);
@@ -851,10 +866,10 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
               state != null && now - state.lastUpdateTime > staleAfterMs && now - state.lastBroadcastAt > staleAfterMs
             ) {
               if (state.currentState == CONFIRMED_HOT || state.currentState == PRE_COOLING) {
-                // handle the key can not be evicted silently,
-                // we need to broadcast COOL to the app if the key is still HOT or PRE_COOLING
-                onCoolEvict.accept(key);
-                log.info("Stale HOT key evicted, COOL broadcast triggered: key={}", key);
+                // Collected for the COOL broadcast in phase 3 — the send itself
+                // runs outside the lock so a slow AMQP publish cannot stall the
+                // eviction of other keys or evaluations sharing this stripe.
+                evictedHotKeys.add(key);
               }
               states.remove(key);
             }
@@ -862,6 +877,25 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
             lock.unlock();
           }
         }
+      }
+    }
+
+    // Phase 3: broadcast COOL for the evicted hot keys outside the per-key
+    // locks. State cleanup already happened in phase 2, so a failed or throwing
+    // callback can neither abort the remaining keys nor the enclosing eviction
+    // cycle (a lost COOL fails lenient — Apps hold the hot TTL until hard
+    // expiry, see ADR-0024).
+    for (String key : evictedHotKeys) {
+      if (states.containsKey(key)) {
+        // The key was re-evaluated after removal and is live again: skip the
+        // COOL — its fresh state will re-broadcast HOT on its own.
+        continue;
+      }
+      try {
+        onCoolEvict.accept(key);
+        log.info("Stale HOT key evicted, COOL broadcast triggered: key={}", key);
+      } catch (Exception e) {
+        log.warn("COOL broadcast failed for evicted key={}", key, e);
       }
     }
   }

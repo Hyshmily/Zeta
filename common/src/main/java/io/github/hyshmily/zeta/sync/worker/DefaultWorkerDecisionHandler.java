@@ -158,6 +158,21 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
       return;
     }
 
+    // Pre-read the real dataVersion from Redis BEFORE acquiring the compute
+    // lock: this is network I/O and must not run under the Caffeine bin lock
+    // (ADR-0030). Only needed when no entry exists yet — the DCL pre-check
+    // mirrors the compute's own guard, so the common existing-entry path
+    // pays nothing.  Falls back to 0/not-degraded when versionController is
+    // absent or Redis is unreachable.  A version read slightly earlier than
+    // the create is harmless: it avoids creating an entry with version=0
+    // that could be evicted by a stale invalidation (see issue 4.11), and
+    // any race window is bounded by the version-floor cache (ADR-0022).
+    long actualDataVersion =
+      !(caffeineCache.getIfPresent(cacheKey) instanceof CacheEntry) && versionController != null
+        ? versionController.currentVersion(cacheKey).orElse(0L)
+        : 0L;
+    boolean actualDegraded = false;
+
     caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
@@ -180,16 +195,6 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
             defultHotHardTtl,
             defultHotSoftTtl
           );
-        }
-
-        // Try to read the real dataVersion from Redis to avoid creating
-        // an entry with version=0 that could be evicted by a stale
-        // invalidation (see issue 4.11).  Fall back to 0/not-degraded
-        // when versionController is absent or Redis is unreachable.
-        long actualDataVersion = 0;
-        boolean actualDegraded = false;
-        if (versionController != null) {
-          actualDataVersion = versionController.currentVersion(cacheKey).orElse(0L);
         }
 
         return expireManager.createBuilder(

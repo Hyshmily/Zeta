@@ -353,6 +353,133 @@ class ZetaCacheTest {
         .isVersionDegraded(false)
         .decisionVersion(0)
         .hardTtlMs(300_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+
+    assertThatThrownBy(() ->
+      hotKeyCache.computeIfAbsent(
+        "key1",
+        CachePolicy.of(() -> {
+          throw new IllegalStateException("boom");
+        }, 0L, 0L, true, true, StalePolicy.REVALIDATE)
+          .withFailOnError()
+      )
+    )
+      .isInstanceOf(IllegalStateException.class)
+      .hasMessage("boom");
+    assertThat(caffeineCache.getIfPresent("key1")).isNotNull();
+  }
+
+  @Test
+  void computeIfAbsent_miss_shouldLoadViaSingleFlightAndCacheNormalEntry() {
+    when(singleFlight.load(eq("key1"), any())).thenReturn(Optional.of("fresh"));
+
+    assertThat(hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "fresh"))).contains("fresh");
+
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) raw).getValue()).isEqualTo("fresh");
+    assertThat(((CacheEntry) raw).getKeyState()).isEqualTo(KeyState.NORMAL);
+  }
+
+  @Test
+  void computeIfAbsent_nullReader_shouldCacheNullSentinelAndReturnEmpty() {
+    when(singleFlight.load(anyString(), any())).thenReturn(Optional.empty());
+
+    assertThat(hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> null))).isEmpty();
+
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) raw).getValue()).isEqualTo(NullValue.INSTANCE);
+  }
+
+  @Test
+  void computeIfAbsent_nullReader_noNullCaching_shouldLeaveNoEntry() {
+    when(singleFlight.load(anyString(), any())).thenReturn(Optional.empty());
+
+    assertThat(
+      hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> null, 0L, 0L, false, true, StalePolicy.SOFT_REFRESH))
+    )
+      .isEmpty();
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
+  }
+
+  @Test
+  void computeIfAbsent_revalidate_readerFailure_shouldKeepEntryAndReturnEmpty() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
+
+    assertThat(
+      hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
+    )
+      .isEmpty();
+
+    // The soft-expired entry is kept in L1: it powers the circuit-breaker
+    // fallback and lets the next call retry after the failed load.
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) raw).getValue()).isEqualTo("stale");
+  }
+
+  @Test
+  void computeIfAbsent_revalidate_circuitBreakerOpen_shouldServeStaleEntry() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    when(singleFlight.isBreakerOpen()).thenReturn(true);
+    when(singleFlight.load(anyString(), any())).thenReturn(Optional.empty());
+
+    assertThat(
+      hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
+    )
+      .contains("stale");
+  }
+
+  @Test
+  void computeIfAbsent_hardExpired_readerFailure_shouldRemoveEntryAndReturnEmpty() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("old")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
         .hardExpireAtMs(System.currentTimeMillis() - 1000)
         .softTtlMs(30_000)
         .softExpireAtMs(System.currentTimeMillis() - 1000)
@@ -361,18 +488,104 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
+    when(singleFlight.load(anyString(), any())).thenThrow(new IllegalStateException("boom"));
 
-    assertThatThrownBy(() ->
-      hotKeyCache.computeIfAbsent(
-        "key1",
-        CachePolicy.of(() -> {
-          throw new IllegalStateException("boom");
-        }).withFailOnError()
-      )
+    // Aligned with the get() path: hard-expired entries are removed on a
+    // failed reload — they are never served as stale.
+    assertThat(hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "fresh"))).isEmpty();
+    assertThat(caffeineCache.getIfPresent("key1")).isNull();
+  }
+
+  @Test
+  void computeIfAbsent_lazyTtl_shouldNotEvaluateTtlSuppliersOnPlainNormalHit() {
+    AtomicInteger hardEvals = new AtomicInteger();
+    AtomicInteger softEvals = new AtomicInteger();
+
+    CachePolicy policy = new CachePolicy(
+      () -> {
+        hardEvals.incrementAndGet();
+        return 100_000L;
+      },
+      () -> {
+        softEvals.incrementAndGet();
+        return 10_000L;
+      },
+      true,
+      false,
+      StalePolicy.SOFT_REFRESH,
+      () -> "fresh",
+      true,
+      false
+    );
+
+    when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
+
+    // Miss: TTL suppliers are evaluated exactly once (entry creation).
+    assertThat(hotKeyCache.computeIfAbsent("key1", policy)).contains("fresh");
+    assertThat(hardEvals.get()).isEqualTo(1);
+    assertThat(softEvals.get()).isEqualTo(1);
+
+    // Plain NORMAL hit: suppliers must NOT be evaluated again (ADR-0023).
+    assertThat(hotKeyCache.computeIfAbsent("key1", policy)).contains("fresh");
+    assertThat(hardEvals.get()).isEqualTo(1);
+    assertThat(softEvals.get()).isEqualTo(1);
+  }
+
+  @Test
+  void computeIfAbsent_softRefresh_shouldServeStaleAndTriggerBackgroundRefresh() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        // 10s in the past: comfortably beyond TimeSource's ~5ms cached-clock
+        // staleness so the soft-expire branch is taken deterministically.
+        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    // Stale-while-revalidate: the caller receives the stale value, and the
+    // background refresh runs on the (synchronous test) executor, replacing
+    // the entry with the fresh value before the call returns.
+    assertThat(
+      hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
     )
-      .isInstanceOf(IllegalStateException.class)
-      .hasMessage("boom");
-    assertThat(caffeineCache.getIfPresent("key1")).isNotNull();
+      .contains("stale");
+
+    Object raw = caffeineCache.getIfPresent("key1");
+    assertThat(raw).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) raw).getValue()).isEqualTo("fresh");
+  }
+
+  @Test
+  void computeIfAbsent_nullSentinelHit_shouldReturnEmptyWithoutInvokingReader() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value(NullValue.INSTANCE)
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(10_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 10_000)
+        .softTtlMs(0L)
+        .softExpireAtMs(0L)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(10_000)
+        .normalSoftTtlMs(0L)
+        .build()
+    );
+
+    assertThat(hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "should-not-load"))).isEmpty();
+    verify(singleFlight, never()).load(anyString(), any());
   }
 
   @Test

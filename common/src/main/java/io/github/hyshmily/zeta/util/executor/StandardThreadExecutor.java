@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.util.executor;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
+import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.Getter;
@@ -85,9 +86,19 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
     try {
       super.execute(command);
     } catch (RejectedExecutionException rx) {
-      if (!((StandardExecutorQueue) getQueue()).force(command)) {
+      StandardExecutorQueue queue = (StandardExecutorQueue) getQueue();
+      try {
+        if (!queue.force(command)) {
+          submittedTasksCount.decrementAndGet();
+          getRejectedExecutionHandler().rejectedExecution(command, this);
+        }
+      } catch (RejectedExecutionException forceRx) {
+        // The task was never queued and never executed, so afterExecute will never fire:
+        // compensate the increment here. force() throws exactly when the pool is shutting
+        // down (see StandardExecutorQueue#force), the one path where the JDK recheck
+        // (offer -> remove -> reject) also lands in this catch.
         submittedTasksCount.decrementAndGet();
-        getRejectedExecutionHandler().rejectedExecution(command, this);
+        throw forceRx;
       }
     }
   }
@@ -101,6 +112,25 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
       // remains the ThreadPoolExecutor's own responsibility.
       ZetaExceptionHandler.handleException("StandardThreadExecutor task failed", t);
     }
+  }
+
+  /**
+   * Stop the executor and drain the queue of tasks that never started.
+   *
+   * <p>Tasks returned here never execute, so {@link #afterExecute} never fires for them;
+   * their {@code submittedTasksCount} increments are compensated against the drained batch
+   * to keep the counter symmetric across the shutdown paths. The drain performed by
+   * {@link ThreadPoolExecutor#shutdownNow()} is atomic with the STOP transition, so no new
+   * task can slip into the queue after the drained batch is accounted for.
+   *
+   * @return the list of tasks that never commenced execution
+   */
+  @Override
+  @NonNull
+  public List<Runnable> shutdownNow() {
+    List<Runnable> drained = super.shutdownNow();
+    submittedTasksCount.addAndGet(-drained.size());
+    return drained;
   }
 
   public int getSubmittedTasksCount() {

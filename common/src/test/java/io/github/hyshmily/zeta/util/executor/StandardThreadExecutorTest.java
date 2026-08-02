@@ -269,6 +269,53 @@ class StandardThreadExecutorTest {
   }
 
   @Test
+  void rejectionAfterShutdown_shouldNotLeakSubmittedCount() throws Exception {
+    // Pins the symmetric accounting on the force()-throws path: a submission rejected
+    // because the pool is shutting down never triggers afterExecute, so execute() must
+    // compensate the increment itself. Without the compensation the counter would drift
+    // upward by one per rejected submission, polluting the in-flight accounting.
+    var executor = newExecutor(1, 2, 10);
+    try {
+      executor.shutdown();
+      assertThatThrownBy(() -> executor.execute(() -> {})).isInstanceOf(RejectedExecutionException.class);
+      assertThat(executor.getSubmittedTasksCount()).isZero();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void shutdownNow_shouldRecountDrainedTasks() throws Exception {
+    // Pins the symmetric accounting on the shutdownNow() path: tasks returned by
+    // shutdownNow() never execute, so afterExecute never fires and the drained batch
+    // must compensate their increments. Without the compensation the counter would
+    // stay at the number of drained tasks forever.
+    var executor = newExecutor(1, 1, 100);
+    var firstStarted = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    Runnable blocking = () -> {
+      firstStarted.countDown();
+      try {
+        release.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    };
+    try {
+      executor.execute(blocking);
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      executor.execute(() -> {}); // queued — the only worker is busy with the blocker
+      executor.execute(() -> {}); // queued
+      executor.shutdownNow(); // drains the two queued tasks
+      assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(executor.getSubmittedTasksCount()).isZero();
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
   void force_shouldAcceptTask_whenRunning() throws Exception {
     var executor = newExecutor(1, 1, 10);
     var firstStarted = new CountDownLatch(1);

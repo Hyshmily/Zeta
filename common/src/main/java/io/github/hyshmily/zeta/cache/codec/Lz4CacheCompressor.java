@@ -48,6 +48,15 @@ public class Lz4CacheCompressor implements CacheCompressor {
   private static final byte FLAG_LZ4_BYTES = 2;
   private static final byte FLAG_RAW_BYTES = 3;
 
+  /**
+   * Reusable compression scratch buffer, one per thread. Compress allocates a
+   * {@code maxCompressedLength + 5} array plus a final {@code copyOf} result
+   * per call; reusing the intermediate array removes one allocation per
+   * compression. The buffer grows to the largest value compressed on that
+   * thread and stays resident (bounded by the executor thread count).
+   */
+  private static final ThreadLocal<byte[]> SCRATCH = ThreadLocal.withInitial(() -> new byte[0]);
+
   private final LZ4Compressor compressor;
   private final LZ4FastDecompressor decompressor;
 
@@ -68,8 +77,16 @@ public class Lz4CacheCompressor implements CacheCompressor {
     return value;
   }
 
-  private byte[] wrapString(String s) {
+  private Object wrapString(String s) {
     byte[] raw = s.getBytes(UTF_8);
+    if (raw.length < MIN_COMPRESS_LENGTH) {
+      // Small values pass through as the original String: unwrap returns
+      // non-byte[] values verbatim, so hits are a zero-copy, zero-allocation
+      // return of the stored instance. Compression only pays off at or above
+      // MIN_COMPRESS_LENGTH — small values must not pay the per-hit byte[]
+      // decode cost for a benefit they never receive.
+      return s;
+    }
     return process(raw, FLAG_RAW, FLAG_LZ4);
   }
 
@@ -89,11 +106,15 @@ public class Lz4CacheCompressor implements CacheCompressor {
 
   private byte[] compress(byte[] raw, byte flag) {
     int maxLen = compressor.maxCompressedLength(raw.length);
-    byte[] compressed = new byte[maxLen + 5];
-    compressed[0] = flag;
-    writeLen(compressed, raw.length);
-    int len = compressor.compress(raw, 0, raw.length, compressed, 5, maxLen);
-    return Arrays.copyOf(compressed, len + 5);
+    byte[] scratch = SCRATCH.get();
+    if (scratch.length < maxLen + 5) {
+      scratch = new byte[maxLen + 5];
+      SCRATCH.set(scratch);
+    }
+    scratch[0] = flag;
+    writeLen(scratch, raw.length);
+    int len = compressor.compress(raw, 0, raw.length, scratch, 5, maxLen);
+    return Arrays.copyOf(scratch, len + 5);
   }
 
   @Override

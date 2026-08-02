@@ -55,13 +55,26 @@ class ZetaBayesianSMEdgeTest {
   // Lower adjustedLogThreshold (1.0 ≈ e^1 ≈ 2.7) simulates the momentum from a
   // sustained key — Evaluator would produce this when EMA cmsCount >> windowSum.
   private static final EvaluationContext COLD_HIGH_CTX = new EvaluationContext(
-    100L, 5L, 10L, null, Math.log(10), 0.8, 0.0
+    100L,
+    5L,
+    10L,
+    null,
+    Math.log(10),
+    0.8,
+    0.0
   );
 
   private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null, 0.0);
 
   private static ZetaBayesianSM machineWith(int confirm, int cool, int grace) {
-    return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(confirm, cool, grace, EVAL, 2.3026, Long.MAX_VALUE);
+    return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(
+      confirm,
+      cool,
+      grace,
+      EVAL,
+      2.3026,
+      Long.MAX_VALUE
+    );
   }
 
   @Test
@@ -205,6 +218,88 @@ class ZetaBayesianSMEdgeTest {
     Thread.sleep(5);
     m.evictStale(2, k -> {});
     assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void evictStale_callback_shouldFireAfterStateRemoval() throws Exception {
+    // Pins the phase-3 ordering: the COOL callback must observe the key already
+    // removed from the state map (removal is atomic with the staleness re-check
+    // under the per-key lock, the callback runs outside it).
+    ZetaBayesianSM m = machineWith(1, 5, 2);
+    m.evaluate("hot", true, false, CTX);
+    assertThat(m.getStateSnapshot("hot").currentState()).isEqualTo("CONFIRMED_HOT");
+    Thread.sleep(50);
+    AtomicReference<String> seen = new AtomicReference<>();
+    m.evictStale(10, key -> {
+      if (m.getStateSnapshot(key) == null) {
+        seen.set(key);
+      }
+    });
+    assertThat(seen).hasValue("hot");
+    assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void evictStale_throwingCallback_shouldNotAffectEviction() throws Exception {
+    // Pins the failure isolation: a throwing callback must abort neither the
+    // remaining keys' callbacks nor the removal, and must not propagate.
+    ZetaBayesianSM m = machineWith(1, 5, 2);
+    m.evaluate("bad", true, false, CTX);
+    m.evaluate("good", true, false, CTX);
+    Thread.sleep(50);
+    AtomicInteger callbackCount = new AtomicInteger();
+    assertThatCode(() ->
+      m.evictStale(10, key -> {
+        callbackCount.incrementAndGet();
+        if (key.equals("bad")) {
+          throw new IllegalStateException("AMQP down");
+        }
+      })
+    ).doesNotThrowAnyException();
+    assertThat(callbackCount).hasValue(2);
+    assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void evictStale_cooledKey_shouldNotTriggerCallback() throws Exception {
+    // Pins the callback condition: only CONFIRMED_HOT / PRE_COOLING stale keys
+    // trigger the COOL broadcast; a fully cooled key is removed silently.
+    ZetaBayesianSM m = machineWith(1, 2, 1);
+    m.evaluate("cooled", true, false, CTX);
+    m.evaluate("cooled", false, false, COLD_CTX);
+    m.evaluate("cooled", false, false, COLD_CTX);
+    assertThat(m.getStateSnapshot("cooled").currentState()).isEqualTo("COLD");
+    Thread.sleep(50);
+    AtomicInteger callbackCount = new AtomicInteger();
+    m.evictStale(10, key -> callbackCount.incrementAndGet());
+    assertThat(callbackCount).hasValue(0);
+    assertThat(m.getTrackedKeys()).isZero();
+  }
+
+  @Test
+  void evictStale_rehotKey_shouldSkipCallback() throws Exception {
+    // Pins the re-hot guard: if a key is re-evaluated between its phase-2
+    // removal and the phase-3 broadcast, the stale COOL must be skipped — the
+    // fresh state owns its own HOT/COOL decisions. The guard holds regardless
+    // of the (unordered) eviction batch order: exactly one COOL fires, and
+    // exactly the re-hot key survives.
+    ZetaBayesianSM m = machineWith(1, 5, 2);
+    m.evaluate("a", true, false, CTX);
+    m.evaluate("b", true, false, CTX);
+    Thread.sleep(50);
+    AtomicInteger callbackCount = new AtomicInteger();
+    AtomicReference<String> firstKey = new AtomicReference<>();
+    m.evictStale(10, key -> {
+      if (firstKey.compareAndSet(null, key)) {
+        // Simulate a report arriving after the first removal: re-hot the key
+        // that still awaits its broadcast turn.
+        m.evaluate(key.equals("a") ? "b" : "a", true, false, CTX);
+      }
+      callbackCount.incrementAndGet();
+    });
+    assertThat(callbackCount).hasValue(1);
+    long alive = (m.getStateSnapshot("a") != null ? 1 : 0) + (m.getStateSnapshot("b") != null ? 1 : 0);
+    assertThat(alive).isEqualTo(1);
   }
 
   @Test

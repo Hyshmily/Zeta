@@ -19,12 +19,12 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 import lombok.Getter;
-import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -63,16 +63,58 @@ public class HealthViewImpl implements HealthView {
 
   private final long heartbeatTimeoutMs;
   private final int degradeAfterFailures;
+  private final long healthCacheTtlMs;
 
-  @Setter
   private volatile int minAliveWorkers;
 
   @Getter
   private volatile long lastAnyHeartbeatTime;
 
+  /**
+   * Cached cluster-health judgment. {@link #isClusterHealthy()} walks every
+   * Worker record (stream + timestamp comparisons), which is far too expensive
+   * for the COOL-key hit path. Health is a slowly changing signal (heartbeat
+   * cadence is seconds-level), so the judgment is cached for
+   * {@link #healthCacheTtlMs} and recomputed on demand — a single volatile read
+   * on the hot path. Every record mutation invalidates the cache explicitly, so
+   * a state change is reflected immediately; the TTL is the safety net for any
+   * missed invalidation hook.
+   */
+  private volatile boolean clusterHealthyCache;
+  private volatile long clusterHealthyComputedMs = -1;
+
   public HealthViewImpl(long heartbeatTimeoutMs, int degradeAfterFailures) {
+    this(heartbeatTimeoutMs, degradeAfterFailures, DEFAULT_HEALTH_CACHE_TTL_MS);
+  }
+
+  /**
+   * Creates a HealthViewImpl with an explicit health-cache TTL.
+   *
+   * @param heartbeatTimeoutMs   heartbeat timeout window (ms)
+   * @param degradeAfterFailures verification failures before a Worker is stale
+   * @param healthCacheTtlMs     cluster-health judgment cache TTL (ms); a smaller
+   *                             value trades hot-path cost for fresher judgments
+   *                             (mainly useful in tests)
+   */
+  public HealthViewImpl(long heartbeatTimeoutMs, int degradeAfterFailures, long healthCacheTtlMs) {
     this.heartbeatTimeoutMs = heartbeatTimeoutMs;
     this.degradeAfterFailures = degradeAfterFailures;
+    this.healthCacheTtlMs = healthCacheTtlMs;
+  }
+
+  /** Default cluster-health cache TTL: heartbeat cadence is seconds-level, 1s is ample. */
+  private static final long DEFAULT_HEALTH_CACHE_TTL_MS = 1_000;
+
+  /**
+   * Override the minimum alive Worker threshold. Any change invalidates the
+   * cached health judgment.
+   *
+   * @param minAliveWorkers minimum alive Workers for a healthy cluster; {@code <= 0}
+   *                        restores the records-derived one-third threshold
+   */
+  public void setMinAliveWorkers(int minAliveWorkers) {
+    this.minAliveWorkers = minAliveWorkers;
+    invalidateHealthCache();
   }
 
   /**
@@ -124,6 +166,7 @@ public class HealthViewImpl implements HealthView {
     });
 
     lastAnyHeartbeatTime = System.currentTimeMillis();
+    invalidateHealthCache();
   }
 
   /**
@@ -142,6 +185,7 @@ public class HealthViewImpl implements HealthView {
       r.verifyFailures = 0;
       return r;
     });
+    invalidateHealthCache();
   }
 
   /**
@@ -168,6 +212,7 @@ public class HealthViewImpl implements HealthView {
       }
       return r;
     });
+    invalidateHealthCache();
   }
 
   /**
@@ -190,6 +235,7 @@ public class HealthViewImpl implements HealthView {
   @Override
   public void removeRecord(String workerId) {
     records.remove(workerId);
+    invalidateHealthCache();
   }
 
   /**
@@ -215,6 +261,28 @@ public class HealthViewImpl implements HealthView {
    */
   @Override
   public boolean isClusterHealthy() {
+    // Cached judgment: a single volatile read on the hot path (COOL-key
+    // promotion check). Recomputed when invalidated by a record mutation or
+    // when the cache TTL elapsed — health is a seconds-level signal, so a
+    // stale judgment inside the TTL window is never observable in practice.
+    // Concurrent recomputation is idempotent, so the unsynchronized
+    // check-then-act is safe.
+    long now = TimeSource.currentTimeMillis();
+    long computed = clusterHealthyComputedMs;
+    if (computed < 0 || now - computed >= healthCacheTtlMs) {
+      clusterHealthyCache = computeClusterHealthy();
+      clusterHealthyComputedMs = now;
+    }
+    return clusterHealthyCache;
+  }
+
+  /**
+   * Full cluster-health computation: count alive Workers against the minimum
+   * threshold (see {@link #isClusterHealthy()} for the semantics).
+   *
+   * @return {@code true} if the minimum alive Worker threshold is met
+   */
+  private boolean computeClusterHealthy() {
     int minAlive = minAliveWorkers;
     if (minAlive <= 0) {
       minAlive = Math.max(1, (records.size() + 2) / 3);
@@ -225,6 +293,14 @@ public class HealthViewImpl implements HealthView {
       .filter(r -> r.isAlive(heartbeatTimeoutMs))
       .count();
     return aliveCount >= minAlive;
+  }
+
+  /**
+   * Mark the cached health judgment stale so the next {@link #isClusterHealthy()}
+   * call recomputes. Called from every record mutation; cheap (one volatile write).
+   */
+  private void invalidateHealthCache() {
+    clusterHealthyComputedMs = -1;
   }
 
   /**

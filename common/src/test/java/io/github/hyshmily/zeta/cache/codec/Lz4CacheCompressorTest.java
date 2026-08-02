@@ -33,10 +33,13 @@ class Lz4CacheCompressorTest {
   }
 
   @Test
-  void wrap_shortString_shouldStoreAsRaw() {
-    byte[] result = (byte[]) compressor.wrap("hello");
-    assertThat(result[0]).isZero(); // FLAG_RAW
-    assertThat(new String(result, 1, result.length - 1, StandardCharsets.UTF_8)).isEqualTo("hello");
+  void wrap_shortString_shouldPassThroughOriginal() throws IOException {
+    String input = "hello";
+    Object result = compressor.wrap(input);
+    // Small values bypass compression entirely: unwrap returns the very same
+    // String instance, so hits allocate nothing.
+    assertThat(result).isSameAs(input);
+    assertThat(compressor.unwrap(result)).isSameAs(input);
   }
 
   @Test
@@ -92,14 +95,6 @@ class Lz4CacheCompressorTest {
   }
 
   @Test
-  void unwrap_rawString_shouldReturnOriginal() throws IOException {
-    String input = "hello";
-    byte[] raw = (byte[]) compressor.wrap(input);
-    Object result = compressor.unwrap(raw);
-    assertThat(result).isEqualTo(input);
-  }
-
-  @Test
   void unwrap_nonByteArray_shouldPassThrough() throws IOException {
     Object result = compressor.unwrap("notbytes");
     assertThat(result).isEqualTo("notbytes");
@@ -143,10 +138,43 @@ class Lz4CacheCompressorTest {
   void wrapAndUnwrap_roundTrip_shouldPreserveContent() throws IOException {
     String[] inputs = { "a", "ab", "abc", "x".repeat(255), "x".repeat(256), "x".repeat(1000) };
     for (String input : inputs) {
-      byte[] wrapped = (byte[]) compressor.wrap(input);
+      Object wrapped = compressor.wrap(input);
       Object result = compressor.unwrap(wrapped);
       assertThat(result).as("Round-trip failed for length=" + input.length()).isEqualTo(input);
     }
+  }
+
+  /**
+   * Verifies backward compatibility with the legacy raw format
+   * ({@code [0x00][UTF-8 bytes]}) produced by compressors before the
+   * small-value pass-through: entries written by older versions still
+   * decode correctly.
+   */
+  @Test
+  void unwrap_legacyRawStringFormat_shouldReturnOriginal() throws IOException {
+    byte[] raw = "hello".getBytes(StandardCharsets.UTF_8);
+    byte[] legacy = new byte[1 + raw.length];
+    legacy[0] = 0; // FLAG_RAW
+    System.arraycopy(raw, 0, legacy, 1, raw.length);
+
+    assertThat(compressor.unwrap(legacy)).isEqualTo("hello");
+  }
+
+  /**
+   * Verifies that the raw byte[] flag is still produced for small byte[]
+   * values (byte[] pass-through is a separate concern, see ADR-0015 review).
+   */
+  @Test
+  void wrap_shortBytes_shouldStillUseRawBytesFlag() {
+    byte[] input = "small".getBytes(StandardCharsets.UTF_8);
+    byte[] result = (byte[]) compressor.wrap(input);
+    assertThat(result[0]).isEqualTo((byte) 3); // FLAG_RAW_BYTES
+    assertThat(result).hasSize(1 + input.length);
+    assertThat(result[1]).isEqualTo((byte) 's');
+    assertThat(result[2]).isEqualTo((byte) 'm');
+    assertThat(result[3]).isEqualTo((byte) 'a');
+    assertThat(result[4]).isEqualTo((byte) 'l');
+    assertThat(result[5]).isEqualTo((byte) 'l');
   }
 
   @Test

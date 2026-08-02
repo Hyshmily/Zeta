@@ -187,9 +187,7 @@ public class DefaultEvaluator implements Evaluator {
     // cmsCount = cmsCount * α + count
     // High cmsCount + low windowSum = key was hot but cooling (momentum < 1)
     // Low cmsCount + high windowSum = sudden spike with no history
-    double prevCms = cmsCounts.getOrDefault(key, 0.0);
-    double cms = prevCms * CMS_ALPHA + count;
-    cmsCounts.put(key, cms);
+    double cms = cmsCounts.compute(key, (k, prev) -> (prev == null ? 0.0 : prev) * CMS_ALPHA + count);
 
     // Momentum = cmsCount / windowSum — how much "history" the key carries
     // relative to its current burst size.
