@@ -169,8 +169,11 @@ public class KeyReporterImpl implements KeyReporter {
       new ZetaThreadFactory("zeta-report-routing"),
       (r, executor) -> {
         long dropped = routingDropCounter.incrementAndGet();
-        if ((dropped & 100) == 0 || dropped == 1) {
-          routingDropCounter.set(1);
+        // Log roughly once per 100 drops (dropped=1, 101, 201, ...). The
+        // counter keeps the real cumulative total for metrics — it is never
+        // reset (a previous bitwise check made the log timing random and a
+        // set(1) corrupted the total).
+        if (dropped % 100 == 1) {
           log.warn("routing queue full, dropping report batch; totalDropped={}", dropped);
         }
       }

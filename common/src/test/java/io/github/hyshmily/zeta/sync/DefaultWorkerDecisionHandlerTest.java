@@ -100,6 +100,41 @@ class DefaultWorkerDecisionHandlerTest {
     verify(hook).afterHotPromotion(eq("key1"), any(), any());
   }
 
+  /**
+   * Verifies the create path preserves the Worker decision identity (C1): an
+   * entry created by a Worker HOT decision carries nodeId/epoch, so
+   * VersionGuard can compare against out-of-order replayed decisions instead
+   * of accepting them unconditionally.
+   */
+  @Test
+  void handleHot_entryAbsent_shouldPreserveDecisionIdentity() {
+    handler.handleHot(workerMessage("newkey", WorkerMessage.TYPE_HOT, 1L));
+
+    CacheEntry ce = (CacheEntry) cache.getIfPresent("newkey");
+    assertThat(ce).isNotNull();
+    assertThat(ce.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(ce.getDecisionNodeId()).isEqualTo("node");
+    assertThat(ce.getDecisionEpoch()).isEqualTo(1L);
+    assertThat(ce.getDecisionVersion()).isEqualTo(1L);
+  }
+
+  /**
+   * Verifies the C1 fix end-to-end: after a Worker-HOT create, a replayed
+   * older decision from the same Worker (same epoch/nodeId, lower dv) is
+   * rejected by the version guard instead of overwriting the entry.
+   */
+  @Test
+  void handleHot_olderDecisionFromSameNode_shouldNotOverwriteCreatedEntry() {
+    handler.handleHot(workerMessage("newkey", WorkerMessage.TYPE_HOT, 5L));
+    CacheEntry before = (CacheEntry) cache.getIfPresent("newkey");
+    assertThat(before.getDecisionVersion()).isEqualTo(5L);
+
+    handler.handleHot(workerMessage("newkey", WorkerMessage.TYPE_HOT, 3L));
+
+    CacheEntry after = (CacheEntry) cache.getIfPresent("newkey");
+    assertThat(after.getDecisionVersion()).isEqualTo(5L);
+  }
+
   @Test
   void handleHot_sreThrottled_shouldInvokeOnHotSkippedSre() {
     SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);

@@ -202,6 +202,12 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
           actualDataVersion,
           actualDegraded,
           wm.decisionVersion(),
+          // Preserve the decision identity on the create path: without
+          // nodeId/epoch, VersionGuard.shouldSkipForWorker treats every
+          // subsequent decision as cross-Worker (unconditional accept), so
+          // out-of-order replayed messages could overwrite this entry.
+          wm.nodeId(),
+          wm.epoch(),
           defultHotHardTtl,
           defultHotSoftTtl,
           expireManager.getEffectiveHardTtlMs(),

@@ -315,10 +315,13 @@ class CacheSyncListenerTest {
   }
 
   /**
-   * Verifies that a refresh with null loader return on a plain string value preserves it.
+   * Verifies the REFRESH value-channel fallback (C2/ADR-0031): when the
+   * loader returns null (nothing writes the cache-key namespace in Redis by
+   * default), the entry is invalidated locally so the next read reloads
+   * through the type-safe application reader — the stale copy is never kept.
    */
   @Test
-  void handleSyncMessage_withRefreshOnStringValueAndNullLoaderReturn_shouldPreserve()
+  void handleSyncMessage_withRefreshOnStringValueAndNullLoaderReturn_shouldInvalidate()
     throws IOException, InterruptedException {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
@@ -330,7 +333,7 @@ class CacheSyncListenerTest {
     nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 6L, false));
     verify(channel).basicAck(anyLong(), eq(false));
     awaitWorkerTasks();
-    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(5);
+    assertThat(cache.getIfPresent("key1")).isNull();
   }
 
   /**

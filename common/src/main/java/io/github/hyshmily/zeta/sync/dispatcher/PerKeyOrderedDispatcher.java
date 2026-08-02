@@ -24,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -160,10 +161,8 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
     // the existing worker. The start decision is made atomically with the insertion, so there
     // is no window in which the worker can be orphaned (a queue whose owner never re-runs it) —
     // the running-flag re-verification and retry loop of earlier designs is not needed.
-    boolean[] startWorker = { false };
     KeyWorker worker = queues.compute(key, (k, existing) -> {
       if (existing == null) {
-        startWorker[0] = true;
         return new KeyWorker(key, task);
       }
       // Key is already being processed, try to enqueue.
@@ -173,9 +172,14 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
       return existing;
     });
 
-    // Must run execute outside of compute: the executor call may reject (or block), and the
-    // map bin lock must not be held while invoking it.
-    if (startWorker[0]) {
+    // Grant the first executor submission exactly once per worker incarnation.
+    // The compute remapping function must stay side-effect free (CHM contract:
+    // it may be invoked multiple times under bin-lock contention), so the
+    // start decision is moved here via CAS. runCycle's continuation calls
+    // executeWorker directly and is not affected by this guard.
+    if (worker.scheduled.compareAndSet(false, true)) {
+      // Must run execute outside of compute: the executor call may reject (or block), and the
+      // map bin lock must not be held while invoking it.
       executeWorker(worker);
     }
   }
@@ -302,6 +306,13 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
     private static final int INITIAL_QUEUE_SIZE = 8;
 
     final Object key;
+    /**
+     * Set exactly once per worker incarnation, via CAS, by the submit path to
+     * grant the first executor submission. runCycle's continuation does not
+     * consult it. Reset implicitly when the worker is removed from the map and
+     * a fresh worker is created.
+     */
+    final AtomicBoolean scheduled = new AtomicBoolean(false);
     /**
      * First task, stored separately from the queue so that the common single-task case never
      * allocates the {@link ArrayDeque} at all. Accessed only while holding the map bin lock

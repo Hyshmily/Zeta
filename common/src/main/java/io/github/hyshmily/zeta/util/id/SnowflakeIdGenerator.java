@@ -18,8 +18,6 @@ package io.github.hyshmily.zeta.util.id;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.TimeSource;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -34,15 +32,16 @@ import java.util.concurrent.ThreadLocalRandom;
  *   <li><b>Sign (1 bit):</b> always 0 – IDs are always positive</li>
  *   <li><b>Timestamp (41 bits):</b> milliseconds since {@link #EPOCH} (~69 years)</li>
  *   <li><b>Datacenter (2 bits):</b> {@code 0..3}, configured explicitly</li>
- *   <li><b>Worker (8 bits):</b> {@code 0..255}, derived from IP last octet or
- *       {@link InstanceIdGenerator#getNodeId()}</li>
+ *   <li><b>Worker (8 bits):</b> {@code 0..255}, derived from the JVM-unique
+ *       node id XOR the process id (unique per JVM on a host)</li>
  *   <li><b>Sequence (12 bits):</b> {@code 0..4095}, increments per-millisecond per-node</li>
  * </ul>
  *
  * <p>Zeta-specific adaptations over the canonical reference:
  * <ul>
  *   <li>Clock source: {@link TimeSource#currentTimeMillis()} – cached, avoids native JNI overhead</li>
- *   <li>Worker seed: {@link InstanceIdGenerator#getNodeId()} – already unique per JVM</li>
+ *   <li>Worker seed: {@link InstanceIdGenerator#getNodeId()} XOR the process
+ *       id — unique per JVM even on a shared host (containers)</li>
  *   <li>Small clock rewinds (up to {@code timeOffset} ms) are tolerated by busy-wait</li>
  *   <li>Optionally randomises the per-millisecond sequence start to avoid even-number bias
  *       in the lowest 12 bits (useful when IDs are used for hash-based partitioning)</li>
@@ -163,16 +162,14 @@ public class SnowflakeIdGenerator {
   }
 
   /**
-   * Resolve worker ID from the last octet of the local IP address, falling back
-   * to the lower 8 bits of {@link InstanceIdGenerator#getNodeId()}.
+   * Resolve worker ID (0..255) from the JVM-unique random node id XOR the
+   * process id. The previous IP-last-octet scheme collided for multiple
+   * instances deployed on the same host (containers): same host → same IP
+   * octet → same workerId → identical IDs within the same millisecond, which
+   * broke degraded-version ordering across instances.
    */
   private static long resolveWorkerId() {
-    try {
-      InetAddress addr = InetAddress.getLocalHost();
-      byte[] bytes = addr.getAddress();
-      return bytes[bytes.length - 1] & 0xFFL;
-    } catch (UnknownHostException e) {
-      return InstanceIdGenerator.getNodeId() & 0xFFL;
-    }
+    long pid = ProcessHandle.current().pid();
+    return (InstanceIdGenerator.getNodeId() ^ pid) & MAX_WORKER_ID;
   }
 }

@@ -69,6 +69,8 @@ M = method, M/T = method or type.
 
 "Ignored" means: the annotation is silently a no-op today, and the aspect logs a one-time WARN (rule R2) so the mistake is visible.
 
+**`@CachePut` cross-instance semantics:** `@CachePut` writes through (`putThrough`) and broadcasts a REFRESH sync message. Zeta itself never writes the cache-key namespace in Redis, so in the default wiring the receiver cannot load the new value — the REFRESH handler falls back to a **local invalidation** (ADR-0031): the peer's copy is evicted and the next read reloads through the application reader. If your integration maintains the value in Redis itself, the push path is used instead. Use `@SkipBroadcast` for local-only writes.
+
 ---
 
 ## 4. Interaction rules

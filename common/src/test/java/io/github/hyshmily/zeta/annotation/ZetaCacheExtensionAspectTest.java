@@ -489,6 +489,28 @@ class ZetaCacheExtensionAspectTest {
       .hasMessage("from-method");
   }
 
+  @Test
+  @DisplayName("JVM Error is not swallowed by @Fallback (I4)")
+  void methodErrorWithFallback_propagates() throws Throwable {
+    Method method = TestService.class.getMethod("findThrowing", String.class);
+    MethodSignature signature = mock(MethodSignature.class);
+    ProceedingJoinPoint pjp = mock(ProceedingJoinPoint.class);
+
+    when(signature.getMethod()).thenReturn(method);
+    when(pjp.getSignature()).thenReturn(signature);
+    when(pjp.getTarget()).thenReturn(new TestService());
+    when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
+    when(pjp.proceed()).thenThrow(new Error("fatal"));
+
+    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+
+    // Even with @Fallback present, an Error must propagate — the fallback
+    // path swallows Exception only, so fatal JVM failures surface.
+    assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
+      .isInstanceOf(Error.class)
+      .hasMessage("fatal");
+  }
+
   // ── resolveCacheName tests ──
 
   @Test

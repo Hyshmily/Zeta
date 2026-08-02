@@ -1844,17 +1844,10 @@ public class HotKeyCache {
             oldValue[0] = (T) unwrapValue(ce.getValue(), nk);
             return expireManager.replaceEntryValue(ce, newValue);
           }
-          if (existing != null) {
-            oldValue[0] = (T) existing;
-            return buildEntry(
-              newValue,
-              resolvedHardTtl,
-              resolvedSoftTtl,
-              KeyState.NORMAL,
-              resolvedHardTtl,
-              resolvedSoftTtl
-            );
-          }
+          // Bare value or absent: replace with a fresh NORMAL entry. The
+          // previous raw value (or null when absent) is preserved via
+          // Optional.ofNullable below.
+          oldValue[0] = (T) existing;
           return buildEntry(
             newValue,
             resolvedHardTtl,

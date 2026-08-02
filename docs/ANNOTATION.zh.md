@@ -67,6 +67,8 @@ Zeta / HotKeyCache
 
 "忽略"指：该注解今天是静默 no-op，切面会记录一次性 WARN（规则 R2）让错误可见。
 
+**`@CachePut` 跨实例语义：** `@CachePut` 写透（`putThrough`）并广播 REFRESH 同步消息。Zeta 自身从不向 Redis 的缓存键命名空间写值，因此在默认装配下接收方无法加载新值——REFRESH 处理器回退为**本地失效**（ADR-0031）：对端副本被逐出，下次读经应用 reader 重新加载。若集成方自行在 Redis 中维护该键的值，则走推送路径。本地写请使用 `@SkipBroadcast`。
+
 ---
 
 ## 4. 交互规则

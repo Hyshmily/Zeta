@@ -659,10 +659,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    */
   private long updateEmptySlot(int index, int active, long itemFingerprint, long increment, long maxCount) {
     fingerprints[index] = (int) itemFingerprint;
-    windows[index * windowStride + active] += increment;
-    slotSums[index] += increment;
-    if (increment > 0 && slotSums[index] < 0) slotSums[index] = Long.MAX_VALUE;
-    return Math.max(maxCount, slotSums[index]);
+    return applyIncrement(index, active, increment, maxCount);
   }
 
   /**
@@ -670,7 +667,30 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * {@link #slotSums} by {@code increment}.
    */
   private long updateMatchingSlot(int index, int active, long increment, long maxCount) {
-    windows[index * windowStride + active] += increment;
+    return applyIncrement(index, active, increment, maxCount);
+  }
+
+  /**
+   * Shared fast-path tail of {@link #updateEmptySlot} and
+   * {@link #updateMatchingSlot}: add {@code increment} to the active window
+   * and mirror it into {@link #slotSums}, returning the running
+   * {@code maxCount}.
+   *
+   * <p><b>Saturation guard:</b> both counters saturate at
+   * {@link Long#MAX_VALUE} instead of wrapping negative. A wrapped window
+   * would look "already decayed" to {@link #decayCollisionSlot}'s survivor
+   * check and be skipped by it; a wrapped slot sum would misrank the slot.
+   * The guard is a single comparison on the hot path, and saturation is a
+   * stop-condition rather than steady state — {@link #fading()} zeroes
+   * windows on rotation and {@code decayCollisionSlot} decays slot sums, so
+   * a slot can only reach the cap under extreme continuous traffic.
+   */
+  private long applyIncrement(int index, int active, long increment, long maxCount) {
+    long window = windows[index * windowStride + active] + increment;
+    if (increment > 0 && window < 0) {
+      window = Long.MAX_VALUE; // saturation guard: an overflowing window would decay-skip
+    }
+    windows[index * windowStride + active] = window;
     slotSums[index] += increment;
     if (increment > 0 && slotSums[index] < 0) slotSums[index] = Long.MAX_VALUE;
     return Math.max(maxCount, slotSums[index]);

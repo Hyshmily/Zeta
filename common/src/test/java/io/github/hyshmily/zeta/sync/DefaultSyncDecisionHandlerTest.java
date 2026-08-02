@@ -96,6 +96,24 @@ class DefaultSyncDecisionHandlerTest {
     verify(hook).afterRefresh(eq("key1"), any(), any());
   }
 
+  /**
+   * Verifies the REFRESH value-channel fallback (C2/ADR-0031): when no value
+   * can be loaded from Redis (the default — nothing in Zeta writes the
+   * cache-key namespace), the refresh falls back to a local invalidation so
+   * the next read reloads through the type-safe application reader instead
+   * of keeping a stale entry.
+   */
+  @Test
+  void handleRefresh_noValueInRedis_shouldFallBackToLocalInvalidation() {
+    cache.put("key1", entry(1, false, KeyState.NORMAL));
+    CacheLoader nullLoader = k -> null;
+    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList());
+
+    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+  }
+
   @Test
   void handleRefresh_staleVersion_shouldInvokeOnRefreshSkipped() {
     cache.put("key1", entry(5, false, KeyState.NORMAL));

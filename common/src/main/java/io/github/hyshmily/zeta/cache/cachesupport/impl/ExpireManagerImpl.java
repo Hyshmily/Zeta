@@ -822,9 +822,13 @@ public class ExpireManagerImpl implements ExpireManager {
         }
       } finally {
         // Always release the limiter permit and remove the in-flight
-        // marker so that a future refresh can be scheduled.
+        // marker so that a future refresh can be scheduled. Conditional
+        // removal by object identity: a concurrent triggerBackgroundRefresh
+        // may have replaced the map entry with a newer task while this
+        // callback ran — unconditional removal would delete that newer
+        // marker and allow a third concurrent refresh (ABA).
         refreshLimiter.release();
-        pendingRefreshes.remove(cacheKey);
+        pendingRefreshes.remove(cacheKey, task);
       }
     });
 

@@ -211,7 +211,14 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
 
     Object value = loadFromRedis(sm);
     if (value == null) {
-      log.warn("Refresh failed to load value from Redis for key={}", cacheKey);
+      // No value channel exists by default: nothing in Zeta writes the
+      // cache-key namespace in Redis, so a REFRESH broadcast can never carry
+      // the payload. Fall back to a local invalidation so the next read
+      // reloads through the type-safe application reader instead of silently
+      // keeping a stale entry (ADR-0031). Local-only: no version record and
+      // no re-broadcast, so this cannot loop.
+      log.debug("Refresh has no value in Redis for key={}, falling back to local invalidation", cacheKey);
+      caffeineCache.invalidate(cacheKey);
       fireOnRefreshSkipped(cacheKey, sm);
       return;
     }

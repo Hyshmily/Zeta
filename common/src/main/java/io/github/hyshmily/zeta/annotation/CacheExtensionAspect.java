@@ -338,7 +338,10 @@ public class CacheExtensionAspect {
       }
 
       return result;
-    } catch (Throwable e) {
+    } catch (Exception e) {
+      // Deliberately Exception, not Throwable: JVM-level Errors (OOM,
+      // StackOverflow) must propagate — swallowing them behind a fallback
+      // hides fatal failures.
       if (fallback != null) {
         log.warn("[HotKeyCacheExtension] fallback triggered for key={}, reason={}", prefixedKey, e.getMessage());
         return resolveFallback(pjp, fallback, method);
