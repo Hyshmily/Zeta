@@ -605,16 +605,22 @@ public class HotKeyCache {
   }
 
   /**
-   * Trigger a background refresh if the raw value is a worker-managed entry
-   * and its soft TTL has expired.
+   * Trigger a background refresh if the raw value is a Worker-managed entry
+   * (HOT or COOL) whose soft TTL has expired. COOL entries are refreshed too —
+   * their value must stay fresh while the Worker has not re-decided; a
+   * successful refresh downgrades COOL to NORMAL (see
+   * {@code ExpireManagerImpl#applyRefreshTask}), after which the entry follows
+   * the ordinary NORMAL lifecycle (hard-TTL reload). NORMAL entries are not
+   * refreshed here: they use their own short TTLs.
    *
    * @param cacheKey  the cache key
    * @param raw       the raw value from Caffeine (may be {@link CacheEntry} or bare)
-   * @param reader    the value supplier for the refresh
+   * @param reader    the value supplier for the refresh ({@code null} skips the
+   *                  refresh — convenience policies carry no reader)
    * @param softTtlMs per-call soft TTL override (0 = use configured default)
    */
   private void refreshSoftExpire(String cacheKey, Object raw, Supplier<?> reader, long softTtlMs) {
-    if (!isWorkerManaged(raw)) return;
+    if (!isWorkerManaged(raw) || reader == null) return;
 
     CacheEntry ce = (CacheEntry) raw;
     if (!expireManager.isSoftExpired(ce)) return;
@@ -1631,13 +1637,19 @@ public class HotKeyCache {
                 case SOFT_REFRESH -> {
                   // Trigger the background refresh outside the compute lock
                   // (see below); the caller already receives the stale value.
-                  refreshRef[0] = true;
-                  refreshEntryRef[0] = ce;
+                  // A null reader (convenience policies) skips the refresh;
+                  // a successful COOL refresh downgrades the entry to NORMAL
+                  // (see ExpireManagerImpl#applyRefreshTask).
+                  if (reader != null) {
+                    refreshRef[0] = true;
+                    refreshEntryRef[0] = ce;
+                  }
                   return existing;
                 }
                 case REVALIDATE -> {
                   hitRef[0] = false;
-                  valueRef[0] = null; // prevent stale value leak on the load path
+                  valueRef[0] = null;
+                  // prevent stale value leak on the load path
                   // Keep the stale entry in L1: it powers the circuit-breaker
                   // fallback and lets the next call retry after a failed load.
                   return existing;

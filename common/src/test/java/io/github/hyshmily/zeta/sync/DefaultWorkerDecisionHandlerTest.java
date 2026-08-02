@@ -197,6 +197,37 @@ class DefaultWorkerDecisionHandlerTest {
   }
 
   @Test
+  void handleCool_missingNormalTtl_shouldApplyFallbackProtectionTtlsInMs() {
+    cache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("v")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(1)
+        .decisionNodeId("node")
+        .decisionEpoch(1L)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(30_000)
+        .keyState(KeyState.HOT)
+        .normalHardTtlMs(0)
+        .normalSoftTtlMs(0)
+        .build()
+    );
+
+    handler.handleCool(workerMessage("key1", WorkerMessage.TYPE_COOL, 2L));
+
+    CacheEntry ce = (CacheEntry) cache.getIfPresent("key1");
+    assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
+    // Unit regression guard: the fallback protection TTLs are declared in
+    // seconds (120/60) but must be applied in milliseconds (120000/60000).
+    assertThat(ce.getHardTtlMs()).isEqualTo(120_000L);
+    assertThat(ce.getSoftTtlMs()).isEqualTo(60_000L);
+  }
+
+  @Test
   void handleCool_noEntry_shouldInvokeOnCoolSkipped() {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
     handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));

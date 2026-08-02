@@ -9,7 +9,7 @@
 
 ## Cache States
 
-- **KeyState** — Enum: `NORMAL` / `HOT` / `COOL`. HOT and COOL are set by the Worker; NORMAL is the default. Transitions: `NORMAL ↔ HOT` (via Worker broadcast), `HOT ↔ COOL` (via Worker broadcast), `COOL → NORMAL` (via expiry + reload).
+- **KeyState** — Enum: `NORMAL` / `HOT` / `COOL`. HOT and COOL are set by the Worker; NORMAL is the default. Transitions: `NORMAL ↔ HOT` (via Worker broadcast), `HOT ↔ COOL` (via Worker broadcast), `COOL → NORMAL` (via expiry + reload, or via a successful soft-expire refresh — local read activity returns the entry to the ordinary local lifecycle).
 - **NORMAL** — Default state. No Worker involvement. Local TopK can freely promote to HOT.
 - **HOT** — Worker-broadcasted hot decision OR local promotion result. Longest TTLs (hotHardTtl / hotSoftTtl). Never degraded or overwritten by local decisions.
 - **COOL** — Worker-broadcasted cool decision. Preserved while the Worker cluster is healthy (default: at least one third of observed Workers alive, minimum 1 — see ADR-0028). Eligible for local promotion to HOT only when the health gate fails (graceful degradation mode).

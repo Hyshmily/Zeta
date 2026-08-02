@@ -68,10 +68,10 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
   /** Optional lifecycle hooks for Worker decision events. Never null. */
   private final List<WorkerDecisionHook> workerHooks;
 
-  /** Fallback hard TTL (seconds) for COOL entries when no normal TTL is configured on the existing entry. */
-  private static final long COOL_DEFAULT_PROTECTION_HARDTTL_TIME = 120;
-  /** Fallback soft TTL (seconds) for COOL entries when no normal TTL is configured on the existing entry. */
-  private static final long COOL_DEFAULT_PROTECTION_SOFTTTL_TIME = 60;
+  /** Fallback hard TTL (ms) for COOL entries when no normal TTL is configured on the existing entry. */
+  private static final long COOL_DEFAULT_PROTECTION_HARDTTL_TIME = 120_000;
+  /** Fallback soft TTL (ms) for COOL entries when no normal TTL is configured on the existing entry. */
+  private static final long COOL_DEFAULT_PROTECTION_SOFTTTL_TIME = 60_000;
   /** Jitter ratio for COOL fallback hard TTL (±20%). */
   private static final double COOL_DEFAULT_PROTECTION_HARDTTL_TIME_RATIO = 0.2;
   /** Jitter ratio for COOL fallback soft TTL (±20%). */
@@ -228,10 +228,17 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
    *   <li>The cached value, {@code dataVersion}, degradation flag, and
    *       {@code decisionVersion} are all preserved — the data remains available.</li>
    *   <li>The hard TTL is reset to the normal value (from
-   *       {@code normalHardTtlMs}).</li>
-   *   <li>Soft expiration is fully disabled (both {@code softTtlMs} and
-   *       {@code softExpireAtMs} set to {@code 0L}), so the entry stops being
-   *       proactively refreshed.</li>
+   *       {@code normalHardTtlMs}, or a 120s protection default).</li>
+   *   <li>The soft TTL is reset to the normal value (from
+   *       {@code normalSoftTtlMs}, or a 60s protection default), so the entry
+   *       eventually soft-expires.</li>
+   *   <li>Read paths still refresh COOL entries on soft expiry
+   *       (SOFT_REFRESH, when a reader is present); a successful refresh
+   *       downgrades the entry to NORMAL — the local read traffic shows the
+   *       key is still active locally, so it returns to the ordinary local
+   *       lifecycle. After that, {@code getWithSoftExpire} no longer refreshes
+   *       it (NORMAL uses its short TTLs and a hard-TTL reload); a Worker
+   *       broadcast can still override at any time via {@code decisionVersion}.</li>
    * </ul>
    *
    * <p>If no existing entry is present in L1, the COOL decision is a no-op —

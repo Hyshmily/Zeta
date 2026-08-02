@@ -566,6 +566,92 @@ class ZetaCacheTest {
   }
 
   @Test
+  void computeIfAbsent_softRefresh_shouldRefreshCoolEntryAndDowngradeToNormal() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(5)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .keyState(KeyState.COOL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(5000)
+        .build()
+    );
+
+    // COOL entries are proactively refreshed on the annotation path too; the
+    // successful refresh downgrades the entry to NORMAL.
+    assertThat(
+      hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
+    )
+      .contains("stale");
+
+    CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(after.getValue()).isEqualTo("fresh");
+    assertThat(after.getKeyState()).isEqualTo(KeyState.NORMAL);
+  }
+
+  @Test
+  void computeIfAbsent_softRefresh_coolEntryWithNullReader_shouldNotRefreshAndReturnValue() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(5)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .keyState(KeyState.COOL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(5000)
+        .build()
+    );
+
+    // Convenience policy without a reader: the background refresh must be
+    // skipped (no NPE on supplyAsync(null)), the stale value served, and the
+    // entry left untouched.
+    assertThat(hotKeyCache.computeIfAbsent("key1", CachePolicy.of(0L, 0L, true, false))).contains("stale");
+
+    CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(after.getValue()).isEqualTo("stale");
+    assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
+  }
+
+  @Test
+  void getWithSoftExpire_softRefresh_coolEntryWithNullReader_shouldNotRefreshAndReturnValue() {
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(5)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .keyState(KeyState.COOL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(5000)
+        .build()
+    );
+
+    assertThat(hotKeyCache.getWithSoftExpire("key", CachePolicy.of(0L, 0L, true, false))).contains("stale");
+
+    CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(after.getValue()).isEqualTo("stale");
+    assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
+  }
+
+  @Test
   void computeIfAbsent_nullSentinelHit_shouldReturnEmptyWithoutInvokingReader() {
     caffeineCache.put(
       "key1",
@@ -1624,8 +1710,8 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("getWithSoftExpire uses normalSoftTtlMs for COOL entry")
-    void getWithSoftExpire_shouldUseCoolNormalSoftTtl() {
+    @DisplayName("getWithSoftExpire refreshes COOL entry and downgrades it to NORMAL")
+    void getWithSoftExpire_shouldRefreshCoolEntryAndDowngradeToNormal() {
       caffeineCache.put(
         "key",
         CacheEntry.builder()
@@ -1645,9 +1731,12 @@ class ZetaCacheTest {
 
       hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
+      // COOL entries are refreshed; the successful refresh downgrades the
+      // entry to NORMAL (local activity regains the ordinary lifecycle).
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
       assertThat(after.getSoftTtlMs()).isEqualTo(5000L);
+      assertThat(after.getKeyState()).isEqualTo(KeyState.NORMAL);
     }
 
     @Test
@@ -1945,7 +2034,7 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("getWithSoftExpire with COOL expired entry triggers background refresh")
+    @DisplayName("getWithSoftExpire with COOL expired entry refreshes and downgrades to NORMAL")
     void getWithSoftExpire_coolEntry_shouldTriggerRefresh() {
       caffeineCache.put(
         "key",
@@ -1966,14 +2055,17 @@ class ZetaCacheTest {
 
       hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
+      // COOL entries are proactively refreshed; the success downgrades the
+      // entry to NORMAL (value and soft-expiry timestamp updated).
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
       assertThat(after.getSoftExpireAtMs()).isGreaterThan(System.currentTimeMillis() - 500);
+      assertThat(after.getKeyState()).isEqualTo(KeyState.NORMAL);
     }
 
     @Test
-    @DisplayName("getWithSoftExpire with COOL entry and default soft uses effective soft TTL")
-    void getWithSoftExpire_coolEntryWithZeroNormalSoft_usesEffectiveSoft() {
+    @DisplayName("getWithSoftExpire with COOL entry and zero soft TTL refreshes")
+    void getWithSoftExpire_coolEntryWithZeroSoft_shouldRefresh() {
       caffeineCache.put(
         "key",
         CacheEntry.builder()
@@ -1996,6 +2088,7 @@ class ZetaCacheTest {
 
       CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key");
       assertThat(after.getValue()).isEqualTo("fresh");
+      assertThat(after.getKeyState()).isEqualTo(KeyState.NORMAL);
     }
 
     @Test

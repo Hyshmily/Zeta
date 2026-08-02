@@ -895,7 +895,18 @@ public class ExpireManagerImpl implements ExpireManager {
               log.debug("Async refresh discarded: newer version exists: {}", cacheKey);
               return entry;
             }
-            return entry.withValueAndSoftTtl(compressor.wrap(value), softTtlMs, computeSoftExpireAt(softTtlMs));
+            // A successful refresh of a COOL entry downgrades it to NORMAL:
+            // the local read that triggered the refresh shows the key is
+            // still active locally, so it returns to the ordinary local
+            // lifecycle (promotion-eligible, hard-TTL reload). Decision
+            // metadata is preserved, so a later Worker broadcast still
+            // overrides via decisionVersion. NORMAL/HOT entries keep state.
+            CacheEntry refreshed = entry.withValueAndSoftTtl(
+              compressor.wrap(value),
+              softTtlMs,
+              computeSoftExpireAt(softTtlMs)
+            );
+            return entry.getKeyState() == KeyState.COOL ? refreshed.withKeyState(KeyState.NORMAL) : refreshed;
           })
           .orElseGet(() -> {
             long effectiveHardTtl = getEffectiveHardTtlMs();
@@ -912,7 +923,9 @@ public class ExpireManagerImpl implements ExpireManager {
               computeSoftExpireAt(softTtlMs),
               getEffectiveHardTtlMs(),
               getEffectiveSoftTtlMs(),
-              refreshStartKeyState
+              // Same COOL → NORMAL downgrade as the existing-entry branch: a
+              // successful refresh rebuilds a COOL entry as NORMAL.
+              refreshStartKeyState == KeyState.COOL ? KeyState.NORMAL : refreshStartKeyState
             );
           })
       );
