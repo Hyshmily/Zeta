@@ -29,6 +29,7 @@ import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -91,7 +92,11 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
    * <ul>
    *   <li><b>Unconditional path:</b> When {@code version == 0L && !isVersionDegraded}
    *       (clean invalidation from {@code invalidateAllLocal}), the guard is bypassed
-   *       entirely — the entry is always removed.</li>
+   *       for ordinary entries. <em>Worker-managed entries</em> ({@link KeyState#HOT}
+   *       or {@link KeyState#COOL}) are preserved: a version-less INVALIDATE carries
+   *       no decision-version information, and clearing such an entry would discard
+   *       its decision metadata and extended TTL (ADR-0021 / ADR-0024 depend on them
+   *       surviving); it expires naturally or awaits the next Worker decision.</li>
    *   <li><b>Guarded path:</b> Uses {@link VersionGuard#shouldSkipForSync} with the
    *       4-case degraded comparison. Case 2 (existing normal, incoming degraded)
    *       prevents a stale degraded INVALIDATE from wiping a healthy entry.</li>
@@ -100,7 +105,10 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
    * <p>Double-checked locking (DCL): a fast version guard before the atomic
    * {@code compute} (first pass), and a second guard inside the {@code compute}
    * body (second pass) to prevent a concurrent REFRESH from being wiped by a
-   * stale invalidate that arrived after the refresh.
+   * stale invalidate that arrived after the refresh. Invalidation watermark
+   * recording and {@link SyncHook} dispatch happen only when the entry was
+   * actually removed — a rejected (preserved) invalidate must not block later
+   * REFRESH messages via a {@code Long.MAX_VALUE} watermark.
    *
    * @param sm the sync message containing the key to invalidate; if the key
    *           is null or invalid, the invalidation is silently skipped
@@ -117,6 +125,7 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
       return;
     }
 
+    AtomicBoolean removed = new AtomicBoolean(false);
     caffeineCache
       .asMap()
       .compute(sm.cacheKey(), (key, existing) -> {
@@ -127,11 +136,24 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
         ) {
           return existing;
         }
+        if (
+          unconditional &&
+          existing instanceof CacheEntry ce &&
+          (ce.getKeyState() == KeyState.HOT || ce.getKeyState() == KeyState.COOL)
+        ) {
+          // Version-less INVALIDATE cannot be compared against the Worker
+          // decision version; preserving HOT/COOL keeps decision metadata and
+          // extended TTLs alive (see Javadoc above).
+          return existing;
+        }
+        removed.set(true);
         return null;
       });
-    log.debug("Invalidated by sync: {}", sm.cacheKey());
-    recordInvalidation(sm.cacheKey(), sm.version());
-    fireAfterInvalidate(sm.cacheKey(), sm);
+    if (removed.get()) {
+      log.debug("Invalidated by sync: {}", sm.cacheKey());
+      recordInvalidation(sm.cacheKey(), sm.version());
+      fireAfterInvalidate(sm.cacheKey(), sm);
+    }
   }
 
   /**
@@ -141,6 +163,11 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
    * ({@link CacheSyncPublisher#broadcastLocalInvalidateAll}) always sends clean
    * messages (version=0L, not degraded) and all keys are removed unconditionally.
    * This is more efficient than sending individual INVALIDATE messages for each key.
+   *
+   * <p>Unlike single-key {@link #handleLocalInvalidate} (which preserves
+   * Worker-managed HOT/COOL entries from version-less invalidations), batch
+   * invalidation is an explicit full-clear operation: every key is removed
+   * regardless of state.
    *
    * <p>Deserialization failures (malformed JSON) are logged at ERROR level and
    * do not propagate.

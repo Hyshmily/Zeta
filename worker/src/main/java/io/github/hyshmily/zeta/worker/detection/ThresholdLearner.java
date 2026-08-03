@@ -16,6 +16,7 @@
 
 package io.github.hyshmily.zeta.worker.detection;
 
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.config.WorkerProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -36,7 +37,7 @@ public class ThresholdLearner implements Runnable {
   private final WorkerProperties properties;
 
   /** Worker startup time (when this bean is constructed). */
-  private final long workerStartTime = System.currentTimeMillis();
+  private final long workerStartTime = TimeSource.monotonicMillis();
 
   private volatile double smoothedQps = 0.0;
 
@@ -64,7 +65,7 @@ public class ThresholdLearner implements Runnable {
     try {
       // Learning period: skip updates
       if (
-        System.currentTimeMillis() - workerStartTime < properties.getGlobalQpsDynamicThreshold().getLearningPeriodMs()
+        TimeSource.monotonicMillis() - workerStartTime < properties.getGlobalQpsDynamicThreshold().getLearningPeriodMs()
       ) {
         return;
       }

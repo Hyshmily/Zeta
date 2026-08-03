@@ -142,6 +142,28 @@ class SnowflakeIdGeneratorTest {
     }
   }
 
+  /**
+   * Regression (issue 28): the randomized per-window sequence start must keep
+   * same-worker generators collision-free within the same 5ms TimeSource window.
+   * With a fixed start (randomSequence=false), every pair of same-worker IDs in
+   * one window is identical — the degraded dataVersion collision that drops
+   * broadcasts. With random starts, equality requires both generators to draw
+   * the same 4096-entry sequence start.
+   */
+  @Test
+  void randomSequence_shouldSpreadSequenceStartsAcrossSameWindow() {
+    var firstIds = new HashSet<Long>();
+    for (int i = 0; i < 300; i++) {
+      var a = new SnowflakeIdGenerator(0, 1, 5, true);
+      var b = new SnowflakeIdGenerator(0, 1, 5, true);
+      firstIds.add(a.nextId());
+      firstIds.add(b.nextId());
+    }
+    // A fixed sequence start collapses each same-window pair to ~1 distinct ID;
+    // randomized starts spread them across the 4096-entry sequence space.
+    assertThat(firstIds.size()).isGreaterThan(500);
+  }
+
   @Test
   void differentWorkersProduceDifferentIdRanges() {
     var genA = new SnowflakeIdGenerator(0, 1);

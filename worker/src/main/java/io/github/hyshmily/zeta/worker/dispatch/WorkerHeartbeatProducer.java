@@ -19,6 +19,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTB
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
@@ -122,7 +123,7 @@ public class WorkerHeartbeatProducer {
       stateMachine,
       broadcaster,
       initEpoch(workerId, redisConnectionFactory),
-      System.currentTimeMillis(),
+      TimeSource.monotonicMillis(),
       scheduler,
       false,
       configTimestampCounter,
@@ -165,7 +166,7 @@ public class WorkerHeartbeatProducer {
       stateMachine,
       broadcaster,
       epoch,
-      System.currentTimeMillis(),
+      TimeSource.monotonicMillis(),
       scheduler,
       false,
       configTimestampCounter,
@@ -333,7 +334,7 @@ public class WorkerHeartbeatProducer {
    * @return {@code true} if the Worker considers itself ready
    */
   private boolean isReadyToServe() {
-    long uptime = System.currentTimeMillis() - startTime;
+    long uptime = TimeSource.monotonicMillis() - startTime;
     return uptime > 3000 || stateMachine.getTrackedKeys() > 0;
   }
 
@@ -403,7 +404,7 @@ public class WorkerHeartbeatProducer {
       );
       rabbitTemplate.send(heartbeatExchange, KEY_HEARTBEAT + workerId, hb.toMessage());
     } catch (Exception e) {
-      long now = System.currentTimeMillis();
+      long now = TimeSource.monotonicMillis();
       if (now - lastErrorLogMs > 60_000L) {
         log.warn("Scheduled sendHeartbeat failed (rate-limited, next WARN in 60s)", e);
         lastErrorLogMs = now;

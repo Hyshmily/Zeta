@@ -24,9 +24,11 @@ import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
+import java.io.IOException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -91,6 +93,21 @@ class WorkerHeartbeatVerifierTest {
     assertThat(verifier.sendPingAndWaitPong("w2")).isFalse();
   }
 
+  /**
+   * Regression: a connection failure (broker down / black-hole) must be treated like a timeout —
+   * returning {@code false} so the failure-count/backoff path engages. Previously the
+   * {@code AmqpConnectException} propagated out of {@code sendPingAndWaitPong}, bypassing
+   * failure counting and backoff entirely, causing unbounded re-probing every round.
+   */
+  @Test
+  void shouldReturnFalseOnAmqpConnectException() {
+    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenThrow(
+      new AmqpConnectException("connection refused", new IOException("boom"))
+    );
+
+    assertThat(verifier.sendPingAndWaitPong("w2")).isFalse();
+  }
+
   @Test
   void shouldReturnFalseWhenPongIsNull() {
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(null);
@@ -145,6 +162,92 @@ class WorkerHeartbeatVerifierTest {
 
     verify(healthView).markVerificationFailed("w2");
     verify(healthView).markVerificationFailed("w3");
+  }
+
+  /**
+   * Regression: a connection exception during probing must engage the failure path
+   * (markVerificationFailed) instead of being swallowed by the outer catch and re-probed
+   * unboundedly every round.
+   */
+  @Test
+  void shouldMarkVerificationFailedOnConnectException() {
+    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenThrow(
+      new AmqpConnectException("connection refused", new IOException("boom"))
+    );
+
+    verifier.verifySuspectedWorkers();
+
+    verify(healthView).markVerificationFailed("w2");
+    verify(healthView).markVerificationFailed("w3");
+  }
+
+  /**
+   * Regression: after a connection-exception failure, the Worker must enter exponential
+   * backoff so the next round does not immediately re-probe.
+   */
+  @Test
+  void shouldBackoffAfterConnectExceptionFailure() {
+    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenThrow(
+      new AmqpConnectException("connection refused", new IOException("boom"))
+    );
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
+      rabbitTemplate,
+      healthView,
+      "test-app",
+      new WorkerHeartbeatVerifier.VerifierConfig(10_000, 500, 60_000)
+    );
+
+    v.verifySuspectedWorkers();
+    v.verifySuspectedWorkers();
+
+    verify(rabbitTemplate, times(2)).sendAndReceive(anyString(), anyString(), any());
+  }
+
+  /**
+   * Regression: connection-exception failures must count toward MAX_RETRY so a dead broker
+   * leads to bounded probing and Worker removal, not an endless reconnection storm.
+   */
+  @Test
+  void shouldRemoveWorkerAfterMaxRetriesOnConnectException() throws Exception {
+    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenThrow(
+      new AmqpConnectException("connection refused", new IOException("boom"))
+    );
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
+      rabbitTemplate,
+      healthView,
+      "test-app",
+      new WorkerHeartbeatVerifier.VerifierConfig(1, 1, 5)
+    );
+
+    for (int i = 0; i < 6; i++) {
+      v.verifySuspectedWorkers();
+      Thread.sleep(10);
+    }
+
+    verify(healthView).removeRecord("w2");
+    verify(healthView).removeRecord("w3");
+  }
+
+  /**
+   * Regression: any unexpected non-AMQP exception during probing must also count as a
+   * failure (backoff + bounded retry) rather than being logged and re-probed every round.
+   */
+  @Test
+  void shouldCountUnexpectedExceptionAsFailureAndBackoff() {
+    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenThrow(new RuntimeException("boom"));
+    WorkerHeartbeatVerifier v = new WorkerHeartbeatVerifier(
+      rabbitTemplate,
+      healthView,
+      "test-app",
+      new WorkerHeartbeatVerifier.VerifierConfig(10_000, 500, 60_000)
+    );
+
+    v.verifySuspectedWorkers();
+    v.verifySuspectedWorkers();
+
+    verify(healthView).markVerificationFailed("w2");
+    verify(healthView).markVerificationFailed("w3");
+    verify(rabbitTemplate, times(2)).sendAndReceive(anyString(), anyString(), any());
   }
 
   // ── start ──

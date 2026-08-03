@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.sync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
@@ -309,7 +310,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
-    r.lastHeartbeatTime = System.currentTimeMillis();
+    r.lastHeartbeatTime = TimeSource.monotonicMillis();
     assertThat(r.isAlive(5000)).isTrue();
   }
 
@@ -318,7 +319,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = false;
     r.stale = false;
-    r.lastHeartbeatTime = System.currentTimeMillis();
+    r.lastHeartbeatTime = TimeSource.monotonicMillis();
     assertThat(r.isAlive(5000)).isFalse();
   }
 
@@ -327,7 +328,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = true;
-    r.lastHeartbeatTime = System.currentTimeMillis();
+    r.lastHeartbeatTime = TimeSource.monotonicMillis();
     assertThat(r.isAlive(5000)).isFalse();
   }
 
@@ -336,7 +337,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
-    r.lastHeartbeatTime = System.currentTimeMillis() - 100;
+    r.lastHeartbeatTime = TimeSource.monotonicMillis() - 100;
     assertThat(r.isAlive(50)).isFalse();
   }
 
@@ -404,7 +405,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
-    r.lastHeartbeatTime = System.currentTimeMillis() - 5000;
+    r.lastHeartbeatTime = TimeSource.monotonicMillis() - 5000;
     assertThat(r.isAlive(5000)).isFalse();
   }
 

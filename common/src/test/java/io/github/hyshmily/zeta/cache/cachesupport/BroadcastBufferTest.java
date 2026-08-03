@@ -266,6 +266,44 @@ class BroadcastBufferTest {
   }
 
   /**
+   * Verifies that when the scheduler rejects the deferred flush scheduling, record degrades to a
+   * synchronous flush so the pending entry is still delivered.
+   */
+  @Test
+  void record_whenScheduleRejected_shouldFlushSynchronously() {
+    ScheduledExecutorService rejecting = mock(ScheduledExecutorService.class);
+    when(rejecting.schedule(any(Runnable.class), anyLong(), any(TimeUnit.class)))
+      .thenThrow(new RejectedExecutionException("saturated"));
+
+    BroadcastBuffer buf = new BroadcastBuffer(rejecting, Optional.of(publisher), 5000L);
+    buf.record("key1", 1L, false);
+
+    verify(publisher).broadcastRefresh("key1", 1L, false);
+  }
+
+  /**
+   * Verifies that when the scheduler rejects the forced cap-flush scheduling, record degrades to a
+   * synchronous flush instead of stranding the pending entries.
+   */
+  @Test
+  void record_whenCapFlushScheduleRejected_shouldFlushSynchronously() {
+    ScheduledExecutorService rejecting = mock(ScheduledExecutorService.class);
+    when(rejecting.schedule(any(Runnable.class), anyLong(), any(TimeUnit.class)))
+      .thenReturn(mock(ScheduledFuture.class));
+    doThrow(new RejectedExecutionException("saturated")).when(rejecting).execute(any(Runnable.class));
+
+    BroadcastBuffer buf = new BroadcastBuffer(rejecting, Optional.of(publisher), 5000L);
+
+    for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES; i++) {
+      buf.record("key-" + i, i, false);
+    }
+    buf.record("key-cap", 1L, false);
+
+    verify(publisher, times(BroadcastBuffer.MAX_PENDING_ENTRIES + 1)).broadcastRefresh(anyString(), anyLong(), anyBoolean());
+    verify(publisher).broadcastRefresh("key-cap", 1L, false);
+  }
+
+  /**
    * Verifies that recording during a flush does not lose data — the concurrent record goes into a
    * fresh map that will be flushed next time.
    */

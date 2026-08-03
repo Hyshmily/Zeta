@@ -41,6 +41,16 @@ public final class TimeSource {
   private static final AtomicInteger threadTryCount = new AtomicInteger(0);
   private static final int THREAD_TRY_MAX = 3;
 
+  /** Monotonic baseline: wall clock at JVM start, used to render monotonic values near wall time. */
+  private static final long BOOT_WALL_MS = System.currentTimeMillis();
+  private static final long BOOT_NANO = System.nanoTime();
+
+  /** Wall-clock offset applied by tests to simulate NTP jumps; 0 in production. */
+  private static volatile long wallOffsetMs = 0L;
+
+  /** Monotonic offset applied by tests; 0 in production. */
+  private static volatile long monoOffsetMs = 0L;
+
   /**
    * Start the background clock-cache thread. Idempotent after the thread is
    * running.  If the thread dies unexpectedly it will be restarted up to
@@ -84,10 +94,47 @@ public final class TimeSource {
    * Falls back to {@link System#currentTimeMillis()} if the thread has not
    * been started or was interrupted.
    *
-   * @return current time in milliseconds (epoch-based)
+   * @return current time in milliseconds (epoch-based, wall clock)
    */
   public static long currentTimeMillis() {
-    return threadRunning.get() ? currentMillis : System.currentTimeMillis();
+    return (threadRunning.get() ? currentMillis : System.currentTimeMillis()) + wallOffsetMs;
+  }
+
+  /**
+   * Returns the current time in milliseconds on a monotonic axis that never
+   * moves backwards, anchored to the wall clock at JVM start.
+   * <p>
+   * Implemented as {@code bootWallMs + (System.nanoTime() - bootNano) / 1e6},
+   * so wall-clock jumps (NTP steps, container clock drift) do not affect
+   * elapsed-time computations. Use this source for <em>all delta
+   * computations</em> (heartbeat timeouts, sliding windows, backoff, EMA
+   * decay intervals, uptime). Keep {@link #currentTimeMillis()} for absolute
+   * expiry timestamps, epoch/version stamping, and display — those semantics
+   * inherently require the wall clock.
+   * <p>
+   * The returned value approximates the wall clock (deviation grows only
+   * with wall-clock jumps), which keeps logs and diagnostics readable.
+   *
+   * @return current time in milliseconds on a monotonic axis
+   */
+  public static long monotonicMillis() {
+    return BOOT_WALL_MS + (System.nanoTime() - BOOT_NANO) / 1_000_000L + monoOffsetMs;
+  }
+
+  /**
+   * Test-only hook to simulate wall-clock jumps (e.g. NTP steps) for
+   * {@code TimeJumpTest}-style regression tests. A positive {@code wallOffsetMs}
+   * simulates a forward jump, a negative one a backward jump; the monotonic
+   * axis is offset independently so tests can model "wall clock jumped,
+   * monotonic did not". Reset with {@code setTimeOffsetForTest(0, 0)}.
+   * No effect in production (defaults are zero).
+   *
+   * @param wallOffsetMs offset applied to {@link #currentTimeMillis()}
+   * @param monoOffsetMs offset applied to {@link #monotonicMillis()}
+   */
+  public static void setTimeOffsetForTest(long wallOffsetMs, long monoOffsetMs) {
+    TimeSource.wallOffsetMs = wallOffsetMs;
+    TimeSource.monoOffsetMs = monoOffsetMs;
   }
 
   private TimeSource() {}

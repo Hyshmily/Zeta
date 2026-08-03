@@ -138,7 +138,7 @@ public class HealthViewImpl implements HealthView {
   @Override
   public void onHeartbeat(WorkerHeartbeatMessage hb) {
     records.compute(hb.workerId(), (id, existing) -> {
-      long now = System.currentTimeMillis();
+      long now = TimeSource.monotonicMillis();
 
       if (existing == null || hb.epoch() > existing.epoch) {
         WorkerHealthRecord r = new WorkerHealthRecord();
@@ -165,7 +165,7 @@ public class HealthViewImpl implements HealthView {
       return existing;
     });
 
-    lastAnyHeartbeatTime = System.currentTimeMillis();
+    lastAnyHeartbeatTime = TimeSource.monotonicMillis();
     invalidateHealthCache();
   }
 
@@ -181,7 +181,7 @@ public class HealthViewImpl implements HealthView {
   @Override
   public void recordPong(String workerId) {
     records.computeIfPresent(workerId, (id, r) -> {
-      r.lastHeartbeatTime = System.currentTimeMillis();
+      r.lastHeartbeatTime = TimeSource.monotonicMillis();
       r.verifyFailures = 0;
       return r;
     });
@@ -267,7 +267,7 @@ public class HealthViewImpl implements HealthView {
     // stale judgment inside the TTL window is never observable in practice.
     // Concurrent recomputation is idempotent, so the unsynchronized
     // check-then-act is safe.
-    long now = TimeSource.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     long computed = clusterHealthyComputedMs;
     if (computed < 0 || now - computed >= healthCacheTtlMs) {
       clusterHealthyCache = computeClusterHealthy();
@@ -366,9 +366,9 @@ public class HealthViewImpl implements HealthView {
      *       initial detection cycle and is accepting requests</li>
      *   <li>{@link #stale} is {@code false} — the Worker has not exceeded the
      *       configured verification failure threshold</li>
-     *   <li>The elapsed wall-clock time since {@link #lastHeartbeatTime} is less
+     *   <li>The elapsed monotonic time since {@link #lastHeartbeatTime} is less
      *       than {@code timeoutMs} — heartbeats are arriving within the expected
-     *       interval</li>
+     *       interval (monotonic, so NTP wall-clock jumps cannot kill workers)</li>
      * </ul>
      *
      * @param timeoutMs the heartbeat timeout window in milliseconds; must be positive
@@ -376,7 +376,7 @@ public class HealthViewImpl implements HealthView {
      *         within the timeout window
      */
     public boolean isAlive(long timeoutMs) {
-      return readyToServe && !stale && System.currentTimeMillis() - lastHeartbeatTime < timeoutMs;
+      return readyToServe && !stale && TimeSource.monotonicMillis() - lastHeartbeatTime < timeoutMs;
     }
   }
 }

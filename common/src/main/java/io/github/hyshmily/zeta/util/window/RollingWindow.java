@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.util.window;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.atomic.AtomicLongArray;
 
 /**
@@ -77,7 +78,7 @@ public final class RollingWindow {
     this.windowMask = aligned - 1;
     this.bucketDurationMs = windowDurationMs / aligned;
     this.buckets = new AtomicLongArray(aligned);
-    windowField.windowStart = System.currentTimeMillis();
+    windowField.windowStart = TimeSource.monotonicMillis();
   }
 
   /**
@@ -170,7 +171,7 @@ public final class RollingWindow {
       for (int i = 0; i < windowSize; i++) {
         buckets.set(i, 0);
       }
-      windowField.windowStart = System.currentTimeMillis();
+      windowField.windowStart = TimeSource.monotonicMillis();
       windowField.currentBucket = 0;
     }
   }
@@ -187,12 +188,12 @@ public final class RollingWindow {
   /** Advance the window, zeroing buckets that have elapsed. */
   private void tick() {
     // Fast path (no lock) — 99.9%+ of calls hit this.
-    if (System.currentTimeMillis() - windowField.windowStart < bucketDurationMs) {
+    if (TimeSource.monotonicMillis() - windowField.windowStart < bucketDurationMs) {
       return;
     }
 
     synchronized (tickLock) {
-      long now = System.currentTimeMillis();
+      long now = TimeSource.monotonicMillis();
       long elapsed = now - windowField.windowStart;
       if (elapsed < bucketDurationMs) {
         return; // double-check: another thread already rotated

@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.worker.detection;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -219,7 +220,7 @@ public class DefaultEvaluator implements Evaluator {
    */
   @Override
   public void evictStale(long staleAfterMs) {
-    long now = System.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     windowSumHistories.values().removeIf(h -> now - h.lastAccessTime > staleAfterMs);
     // EMA only decays on evaluate(); apply periodic decay to all entries so inactive
     // keys eventually fall below 1.0 and are removed. For active keys this adds one
@@ -275,7 +276,7 @@ public class DefaultEvaluator implements Evaluator {
      */
     @SuppressWarnings("all")
     synchronized Double addAndGetCv(long windowSum, double globalRatio) {
-      lastAccessTime = System.currentTimeMillis();
+      lastAccessTime = TimeSource.monotonicMillis();
       buffer[writeIndex] = windowSum;
       writeIndex = (writeIndex + 1) & CV_HISTORY_MASK;
       if (count < CV_HISTORY_SIZE) {

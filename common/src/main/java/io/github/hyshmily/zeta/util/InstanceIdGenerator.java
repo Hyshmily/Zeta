@@ -19,7 +19,7 @@ import static java.util.logging.Level.FINE;
 import static java.util.logging.Level.INFO;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.util.version.VersionGuard;
+import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.logging.Logger;
@@ -44,9 +44,11 @@ public final class InstanceIdGenerator {
    * JVM-local node identifier derived from the upper 64 bits of a random UUID.
    * Initialized once at class load, stable for the JVM lifetime.
    *
-   * <p>Used by {@link VersionGuard} as the upper 64 bits of the
-   * fallback version when Redis INCR is unavailable, ensuring that degraded
-   * versions from different JVMs occupy non-overlapping ranges.
+   * <p>Used by {@link SnowflakeIdGenerator} as the worker-id seed (XOR the
+   * process id), randomizing the 8-bit worker space per JVM, and exposed via
+   * the actuator endpoint for instance identification. The previous role as
+   * the upper bits of a counter-based degraded dataVersion ended with ADR-0019
+   * (Snowflake-timestamped degraded versions).
    */
   private static final long NODE_ID;
 

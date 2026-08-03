@@ -171,7 +171,7 @@
 | `zeta.local.circuit-breaker.exclude-exceptions`            | `[]`    | 不触发熔断的异常全类名白名单                     |
 | `zeta.local.circuit-breaker.include-exceptions`            | `[]`    | 只有这些异常才触发熔断（为空表示全部触发）       |
 
-熔断器作用于 `SingleFlight.load()`——打开时 `load()` 立即返回 `Optional.empty()`，`HotKeyCache.get()` 会尝试返回过期缓存（如果 L1 中存在）。仅当缓存加载器（数据库查询、远程 API）容易出现级联故障时再启用。
+熔断器作用于 `SingleFlight.load()`——打开时 `load()` 立即返回 `Optional.empty()`，`HotKeyCache.get()` 会尝试返回 L1 中**硬 TTL 未过期**的陈旧条目（软过期、硬有效；硬过期的条目绝不作为 stale 返回——硬 TTL 契约不被绕过，见 CONTEXT.md "Expire"）。仅当缓存加载器（数据库查询、远程 API）容易出现级联故障时再启用。
 
 **状态机：** CLOSED → OPEN → HALF_OPEN → CLOSED。CLOSED 状态下滑动窗口记录失败率，超过 `fail-threshold` 且请求量满足 `request-volume-threshold` 时打开熔断。OPEN 状态等待 `single-test-interval-ms` 后允许一个探针进入 HALF_OPEN。HALF_OPEN 需要 `consecutive-success-threshold` 次连续成功才能关闭——任何失败立即回到 OPEN。此防抖动设计借鉴自 `neural-circuitbreaker` 项目。
 

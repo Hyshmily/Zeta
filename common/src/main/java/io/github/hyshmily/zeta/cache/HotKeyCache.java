@@ -756,11 +756,18 @@ public class HotKeyCache {
    * entry when the circuit breaker is open, or cache a {@link NullValue}
    * sentinel with a short TTL and return {@link Optional#empty()}.
    *
+   * <p>Only entries whose hard TTL has <b>not</b> expired may serve as the
+   * stale fallback — the hard TTL contract (see CONTEXT.md "Expire") is never
+   * bypassed, even during a source outage. A hard-expired entry returns empty
+   * without writing a {@link NullValue} sentinel: the source never answered
+   * null, and the stale entry is evicted by the next read's L1 check.
+   *
    * @param cacheKey the key that was loaded (resulted in a null value)
    * @param <T>      the expected value type
    * @return a stale value if the circuit breaker is open and a cached entry
-   *         exists; {@link Optional#empty()} otherwise (a NullValue sentinel
-   *         is written to L1 in both cases)
+   *         exists within its hard TTL; {@link Optional#empty()} otherwise (a
+   *         NullValue sentinel is written to L1 unless a hard-expired entry
+   *         was present)
    */
   @SuppressWarnings("unchecked")
   private <T> Optional<T> mapEmpty(String cacheKey, boolean nullCaching) {
@@ -768,6 +775,12 @@ public class HotKeyCache {
       Object stale = caffeineCache.getIfPresent(cacheKey);
 
       if (stale != null) {
+        // Hard-expired entries are never served as stale, even during an
+        // outage: the hard TTL contract (CONTEXT.md "Expire") is not bypassed.
+        if (stale instanceof CacheEntry ce && expireManager.isLogicallyExpired(ce)) {
+          log.debug("CB open, discarding hard-expired entry for key={}", cacheKey);
+          return Optional.empty();
+        }
         T val = stale instanceof CacheEntry ce ? (T) unwrapValue(ce.getValue(), cacheKey) : (T) stale;
         log.debug("CB open, returning stale entry for key={}", cacheKey);
         return Optional.ofNullable(val);
@@ -1127,17 +1140,16 @@ public class HotKeyCache {
             dispatcher.send(nk, SyncMessage.TYPE_REFRESH, vr.dataVersion(), vr.degraded());
           }
         } catch (RejectedExecutionException ree) {
-          // hotKeyExecutor saturated mid-body (nextVersion/Redis did run, but
-          // we cannot distinguish here — VersionController.nextVersion already
-          // has its own Redis-degraded fallback path). Cache and send are
-          // skipped; the next read or the next periodic Worker cycle will
-          // reconcile. Logged at ERROR so operators can detect silent drops.
-          log.error(
-            "putThrough executor rejected mid-flight for key={} (local cache NOT updated, send NOT sent)",
+          // L1 was already updated above; REE can only originate from REFRESH
+          // flush scheduling on the shared scheduler, which BroadcastBuffer.record
+          // degrades to a synchronous flush. Log for observability only — no
+          // rethrow (downstream exceptionally only logs) and no degraded re-write
+          // (that would overwrite the fresh normal version with a degraded one).
+          log.warn(
+            "putThrough REFRESH scheduling rejected for key={} (BroadcastBuffer sync-flush fallback applies)",
             nk,
             ree
           );
-          throw ree; // CompletableFuture.exceptionally downstream decides policy
         } catch (Exception e) {
           // Redis-relayed exception or unexpected error. The local L1 is still
           // updated using a degraded version so the cache remains coherent with
@@ -1710,10 +1722,12 @@ public class HotKeyCache {
       }
       // Circuit breaker fallback: a soft-expired REVALIDATE entry was kept in
       // L1, so it is still serveable during an upstream outage (graceful
-      // degradation, ADR-0021).
+      // degradation, ADR-0021). Hard-expired entries are never served — the
+      // hard TTL contract is not bypassed even in the race where the kept
+      // entry crosses its hard expiry while the load is in flight.
       if (singleFlight.isBreakerOpen()) {
         Object stale = caffeineCache.getIfPresent(cacheKey);
-        if (stale instanceof CacheEntry ce) {
+        if (stale instanceof CacheEntry ce && !expireManager.isLogicallyExpired(ce)) {
           @SuppressWarnings("unchecked")
           T val = (T) unwrapValue(ce.getValue(), cacheKey);
 

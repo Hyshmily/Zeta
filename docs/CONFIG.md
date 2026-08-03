@@ -179,7 +179,7 @@
 | `zeta.local.circuit-breaker.exclude-exceptions`            | `[]`    | Exception class names (fully qualified) that should NOT trip the breaker           |
 | `zeta.local.circuit-breaker.include-exceptions`            | `[]`    | Exception class names (fully qualified) that SHOULD trip the breaker (empty = all) |
 
-The circuit breaker wraps `SingleFlight.load()` — when open, `load()` returns `Optional.empty()` immediately without executing the supplier. The calling `HotKeyCache.get()` then falls back to returning any stale L1 entry if available. Only enable when your cache-load suppliers (database queries, remote API calls) are prone to cascading failures.
+The circuit breaker wraps `SingleFlight.load()` — when open, `load()` returns `Optional.empty()` immediately without executing the supplier. The calling `HotKeyCache.get()` then falls back to returning any stale L1 entry whose **hard TTL has not expired** (soft-expired, hard-valid entries; a hard-expired entry is never served as stale — the hard TTL contract is not bypassed, see CONTEXT.md "Expire"). Only enable when your cache-load suppliers (database queries, remote API calls) are prone to cascading failures.
 
 **State machine:** CLOSED → OPEN → HALF_OPEN → CLOSED. In CLOSED state, a sliding-window tracks failure rate. When the rate exceeds `fail-threshold` and volume meets `request-volume-threshold`, the breaker opens. After `single-test-interval-ms`, one probe request enters HALF_OPEN. It requires `consecutive-success-threshold` consecutive successes to close — any failure in HALF_OPEN returns immediately to OPEN. This anti-flapping design is inspired by the `neural-circuitbreaker` project.
 

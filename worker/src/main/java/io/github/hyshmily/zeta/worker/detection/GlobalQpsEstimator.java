@@ -16,6 +16,8 @@
 
 package io.github.hyshmily.zeta.worker.detection;
 
+import io.github.hyshmily.zeta.util.TimeSource;
+
 /**
  * A sliding‑window based estimator of the overall qps (queries per second)
  * across all keys in the current shard.
@@ -107,7 +109,7 @@ public class GlobalQpsEstimator {
    *                   the batch; must be non-negative
    */
   public synchronized void addTotal(long totalCount) {
-    long now = System.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
 
     // Detect infrequent-call gap: if more than windowSize slices elapsed,
@@ -146,7 +148,7 @@ public class GlobalQpsEstimator {
    *         if no accesses have been recorded
    */
   public long getWindowTotal() {
-    long now = System.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
     long sum = 0;
     for (int i = 0; i < windowSize; i++) {

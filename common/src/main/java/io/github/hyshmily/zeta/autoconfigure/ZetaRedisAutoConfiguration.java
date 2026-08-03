@@ -50,10 +50,10 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  *
  * <p>Activates when a {@link RedisTemplate} bean is available.
  * {@link StringRedisTemplate} is injected as optional — if absent,
- * version tracking falls back to a node-local counter ({@link
- * io.github.hyshmily.zeta.util.InstanceIdGenerator#getNodeId()} + {@link
- * java.util.concurrent.atomic.AtomicLong}) with a {@code Long.MIN_VALUE}
- * base, ensuring degraded versions from different JVMs occupy distinct ranges.
+ * version tracking falls back to the Snowflake-timestamped degraded
+ * version path ({@code VersionControllerImpl#fallbackVersion()}, ADR-0019)
+ * with a {@code Long.MIN_VALUE} base, keeping degraded versions globally
+ * comparable and below any positive Redis INCR version.
  *
  * <p>Runs <em>after</em> {@link ZetaAutoConfiguration} so its
  * {@code @ConditionalOnMissingBean} on {@code hotKeyCache} wins over the

@@ -18,10 +18,6 @@ package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.InitializingBean;
-
-import javax.security.auth.Destroyable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -31,6 +27,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
+import javax.security.auth.Destroyable;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.InitializingBean;
 
 /**
  * Per-key routing counter: aggregates high-frequency single-key increments
@@ -178,12 +177,13 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * (~2-5ns) decides the routing; sustained hot keys are promoted by the
    * delivery-time scan, capped at {@link #hotLimit}.
    *
-   * <p>Backed by {@link ConcurrentHashMap#newKeySet()} — internally the same
-   * {@code Boolean.TRUE} sentinel as a {@code Map<String, Boolean>}, but with
-   * a semantic {@link Set} API ({@code add} instead of {@code put}).  Only
-   * the single deliverer thread writes it; writers only read.
+   * <p>Backed by {@link ConcurrentHashMap#newKeySet(int)} sized to
+   * {@code hotLimit} — internally the same {@code Boolean.TRUE} sentinel as
+   * a {@code Map<String, Boolean>}, but with a semantic {@link Set} API
+   * ({@code add} instead of {@code put}).  Only the single deliverer thread
+   * writes it; writers only read.
    */
-  private final Set<String> beacon = ConcurrentHashMap.newKeySet();
+  private final Set<String> beacon;
 
   /**
    * Thread-local hot aggregation map (writer-private, zero sharing).
@@ -221,7 +221,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * Writers currently inside the hot path of {@link #count(String, long)};
    * {@link #destroy()} waits for it to drain so the final add is exact.
    */
-  private final LongAdder floatWatcher = new LongAdder();
+  private final PaddedFloatWatcher floatWatcher = new PaddedFloatWatcher();
 
   /**
    * Serializes the shared-table reference capture in {@link #discharge(Ceils)}
@@ -235,7 +235,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * reach zero before snapshotting, guaranteeing the snapshot sees a
    * quiescent table for hot-path data.
    */
-  private final AtomicInteger mergesInFlight = new AtomicInteger();
+  private final PaddedMergesInFlight mergesInFlight = new PaddedMergesInFlight();
 
   private final Consumer<Map<String, Long>> batchConsumer;
 
@@ -320,6 +320,9 @@ public class WaveCounter implements InitializingBean, Destroyable {
     this.deliverIntervalMs = deliverIntervalMs;
     this.hotThreshold = hotThreshold;
     this.hotLimit = hotLimit;
+    // Sized to hotLimit so the promotion scan never triggers mid-life CHM
+    // resizes (each resize copies the whole promoted set).
+    this.beacon = ConcurrentHashMap.newKeySet(hotLimit);
     this.ownsScheduler = ownsScheduler;
     this.scheduler = ownsScheduler
       ? new SafeScheduledExecutorService(1, new ZetaThreadFactory("zeta-hot-route-counter-flusher"))
@@ -450,8 +453,10 @@ public class WaveCounter implements InitializingBean, Destroyable {
       return null;
     }
     // (snapshot-promote): the old table is now quiescent — drain it.
+    // Keys are unique (CHM + computeIfAbsent), so plain put is exact and
+    // skips merge's redundant per-key lookup.
     Map<String, Long> snapshot = new HashMap<>(old.size());
-    old.forEach((k, v) -> snapshot.merge(k, v.sum(), Long::sum));
+    old.forEach((k, v) -> snapshot.put(k, v.sum()));
     return snapshot;
   }
 
@@ -507,6 +512,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * <p>Phases 3-5 are delegated to {@link #tideWatcher()} (shared with
    * {@link #destroy()}).
    */
+  @SuppressWarnings("all")
   private void tide() {
     try {
       // (add-locals): every writer's hot local map enters the
@@ -526,17 +532,18 @@ public class WaveCounter implements InitializingBean, Destroyable {
         // (snapshot-promote): promote keys that exceeded the
         // threshold to the exact hot path from the next cycle on.  The cap
         // is soft by design: promotion is single-threaded (the deliverer),
-        // so the size check below is race-free and stops exactly at
+        // so the local counter below is race-free and stops exactly at
         // hotLimit — a hard putIfAbsent+trim scheme would add complexity
         // without tightening the bound.  `add` is putIfAbsent, so
-        // re-promoting an already-hot key is a no-op.
-        if (beacon.size() < hotLimit) {
+        // re-promoting an already-hot key is a no-op (returns false and
+        // does not advance the counter).
+        int promoted = beacon.size();
+        if (promoted < hotLimit) {
           for (Map.Entry<String, Long> e : snapshot.entrySet()) {
-            if (beacon.size() >= hotLimit) {
-              break;
-            }
-            if (e.getValue() >= hotThreshold) {
-              beacon.add(e.getKey());
+            if (e.getValue() >= hotThreshold && beacon.add(e.getKey())) {
+              if (++promoted >= hotLimit) {
+                break;
+              }
             }
           }
         }
@@ -712,7 +719,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
      *                       captured atomically vs the tide swap)
      * @param mergesInFlight the in-flight counter to bump during the drain
      */
-    void drainInto(ConcurrentHashMap<String, LongAdder> table, AtomicInteger mergesInFlight) {
+    void drainInto(ConcurrentHashMap<String, LongAdder> table, PaddedMergesInFlight mergesInFlight) {
       synchronized (this) {
         mergesInFlight.incrementAndGet();
         try {
@@ -736,6 +743,108 @@ public class WaveCounter implements InitializingBean, Destroyable {
       }
       size = 0;
       lastFlushNanos = System.nanoTime();
+    }
+  }
+
+  /** 120-byte leading pad to isolate the first hot field from object header and other instance fields. */
+  @SuppressWarnings("all")
+  static final class PaddedFloatWatcher {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+
+    final LongAdder value = new LongAdder();
+
+    byte p120, p121, p122, p123, p124, p125, p126, p127;
+    byte p128, p129, p130, p131, p132, p133, p134, p135;
+    byte p136, p137, p138, p139, p140, p141, p142, p143;
+    byte p144, p145, p146, p147, p148, p149, p150, p151;
+    byte p152, p153, p154, p155, p156, p157, p158, p159;
+    byte p160, p161, p162, p163, p164, p165, p166, p167;
+    byte p168, p169, p170, p171, p172, p173, p174, p175;
+    byte p176, p177, p178, p179, p180, p181, p182, p183;
+    byte p184, p185, p186, p187, p188, p189, p190, p191;
+    byte p192, p193, p194, p195, p196, p197, p198, p199;
+    byte p200, p201, p202, p203, p204, p205, p206, p207;
+    byte p208, p209, p210, p211, p212, p213, p214, p215;
+    byte p216, p217, p218, p219, p220, p221, p222, p223;
+    byte p224, p225, p226, p227, p228, p229, p230, p231;
+    byte p232, p233, p234, p235, p236, p237, p238, p239;
+
+    void increment() {
+      value.increment();
+    }
+
+    void decrement() {
+      value.decrement();
+    }
+
+    long sum() {
+      return value.sum();
+    }
+  }
+
+  /** 120-byte leading pad to isolate the first hot field from object header and other instance fields. */
+  @SuppressWarnings("all")
+  static final class PaddedMergesInFlight {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+
+    final AtomicInteger value = new AtomicInteger();
+
+    byte p120, p121, p122, p123, p124, p125, p126, p127;
+    byte p128, p129, p130, p131, p132, p133, p134, p135;
+    byte p136, p137, p138, p139, p140, p141, p142, p143;
+    byte p144, p145, p146, p147, p148, p149, p150, p151;
+    byte p152, p153, p154, p155, p156, p157, p158, p159;
+    byte p160, p161, p162, p163, p164, p165, p166, p167;
+    byte p168, p169, p170, p171, p172, p173, p174, p175;
+    byte p176, p177, p178, p179, p180, p181, p182, p183;
+    byte p184, p185, p186, p187, p188, p189, p190, p191;
+    byte p192, p193, p194, p195, p196, p197, p198, p199;
+    byte p200, p201, p202, p203, p204, p205, p206, p207;
+    byte p208, p209, p210, p211, p212, p213, p214, p215;
+    byte p216, p217, p218, p219, p220, p221, p222, p223;
+    byte p224, p225, p226, p227, p228, p229, p230, p231;
+    byte p232, p233, p234, p235, p236, p237, p238, p239;
+
+    int get() {
+      return value.get();
+    }
+
+    void incrementAndGet() {
+      value.incrementAndGet();
+    }
+
+    void decrementAndGet() {
+      value.decrementAndGet();
     }
   }
 }

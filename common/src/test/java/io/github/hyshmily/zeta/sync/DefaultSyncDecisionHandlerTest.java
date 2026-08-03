@@ -147,6 +147,81 @@ class DefaultSyncDecisionHandlerTest {
     verify(hook).afterInvalidate(eq("key1"), any());
   }
 
+  /**
+   * Verifies that a version-less (unconditional) INVALIDATE still removes an
+   * ordinary NORMAL entry regardless of its data version.
+   */
+  @Test
+  void handleLocalInvalidate_unconditional_shouldRemoveNormalEntry() {
+    cache.put("key1", entry(5, false, KeyState.NORMAL));
+
+    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
+
+    assertThat(cache.getIfPresent("key1")).isNull();
+  }
+
+  /**
+   * Verifies that a version-less (unconditional) INVALIDATE cannot clear a
+   * Worker-managed HOT entry — decision metadata and extended TTL survive.
+   */
+  @Test
+  void handleLocalInvalidate_unconditional_shouldPreserveHotEntry() {
+    cache.put("key1", entry(5, false, KeyState.HOT));
+
+    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
+
+    assertThat(cache.getIfPresent("key1")).isNotNull();
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
+   * Verifies that a version-less (unconditional) INVALIDATE cannot clear a
+   * Worker-managed COOL entry.
+   */
+  @Test
+  void handleLocalInvalidate_unconditional_shouldPreserveCoolEntry() {
+    cache.put("key1", entry(5, false, KeyState.COOL));
+
+    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
+
+    assertThat(cache.getIfPresent("key1")).isNotNull();
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.COOL);
+  }
+
+  /**
+   * Verifies that a preserved (rejected) unconditional INVALIDATE does not fire
+   * the after-invalidate hook — the entry was not actually removed, so a
+   * {@code Long.MAX_VALUE} watermark must not block later REFRESH messages.
+   */
+  @Test
+  void handleLocalInvalidate_unconditional_onWorkerManaged_shouldNotFireHook() {
+    cache.put("key1", entry(5, false, KeyState.HOT));
+    SyncHook hook = mock(SyncHook.class);
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook));
+
+    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
+
+    verify(hook, never()).afterInvalidate(eq("key1"), any());
+    assertThat(cache.getIfPresent("key1")).isNotNull();
+  }
+
+  /**
+   * Verifies that a preserved unconditional INVALIDATE does not record the
+   * invalidation watermark — a subsequent newer REFRESH must still apply.
+   */
+  @Test
+  void handleLocalInvalidate_unconditional_preserved_shouldNotBlockLaterRefresh() {
+    cache.put("key1", entry(5, false, KeyState.HOT));
+
+    handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
+    handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 6L, false));
+
+    CacheEntry entry = (CacheEntry) cache.getIfPresent("key1");
+    assertThat(entry).isNotNull();
+    assertThat(entry.getDataVersion()).isEqualTo(6L);
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
   @Test
   void handleRulesSync_shouldDelegateToRuleMatcher() {
     handler.handleRulesSync(syncMessage("rules-payload", SyncMessage.TYPE_RULES_SYNC, 0L, false));

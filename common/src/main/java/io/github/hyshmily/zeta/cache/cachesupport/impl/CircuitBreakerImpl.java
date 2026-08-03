@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport.impl;
 
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
+import static io.github.hyshmily.zeta.util.TimeSource.monotonicMillis;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
@@ -129,7 +129,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
     }
 
     if (s == CircuitBreakerState.OPEN) {
-      long now = currentTimeMillis();
+      long now = monotonicMillis();
 
       if (now - lastOpenedTime.get() > config.getSingleTestIntervalMs()) {
         if (lastHalfOpenAttempt.compareAndSet(0L, now)) {
@@ -221,7 +221,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
       halfOpenInflight.set(0);
       consecutiveSuccessCounter.set(0);
       state = CircuitBreakerState.OPEN;
-      lastOpenedTime.set(currentTimeMillis());
+      lastOpenedTime.set(monotonicMillis());
       if (config.isLogEnabled()) {
         log.info("CB HALF_OPEN -> OPEN (probe failed)");
       }
@@ -295,7 +295,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
 
       if (rate > config.getFailThreshold()) {
         state = CircuitBreakerState.OPEN;
-        lastOpenedTime.set(currentTimeMillis());
+        lastOpenedTime.set(monotonicMillis());
         if (config.isLogEnabled()) {
           log.info("CB OPEN (failRate={}, total={})", rate, totalSuccess + totalFail);
         }

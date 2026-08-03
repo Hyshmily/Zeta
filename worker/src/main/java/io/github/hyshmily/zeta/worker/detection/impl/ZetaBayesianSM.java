@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceLevel;
 import io.github.hyshmily.zeta.worker.confidence.ProbabilityResult;
@@ -197,7 +198,7 @@ import lombok.extern.slf4j.Slf4j;
  * fast-lane path can atomically replace state via the builder while the
  * normal Bayesian path mutates fields in-place on the existing object.
  * {@code @Builder.Default} on {@code lastUpdateTime} evaluates to
- * {@link System#currentTimeMillis()} at build time, ensuring freshly
+ * {@link TimeSource#monotonicMillis()} at build time, ensuring freshly
  * created states have a realistic timestamp.
  */
 @Internal
@@ -405,7 +406,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
           state.mutationSeq
         );
       }
-      state.lastUpdateTime = System.currentTimeMillis();
+      state.lastUpdateTime = TimeSource.monotonicMillis();
 
       // Re-read the current sliding-window sum inside the lock via the
       // LongSupplier provided by Evaluator.  This closes the TOCTOU race:
@@ -487,7 +488,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
           case HIGH -> {
             state.currentState = CONFIRMED_HOT;
             state.lowResetCount = 0;
-            state.lastBroadcastAt = System.currentTimeMillis();
+            state.lastBroadcastAt = TimeSource.monotonicMillis();
             log.info("State transition: COLD -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
             return ZetaDecision.hot(key, snapShot);
           }
@@ -529,7 +530,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         if (pr.level() == ConfidenceLevel.HIGH) {
           state.currentState = CONFIRMED_HOT;
           state.lowResetCount = 0;
-          state.lastBroadcastAt = System.currentTimeMillis();
+          state.lastBroadcastAt = TimeSource.monotonicMillis();
 
           log.info("State transition: CANDIDATE_HOT -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
           return ZetaDecision.hot(key, snapShot);
@@ -547,7 +548,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         // CONFIRMED_HOT + hot window: previously always NONE, so a HOT broadcast
         // lost in flight (ADR-0007 fire-and-forget) was never recovered. Re-emit
         // at most once per rebroadcastIntervalMs (ADR-0024).
-        long now = System.currentTimeMillis();
+        long now = TimeSource.monotonicMillis();
         if (now - state.lastBroadcastAt >= rebroadcastIntervalMs) {
           state.lastBroadcastAt = now;
           log.debug("Periodic HOT rebroadcast: key={}", key);
@@ -700,7 +701,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    */
   private ZetaDecision fastlane(KeyState state, String key) {
     StateSnapshot snapShot;
-    long now = System.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
 
     if (state == null) {
       state = KeyState.builder()
@@ -841,7 +842,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   @Override
   @SuppressWarnings("all")
   public void evictStale(long staleAfterMs, Consumer<String> onCoolEvict) {
-    long now = System.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
 
     // Phase 1: lock-free scan to collect candidates that appear stale.
     List<String> candidates = new ArrayList<>();
@@ -1057,7 +1058,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
 
     /** Last evaluation timestamp (epoch millis). Volatile for lock-free reads. */
     @Builder.Default
-    volatile long lastUpdateTime = System.currentTimeMillis();
+    volatile long lastUpdateTime = TimeSource.monotonicMillis();
 
     /**
      * Last time a HOT broadcast was emitted for this key (epoch millis); 0 = never.

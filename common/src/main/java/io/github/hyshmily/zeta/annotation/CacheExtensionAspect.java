@@ -25,6 +25,7 @@ import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.model.StalePolicy;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -267,7 +268,7 @@ public class CacheExtensionAspect {
             if (blockMs > 0) {
               Long unblockTime = qpsBlockTable.getIfPresent(prefixedKey);
               if (unblockTime != null) {
-                if (System.currentTimeMillis() < unblockTime) {
+                if (TimeSource.monotonicMillis() < unblockTime) {
                   notifyDetectorOnIntercept(prefixedKey);
                   return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
                 }
@@ -286,7 +287,7 @@ public class CacheExtensionAspect {
             if (!bucket.tryConsume(1)) {
               // First breach → enter block table if configured
               if (blockMs > 0) {
-                qpsBlockTable.put(prefixedKey, System.currentTimeMillis() + blockMs);
+                qpsBlockTable.put(prefixedKey, TimeSource.monotonicMillis() + blockMs);
               }
               notifyDetectorOnIntercept(prefixedKey);
               return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);

@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.sync.worker;
 
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
+import static io.github.hyshmily.zeta.util.TimeSource.monotonicMillis;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
@@ -28,6 +28,7 @@ import java.util.Set;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -74,6 +75,7 @@ public class WorkerHeartbeatVerifier {
   private static final String QUEUE_VERIFY_PING_PREFIX = "zeta.verify.ping.";
   private static final int MAX_BACKOFF_SHIFT = 30;
   private static final int MAX_RETRY = 5;
+  private static final int VERIFY_BATCH_TIMEOUT_SECONDS = 30;
 
   /**
    * Parameter object for {@link WorkerHeartbeatVerifier} construction.
@@ -252,6 +254,11 @@ public class WorkerHeartbeatVerifier {
    * This avoids the serial bottleneck of probing N suspected Workers
    * sequentially (N × {@code pingTimeoutMs} per round).
    *
+   * <p>The batch wait is capped at {@value #VERIFY_BATCH_TIMEOUT_SECONDS} seconds
+   * so a single slow/blocked probe (e.g. broker black-hole with long connection
+   * timeouts) cannot stall the verifier scheduler; late completions are still
+   * applied to the health view when the probe threads eventually finish.
+   *
    * <p>Workers in exponential backoff (see {@link #nextVerifyTime}) are
    * skipped before being added to the probe batch.
    *
@@ -278,15 +285,31 @@ public class WorkerHeartbeatVerifier {
       List<CompletableFuture<Void>> futures = new ArrayList<>();
       for (String workerId : suspected) {
         Long skipUntil = nextVerifyTime.get(workerId);
-        if (skipUntil != null && currentTimeMillis() < skipUntil) {
-          log.trace("Worker {} in backoff, skip (remaining={}ms)", workerId, skipUntil - currentTimeMillis());
+        if (skipUntil != null && monotonicMillis() < skipUntil) {
+          log.trace("Worker {} in backoff, skip (remaining={}ms)", workerId, skipUntil - monotonicMillis());
           continue;
         }
 
         futures.add(CompletableFuture.runAsync(() -> probeWorker(workerId), probeExecutor));
       }
 
-      CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+      if (futures.isEmpty()) {
+        return;
+      }
+
+      CompletableFuture<Void> all = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+
+      try {
+        all.get(VERIFY_BATCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+      } catch (TimeoutException e) {
+        log.warn(
+          "verify batch timed out after {}s, {} workers still pending",
+          VERIFY_BATCH_TIMEOUT_SECONDS,
+          futures.size()
+        );
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+      }
     } catch (Exception e) {
       log.error("Scheduled verifySuspectedWorkers failed", e);
     }
@@ -309,20 +332,7 @@ public class WorkerHeartbeatVerifier {
     try {
       boolean alive = sendPingAndWaitPong(workerId);
       if (!alive) {
-        healthView.markVerificationFailed(workerId);
-
-        int attempt = healthView.getVerifyFailures(workerId);
-        if (attempt >= MAX_RETRY) {
-          log.warn("Worker {} confirmed dead ({} failures), removing reportToWorker", workerId, MAX_RETRY);
-          healthView.removeRecord(workerId);
-          nextVerifyTime.remove(workerId);
-          return;
-        }
-
-        long backoffMs = computeBackoffMs(attempt);
-
-        nextVerifyTime.put(workerId, currentTimeMillis() + backoffMs);
-        log.warn("Worker {} verification failed (attempt={}, backoff={}ms)", workerId, attempt, backoffMs);
+        handleProbeFailure(workerId);
       } else {
         nextVerifyTime.remove(workerId);
         healthView.recordPong(workerId);
@@ -333,7 +343,36 @@ public class WorkerHeartbeatVerifier {
       }
     } catch (Exception e) {
       log.error("Failed to probe worker {}", workerId, e);
+      handleProbeFailure(workerId);
     }
+  }
+
+  /**
+   * Applies the failure bookkeeping for a Worker that failed active verification:
+   * increments the failure counter, schedules exponential backoff, and removes the
+   * Worker once {@link #MAX_RETRY} consecutive failures accumulate.
+   *
+   * <p>Shared by the timeout path and the defensive catch in {@link #probeWorker},
+   * so every failure mode (timeout, connection exception, unexpected error) is
+   * subject to the same bounded retry discipline.
+   *
+   * @param workerId the Worker that failed verification; must not be null
+   */
+  private void handleProbeFailure(String workerId) {
+    healthView.markVerificationFailed(workerId);
+
+    int attempt = healthView.getVerifyFailures(workerId);
+    if (attempt >= MAX_RETRY) {
+      log.warn("Worker {} confirmed dead ({} failures), removing reportToWorker", workerId, MAX_RETRY);
+      healthView.removeRecord(workerId);
+      nextVerifyTime.remove(workerId);
+      return;
+    }
+
+    long backoffMs = computeBackoffMs(attempt);
+
+    nextVerifyTime.put(workerId, monotonicMillis() + backoffMs);
+    log.warn("Worker {} verification failed (attempt={}, backoff={}ms)", workerId, attempt, backoffMs);
   }
 
   /**
@@ -372,7 +411,8 @@ public class WorkerHeartbeatVerifier {
    * @param workerId the Worker to ping; must not be null
    * @return {@code true} if a non-null PONG response was received within
    *         {@code pingTimeoutMs}; {@code false} if the request timed out
-   *         ({@link AmqpTimeoutException}) or the queue is unreachable
+   *         ({@link AmqpTimeoutException}) or failed with any other AMQP
+   *         exception (e.g. connection failure or unreachable queue)
    */
   public boolean sendPingAndWaitPong(String workerId) {
     MessageProperties props = new MessageProperties();
@@ -385,7 +425,7 @@ public class WorkerHeartbeatVerifier {
     try {
       Message pong = rabbitTemplate.sendAndReceive("", QUEUE_VERIFY_PING_PREFIX + workerId, ping);
       return pong != null;
-    } catch (AmqpTimeoutException e) {
+    } catch (AmqpException e) {
       return false;
     }
   }

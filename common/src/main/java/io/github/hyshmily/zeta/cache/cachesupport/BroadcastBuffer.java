@@ -16,8 +16,10 @@ package io.github.hyshmily.zeta.cache.cachesupport;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -115,6 +117,10 @@ public class BroadcastBuffer {
    * (off-loaded to the scheduler thread) instead of deferring further,
    * bounding memory under write bursts.
    *
+   * <p>If the scheduler rejects the flush scheduling (saturated or shutting
+   * down), the buffer degrades to a synchronous flush on the calling thread
+   * so pending REFRESH messages are never stranded until the next write.
+   *
    * @param key      the cache key
    * @param version  the data version to send
    * @param degraded whether the version is degraded
@@ -122,10 +128,19 @@ public class BroadcastBuffer {
   @SuppressWarnings("java:S6213")
   public void record(String key, long version, boolean degraded) {
     pending.merge(key, new VersionInfo(version, degraded), (old, cur) -> cur);
-    if (pending.size() > MAX_PENDING_ENTRIES) {
-      scheduler.execute(this::flushAndReset);
-    } else {
-      rescheduleFlush();
+    try {
+      if (pending.size() > MAX_PENDING_ENTRIES) {
+        scheduler.execute(this::flushAndReset);
+      } else {
+        rescheduleFlush();
+      }
+    } catch (RejectedExecutionException e) {
+      // Scheduler saturated or shutting down — the pending entry would never
+      // be flushed by a scheduled task, so degrade to a synchronous send on
+      // the calling thread. Without this, a lost REFRESH leaves peers on the
+      // stale value until the next write for the same key.
+      log.warn("Scheduler rejected flush scheduling, flushing synchronously (key={})", key, e);
+      flush();
     }
   }
 
@@ -162,7 +177,7 @@ public class BroadcastBuffer {
    */
   private void rescheduleFlush() {
     synchronized (scheduleLock) {
-      long now = System.currentTimeMillis();
+      long now = TimeSource.monotonicMillis();
       if (firstRecordAtMs == 0L) {
         firstRecordAtMs = now;
       }

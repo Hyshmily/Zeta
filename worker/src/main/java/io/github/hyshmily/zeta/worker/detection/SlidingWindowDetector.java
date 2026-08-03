@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.worker.detection;
 
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.config.WorkerAutoConfiguration;
 import java.util.ArrayList;
 import java.util.List;
@@ -161,7 +162,7 @@ public class SlidingWindowDetector {
    * @throws NullPointerException if {@code key} is {@code null}
    */
   public long addCount(String key, long count) {
-    long now = System.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
 
     AtomicLongArray slices = windows.get(key);
     if (slices == null) {
@@ -223,7 +224,7 @@ public class SlidingWindowDetector {
   public long getWindowSum(String key) {
     AtomicLongArray slices = windows.get(key);
     if (slices == null) return 0L;
-    long now = System.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
     long sum = 0L;
     for (int i = 0; i < windowSize; i++) {
@@ -247,7 +248,7 @@ public class SlidingWindowDetector {
    *                     considered stale and evicted; must be non-negative
    */
   public void evictStale(long staleAfterMs) {
-    long now = System.currentTimeMillis();
+    long now = TimeSource.monotonicMillis();
 
     // This is a best‑effort snapshot; concurrent addCount calls may update
     // lastAccessTime after this collection, so we must re‑check later.
