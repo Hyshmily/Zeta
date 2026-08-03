@@ -51,13 +51,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.core.io.DefaultResourceLoader;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -587,6 +590,71 @@ class ZetaAmqpAutoConfigurationTest {
     );
 
     assertThat(verifier).isNotNull();
+  }
+
+  // ── HeartbeatConnectionConfiguration ──
+
+  /**
+   * Verifies that the dedicated heartbeat connection factory inherits the full
+   * {@link RabbitProperties} surface — including SSL (TLS) — via Spring Boot's
+   * connection factory configurer, instead of only host/port/credentials.
+   */
+  @Test
+  void heartbeatConnectionFactoryInheritsSslAndCredentialsFromRabbitProperties() {
+    RabbitProperties props = new RabbitProperties();
+    props.setHost("broker.example.com");
+    props.setPort(5671);
+    props.setUsername("zeta");
+    props.setPassword("secret");
+    props.getSsl().setEnabled(true);
+    ObjectProvider<RabbitProperties> propsProvider = mock(ObjectProvider.class);
+    when(propsProvider.getIfAvailable()).thenReturn(props);
+
+    ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration config =
+      new ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration();
+    CachingConnectionFactory cf = config.heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader());
+
+    assertThat(cf.getRabbitConnectionFactory().isSSL()).isTrue();
+    assertThat(cf.getHost()).isEqualTo("broker.example.com");
+    assertThat(cf.getPort()).isEqualTo(5671);
+    assertThat(cf.getUsername()).isEqualTo("zeta");
+    assertThat(cf.getVirtualHost()).isEqualTo("/");
+  }
+
+  /**
+   * Verifies that the heartbeat connection factory stays plain (no TLS) when
+   * SSL is not enabled in {@link RabbitProperties}.
+   */
+  @Test
+  void heartbeatConnectionFactoryIsPlainWhenSslDisabled() {
+    RabbitProperties props = new RabbitProperties();
+    ObjectProvider<RabbitProperties> propsProvider = mock(ObjectProvider.class);
+    when(propsProvider.getIfAvailable()).thenReturn(props);
+
+    ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration config =
+      new ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration();
+    CachingConnectionFactory cf = config.heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader());
+
+    assertThat(cf.getRabbitConnectionFactory().isSSL()).isFalse();
+    assertThat(cf.getHost()).isEqualTo("localhost");
+    assertThat(cf.getPort()).isEqualTo(5672);
+  }
+
+  /**
+   * Verifies that the heartbeat connection factory falls back to an unconfigured
+   * factory when no {@link RabbitProperties} bean is available.
+   */
+  @Test
+  void heartbeatConnectionFactoryFallsBackWhenNoProperties() {
+    ObjectProvider<RabbitProperties> propsProvider = mock(ObjectProvider.class);
+    when(propsProvider.getIfAvailable()).thenReturn(null);
+
+    ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration config =
+      new ZetaAmqpAutoConfiguration.HeartbeatConnectionConfiguration();
+    CachingConnectionFactory cf = config.heartbeatConnectionFactory(propsProvider, new DefaultResourceLoader());
+
+    assertThat(cf).isNotNull();
+    assertThat(cf.getRabbitConnectionFactory().isSSL()).isFalse();
   }
 
   // ── Conditional configuration skip tests ──

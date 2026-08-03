@@ -161,7 +161,7 @@
 | `zeta.local.heartbeat.verify-max-backoff-ms`  | `600000`                  | Max exponential backoff (ms) between verification probes for a repeatedly failing Worker (10min) |
 | `zeta.local.heartbeat.min-alive-workers`      | `0`                       | Minimum alive Workers for cluster health; 0 (default) = derived threshold: one third of observed Workers, rounded up, minimum 1 (e.g. 3 observed → 1 alive is healthy; 5 observed → 2; 9 observed → 3). A single surviving Worker is intentionally healthy — see ADR-0028. Set a positive value to override with an absolute alive count |
 
-> **Connection isolation:** Heartbeats (producer + PING/PONG verification) use a **dedicated `CachingConnectionFactory`** (`zetaHeartbeatConnectionFactory`) and **dedicated `RabbitTemplate`** (`zetaVerifyRabbitTemplate` / `zetaHeartbeatRabbitTemplate`), completely isolated from the data-plane connection shared by reports, broadcasts, and sync. This prevents data-plane congestion or broker flow-control from delaying heartbeat delivery — the heartbeat TCP connection has its own channel pool independent of data-plane traffic. One extra TCP connection per node is the cost.
+> **Connection isolation:** Heartbeats (producer + PING/PONG verification) use a **dedicated `CachingConnectionFactory`** (`zetaHeartbeatConnectionFactory`) and **dedicated `RabbitTemplate`** (`zetaVerifyRabbitTemplate` / `zetaHeartbeatRabbitTemplate`), completely isolated from the data-plane connection shared by reports, broadcasts, and sync. This prevents data-plane congestion or broker flow-control from delaying heartbeat delivery — the heartbeat TCP connection has its own channel pool independent of data-plane traffic. One extra TCP connection per node is the cost. The dedicated factory inherits the same `spring.rabbitmq.*` settings (credentials, virtual host, `ssl.*`) as the data-plane factory, so TLS configuration is shared.
 
 ### Circuit Breaker (`zeta.local.circuit-breaker.*`)
 
@@ -340,7 +340,7 @@ Allows standard `@Cacheable` / `@CachePut` / `@CacheEvict` annotations to trigge
 
 ## Security
 
-All RabbitMQ-based exchanges (`zeta.sync.exchange`, `zeta.reportToWorker.exchange`, `zeta.send.exchange`) use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*`:
+All RabbitMQ connections — the data plane (report, sync, broadcast) and the dedicated control-plane heartbeat factory (`zetaHeartbeatConnectionFactory`) — use plain AMQP connections by default. In production, configure TLS via Spring Boot's `spring.rabbitmq.ssl.*`; the heartbeat factory inherits the same settings, so both planes are covered by a single configuration:
 
 ```yaml
 spring:
@@ -353,4 +353,4 @@ spring:
       trust-store-password: changeit
 ```
 
-See [Spring Boot RabbitMQ SSL docs](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title) for details.
+See [Spring Boot RabbitMQ SSL docs](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title) for details. Note: `spring.rabbitmq.ssl.bundle` is not supported by the heartbeat factory — use the `key-store` / `trust-store` properties above.

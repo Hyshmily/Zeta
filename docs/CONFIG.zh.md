@@ -153,7 +153,7 @@
 | `zeta.local.heartbeat.verify-max-backoff-ms`  | `600000`                  | 单 Worker 指数退避最大间隔（毫秒，10 分钟）                              |
 | `zeta.local.heartbeat.min-alive-workers`      | `0`                       | 集群健康所需最小存活 Worker 数；0（默认）= 推导阈值：观测 Worker 数的三分之一，向上取整，下限 1（如观测 3 台→1 台存活即健康；观测 5 台→2 台；观测 9 台→3 台）。单幸存 Worker 有意视为健康——见 ADR-0028。设为正数以绝对存活数覆盖 |
 
-> **连接隔离：** 心跳（生产者 + PING/PONG 验证）使用**专用的 `CachingConnectionFactory`**（`zetaHeartbeatConnectionFactory`）和**专用的 `RabbitTemplate`**（`zetaVerifyRabbitTemplate` / `zetaHeartbeatRabbitTemplate`），与数据面（report、broadcast、sync）完全隔离。防止数据面拥塞或 broker 流控延迟心跳投递——心跳 TCP 连接拥有独立于数据面流量的 channel 池。代价是每节点多一条 TCP 连接。
+> **连接隔离：** 心跳（生产者 + PING/PONG 验证）使用**专用的 `CachingConnectionFactory`**（`zetaHeartbeatConnectionFactory`）和**专用的 `RabbitTemplate`**（`zetaVerifyRabbitTemplate` / `zetaHeartbeatRabbitTemplate`），与数据面（report、broadcast、sync）完全隔离。防止数据面拥塞或 broker 流控延迟心跳投递——心跳 TCP 连接拥有独立于数据面流量的 channel 池。代价是每节点多一条 TCP 连接。专用工厂继承与数据面工厂相同的 `spring.rabbitmq.*` 配置（凭据、virtual host、`ssl.*`），因此 TLS 配置共享。
 
 ### 熔断器配置（`zeta.local.circuit-breaker.*`）
 
@@ -332,7 +332,7 @@
 
 ## 安全性
 
-所有基于 RabbitMQ 的交换机（`zeta.sync.exchange`、`zeta.reportToWorker.exchange`、`zeta.send.exchange`）默认使用明文 AMQP 连接。生产环境中应通过 Spring Boot 的 `spring.rabbitmq.ssl.*` 配置 TLS：
+所有 RabbitMQ 连接——数据面（report、sync、broadcast）以及专用的控制面心跳工厂（`zetaHeartbeatConnectionFactory`）——默认使用明文 AMQP 连接。生产环境中应通过 Spring Boot 的 `spring.rabbitmq.ssl.*` 配置 TLS；心跳工厂继承相同配置，因此一份配置同时覆盖两个平面：
 
 ```yaml
 spring:
@@ -345,4 +345,4 @@ spring:
       trust-store-password: changeit
 ```
 
-详见 [Spring Boot RabbitMQ SSL 文档](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title)。
+详见 [Spring Boot RabbitMQ SSL 文档](https://docs.spring.io/spring-boot/reference/messaging/amqp.html#page-title)。注意：心跳工厂不支持 `spring.rabbitmq.ssl.bundle`——请使用上面的 `key-store` / `trust-store` 属性。

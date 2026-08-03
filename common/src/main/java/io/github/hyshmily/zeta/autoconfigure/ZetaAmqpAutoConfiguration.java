@@ -32,19 +32,8 @@ import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
-import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
-import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
-import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
-import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
-import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
-import io.github.hyshmily.zeta.sync.local.SyncHook;
-import io.github.hyshmily.zeta.sync.worker.DefaultWorkerDecisionHandler;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
-import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHook;
-import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
-import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
-import io.github.hyshmily.zeta.sync.worker.WorkerListener;
-import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
+import io.github.hyshmily.zeta.sync.local.*;
+import io.github.hyshmily.zeta.sync.worker.*;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
@@ -54,13 +43,13 @@ import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
-import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.springframework.amqp.core.*;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
@@ -69,6 +58,7 @@ import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.amqp.RabbitConnectionFactoryBeanConfigurer;
 import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -78,6 +68,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.core.io.ResourceLoader;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -799,6 +790,14 @@ public class ZetaAmqpAutoConfiguration {
    * gained (standard practice: K8s health endpoint on separate port, Kafka controller
    * listener, etc.).
    *
+   * <p>The factory is built through Spring Boot's
+   * {@link RabbitConnectionFactoryBeanConfigurer} — the sanctioned extension point
+   * for custom connection factories — so the control plane inherits the full
+   * {@link RabbitProperties} surface with the same semantics as the Boot-managed
+   * data-plane factory: credentials, virtual host, heartbeat, timeouts, and
+   * {@code spring.rabbitmq.ssl.*} (TLS). {@code spring.rabbitmq.ssl.bundle} is not
+   * supported (it requires a Boot-internal factory bean subtype).
+   *
    * <p><b>Final channel mapping (ADR-0010 addendum, 2026-07):</b>
    * <ul>
    *   <li><b>Control plane</b> (this factory): app heartbeat consumption, verify
@@ -822,23 +821,28 @@ public class ZetaAmqpAutoConfiguration {
     @Primary
     @Bean("zetaHeartbeatConnectionFactory")
     @ConditionalOnMissingBean(name = "zetaHeartbeatConnectionFactory")
-    public CachingConnectionFactory heartbeatConnectionFactory(ObjectProvider<RabbitProperties> propsProvider) {
+    public CachingConnectionFactory heartbeatConnectionFactory(
+      ObjectProvider<RabbitProperties> propsProvider,
+      ResourceLoader resourceLoader
+    ) {
       RabbitProperties props = propsProvider.getIfAvailable();
       if (props == null) {
         // Fallback: create an unconfigured factory; Spring Boot's
         // default connection factory will be used in most environments.
         return new CachingConnectionFactory();
       }
-      CachingConnectionFactory cf = new CachingConnectionFactory(props.getHost(), props.getPort());
-      cf.setUsername(props.getUsername());
-      cf.setPassword(props.getPassword());
-      String vh = props.getVirtualHost();
-      cf.setVirtualHost(vh != null ? vh : "/");
-      Duration hb = props.getRequestedHeartbeat();
-      cf.setRequestedHeartBeat(hb != null ? (int) hb.getSeconds() : 60);
-      Duration ct = props.getConnectionTimeout();
-      cf.setConnectionTimeout(ct != null ? (int) ct.toMillis() : 60000);
-      return cf;
+      RabbitConnectionFactoryBean factoryBean = new RabbitConnectionFactoryBean();
+      new RabbitConnectionFactoryBeanConfigurer(resourceLoader, props).configure(factoryBean);
+      try {
+        factoryBean.afterPropertiesSet();
+        com.rabbitmq.client.ConnectionFactory underlying = factoryBean.getObject();
+        if (underlying == null) {
+          throw new IllegalStateException("RabbitConnectionFactoryBean produced no ConnectionFactory");
+        }
+        return new CachingConnectionFactory(underlying);
+      } catch (Exception ex) {
+        throw new IllegalStateException("Failed to create RabbitConnectionFactory", ex);
+      }
     }
   }
 }
