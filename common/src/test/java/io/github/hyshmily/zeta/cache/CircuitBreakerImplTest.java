@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.CircuitBreakerImpl;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -42,6 +43,11 @@ class CircuitBreakerImplTest {
     config.setSingleTestIntervalMs(100);
     config.setLogEnabled(false);
     breaker = new CircuitBreakerImpl(config);
+  }
+
+  @AfterEach
+  void tearDown() {
+    breaker.close();
   }
 
   @Test

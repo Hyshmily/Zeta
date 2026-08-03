@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.model.CacheEntry;
 import java.util.Collection;
 import java.util.Map;
 import org.jspecify.annotations.NonNull;
+import org.openjdk.jol.info.GraphLayout;
 
 /**
  * Heap-weight estimator for {@link CacheEntry} values backed by Lucene's {@link
@@ -33,6 +34,13 @@ import org.jspecify.annotations.NonNull;
  * alignment calculations to Lucene's {@code RamUsageEstimator} (which auto-detects compressed
  * OOPs, object alignment, and JVM pointer sizes), then adds conservative estimates for
  * variable-length data and Caffeine internal metadata.
+ *
+ * <p><b>Precision boundary:</b> {@link String}, {@code byte[]}, {@link Collection}, {@link Map}
+ * and {@code Object[]} values use exact or per-element estimates. Any other value type falls
+ * back to jol {@link org.openjdk.jol.info.GraphLayout#parseInstance(Object[]) graph layout},
+ * which measures the full reachable object graph — nested {@code char[]} / {@code byte[]} inside
+ * user POJOs included, cycle-safe. Weights are recomputed on every write (cache miss / refresh),
+ * never on the read hot path.
  */
 @SuppressWarnings("all")
 public enum DefaultWeigher implements Weigher<String, Object> {
@@ -50,6 +58,9 @@ public enum DefaultWeigher implements Weigher<String, Object> {
   }
 
   private static long valueOf(Object v) {
+    if (v == null) {
+      return 0;
+    }
     if (v instanceof CacheEntry ce) {
       return shallowSizeOf(ce) + valueOf(ce.getValue());
     }
@@ -71,6 +82,9 @@ public enum DefaultWeigher implements Weigher<String, Object> {
     if (v instanceof Object[] a) {
       return shallowSizeOf(a) + (long) a.length * NUM_BYTES_OBJECT_REF;
     }
-    return shallowSizeOf(v) + 1024;
+    // jol graph layout measures the full reachable object graph (nested char[] / byte[] inside
+    // user POJOs included, cycle-safe). Weights are recomputed per write, never on the read
+    // hot path.
+    return GraphLayout.parseInstance(v).totalSize();
   }
 }

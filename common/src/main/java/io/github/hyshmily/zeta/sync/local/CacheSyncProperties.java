@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.sync.local;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -82,6 +83,16 @@ public class CacheSyncProperties {
   /** AMQP prefetch count per consumer. Controls how many unacknowledged messages
    * each consumer can hold at once. */
   private int prefetchCount = 5;
+
+  /**
+   * Global cap (in weighted units) on tasks pending in the per-key sync dispatcher
+   * ({@link PerKeyOrderedDispatcher}). One unit approximates 1 KB of AMQP payload:
+   * single-key messages charge 1 unit, batch INVALIDATE_ALL messages charge by body
+   * size ({@code 1 + bodyBytes/1024}). When the budget is exhausted, new tasks are
+   * dropped — the message was already acked (at-most-once, ADR-0004), so a dropped
+   * invalidation is re-sent by the next application-level write or bounded by hard TTL.
+   */
+  private int maxPendingUnits = 50_000;
 
   /**
    * Returns the unique per-instance queue name.

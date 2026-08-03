@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
+import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.CircuitBreakerImpl;
@@ -132,6 +133,23 @@ public class ZetaAutoConfiguration {
   }
 
   /**
+   * Create the sliding-window circuit breaker protecting remote cache-load calls.
+   *
+   * <p>Registered as a Spring-managed {@link AutoCloseable} bean — the container infers
+   * {@code close()} as its destroy method, so the instance-level slide scheduler is shut
+   * down on context shutdown and hot-restart (new classloader) scenarios do not leak
+   * threads or breaker instances.
+   *
+   * @param properties the HotKey configuration properties (never {@code null})
+   * @return a new circuit breaker instance
+   */
+  @Bean
+  @ConditionalOnMissingBean(CircuitBreaker.class)
+  public CircuitBreaker circuitBreaker(ZetaProperties properties) {
+    return new CircuitBreakerImpl(properties.getCircuitBreaker());
+  }
+
+  /**
    * Create the SingleFlight deduplication layer for concurrent cache-load requests.
    *
    * <p>When multiple threads request the same key simultaneously (a cache miss), the
@@ -141,17 +159,22 @@ public class ZetaAutoConfiguration {
    *
    * @param properties     the HotKey configuration properties (never {@code null})
    * @param hotKeyExecutor the dedicated HotKey executor for async load execution (never {@code null})
+   * @param circuitBreaker the circuit breaker protecting remote load calls (never {@code null})
    * @return a new SingleFlight instance
    */
   @Bean
   @ConditionalOnMissingBean
-  public SingleFlight singleFlight(ZetaProperties properties, @Qualifier("hotKeyExecutor") Executor hotKeyExecutor) {
+  public SingleFlight singleFlight(
+    ZetaProperties properties,
+    @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
+    CircuitBreaker circuitBreaker
+  ) {
     return new SingleFlightImpl(
       properties.getInflightMaxSize(),
       properties.getInflightTtlSeconds(),
       properties.getInflightTimeoutSeconds(),
       hotKeyExecutor,
-      new CircuitBreakerImpl(properties.getCircuitBreaker())
+      circuitBreaker
     );
   }
 
@@ -359,6 +382,12 @@ public class ZetaAutoConfiguration {
    * entry count. Time-based TTL for entries without an explicit hard-expire
    * timestamp defaults to {@code zeta.local.local-cache-ttl-minutes}.
    *
+   * <p>Stats recording is always enabled ({@code recordStats()}) so that
+   * {@code Zeta#stats()} and the {@code cache.*} Micrometer metrics report
+   * hit/miss/eviction counters. A custom {@code Cache<String, Object>} bean
+   * replacing this one must enable {@code recordStats()} itself for those
+   * counters to be populated.
+   *
    * @param properties the HotKey configuration properties (never {@code null})
    * @return a configured Caffeine {@link Cache} instance
    */
@@ -372,6 +401,9 @@ public class ZetaAutoConfiguration {
     } else {
       builder.maximumSize(cfg.getMaxSize());
     }
+    // Stats recording enables hit/miss/eviction counters for Zeta#stats() and the cache.*
+    // Micrometer metrics; overhead is a few LongAdder increments per cache operation.
+    builder.recordStats();
     builder.expireAfter(
       new Expiry<>() {
         /**

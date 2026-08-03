@@ -26,10 +26,10 @@ import io.github.hyshmily.zeta.Zeta;
  * <p><b>Availability:</b>
  * <ul>
  *   <li>{@code hitCount}, {@code missCount}, {@code hitRate}, and
- *       {@code evictionCount} are populated <em>only</em> when Caffeine's
- *       {@code recordStats()} is enabled (automatic when Micrometer is on
- *       the classpath). When stats recording is disabled, all four fields
- *       reportToWorker {@code 0}.</li>
+ *       {@code evictionCount} are populated by the default L1 cache, which
+ *       always enables Caffeine's {@code recordStats()}. If a custom
+ *       {@code Cache} bean is supplied without {@code recordStats()}, all
+ *       four fields report {@code 0}.</li>
  *   <li>{@code estimatedSizeOfKeysCount} is always available — it reflects the
  *       underlying Caffeine estimate and does not require stats recording.</li>
  * </ul>

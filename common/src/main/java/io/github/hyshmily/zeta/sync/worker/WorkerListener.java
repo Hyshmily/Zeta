@@ -93,7 +93,13 @@ public class WorkerListener {
    */
   @PostConstruct
   public void init() {
-    this.dispatcher = new PerKeyOrderedDispatcher(scheduler, "worker-listener");
+    this.dispatcher = new PerKeyOrderedDispatcher(
+      scheduler,
+      "worker-listener",
+      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      properties.getMaxPendingUnits()
+    );
   }
 
   /**

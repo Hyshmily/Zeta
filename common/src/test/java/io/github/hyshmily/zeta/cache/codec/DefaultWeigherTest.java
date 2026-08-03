@@ -91,4 +91,29 @@ class DefaultWeigherTest {
     int weight = DefaultWeigher.INSTANCE.weigh("myKey", new byte[0]);
     assertThat(weight).isPositive();
   }
+
+  @Test
+  void weigh_keyAndPojoWithLargeArray_shouldCountNestedFieldContent() {
+    int smallWeight = DefaultWeigher.INSTANCE.weigh("myKey", new PojoWithPayload(16));
+    int largeWeight = DefaultWeigher.INSTANCE.weigh("myKey", new PojoWithPayload(10_000_000));
+    assertThat((long) largeWeight - smallWeight).isGreaterThan(10_000_000L);
+  }
+
+  @Test
+  void weigh_cacheEntryContainingPojoWithLargeArray_shouldCountNestedFieldContent() {
+    CacheEntry small = CacheEntry.builder().value(new PojoWithPayload(16)).dataVersion(1).build();
+    CacheEntry large = CacheEntry.builder().value(new PojoWithPayload(10_000_000)).dataVersion(1).build();
+    int smallWeight = DefaultWeigher.INSTANCE.weigh("myKey", small);
+    int largeWeight = DefaultWeigher.INSTANCE.weigh("myKey", large);
+    assertThat((long) largeWeight - smallWeight).isGreaterThan(10_000_000L);
+  }
+
+  private static final class PojoWithPayload {
+
+    private final char[] payload;
+
+    private PojoWithPayload(int size) {
+      this.payload = new char[size];
+    }
+  }
 }

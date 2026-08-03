@@ -1,0 +1,9 @@
+# Weighted Global Pending Budget for PerKeyOrderedDispatcher
+
+The per-key ordered dispatcher bounds each key's queue (`maxQueuePerKey = 1024`) but the number of distinct keys is unbounded, so under a broadcast storm the aggregate pending tasks can grow without limit (e.g. 10k keys × 1025 tasks ≈ 2 GB). We added a global budget: the total weight of pending tasks across all keys is capped (`maxGlobalPendingUnits`, default 50,000), and submissions that would exceed it are dropped before enqueue.
+
+Tasks carry a weight — 1 by default, ~1 unit per KB of AMQP body for sync messages (`1 + bodyBytes/1024`), so batch INVALIDATE_ALL payloads (~50 KB) are charged by the bytes they hold, not by message count. The counter is adjusted once per submission after the `ConcurrentHashMap.compute` call (the remapping stays side-effect free), and discharged once per executed task in `runCycle`; `close()` resets it.
+
+Dropping is consistent with the existing loss envelope: sync messages are acked before the cache mutation (at-most-once, ADR-0004) and re-sent by the next application-level write or bounded by hard TTL; Worker decisions recover via the periodic HOT rebroadcast (ADR-0024) and stale eviction. The gate is a soft bound — concurrent submitters may overshoot by a bounded amount, and a single heavy task can push the budget past the cap. Both consumers wire separate budgets: `zeta.sync.max-pending-units` (50,000) and `zeta.worker-listener.max-pending-units` (200,000), the latter larger because a dropped HOT/COOL decision has real cost while sync invalidations self-heal cheaply.
+
+The executor rejection/retry path (200 ms delayed re-drive) is retained unchanged; note that with the default unbounded `ScheduledThreadPoolExecutor` work queue it only fires on shutdown, so it is not the accumulation mechanism the budget defends against — the unbounded structures were the dispatcher map itself and the scheduler's own delayed-queue.

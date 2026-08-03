@@ -37,6 +37,11 @@ import lombok.extern.slf4j.Slf4j;
  * (default 500ms). Subsequent records within that window reset the timer,
  * combining multiple writes into a single send cycle.
  *
+ * <p>To bound memory under write bursts, the pending map is capped at
+ * {@value #MAX_PENDING_ENTRIES} entries; crossing the cap triggers an
+ * immediate flush (off-loaded to the scheduler thread) rather than
+ * deferring further.
+ *
  * <p>The internal {@code pending} map is lazily initialized on first
  * {@code reportToWorker()} call to avoid allocating maps that are never used.
  */
@@ -46,6 +51,14 @@ public class BroadcastBuffer {
 
   private static final long DEFAULT_FLUSH_DELAY_MS = 500;
   private static final long DEFAULT_MAX_DEFER_MS = 2_000;
+
+  /**
+   * Maximum number of pending entries before a forced flush is triggered (soft cap: the flush is
+   * off-loaded to the scheduler thread, so the map may briefly overshoot under a write burst).
+   * Bounds memory of the defer window (≈12MB at ~120B per entry).
+   */
+  static final int MAX_PENDING_ENTRIES = 100_000;
+
   private final long maxDeferMs;
   private long firstRecordAtMs = 0L;
 
@@ -97,7 +110,10 @@ public class BroadcastBuffer {
   /**
    * Record a version update for the given key.  If the key already has a
    * pending entry, it is unconditionally replaced (last-writer-wins).
-   * Resets the deferred flush timer on each call.
+   * Resets the deferred flush timer on each call.  If the pending map
+   * exceeds {@link #MAX_PENDING_ENTRIES}, a flush is triggered immediately
+   * (off-loaded to the scheduler thread) instead of deferring further,
+   * bounding memory under write bursts.
    *
    * @param key      the cache key
    * @param version  the data version to send
@@ -106,7 +122,11 @@ public class BroadcastBuffer {
   @SuppressWarnings("java:S6213")
   public void record(String key, long version, boolean degraded) {
     pending.merge(key, new VersionInfo(version, degraded), (old, cur) -> cur);
-    rescheduleFlush();
+    if (pending.size() > MAX_PENDING_ENTRIES) {
+      scheduler.execute(this::flushAndReset);
+    } else {
+      rescheduleFlush();
+    }
   }
 
   /**

@@ -108,7 +108,7 @@
 | `zeta.local.min-count`                | `10`                           | 热点 key 最低计数阈值                                                                                                                                                                       |
 | `zeta.local.sketch-window-count`      | `3`                            | 每 sketch slot 的滑动窗口数（环形缓冲区）。W=3 覆盖 3×衰减周期的数据，消除热点漂移。范围 1–10                                                                                               |
 | `zeta.local.cache.max-size`           | `100000`                       | Caffeine L1 最大条目数（`max-weight` 为 0 时生效）                                                                                                                                          |
-| `zeta.local.cache.max-weight`         | `0`                            | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重                                                                                                     |
+| `zeta.local.cache.max-weight`         | `0`                            | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重（String/byte[]/Collection/Map 精确；其他类型经 jol GraphLayout 深度测量，POJO 嵌套字段内容计入）                           |
 | `zeta.local.cache.max-value-size`     | `0`                            | 单值字节大小限制；0 = 不限。超过此大小的值不会被缓存                                                                                                                                        |
 | `zeta.local.cache-key.strip-query`    | `false`                        | 在缓存操作前从缓存键中剥离查询参数（`?key=val`），避免相同业务数据因 URL 参数不同而分裂到多个 Caffeine 条目中，从而稀释 HeavyKeeper 热点检测。默认关闭——未启用时零开销                      |
 | `zeta.local.local-cache-ttl-minutes`  | `5`                            | Caffeine L1 写入 TTL（分钟）                                                                                                                                                                |
@@ -207,7 +207,8 @@
 | `zeta.worker-listener.broadcast-jitter-ms`   | `0`                  | 应用 Worker 广播前的随机 jitter（毫秒）；0 = 收到后立即应用                                                                       |
 | `zeta.worker-listener.concurrent-consumers`  | `2`                  | Worker 决策队列的并发消费者数                                                                                                     |
 | `zeta.worker-listener.scheduler-pool-size`   | `4`                  | 执行 Worker 缓存更新任务的调度线程池大小                                                                                          |
-| `zeta.worker-listener.prefetch-count`        | `5`                  | 每消费者的 AMQP 预取数                                                                                                            |
+| `zeta.worker-listener.prefetch-count`        | `5`                  | 每消费者的 AMQP 预取数                                            |
+| `zeta.worker-listener.max-pending-units`     | `200000`             | Worker 决策调度器全局待处理任务上限（加权单位）；超限 HOT/COOL 决策被丢弃（ADR-0024 重播 + 过期驱逐恢复） |
 | `zeta.worker-listener.sre.enabled`           | `true`               | 启用 Google SRE 自适应速率限制器作用于 HOT 提升处理                                                                               |
 | `zeta.worker-listener.sre.window-ms`         | `3000`               | SRE 速率限制器的滑动窗口时长（毫秒）                                                                                              |
 | `zeta.worker-listener.sre.buckets`           | `10`                 | SRE 滑动窗口的时间桶数                                                                                                            |
@@ -258,6 +259,7 @@
 | `zeta.sync.concurrent-consumers` | `3`                  | 同步队列 RabbitMQ 消费者并发数                                                   |
 | `zeta.sync.scheduler-pool-size`  | `4`                  | 同步 jitter 延迟的线程池大小                                                     |
 | `zeta.sync.prefetch-count`       | `5`                  | 每个同步消费者的 AMQP 预取数量                                                   |
+| `zeta.sync.max-pending-units`    | `50000`              | 同步调度器全局待处理任务上限（加权单位，≈1KB 载荷/单位）；超限提交直接丢弃（消息已 ack，下次写入会重发） |
 | `zeta.sync.auto-startup`         | `true`               | 同步监听器容器是否随应用自动启动                                                 |
 
 ### Worker 节点（`zeta.worker.*`）

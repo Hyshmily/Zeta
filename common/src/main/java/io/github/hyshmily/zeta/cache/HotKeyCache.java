@@ -1417,12 +1417,13 @@ public class HotKeyCache {
   /**
    * Return a snapshot of basic L1 cache statistics.
    * <p>
-   * Hit/miss/eviction counters are populated only when Caffeine's
-   * {@code recordStats()} is enabled.  {@code estimatedSizeOfKeysCount} is always
-   * available.
+   * Hit/miss/eviction counters are populated because the default L1 cache
+   * enables Caffeine's {@code recordStats()}; they are {@code 0} only when a
+   * custom {@code Cache} bean is supplied without stats recording.
+   * {@code estimatedSizeOfKeysCount} is always available.
    *
-   * @return a {@link ZetaCacheStats} reportToWorker; hit/miss counters are {@code 0}
-   *         if stats recording is not enabled
+   * @return a {@link ZetaCacheStats} report; hit/miss counters are {@code 0}
+   *         if stats recording is not enabled on the underlying cache
    */
   public ZetaCacheStats stats() {
     CacheStats cs = caffeineCache.stats();

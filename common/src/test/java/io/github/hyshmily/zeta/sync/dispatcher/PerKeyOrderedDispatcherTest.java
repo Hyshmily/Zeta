@@ -402,6 +402,182 @@ class PerKeyOrderedDispatcherTest {
     }
   }
 
+  /**
+   * Verifies that when the global pending budget is exhausted, excess submissions are dropped,
+   * and that the budget drains back as tasks execute — later submissions are accepted again.
+   */
+  @Test
+  void submit_globalCap_shouldDropAndRecoverAfterDrain() throws InterruptedException {
+    PerKeyOrderedDispatcher capped = new PerKeyOrderedDispatcher(
+      executor,
+      "capped",
+      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      1
+    );
+
+    CountDownLatch blockLatch = new CountDownLatch(1);
+    CountDownLatch task1Started = new CountDownLatch(1);
+    CountDownLatch task2Ran = new CountDownLatch(1);
+    CountDownLatch task3Ran = new CountDownLatch(1);
+
+    try {
+      // Submit task1 — runs immediately and holds the entire budget of 1 unit.
+      capped.submit("key", () -> {
+        task1Started.countDown();
+        try {
+          assertThat(blockLatch.await(10, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+
+      assertThat(task1Started.await(5, TimeUnit.SECONDS)).isTrue();
+
+      // Submit task2 — budget exhausted (1 pending + 1 > cap 1) → dropped.
+      capped.submit("key", task2Ran::countDown);
+
+      // Release task1 → its unit is discharged asynchronously → the budget drains to 0.
+      blockLatch.countDown();
+
+      // The discharge races with our next submission, so retry until the budget drains
+      // and a submission is finally accepted (bounded retry: drain happens within µs).
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (task3Ran.getCount() > 0 && System.nanoTime() < deadline) {
+        capped.submit("key", task3Ran::countDown);
+        Thread.sleep(10);
+      }
+
+      assertThat(task3Ran.await(200, TimeUnit.MILLISECONDS)).isTrue();
+      // Task2 was dropped before enqueue and must never run.
+      assertThat(task2Ran.await(200, TimeUnit.MILLISECONDS)).isFalse();
+    } finally {
+      capped.close();
+    }
+  }
+
+  /**
+   * Verifies that submissions carry a weight against the global budget: a heavy task
+   * (weight 10) fills a budget of 10, and a subsequent weight-1 task is dropped.
+   */
+  @Test
+  void submit_weighted_shouldChargeByWeight() throws InterruptedException {
+    PerKeyOrderedDispatcher capped = new PerKeyOrderedDispatcher(
+      executor,
+      "weighted",
+      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      10
+    );
+
+    CountDownLatch heavyRan = new CountDownLatch(1);
+    CountDownLatch lightRan = new CountDownLatch(1);
+
+    try {
+      // Weight-10 task: 0 + 10 > 10 is false → accepted, budget now full.
+      capped.submitWithWeight("key", heavyRan::countDown, 10);
+      assertThat(heavyRan.await(5, TimeUnit.SECONDS)).isTrue();
+
+      // The budget discharges right after the heavy task returns — it races with our next
+      // submission, so retry until the drain lands and a weight-10 task fits exactly
+      // (bounded retry: the drain happens within µs of the task completing).
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+      while (lightRan.getCount() > 0 && System.nanoTime() < deadline) {
+        capped.submitWithWeight("key", lightRan::countDown, 10);
+        Thread.sleep(10);
+      }
+      assertThat(lightRan.await(200, TimeUnit.MILLISECONDS)).isTrue();
+    } finally {
+      capped.close();
+    }
+  }
+
+  /**
+   * Verifies that a weight-10 task blocks out a weight-1 task while it is still pending,
+   * and that a weight exceeding the budget by itself is rejected while the budget is occupied.
+   */
+  @Test
+  void submit_weighted_shouldDropWhenBudgetOccupied() throws InterruptedException {
+    PerKeyOrderedDispatcher capped = new PerKeyOrderedDispatcher(
+      executor,
+      "weighted",
+      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      10
+    );
+
+    CountDownLatch blockLatch = new CountDownLatch(1);
+    CountDownLatch heavyStarted = new CountDownLatch(1);
+    CountDownLatch lightRan = new CountDownLatch(1);
+
+    try {
+      // Weight-10 task runs and holds the whole budget.
+      capped.submitWithWeight("key", () -> {
+        heavyStarted.countDown();
+        try {
+          assertThat(blockLatch.await(10, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }, 10);
+
+      assertThat(heavyStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+      // Weight-1 task while budget (10) is fully occupied → dropped.
+      capped.submitWithWeight("key", lightRan::countDown, 1);
+
+      blockLatch.countDown();
+
+      assertThat(lightRan.await(500, TimeUnit.MILLISECONDS)).isFalse();
+    } finally {
+      capped.close();
+    }
+  }
+
+  /**
+   * Verifies that the global budget gate applies when a delayed weighted submission
+   * actually fires, not at scheduling time.
+   */
+  @Test
+  void submit_delayedWeighted_shouldApplyGateAtActualSubmission() throws InterruptedException {
+    PerKeyOrderedDispatcher capped = new PerKeyOrderedDispatcher(
+      executor,
+      "weighted",
+      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      10
+    );
+
+    CountDownLatch blockLatch = new CountDownLatch(1);
+    CountDownLatch heavyStarted = new CountDownLatch(1);
+    CountDownLatch delayedRan = new CountDownLatch(1);
+
+    try {
+      // Weight-10 task holds the budget for the whole test.
+      capped.submitWithWeight("key", () -> {
+        heavyStarted.countDown();
+        try {
+          assertThat(blockLatch.await(10, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      }, 10);
+
+      assertThat(heavyStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+      // Delayed weight-1 submission fires at 200 ms. Keep the budget occupied until after
+      // the delayed submission has fired, so the gate (checked at actual submission time)
+      // sees it exhausted and drops the task.
+      capped.submitWithWeight("key", delayedRan::countDown, 1, 200);
+      Thread.sleep(400);
+      blockLatch.countDown();
+
+      assertThat(delayedRan.await(200, TimeUnit.MILLISECONDS)).isFalse();
+    } finally {
+      capped.close();
+    }
+  }
+
   // ── Helper classes ──────────────────────────────────────────
 
   /**

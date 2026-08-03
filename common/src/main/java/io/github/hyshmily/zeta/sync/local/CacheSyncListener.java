@@ -78,7 +78,13 @@ public class CacheSyncListener {
 
   @PostConstruct
   public void init() {
-    this.dispatcher = new PerKeyOrderedDispatcher(scheduler, "cache-sync");
+    this.dispatcher = new PerKeyOrderedDispatcher(
+      scheduler,
+      "cache-sync",
+      PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      properties.getMaxPendingUnits()
+    );
   }
 
   @PreDestroy
@@ -139,9 +145,15 @@ public class CacheSyncListener {
       }
     };
 
+    // Weight the task against the dispatcher's global pending budget by payload size
+    // (~1 unit per KB): batch payloads (INVALIDATE_ALL body = JSON key list) are far
+    // heavier than single-key messages, so the budget must track bytes, not message count.
+    byte[] body = msg.getBody();
+    int weight = 1 + (body == null ? 0 : body.length >> 10);
+
     long jitterMs = properties.getWarmupJitterMs();
     long delay = jitterMs > 0 ? ThreadLocalRandom.current().nextLong(jitterMs) : 0L;
-    dispatcher.submit(sm.cacheKey(), task, delay);
+    dispatcher.submitWithWeight(sm.cacheKey(), task, weight, delay);
   }
 
   /**

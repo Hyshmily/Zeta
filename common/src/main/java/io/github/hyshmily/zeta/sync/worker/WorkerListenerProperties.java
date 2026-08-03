@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.sync.worker;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -81,6 +82,16 @@ public class WorkerListenerProperties {
   /** AMQP prefetch count per consumer. Controls how many unacknowledged messages
    * each consumer can hold at once. */
   private int prefetchCount = 5;
+
+  /**
+   * Global cap (in weighted units) on tasks pending in the per-key Worker-decision
+   * dispatcher ({@link PerKeyOrderedDispatcher}). Worker decisions carry small payloads
+   * (weight 1 each). The budget is kept higher than the cache-sync budget because a
+   * dropped HOT/COOL decision has real cost — recovery relies on the periodic HOT
+   * rebroadcast (ADR-0024) and stale eviction, so this budget trades memory against
+   * decision loss.
+   */
+  private int maxPendingUnits = 200_000;
 
   /** Configuration for the SRE adaptive rate limiter on HOT decision processing.
    * Provides backpressure when downstream resources are saturated. */

@@ -15,13 +15,13 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport.impl;
 
+import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
+
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerState;
 import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
-import lombok.extern.slf4j.Slf4j;
-
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.HashSet;
@@ -32,8 +32,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-
-import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Sliding-window circuit breaker.
@@ -63,15 +62,6 @@ import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 @Internal
 public class CircuitBreakerImpl implements CircuitBreaker {
 
-  private static final ScheduledExecutorService SCHEDULER = new SafeScheduledExecutorService(
-    Runtime.getRuntime().availableProcessors(),
-    r -> {
-      Thread t = new Thread(r, "zeta-cb");
-      t.setDaemon(true);
-      return t;
-    }
-  );
-
   private static final VarHandle VH = MethodHandles.arrayElementVarHandle(long[].class);
 
   private static final int STRIDE = 16;
@@ -81,6 +71,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   private final ZetaProperties.CircuitBreaker config;
   private final int bucketSize;
   private final long[] counts;
+  private final ScheduledExecutorService scheduler;
   private volatile int currentIndex;
 
   private volatile CircuitBreakerState state = CircuitBreakerState.CLOSED;
@@ -104,7 +95,15 @@ public class CircuitBreakerImpl implements CircuitBreaker {
         "window-time-ms (" + config.getWindowTimeMs() + ") must be >= window-buckets (" + bucketSize + ")"
       );
     }
-    this.slideFuture = SCHEDULER.scheduleAtFixedRate(this::slide, slideMs, slideMs, TimeUnit.MILLISECONDS);
+    // Instance-level single-thread scheduler: the slide task is trivial, one daemon thread per
+    // breaker is enough. Owned by this instance and shut down in close(), so hot-restart
+    // (new classloader) scenarios do not leak threads or this instance via the task chain.
+    this.scheduler = new SafeScheduledExecutorService(1, r -> {
+      Thread t = new Thread(r, "zeta-cb");
+      t.setDaemon(true);
+      return t;
+    });
+    this.slideFuture = scheduler.scheduleAtFixedRate(this::slide, slideMs, slideMs, TimeUnit.MILLISECONDS);
   }
 
   /**
@@ -369,13 +368,13 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   }
 
   /**
-   * Cleans up the scheduled sliding task. Called by the owning component
-   * (e.g., {@code HotKeyCache}) during shutdown.
+   * Cancels the scheduled sliding task and shuts down the instance-level scheduler.
+   * Called by the Spring container (AutoCloseable destroy-method inference) on
+   * context shutdown — releasing this instance and its config for GC.
    */
   @Override
   public void close() {
-    if (slideFuture != null) {
-      slideFuture.cancel(false);
-    }
+    slideFuture.cancel(false);
+    scheduler.shutdownNow();
   }
 }

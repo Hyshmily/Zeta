@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.*;
 
@@ -140,6 +141,83 @@ class BroadcastBufferTest {
     BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
     buf.flush();
     verifyNoInteractions(publisher);
+  }
+
+  // ── Size cap ──
+
+  /**
+   * Installs a counting answer on the publisher that releases the latch once the given number of
+   * broadcasts has been observed.
+   *
+   * @param sent   the counter incremented per broadcast
+   * @param target the count at which the latch is released
+   * @return the latch released when the target count is reached
+   */
+  private CountDownLatch installCountingPublisher(AtomicInteger sent, int target) {
+    CountDownLatch latch = new CountDownLatch(1);
+    doAnswer(inv -> {
+      if (sent.incrementAndGet() == target) {
+        latch.countDown();
+      }
+      return null;
+    })
+      .when(publisher)
+      .broadcastRefresh(anyString(), anyLong(), anyBoolean());
+    return latch;
+  }
+
+  /**
+   * Verifies that the pending map is capped: recording exactly the cap never flushes by itself, but
+   * the first record above the cap forces an automatic flush of every buffered key.
+   */
+  @Test
+  void record_whenExceedingCap_shouldForceFlushAutomatically() throws Exception {
+    AtomicInteger sent = new AtomicInteger(0);
+    CountDownLatch allSent = installCountingPublisher(sent, BroadcastBuffer.MAX_PENDING_ENTRIES + 1);
+
+    // Long flush delay so the deferred flush cannot fire during this test
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+
+    for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES; i++) {
+      buf.record("key-" + i, i, false);
+    }
+    // At exactly the cap nothing is sent yet (threshold is strictly greater-than)
+    Thread.sleep(300);
+    assertThat(sent).hasValue(0);
+
+    // One more record crosses the cap and forces a flush
+    buf.record("key-cap", 1L, false);
+    boolean flushed = allSent.await(2000, TimeUnit.MILLISECONDS);
+    org.junit.jupiter.api.Assertions.assertTrue(flushed, "Forced flush should have fired within timeout");
+    org.junit.jupiter.api.Assertions.assertEquals(
+      BroadcastBuffer.MAX_PENDING_ENTRIES + 1,
+      sent.get(),
+      "Forced flush should send every buffered key exactly once"
+    );
+  }
+
+  /**
+   * Verifies that a forced flush swaps to a fresh map: records made after the forced flush are
+   * buffered normally and delivered by the next explicit flush.
+   */
+  @Test
+  void record_afterForcedFlush_shouldContinueBuffering() throws Exception {
+    AtomicInteger sent = new AtomicInteger(0);
+    CountDownLatch allSent = installCountingPublisher(sent, BroadcastBuffer.MAX_PENDING_ENTRIES + 1);
+
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+
+    for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES + 1; i++) {
+      buf.record("key-" + i, i, false);
+    }
+
+    boolean flushed = allSent.await(2000, TimeUnit.MILLISECONDS);
+    org.junit.jupiter.api.Assertions.assertTrue(flushed, "Forced flush should have fired within timeout");
+    org.junit.jupiter.api.Assertions.assertEquals(BroadcastBuffer.MAX_PENDING_ENTRIES + 1, sent.get());
+
+    buf.record("post-forced", 1L, false);
+    buf.flush();
+    verify(publisher).broadcastRefresh("post-forced", 1L, false);
   }
 
   // ── Scheduling behavior ──

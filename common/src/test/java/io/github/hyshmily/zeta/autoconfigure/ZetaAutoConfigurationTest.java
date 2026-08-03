@@ -198,6 +198,22 @@ class ZetaAutoConfigurationTest {
   }
 
   /**
+   * Verifies that the default L1 cache enables Caffeine stats recording, so hit/miss/eviction
+   * counters are populated (prerequisite for {@code Zeta#stats()} and the {@code cache.*} Micrometer
+   * metrics).
+   */
+  @Test
+  void hotLocalCache_shouldEnableStatsRecording() {
+    runner.run(ctx -> {
+      assertThat(ctx).hasSingleBean(Cache.class);
+      Cache<String, Object> cache = ctx.getBean(Cache.class);
+      cache.put("k", "v");
+      cache.getIfPresent("k");
+      assertThat(cache.stats().hitCount()).isPositive();
+    });
+  }
+
+  /**
    * Verifies that the ruleMatcher bean is created with optional sync publisher.
    */
   @Test
