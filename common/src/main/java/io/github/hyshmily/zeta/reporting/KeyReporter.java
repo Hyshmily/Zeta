@@ -15,11 +15,13 @@
  */
 package io.github.hyshmily.zeta.reporting;
 
+import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
+
 /**
  * Periodically aggregates per-key access counts and publishes them
  * to the Worker via {@link ReportPublisher}.
  *
- * <p>Uses a {@link io.github.hyshmily.zeta.hotkeydetector.doublebuffer.BufferedCounter} double-buffer as a temporary counter store.
+ * <p>Uses a {@link WaveCounter} as a temporary counter store.
  * Burst absorption and backpressure are provided by a bounded
  * {@link java.util.concurrent.LinkedBlockingQueue} between the flush callback and the
  * RabbitMQ publisher.

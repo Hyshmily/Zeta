@@ -58,16 +58,12 @@ public class ConfidenceEvaluator {
    * @see BayesianConfidenceEstimator#evaluateWithAccumulatedPrior
    */
   public ProbabilityResult evaluateWithAccumulatedPrior(
-    long observedCount, double logThreshold, Double cv,
-    double accumulatedMean, double accumulatedPrec
+    long observedCount,
+    double logThreshold,
+    Double cv,
+    double accumulatedMean,
+    double accumulatedPrec
   ) {
-    return estimator.evaluateWithAccumulatedPrior(
-      observedCount, logThreshold, cv, accumulatedMean, accumulatedPrec
-    );
-  }
-
-  /** Returns the configured prior mean from the underlying estimator. */
-  public double getPriorMean() {
-    return estimator.getPriorMean();
+    return estimator.evaluateWithAccumulatedPrior(observedCount, logThreshold, cv, accumulatedMean, accumulatedPrec);
   }
 }

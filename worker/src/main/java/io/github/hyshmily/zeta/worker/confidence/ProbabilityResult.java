@@ -22,6 +22,56 @@ package io.github.hyshmily.zeta.worker.confidence;
  * exceeds the hot threshold, along with the full Normal-Normal conjugate
  * posterior parameters for transparency and debugging.
  *
+ * <h3>Threshold tuning protocol (2026-07-29)</h3>
+ *
+ * <p><b>Recommendation: keep HIGH = 0.95, adjust MEDIUM to 0.75-0.78.</b>
+ * Based on an exhaustive sweep of count values × thresholds × CV scenarios ×
+ * configs:
+ *
+ * <ol>
+ *   <li><b>HIGH_THRESHOLD = 0.95 (current value is correct)</b> — FPR
+ *       &lt; 0.1% for normal traffic patterns; P(hot | classified HIGH)
+ *       &gt; 99.5% for all CV ≤ 0.5.  HIGH gates the expensive HOT
+ *       broadcast, so false positives waste broadcast bandwidth and cause
+ *       cache pollution.  Only keys with observedCount &gt;&gt; ln(threshold)
+ *       reach 0.95 — the desired behavior for production hotness.  Lowering
+ *       to 0.90 triples HIGH classifications without meaningful recall
+ *       gain.</li>
+ *   <li><b>MEDIUM_THRESHOLD = 0.75-0.78 (0.80 is slightly high)</b> — MEDIUM
+ *       gates the CANDIDATE_HOT → CONFIRMED_HOT transition via the
+ *       accumulated prior over multiple windows.  At ln(15) ≈ 2.71 with
+ *       CV=0.3, a key needs only 3-4 consecutive windows to reach HIGH from
+ *       0.75, but 5-7 windows from 0.80; at 0.80, ~15% of borderline keys
+ *       that should be CANDIDATE_HOT are classified LOW, causing unnecessary
+ *       hotStreak cycling.  Lowering to 0.75 reduces the LOW false-negative
+ *       rate by ~40% while increasing false-MEDIUM by &lt; 2%.  Recommended
+ *       range: 0.75 (aggressive) to 0.78 (conservative).</li>
+ *   <li><b>CV adaptation is well-calibrated</b> — the CV adjustment is the
+ *       strongest signal for confidence damping: bursty traffic (CV=0.8)
+ *       naturally reduces confidence by 10-25%, which with the current
+ *       thresholds correctly delays HOT decisions.  No change needed.</li>
+ *   <li><b>Accumulated prior (κ_max=5) is well-tuned</b> — after 5 windows
+ *       the posterior std stabilizes at ~0.33× prior, preventing
+ *       sticky-hot while accumulating evidence.  No change needed.</li>
+ *   <li><b>Impact of lowering MEDIUM from 0.80 to 0.75</b> — HIGH decisions
+ *       (expensive broadcast) unchanged; MEDIUM decisions (cheap candidate
+ *       tracking) +2-3%; LOW decisions where the key is actually hot -8-12%;
+ *       CANDIDATE_HOT → CONFIRMED_HOT latency reduced by ~2 windows (40%
+ *       faster); worst case 1 extra CANDIDATE_HOT entry per 50 keys
+ *       (acceptable memory).</li>
+ *   <li><b>Separation margin (HIGH - MEDIUM)</b> — currently 0.15 (0.95 -
+ *       0.80), recommended 0.17-0.20 (0.95 - 0.75/0.78): a wider margin
+ *       provides better noise immunity for the state machine, and the
+ *       3-bucket system (LOW/MEDIUM/HIGH) needs adequate separation between
+ *       levels to prevent oscillation.</li>
+ * </ol>
+ *
+ * <p><b>Final recommended values:</b> HIGH_THRESHOLD = 0.95 (unchanged),
+ * MEDIUM_THRESHOLD = 0.76 (was 0.80), separation = 0.19 (was 0.15).  This
+ * gives ~99.5% precision at HIGH, ~40% faster CANDIDATE→CONFIRMED promotion
+ * for borderline keys, and &lt; 2% memory increase from extra CANDIDATE_HOT
+ * entries.  Tests done at various traffic scenarios (2026-07-29).
+ *
  * @param probability          P(true frequency &gt; threshold) — the key output decision value
  * @param level                {@link ConfidenceLevel} derived from {@code probability} via {@link #classify}
  * @param posteriorMean        mean of the posterior log-frequency distribution
@@ -39,72 +89,10 @@ public record ProbabilityResult(
   Double cv,
   double accumulatedPrecision
 ) {
-  /**
-   *       ██ RECOMMENDATION: Keep HIGH=0.95, adjust MEDIUM to 0.75-0.78 ██
-   *
-   *       Based on exhaustive sweep of %,d count values × %d thresholds × %d CV scenarios × %d configs:
-   *
-   *       1. HIGH_THRESHOLD = 0.95 (CURRENT VALUE IS CORRECT)
-   *          - At 0.95, FPR is < 0.1%% for normal traffic patterns
-   *          - At 0.95, P(hot|classified HIGH) > 99.5%% for all CV ≤ 0.5
-   *          - The state machine uses HIGH to gate HOT broadcast (expensive);
-   *            false positives waste broadcast bandwidth and cause cache pollution
-   *          - Only keys with observedCount >> ln(threshold) reach 0.95,
-   *            which is the desired behavior for production hotness
-   *          - Lowering to 0.90 increases HIGH classifications ~3x without
-   *            meaningful recall gain
-   *
-   *       2. MEDIUM_THRESHOLD = 0.75-0.78 (CURRENT 0.80 is slightly HIGH)
-   *          - The MEDIUM level gates CANDIDATE_HOT → CONFIRMED_HOT transition
-   *            via accumulated prior over multiple windows
-   *          - DEFAULT config: a key at ln(15) ≈ 2.71 with CV=0.3
-   *            needs only 3-4 consecutive windows to reach HIGH from 0.75,
-   *            but 5-7 windows from 0.80
-   *          - At 0.80, ~15%% of borderline keys that should be CANDIDATE_HOT
-   *            are classified as LOW, causing unnecessary hotStreak cycling
-   *          - Lowering to 0.75 reduces the LOW false-negative rate by ~40%%
-   *            while increasing false-MEDIUM by < 2%%
-   *          - Recommended range: 0.75 (aggressive) to 0.78 (conservative)
-   *
-   *       3. CV ADAPTATION IS WELL-CALIBRATED
-   *          - The CV adjustment is the strongest signal for confidence damping
-   *          - Bursty traffic (CV=0.8) naturally reduces confidence by 10-25%%
-   *            which with current thresholds correctly delays HOT decisions
-   *          - No change needed to adjustLikelihoodStd()
-   *
-   *       4. ACCUMULATED PRIOR (κ_max=5) IS WELL-TUNED
-   *          - After 5 windows, the posterior std stabilizes at ~0.33× prior
-   *          - This prevents sticky-hot while accumulating evidence
-   *          - No change needed
-   *
-   *       5. IMPACT OF LOWERING MEDIUM FROM 0.80 TO 0.75:
-   *          - HIGH decisions (expensive broadcast): no change (same HIGH threshold)
-   *          - MEDIUM decisions (cheap candidate tracking): +2-3%% increase
-   *          - LOW decisions where key is actually hot: -8-12%% decrease
-   *          - CANDIDATE_HOT → CONFIRMED_HOT latency: reduced by ~2 windows (40%% faster)
-   *          - Worst-case: 1 extra CANDIDATE_HOT entry per 50 keys (acceptable memory)
-   *
-   *       6. SEPARATION MARGIN (HIGH - MEDIUM):
-   *          - CURRENT: 0.15 (0.95 - 0.80) — good, but wide
-   *          - RECOMMENDED: 0.17-0.20 (0.95 - 0.75/0.78) — same or slightly wider
-   *          - Wider margin provides better noise immunity for the state machine
-   *          - The 3-bucket system (LOW/MEDIUM/HIGH) needs adequate separation
-   *            between levels to prevent oscillation
-   *
-   *       ██ FINAL RECOMMENDED VALUES ██
-   *         HIGH_THRESHOLD   = 0.95   (unchanged)
-   *         MEDIUM_THRESHOLD = 0.76   (was 0.80)
-   *         SEPARATION       = 0.19   (was 0.15)
-   *
-   *       This gives ~99.5%% precision at HIGH, ~40%% faster CANDIDATE→CONFIRMED
-   *       promotion for borderline keys, and < 2%% memory increase from extra
-   *       CANDIDATE_HOT entries.
-   *
-   *       Tests done at various traffic scenarios.(2026.7.29)
-   *
-   */
+  /** Posterior probability at or above which the level is {@link ConfidenceLevel#HIGH} (see class doc). */
   private static final double HIGH_THRESHOLD = 0.95;
 
+  /** Posterior probability at or above which the level is {@link ConfidenceLevel#MEDIUM} (see class doc). */
   private static final double MEDIUM_THRESHOLD = 0.76;
 
   public ProbabilityResult(

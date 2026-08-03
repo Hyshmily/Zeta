@@ -19,7 +19,7 @@ import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalid
 import static io.github.hyshmily.zeta.constants.ZetaConstants.TOPK_INCR;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.BufferedCounter;
+import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.AddResult;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
@@ -42,7 +42,7 @@ import org.springframework.beans.factory.InitializingBean;
  *   <li><b>Direct</b> ({@link #addDirect}) — synchronous sketch and heap update
  *       without buffering, used by the Worker and for internal detector calls.</li>
  *   <li><b>Buffered</b> ({@link #add}) — asynchronous, batched path via
- *       {@link BufferedCounter} that aggregates high-frequency single-key
+ *       {@link WaveCounter} that aggregates high-frequency single-key
  *       increments and flushes them every 500 ms to the direct path. Used
  *       by the app-level read path.</li>
  * </ul>
@@ -52,13 +52,13 @@ import org.springframework.beans.factory.InitializingBean;
  * {@link #afterPropertiesSet()} and shut down in {@link #destroy()}.
  *
  * <p>Thread-safe: all public methods delegate to the thread-safe
- * HeavyKeeper and BufferedCounter implementations.
+ * HeavyKeeper and WaveCounter implementations.
  */
 @Internal
 public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
 
   private final HeavyKeeper heavyKeeper;
-  private final BufferedCounter cacheBufferedCounter;
+  private final WaveCounter cacheBufferedCounter;
 
   /**
    * Creates a detector that wraps the given HeavyKeeper instance.
@@ -68,7 +68,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   public HotKeyDetector(HeavyKeeper heavyKeeper) {
     this.heavyKeeper = heavyKeeper;
-    this.cacheBufferedCounter = new BufferedCounter(heavyKeeper::addDirect);
+    this.cacheBufferedCounter = new WaveCounter(heavyKeeper::addDirect);
   }
 
   /**
@@ -79,7 +79,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   public HotKeyDetector(HeavyKeeper heavyKeeper, ScheduledExecutorService scheduler) {
     this.heavyKeeper = heavyKeeper;
-    this.cacheBufferedCounter = new BufferedCounter(heavyKeeper::addDirect, scheduler);
+    this.cacheBufferedCounter = new WaveCounter(heavyKeeper::addDirect, scheduler);
   }
 
   /**

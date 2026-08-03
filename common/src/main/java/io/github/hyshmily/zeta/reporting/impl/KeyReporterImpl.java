@@ -19,7 +19,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.TOPK_INCR;
 import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.BufferedCounter;
+import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
 import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
@@ -40,10 +40,10 @@ import lombok.extern.slf4j.Slf4j;
  * Periodically aggregates per-key access counts and publishes them
  * to the Worker via {@link ReportPublisher}.
  *
- * <p>Uses a {@link BufferedCounter} double-buffer as a temporary counter store;
- * the active buffer accepts lock-free writes while the standby buffer is drained
- * and reset on each flush cycle. Flushed to the appropriate shard at a fixed
- * interval.
+ * <p>Uses a {@link WaveCounter} as a temporary counter store; hot keys
+ * aggregate in zero-contention local maps while cold keys write directly,
+ * and the shared snapshot is flushed to the appropriate shard at a fixed
+ * interval.</p>
  *
  * <p>Keys are routed via the {@link RingManager} consistent-hash ring, ensuring the
  * same key always maps to the same Worker node even as the cluster scales.
@@ -64,14 +64,14 @@ import lombok.extern.slf4j.Slf4j;
 @Internal
 public class KeyReporterImpl implements KeyReporter {
 
-  /** Maximum distinct keys in the BufferedCounter before eager swap. */
+  /** Maximum distinct keys in the counter before eager swap (legacy constant, kept for compat). */
   private static final int MAX_BUFFER_SIZE = 100_000;
 
-  /** Fraction of maxBufferSize that triggers an eager buffer swap. */
+  /** Fraction of maxBufferSize that triggers an eager buffer swap (legacy, unused). */
   private static final double EAGER_SWAP_RATIO = 0.8;
 
   /** Double-buffered counter aggregating per-key access counts between flushes. */
-  private final BufferedCounter reportBufferedCounter;
+  private final WaveCounter reportBufferedCounter;
 
   /** Publishes aggregated reports to RabbitMQ. */
   private final ReportPublisher reportPublisher;
@@ -178,7 +178,7 @@ public class KeyReporterImpl implements KeyReporter {
         }
       }
     );
-    this.reportBufferedCounter = new BufferedCounter(
+    this.reportBufferedCounter = new WaveCounter(
       this::onFlush,
       MAX_BUFFER_SIZE,
       reportIntervalMs,
@@ -200,7 +200,7 @@ public class KeyReporterImpl implements KeyReporter {
    * Record one access for the given cache key.
    *
    * <p>Idempotent per-key local counter increment.  The counter is stored in
-   * a double-buffered {@link BufferedCounter} and flushed periodically to the
+   * a routed {@link WaveCounter} and flushed periodically to the
    * configured Workers.
    *
    * @param cacheKey the accessed key
@@ -214,7 +214,7 @@ public class KeyReporterImpl implements KeyReporter {
    * Start the periodic flush scheduler and the reportToWorker dispatcher.
    * Idempotent — subsequent calls are silently ignored.
    *
-   * <p>The flush callback drains the {@link BufferedCounter}, groups entries by
+   * <p>The flush callback drains the {@link WaveCounter}, groups entries by
    * target (shard index or nodeId), and enqueues them.  Actual publishing
    * to RabbitMQ runs on dedicated consumer threads, decoupling the flush
    * callback from network I/O.
@@ -278,7 +278,7 @@ public class KeyReporterImpl implements KeyReporter {
   }
 
   /**
-   * Callback invoked by the {@link BufferedCounter} on each scheduled flush.
+   * Callback invoked by the {@link WaveCounter} on each scheduled flush.
    * Groups the drained key-count map by target Worker via consistent-hash
    * routing and enqueues one {@link ShardBatch} per target.
    *
