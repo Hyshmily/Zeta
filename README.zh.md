@@ -620,6 +620,8 @@ public String updateLocal(String id, String val) { ... }
 
 启用 `zeta.sync.enabled=true`。
 
+读路径条目(L1 miss、软过期刷新、null 哨兵)会以值读取后探测到的 Redis `dataVersion` 盖章(批量装载走 pipeline),迟到的过期广播会被共享的版本比较拒绝,而不会覆盖更新的值。探测失败时条目不盖章(fail-open);详见 ADR-0033。
+
 ## 规则系统
 
 启用 `zeta.sync.enabled=true` 以启用跨实例规则同步。规则系统提供两种操作：

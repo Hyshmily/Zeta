@@ -176,8 +176,8 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
-        long defultHotHardTtl = expireManager.getEffectiveHotHardTtlMs();
-        long defultHotSoftTtl = expireManager.getEffectiveHotSoftTtlMs();
+        long defultHotHardTtl = expireManager.ttlPolicy().getEffectiveHotHardTtlMs();
+        long defultHotSoftTtl = expireManager.ttlPolicy().getEffectiveHotSoftTtlMs();
 
         // DCL second check – atomic with to write
         if (existing instanceof CacheEntry ce) {
@@ -185,33 +185,35 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
             return existing;
           }
 
-          return expireManager.applyTtl(
-            expireManager
-              .replaceEntryValue(ce, value)
-              .withDecisionVersion(wm.decisionVersion())
-              .withDecisionNodeId(wm.nodeId())
-              .withDecisionEpoch(wm.epoch())
-              .withKeyState(KeyState.HOT),
-            defultHotHardTtl,
-            defultHotSoftTtl
-          );
+          return expireManager
+            .ttlPolicy()
+            .applyTtl(
+              expireManager
+                .replaceEntryValue(ce, value)
+                .withDecisionVersion(wm.decisionVersion())
+                .withDecisionNodeId(wm.nodeId())
+                .withDecisionEpoch(wm.epoch())
+                .withKeyState(KeyState.HOT),
+              defultHotHardTtl,
+              defultHotSoftTtl
+            );
         }
 
         return expireManager.createBuilder(
           value,
-          actualDataVersion,
-          actualDegraded,
-          wm.decisionVersion(),
+          new ExpireManager.VersionStamp(actualDataVersion, actualDegraded),
           // Preserve the decision identity on the create path: without
           // nodeId/epoch, VersionGuard.shouldSkipForWorker treats every
           // subsequent decision as cross-Worker (unconditional accept), so
           // out-of-order replayed messages could overwrite this entry.
-          wm.nodeId(),
-          wm.epoch(),
-          defultHotHardTtl,
-          defultHotSoftTtl,
-          expireManager.getEffectiveHardTtlMs(),
-          expireManager.getEffectiveSoftTtlMs(),
+          new ExpireManager.DecisionStamp(wm.decisionVersion(), wm.nodeId(), wm.epoch()),
+          new ExpireManager.TtlSpec(
+            defultHotHardTtl,
+            defultHotSoftTtl,
+            expireManager.ttlPolicy().getEffectiveHardTtlMs(),
+            expireManager.ttlPolicy().getEffectiveSoftTtlMs()
+          ),
+          null,
           KeyState.HOT
         );
       });
@@ -275,14 +277,12 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
           long hardTtlMsIfZero = normalHardTtlMs > 0 ? normalHardTtlMs : COOL_DEFAULT_PROTECTION_HARDTTL_TIME;
           long softTtlMsIfZero = normalSoftTtlMs > 0 ? normalSoftTtlMs : COOL_DEFAULT_PROTECTION_SOFTTTL_TIME;
 
-          long hardTtlExpireAtMs = expireManager.toHardExpireTimestamp(
-            hardTtlMsIfZero,
-            COOL_DEFAULT_PROTECTION_HARDTTL_TIME_RATIO
-          );
-          long softTtlExpireAtMs = expireManager.toSoftExpireTimestamp(
-            softTtlMsIfZero,
-            COOL_DEFAULT_PROTECTION_SOFTTTL_TIME_RATIO
-          );
+          long hardTtlExpireAtMs = expireManager
+            .ttlPolicy()
+            .toHardExpireTimestamp(hardTtlMsIfZero, COOL_DEFAULT_PROTECTION_HARDTTL_TIME_RATIO);
+          long softTtlExpireAtMs = expireManager
+            .ttlPolicy()
+            .toSoftExpireTimestamp(softTtlMsIfZero, COOL_DEFAULT_PROTECTION_SOFTTTL_TIME_RATIO);
 
           cooled[0] = true;
           return cacheEntry.withDecisionAndTtlAndState(

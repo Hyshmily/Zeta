@@ -270,8 +270,8 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
         clearInvalidation(key);
 
         if (existing instanceof CacheEntry cacheEntry) {
-          long hardExpireAt = expireManager.computeHardExpireAt(cacheEntry.getHardTtlMs());
-          long softExpireAt = expireManager.computeSoftExpireAt(cacheEntry.getSoftTtlMs());
+          long hardExpireAt = expireManager.ttlPolicy().computeHardExpireAt(cacheEntry.getHardTtlMs());
+          long softExpireAt = expireManager.ttlPolicy().computeSoftExpireAt(cacheEntry.getSoftTtlMs());
           return cacheEntry.withValueAndRefreshMeta(
             expireManager.wrapValue(value),
             sm.version(),
@@ -280,17 +280,14 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
             softExpireAt
           );
         }
-        long defaultHardTtlMs = expireManager.getEffectiveHardTtlMs();
-        long defaultSoftTtlMs = expireManager.getEffectiveSoftTtlMs();
+        long defaultHardTtlMs = expireManager.ttlPolicy().getEffectiveHardTtlMs();
+        long defaultSoftTtlMs = expireManager.ttlPolicy().getEffectiveSoftTtlMs();
         return expireManager.createBuilder(
           value,
-          sm.version(),
-          sm.isVersionDegraded(),
-          0L,
-          defaultHardTtlMs,
-          defaultSoftTtlMs,
-          defaultHardTtlMs,
-          defaultSoftTtlMs,
+          new ExpireManager.VersionStamp(sm.version(), sm.isVersionDegraded()),
+          null,
+          new ExpireManager.TtlSpec(defaultHardTtlMs, defaultSoftTtlMs, defaultHardTtlMs, defaultSoftTtlMs),
+          null,
           KeyState.NORMAL
         );
       });

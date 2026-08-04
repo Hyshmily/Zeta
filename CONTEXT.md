@@ -42,6 +42,7 @@
 - **decisionVersion** — Monotonically increasing `AtomicLong` on the Worker. Orders HOT/COOL decisions. Never degraded. Independent of dataVersion.
 - **rulesVersion** — Monotonically increasing `AtomicLong` in `RuleMatcher`. Orders rule set changes across instances. Used to prevent stale rule broadcasts from overwriting newer rule sets. Independent of both dataVersion and decisionVersion.
 - **Degraded Version** — A dataVersion produced when Redis is unavailable. Previously `Long.MIN_VALUE + localCounter` (per-JVM partitioned); now `Long.MIN_VALUE + SnowflakeId` (globally time-sortable, cross-instance comparable). Marked with `isVersionDegraded=true`. Always loses against a normal (Redis) version in broadcast comparisons — the `Long.MIN_VALUE` offset ensures degraded versions sort below any positive Redis INCR value.
+- **Version-Stamped Load** — Read-path invariant (ADR-0033): every L1 entry created by the read path (miss load, soft-expire refresh, NullValue sentinel) carries a `dataVersion` probed from Redis **after** the value read, so the stamped version is never lower than the value's true version. Probe failure withholds the stamp (fail-open) — an entry is never demoted to degraded by a failed probe. This lets the shared 4-case comparison reject late stale broadcasts, which a zero-stamped entry would admit.
 
 ## Lifecycle
 

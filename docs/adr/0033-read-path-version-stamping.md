@@ -1,0 +1,17 @@
+# Read-Path Version Stamping: Every Load Carries Its Probed dataVersion
+
+The read path was version-blind: `buildEntry` hard-coded `VERSION_DEFAULT (0)` on L1 misses (`HotKeyCache`), soft-expire refreshes stamped the snapshot version captured at refresh creation (`applyRefreshTask`), and a zero-stamped entry accepts any late REFRESH broadcast with `m > 0` under the `shouldSkipForSync` 4-case matrix — a stale broadcast value could overwrite a newer loaded value, and a fresh refresh value could carry a stale version. The Worker HOT-create path already probes `currentVersion()` before entry creation (ADR-0030); the read path did not. We decided every L1 entry created by the read path — miss load, soft-expire refresh, and `NullValue` sentinel — is stamped with the `dataVersion` probed from Redis **after** the value read, and the shared 4-case comparison (`VersionGuard.shouldSkipForSync`) decides acceptance.
+
+**Four rules:**
+
+- **Probe after the value read.** `putThrough` runs the user writer before the version INCR, so a version probed after a value read is never lower than the value's true version. Stamping is monotone in the reject-more direction: an entry can claim a version one write ahead of its data, never behind. Residual staleness is bounded by the next refresh/anti-entropy cycle (ADR-0013).
+- **Probe failure withholds the stamp (fail-open).** When `currentVersion()` fails, the load falls back to today's behavior: preserve the existing entry's version, or `VERSION_DEFAULT` on a cold create. A failed probe never writes a degraded flag onto a healthy entry — the 4-case matrix grants degraded entries no protection against normal broadcasts (case 4), so stamping degraded would be self-demotion.
+- **Batch loads probe in one RTT.** The batch miss path probes all version keys via pipelined GETs (a `currentVersions(Iterable)` overload on `VersionController`), with per-key fail-open. Concurrent waiters share the probe through SingleFlight's existing dedup.
+- **Refresh apply guard reuses the 4-case comparison.** The refresh result is applied iff `!shouldSkipForSync(existing, probedVersion, false)` — degraded existing + recovered-Redis probe is never skipped (normal overwrites degraded), both normal applies only when the entry is older. A raw numeric `entry.getDataVersion() > probedVersion` guard would be wrong here: a degraded (negative) entry must not discard a normal probe just because the numbers say so. When the probe fails, the existing L1-internal guard against the snapshot remains.
+
+**Consequences:**
+
+- **Cost:** +1 Redis GET per cold miss and per soft-expire refresh (async thread), +1 GET per null miss, one pipelined round trip per batch miss. The L1-hit hot path is untouched (ADR-0030 — no I/O under the bin lock, none on hits).
+- **Closed holes:** a zero-stamped entry can no longer admit a late stale broadcast (previous `buildEntry` behavior); a fresh refresh value can no longer carry a stale version that lets an older broadcast overwrite it; a null sentinel can no longer be overwritten by stale data.
+- **Self-healing of degraded entries:** a successful probe stamps a normal version, converting a degraded entry back to the normal domain (case-4 direction) without waiting for a broadcast.
+- **Probe-failure windows:** transient one-op failures reopen the stale-wins window briefly; bounded by the next cycle. Redis-down loads fail before the probe, so the window is narrower than it sounds.

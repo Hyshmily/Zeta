@@ -23,6 +23,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
@@ -76,6 +77,7 @@ class ZetaEndpointTest {
     ruleMatcher = new RuleMatcherImpl(Optional.empty(), Optional.empty());
     workerHealthMonitor = mock(RingManager.class);
     expireManager = mock(ExpireManager.class);
+    when(expireManager.ttlPolicy()).thenReturn(mock(TtlPolicy.class));
     versionController = mock(VersionController.class);
     cacheSyncPublisher = mock(CacheSyncPublisher.class);
     zetaBayesianSM = mock(ZetaBayesianSM.class);
@@ -122,10 +124,10 @@ class ZetaEndpointTest {
     when(KeyReporter.dispatcherExpired()).thenReturn(2L);
     when(KeyReporter.dispatcherDropped()).thenReturn(1L);
     when(KeyReporter.getPendingKeyCount()).thenReturn(5L);
-    when(expireManager.getEffectiveHardTtlMs()).thenReturn(300000L);
-    when(expireManager.getEffectiveSoftTtlMs()).thenReturn(30000L);
-    when(expireManager.getEffectiveHotHardTtlMs()).thenReturn(3600000L);
-    when(expireManager.getEffectiveHotSoftTtlMs()).thenReturn(300000L);
+    when(expireManager.ttlPolicy().getEffectiveHardTtlMs()).thenReturn(300000L);
+    when(expireManager.ttlPolicy().getEffectiveSoftTtlMs()).thenReturn(30000L);
+    when(expireManager.ttlPolicy().getEffectiveHotHardTtlMs()).thenReturn(3600000L);
+    when(expireManager.ttlPolicy().getEffectiveHotSoftTtlMs()).thenReturn(300000L);
     when(expireManager.getRefreshLimiter()).thenReturn(new Semaphore(50));
     when(versionController.isRedisConfigured()).thenReturn(true);
     when(versionController.getDegradedVersionCount()).thenReturn(0L);
@@ -329,10 +331,10 @@ class ZetaEndpointTest {
   void localSection_shouldSkipRefreshPoolWhenLimiterNull() {
     mockTopK(hotKeyDetector, List.of(), 0L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
-    when(expireManager.getEffectiveHardTtlMs()).thenReturn(300000L);
-    when(expireManager.getEffectiveSoftTtlMs()).thenReturn(30000L);
-    when(expireManager.getEffectiveHotHardTtlMs()).thenReturn(3600000L);
-    when(expireManager.getEffectiveHotSoftTtlMs()).thenReturn(300000L);
+    when(expireManager.ttlPolicy().getEffectiveHardTtlMs()).thenReturn(300000L);
+    when(expireManager.ttlPolicy().getEffectiveSoftTtlMs()).thenReturn(30000L);
+    when(expireManager.ttlPolicy().getEffectiveHotHardTtlMs()).thenReturn(3600000L);
+    when(expireManager.ttlPolicy().getEffectiveHotSoftTtlMs()).thenReturn(300000L);
     when(expireManager.getRefreshLimiter()).thenReturn(null);
     ZetaEndpoint ep = endpointWithAll();
     Map<String, Object> info = ep.hotKeyInfo(100);
@@ -373,10 +375,7 @@ class ZetaEndpointTest {
    */
   @Test
   void workerSection_shouldOmitHealthWhenHealthViewNull() {
-    ZetaEndpoint ep = ZetaEndpoint.builder()
-      .properties(properties)
-      .zetaBayesianSM(zetaBayesianSM)
-      .build();
+    ZetaEndpoint ep = ZetaEndpoint.builder().properties(properties).zetaBayesianSM(zetaBayesianSM).build();
 
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> worker = (Map<String, Object>) info.get("worker");

@@ -202,7 +202,7 @@ public class HotKeyCache {
 
     return (
       (cacheEntry != null &&
-        !expireManager.isLogicallyExpired(cacheEntry) &&
+        !expireManager.ttlPolicy().isLogicallyExpired(cacheEntry) &&
         cacheEntry.getKeyState() == KeyState.HOT) ||
       hotKeyDetector.contains(cacheKey)
     );
@@ -502,7 +502,7 @@ public class HotKeyCache {
             case RETURN -> {
             }
             case REVALIDATE -> {
-              if (expireManager.isSoftExpired(ce)) {
+              if (expireManager.ttlPolicy().isSoftExpired(ce)) {
                 caffeineCache.invalidate(nk);
                 return loadAndCache(nk, reader, hardTtlMs, softTtlMs, nullCaching, skipReport);
               }
@@ -592,7 +592,11 @@ public class HotKeyCache {
       return Optional.empty();
     }
 
-    if (stalePolicy == StalePolicy.REVALIDATE && raw instanceof CacheEntry ce && expireManager.isSoftExpired(ce)) {
+    if (
+      stalePolicy == StalePolicy.REVALIDATE &&
+      raw instanceof CacheEntry ce &&
+      expireManager.ttlPolicy().isSoftExpired(ce)
+    ) {
       return Optional.empty();
     }
 
@@ -623,10 +627,12 @@ public class HotKeyCache {
     if (!isWorkerManaged(raw) || reader == null) return;
 
     CacheEntry ce = (CacheEntry) raw;
-    if (!expireManager.isSoftExpired(ce)) return;
+    if (!expireManager.ttlPolicy().isSoftExpired(ce)) return;
 
     long effectiveSoft = computeSoftTtlForRefresh(softTtlMs, ce);
-    expireManager.triggerBackgroundRefresh(cacheKey, reader, effectiveSoft);
+    // ADR-0033: wrap the reader so the refresh task probes dataVersion after
+    // the value read and stamps the result; probe failures stay fail-open.
+    expireManager.triggerBackgroundRefresh(cacheKey, () -> probeVersioned(cacheKey, reader.get()), effectiveSoft);
   }
 
   /**
@@ -640,9 +646,9 @@ public class HotKeyCache {
    */
   private long computeSoftTtlForRefresh(long softTtlMs, CacheEntry ce) {
     if (softTtlMs > 0) return softTtlMs;
-    if (KeyState.HOT == ce.getKeyState()) return expireManager.getEffectiveHotSoftTtlMs();
+    if (KeyState.HOT == ce.getKeyState()) return expireManager.ttlPolicy().getEffectiveHotSoftTtlMs();
     if (ce.getNormalSoftTtlMs() > 0) return ce.getNormalSoftTtlMs();
-    return expireManager.getEffectiveSoftTtlMs();
+    return expireManager.ttlPolicy().getEffectiveSoftTtlMs();
   }
 
   /**
@@ -684,6 +690,53 @@ public class HotKeyCache {
   }
 
   /**
+   * Wrap a loaded value with the {@code dataVersion} probed from Redis
+   * <b>after</b> the value read (ADR-0033 — Read-Path Version Stamping).
+   *
+   * <p>The probe-after-read ordering is monotone-safe: {@code putThrough}
+   * runs the user writer before the version INCR, so the stamped version is
+   * never lower than the value's true version (reject-more direction).
+   *
+   * <p>Fail-open: a failed probe withholds the stamp ({@code stamped=false})
+   * and callers fall back to the legacy version handling — an entry is never
+   * demoted to degraded by a failed probe. The default implementation already
+   * swallows Redis errors; the outer guard covers custom {@link VersionController}
+   * implementations that may throw.
+   *
+   * @param cacheKey the cache key the value was loaded for
+   * @param value    the loaded value (may be {@code null})
+   * @return the value paired with the probed version
+   */
+  private VersionedValue probeVersioned(String cacheKey, Object value) {
+    try {
+      Optional<Long> probed = versionController.currentVersion(cacheKey);
+      return probed
+        .map(v -> new VersionedValue(value, v, true))
+        .orElseGet(() -> new VersionedValue(value, VERSION_DEFAULT, false));
+    } catch (RuntimeException e) {
+      log.warn("Version probe failed for key={}, stamp withheld (fail-open)", cacheKey, e);
+      return new VersionedValue(value, VERSION_DEFAULT, false);
+    }
+  }
+
+  /**
+   * Pair a probed version (from {@code currentVersions}) with a loaded value.
+   *
+   * <p>Fail-open: a missing or failed probe produces an unstamped
+   * {@link VersionedValue}.
+   *
+   * @param value the loaded value (may be {@code null})
+   * @param probe the per-key probe result
+   * @return the value paired with the probed version, or unstamped
+   */
+  @SuppressWarnings("all")
+  private static VersionedValue toVersionedValue(Object value, Optional<Long> probe) {
+    return probe
+      .map(v -> new VersionedValue(value, v, true))
+      .orElseGet(() -> new VersionedValue(value, VERSION_DEFAULT, false));
+  }
+
+  /**
    * Load via SingleFlight, detect hot key, cache with HOT or NORMAL TTL, and return value.
    *
    * @param cacheKey   the key to load
@@ -701,13 +754,21 @@ public class HotKeyCache {
     boolean skipReport
   ) {
     afterGuard(cacheKey);
-    Optional<T> result = singleFlight.load(cacheKey, reader);
+    // ADR-0033: the composite supplier runs inside the SingleFlight execution
+    // scope, so concurrent waiters share one (value, probedVersion) pair —
+    // the version probe is coalesced exactly like the value load.
+    Optional<VersionedValue> result = singleFlight.load(cacheKey, () -> probeVersioned(cacheKey, reader.get()));
 
     if (result.isEmpty()) {
       return mapEmpty(cacheKey, nullCaching);
     }
-    T value = result.get();
-    return Optional.of(processLoaded(cacheKey, value, hardTtlMs, softTtlMs, skipReport));
+    VersionedValue vv = result.get();
+    if (vv.value() == null) {
+      return mapEmpty(cacheKey, nullCaching, vv);
+    }
+    @SuppressWarnings("unchecked")
+    T value = (T) vv.value();
+    return Optional.of(processLoaded(cacheKey, value, vv, hardTtlMs, softTtlMs, skipReport));
   }
 
   /**
@@ -735,6 +796,9 @@ public class HotKeyCache {
     boolean failOnError
   ) {
     Map<String, Optional<T>> loaded = singleFlight.load(cacheKeys, reader, failOnError);
+    // ADR-0033: one pipelined round trip for all version keys; per-key
+    // fail-open (a failed probe leaves that key unstamped).
+    Map<String, Optional<Long>> probes = versionController.currentVersions(loaded.keySet());
     Map<String, Optional<T>> results = new LinkedHashMap<>();
 
     for (String key : cacheKeys) {
@@ -742,9 +806,14 @@ public class HotKeyCache {
         key,
         execute(key, failOnError, () -> {
           Optional<T> opt = loaded.get(key);
-          return opt
-            .map(t -> processLoaded(key, t, hardTtlMs, softTtlMs, skipReports.get(key)))
-            .or(() -> mapEmpty(key, true));
+          Optional<Long> probe = probes.getOrDefault(key, Optional.empty());
+          if (opt.isEmpty()) {
+            return mapEmpty(key, true, toVersionedValue(null, probe));
+          }
+          T t = opt.get();
+          return Optional.of(
+            processLoaded(key, t, toVersionedValue(t, probe), hardTtlMs, softTtlMs, skipReports.get(key))
+          );
         })
       );
     }
@@ -771,13 +840,39 @@ public class HotKeyCache {
    */
   @SuppressWarnings("unchecked")
   private <T> Optional<T> mapEmpty(String cacheKey, boolean nullCaching) {
+    return mapEmpty(cacheKey, nullCaching, new VersionedValue(null, VERSION_DEFAULT, false));
+  }
+
+  /**
+   * Handle the case when SingleFlight returns empty or a null value: either
+   * return a stale entry when the circuit breaker is open, or cache a
+   * {@link NullValue} sentinel with a short TTL and return
+   * {@link Optional#empty()}.
+   *
+   * <p>ADR-0033: a {@code NullValue} sentinel is stamped with the probed
+   * version like any other load, so a late stale broadcast cannot overwrite
+   * a "source returned null" marker; an unstamped sentinel keeps the legacy
+   * version handling (fail-open).
+   *
+   * @param cacheKey the key that was loaded (resulted in a null value)
+   * @param nullCaching whether a null result should be cached as a sentinel
+   * @param vv       the loaded value carrier (value is {@code null} here) with
+   *                 the probed version, if any
+   * @param <T>      the expected value type
+   * @return a stale value if the circuit breaker is open and a cached entry
+   *         exists within its hard TTL; {@link Optional#empty()} otherwise (a
+   *         NullValue sentinel is written to L1 unless a hard-expired entry
+   *         was present)
+   */
+  @SuppressWarnings("unchecked")
+  private <T> Optional<T> mapEmpty(String cacheKey, boolean nullCaching, VersionedValue vv) {
     if (singleFlight.isBreakerOpen()) {
       Object stale = caffeineCache.getIfPresent(cacheKey);
 
       if (stale != null) {
         // Hard-expired entries are never served as stale, even during an
         // outage: the hard TTL contract (CONTEXT.md "Expire") is not bypassed.
-        if (stale instanceof CacheEntry ce && expireManager.isLogicallyExpired(ce)) {
+        if (stale instanceof CacheEntry ce && expireManager.ttlPolicy().isLogicallyExpired(ce)) {
           log.debug("CB open, discarding hard-expired entry for key={}", cacheKey);
           return Optional.empty();
         }
@@ -787,7 +882,7 @@ public class HotKeyCache {
       }
     }
     if (nullCaching) {
-      builtNullValueEntry(cacheKey);
+      builtNullValueEntry(cacheKey, vv);
     }
     return Optional.empty();
   }
@@ -797,22 +892,21 @@ public class HotKeyCache {
    * subsequent reads return empty without hitting the reader.
    *
    * @param cacheKey the key to store the null sentinel for
+   * @param vv       the load carrier; the sentinel is stamped with the probed
+   *                 version when present (ADR-0033), otherwise it stays at
+   *                 {@link VERSION_DEFAULT}
    */
-  private void builtNullValueEntry(String cacheKey) {
-    long nullExpireAtMs = expireManager.computeNullExpireAt(nullTtlMs());
+  private void builtNullValueEntry(String cacheKey, VersionedValue vv) {
+    long nullExpireAtMs = expireManager.ttlPolicy().computeNullExpireAt(nullTtlMs());
+    long dataVersion = vv.stamped() ? vv.dataVersion() : VERSION_DEFAULT;
     caffeineCache.put(
       cacheKey,
       expireManager.createBuilder(
         NullValue.INSTANCE,
-        VERSION_DEFAULT,
-        false,
-        0L,
-        nullTtlMs(),
-        0L,
-        nullExpireAtMs,
-        0L,
-        0L,
-        0L,
+        new ExpireManager.VersionStamp(dataVersion, false),
+        null,
+        new ExpireManager.TtlSpec(nullTtlMs(), 0L, 0L, 0L),
+        new ExpireManager.ExpiryAt(nullExpireAtMs, 0L),
         KeyState.NORMAL
       )
     );
@@ -824,26 +918,35 @@ public class HotKeyCache {
    *
    * @param cacheKey   the key to cache
    * @param value      the loaded value (must not be null at this point)
+   * @param vv         the load carrier with the probed {@code dataVersion}
+   *                   (ADR-0033) for stamping the L1 entry
    * @param hardTtlMs  hard TTL override (0 = use configured default)
    * @param softTtlMs  soft TTL override (0 = use configured default)
    * @param skipReport if {@code true}, skip reporting to Worker
    * @param <T>        the value type
    * @return the loaded value (unchanged)
    */
-  private <T> T processLoaded(String cacheKey, T value, long hardTtlMs, long softTtlMs, boolean skipReport) {
+  private <T> T processLoaded(
+    String cacheKey,
+    T value,
+    VersionedValue vv,
+    long hardTtlMs,
+    long softTtlMs,
+    boolean skipReport
+  ) {
     afterGuard(cacheKey);
 
-    long effectiveHard = expireManager.resolveEffectiveHardTtl(hardTtlMs);
-    long effectiveSoft = expireManager.resolveEffectiveSoftTtl(softTtlMs);
+    long effectiveHard = expireManager.ttlPolicy().resolveEffectiveHardTtl(hardTtlMs);
+    long effectiveSoft = expireManager.ttlPolicy().resolveEffectiveSoftTtl(softTtlMs);
 
     dispatcher.report(cacheKey, skipReport);
     if (hotKeyDetector.contains(cacheKey)) {
-      long hotHard = expireManager.resolveEffectiveHotHard(hardTtlMs);
-      long hotSoft = expireManager.resolveEffectiveHotSoft(softTtlMs);
+      long hotHard = expireManager.ttlPolicy().resolveEffectiveHotHard(hardTtlMs);
+      long hotSoft = expireManager.ttlPolicy().resolveEffectiveHotSoft(softTtlMs);
 
-      loadCacheEntry(cacheKey, value, hotHard, hotSoft, KeyState.HOT, effectiveHard, effectiveSoft);
+      loadCacheEntry(cacheKey, value, hotHard, hotSoft, KeyState.HOT, effectiveHard, effectiveSoft, vv);
     } else {
-      loadCacheEntry(cacheKey, value, effectiveHard, effectiveSoft, KeyState.NORMAL, effectiveHard, effectiveSoft);
+      loadCacheEntry(cacheKey, value, effectiveHard, effectiveSoft, KeyState.NORMAL, effectiveHard, effectiveSoft, vv);
     }
     return value;
   }
@@ -859,7 +962,12 @@ public class HotKeyCache {
    * @param state         the key state to assign (HOT or NORMAL)
    * @param normalHardTtl the normal (non-hot) hard TTL to preserve for demotion
    * @param normalSoftTtl the normal (non-hot) soft TTL to preserve for demotion
+   * @param vv            the load carrier; when stamped (ADR-0033) the entry is
+   *                      built with the probed {@code dataVersion}; when
+   *                      unstamped (fail-open) an existing entry's version
+   *                      identity is preserved, else {@link VERSION_DEFAULT}
    */
+  @SuppressWarnings("all")
   private void loadCacheEntry(
     String cacheKey,
     Object value,
@@ -867,7 +975,8 @@ public class HotKeyCache {
     long softTtlMs,
     KeyState state,
     long normalHardTtl,
-    long normalSoftTtl
+    long normalSoftTtl,
+    VersionedValue vv
   ) {
     caffeineCache
       .asMap()
@@ -875,7 +984,24 @@ public class HotKeyCache {
         if (isWorkerManaged(existing)) {
           return existing;
         }
-        return buildEntry(value, hardTtlMs, softTtlMs, state, normalHardTtl, normalSoftTtl);
+        if (vv.stamped()) {
+          return buildEntry(value, hardTtlMs, softTtlMs, state, normalHardTtl, normalSoftTtl, vv.dataVersion(), false);
+        }
+        if (existing instanceof CacheEntry ce) {
+          // Fail-open (ADR-0033): preserve the existing entry's version
+          // identity instead of zeroing it on reload.
+          return buildEntry(
+            value,
+            hardTtlMs,
+            softTtlMs,
+            state,
+            normalHardTtl,
+            normalSoftTtl,
+            ce.getDataVersion(),
+            ce.isVersionDegraded()
+          );
+        }
+        return buildEntry(value, hardTtlMs, softTtlMs, state, normalHardTtl, normalSoftTtl, VERSION_DEFAULT, false);
       });
   }
 
@@ -889,31 +1015,33 @@ public class HotKeyCache {
    * @param state          the key state to assign
    * @param normalHardTtlMs the normal (non-hot) hard TTL to preserve for demotion
    * @param normalSoftTtlMs the normal (non-hot) soft TTL to preserve for demotion
+   * @param dataVersion    the {@code dataVersion} to stamp on the entry
+   *                       (ADR-0033); {@link VERSION_DEFAULT} when the probe
+   *                       was withheld
+   * @param isVersionDegraded whether the stamped version is degraded
    * @param <T>            the value type
    * @return a new {@link CacheEntry}
    */
+  @SuppressWarnings("all")
   private <T> CacheEntry buildEntry(
     T value,
     long hardTtlMs,
     long softTtlMs,
     KeyState state,
     long normalHardTtlMs,
-    long normalSoftTtlMs
+    long normalSoftTtlMs,
+    long dataVersion,
+    boolean isVersionDegraded
   ) {
-    long hardTtlExpireAtMs = expireManager.computeHardExpireAt(hardTtlMs);
-    long softTtlExpireAtMs = softTtlMs > 0 ? expireManager.computeSoftExpireAt(softTtlMs) : 0L;
+    long hardTtlExpireAtMs = expireManager.ttlPolicy().computeHardExpireAt(hardTtlMs);
+    long softTtlExpireAtMs = softTtlMs > 0 ? expireManager.ttlPolicy().computeSoftExpireAt(softTtlMs) : 0L;
 
     return expireManager.createBuilder(
       value,
-      VERSION_DEFAULT,
-      false,
-      VERSION_DEFAULT,
-      hardTtlMs,
-      softTtlMs,
-      hardTtlExpireAtMs,
-      softTtlExpireAtMs,
-      normalHardTtlMs,
-      normalSoftTtlMs,
+      new ExpireManager.VersionStamp(dataVersion, isVersionDegraded),
+      null,
+      new ExpireManager.TtlSpec(hardTtlMs, softTtlMs, normalHardTtlMs, normalSoftTtlMs),
+      new ExpireManager.ExpiryAt(hardTtlExpireAtMs, softTtlExpireAtMs),
       state
     );
   }
@@ -979,8 +1107,8 @@ public class HotKeyCache {
    * @return {@code true} if the entry was promoted
    */
   private boolean promoteIfLocalHot(String cacheKey, long hardTtlMs, long softTtlMs) {
-    long hotHard = expireManager.resolveEffectiveHotHard(hardTtlMs);
-    long hotSoft = expireManager.resolveEffectiveHotSoft(softTtlMs);
+    long hotHard = expireManager.ttlPolicy().resolveEffectiveHotHard(hardTtlMs);
+    long hotSoft = expireManager.ttlPolicy().resolveEffectiveHotSoft(softTtlMs);
 
     return promote(cacheKey, hotHard, hotSoft);
   }
@@ -1005,8 +1133,8 @@ public class HotKeyCache {
           return entry.withTtlAndKeyState(
             hotHard,
             hotSoft,
-            expireManager.computeHardExpireAt(hotHard),
-            expireManager.computeSoftExpireAt(hotSoft),
+            expireManager.ttlPolicy().computeHardExpireAt(hotHard),
+            expireManager.ttlPolicy().computeSoftExpireAt(hotSoft),
             KeyState.HOT
           );
         }
@@ -1124,8 +1252,8 @@ public class HotKeyCache {
           return;
         }
 
-        long effectiveHardTtl = expireManager.resolveEffectiveHardTtl(hardTtlMs);
-        long effectiveSoftTtl = expireManager.resolveEffectiveSoftTtl(softTtlMs);
+        long effectiveHardTtl = expireManager.ttlPolicy().resolveEffectiveHardTtl(hardTtlMs);
+        long effectiveSoftTtl = expireManager.ttlPolicy().resolveEffectiveSoftTtl(softTtlMs);
 
         try {
           var vr = versionController.nextVersion(nk);
@@ -1220,22 +1348,17 @@ public class HotKeyCache {
     long hardTtl = effectiveHardTtl;
     long softTtl = effectiveSoftTtl;
     if (state == KeyState.HOT) {
-      hardTtl = expireManager.resolveEffectiveHotHard(hardTtl);
-      softTtl = expireManager.resolveEffectiveHotSoft(softTtl);
+      hardTtl = expireManager.ttlPolicy().resolveEffectiveHotHard(hardTtl);
+      softTtl = expireManager.ttlPolicy().resolveEffectiveHotSoft(softTtl);
     }
 
     Object wrapValue = value != null ? value : NullValue.INSTANCE;
     return expireManager.createBuilder(
       wrapValue,
-      vr.dataVersion(),
-      vr.degraded(),
-      decisionVersion,
-      decisionNodeId,
-      decisionEpoch,
-      hardTtl,
-      softTtl,
-      normalHardTtl,
-      normalSoftTtl,
+      new ExpireManager.VersionStamp(vr.dataVersion(), vr.degraded()),
+      new ExpireManager.DecisionStamp(decisionVersion, decisionNodeId, decisionEpoch),
+      new ExpireManager.TtlSpec(hardTtl, softTtl, normalHardTtl, normalSoftTtl),
+      null,
       state
     );
   }
@@ -1258,24 +1381,21 @@ public class HotKeyCache {
     cacheKey = normalize(cacheKey);
     if (preGuard(cacheKey) == null) return;
 
-    long hardTtl = expireManager.resolveEffectiveHardTtl(hardTtlMs);
-    long softTtl = expireManager.resolveEffectiveSoftTtl(softTtlMs);
+    long hardTtl = expireManager.ttlPolicy().resolveEffectiveHardTtl(hardTtlMs);
+    long softTtl = expireManager.ttlPolicy().resolveEffectiveSoftTtl(softTtlMs);
 
     caffeineCache
       .asMap()
       .compute(cacheKey, (k, existing) -> {
         if (existing instanceof CacheEntry ce) {
-          return expireManager.applyTtl(expireManager.replaceEntryValue(ce, value), hardTtl, softTtl);
+          return expireManager.ttlPolicy().applyTtl(expireManager.replaceEntryValue(ce, value), hardTtl, softTtl);
         }
         return expireManager.createBuilder(
           value,
-          VERSION_DEFAULT,
-          false,
-          0L,
-          hardTtl,
-          softTtl,
-          hardTtl,
-          softTtl,
+          new ExpireManager.VersionStamp(VERSION_DEFAULT, false),
+          null,
+          new ExpireManager.TtlSpec(hardTtl, softTtl, hardTtl, softTtl),
+          null,
           KeyState.NORMAL
         );
       });
@@ -1504,7 +1624,7 @@ public class HotKeyCache {
    * @return the effective soft TTL in milliseconds, always positive
    */
   public long resolveEffectiveSoftTtl(long softTtlMs) {
-    return expireManager.resolveEffectiveSoftTtl(softTtlMs);
+    return expireManager.ttlPolicy().resolveEffectiveSoftTtl(softTtlMs);
   }
 
   /**
@@ -1613,7 +1733,7 @@ public class HotKeyCache {
         if (existing instanceof CacheEntry ce) {
           valueRef[0] = unwrapValue(ce.getValue(), cacheKey);
 
-          if (!expireManager.isLogicallyExpired(ce)) {
+          if (!expireManager.ttlPolicy().isLogicallyExpired(ce)) {
             hitRef[0] = true;
 
             // HOT renewal: extend the expiry window when more than 75% of the
@@ -1624,25 +1744,25 @@ public class HotKeyCache {
               long totalTtl = ce.getHardTtlMs();
 
               if (totalTtl > 0 && remainingTtl < totalTtl * 0.25) {
-                long hotHardTtl = expireManager.resolveEffectiveHotHard(rawHard.getAsLong());
-                long hotSoftTtl = expireManager.resolveEffectiveHotSoft(rawSoft.getAsLong());
+                long hotHardTtl = expireManager.ttlPolicy().resolveEffectiveHotHard(rawHard.getAsLong());
+                long hotSoftTtl = expireManager.ttlPolicy().resolveEffectiveHotSoft(rawSoft.getAsLong());
 
-                return expireManager.applyTtl(ce, hotHardTtl, hotSoftTtl);
+                return expireManager.ttlPolicy().applyTtl(ce, hotHardTtl, hotSoftTtl);
               }
             } else if (isPromotableState(ce) && hotKeyDetector.contains(k)) {
-              long hotHardTtl = expireManager.resolveEffectiveHotHard(rawHard.getAsLong());
-              long hotSoftTtl = expireManager.resolveEffectiveHotSoft(rawSoft.getAsLong());
+              long hotHardTtl = expireManager.ttlPolicy().resolveEffectiveHotHard(rawHard.getAsLong());
+              long hotSoftTtl = expireManager.ttlPolicy().resolveEffectiveHotSoft(rawSoft.getAsLong());
 
               return ce.withTtlAndKeyState(
                 hotHardTtl,
                 hotSoftTtl,
-                expireManager.computeHardExpireAt(hotHardTtl),
-                expireManager.computeSoftExpireAt(hotSoftTtl),
+                expireManager.ttlPolicy().computeHardExpireAt(hotHardTtl),
+                expireManager.ttlPolicy().computeSoftExpireAt(hotSoftTtl),
                 KeyState.HOT
               );
             }
 
-            if (expireManager.isSoftExpired(ce)) {
+            if (expireManager.ttlPolicy().isSoftExpired(ce)) {
               switch (policy.stalePolicy()) {
                 case RETURN -> {
                   return existing;
@@ -1684,7 +1804,7 @@ public class HotKeyCache {
       if (refreshRef[0]) {
         expireManager.triggerBackgroundRefresh(
           cacheKey,
-          reader,
+          () -> probeVersioned(cacheKey, reader.get()),
           computeSoftTtlForRefresh(rawSoft.getAsLong(), refreshEntryRef[0])
         );
       }
@@ -1709,9 +1829,18 @@ public class HotKeyCache {
     long rawHardTtl = rawHard.getAsLong();
     long rawSoftTtl = rawSoft.getAsLong();
     try {
-      Optional<T> loaded = singleFlight.load(cacheKey, reader);
+      // ADR-0033: probe inside the SingleFlight execution scope — concurrent
+      // waiters share one (value, probedVersion) pair.
+      Optional<VersionedValue> loaded = singleFlight.load(cacheKey, () -> probeVersioned(cacheKey, reader.get()));
       return loaded
-        .map(t -> processLoaded(cacheKey, t, rawHardTtl, rawSoftTtl, skipReport))
+        .flatMap(vv -> {
+          if (vv.value() == null) {
+            return mapEmpty(cacheKey, policy.nullCaching(), vv);
+          }
+          @SuppressWarnings("unchecked")
+          T t = (T) vv.value();
+          return Optional.of(processLoaded(cacheKey, t, vv, rawHardTtl, rawSoftTtl, skipReport));
+        })
         .or(() -> mapEmpty(cacheKey, policy.nullCaching()));
     } catch (RuntimeException e) {
       if (policy.failOnError()) {
@@ -1727,7 +1856,7 @@ public class HotKeyCache {
       // entry crosses its hard expiry while the load is in flight.
       if (singleFlight.isBreakerOpen()) {
         Object stale = caffeineCache.getIfPresent(cacheKey);
-        if (stale instanceof CacheEntry ce && !expireManager.isLogicallyExpired(ce)) {
+        if (stale instanceof CacheEntry ce && !expireManager.ttlPolicy().isLogicallyExpired(ce)) {
           @SuppressWarnings("unchecked")
           T val = (T) unwrapValue(ce.getValue(), cacheKey);
 
@@ -1849,8 +1978,8 @@ public class HotKeyCache {
     return execute(nk, false, () -> {
       @SuppressWarnings("unchecked")
       T[] oldValue = (T[]) new Object[1];
-      long resolvedHardTtl = expireManager.resolveEffectiveHardTtl(hardTtlMs);
-      long resolvedSoftTtl = expireManager.resolveEffectiveSoftTtl(softTtlMs);
+      long resolvedHardTtl = expireManager.ttlPolicy().resolveEffectiveHardTtl(hardTtlMs);
+      long resolvedSoftTtl = expireManager.ttlPolicy().resolveEffectiveSoftTtl(softTtlMs);
 
       caffeineCache
         .asMap()
@@ -1869,7 +1998,9 @@ public class HotKeyCache {
             resolvedSoftTtl,
             KeyState.NORMAL,
             resolvedHardTtl,
-            resolvedSoftTtl
+            resolvedSoftTtl,
+            VERSION_DEFAULT,
+            false
           );
         });
       return Optional.ofNullable(oldValue[0]);
@@ -1962,8 +2093,8 @@ public class HotKeyCache {
     if (preGuard(nk) == null) return false;
 
     return execute(nk, false, () -> {
-      long effectiveHard = expireManager.resolveEffectiveHardTtl(hardTtlMs);
-      long effectiveSoft = expireManager.resolveEffectiveSoftTtl(softTtlMs);
+      long effectiveHard = expireManager.ttlPolicy().resolveEffectiveHardTtl(hardTtlMs);
+      long effectiveSoft = expireManager.ttlPolicy().resolveEffectiveSoftTtl(softTtlMs);
       boolean[] written = { false };
 
       caffeineCache
@@ -1976,7 +2107,16 @@ public class HotKeyCache {
             return existing;
           }
           written[0] = true;
-          return buildEntry(value, effectiveHard, effectiveSoft, KeyState.NORMAL, effectiveHard, effectiveSoft);
+          return buildEntry(
+            value,
+            effectiveHard,
+            effectiveSoft,
+            KeyState.NORMAL,
+            effectiveHard,
+            effectiveSoft,
+            VERSION_DEFAULT,
+            false
+          );
         });
 
       return Optional.of(written[0]);

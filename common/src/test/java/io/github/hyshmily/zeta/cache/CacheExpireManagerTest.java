@@ -16,7 +16,6 @@
 package io.github.hyshmily.zeta.cache;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -25,15 +24,19 @@ import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
-import io.github.hyshmily.zeta.util.TimeSource;
+import io.github.hyshmily.zeta.model.VersionedValue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for {@link ExpireManager}, covering soft-expire logic, TTL computation, and background refresh.
+ * Tests for the stateful side of {@link ExpireManager}: background refresh
+ * scheduling (dedup, limiter, timeout, fault modes, version-guarded merge),
+ * the entry factory ({@code createBuilder} parameter combinations), and
+ * expiry extension.
+ *
+ * <p>The stateless TTL arithmetic tests live in {@link TtlPolicyTest}.
  */
 class CacheExpireManagerTest {
 
@@ -47,56 +50,6 @@ class CacheExpireManagerTest {
     ttlConfig = new ZetaProperties();
     Executor executor = Runnable::run;
     expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
-  }
-
-  /**
-   * Verifies that computeHardExpireAt with a positive TTL returns a timestamp in the future.
-   */
-  @Test
-  void computeHardExpireAt_withPositiveTtl_shouldReturnFutureTimestamp() {
-    long expireAt = expireManager.computeHardExpireAt(1000);
-    assertThat(expireAt).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeHardExpireAt falls back to the default TTL when the given value is zero.
-   */
-  @Test
-  void computeHardExpireAt_withZeroTtl_shouldFallbackToDefault() {
-    long expireAt = expireManager.computeHardExpireAt(0);
-    assertThat(expireAt).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that getEffectiveHardTtlMs returns the configured default hard TTL value.
-   */
-  @Test
-  void getEffectiveHardTtlMs_shouldReturnConfigValue() {
-    assertThat(expireManager.getEffectiveHardTtlMs()).isEqualTo(300_000L);
-  }
-
-  /**
-   * Verifies that getEffectiveHotHardTtlMs returns the configured hot-key hard TTL value.
-   */
-  @Test
-  void getEffectiveHotHardTtlMs_shouldReturnConfigValue() {
-    assertThat(expireManager.getEffectiveHotHardTtlMs()).isEqualTo(3_600_000L);
-  }
-
-  /**
-   * Verifies that getEffectiveSoftTtlMs returns the configured default soft TTL value.
-   */
-  @Test
-  void getEffectiveSoftTtlMs_shouldReturnConfigValue() {
-    assertThat(expireManager.getEffectiveSoftTtlMs()).isEqualTo(30_000L);
-  }
-
-  /**
-   * Verifies that getEffectiveHotSoftTtlMs returns the configured hot-key soft TTL value.
-   */
-  @Test
-  void getEffectiveHotSoftTtlMs_shouldReturnConfigValue() {
-    assertThat(expireManager.getEffectiveHotSoftTtlMs()).isEqualTo(300_000L);
   }
 
   /**
@@ -121,72 +74,9 @@ class CacheExpireManagerTest {
         .build()
     );
 
-    expireManager.triggerBackgroundRefresh("key", () -> "newValue", 30_000);
+    expireManager.triggerBackgroundRefresh("key", () -> new VersionedValue("newValue", 0L, false), 30_000);
 
     assertThat(caffeineCache.getIfPresent("key")).isNotNull();
-  }
-
-  /**
-   * Verifies that a non-CacheEntry plain value is considered soft-expired.
-   */
-  @Test
-  void isSoftExpired_shouldReturnTrueForNonCacheEntry() {
-    caffeineCache.put("plain", "not-a-cache-entry");
-    assertThat(expireManager.isSoftExpired("not-a-cache-entry")).isTrue();
-  }
-
-  /**
-   * Verifies that a missing cache key is considered soft-expired.
-   */
-  @Test
-  void isSoftExpired_shouldReturnTrueForMissingEntry() {
-    assertThat(expireManager.isSoftExpired(null)).isTrue();
-  }
-
-  /**
-   * Verifies that computeHardExpireAt with zero falls back to default and returns a future timestamp.
-   */
-  @Test
-  void computeHardExpireAt_withZero_shouldFallbackAndReturnFuture() {
-    long result = expireManager.computeHardExpireAt(0);
-    assertThat(result).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeHardExpireAt with a negative TTL falls back to default and returns a future timestamp.
-   */
-  @Test
-  void computeHardExpireAt_withNegative_shouldFallbackAndReturnFuture() {
-    long result = expireManager.computeHardExpireAt(-1);
-    assertThat(result).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeHardExpireAt with Long.MAX_VALUE passes it through unchanged.
-   */
-  @Test
-  void computeHardExpireAt_withMaxValue_shouldPassthrough() {
-    assertThat(expireManager.computeHardExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
-  }
-
-  /**
-   * Verifies that computeHardExpireAt with a positive TTL returns a future timestamp.
-   */
-  @Test
-  void computeHardExpireAt_withPositive_shouldReturnFuture() {
-    long result = expireManager.computeHardExpireAt(1000);
-    assertThat(result).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeSoftExpireAt returns zero when soft-expire is disabled.
-   */
-  @Test
-  void computeSoftExpireAt_withDisabledConfig_shouldReturnMaxValue() {
-    ttlConfig.setDefaultSoftTtlMs(0);
-    ttlConfig.setDefaultHotSoftTtlMs(0);
-    ExpireManager disabled = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 0);
-    assertThat(disabled.computeSoftExpireAt(0)).isZero();
   }
 
   /**
@@ -222,7 +112,8 @@ class CacheExpireManagerTest {
             }
             return existing;
           });
-        return "stale-value";
+        // Unstamped carrier: the legacy L1-internal snapshot guard must discard it.
+        return new VersionedValue("stale-value", 0L, false);
       },
       30_000
     );
@@ -231,140 +122,6 @@ class CacheExpireManagerTest {
     assertThat(entry).isNotNull();
     assertThat(entry.getDataVersion()).isEqualTo(10);
     assertThat((Object) entry.getValue()).isEqualTo("original");
-  }
-
-  /**
-   * Verifies that computeHardExpireAt produces a positive timestamp within a reasonable range.
-   */
-  @Test
-  void hardExpireAt_producesPositiveTimestamp() {
-    long hard = expireManager.computeHardExpireAt(5_000);
-    assertThat(hard).isGreaterThan(System.currentTimeMillis());
-    assertThat(hard).isLessThan(System.currentTimeMillis() + 60_000);
-  }
-
-  /**
-   * Verifies that computeSoftExpireAt produces a positive timestamp within a reasonable range.
-   */
-  @Test
-  void softExpireAt_producesPositiveTimestamp() {
-    long soft = expireManager.computeSoftExpireAt(5_000);
-    assertThat(soft).isGreaterThan(System.currentTimeMillis());
-    assertThat(soft).isLessThan(System.currentTimeMillis() + 60_000);
-  }
-
-  /**
-   * Verifies that computeHotHardExpireAt produces a positive future timestamp.
-   */
-  @Test
-  void hotHardExpireAt_producesPositiveTimestamp() {
-    long hot = expireManager.computeHotHardExpireAt();
-    assertThat(hot).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeHotHardExpireAt returns Long.MAX_VALUE when hot hard TTL is disabled (0).
-   * This covers toHardExpireTimestamp when hardTtlMs <= 0.
-   */
-  @Test
-  void computeHotHardExpireAt_withDisabledHotHardTtl_shouldReturnMaxValue() {
-    ttlConfig.setDefaultHotHardTtlMs(0);
-    assertThat(expireManager.computeHotHardExpireAt()).isEqualTo(Long.MAX_VALUE);
-  }
-
-  /**
-   * Verifies that computeHotSoftExpireAt produces a positive future timestamp.
-   */
-  @Test
-  void hotSoftExpireAt_producesPositiveTimestamp() {
-    long hot = expireManager.computeHotSoftExpireAt();
-    assertThat(hot).isGreaterThan(System.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeHotSoftExpireAt returns 0 when hot soft TTL is disabled (0).
-   * This covers the toSoftExpireTimestamp branch when softTtlMs <= 0.
-   */
-  @Test
-  void computeHotSoftExpireAt_withZeroHotSoftTtl_shouldReturnZero() {
-    ttlConfig.setDefaultHotSoftTtlMs(0);
-    assertThat(expireManager.computeHotSoftExpireAt()).isZero();
-  }
-
-  /**
-   * Verifies that isSoftExpired returns true when softExpireAtMs is a past timestamp
-   * (positive but earlier than the current time).
-   */
-  @Test
-  void isSoftExpired_withExpiredEntry_shouldReturnTrue() {
-    CacheEntry entry = CacheEntry.builder()
-      .value("v")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(30_000)
-      .softExpireAtMs(1L)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build();
-    assertThat(expireManager.isSoftExpired(entry)).isTrue();
-  }
-
-  /**
-   * Verifies that isSoftExpired with softExpireAtMs=Long.MAX_VALUE returns false
-   * (MAX_VALUE means never soft-expire).
-   */
-  @Test
-  void isSoftExpired_withMaxValue_shouldReturnFalse() {
-    CacheEntry entry = CacheEntry.builder()
-      .value("v")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(Long.MAX_VALUE)
-      .softExpireAtMs(Long.MAX_VALUE)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build();
-    caffeineCache.put("perm", entry);
-    assertThat(expireManager.isSoftExpired(entry)).isFalse();
-  }
-
-  /**
-   * Verifies that isSoftExpired with softExpireAtMs=0 returns true
-   * (zero means immediately expired).
-   */
-  @Test
-  void isSoftExpired_withZeroExpireAt_shouldReturnTrue() {
-    CacheEntry entry = CacheEntry.builder()
-      .value("v")
-      .dataVersion(1)
-      .isVersionDegraded(false)
-      .decisionVersion(0)
-      .hardTtlMs(300_000)
-      .hardExpireAtMs(Long.MAX_VALUE)
-      .softTtlMs(0)
-      .softExpireAtMs(0)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build();
-    caffeineCache.put("zero", entry);
-    assertThat(expireManager.isSoftExpired(entry)).isTrue();
-  }
-
-  /**
-   * Verifies that computeSoftExpireAt passes Long.MAX_VALUE through unchanged.
-   */
-  @Test
-  void computeSoftExpireAt_withMaxValue_shouldPassthrough() {
-    assertThat(expireManager.computeSoftExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
   }
 
   /**
@@ -583,42 +340,6 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that custom ratio (0.5 = ±50%) produces jitter within the configured range.
-   */
-  @Test
-  void toHardExpireTimestamp_withCustomRatio_shouldJitterWithinRange() {
-    ttlConfig.setTtlJitterRatio(0.5);
-    ExpireManager highJitter = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 10);
-    long ttl = 10_000;
-    Stream.generate(() -> highJitter.computeHardExpireAt(ttl))
-      .limit(100)
-      .forEach(expireAt -> {
-        long diff = expireAt - System.currentTimeMillis();
-        assertThat(diff).isBetween(4_900L, 15_100L);
-      });
-  }
-
-  /**
-   * Verifies that the default (0.1 = ±10%) jitter is applied and within range for both hard and soft TTL paths.
-   */
-  @Test
-  void toHardExpireTimestamp_withDefaultJitter_shouldJitterWithinRange() {
-    long ttl = 10_000;
-    Stream.generate(() -> expireManager.computeHardExpireAt(ttl))
-      .limit(100)
-      .forEach(expireAt -> {
-        long diff = expireAt - System.currentTimeMillis();
-        assertThat(diff).isBetween(9_000L, 11_000L);
-      });
-    Stream.generate(() -> expireManager.computeSoftExpireAt(ttl))
-      .limit(100)
-      .forEach(expireAt -> {
-        long diff = expireAt - System.currentTimeMillis();
-        assertThat(diff).isBetween(9_000L, 11_000L);
-      });
-  }
-
-  /**
    * Verifies that a key that is removed from the cache during an in-flight background
    * refresh does not cause errors (fault mode: key evicted mid-refresh).
    */
@@ -648,7 +369,7 @@ class CacheExpireManagerTest {
       "key",
       () -> {
         caffeineCache.invalidate("key");
-        return "fresh-value";
+        return new VersionedValue("fresh-value", 0L, false);
       },
       30_000
     );
@@ -660,83 +381,6 @@ class CacheExpireManagerTest {
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
     assertThat((Object) entry.getValue()).isEqualTo("fresh-value");
-  }
-
-  /**
-   * Verifies that toHardExpireTimestamp with a custom jitter ratio uses the given ratio.
-   */
-  @Test
-  void toHardExpireTimestamp_withCustomRatio_shouldUseGivenRatio() {
-    long ttl = 10_000;
-    Stream.generate(() -> expireManager.toHardExpireTimestamp(ttl, 0.5))
-      .limit(50)
-      .forEach(expireAt -> {
-        long diff = expireAt - TimeSource.currentTimeMillis();
-        assertThat(diff).isBetween(5_000L, 15_000L);
-      });
-  }
-
-  /**
-   * Verifies that toHardExpireTimestamp with Long.MAX_VALUE and a custom ratio passes through.
-   */
-  @Test
-  void toHardExpireTimestamp_withMaxValueAndCustomRatio_shouldPassthrough() {
-    assertThat(expireManager.toHardExpireTimestamp(Long.MAX_VALUE, 0.5)).isEqualTo(Long.MAX_VALUE);
-  }
-
-  /**
-   * Verifies that toSoftExpireTimestamp with a custom jitter ratio uses the given ratio.
-   */
-  @Test
-  void toSoftExpireTimestamp_withCustomRatio_shouldUseGivenRatio() {
-    long ttl = 10_000;
-    Stream.generate(() -> expireManager.toSoftExpireTimestamp(ttl, 0.5))
-      .limit(50)
-      .forEach(expireAt -> {
-        long diff = expireAt - TimeSource.currentTimeMillis();
-        assertThat(diff).isBetween(5_000L, 15_000L);
-      });
-  }
-
-  /**
-   * Verifies that toSoftExpireTimestamp with non-positive soft TTL returns zero.
-   */
-  @Test
-  void toSoftExpireTimestamp_withNonPositiveTtlAndCustomRatio_shouldReturnZero() {
-    assertThat(expireManager.toSoftExpireTimestamp(0, 0.5)).isZero();
-    assertThat(expireManager.toSoftExpireTimestamp(-1, 0.5)).isZero();
-  }
-
-  /**
-   * Verifies that toSoftExpireTimestamp with Long.MAX_VALUE passes through.
-   */
-  @Test
-  void toSoftExpireTimestamp_withMaxValueAndCustomRatio_shouldPassthrough() {
-    assertThat(expireManager.toSoftExpireTimestamp(Long.MAX_VALUE, 0.5)).isEqualTo(Long.MAX_VALUE);
-  }
-
-  /**
-   * Verifies that computeNullExpireAt with positive TTL returns a future timestamp.
-   */
-  @Test
-  void computeNullExpireAt_withPositiveTtl_shouldReturnFuture() {
-    assertThat(expireManager.computeNullExpireAt(1_000)).isGreaterThan(TimeSource.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeNullExpireAt with zero TTL falls back to config default.
-   */
-  @Test
-  void computeNullExpireAt_withZeroTtl_shouldFallbackToConfig() {
-    assertThat(expireManager.computeNullExpireAt(0)).isGreaterThan(TimeSource.currentTimeMillis());
-  }
-
-  /**
-   * Verifies that computeNullExpireAt with Long.MAX_VALUE passes through.
-   */
-  @Test
-  void computeNullExpireAt_withMaxValue_shouldPassthrough() {
-    assertThat(expireManager.computeNullExpireAt(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE);
   }
 
   /**
@@ -802,7 +446,7 @@ class CacheExpireManagerTest {
           .build()
       );
 
-      asyncExpire.triggerBackgroundRefresh("key", () -> "updated", 30_000);
+      asyncExpire.triggerBackgroundRefresh("key", () -> new VersionedValue("updated", 0L, false), 30_000);
       Thread.sleep(200);
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
@@ -813,124 +457,21 @@ class CacheExpireManagerTest {
     }
   }
 
-  // ── applyHardTtl / applySoftTtl / applyNormalTtl ──────────────
+  // ── createBuilder parameter combinations ──────────────────────
 
   /**
-   * Verifies that applyHardTtl updates the hard TTL and expire-at while
-   * preserving the soft TTL and all version/state fields.
-   */
-  @Test
-  void applyHardTtl_shouldUpdateHardTtlAndPreserveSoftTtl() {
-    long now = System.currentTimeMillis();
-    CacheEntry original = CacheEntry.builder()
-      .value("v")
-      .dataVersion(10)
-      .isVersionDegraded(true)
-      .decisionVersion(5)
-      .hardTtlMs(60_000)
-      .hardExpireAtMs(now + 60_000)
-      .softTtlMs(30_000)
-      .softExpireAtMs(now + 30_000)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build();
-
-    CacheEntry updated = expireManager.applyHardTtl(original, 120_000);
-
-    assertThat(updated.getHardTtlMs()).isEqualTo(120_000);
-    assertThat(updated.getHardExpireAtMs()).isGreaterThan(original.getHardExpireAtMs());
-    assertThat(updated.getSoftTtlMs()).isEqualTo(30_000);
-    assertThat(updated.getSoftExpireAtMs()).isEqualTo(original.getSoftExpireAtMs());
-    assertThat(updated.getDataVersion()).isEqualTo(10);
-    assertThat(updated.isVersionDegraded()).isTrue();
-    assertThat(updated.getDecisionVersion()).isEqualTo(5);
-    assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
-  }
-
-  /**
-   * Verifies that applySoftTtl updates the soft TTL and expire-at while
-   * preserving the hard TTL and all version/state fields.
-   */
-  @Test
-  void applySoftTtl_shouldUpdateSoftTtlAndPreserveHardTtl() {
-    long now = System.currentTimeMillis();
-    CacheEntry original = CacheEntry.builder()
-      .value("v")
-      .dataVersion(10)
-      .isVersionDegraded(true)
-      .decisionVersion(5)
-      .hardTtlMs(60_000)
-      .hardExpireAtMs(now + 60_000)
-      .softTtlMs(30_000)
-      .softExpireAtMs(now + 30_000)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build();
-
-    CacheEntry updated = expireManager.applySoftTtl(original, 120_000);
-
-    assertThat(updated.getSoftTtlMs()).isEqualTo(120_000);
-    assertThat(updated.getSoftExpireAtMs()).isGreaterThan(original.getSoftExpireAtMs());
-    assertThat(updated.getHardTtlMs()).isEqualTo(60_000);
-    assertThat(updated.getHardExpireAtMs()).isEqualTo(original.getHardExpireAtMs());
-    assertThat(updated.getDataVersion()).isEqualTo(10);
-    assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
-  }
-
-  /**
-   * Verifies that applyNormalTtl updates only the normal TTL fields
-   * (normalHardTtlMs, normalSoftTtlMs), leaving all other fields untouched.
-   */
-  @Test
-  void applyNormalTtl_shouldUpdateNormalTtlFields() {
-    CacheEntry original = CacheEntry.builder()
-      .value("v")
-      .dataVersion(10)
-      .isVersionDegraded(false)
-      .decisionVersion(5)
-      .hardTtlMs(60_000)
-      .hardExpireAtMs(System.currentTimeMillis() + 60_000)
-      .softTtlMs(30_000)
-      .softExpireAtMs(System.currentTimeMillis() + 30_000)
-      .keyState(KeyState.HOT)
-      .normalHardTtlMs(300_000)
-      .normalSoftTtlMs(30_000)
-      .build();
-
-    CacheEntry updated = expireManager.applyNormalTtl(original, 600_000, 60_000);
-
-    assertThat(updated.getNormalHardTtlMs()).isEqualTo(600_000);
-    assertThat(updated.getNormalSoftTtlMs()).isEqualTo(60_000);
-    assertThat(updated.getHardTtlMs()).isEqualTo(60_000);
-    assertThat(updated.getSoftTtlMs()).isEqualTo(30_000);
-    assertThat(updated.getDataVersion()).isEqualTo(10);
-    assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
-  }
-
-  // ── createBuilder overloads ────────────────────────────────────
-
-  /**
-   * Verifies that createBuilder (overload with decision metadata and
-   * pre-computed expire timestamps) sets all fields correctly.
+   * Verifies that createBuilder with decision metadata and pre-computed
+   * expire timestamps sets all fields correctly.
    */
   @Test
   void createBuilder_withDecisionMetadataAndExpireTimestamps_shouldSetAllFields() {
     long now = System.currentTimeMillis();
     CacheEntry entry = expireManager.createBuilder(
       "value",
-      42,
-      true,
-      7,
-      "worker-1",
-      3,
-      60_000,
-      30_000,
-      now + 60_000,
-      now + 30_000,
-      300_000,
-      30_000,
+      new ExpireManager.VersionStamp(42, true),
+      new ExpireManager.DecisionStamp(7, "worker-1", 3),
+      new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
+      new ExpireManager.ExpiryAt(now + 60_000, now + 30_000),
       KeyState.HOT
     );
 
@@ -950,23 +491,18 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that createBuilder (overload with decision metadata but no
-   * expire timestamps) computes expire-at via applyTtl.
+   * Verifies that createBuilder with decision metadata but no expire
+   * timestamps computes expire-at via applyTtl.
    */
   @Test
   void createBuilder_withDecisionMetadataAndNoExpireTimestamps_shouldComputeExpire() {
     long before = System.currentTimeMillis();
     CacheEntry entry = expireManager.createBuilder(
       "value",
-      42,
-      false,
-      7,
-      "worker-1",
-      3,
-      60_000,
-      30_000,
-      300_000,
-      30_000,
+      new ExpireManager.VersionStamp(42, false),
+      new ExpireManager.DecisionStamp(7, "worker-1", 3),
+      new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
+      null,
       KeyState.HOT
     );
 
@@ -985,23 +521,19 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that createBuilder (overload without decision metadata,
-   * with pre-computed expire timestamps) sets all fields correctly.
+   * Verifies that createBuilder without decision node/epoch metadata (local
+   * origin, no Worker) but with pre-computed expire timestamps sets all
+   * fields correctly.
    */
   @Test
   void createBuilder_withoutDecisionMetadataWithExpireTimestamps_shouldSetAllFields() {
     long now = System.currentTimeMillis();
     CacheEntry entry = expireManager.createBuilder(
       "value",
-      42,
-      false,
-      7,
-      60_000,
-      30_000,
-      now + 60_000,
-      now + 30_000,
-      300_000,
-      30_000,
+      new ExpireManager.VersionStamp(42, false),
+      new ExpireManager.DecisionStamp(7, null, 0),
+      new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
+      new ExpireManager.ExpiryAt(now + 60_000, now + 30_000),
       KeyState.NORMAL
     );
 
@@ -1019,22 +551,19 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that createBuilder (raw fields overload, no decision meta,
-   * no expire timestamps) produces a correctly built entry with
-   * timestamps computed via applyTtl.
+   * Verifies that createBuilder with no decision metadata and no expire
+   * timestamps produces a correctly built entry with timestamps computed
+   * via applyTtl.
    */
   @Test
   void createBuilder_rawFields_shouldComputeExpireAndSetFields() {
     long before = System.currentTimeMillis();
     CacheEntry entry = expireManager.createBuilder(
       "value",
-      42,
-      false,
-      7,
-      60_000,
-      30_000,
-      300_000,
-      30_000,
+      new ExpireManager.VersionStamp(42, false),
+      new ExpireManager.DecisionStamp(7, null, 0),
+      new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
+      null,
       KeyState.NORMAL
     );
 

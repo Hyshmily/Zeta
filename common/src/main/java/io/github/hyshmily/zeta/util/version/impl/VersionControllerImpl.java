@@ -22,9 +22,7 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -182,15 +180,80 @@ public class VersionControllerImpl implements VersionController {
    */
   @Override
   public Optional<Long> currentVersion(String cacheKey) {
-    return redisTemplate.map(t -> {
-      try {
-        String v = t.opsForValue().get(ZetaConstants.Redis.VERSION_KEY_PREFIX + cacheKey);
-        return v != null ? Optional.of(Long.parseLong(v)) : Optional.<Long>empty();
-      } catch (Exception e) {
-        log.warn("Failed to read current version for key {}", cacheKey, e);
-        return Optional.<Long>empty();
-      }
-    }).orElse(Optional.empty());
+    return redisTemplate
+      .map(t -> {
+        try {
+          String v = t.opsForValue().get(ZetaConstants.Redis.VERSION_KEY_PREFIX + cacheKey);
+          return v != null ? Optional.of(Long.parseLong(v)) : Optional.<Long>empty();
+        } catch (Exception e) {
+          log.warn("Failed to read current version for key {}", cacheKey, e);
+          return Optional.<Long>empty();
+        }
+      })
+      .orElse(Optional.empty());
+  }
+
+  /**
+   * Read-only current versions for the given cache keys via a single
+   * pipelined MGET (1 round trip, ADR-0033).
+   *
+   * <p>Per-key fail-open: a key whose value is missing, malformed, or part
+   * of a failed batch maps to an empty {@code Optional}. A batch-wide Redis
+   * failure maps every key to empty — a failed probe never demotes an entry.
+   */
+  @Override
+  public Map<String, Optional<Long>> currentVersions(Iterable<String> cacheKeys) {
+    List<String> keys = new ArrayList<>();
+    cacheKeys.forEach(keys::add);
+    if (keys.isEmpty()) {
+      return Collections.emptyMap();
+    }
+    return redisTemplate
+      .map(t -> {
+        try {
+          List<String> versionKeys = keys
+            .stream()
+            .map(k -> ZetaConstants.Redis.VERSION_KEY_PREFIX + k)
+            .toList();
+          List<String> values = t.opsForValue().multiGet(versionKeys);
+          Map<String, Optional<Long>> out = new LinkedHashMap<>();
+
+          for (int i = 0; i < keys.size(); i++) {
+            String v = values != null && i < values.size() ? values.get(i) : null;
+            out.put(keys.get(i), parseVersion(v));
+          }
+          return out;
+        } catch (Exception e) {
+          log.warn("Failed to read current versions for {} keys", keys.size(), e);
+          return allEmpty(keys);
+        }
+      })
+      .orElseGet(() -> allEmpty(keys));
+  }
+
+  /**
+   * Parse a raw version-key value, mapping malformed values to empty
+   * (fail-open).
+   */
+  private static Optional<Long> parseVersion(String raw) {
+    if (raw == null) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(Long.parseLong(raw));
+    } catch (NumberFormatException e) {
+      log.warn("Malformed version value '{}', treated as absent (fail-open)", raw);
+      return Optional.empty();
+    }
+  }
+
+  /** Map every key to an empty version (fail-open). */
+  private static Map<String, Optional<Long>> allEmpty(List<String> keys) {
+    Map<String, Optional<Long>> out = new LinkedHashMap<>();
+    for (String key : keys) {
+      out.put(key, Optional.empty());
+    }
+    return out;
   }
 
   /**

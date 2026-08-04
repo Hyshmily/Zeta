@@ -189,10 +189,10 @@ public class ZetaEndpoint {
     }
 
     if (expireManager != null) {
-      local.put("hardTtlMs", expireManager.getEffectiveHardTtlMs());
-      local.put("softTtlMs", expireManager.getEffectiveSoftTtlMs());
-      local.put("hotHardTtlMs", expireManager.getEffectiveHotHardTtlMs());
-      local.put("hotSoftTtlMs", expireManager.getEffectiveHotSoftTtlMs());
+      local.put("hardTtlMs", expireManager.ttlPolicy().getEffectiveHardTtlMs());
+      local.put("softTtlMs", expireManager.ttlPolicy().getEffectiveSoftTtlMs());
+      local.put("hotHardTtlMs", expireManager.ttlPolicy().getEffectiveHotHardTtlMs());
+      local.put("hotSoftTtlMs", expireManager.ttlPolicy().getEffectiveHotSoftTtlMs());
       local.put("nullValueTtlSec", properties.getNullValueTtlSeconds());
       if (expireManager.getRefreshLimiter() != null) {
         local.put("refreshPoolAvailable", expireManager.getRefreshLimiter().availablePermits());

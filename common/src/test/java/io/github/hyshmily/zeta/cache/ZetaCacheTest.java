@@ -37,6 +37,7 @@ import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.model.StalePolicy;
+import io.github.hyshmily.zeta.model.VersionedValue;
 import io.github.hyshmily.zeta.model.ZetaCacheStats;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.Rule.RuleAction;
@@ -107,6 +108,18 @@ class ZetaCacheTest {
       mock(HealthView.class),
       CacheCompressor.NONE
     );
+  }
+
+  /**
+   * SingleFlight stub carrier for the ADR-0033 composite-load contract: the
+   * supplier handed to {@code singleFlight.load} returns a {@link VersionedValue}.
+   * Unstamped (probe withheld) so tests keep exercising the legacy version
+   * handling. Typed as {@code Optional<Object>} so the {@code any()} matcher's
+   * {@code T=Object} inference accepts it.
+   */
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  private static Optional<Object> vv(String value) {
+    return (Optional) Optional.of(new VersionedValue(value, 0L, false));
   }
 
   /**
@@ -225,7 +238,7 @@ class ZetaCacheTest {
    */
   @Test
   void get_shouldLoadAndCacheOnMiss() {
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loadedValue"));
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("loadedValue"));
 
     Optional<String> result = hotKeyCache.get(
       "key1",
@@ -397,7 +410,7 @@ class ZetaCacheTest {
 
   @Test
   void computeIfAbsent_miss_shouldLoadViaSingleFlightAndCacheNormalEntry() {
-    when(singleFlight.load(eq("key1"), any())).thenReturn(Optional.of("fresh"));
+    when(singleFlight.load(eq("key1"), any())).thenReturn(vv("fresh"));
 
     assertThat(hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "fresh"))).contains("fresh");
 
@@ -623,7 +636,7 @@ class ZetaCacheTest {
       false
     );
 
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("fresh"));
 
     // Miss: TTL suppliers are evaluated exactly once (entry creation).
     assertThat(hotKeyCache.computeIfAbsent("key1", policy)).contains("fresh");
@@ -807,7 +820,7 @@ class ZetaCacheTest {
     props.setDefaultHotSoftTtlMs(0);
     ExpireManager noSoft = new ExpireManagerImpl(caffeineCache, executor, props, 10);
 
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loaded"));
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("loaded"));
 
     HotKeyCache cache = new HotKeyCache(
       hotKeyDetector,
@@ -1264,7 +1277,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("fresh"));
 
     assertThat(
       hotKeyCache.get("expired", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
@@ -1303,7 +1316,7 @@ class ZetaCacheTest {
         .normalSoftTtlMs(30_000)
         .build()
     );
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("fresh"));
 
     assertThat(
       hotKeyCache.getWithSoftExpire(
@@ -1317,7 +1330,7 @@ class ZetaCacheTest {
 
   @Test
   void getWithSoftExpire_withCacheMiss_shouldLoad() {
-    when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("loaded"));
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("loaded"));
 
     assertThat(
       hotKeyCache.getWithSoftExpire(
@@ -1849,7 +1862,7 @@ class ZetaCacheTest {
     @DisplayName("loadAndCache should promote key to HOT when detected as hot")
     void loadAndCache_shouldPromoteHotKey() {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
-      when(singleFlight.load(eq("key1"), any())).thenReturn(Optional.of("value"));
+      when(singleFlight.load(eq("key1"), any())).thenReturn(vv("value"));
 
       Optional<String> result = hotKeyCache.get(
         "key1",
@@ -1869,7 +1882,7 @@ class ZetaCacheTest {
     void loadAndCache_shouldPreserveWorkerManagedEntry() {
       when(hotKeyDetector.contains("key1")).thenReturn(false);
       when(singleFlight.load(eq("key1"), any())).thenAnswer(invocation -> {
-        Supplier<String> reader = invocation.getArgument(1);
+        Supplier<?> reader = invocation.getArgument(1);
         caffeineCache.put(
           "key1",
           CacheEntry.builder()
@@ -2215,7 +2228,7 @@ class ZetaCacheTest {
     @Test
     @DisplayName("get with TTL overrides should use them in loadAndCache")
     void get_shouldUseTtlOverrides() {
-      when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("value"));
+      when(singleFlight.load(anyString(), any())).thenReturn(vv("value"));
       when(hotKeyDetector.contains("key1")).thenReturn(false);
 
       hotKeyCache.get("key1", CachePolicy.of(() -> "value", 50000L, 5000L, true, true, StalePolicy.SOFT_REFRESH));
@@ -2277,7 +2290,7 @@ class ZetaCacheTest {
           .normalSoftTtlMs(0)
           .build()
       );
-      when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("fresh"));
+      when(singleFlight.load(anyString(), any())).thenReturn(vv("fresh"));
 
       hotKeyCache.getWithSoftExpire("key", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
@@ -2289,7 +2302,7 @@ class ZetaCacheTest {
     @Test
     @DisplayName("get with TTL overrides and hot detection uses TTL overrides in hot path")
     void get_withTtlOverridesAndHotDetection_usesTtlOverrides() {
-      when(singleFlight.load(anyString(), any())).thenReturn(Optional.of("hot-value"));
+      when(singleFlight.load(anyString(), any())).thenReturn(vv("hot-value"));
       when(hotKeyDetector.contains("key1")).thenReturn(true);
 
       hotKeyCache.get("key1", CachePolicy.of(() -> "hot-value", 80000L, 8000L, true, true, StalePolicy.SOFT_REFRESH));
@@ -2306,7 +2319,7 @@ class ZetaCacheTest {
     @DisplayName("get with ALLOW_NO_REPORT and hot detection skips reportToWorker")
     void get_withAllowNoReportAndHotDetection_skipsReport() {
       hotKeyCache.addWhitelist("noreport-hot");
-      when(singleFlight.load(eq("noreport-hot"), any())).thenReturn(Optional.of("value"));
+      when(singleFlight.load(eq("noreport-hot"), any())).thenReturn(vv("value"));
       when(hotKeyDetector.contains("noreport-hot")).thenReturn(true);
 
       hotKeyCache.get("noreport-hot", CachePolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
@@ -2320,7 +2333,7 @@ class ZetaCacheTest {
     @DisplayName("get with ALLOW_NO_REPORT and no hot detection skips reportToWorker")
     void get_withAllowNoReportAndNoHotDetection_skipsReport() {
       hotKeyCache.addWhitelist("noreport-normal");
-      when(singleFlight.load(eq("noreport-normal"), any())).thenReturn(Optional.of("value"));
+      when(singleFlight.load(eq("noreport-normal"), any())).thenReturn(vv("value"));
       when(hotKeyDetector.contains("noreport-normal")).thenReturn(false);
 
       hotKeyCache.get("noreport-normal", CachePolicy.of(() -> "value", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
@@ -2418,7 +2431,7 @@ class ZetaCacheTest {
     void loadAndCache_withWorkerManagedEntryInHotPath_preservesIt() {
       when(hotKeyDetector.contains("key1")).thenReturn(true);
       when(singleFlight.load(eq("key1"), any())).thenAnswer(invocation -> {
-        Supplier<String> reader = invocation.getArgument(1);
+        Supplier<?> reader = invocation.getArgument(1);
         caffeineCache.put(
           "key1",
           CacheEntry.builder()

@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.zeta.util.version;
 
+import java.util.Map;
+import java.util.Optional;
+
 /**
  * Manages per-key monotonically increasing version numbers for the application-level
  * {@code dataVersion} space.
@@ -72,4 +75,27 @@ public interface VersionController {
    * @return the current version, or empty if absent/unavailable
    */
   java.util.Optional<Long> currentVersion(String cacheKey);
+
+  /**
+   * Batch variant of {@link #currentVersion(String)}.
+   *
+   * <p>Implementations are encouraged to read all version keys in a single
+   * round trip (pipelined GET/MGET). The default implementation delegates to
+   * {@link #currentVersion(String)} per key — compatible with custom
+   * implementations that do not override it.
+   *
+   * <p>Per-key fail-open: a key whose read fails (or whose value is malformed)
+   * maps to an empty {@code Optional}; a probe failure never demotes an entry.
+   *
+   * @param cacheKeys the cache keys whose versions to look up; must not be null
+   * @return an ordered map of key → current version, or empty when
+   *         absent/unavailable
+   */
+  default Map<String, java.util.Optional<Long>> currentVersions(Iterable<String> cacheKeys) {
+    Map<String, Optional<Long>> out = new java.util.LinkedHashMap<>();
+    for (String cacheKey : cacheKeys) {
+      out.put(cacheKey, currentVersion(cacheKey));
+    }
+    return out;
+  }
 }

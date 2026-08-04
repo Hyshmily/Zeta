@@ -622,6 +622,8 @@ Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classp
 
 Enable `zeta.sync.enabled=true`.
 
+Read-path entries (L1 misses, soft-expire refreshes, null sentinels) are stamped with the `dataVersion` probed from Redis after the value read (pipelined for batch loads), so late stale broadcasts are rejected by the shared version comparison instead of overwriting fresher values. Probe failures leave entries unstamped (fail-open); see ADR-0033.
+
 ## Rule System
 
 Enable `zeta.sync.enabled=true` to enable cross-instance rule synchronization. The rule system supports two actions:
