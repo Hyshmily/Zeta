@@ -28,6 +28,7 @@ import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.model.VersionedValue;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.util.Optional;
 import java.util.concurrent.*;
@@ -75,15 +76,31 @@ public class ExpireManagerImpl implements ExpireManager {
   @SuppressWarnings("all")
   private static final long refreshTimeoutSeconds = 30;
 
+  /** Lease-on-failure (ADR-0036): TTL halving divisor applied to the remaining budget. */
+  @SuppressWarnings("all")
+  private static final long LEASE_DIVISOR = 1;
+
+  /** Lease-on-failure (ADR-0036): minimum lease duration in milliseconds — the decay floor. */
+  @SuppressWarnings("all")
+  private static final long LEASE_MIN_TTL_MS = 120_000;
+
   @SuppressWarnings("all")
   private record snapshotEntry(
     long dataVersion,
     long decisionVersion,
     String decisionNodeId,
     long decisionEpoch,
-    KeyState keyState
+    KeyState keyState,
+    long hardExpireAtMs
   ) {
-    static final snapshotEntry DEFAULT = new snapshotEntry(VERSION_DEFAULT, VERSION_DEFAULT, null, 0L, KeyState.NORMAL);
+    static final snapshotEntry DEFAULT = new snapshotEntry(
+      VERSION_DEFAULT,
+      VERSION_DEFAULT,
+      null,
+      0L,
+      KeyState.NORMAL,
+      Long.MAX_VALUE
+    );
   }
 
   private static snapshotEntry snapshotEntry(Object raw) {
@@ -93,7 +110,8 @@ public class ExpireManagerImpl implements ExpireManager {
         entry.getDecisionVersion(),
         entry.getDecisionNodeId(),
         entry.getDecisionEpoch(),
-        entry.getKeyState()
+        entry.getKeyState(),
+        entry.getHardExpireAtMs()
       );
     }
     return snapshotEntry.DEFAULT;
@@ -486,7 +504,10 @@ public class ExpireManagerImpl implements ExpireManager {
    *   <li>On completion (success or failure): release the limiter permit,
    *       remove the in-flight marker from {@code pendingRefreshes}, and
    *       call {@link #applyRefreshTask} only when the value is non-null and
-   *       no error occurred.</li>
+   *       no error occurred. On failure, {@link #leaseOnFailure} extends the
+   *       existing entry's expire timestamps instead (ADR-0036) — the stale
+   *       value stays servable and the next soft-expiry read re-arms the
+   *       refresh.</li>
    * </ol>
    *
    * <p><b>Version guard:</b> Inside {@code applyRefreshTask}, the stale
@@ -530,6 +551,9 @@ public class ExpireManagerImpl implements ExpireManager {
           } else {
             log.warn("Background soft refresh failed: {}", cacheKey, error);
           }
+          // ADR-0036: keep the stale entry servable instead of letting it run
+          // into the hard TTL and stampede the failing source on every read.
+          leaseOnFailure(cacheKey, snap);
           return;
         }
         if (value instanceof VersionedValue vv && vv.value() != null) {
@@ -548,6 +572,72 @@ public class ExpireManagerImpl implements ExpireManager {
     });
 
     return task;
+  }
+
+  /**
+   * Lease-on-Failure (ADR-0036): keep a stale entry servable after its
+   * background refresh failed, by extending its expire timestamps.
+   *
+   * <p><b>Semantics:</b> the lease is a <i>provisional keep-alive</i>, not an
+   * authoritative state transition — the value, all metadata (dataVersion,
+   * decision stamps, keyState) and the {@code hardTtlMs}/{@code softTtlMs}
+   * duration fields are preserved verbatim; only the expire timestamps move.
+   * The hard timestamp extends to {@code now + max(remaining/2, 120s)} — the
+   * halved remaining budget gives soft exponential decay to the 120s floor,
+   * so repeated failure is graceful degradation rather than an entry clearing.
+   * The soft timestamp extends to the lease midpoint ({@code now + lease/2}):
+   * the entry is soft-expired during the second half of every lease while
+   * still hard-valid, which is the read-triggered retry window — the next
+   * read re-arms the refresh. {@code soft == hard} would close the window:
+   * the read path checks hard expiry before soft expiry, so the entry would
+   * die at lease end without ever retrying.
+   *
+   * <p><b>Identity guard:</b> mirrors {@link #applyRefreshTask}'s version
+   * guard — the lease applies only to the same logical entry that failed the
+   * refresh ({@code dataVersion} and {@code hardExpireAtMs} both equal to the
+   * creation-time snapshot). A write, broadcast, or promotion that landed
+   * in-flight already granted fresh TTLs; leasing it would shorten them. An
+   * absent (evicted) entry is never recreated — the failure path carries no
+   * new value. Permanent entries ({@code hardExpireAtMs == Long.MAX_VALUE})
+   * are never leased: there is nothing to extend and the halving arithmetic
+   * would overflow.
+   *
+   * @param cacheKey the key whose entry to lease
+   * @param snap     the entry metadata snapshot taken at refresh-creation time
+   */
+  private void leaseOnFailure(String cacheKey, snapshotEntry snap) {
+    caffeineCache
+      .asMap()
+      .compute(cacheKey, (key, existing) -> {
+        if (
+          !(existing instanceof CacheEntry entry) ||
+          entry.getDataVersion() != snap.dataVersion() ||
+          entry.getHardExpireAtMs() != snap.hardExpireAtMs() ||
+          entry.getHardExpireAtMs() == Long.MAX_VALUE
+        ) {
+          return existing;
+        }
+
+        long now = TimeSource.currentTimeMillis();
+        long remainingMs = entry.getHardExpireAtMs() - now;
+        long leaseTtlMs = Math.max(LEASE_MIN_TTL_MS, Math.max(1, remainingMs) >> LEASE_DIVISOR);
+        long leaseExpireAtMs = now + leaseTtlMs;
+        // The soft timestamp sits at the midpoint of the lease: the entry spends
+        // the second half of every lease soft-expired while still hard-valid, so
+        // the next read re-arms the refresh (retry window). soft == hard would
+        // close the window entirely — the read path checks hard expiry before
+        // soft expiry, so the entry would die at lease end without ever retrying.
+        // NB: the halving applies to the lease DURATION only — shifting the full
+        // epoch timestamp (now + lease) would land it decades in the past.
+        long leaseSoftExpireAtMs = now + (leaseTtlMs >> LEASE_DIVISOR);
+        log.debug(
+          "Lease-on-failure: extending stale entry for key={} by {}ms (floor {}ms)",
+          cacheKey,
+          leaseTtlMs,
+          LEASE_MIN_TTL_MS
+        );
+        return entry.toBuilder().hardExpireAtMs(leaseExpireAtMs).softExpireAtMs(leaseSoftExpireAtMs).build();
+      });
   }
 
   /**

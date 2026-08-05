@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.model.VersionedValue;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -301,6 +302,8 @@ class CacheExpireManagerTest {
   /**
    * Verifies that triggerBackgroundRefresh with a supplier error logs the failure
    * and leaves the existing entry intact (fault mode: supplier exception).
+   * A permanent entry ({@code hardExpireAtMs == Long.MAX_VALUE}) is never
+   * leased — there is nothing to extend (ADR-0036).
    */
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldPreserveExistingEntry() throws InterruptedException {
@@ -337,6 +340,7 @@ class CacheExpireManagerTest {
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
     assertThat(entry).isNotNull();
     assertThat((Object) entry.getValue()).isEqualTo("original");
+    assertThat(entry.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
   }
 
   /**
@@ -419,8 +423,186 @@ class CacheExpireManagerTest {
     assertThat((Object) entry.getValue()).isEqualTo("original");
   }
 
+  // ── Lease-on-Failure (ADR-0036) ───────────────────────────────────
+
   /**
-   * Verifies that triggerBackgroundRefresh with a real async executor and the
+   * Verifies that a failed background refresh leases the existing entry:
+   * value and metadata preserved, duration fields untouched (Option B), both
+   * expire timestamps extended to approximately half of the remaining budget.
+   */
+  @Test
+  void triggerBackgroundRefresh_withSupplierError_shouldLeaseExistingEntry() throws InterruptedException {
+    ExecutorService asyncExec = Executors.newCachedThreadPool();
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    try {
+      long originalExpire = System.currentTimeMillis() + 300_000;
+      caffeineCache.put("key", hotEntry("original", 1, originalExpire));
+
+      asyncExpire.triggerBackgroundRefresh(
+        "key",
+        () -> {
+          throw new RuntimeException("refresh-failed");
+        },
+        30_000
+      );
+      Thread.sleep(200);
+
+      long now = System.currentTimeMillis();
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+      assertThat(entry).isNotNull();
+      assertThat((Object) entry.getValue()).isEqualTo("original");
+      assertThat(entry.getDataVersion()).isEqualTo(1);
+      assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+      // Duration fields stay authoritative — only timestamps move (ADR-0036).
+      assertThat(entry.getHardTtlMs()).isEqualTo(300_000);
+      assertThat(entry.getSoftTtlMs()).isEqualTo(30_000);
+      // Lease = remaining/2 (well above the 120s floor); hard extended to
+      // now + lease, soft to the lease midpoint — the retry window.
+      assertThat(entry.getHardExpireAtMs()).isGreaterThan(now + 120_000);
+      assertThat(entry.getHardExpireAtMs()).isLessThanOrEqualTo(now + 160_000);
+      assertThat(entry.getSoftExpireAtMs()).isBetween(now + 60_000, now + 80_000);
+      assertThat(entry.getSoftExpireAtMs()).isLessThan(entry.getHardExpireAtMs());
+    } finally {
+      asyncExec.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that repeated failures halve the remaining budget each time,
+   * decaying to the 120s floor (soft exponential decay, ADR-0036).
+   */
+  @Test
+  void triggerBackgroundRefresh_repeatedFailures_shouldDecayLeaseToFloor() {
+    caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 600_000));
+    ExpireManager syncExpire = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 10);
+
+    syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
+    long now = System.currentTimeMillis();
+    CacheEntry first = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(first.getHardExpireAtMs()).isBetween(now + 260_000, now + 320_000);
+
+    syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
+    now = System.currentTimeMillis();
+    CacheEntry second = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(second.getHardExpireAtMs()).isBetween(now + 130_000, now + 170_000);
+
+    syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
+    now = System.currentTimeMillis();
+    CacheEntry third = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(third.getHardExpireAtMs()).isBetween(now + 110_000, now + 130_000);
+    // Floor lease: soft at the midpoint (60s) — the entry stays retry-eligible.
+    assertThat(third.getSoftExpireAtMs()).isBetween(now + 50_000, now + 70_000);
+    assertThat(third.getSoftExpireAtMs()).isLessThan(third.getHardExpireAtMs());
+    assertThat((Object) third.getValue()).isEqualTo("original");
+  }
+
+  /**
+   * Verifies that a version advance landing during the in-flight refresh
+   * (a write) suppresses the lease — the guard treats it as a different
+   * logical entry (ADR-0036 identity guard).
+   */
+  @Test
+  void triggerBackgroundRefresh_withSupplierError_shouldNotLeaseWhenVersionAdvanced() throws InterruptedException {
+    ExecutorService asyncExec = Executors.newCachedThreadPool();
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    try {
+      long originalExpire = System.currentTimeMillis() + 300_000;
+      caffeineCache.put("key", hotEntry("original", 5, originalExpire));
+
+      asyncExpire.triggerBackgroundRefresh(
+        "key",
+        () -> {
+          caffeineCache
+            .asMap()
+            .computeIfPresent("key", (k, existing) -> {
+              if (existing instanceof CacheEntry ce) {
+                return ce.toBuilder().dataVersion(10).build();
+              }
+              return existing;
+            });
+          throw new RuntimeException("refresh-failed");
+        },
+        30_000
+      );
+      Thread.sleep(200);
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+      assertThat(entry).isNotNull();
+      assertThat(entry.getDataVersion()).isEqualTo(10);
+      assertThat(entry.getHardExpireAtMs()).isEqualTo(originalExpire);
+    } finally {
+      asyncExec.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that an in-flight entry rewrite with fresh TTLs (simulating a
+   * Worker rebroadcast, ADR-0024) suppresses the lease — the new hard expiry
+   * is never shortened (ADR-0036 identity guard on hardExpireAtMs).
+   */
+  @Test
+  void triggerBackgroundRefresh_withSupplierError_shouldNotLeaseWhenEntryRewritten() throws InterruptedException {
+    Executor asyncExec = Executors.newCachedThreadPool();
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    try {
+      long originalExpire = System.currentTimeMillis() + 300_000;
+      caffeineCache.put("key", hotEntry("original", 5, originalExpire));
+      long rewrittenExpire = System.currentTimeMillis() + 60_000;
+
+      asyncExpire.triggerBackgroundRefresh(
+        "key",
+        () -> {
+          caffeineCache
+            .asMap()
+            .computeIfPresent("key", (k, existing) -> {
+              if (existing instanceof CacheEntry ce) {
+                return ce.withHardTtl(60_000, rewrittenExpire);
+              }
+              return existing;
+            });
+          throw new RuntimeException("refresh-failed");
+        },
+        30_000
+      );
+      Thread.sleep(200);
+
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key");
+      assertThat(entry).isNotNull();
+      assertThat(entry.getHardExpireAtMs()).isEqualTo(rewrittenExpire);
+    } finally {
+      ((ExecutorService) asyncExec).shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that an entry evicted during the in-flight refresh is never
+   * recreated on the failure path — the lease has no new value to write.
+   */
+  @Test
+  void triggerBackgroundRefresh_withSupplierError_shouldNotRecreateEvictedEntry() throws InterruptedException {
+    Executor asyncExec = Executors.newCachedThreadPool();
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    try {
+      caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 300_000));
+
+      asyncExpire.triggerBackgroundRefresh(
+        "key",
+        () -> {
+          caffeineCache.invalidate("key");
+          throw new RuntimeException("refresh-failed");
+        },
+        30_000
+      );
+      Thread.sleep(200);
+
+      assertThat(caffeineCache.getIfPresent("key")).isNull();
+    } finally {
+      ((ExecutorService) asyncExec).shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that a failed refresh with a real async executor and the
    * new refresh-timeout wrapper works normally — the value is updated on success.
    */
   @Test
@@ -579,5 +761,29 @@ class CacheExpireManagerTest {
     assertThat(entry.getNormalHardTtlMs()).isEqualTo(300_000);
     assertThat(entry.getNormalSoftTtlMs()).isEqualTo(30_000);
     assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+  }
+
+  /** Build a Worker-managed HOT entry with the given value, version and hard expiry. */
+  private static CacheEntry hotEntry(Object value, long dataVersion, long hardExpireAtMs) {
+    return CacheEntry.builder()
+      .value(value)
+      .dataVersion(dataVersion)
+      .isVersionDegraded(false)
+      .decisionVersion(1)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(hardExpireAtMs)
+      .softTtlMs(30_000)
+      .softExpireAtMs(hardExpireAtMs == Long.MAX_VALUE ? System.currentTimeMillis() + 30_000 : hardExpireAtMs)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
+      .build();
+  }
+
+  /** A reader that always throws — the lease-on-failure trigger. */
+  private static Supplier<?> failingReader() {
+    return () -> {
+      throw new RuntimeException("refresh-failed");
+    };
   }
 }
