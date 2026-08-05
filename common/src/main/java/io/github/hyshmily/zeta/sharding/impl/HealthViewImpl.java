@@ -32,8 +32,9 @@ import lombok.extern.slf4j.Slf4j;
  * {@link WorkerHeartbeatMessage} broadcasts from all Worker nodes.
  *
  * <p>This is the central health authority for the local app instance. It tracks
- * every known Worker by ID with its epoch (restart counter), heartbeat timestamps,
- * readiness flag, decision version high-water mark, and verification failure count.
+ * every known Worker by ID with its epoch (restart counter), last alive
+ * evidence timestamp (heartbeat or PONG), readiness flag, and verification
+ * failure count.
  *
  * <p><b>Health judgment:</b> The cluster is considered healthy when at least one
  * third of the Workers observed via heartbeats (rounded up, minimum 1) are alive
@@ -123,12 +124,14 @@ public class HealthViewImpl implements HealthView {
    *
    * <p><b>New or restarted Worker:</b> If this is the first heartbeat from a Worker,
    * or if the heartbeat epoch exceeds the stored epoch (indicating a Worker restart),
-   * a new {@link WorkerHealthRecord} is created with fresh timestamps and the old
-   * decision watermark is discarded.
+   * a new {@link WorkerHealthRecord} is created with fresh timestamps and all
+   * state from the previous incarnation is discarded.
    *
-   * <p><b>Known Worker:</b> Updates the last heartbeat timestamp, decision version
-   * watermark (taking the max), load factor, and readiness flag. Clears any stale
-   * or restarted flags.
+   * <p><b>Known Worker:</b> Updates the last alive evidence timestamp, load
+   * factor, and readiness flag. Clears the stale flag and resets the
+   * verification failure count — a heartbeat is stronger liveness evidence
+   * than any number of probe failures, so strikes only accumulate while
+   * heartbeats are absent.
    *
    * <p><b>Cluster recovery:</b> If the cluster was in degraded state and this heartbeat
    * brings the majority back to health, the degraded flag is automatically cleared.
@@ -145,7 +148,7 @@ public class HealthViewImpl implements HealthView {
 
         r.workerId = hb.workerId();
         r.epoch = hb.epoch();
-        r.lastHeartbeatTime = now;
+        r.lastAliveEvidenceTime = now;
         r.readyToServe = hb.readyToServe();
         if (existing == null) {
           log.info("Worker joined cluster: {} (epoch={})", hb.workerId(), hb.epoch());
@@ -159,9 +162,10 @@ public class HealthViewImpl implements HealthView {
         return existing;
       }
 
-      existing.lastHeartbeatTime = now;
+      existing.lastAliveEvidenceTime = now;
       existing.readyToServe = hb.readyToServe();
       existing.stale = false;
+      existing.verifyFailures = 0;
       return existing;
     });
 
@@ -174,14 +178,15 @@ public class HealthViewImpl implements HealthView {
    * ({@link WorkerHeartbeatVerifier#verifySuspectedWorkers}).
    *
    * <p>Resets the Worker's verification failure count to zero and updates its
-   * heartbeat timestamp to now, effectively restoring it to the alive set.
+   * last alive evidence timestamp to now, effectively restoring it to the
+   * alive set.
    *
    * @param workerId the Worker that responded with a PONG; must not be null
    */
   @Override
   public void recordPong(String workerId) {
     records.computeIfPresent(workerId, (id, r) -> {
-      r.lastHeartbeatTime = TimeSource.monotonicMillis();
+      r.lastAliveEvidenceTime = TimeSource.monotonicMillis();
       r.verifyFailures = 0;
       return r;
     });
@@ -196,6 +201,11 @@ public class HealthViewImpl implements HealthView {
    * the Worker is marked as stale ({@code stale = true}). Stale Workers are
    * excluded from {@link #isClusterHealthy()} and {@link #getAliveWorkerIds()}
    * — they are effectively considered dead even if they were previously alive.
+   *
+   * <p><b>Consecutive-failure semantics:</b> The count measures failures within
+   * the current outage episode. Any liveness evidence — a heartbeat
+   * ({@link #onHeartbeat}) or a PONG ({@link #recordPong}) — resets it, so
+   * strikes never accumulate across recovered partitions.
    *
    * <p>If the Worker ID is not present in the health view (never seen, or already
    * removed), this call is a no-op.
@@ -329,9 +339,39 @@ public class HealthViewImpl implements HealthView {
   }
 
   /**
+   * Whether the given Worker is currently considered alive — the same
+   * freshness-based judgment as {@link #getAliveWorkerIds()} and the ring /
+   * report path: ready to serve, not stale, and within the heartbeat timeout.
+   * Unknown Workers are never alive. O(1) per-record lookup — safe on the
+   * read path.
+   *
+   * @param workerId the Worker node ID
+   * @return {@code true} if the Worker is alive
+   */
+  @Override
+  public boolean isAlive(String workerId) {
+    WorkerHealthRecord r = records.get(workerId);
+    return r != null && r.isAlive(heartbeatTimeoutMs);
+  }
+
+  /**
+   * The current epoch (restart incarnation) of the given Worker, or
+   * {@link #UNKNOWN_EPOCH} when the Worker has never been seen or its record
+   * was removed after confirmation of death.
+   *
+   * @param workerId the Worker node ID
+   * @return the Worker's current epoch, or {@link #UNKNOWN_EPOCH}
+   */
+  @Override
+  public long epochOf(String workerId) {
+    WorkerHealthRecord r = records.get(workerId);
+    return r != null ? r.epoch : UNKNOWN_EPOCH;
+  }
+
+  /**
    * Per-Worker health state tracked within the cluster health view.
    *
-   * <p>Each reportToWorker captures the Worker's current epoch, heartbeat timing,
+   * <p>Each reportToWorker captures the Worker's current epoch, liveness timing,
    * readiness, load, and verification failure state. Records are created
    * on first heartbeat and updated (or replaced on epoch change) via
    * atomic {@code ConcurrentHashMap.compute} operations.
@@ -350,7 +390,7 @@ public class HealthViewImpl implements HealthView {
 
     public volatile String workerId;
     public volatile long epoch;
-    public volatile long lastHeartbeatTime;
+    public volatile long lastAliveEvidenceTime;
     public volatile boolean readyToServe;
     public volatile boolean stale;
 
@@ -360,23 +400,24 @@ public class HealthViewImpl implements HealthView {
      * Returns whether this Worker is currently considered alive for health-majority
      * calculations.
      *
-     * <p>All three conditions must hold:
-     * <ul>
-     *   <li>{@link #readyToServe} is {@code true} — the Worker has completed its
-     *       initial detection cycle and is accepting requests</li>
-     *   <li>{@link #stale} is {@code false} — the Worker has not exceeded the
-     *       configured verification failure threshold</li>
-     *   <li>The elapsed monotonic time since {@link #lastHeartbeatTime} is less
-     *       than {@code timeoutMs} — heartbeats are arriving within the expected
-     *       interval (monotonic, so NTP wall-clock jumps cannot kill workers)</li>
-     * </ul>
-     *
-     * @param timeoutMs the heartbeat timeout window in milliseconds; must be positive
-     * @return {@code true} if this Worker is ready, not stale, and has sent a heartbeat
-     *         within the timeout window
-     */
-    public boolean isAlive(long timeoutMs) {
-      return readyToServe && !stale && TimeSource.monotonicMillis() - lastHeartbeatTime < timeoutMs;
-    }
+   * <p>All three conditions must hold:
+   * <ul>
+   *   <li>{@link #readyToServe} is {@code true} — the Worker has completed its
+   *       initial detection cycle and is accepting requests</li>
+   *   <li>{@link #stale} is {@code false} — the Worker has not exceeded the
+   *       configured verification failure threshold</li>
+   *   <li>The elapsed monotonic time since {@link #lastAliveEvidenceTime} is
+   *       less than {@code timeoutMs} — liveness evidence (a heartbeat or a
+   *       verified PONG) has arrived within the expected interval (monotonic,
+   *       so NTP wall-clock jumps cannot kill workers)</li>
+   * </ul>
+   *
+   * @param timeoutMs the heartbeat timeout window in milliseconds; must be positive
+   * @return {@code true} if this Worker is ready, not stale, and has provided
+   *         liveness evidence within the timeout window
+   */
+  public boolean isAlive(long timeoutMs) {
+    return readyToServe && !stale && TimeSource.monotonicMillis() - lastAliveEvidenceTime < timeoutMs;
+  }
   }
 }

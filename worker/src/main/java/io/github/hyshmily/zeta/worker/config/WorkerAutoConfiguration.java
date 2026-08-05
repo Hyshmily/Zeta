@@ -781,7 +781,7 @@ public class WorkerAutoConfiguration {
 
   /**
    * Enhanced heartbeat producer that sends structured heartbeats with epoch,
-   * load factor, decision-version watermark, and state-machine config gossip.
+   * load factor, and state-machine config gossip.
    *
    * <p>Shares the same epoch counter bean with {@link WorkerBroadcaster}
    * so that epoch values in heartbeat messages and send messages are
@@ -795,7 +795,6 @@ public class WorkerAutoConfiguration {
    * @param rabbitTemplate         the heartbeat-dedicated RabbitMQ template
    * @param properties             worker configuration providing exchange and interval settings
    * @param stateMachine           the state machine providing config gossip fields
-   * @param broadcaster            the broadcaster for reading the current decision version watermark
    * @param epochCounter           the shared epoch counter (initialised via Redis INTR)
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @param scheduler              the shared worker scheduler for periodic heartbeat sends
@@ -806,7 +805,6 @@ public class WorkerAutoConfiguration {
     @Qualifier("zetaHeartbeatRabbitTemplate") RabbitTemplate rabbitTemplate,
     WorkerProperties properties,
     ZetaBayesianSM stateMachine,
-    WorkerBroadcaster broadcaster,
     @Qualifier("workerEpochCounter") AtomicLong epochCounter,
     @Qualifier("configTimestampCounter") AtomicLong configTimestampCounter,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
@@ -817,7 +815,6 @@ public class WorkerAutoConfiguration {
       properties.getMessaging().getHeartbeatExchange(),
       nodeId,
       stateMachine,
-      broadcaster,
       configTimestampCounter,
       epochCounter.get(),
       properties.getHeartbeat().getPingIntervalMs(),

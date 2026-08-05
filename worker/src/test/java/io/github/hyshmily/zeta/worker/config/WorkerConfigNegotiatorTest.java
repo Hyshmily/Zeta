@@ -48,7 +48,6 @@ class WorkerConfigNegotiatorTest {
     props.setHeader(HEADER_HEARTBEAT_CONFIG_GRACE, 3);
     props.setHeader(HEADER_HEARTBEAT_EPOCH, 1L);
     props.setHeader(HEADER_TIMESTAMP, System.currentTimeMillis());
-    props.setHeader(HEADER_HEARTBEAT_DV_HWM, 0L);
     props.setHeader(HEADER_HEARTBEAT_LOAD, 0.0);
     props.setHeader(HEADER_HEARTBEAT_READY, true);
     props.setHeader(HEADER_HEARTBEAT_CONFIG_FP, 0);

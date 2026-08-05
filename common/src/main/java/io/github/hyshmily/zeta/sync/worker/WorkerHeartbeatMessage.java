@@ -36,8 +36,6 @@ import org.springframework.amqp.core.MessageProperties;
  *   <li>{@code epoch} — Monotonically increasing Worker restart counter. Handles
  *       the case where a Worker dies and its {@code AtomicLong} decision version
  *       resets, allowing App instances to detect restarts.</li>
- *   <li>{@code decisionVersionHwm} — Watermark (high-water mark) of the Worker's
- *       current decision version, used for idempotent decision ordering on the receiver.</li>
  *   <li>{@code loadFactor} — Normalized scheduling hint (0.0–1.0) reflecting the
  *       Worker's current processing load.</li>
  *   <li>{@code readyToServe} — Cold-start guard; {@code false} during Worker
@@ -52,7 +50,6 @@ import org.springframework.amqp.core.MessageProperties;
  *
  * @param workerId           unique identifier for the originating Worker node
  * @param epoch              Worker restart counter; increases monotonically on each Worker start
- * @param decisionVersionHwm high-water mark of the Worker's current decision version
  * @param loadFactor         normalized load factor (0.0–1.0) for scheduling hints
  * @param readyToServe       {@code false} during Worker cold-start initialization;
  *                           App instances should not rely on this Worker's decisions yet
@@ -69,7 +66,6 @@ public record WorkerHeartbeatMessage(
   long id,
   String workerId,
   long epoch,
-  long decisionVersionHwm,
   double loadFactor,
   boolean readyToServe,
   int configConfirmCount,
@@ -85,9 +81,8 @@ public record WorkerHeartbeatMessage(
    * set as message headers.
    *
    * <p>The body carries the {@code workerId} as UTF-8 bytes. Headers include
-   * type discriminator ({@value #TYPE}), epoch, decision version watermark,
-   * load factor, readiness flag, config gossip fields, and the originating
-   * node identifier &amp; timestamp.
+   * type discriminator ({@value #TYPE}), epoch, load factor, readiness flag,
+   * config gossip fields, and the originating node identifier &amp; timestamp.
    *
    * @return the constructed AMQP message
    */
@@ -96,7 +91,6 @@ public record WorkerHeartbeatMessage(
 
     props.setHeader(HEADER_TYPE, TYPE);
     props.setHeader(HEADER_HEARTBEAT_EPOCH, epoch);
-    props.setHeader(HEADER_HEARTBEAT_DV_HWM, decisionVersionHwm);
     props.setHeader(HEADER_HEARTBEAT_LOAD, loadFactor);
     props.setHeader(HEADER_HEARTBEAT_READY, readyToServe);
     props.setHeader(HEADER_NODE_ID, workerId);
@@ -136,7 +130,6 @@ public record WorkerHeartbeatMessage(
       h.getHeader(HEADER_MESSAGE_ID) instanceof Number n ? n.longValue() : 0,
       h.getHeader(HEADER_NODE_ID) instanceof String s ? s : "",
       h.getHeader(HEADER_HEARTBEAT_EPOCH) instanceof Number n ? n.longValue() : 0,
-      h.getHeader(HEADER_HEARTBEAT_DV_HWM) instanceof Number n ? n.longValue() : 0,
       h.getHeader(HEADER_HEARTBEAT_LOAD) instanceof Number n ? n.doubleValue() : 0.0,
       Boolean.TRUE.equals(h.getHeader(HEADER_HEARTBEAT_READY)),
       h.getHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM) instanceof Number n ? n.intValue() : 0,

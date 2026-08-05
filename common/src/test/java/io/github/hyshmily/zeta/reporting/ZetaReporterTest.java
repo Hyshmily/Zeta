@@ -99,7 +99,7 @@ class ZetaReporterTest {
   }
 
   private static void registerWorker(HealthView hv, String workerId) {
-    hv.onHeartbeat(new WorkerHeartbeatMessage(0L, workerId, 1, 0, 0.0, true, 0, 0, 0, 0));
+    hv.onHeartbeat(new WorkerHeartbeatMessage(0L, workerId, 1, 0.0, true, 0, 0, 0, 0));
   }
 
   private void awaitPublish(int minCount) throws InterruptedException {

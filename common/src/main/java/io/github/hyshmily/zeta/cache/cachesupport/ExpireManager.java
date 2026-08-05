@@ -51,6 +51,45 @@ public interface ExpireManager {
   boolean invalidateIfIsLogicallyExpired(String cacheKey, Object raw);
 
   /**
+   * Demote a Worker-sourced {@link KeyState#HOT} entry whose issuing Worker
+   * incarnation is no longer authoritative (Decision Validity — ADR-0035).
+   *
+   * <p>The demotion is an in-place rewrite performed on the read path: the
+   * value is preserved and continues to be served, the entry reverts to the
+   * ordinary NORMAL lifecycle (normal TTLs, decision stamp cleared), and the
+   * local TopK re-decides on the next reload. Zero scan — only entries
+   * actually read are visited.
+   *
+   * <p>Decision invalidity: the entry carries a {@code decisionNodeId} whose
+   * health record is absent, whose incarnation is dead, or whose epoch no
+   * longer matches the entry's {@code decisionEpoch} (Worker restart). The
+   * predicate is re-verified inside the atomic write, so a concurrent fresh
+   * broadcast (recovered Worker) is never clobbered.
+   *
+   * @param cacheKey the cache key
+   * @param raw      the raw value from the Caffeine cache (may be {@link CacheEntry} or bare)
+   * @return {@code true} if the entry was demoted
+   */
+  boolean demoteIfDecisionInvalid(String cacheKey, Object raw);
+
+  /**
+   * Pure Decision-Validity demotion (ADR-0035): if the given Worker-sourced
+   * HOT entry's issuing Worker incarnation is dead or restarted, return the
+   * entry rewritten in place to the NORMAL lifecycle — value preserved, normal
+   * TTLs, decision stamp cleared. Returns {@code null} when no demotion
+   * applies.
+   *
+   * <p>Stateless and side-effect-free: the caller decides atomicity. Safe
+   * inside a Caffeine {@code compute} callback, where the bin lock already
+   * makes the check-and-rewrite atomic (see {@code HotKeyCache.computeInLock}).
+   *
+   * @param entry the Worker-sourced cache entry to inspect
+   * @return the demoted entry, or {@code null} if no demotion applies
+   */
+  @Nullable
+  CacheEntry demoteIfDecisionInvalidInPlace(CacheEntry entry);
+
+  /**
    * The version stamp carried by a cache entry: the {@code dataVersion} used
    * for cross-instance sync ordering, plus whether it was produced in
    * degraded (local fallback) mode.
@@ -139,13 +178,4 @@ public interface ExpireManager {
    * current entry has reached its soft expiry threshold.
    */
   void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs);
-
-  /** Extend both the hard and soft expiry for a cache entry. */
-  void extendExpiry(String cacheKey, long hardTtlMs, long softTtlMs);
-
-  /** Extend only the hard expiry for a cache entry, leaving the soft expiry unchanged. */
-  void extendHardExpiry(String cacheKey, long hardTtlMs);
-
-  /** Extend only the soft expiry for a cache entry, leaving the hard expiry unchanged. */
-  void extendSoftExpiry(String cacheKey, long softTtlMs);
 }

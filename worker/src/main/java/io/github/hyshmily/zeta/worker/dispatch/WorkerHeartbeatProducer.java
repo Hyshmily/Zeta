@@ -45,7 +45,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * Enhanced Worker heartbeat sender.
  *
  * <p>Replaces the old ping-only heartbeat approach with
- * structured heartbeats containing epoch, decisionVersionHwm, loadFactor,
+ * structured heartbeats containing epoch, loadFactor,
  * and readyToServe flags. Broadcast on the dedicated heartbeat exchange.
  *
  * <p>Epoch is persisted to Redis (fallback to local file), incremented
@@ -65,8 +65,6 @@ public class WorkerHeartbeatProducer {
   private final String workerId;
   /** State machine providing config-gossip fields (confirm/cool/grace counts). */
   private final ZetaBayesianSM stateMachine;
-  /** Broadcaster for reading the current decision version watermark. */
-  private final WorkerBroadcaster broadcaster;
   /** Monotonically increasing epoch, persisted across restarts. */
   private final long epoch;
   /** JVM start timestamp used for the ready-to-serve grace period. */
@@ -97,7 +95,6 @@ public class WorkerHeartbeatProducer {
    * @param heartbeatExchange      the target topic exchange for heartbeat messages
    * @param workerId               unique identity of this Worker node
    * @param stateMachine           the state machine providing config-gossip fields
-   * @param broadcaster            the broadcaster for reading the current decision version watermark
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @param redisConnectionFactory the Redis connection factory for epoch initialization
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
@@ -109,7 +106,6 @@ public class WorkerHeartbeatProducer {
     String heartbeatExchange,
     String workerId,
     ZetaBayesianSM stateMachine,
-    WorkerBroadcaster broadcaster,
     AtomicLong configTimestampCounter,
     RedisConnectionFactory redisConnectionFactory,
     long pingIntervalMs,
@@ -121,7 +117,6 @@ public class WorkerHeartbeatProducer {
       heartbeatExchange,
       workerId,
       stateMachine,
-      broadcaster,
       initEpoch(workerId, redisConnectionFactory),
       TimeSource.monotonicMillis(),
       scheduler,
@@ -140,7 +135,6 @@ public class WorkerHeartbeatProducer {
    * @param heartbeatExchange      the target topic exchange for heartbeat messages
    * @param workerId               unique identity of this Worker node
    * @param stateMachine           the state machine providing config-gossip fields
-   * @param broadcaster            the broadcaster for reading the current decision version watermark
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @param epoch                  the externally-computed epoch value
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
@@ -152,7 +146,6 @@ public class WorkerHeartbeatProducer {
     String heartbeatExchange,
     String workerId,
     ZetaBayesianSM stateMachine,
-    WorkerBroadcaster broadcaster,
     AtomicLong configTimestampCounter,
     long epoch,
     long pingIntervalMs,
@@ -164,7 +157,6 @@ public class WorkerHeartbeatProducer {
       heartbeatExchange,
       workerId,
       stateMachine,
-      broadcaster,
       epoch,
       TimeSource.monotonicMillis(),
       scheduler,
@@ -184,7 +176,6 @@ public class WorkerHeartbeatProducer {
    * @param heartbeatExchange      the target topic exchange for heartbeat messages
    * @param workerId               unique identity of this Worker node
    * @param stateMachine           the state machine providing config-gossip fields
-   * @param broadcaster            the broadcaster for reading the current decision version watermark
    * @param configTimestampCounter the shared monotonic counter for config-change timestamps
    * @param pingIntervalMs         interval between consecutive heartbeat sends (milliseconds)
    * @return a new heartbeat producer ready for testing
@@ -194,7 +185,6 @@ public class WorkerHeartbeatProducer {
     String heartbeatExchange,
     String workerId,
     ZetaBayesianSM stateMachine,
-    WorkerBroadcaster broadcaster,
     AtomicLong configTimestampCounter,
     long pingIntervalMs,
     SnowflakeIdGenerator snowflakeIdGenerator
@@ -206,7 +196,6 @@ public class WorkerHeartbeatProducer {
       heartbeatExchange,
       workerId,
       stateMachine,
-      broadcaster,
       epoch,
       System.currentTimeMillis(),
       scheduler,
@@ -394,7 +383,6 @@ public class WorkerHeartbeatProducer {
         snowflakeIdGenerator.nextId(),
         workerId,
         epoch,
-        broadcaster.getCurrentDecisionVersion(),
         computeLoadFactor(),
         isReadyToServe(),
         stateMachine.getConfirmCount(),

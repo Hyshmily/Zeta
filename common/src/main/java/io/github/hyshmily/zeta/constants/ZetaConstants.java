@@ -48,8 +48,6 @@ public interface ZetaConstants {
     String HEADER_HEARTBEAT_READY = "hbReady";
     /** Sender's config fingerprint for change detection. */
     String HEADER_HEARTBEAT_CONFIG_FP = "hbConfigFp";
-    /** Sender's data version high-water mark. */
-    String HEADER_HEARTBEAT_DV_HWM = "hbDvHwm";
     /** Sender's config confirm count. */
     String HEADER_HEARTBEAT_CONFIG_CONFIRM = "hbConfigConfirm";
     /** Sender's config cool count. */

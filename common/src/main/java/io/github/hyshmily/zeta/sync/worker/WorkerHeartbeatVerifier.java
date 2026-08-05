@@ -262,6 +262,11 @@ public class WorkerHeartbeatVerifier {
    * <p>Workers in exponential backoff (see {@link #nextVerifyTime}) are
    * skipped before being added to the probe batch.
    *
+   * <p><b>Backoff hygiene:</b> Backoff entries for Workers that are no longer
+   * suspected (heartbeat or PONG resumed) are dropped each round, so a stale
+   * entry from a previous outage episode can never delay the first probe of
+   * the next episode.
+   *
    * <p>When cumulative failures across all suspected Workers reach
    * {@code degradeAfterFailures} and the cluster remains unhealthy, the cluster
    * is marked as degraded.
@@ -277,6 +282,12 @@ public class WorkerHeartbeatVerifier {
         .filter(id -> !healthView.getAliveWorkerIds().contains(id))
         .filter(id -> healthView.getVerifyFailures(id) < MAX_RETRY)
         .collect(Collectors.toSet());
+
+      // Drop backoff entries for Workers that are alive again (or removed):
+      // a stale entry from a previous outage would delay the first probe of
+      // the next one. Runs even when nothing is suspected, so a recovery that
+      // empties the suspected set still cleans up.
+      nextVerifyTime.keySet().removeIf(id -> !suspected.contains(id));
 
       if (suspected.isEmpty()) {
         return;

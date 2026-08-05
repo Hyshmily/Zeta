@@ -59,4 +59,27 @@ public interface HealthView {
 
   /** Get the IDs of all known Workers. */
   Set<String> getAllWorkerIds();
+
+  /**
+   * Whether the given Worker is currently considered alive (ready, not stale,
+   * and within the heartbeat timeout) — the same liveness judgment the ring
+   * and report path use. Unknown Workers are never alive.
+   *
+   * @param workerId the Worker node ID
+   * @return {@code true} if the Worker is alive
+   */
+  boolean isAlive(String workerId);
+
+  /**
+   * The current epoch (restart incarnation) of the given Worker, or
+   * {@link #UNKNOWN_EPOCH} when the Worker has never been seen (or its record
+   * was removed after confirmation of death).
+   *
+   * @param workerId the Worker node ID
+   * @return the Worker's current epoch, or {@link #UNKNOWN_EPOCH}
+   */
+  long epochOf(String workerId);
+
+  /** Sentinel returned by {@link #epochOf} for Workers with no health record. */
+  long UNKNOWN_EPOCH = -1L;
 }

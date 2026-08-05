@@ -68,9 +68,16 @@ public class WorkerBroadcaster {
 
   /**
    * Worker‑local decision version counter.
-   * Incremented atomically for every send to provide strict ordering
+   * Allocated atomically for every broadcast attempt to provide strict ordering
    * for this worker.  Combined with consistent‑hash sharding (one key → one
    * worker) this guarantees a total order of decisions per key.
+   *
+   * <p><b>Watermark semantics:</b> The version is allocated {@code before}
+   * the send ({@link #nextDecisionVersion()}), so a failed broadcast burns a
+   * version and the sequence contains holes. It is a monotone <em>high-water
+   * mark of broadcast attempts</em>, not a count of delivered messages.
+   * Receivers must treat it as an ordering watermark only (compare with
+   * {@code >=}) and never assume every intermediate version exists.
    *
    * <p>Initialised at zero — the epoch counter handles cross‑restart ordering,
    * so we neither need nor want a wall‑clock seed (see ADR-0010).
@@ -152,17 +159,6 @@ public class WorkerBroadcaster {
       // no throw — ADR-0007 fire-and-forget
     }
     return true;
-  }
-
-  /**
-   * Returns the current decision version without incrementing.
-   *
-   * <p>Used by {@link WorkerHeartbeatProducer} for the heartbeat's decisionVersionHwm field.
-   *
-   * @return the current decision version counter value
-   */
-  public long getCurrentDecisionVersion() {
-    return decisionVersionCounter.get();
   }
 
   /**

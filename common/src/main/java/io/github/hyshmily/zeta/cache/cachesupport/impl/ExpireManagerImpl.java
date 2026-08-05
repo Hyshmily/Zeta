@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.model.VersionedValue;
+import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.util.Optional;
 import java.util.concurrent.*;
@@ -63,6 +64,13 @@ public class ExpireManagerImpl implements ExpireManager {
 
   /** Jitter ratio applied to TTLs to prevent cache stampedes (from config, default 0.05 = ±5%). */
   private final double defaultTtlJitterRatio;
+
+  /**
+   * Cluster health view used for the Decision-Validity check
+   * (ADR-0035). {@code null} disables demotion (test doubles, consumers
+   * without a health view).
+   */
+  private final HealthView healthView;
 
   @SuppressWarnings("all")
   private static final long refreshTimeoutSeconds = 30;
@@ -125,10 +133,38 @@ public class ExpireManagerImpl implements ExpireManager {
     int refreshMaxPools,
     CacheCompressor compressor
   ) {
+    this(caffeineCache, executor, ttlConfig, refreshMaxPools, compressor, null);
+  }
+
+  /**
+   * Creates a ExpireManagerImpl with the given Caffeine cache, executor, TTL config,
+   * compressor, and cluster health view.
+   *
+   * <p>The {@link HealthView} powers the Decision-Validity demotion (ADR-0035):
+   * Worker-sourced HOT entries whose issuing Worker incarnation is dead or
+   * restarted are reverted to the NORMAL lifecycle on the read path. A
+   * {@code null} health view disables demotion.
+   *
+   * @param caffeineCache   the underlying L1 Caffeine cache
+   * @param executor        async executor for background refresh
+   * @param ttlConfig       TTL configuration (normal and hot-key variants)
+   * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
+   * @param compressor      compressor for L1 cache values
+   * @param healthView      cluster health view for the Decision-Validity check, or {@code null}
+   */
+  public ExpireManagerImpl(
+    Cache<String, Object> caffeineCache,
+    Executor executor,
+    ZetaProperties ttlConfig,
+    int refreshMaxPools,
+    CacheCompressor compressor,
+    HealthView healthView
+  ) {
     this.caffeineCache = caffeineCache;
     this.executor = executor;
     this.ttlConfig = ttlConfig;
     this.compressor = compressor;
+    this.healthView = healthView;
     initRefreshLimiter(refreshMaxPools);
     this.defaultTtlJitterRatio = ttlConfig.getTtlJitterRatio();
     this.ttlPolicy = new TtlPolicy(ttlConfig, this.defaultTtlJitterRatio);
@@ -145,10 +181,26 @@ public class ExpireManagerImpl implements ExpireManager {
     double defaultTtlJitterRatio,
     CacheCompressor compressor
   ) {
+    this(caffeineCache, executor, ttlConfig, refreshMaxPools, defaultTtlJitterRatio, compressor, null);
+  }
+
+  /**
+   * Create a ExpireManagerImpl with explicit jitter ratio and health view (for testing).
+   */
+  ExpireManagerImpl(
+    Cache<String, Object> caffeineCache,
+    Executor executor,
+    ZetaProperties ttlConfig,
+    int refreshMaxPools,
+    double defaultTtlJitterRatio,
+    CacheCompressor compressor,
+    HealthView healthView
+  ) {
     this.caffeineCache = caffeineCache;
     this.executor = executor;
     this.ttlConfig = ttlConfig;
     this.compressor = compressor;
+    this.healthView = healthView;
     initRefreshLimiter(refreshMaxPools);
     this.defaultTtlJitterRatio = defaultTtlJitterRatio;
     this.ttlPolicy = new TtlPolicy(ttlConfig, defaultTtlJitterRatio);
@@ -178,6 +230,130 @@ public class ExpireManagerImpl implements ExpireManager {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Decision-Validity demotion (ADR-0035): revert a Worker-sourced HOT entry
+   * to the NORMAL lifecycle when its issuing Worker incarnation is no longer
+   * authoritative.
+   *
+   * <p>An entry's Worker decision is valid only while the issuing incarnation
+   * is alive and its epoch is unchanged: the Worker is the sole authority for
+   * cooling the key down, so a dead or restarted Worker leaves the entry with
+   * HOT TTLs but no one to revoke them. On the first read after invalidity is
+   * detected, the entry is rewritten in place — value preserved and still
+   * served, TTLs reverted to the normal baseline, decision stamp cleared —
+   * so it converges at the normal hard TTL and the local TopK re-decides on
+   * the next reload.
+   *
+   * <p>Runs on the read path; the predicate is a cheap O(1) health-view lookup
+   * and only fires for entries carrying a decision stamp. The predicate is
+   * re-verified inside the atomic {@code compute}, so a concurrent fresh
+   * broadcast (recovered Worker) is never clobbered. With no health view
+   * configured, demotion is disabled (no-op, {@code false}).
+   *
+   * @param cacheKey the cache key
+   * @param raw      the raw value from the Caffeine cache
+   * @return {@code true} if the entry was demoted
+   */
+  @Override
+  public boolean demoteIfDecisionInvalid(String cacheKey, Object raw) {
+    HealthView view = healthView;
+    if (view == null || !(raw instanceof CacheEntry entry)) {
+      return false;
+    }
+
+    String decisionNodeId = entry.getDecisionNodeId();
+    if (
+      decisionNodeId == null ||
+      entry.getKeyState() != KeyState.HOT ||
+      decisionStillValid(view, decisionNodeId, entry.getDecisionEpoch())
+    ) {
+      return false;
+    }
+
+    boolean[] demoted = new boolean[1];
+    caffeineCache
+      .asMap()
+      .compute(cacheKey, (key, existing) -> {
+        if (!(existing instanceof CacheEntry current)) {
+          return existing;
+        }
+        // Re-verify inside the atomic write: the entry may have been
+        // re-stamped by a fresh broadcast (recovered Worker) or locally
+        // re-promoted since the outer check. The pure function judges the
+        // current entry independently — any now-invalid stamp is demoted.
+        CacheEntry corrected = demoteIfDecisionInvalidInPlace(current);
+        if (corrected != null) {
+          demoted[0] = true;
+          return corrected;
+        }
+        return existing;
+      });
+    if (demoted[0]) {
+      log.debug(
+        "Decision-Validity demotion: key={} nodeId={} epoch={} reverted to NORMAL lifecycle",
+        cacheKey,
+        decisionNodeId,
+        entry.getDecisionEpoch()
+      );
+    }
+    return demoted[0];
+  }
+
+  /**
+   * Pure Decision-Validity demotion: judge the entry and, when its issuing
+   * Worker incarnation is dead or restarted, return it rewritten to NORMAL
+   * (value preserved, normal TTLs, decision stamp cleared). {@code null} when
+   * no demotion applies. Side-effect-free — the caller provides atomicity.
+   *
+   * @param entry the Worker-sourced cache entry to inspect
+   * @return the demoted entry, or {@code null} if no demotion applies
+   */
+  @Override
+  @Nullable
+  public CacheEntry demoteIfDecisionInvalidInPlace(CacheEntry entry) {
+    HealthView view = healthView;
+    if (view == null) {
+      return null;
+    }
+
+    String decisionNodeId = entry.getDecisionNodeId();
+    if (
+      decisionNodeId == null ||
+      entry.getKeyState() != KeyState.HOT ||
+      decisionStillValid(view, decisionNodeId, entry.getDecisionEpoch())
+    ) {
+      return null;
+    }
+
+    long normalHardTtlMs = ttlPolicy.resolveEffectiveHardTtl(entry.getNormalHardTtlMs());
+    long normalSoftTtlMs = ttlPolicy.resolveEffectiveSoftTtl(entry.getNormalSoftTtlMs());
+    return entry
+      .withTtlAndKeyState(
+        normalHardTtlMs,
+        normalSoftTtlMs,
+        ttlPolicy.toHardExpireTimestamp(normalHardTtlMs),
+        ttlPolicy.toSoftExpireTimestamp(normalSoftTtlMs),
+        KeyState.NORMAL
+      )
+      .withDecisionVersion(VERSION_DEFAULT)
+      .withDecisionNodeId(null)
+      .withDecisionEpoch(0L);
+  }
+
+  /**
+   * Whether a Worker decision stamped with the given nodeId/epoch is still
+   * authoritative: the Worker has a health record, is alive (same freshness
+   * judgment as the ring/report path), and its current epoch matches.
+   *
+   * @param view      the cluster health view (never {@code null} here)
+   * @param nodeId    the decision's issuing Worker node ID
+   * @param epoch     the decision's issuing epoch
+   * @return {@code true} if the decision is still valid
+   */
+  private boolean decisionStillValid(HealthView view, String nodeId, long epoch) {
+    return view.isAlive(nodeId) && view.epochOf(nodeId) == epoch;
   }
 
   /**
@@ -516,89 +692,5 @@ public class ExpireManagerImpl implements ExpireManager {
             );
           })
       );
-  }
-
-  /**
-   * Extend both the hard and soft expiry for a cache entry.
-   *
-   * <p>If the caller passes {@code 0} for either TTL, the configured default
-   * hot TTL ({@link TtlPolicy#getEffectiveHotHardTtlMs()} / {@link TtlPolicy#getEffectiveHotSoftTtlMs()})
-   * is used.
-   *
-   * @param cacheKey  the key whose expiry should be extended
-   * @param hardTtlMs new hard TTL in milliseconds; {@code 0} to use the
-   *                  configured hot hard TTL
-   * @param softTtlMs new soft TTL in milliseconds; {@code 0} to use the
-   *                  configured hot soft TTL
-   */
-  @Override
-  public void extendExpiry(String cacheKey, long hardTtlMs, long softTtlMs) {
-    long hard = ttlPolicy.resolveEffectiveHotHard(hardTtlMs);
-    long soft = ttlPolicy.resolveEffectiveHotSoft(softTtlMs);
-    extendExpiry(cacheKey, hard, soft, true, true);
-  }
-
-  /**
-   * Extend only the hard expiry for a cache entry, leaving the soft expiry
-   * unchanged. Useful when promoting a NORMAL or COOL entry to HOT — the
-   * hard TTL must be lengthened to the hot‑key value, but the existing soft
-   * expiry (if any) should be preserved because it reflects a more recent
-   * refresh cycle.
-   *
-   * <p>If the caller passes {@code 0} the configured default hot hard TTL
-   * ({@link TtlPolicy#getEffectiveHotHardTtlMs()}) is used.
-   *
-   * @param cacheKey  the key whose hard expiry should be extended
-   * @param hardTtlMs new hard TTL in milliseconds; {@code 0} to use the
-   *                  configured hot hard TTL
-   */
-  @Override
-  public void extendHardExpiry(String cacheKey, long hardTtlMs) {
-    long hard = ttlPolicy.resolveEffectiveHotHard(hardTtlMs);
-    extendExpiry(cacheKey, hard, 0, true, false);
-  }
-
-  /**
-   * Extend only the soft expiry for a cache entry, leaving the hard expiry
-   * unchanged. Useful when a background refresh has completed and the caller
-   * wants to reset the soft TTL without affecting the hard TTL.
-   *
-   * <p>If the caller passes {@code 0} the configured default hot soft TTL
-   * ({@link TtlPolicy#getEffectiveHotSoftTtlMs()}) is used.
-   *
-   * @param cacheKey  the key whose soft expiry should be extended
-   * @param softTtlMs new soft TTL in milliseconds; {@code 0} to use the
-   *                  configured hot soft TTL
-   */
-  @Override
-  public void extendSoftExpiry(String cacheKey, long softTtlMs) {
-    long soft = ttlPolicy.resolveEffectiveHotSoft(softTtlMs);
-    extendExpiry(cacheKey, 0, soft, false, true);
-  }
-
-  /**
-   * Atomically update the expiry timestamps of an existing cache entry.
-   *
-   * @param cacheKey    the key whose expiry should be extended
-   * @param hardTtlMs   new hard TTL in milliseconds (ignored if {@code updateHard} is false)
-   * @param softTtlMs   new soft TTL in milliseconds (ignored if {@code updateSoft} is false)
-   * @param updateHard  whether to update the hard expiry timestamp
-   * @param updateSoft  whether to update the soft expiry timestamp
-   */
-  private void extendExpiry(String cacheKey, long hardTtlMs, long softTtlMs, boolean updateHard, boolean updateSoft) {
-    caffeineCache
-      .asMap()
-      .computeIfPresent(cacheKey, (k, existing) -> {
-        if (existing instanceof CacheEntry entry) {
-          if (updateHard) {
-            entry = ttlPolicy.applyHardTtl(entry, ttlPolicy.resolveEffectiveHardTtl(hardTtlMs));
-          }
-          if (updateSoft) {
-            entry = ttlPolicy.applySoftTtl(entry, ttlPolicy.resolveEffectiveSoftTtl(softTtlMs));
-          }
-          return entry;
-        }
-        return existing;
-      });
   }
 }

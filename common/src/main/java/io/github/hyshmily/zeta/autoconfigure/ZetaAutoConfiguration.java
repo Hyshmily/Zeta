@@ -198,14 +198,16 @@ public class ZetaAutoConfiguration {
     Cache<String, Object> hotLocalCache,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     ZetaProperties properties,
-    CacheCompressor compressor
+    CacheCompressor compressor,
+    HealthView clusterHealthView
   ) {
     return new ExpireManagerImpl(
       hotLocalCache,
       hotKeyExecutor,
       properties,
       properties.getRefreshMaxPools(),
-      compressor
+      compressor,
+      clusterHealthView
     );
   }
 

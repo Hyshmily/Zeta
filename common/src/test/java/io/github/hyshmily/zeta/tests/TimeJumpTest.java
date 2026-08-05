@@ -40,7 +40,7 @@ class TimeJumpTest {
   }
 
   private static WorkerHeartbeatMessage heartbeat(String workerId, long epoch) {
-    return new WorkerHeartbeatMessage(0L, workerId, epoch, 0, 0.0, true, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(0L, workerId, epoch, 0.0, true, 0, 0, 0, 0);
   }
 
   // ── TimeSource semantics ──

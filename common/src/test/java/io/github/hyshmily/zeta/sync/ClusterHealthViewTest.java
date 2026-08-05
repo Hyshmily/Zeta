@@ -38,11 +38,7 @@ class ClusterHealthViewTest {
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, long epoch, boolean ready) {
-    return new WorkerHeartbeatMessage(0L, workerId, epoch, 0, 0.0, ready, 0, 0, 0, 0);
-  }
-
-  private static WorkerHeartbeatMessage hbWithHwm(String workerId, long epoch, boolean ready, long hwm) {
-    return new WorkerHeartbeatMessage(0L, workerId, epoch, hwm, 0.0, ready, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(0L, workerId, epoch, 0.0, ready, 0, 0, 0, 0);
   }
 
   // ── onHeartbeat ──
@@ -99,6 +95,23 @@ class ClusterHealthViewTest {
     view.markVerificationFailed("w1");
     assertThat(view.getAliveWorkerIds()).doesNotContain("w1");
     view.onHeartbeat(hb("w1", 1, true));
+    assertThat(view.getAliveWorkerIds()).contains("w1");
+  }
+
+  /**
+   * A heartbeat is stronger liveness evidence than probe failures: the same-epoch
+   * heartbeat clears the verification failure count, so strikes never accumulate
+   * across a recovered partition episode.
+   */
+  @Test
+  void shouldResetVerifyFailuresOnHeartbeat() {
+    view.onHeartbeat(hb("w1", 1, true));
+    view.markVerificationFailed("w1");
+    view.markVerificationFailed("w1");
+    assertThat(view.getVerifyFailures("w1")).isEqualTo(2);
+    view.onHeartbeat(hb("w1", 1, true));
+    assertThat(view.getVerifyFailures("w1")).isZero();
+    view.markVerificationFailed("w1");
     assertThat(view.getAliveWorkerIds()).contains("w1");
   }
 
@@ -303,6 +316,48 @@ class ClusterHealthViewTest {
     assertThat(view.getAllWorkerIds()).isEmpty();
   }
 
+  // ── isAlive / epochOf (Decision-Validity accessors, ADR-0035) ──
+
+  @Test
+  void isAliveShouldReflectAliveSet() {
+    view.onHeartbeat(hb("w1", 1, true));
+    assertThat(view.isAlive("w1")).isTrue();
+    assertThat(view.isAlive("w2")).isFalse();
+  }
+
+  @Test
+  void isAliveShouldReturnFalseForDeadWorker() {
+    view.onHeartbeat(hb("w1", 1, true));
+    view.markVerificationFailed("w1");
+    view.markVerificationFailed("w1");
+    assertThat(view.isAlive("w1")).isFalse();
+  }
+
+  @Test
+  void epochOfShouldReturnStoredEpoch() {
+    view.onHeartbeat(hb("w1", 7, true));
+    assertThat(view.epochOf("w1")).isEqualTo(7);
+  }
+
+  @Test
+  void epochOfShouldReturnUnknownForUnseenWorker() {
+    assertThat(view.epochOf("w1")).isEqualTo(HealthView.UNKNOWN_EPOCH);
+  }
+
+  @Test
+  void epochOfShouldReturnUnknownForRemovedWorker() {
+    view.onHeartbeat(hb("w1", 7, true));
+    view.removeRecord("w1");
+    assertThat(view.epochOf("w1")).isEqualTo(HealthView.UNKNOWN_EPOCH);
+  }
+
+  @Test
+  void epochOfShouldReturnNewEpochAfterRestart() {
+    view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w1", 2, true));
+    assertThat(view.epochOf("w1")).isEqualTo(2);
+  }
+
   // ── WorkerHealthRecord.isAlive ──
 
   @Test
@@ -310,7 +365,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
-    r.lastHeartbeatTime = TimeSource.monotonicMillis();
+    r.lastAliveEvidenceTime = TimeSource.monotonicMillis();
     assertThat(r.isAlive(5000)).isTrue();
   }
 
@@ -319,7 +374,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = false;
     r.stale = false;
-    r.lastHeartbeatTime = TimeSource.monotonicMillis();
+    r.lastAliveEvidenceTime = TimeSource.monotonicMillis();
     assertThat(r.isAlive(5000)).isFalse();
   }
 
@@ -328,7 +383,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = true;
-    r.lastHeartbeatTime = TimeSource.monotonicMillis();
+    r.lastAliveEvidenceTime = TimeSource.monotonicMillis();
     assertThat(r.isAlive(5000)).isFalse();
   }
 
@@ -337,7 +392,7 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
-    r.lastHeartbeatTime = TimeSource.monotonicMillis() - 100;
+    r.lastAliveEvidenceTime = TimeSource.monotonicMillis() - 100;
     assertThat(r.isAlive(50)).isFalse();
   }
 
@@ -377,23 +432,12 @@ class ClusterHealthViewTest {
   }
 
   /**
-   * Verifies that onHeartbeat updates the decision version HWM to the max.
-   */
-  @Test
-  void onHeartbeat_shouldUpdateDecisionVersionHwm() {
-    view.onHeartbeat(hbWithHwm("w1", 1, true, 10));
-    view.onHeartbeat(hbWithHwm("w1", 1, true, 20));
-    view.onHeartbeat(hbWithHwm("w1", 1, true, 5));
-    assertThat(view.getAliveWorkerIds()).contains("w1");
-  }
-
-  /**
-   * Verifies that an epoch change resets the reportToWorker including decisionVersionHwm.
+   * Verifies that an epoch change replaces the per-Worker record entirely.
    */
   @Test
   void onHeartbeat_higherEpoch_shouldReplaceRecord() {
-    view.onHeartbeat(hbWithHwm("w1", 1, true, 100));
-    view.onHeartbeat(hbWithHwm("w1", 2, false, 0));
+    view.onHeartbeat(hb("w1", 1, true));
+    view.onHeartbeat(hb("w1", 2, false));
     assertThat(view.getAliveWorkerIds()).doesNotContain("w1");
   }
 
@@ -405,11 +449,10 @@ class ClusterHealthViewTest {
     HealthViewImpl.WorkerHealthRecord r = new HealthViewImpl.WorkerHealthRecord();
     r.readyToServe = true;
     r.stale = false;
-    r.lastHeartbeatTime = TimeSource.monotonicMillis() - 5000;
+    r.lastAliveEvidenceTime = TimeSource.monotonicMillis() - 5000;
     assertThat(r.isAlive(5000)).isFalse();
   }
 
-  /** An alternative to the private hbWithHwm method in this file. */
   @Test
   void shouldHandleHeartbeatForSingleWorker() {
     view.onHeartbeat(hb("w1", 1, true));

@@ -9,10 +9,11 @@
 
 ## Cache States
 
-- **KeyState** — Enum: `NORMAL` / `HOT` / `COOL`. HOT and COOL are set by the Worker; NORMAL is the default. Transitions: `NORMAL ↔ HOT` (via Worker broadcast), `HOT ↔ COOL` (via Worker broadcast), `COOL → NORMAL` (via expiry + reload, or via a successful soft-expire refresh — local read activity returns the entry to the ordinary local lifecycle).
+- **KeyState** — Enum: `NORMAL` / `HOT` / `COOL`. HOT and COOL are set by the Worker; NORMAL is the default. Transitions: `NORMAL ↔ HOT` (via Worker broadcast or local TopK promotion), `HOT ↔ COOL` (via Worker broadcast), `HOT → NORMAL` (via Decision-Validity demotion, ADR-0035 — the issuing Worker incarnation died or restarted), `COOL → NORMAL` (via expiry + reload, or via a successful soft-expire refresh — local read activity returns the entry to the ordinary local lifecycle).
 - **NORMAL** — Default state. No Worker involvement. Local TopK can freely promote to HOT.
 - **HOT** — Worker-broadcasted hot decision OR local promotion result. Longest TTLs (hotHardTtl / hotSoftTtl). Never degraded or overwritten by local decisions.
 - **COOL** — Worker-broadcasted cool decision. Preserved while the Worker cluster is healthy (default: at least one third of observed Workers alive, minimum 1 — see ADR-0028). Eligible for local promotion to HOT only when the health gate fails (graceful degradation mode).
+- **Decision Validity** — A Worker decision stamped on an L1 entry is valid only while its issuing Worker incarnation is alive: the Worker has a health record, is alive (same freshness judgment as the ring/report path), and its current epoch equals the entry's `decisionEpoch`. On invalidity the entry is demoted in place on the next read — value preserved, normal TTLs, decision stamp cleared (ADR-0035). The Worker is the sole authority for cooling keys down; a dead or restarted Worker therefore orphans its HOT entries until the demotion returns them to the local lifecycle.
 
 ## Components
 
@@ -39,7 +40,7 @@
 ## Versions
 
 - **dataVersion** — Monotonically increasing counter (Redis INCR or node-local fallback). Orders data mutations across instances. May be **degraded** (local counter) when Redis is unavailable.
-- **decisionVersion** — Monotonically increasing `AtomicLong` on the Worker. Orders HOT/COOL decisions. Never degraded. Independent of dataVersion.
+- **decisionVersion** — Monotonically increasing `AtomicLong` on the Worker. Orders HOT/COOL decisions. Never degraded. Independent of dataVersion. **Watermark semantics:** allocated before each broadcast attempt, so a failed send burns a version and the sequence contains holes — it is a high-water mark of *attempts*, not a count of delivered messages. Receivers compare with `>=` only and never assume intermediate versions exist.
 - **rulesVersion** — Monotonically increasing `AtomicLong` in `RuleMatcher`. Orders rule set changes across instances. Used to prevent stale rule broadcasts from overwriting newer rule sets. Independent of both dataVersion and decisionVersion.
 - **Degraded Version** — A dataVersion produced when Redis is unavailable. Previously `Long.MIN_VALUE + localCounter` (per-JVM partitioned); now `Long.MIN_VALUE + SnowflakeId` (globally time-sortable, cross-instance comparable). Marked with `isVersionDegraded=true`. Always loses against a normal (Redis) version in broadcast comparisons — the `Long.MIN_VALUE` offset ensures degraded versions sort below any positive Redis INCR value.
 - **Version-Stamped Load** — Read-path invariant (ADR-0033): every L1 entry created by the read path (miss load, soft-expire refresh, NullValue sentinel) carries a `dataVersion` probed from Redis **after** the value read, so the stamped version is never lower than the value's true version. Probe failure withholds the stamp (fail-open) — an entry is never demoted to degraded by a failed probe. This lets the shared 4-case comparison reject late stale broadcasts, which a zero-stamped entry would admit.

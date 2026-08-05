@@ -56,7 +56,7 @@ class WorkerHeartbeatVerifierTest {
   }
 
   private static WorkerHeartbeatMessage hb(String workerId, boolean ready) {
-    return new WorkerHeartbeatMessage(0L, workerId, 1, 0, 0.0, ready, 0, 0, 0, 0);
+    return new WorkerHeartbeatMessage(0L, workerId, 1, 0.0, ready, 0, 0, 0, 0);
   }
 
   // ── sendPingAndWaitPong ──

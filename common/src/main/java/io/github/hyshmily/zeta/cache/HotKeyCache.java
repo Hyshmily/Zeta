@@ -38,7 +38,6 @@ import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
-import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.Nullable;
@@ -652,10 +651,12 @@ public class HotKeyCache {
   }
 
   /**
-   * Process a cache hit: type local hot-key promotion/renewal and reportToWorker
-   * to Worker, then re-check logical expiry (TOCTOU guard) after side effects.
+   * Process a cache hit: reconcile the entry state (Decision-Validity demotion
+   * and local hot-key promotion), reportToWorker, then re-check logical expiry
+   * (TOCTOU guard) after side effects.
    * <p>Extracted from {@link #get} and {@link #getWithSoftExpire} to eliminate
-   * code duplication.
+   * code duplication — every hit-serving path converges here, so the
+   * state-reconciliation step runs exactly once per hit.
    *
    * @param cacheKey  the cache key
    * @param raw       the raw value from Caffeine (maybe {@link CacheEntry} or bare)
@@ -676,10 +677,18 @@ public class HotKeyCache {
   ) {
     dispatcher.report(cacheKey, skipReport);
 
-    boolean wasProcessed = processLocalHotkeyIfNeeded(cacheKey, raw, hardTtlMs, softTtlMs);
+    // Entry-state corrections within one read: demotion (a dead Worker's HOT
+    // stamp is reverted to NORMAL in place) and local promotion are mutually
+    // exclusive here — promotion judges the pre-demotion snapshot, so an
+    // orphaned entry stays NORMAL for one read and the local TopK re-promotes
+    // it on the next read if still hot (ADR-0035). Both are still evaluated:
+    // a demotion never short-circuits the promotion probe.
+    boolean demoted = expireManager.demoteIfDecisionInvalid(cacheKey, raw);
+    boolean promoted = processLocalHotkeyIfNeeded(cacheKey, raw, hardTtlMs, softTtlMs);
+    boolean reconciled = demoted || promoted;
 
-    // TOCTOU: re-read from cache after side effects (promote/reportToWorker may have taken time)
-    if (wasProcessed || !skipReport) {
+    // TOCTOU: re-read from cache after side effects (reconcile/reportToWorker may have taken time)
+    if (reconciled || !skipReport) {
       Object currentRaw = caffeineCache.getIfPresent(cacheKey);
       if (expireManager.invalidateIfIsLogicallyExpired(cacheKey, currentRaw)) {
         return Optional.empty();
@@ -894,7 +903,7 @@ public class HotKeyCache {
    * @param cacheKey the key to store the null sentinel for
    * @param vv       the load carrier; the sentinel is stamped with the probed
    *                 version when present (ADR-0033), otherwise it stays at
-   *                 {@link VERSION_DEFAULT}
+   *                 {@link io.github.hyshmily.zeta.constants.ZetaConstants.Version#VERSION_DEFAULT}
    */
   private void builtNullValueEntry(String cacheKey, VersionedValue vv) {
     long nullExpireAtMs = expireManager.ttlPolicy().computeNullExpireAt(nullTtlMs());
@@ -1047,13 +1056,16 @@ public class HotKeyCache {
   }
 
   /**
-   * Process a cache hit for local hot-key management: if the entry is already
-   * HOT and more than 75% of its TTL has elapsed, extend its expiry window;
-   * otherwise promote eligible non-hot entries (NORMAL or COOL-when-all-dead)
-   * to HOT if the local TopK now considers them hot.
+   * Process a cache hit for local hot-key management: promote eligible
+   * non-hot entries (NORMAL or COOL-when-all-dead) to HOT if the local TopK
+   * now considers them hot.
    * <p>
-   * HOT entries that are still within their first quarter are left untouched —
-   * no need to re-insert the same state.
+   * HOT entries are deliberately left untouched — the hard TTL bound governs
+   * them. Renewal is the Worker's job via periodic HOT rebroadcast
+   * (ADR-0024), and reload-after-expiry rebuilds still-hot entries as HOT
+   * (see {@link #processLoaded}). An unbounded read-driven extension would
+   * keep a key HOT forever once a Worker broadcast HOT and then died without
+   * a COOL (ADR-0034).
    * <p>
    * Non-hot entries first pass a lock-free {@link HotKeyDetector#contains}
    * membership probe on the caller thread; only TopK members reach
@@ -1065,40 +1077,16 @@ public class HotKeyCache {
    * @param raw       the raw cached value (maybe a {@link CacheEntry} or a bare object)
    * @param hardTtlMs hard TTL override (0 = use configured hot hard TTL)
    * @param softTtlMs soft TTL override (0 = use configured hot soft TTL)
-   * @return {@code true} if a local promotion or expiry extension occurred
+   * @return {@code true} if a local promotion occurred
    */
   private boolean processLocalHotkeyIfNeeded(String cacheKey, Object raw, long hardTtlMs, long softTtlMs) {
-    if (raw instanceof CacheEntry ce) {
-      if (ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
-        return extendHotKeyExpiryIfNeeded(cacheKey, ce, hardTtlMs, softTtlMs);
-      }
-      if (ce.getValue() == NullValue.INSTANCE || ce.getValue() instanceof NullValue) {
-        return false;
-      }
-      if (!hotKeyDetector.contains(cacheKey)) {
-        return false;
-      }
-      if (isPromotableState(ce)) {
-        return promoteIfLocalHot(cacheKey, hardTtlMs, softTtlMs);
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Extend the expiry of a HOT entry if more than 75% of its TTL has elapsed.
-   *
-   * @return {@code true} if the entry was extended
-   */
-  private boolean extendHotKeyExpiryIfNeeded(String cacheKey, CacheEntry ce, long hardTtlMs, long softTtlMs) {
-    long remainingTtl = ce.getHardExpireAtMs() - TimeSource.currentTimeMillis();
-    long totalTtl = ce.getHardTtlMs();
-
-    if (totalTtl > 0 && remainingTtl < totalTtl * 0.25) {
-      expireManager.extendExpiry(cacheKey, hardTtlMs, softTtlMs);
-      return true;
-    }
-    return false;
+    return (
+      raw instanceof CacheEntry ce &&
+      ce.getValue() != NullValue.INSTANCE &&
+      hotKeyDetector.contains(cacheKey) &&
+      isPromotableState(ce) &&
+      promoteIfLocalHot(cacheKey, hardTtlMs, softTtlMs)
+    );
   }
 
   /**
@@ -1703,7 +1691,7 @@ public class HotKeyCache {
    * (graceful degradation, ADR-0021); hard-expired entries are never served.
    * <p>
    * <b>Lazy TTL:</b> the TTL suppliers are evaluated at most once per call
-   * and only when an entry is created, promoted, renewed, or a soft-expire
+   * and only when an entry is created, promoted, or a soft-expire
    * refresh is scheduled — never on a plain NORMAL-entry hit (ADR-0023).
    *
    * @param cacheKey   the key to retrieve
@@ -1736,36 +1724,40 @@ public class HotKeyCache {
           if (!expireManager.ttlPolicy().isLogicallyExpired(ce)) {
             hitRef[0] = true;
 
-            // HOT renewal: extend the expiry window when more than 75% of the
-            // TTL has elapsed. Done inline as a pure TTL re-computation so the
-            // compute lock is held only for fast, I/O-free work.
-            if (ce.getKeyState() == KeyState.HOT && ce.getHardExpireAtMs() != Long.MAX_VALUE) {
-              long remainingTtl = ce.getHardExpireAtMs() - TimeSource.currentTimeMillis();
-              long totalTtl = ce.getHardTtlMs();
-
-              if (totalTtl > 0 && remainingTtl < totalTtl * 0.25) {
+            // Decision-Validity demotion (ADR-0035): a Worker-sourced HOT entry
+            // whose issuing Worker died/restarted is reverted to NORMAL in
+            // place. The check-and-rewrite is atomic here because the callback
+            // already holds the Caffeine bin lock — the pure function must not
+            // be wrapped in its own compute. Demotion and local promotion are
+            // mutually exclusive within this read (mirroring process()): a
+            // demoted entry stays NORMAL for one read, then the local TopK
+            // re-promotes it on the next read if still hot.
+            CacheEntry cur = ce;
+            CacheEntry demoted = expireManager.demoteIfDecisionInvalidInPlace(cur);
+            if (demoted != null) {
+              cur = demoted;
+            } else {
+              // Local promotion only: HOT entries are left untouched — the hard
+              // TTL bound governs them, and renewal is the Worker's job via
+              // periodic HOT rebroadcast (ADR-0024) and reload-after-expiry.
+              if (isPromotableState(cur) && hotKeyDetector.contains(k)) {
                 long hotHardTtl = expireManager.ttlPolicy().resolveEffectiveHotHard(rawHard.getAsLong());
                 long hotSoftTtl = expireManager.ttlPolicy().resolveEffectiveHotSoft(rawSoft.getAsLong());
 
-                return expireManager.ttlPolicy().applyTtl(ce, hotHardTtl, hotSoftTtl);
+                return cur.withTtlAndKeyState(
+                  hotHardTtl,
+                  hotSoftTtl,
+                  expireManager.ttlPolicy().computeHardExpireAt(hotHardTtl),
+                  expireManager.ttlPolicy().computeSoftExpireAt(hotSoftTtl),
+                  KeyState.HOT
+                );
               }
-            } else if (isPromotableState(ce) && hotKeyDetector.contains(k)) {
-              long hotHardTtl = expireManager.ttlPolicy().resolveEffectiveHotHard(rawHard.getAsLong());
-              long hotSoftTtl = expireManager.ttlPolicy().resolveEffectiveHotSoft(rawSoft.getAsLong());
-
-              return ce.withTtlAndKeyState(
-                hotHardTtl,
-                hotSoftTtl,
-                expireManager.ttlPolicy().computeHardExpireAt(hotHardTtl),
-                expireManager.ttlPolicy().computeSoftExpireAt(hotSoftTtl),
-                KeyState.HOT
-              );
             }
 
-            if (expireManager.ttlPolicy().isSoftExpired(ce)) {
+            if (expireManager.ttlPolicy().isSoftExpired(cur)) {
               switch (policy.stalePolicy()) {
                 case RETURN -> {
-                  return existing;
+                  return cur;
                 }
                 case SOFT_REFRESH -> {
                   // Trigger the background refresh outside the compute lock
@@ -1775,9 +1767,9 @@ public class HotKeyCache {
                   // (see ExpireManagerImpl#applyRefreshTask).
                   if (reader != null) {
                     refreshRef[0] = true;
-                    refreshEntryRef[0] = ce;
+                    refreshEntryRef[0] = cur;
                   }
-                  return existing;
+                  return cur;
                 }
                 case REVALIDATE -> {
                   hitRef[0] = false;
@@ -1785,12 +1777,12 @@ public class HotKeyCache {
                   // prevent stale value leak on the load path
                   // Keep the stale entry in L1: it powers the circuit-breaker
                   // fallback and lets the next call retry after a failed load.
-                  return existing;
+                  return cur;
                 }
               }
-              if (policy.stalePolicy() != StalePolicy.REVALIDATE) return existing;
+              if (policy.stalePolicy() != StalePolicy.REVALIDATE) return cur;
             } else {
-              return existing;
+              return cur;
             }
           }
         }

@@ -68,9 +68,6 @@ class WorkerHeartbeatProducerTest {
   private ZetaBayesianSM stateMachine;
 
   @Mock
-  private WorkerBroadcaster broadcaster;
-
-  @Mock
   private AtomicLong configTimestampCounter;
 
   @Captor
@@ -124,7 +121,6 @@ class WorkerHeartbeatProducerTest {
         HB_EXCHANGE,
         WORKER_ID,
         stateMachine,
-        broadcaster,
         configTimestampCounter,
         redisFactoryMock,
         PING_INTERVAL_MS,
@@ -209,9 +205,7 @@ class WorkerHeartbeatProducerTest {
   /** Verifies exchange, routing key, and every heartbeat header. */
   @Test
   void sendHeartbeat_shouldDeliverAllFields() {
-    long dv = 123L;
     long configTs = 456L;
-    when(broadcaster.getCurrentDecisionVersion()).thenReturn(dv);
     when(stateMachine.getConfirmCount()).thenReturn(3);
     when(stateMachine.getCoolCount()).thenReturn(10);
     when(stateMachine.getPreCoolGraceCount()).thenReturn(3);
@@ -227,7 +221,6 @@ class WorkerHeartbeatProducerTest {
     assertThat(headers).containsEntry(HEADER_TYPE, WorkerHeartbeatMessage.TYPE);
     assertThat(headers).containsEntry(HEADER_NODE_ID, WORKER_ID);
     assertThat((Long) headers.get(HEADER_HEARTBEAT_EPOCH)).isPositive().isGreaterThan(1_500_000_000_000_000L);
-    assertThat(headers).containsEntry(HEADER_HEARTBEAT_DV_HWM, dv);
     assertThat(headers.get(HEADER_HEARTBEAT_LOAD)).isInstanceOf(Double.class);
     assertThat((Double) headers.get(HEADER_HEARTBEAT_LOAD)).isBetween(0.0, 1.0);
     assertThat(headers).containsEntry(HEADER_HEARTBEAT_READY, true);
@@ -333,7 +326,6 @@ class WorkerHeartbeatProducerTest {
         HB_EXCHANGE,
         WORKER_ID,
         stateMachine,
-        broadcaster,
         configTimestampCounter,
         redisFactoryMock,
         PING_INTERVAL_MS,
@@ -368,7 +360,6 @@ class WorkerHeartbeatProducerTest {
    */
   @Test
   void sendHeartbeat_shouldCatchRabbitMqException() {
-    when(broadcaster.getCurrentDecisionVersion()).thenReturn(0L);
     when(configTimestampCounter.get()).thenReturn(0L);
     doThrow(new RuntimeException("RabbitMQ unavailable")).when(rabbitTemplate).send(anyString(), anyString(), any());
 
@@ -404,7 +395,6 @@ class WorkerHeartbeatProducerTest {
       HB_EXCHANGE,
       WORKER_ID,
       stateMachine,
-      broadcaster,
       configTimestampCounter,
       PING_INTERVAL_MS,
       mock(SnowflakeIdGenerator.class)

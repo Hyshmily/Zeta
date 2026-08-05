@@ -78,6 +78,7 @@ class ZetaCacheTest {
   private Executor executor;
   private HotKeyCache hotKeyCache;
   private ScheduledExecutorService scheduler;
+  private HealthView healthView;
 
   @BeforeEach
   void setUp() {
@@ -87,7 +88,8 @@ class ZetaCacheTest {
     singleFlight = mock(SingleFlight.class);
     executor = Runnable::run;
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
+    healthView = mock(HealthView.class);
+    expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10, CacheCompressor.NONE, healthView);
     scheduler = Executors.newSingleThreadScheduledExecutor();
 
     hotKeyCache = new HotKeyCache(
@@ -105,7 +107,7 @@ class ZetaCacheTest {
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
       new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
       ttlConfig,
-      mock(HealthView.class),
+      healthView,
       CacheCompressor.NONE
     );
   }
@@ -154,6 +156,118 @@ class ZetaCacheTest {
   void peek_shouldReturnEmptyForInvalidKey() {
     assertThat(hotKeyCache.peek(null)).isEmpty();
     assertThat(hotKeyCache.peek("")).isEmpty();
+  }
+
+  /**
+   * Decision-Validity demotion end-to-end (ADR-0035): a HOT entry stamped by a
+   * dead Worker is served on the first read, and the entry is reverted in place
+   * to NORMAL with the decision stamp cleared and normal TTLs — no reload, no
+   * miss, no source dependency.
+   */
+  @Test
+  void get_shouldDemoteOrphanedWorkerHotEntryInPlace() {
+    when(healthView.isAlive("w1")).thenReturn(false);
+    caffeineCache.put("key1", workerHotEntry("w1", 5L));
+
+    Optional<String> result = hotKeyCache.get(
+      "key1",
+      CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
+    );
+
+    assertThat(result).contains("stored");
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+    assertThat(entry.getDecisionNodeId()).isNull();
+    assertThat(entry.getDecisionVersion()).isZero();
+    assertThat(entry.getDecisionEpoch()).isZero();
+    assertThat(entry.getHardTtlMs()).isEqualTo(60_000);
+    assertThat(entry.getValue()).isEqualTo("stored");
+  }
+
+  /**
+   * Decision-Validity control (ADR-0035): a HOT entry stamped by a live Worker
+   * with a matching epoch is untouched by the read path.
+   */
+  @Test
+  void get_shouldKeepLiveWorkerHotEntryUnchanged() {
+    when(healthView.isAlive("w1")).thenReturn(true);
+    when(healthView.epochOf("w1")).thenReturn(5L);
+    caffeineCache.put("key1", workerHotEntry("w1", 5L));
+
+    Optional<String> result = hotKeyCache.get(
+      "key1",
+      CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
+    );
+
+    assertThat(result).contains("stored");
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(entry.getDecisionNodeId()).isEqualTo("w1");
+    assertThat(entry.getHardTtlMs()).isEqualTo(3_600_000);
+  }
+
+  /** Build a Worker-stamped HOT entry with a 1h HOT TTL and 60s/15s normal baseline. */
+  private static CacheEntry workerHotEntry(String nodeId, long epoch) {
+    return CacheEntry.builder()
+      .value("stored")
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(42)
+      .decisionNodeId(nodeId)
+      .decisionEpoch(epoch)
+      .hardTtlMs(3_600_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(300_000)
+      .softExpireAtMs(Long.MAX_VALUE)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(60_000)
+      .normalSoftTtlMs(15_000)
+      .build();
+  }
+
+  /**
+   * Decision-Validity demotion on the atomic read-through path (ADR-0035):
+   * {@code computeIfAbsent} serves an orphaned Worker-HOT entry and reverts it
+   * in place to NORMAL — the compute-in-lock hit branch must not leave the
+   * orphaned stamp behind.
+   */
+  @Test
+  void computeIfAbsent_shouldDemoteOrphanedWorkerHotEntryInPlace() {
+    when(healthView.isAlive("w1")).thenReturn(false);
+    caffeineCache.put("key1", workerHotEntry("w1", 5L));
+
+    Optional<String> result = hotKeyCache.computeIfAbsent(
+      "key1",
+      CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
+    );
+
+    assertThat(result).contains("stored");
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+    assertThat(entry.getDecisionNodeId()).isNull();
+    assertThat(entry.getDecisionVersion()).isZero();
+    assertThat(entry.getHardTtlMs()).isEqualTo(60_000);
+  }
+
+  /**
+   * Decision-Validity control on the atomic read-through path: a live Worker's
+   * HOT entry is untouched by {@code computeIfAbsent}.
+   */
+  @Test
+  void computeIfAbsent_shouldKeepLiveWorkerHotEntryUnchanged() {
+    when(healthView.isAlive("w1")).thenReturn(true);
+    when(healthView.epochOf("w1")).thenReturn(5L);
+    caffeineCache.put("key1", workerHotEntry("w1", 5L));
+
+    Optional<String> result = hotKeyCache.computeIfAbsent(
+      "key1",
+      CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)
+    );
+
+    assertThat(result).contains("stored");
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(entry.getDecisionNodeId()).isEqualTo("w1");
   }
 
   /**
@@ -2344,8 +2458,8 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("processLocalHotkeyIfNeeded should extend HOT entry expiry when past 75% TTL")
-    void processLocalHotkeyIfNeeded_shouldExtendHotExpiry() {
+    @DisplayName("processLocalHotkeyIfNeeded should NOT extend HOT entry past 75% TTL — hard TTL is the bound")
+    void processLocalHotkeyIfNeeded_shouldNotExtendHotExpiry() {
       long originalExpireAt = System.currentTimeMillis() + 5_000;
       caffeineCache.put(
         "key1",
@@ -2368,7 +2482,7 @@ class ZetaCacheTest {
       hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
       CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
-      assertThat(entry.getHardExpireAtMs()).isGreaterThan(originalExpireAt);
+      assertThat(entry.getHardExpireAtMs()).isEqualTo(originalExpireAt);
     }
 
     @Test

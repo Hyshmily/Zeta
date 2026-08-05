@@ -220,7 +220,7 @@ public class Zeta implements DisposableBean {
   }
 
   /**
-   * Per-key compute-if-absent. The hit side (state checks, HOT renewal,
+   * Per-key compute-if-absent. The hit side (state checks, promotion,
    * promotion, stale-policy handling) runs atomically inside one Caffeine
    * {@code asMap().compute()}; on a miss the loader runs <i>outside</i> the
    * bin lock via SingleFlight — deduped, timeout-bounded, and

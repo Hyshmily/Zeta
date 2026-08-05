@@ -112,17 +112,6 @@ class WorkerBroadcasterTest {
   }
 
   /**
-   * Verifies that {@code getCurrentDecisionVersion} returns the current value
-   * without incrementing it.
-   */
-  @Test
-  void getCurrentDecisionVersionShouldNotIncrement() {
-    long v1 = broadcaster.getCurrentDecisionVersion();
-    long v2 = broadcaster.getCurrentDecisionVersion();
-    assertThat(v2).isEqualTo(v1);
-  }
-
-  /**
    * Verifies that broadcastHot and broadcastCool both increment the decision version.
    */
   @Test

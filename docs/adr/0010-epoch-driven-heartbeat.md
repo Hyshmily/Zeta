@@ -1,6 +1,6 @@
 # Epoch-Driven Heartbeat with Dual Queue Isolation
 
-The old heartbeat used a passive PING on a shared Fanout exchange, with every App running its own independent timer — no Worker restart detection, no health metadata, and heartbeat/decision traffic competing on the same queue. Zeta's heartbeats now use a dedicated TopicExchange (`zeta.heartbeat.exchange`, routing key `heartbeat.{workerId}`, NONE ack, prefetch=100) fully isolated from HOT/COOL decisions (MANUAL ack, prefetch=5). Each Worker publishes a structured 9-field `WorkerHeartbeatMessage` (epoch, decisionVersionHwm, loadFactor, readyToServe, config parameters) every 1s via AMQP headers for zero-deserialization parsing.
+The old heartbeat used a passive PING on a shared Fanout exchange, with every App running its own independent timer — no Worker restart detection, no health metadata, and heartbeat/decision traffic competing on the same queue. Zeta's heartbeats now use a dedicated TopicExchange (`zeta.heartbeat.exchange`, routing key `heartbeat.{workerId}`, NONE ack, prefetch=100) fully isolated from HOT/COOL decisions (MANUAL ack, prefetch=5). Each Worker publishes a structured 8-field `WorkerHeartbeatMessage` (epoch, loadFactor, readyToServe, config parameters) every 1s via AMQP headers for zero-deserialization parsing. An earlier `decisionVersionHwm` field was removed: nothing consumed it, and the receiver-side ordering guard uses the per-message `decisionVersion` watermark instead.
 
 ## Epoch Initialization
 

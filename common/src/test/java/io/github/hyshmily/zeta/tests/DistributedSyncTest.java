@@ -641,14 +641,13 @@ class DistributedSyncTest {
     @Test
     @DisplayName("toMessage sets all headers correctly")
     void toMessage_setsAllHeaders() {
-      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-42", 5L, 99L, 0.75, true, 3, 10, 2, 9999L);
+      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-42", 5L, 0.75, true, 3, 10, 2, 9999L);
       Message msg = hb.toMessage();
       MessageProperties h = msg.getMessageProperties();
       Object type = h.getHeader(HEADER_TYPE);
       assertThat(type).isEqualTo(WorkerHeartbeatMessage.TYPE);
       assertThat((Object) h.getHeader(HEADER_NODE_ID)).isEqualTo("w-42");
       assertThat((Object) h.getHeader(HEADER_HEARTBEAT_EPOCH)).isEqualTo(5L);
-      assertThat((Object) h.getHeader(HEADER_HEARTBEAT_DV_HWM)).isEqualTo(99L);
       assertThat((Object) h.getHeader(HEADER_HEARTBEAT_LOAD)).isEqualTo(0.75);
       assertThat((Object) h.getHeader(HEADER_HEARTBEAT_READY)).isEqualTo(true);
       assertThat((Object) h.getHeader(HEADER_HEARTBEAT_CONFIG_CONFIRM)).isEqualTo(3);
@@ -657,14 +656,14 @@ class DistributedSyncTest {
     @Test
     @DisplayName("toMessage body contains workerId")
     void toMessage_bodyIsWorkerId() {
-      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-x", 1L, 0L, 0.0, false, 0, 0, 0, 0L);
+      WorkerHeartbeatMessage hb = new WorkerHeartbeatMessage(0L, "w-x", 1L, 0.0, false, 0, 0, 0, 0L);
       assertThat(new String(hb.toMessage().getBody(), StandardCharsets.UTF_8)).isEqualTo("w-x");
     }
 
     @Test
     @DisplayName("from round-trips correctly")
     void from_roundTrips() {
-      WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(0L, "w-7", 3L, 42L, 0.5, true, 5, 8, 1, 7777L);
+      WorkerHeartbeatMessage original = new WorkerHeartbeatMessage(0L, "w-7", 3L, 0.5, true, 5, 8, 1, 7777L);
       WorkerHeartbeatMessage restored = WorkerHeartbeatMessage.from(original.toMessage());
       assertThat(restored).isEqualTo(original);
     }
@@ -730,7 +729,7 @@ class DistributedSyncTest {
     }
 
     private static WorkerHeartbeatMessage hb(String workerId, boolean ready) {
-      return new WorkerHeartbeatMessage(0L, workerId, 1, 0, 0.0, ready, 0, 0, 0, 0);
+      return new WorkerHeartbeatMessage(0L, workerId, 1, 0.0, ready, 0, 0, 0, 0);
     }
 
     @Test

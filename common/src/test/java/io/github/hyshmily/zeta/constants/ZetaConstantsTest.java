@@ -83,7 +83,6 @@ class ZetaConstantsTest {
     assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_LOAD).isEqualTo("hbLoad");
     assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_READY).isEqualTo("hbReady");
     assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_CONFIG_FP).isEqualTo("hbConfigFp");
-    assertThat(ZetaConstants.Amqp.HEADER_HEARTBEAT_DV_HWM).isEqualTo("hbDvHwm");
   }
 
   @Test
