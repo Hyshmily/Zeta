@@ -232,7 +232,7 @@ The circuit breaker wraps `SingleFlight.load()` — when open, `load()` returns 
 
 | Property                  | Default | Description                                                                                        |
 | ------------------------- | ------- | -------------------------------------------------------------------------------------------------- |
-| `zeta.scheduling.enabled` | `true`  | Enable internal scheduler for HeavyKeeper decay and expelled queue drain                           |
+| `zeta.scheduling.enabled` | `true`  | Enable internal scheduler for HeavyKeeper decay, expelled queue drain, and periodic L1 expired-entry cleanup (`cleanUp()`, every 5s) |
 | `zeta.decay-period`       | `20`    | HeavyKeeper decay period in seconds (resolved via `@Scheduled` directly, not under `zeta.local.*`) |
 
 > ⚠️ Currently hardcoded at 20s — not yet configurable via property.

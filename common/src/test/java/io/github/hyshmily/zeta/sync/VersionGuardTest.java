@@ -70,8 +70,8 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForSync_bothDegraded_shouldSkipWhenExistingVersionHigher() {
-    cache.put("key", entry(10, true, 0));
-    assertThat(VersionGuard.shouldSkipForSync(cache, "key", 8, true)).isTrue();
+    cache.put("key", entry(-10, true, 0));
+    assertThat(VersionGuard.shouldSkipForSync(cache, "key", -12, true)).isTrue();
   }
 
   /**
@@ -79,7 +79,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForSync_existingDegradedIncomingNormal_shouldNotSkip() {
-    cache.put("key", entry(5, true, 0));
+    cache.put("key", entry(-5, true, 0));
     assertThat(VersionGuard.shouldSkipForSync(cache, "key", 1, false)).isFalse();
   }
 
@@ -98,7 +98,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_degradedEntry_lowerDecisionVersion_shouldNotSkip() {
-    cache.put("key", entry(5, true, 0));
+    cache.put("key", entry(-5, true, 0));
     assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 10, null, 0)).isFalse();
   }
 
@@ -176,8 +176,8 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForSync_bothDegradedEqualVersion_shouldSkip() {
-    cache.put("key", entry(10, true, 0));
-    assertThat(VersionGuard.shouldSkipForSync(cache, "key", 10, true)).isTrue();
+    cache.put("key", entry(-10, true, 0));
+    assertThat(VersionGuard.shouldSkipForSync(cache, "key", -10, true)).isTrue();
   }
 
   /**
@@ -217,7 +217,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_higherExistingDv_shouldSkip() {
-    CacheEntry degraded = entry(5, true, 50).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry degraded = entry(-5, true, 50).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
     assertThat(VersionGuard.shouldSkipForWorker(degraded, 1, "W1", 1)).isTrue();
   }
 
@@ -227,7 +227,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_lowerExistingDv_shouldNotSkip() {
-    CacheEntry degraded = entry(5, true, 3).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry degraded = entry(-5, true, 3).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
     assertThat(VersionGuard.shouldSkipForWorker(degraded, 5, "W1", 1)).isFalse();
   }
 
@@ -237,7 +237,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_higherEpoch_shouldNotSkip() {
-    CacheEntry existing = entry(5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = entry(-5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 2)).isFalse();
   }
 
@@ -247,7 +247,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_lowerEpoch_shouldSkip() {
-    CacheEntry existing = entry(5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(2).build();
+    CacheEntry existing = entry(-5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(2).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 1)).isTrue();
   }
 
@@ -257,7 +257,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_differentNodeId_shouldNotSkip() {
-    CacheEntry existing = entry(5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = entry(-5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W2", 1)).isFalse();
   }
 
@@ -267,7 +267,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_degradedEntry_noWorkerHistory_firstContact_shouldNotSkip() {
-    CacheEntry existing = entry(5, true, 0);
+    CacheEntry existing = entry(-5, true, 0);
     assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 0)).isFalse();
   }
 
@@ -388,8 +388,8 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForSync_bothDegradedHigherIncoming_shouldNotSkip() {
-    cache.put("key", entry(10, true, 0));
-    assertThat(VersionGuard.shouldSkipForSync(cache, "key", 12, true)).isFalse();
+    cache.put("key", entry(-10, true, 0));
+    assertThat(VersionGuard.shouldSkipForSync(cache, "key", -1, true)).isFalse();
   }
 
   private static CacheEntry entry(long dataVersion, boolean degraded, long decisionVersion) {

@@ -15,11 +15,10 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
-import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.List;
@@ -36,8 +35,11 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 /**
  * Scheduled tasks for periodic TopK maintenance.
  *
- * <p>Handles decaying (fading) the HeavyKeeper counters and draining
- * expelled hot-key entries.  Uses {@link List List&#60;TopK&#62;} injection
+ * <p>Handles decaying (fading) the HeavyKeeper counters, draining
+ * expelled hot-key entries, and periodically running the L1 cache
+ * maintenance so expired entries are physically reclaimed even when the
+ * cache is idle (Segcache-style eager expiration).  Uses {@link List
+ * List&#60;TopK&#62;} injection
  * to support both the app-side and Worker-side TopK instances when they
  * coexist in the same JVM.
  *
@@ -58,27 +60,33 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 @Slf4j
 public class ZetaSchedulingConfiguration {
 
+  /** Interval between L1 expired-entry cleanup passes. */
+  private static final long L1_CLEANUP_INTERVAL_SECONDS = 5;
+
   private final List<TopK> topKInstances;
   private final ScheduledExecutorService scheduler;
-  private final BroadcastBuffer broadcastBuffer;
-  private final Optional<CacheSyncPublisher> cacheSyncPublisher;
+  private final Optional<Cache<String, Object>> l1Cache;
 
   public ZetaSchedulingConfiguration(
     List<TopK> topKInstances,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
-    BroadcastBuffer broadcastBuffer,
-    Optional<CacheSyncPublisher> cacheSyncPublisher
+    Optional<Cache<String, Object>> l1Cache
   ) {
     this.topKInstances = topKInstances;
     this.scheduler = scheduler;
-    this.broadcastBuffer = broadcastBuffer;
-    this.cacheSyncPublisher = cacheSyncPublisher;
+    this.l1Cache = l1Cache;
   }
 
   @PostConstruct
   void scheduleTasks() {
     scheduler.scheduleWithFixedDelay(this::cleanHotKeys, 20, 20, TimeUnit.SECONDS);
     scheduler.scheduleWithFixedDelay(this::drainExpelled, 10, 10, TimeUnit.SECONDS);
+    scheduler.scheduleWithFixedDelay(
+      this::cleanUpExpiredEntries,
+      L1_CLEANUP_INTERVAL_SECONDS,
+      L1_CLEANUP_INTERVAL_SECONDS,
+      TimeUnit.SECONDS
+    );
   }
 
   /**
@@ -121,6 +129,31 @@ public class ZetaSchedulingConfiguration {
       }
     } catch (Exception e) {
       log.error("Scheduled drainExpelled failed", e);
+    }
+  }
+
+  /**
+   * Periodically run the L1 Caffeine maintenance to physically reclaim
+   * expired entries.
+   *
+   * <p>Reads are served from a logical hard-expire check, so expired entries
+   * are never returned; but without a background maintenance trigger the
+   * Caffeine timing wheel only reclaims them on cache operations (writes,
+   * reads, forced eviction). Under low traffic, entries that expire and are
+   * never read again would otherwise linger in memory until the next
+   * operation. This task bounds the reclamation delay at
+   * {@link #L1_CLEANUP_INTERVAL_SECONDS} — the Segcache-style eager
+   * expiration idea — at the cost of an incremental maintenance pass every
+   * interval (Caffeine maintenance is amortized O(1) per entry).
+   *
+   * <p>No-op when no L1 {@code Cache<String, Object>} bean is present (e.g. a
+   * consumer substituted the cache with their own bean type).
+   */
+  void cleanUpExpiredEntries() {
+    try {
+      l1Cache.ifPresent(Cache::cleanUp);
+    } catch (Exception e) {
+      log.error("Scheduled cleanUpExpiredEntries failed", e);
     }
   }
 }

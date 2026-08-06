@@ -400,24 +400,24 @@ public class HealthViewImpl implements HealthView {
      * Returns whether this Worker is currently considered alive for health-majority
      * calculations.
      *
-     * <p>All three conditions must hold:
-     * <ul>
-     *   <li>{@link #readyToServe} is {@code true} — the Worker has completed its
-     *       initial detection cycle and is accepting requests</li>
-     *   <li>{@link #stale} is {@code false} — the Worker has not exceeded the
-     *       configured verification failure threshold</li>
-     *   <li>The elapsed monotonic time since {@link #lastAliveEvidenceTime} is
-     *       less than {@code timeoutMs} — liveness evidence (a heartbeat or a
+   * <p>All three conditions must hold:
+   * <ul>
+   *   <li>{@link #readyToServe} is {@code true} — the Worker has completed its
+   *       initial detection cycle and is accepting requests</li>
+   *   <li>{@link #stale} is {@code false} — the Worker has not exceeded the
+   *       configured verification failure threshold</li>
+   *   <li>The elapsed monotonic time since {@link #lastAliveEvidenceTime} is
+   *       less than {@code timeoutMs} — liveness evidence (a heartbeat or a
      *       verified PONG) has arrived within the expected interval (monotonic,
      *       so NTP wall-clock jumps cannot kill workers)</li>
      * </ul>
      *
      * @param timeoutMs the heartbeat timeout window in milliseconds; must be positive
      * @return {@code true} if this Worker is ready, not stale, and has provided
-     *         liveness evidence within the timeout window
+   *         liveness evidence within the timeout window
      */
     public boolean isAlive(long timeoutMs) {
       return readyToServe && !stale && TimeSource.monotonicMillis() - lastAliveEvidenceTime < timeoutMs;
-    }
+  }
   }
 }

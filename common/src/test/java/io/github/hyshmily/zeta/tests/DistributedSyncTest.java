@@ -338,28 +338,28 @@ class DistributedSyncTest {
     @Test
     @DisplayName("Case 3: both degraded, existing version higher — skip")
     void bothDegraded_existingHigher_skip() throws Exception {
-      cache.put("k", entry(10, true, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, true));
+      cache.put("k", entry(-10, true, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, -15L, true));
       awaitScheduler();
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-      assertThat(ce.getDataVersion()).isEqualTo(10);
+      assertThat(ce.getDataVersion()).isEqualTo(-10);
     }
 
     @Test
     @DisplayName("Case 3: both degraded, incoming version higher — accept")
     void bothDegraded_incomingHigher_accept() throws Exception {
-      cache.put("k", entry(5, true, 0, null, 0, KeyState.NORMAL));
-      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 15L, true));
+      cache.put("k", entry(-5, true, 0, null, 0, KeyState.NORMAL));
+      listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, -1L, true));
       awaitScheduler();
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-      assertThat(ce.getDataVersion()).isEqualTo(15L);
+      assertThat(ce.getDataVersion()).isEqualTo(-1L);
     }
 
     // Case 4: Existing degraded, incoming normal — never skip
     @Test
     @DisplayName("Case 4: existing degraded, incoming normal — always accept")
     void existingDegraded_incomingNormal_accept() throws Exception {
-      cache.put("k", entry(100, true, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(-100, true, 0, null, 0, KeyState.NORMAL));
       listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 1L, false));
       awaitScheduler();
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -547,7 +547,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("HOT with Redis exception falls back to degraded entry")
     void hot_redisExceptionFallsBackToDegraded() throws Exception {
-      cache.put("k", entry(5, true, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(-5, true, 0, null, 0, KeyState.NORMAL));
       WorkerListener wl = createWorkerListener(
         k -> {
           throw new RuntimeException("Redis down");
@@ -951,27 +951,27 @@ class DistributedSyncTest {
     @DisplayName("REFRESH: both degraded, equal version — skip")
     void refresh_bothDegradedEqual_skip() throws Exception {
       CacheSyncListener l = createListener(k -> "v");
-      cache.put("k", entry(3, true, 0, null, 0, KeyState.NORMAL));
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 3L, true));
+      cache.put("k", entry(-3, true, 0, null, 0, KeyState.NORMAL));
+      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, -3L, true));
       awaitScheduler();
-      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(3L);
+      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(-3L);
     }
 
     @Test
     @DisplayName("REFRESH: existing degraded, incoming degraded higher — accept")
     void refresh_bothDegradedHigher_accept() throws Exception {
       CacheSyncListener l = createListener(k -> "v");
-      cache.put("k", entry(3, true, 0, null, 0, KeyState.NORMAL));
-      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 10L, true));
+      cache.put("k", entry(-3, true, 0, null, 0, KeyState.NORMAL));
+      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, -1L, true));
       awaitScheduler();
-      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(10L);
+      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(-1L);
     }
 
     @Test
     @DisplayName("INVALIDATE: existing degraded, incoming normal — accept")
     void invalidate_existingDegradedIncomingNormal_accept() throws Exception {
       CacheSyncListener l = createListener(k -> null);
-      cache.put("k", entry(3, true, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(-3, true, 0, null, 0, KeyState.NORMAL));
       l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_INVALIDATE, 1L, false));
       awaitScheduler();
       assertThat(cache.getIfPresent("k")).isNull();
@@ -1416,7 +1416,7 @@ class DistributedSyncTest {
       );
 
       // Phase 1: Worker dead, Redis unavailable, degraded entry exists
-      cache.put("k", entry(5, true, 0, null, 0, KeyState.NORMAL));
+      cache.put("k", entry(-5, true, 0, null, 0, KeyState.NORMAL));
 
       // HOT promotion uses Redis which fails, falls back to degraded value
       wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 1L, "w1", 1));
@@ -1443,7 +1443,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("COOL after graceful degradation preserves degraded value")
     void coolAfterDegradation_preservesValue() throws Exception {
-      cache.put("k", entry(5, true, 1, "w1", 1, KeyState.HOT));
+      cache.put("k", entry(-5, true, 1, "w1", 1, KeyState.HOT));
       WorkerListener wl = createWorkerListener(k -> "fresh", null);
 
       wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_COOL, 2L, "w1", 1));

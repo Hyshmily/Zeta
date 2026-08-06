@@ -720,8 +720,8 @@ public class ExpireManagerImpl implements ExpireManager {
               }
               CacheEntry refreshed = entry
                 .withValueAndSoftTtl(compressor.wrap(vv.value()), softTtlMs, ttlPolicy.computeSoftExpireAt(softTtlMs))
-                .withDataVersion(vv.dataVersion())
-                .withIsVersionDegraded(false);
+                // Probe versions are non-negative, so the degraded flag is derived false.
+                .withDataVersion(vv.dataVersion());
               return entry.getKeyState() == KeyState.COOL ? refreshed.withKeyState(KeyState.NORMAL) : refreshed;
             }
             // Degraded version: a Redis-outage write occurred during refresh.

@@ -650,7 +650,7 @@ class CacheExpireManagerTest {
     long now = System.currentTimeMillis();
     CacheEntry entry = expireManager.createBuilder(
       "value",
-      new ExpireManager.VersionStamp(42, true),
+      new ExpireManager.VersionStamp(-42, true),
       new ExpireManager.DecisionStamp(7, "worker-1", 3),
       new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
       new ExpireManager.ExpiryAt(now + 60_000, now + 30_000),
@@ -658,7 +658,7 @@ class CacheExpireManagerTest {
     );
 
     assertThat(entry.getValue()).isEqualTo("value");
-    assertThat(entry.getDataVersion()).isEqualTo(42);
+    assertThat(entry.getDataVersion()).isEqualTo(-42);
     assertThat(entry.isVersionDegraded()).isTrue();
     assertThat(entry.getDecisionVersion()).isEqualTo(7);
     assertThat(entry.getDecisionNodeId()).isEqualTo("worker-1");

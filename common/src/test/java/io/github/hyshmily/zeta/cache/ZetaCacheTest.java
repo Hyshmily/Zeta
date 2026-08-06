@@ -2647,7 +2647,7 @@ class ZetaCacheTest {
       CacheEntry.builder()
         .value("original")
         .dataVersion(Long.MAX_VALUE)
-        .isVersionDegraded(true)
+        .isVersionDegraded(false)
         .decisionVersion(0)
         .hardTtlMs(300_000)
         .hardExpireAtMs(Long.MAX_VALUE)

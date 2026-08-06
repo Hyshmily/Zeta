@@ -187,17 +187,24 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   private final int[] fingerprints;
   /**
    * Flattened per-slot sliding-window counters — a single
-   * {@code long[totalSlots * windowCount]} array. Window {@code w} of slot
+   * {@code int[totalSlots * windowCount]} array. Window {@code w} of slot
    * {@code s} lives at {@code windows[s * windowCount + w]}.
    * Window {@code activeEpoch()} (i.e. {@code windows[s * windowCount + (epoch % windowCount)]})
    * is the most recent window.
+   *
+   * <p>{@code int} storage halves the sketch footprint (better cache locality
+   * on the hot path). Values are bounded: every window is zeroed on rotation
+   * (every 20 s by default) and decayed on collision, and the saturation guard
+   * in {@link #applyIncrement} caps at {@link Integer#MAX_VALUE} — reaching the
+   * cap requires &gt;10⁸ increments/s on a single slot, which is beyond any
+   * single-JVM read path.
    */
-  private final long[] windows;
+  private final int[] windows;
   /**
    * Per-slot running sum across all {@link #windowCount} windows, maintained in O(1) on every
    * update and zero. Replaces the {@code windowCount}-length {@code slotSum} loop on the hot path.
    */
-  private final long[] slotSums;
+  private final int[] slotSums;
   /** {@code totalSlots * windowCount} — precomputed stride used for window indexing. */
   private final int windowStride;
 
@@ -375,8 +382,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       stripes = Integer.highestOneBit(stripes) << 1;
     }
     this.fingerprints = new int[totalSlots];
-    this.windows = new long[totalSlots * windowCount];
-    this.slotSums = new long[totalSlots];
+    this.windows = new int[totalSlots * windowCount];
+    this.slotSums = new int[totalSlots];
     this.lockStripes = new Object[stripes];
     for (int i = 0; i < stripes; i++) {
       lockStripes[i] = new Object();
@@ -423,7 +430,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     if (loc != null) {
       return loc;
     }
-    loc = new SlotLoc(fingerprint(key));
+    loc = new SlotLoc((int) fingerprint(key));
     nonMemberLocCache.put(key, loc);
     return loc;
   }
@@ -434,7 +441,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * {@link #admissionLock} alongside {@link #members} mutations.
    */
   private void cacheLoc(String key) {
-    locCache.put(key, new SlotLoc(fingerprint(key)));
+    locCache.put(key, new SlotLoc((int) fingerprint(key)));
   }
 
   /**
@@ -448,7 +455,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    */
   @Override
   public AddResult addDirect(String key, long increment) {
-    long maxCount = addToSketch(key, increment);
+    long maxCount = addToSketch(key, saturateIncrement(increment));
     return admit(key, maxCount);
   }
 
@@ -469,7 +476,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
     for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
       String key = entry.getKey();
-      long maxCount = addToSketch(key, entry.getValue());
+      long maxCount = addToSketch(key, saturateIncrement(entry.getValue()));
       AddResult r = admit(key, maxCount);
       if (r.isHotKey()) {
         results.add(r);
@@ -507,7 +514,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         }
 
         members.put(key, new Node(key, count));
-        locCache.computeIfAbsent(key, k -> new SlotLoc(fingerprint(k)));
+        locCache.computeIfAbsent(key, k -> new SlotLoc((int) fingerprint(k)));
       }
       this.minPqCount = members.isEmpty() ? 0L : findMinMember().count();
     } finally {
@@ -647,6 +654,19 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     return node != null ? node.count.get() : 0L;
   }
 
+  @SuppressWarnings("null")
+  /**
+   * Clamp an external increment to the sketch's {@code int} counter range.
+   *
+   * <p>Real increments are per-flush batch counts (thousands at most); a
+   * value at or above 2³¹ is a malformed input and saturates like any other
+   * counter — same stop-condition semantics as {@link #applyIncrement}'s
+   * guard.
+   */
+  private static long saturateIncrement(long increment) {
+    return Math.min(increment, Integer.MAX_VALUE);
+  }
+
   /**
    * Apply {@code increment} to the sketch for {@code key} and return the
    * maximum cross-row slot sum observed. The top-level loop dispatches to
@@ -655,7 +675,6 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * fingerprint match. Per-row lock acquisition is delegated to those
    * sub-routines via the {@code synchronized(lockStripes[...])} enclosing block.
    */
-  @SuppressWarnings("null")
   private long addToSketch(String key, long increment) {
     SlotLoc loc = locate(key);
     long itemFingerprint = loc.fp;
@@ -714,7 +733,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * {@code maxCount}.
    *
    * <p><b>Saturation guard:</b> both counters saturate at
-   * {@link Long#MAX_VALUE} instead of wrapping negative. A wrapped window
+   * {@link Integer#MAX_VALUE} instead of wrapping negative. A wrapped window
    * would look "already decayed" to {@link #decayCollisionSlot}'s survivor
    * check and be skipped by it; a wrapped slot sum would misrank the slot.
    * The guard is a single comparison on the hot path, and saturation is a
@@ -723,13 +742,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * a slot can only reach the cap under extreme continuous traffic.
    */
   private long applyIncrement(int index, int active, long increment, long maxCount) {
-    long window = windows[index * windowStride + active] + increment;
+    int window = windows[index * windowStride + active] + (int) increment;
     if (increment > 0 && window < 0) {
-      window = Long.MAX_VALUE; // saturation guard: an overflowing window would decay-skip
+      window = Integer.MAX_VALUE; // saturation guard: an overflowing window would decay-skip
     }
     windows[index * windowStride + active] = window;
-    slotSums[index] += increment;
-    if (increment > 0 && slotSums[index] < 0) slotSums[index] = Long.MAX_VALUE;
+    slotSums[index] += (int) increment;
+    if (increment > 0 && slotSums[index] < 0) slotSums[index] = Integer.MAX_VALUE;
     return Math.max(maxCount, slotSums[index]);
   }
 
@@ -779,11 +798,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       // Replace the slot: fingerprint swap, wipe all windows, replay increment.
       fingerprints[index] = (int) itemFingerprint;
       Arrays.fill(windows, index * windowStride, index * windowStride + windowCount, 0);
-      windows[index * windowStride + active] = increment;
-      slotSums[index] = increment;
+      windows[index * windowStride + active] = (int) increment;
+      slotSums[index] = (int) increment;
       return Math.max(maxCount, increment);
     }
-    // Decrement each window proportionally, keep slotSums in sync.
+    // Decrement each window proportionally, keep slotSums in sync. The
+    // intermediate products (wv/cur * decays) need long arithmetic even with
+    // int counters: both factors can reach 2^31, so the product reaches 2^62.
     long sumBefore = slotSums[index];
     long totalSubtracted = 0;
     int base = index * windowStride;
@@ -795,10 +816,10 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         long sub = (wv / cur) * decays + ((wv % cur) * decays) / cur;
         long newVal = Math.max(0, wv - sub);
         totalSubtracted += wv - newVal;
-        windows[off] = newVal;
+        windows[off] = (int) newVal;
       }
     }
-    slotSums[index] = Math.max(0, sumBefore - totalSubtracted);
+    slotSums[index] = (int) Math.max(0, sumBefore - totalSubtracted);
     return Math.max(maxCount, slotSums[index]);
   }
 
@@ -810,12 +831,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     for (int stripe = 0; stripe < lockStripes.length; stripe++) {
       synchronized (lockStripes[stripe]) {
         for (int i = stripe; i < slotSums.length; i += lockStripes.length) {
-          long oldWindow = windows[i * windowStride + aw];
+          int oldWindow = windows[i * windowStride + aw];
           if (oldWindow != 0) {
             windows[i * windowStride + aw] = 0;
             slotSums[i] -= oldWindow;
             if (slotSums[i] < 0) {
-              slotSums[i] = 0; // guard against long underflow races
+              slotSums[i] = 0; // guard against int underflow races
             }
           }
         }
@@ -851,8 +872,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         // Always attempt the CAS (even when halved==0) so that a concurrent
         // accumulateAndGet() that raises the count between get() and CAS causes
         // the CAS to fail and the loop retries with the updated value.
-        long prev;
-        long halved;
+        int prev;
+        int halved;
         do {
           prev = n.count.get();
           halved = prev >> 1;
@@ -912,7 +933,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     // Fast path: existing member — atomic max-raise, no lock.
     Node member = members.get(key);
     if (member != null) {
-      member.count.accumulateAndGet(maxCount, Math::max);
+      member.count.accumulateAndGet((int) maxCount, Math::max);
       return new AddResult(null, true, key);
     }
     // Admission path: brand-new candidate, may enter or evict.
@@ -921,7 +942,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       // Double-check under lock — another thread may have admitted this key.
       Node existing = members.get(key);
       if (existing != null) {
-        existing.count.accumulateAndGet(maxCount, Math::max);
+        existing.count.accumulateAndGet((int) maxCount, Math::max);
         return new AddResult(null, true, key);
       }
       // O(1) fast reject: can't beat the current minimum member.
@@ -1018,15 +1039,20 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     return snapshot;
   }
 
-  /** Cached Murmur3 fingerprint for a single key. */
-  private record SlotLoc(long fp) {}
+  /** Cached Murmur3 fingerprint for a single key (lower 32 bits; see {@link #bucketIndex}). */
+  private record SlotLoc(int fp) {}
 
   /**
    * A key-count pair used as an entry in the TopK membership set.
-   * {@link #count} is an {@link AtomicLong} supporting atomic max-raise
-   * via {@link AtomicLong#accumulateAndGet(long, java.util.function.LongBinaryOperator)}
-   * on the hot path and atomic halving via {@link AtomicLong#compareAndSet}
+   * {@link #count} is an {@link AtomicInteger} supporting atomic max-raise
+   * via {@link AtomicInteger#accumulateAndGet(int, java.util.function.IntBinaryOperator)}
+   * on the hot path and atomic halving via {@link AtomicInteger#compareAndSet}
    * during periodic decay.
+   *
+   * <p>{@code int} is safe: member counts are raised to the sketch estimate
+   * (int-capped, see {@link #addToSketch}) and halved every decay period.
+   * Persisted snapshot counts injected by {@link #warm} are clamped at
+   * {@link Integer#MAX_VALUE} — a stop-condition, not a working value.
    */
   @SuppressWarnings("ClassCanBeRecord")
   private static final class Node {
@@ -1034,11 +1060,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     /** The cache key. */
     final String key;
     /** Current estimated count — supports atomic read-modify-write for both raise and decay. */
-    final AtomicLong count;
+    final AtomicInteger count;
 
     Node(String key, long count) {
       this.key = key;
-      this.count = new AtomicLong(count);
+      this.count = new AtomicInteger((int) Math.min(count, Integer.MAX_VALUE));
     }
   }
 

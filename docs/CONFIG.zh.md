@@ -224,7 +224,7 @@
 
 | 属性                      | 默认值 | 说明                                                                           |
 | ------------------------- | ------ | ------------------------------------------------------------------------------ |
-| `zeta.scheduling.enabled` | `true` | 启用内部定时器（HeavyKeeper 衰减 + 挤出队列清空）                              |
+| `zeta.scheduling.enabled` | `true` | 启用内部定时器（HeavyKeeper 衰减 + 挤出队列清空 + L1 过期条目周期清理（`cleanUp()`，每 5 秒）） |
 | `zeta.decay-period`       | `20`   | HeavyKeeper 衰减周期（秒），通过 `@Scheduled` 直接解析，不在 `zeta.local.*` 下 |
 
 > ⚠️ 当前硬编码为 20 秒——尚未通过属性可配置。

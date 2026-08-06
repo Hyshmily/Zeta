@@ -722,4 +722,50 @@ class HeavyKeeperTest {
     }
     assertThat(hotkeyCount).as("concurrent accumulates during decay should keep count > 0").isPositive();
   }
+
+  /**
+   * Verifies that a malformed huge increment saturates at
+   * {@link Integer#MAX_VALUE} instead of wrapping negative (the int counter
+   * stop-condition, mirroring the previous long saturation semantics).
+   */
+  @Test
+  void addDirect_hugeIncrement_shouldSaturateNotWrap() {
+    keeper.addDirect("key1", Long.MAX_VALUE);
+
+    assertThat(keeper.contains("key1")).isTrue();
+    List<Item> items = keeper.listTopN(1);
+    assertThat(items).hasSize(1);
+    assertThat(items.get(0).count()).isEqualTo(Integer.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that the hot-path max-raise on an existing member also saturates:
+   * repeated large adds never push a member count negative.
+   */
+  @Test
+  void addDirect_repeatedLargeIncrements_shouldStayPositive() {
+    keeper.addDirect("key1", 1_000_000);
+    for (int i = 0; i < 50; i++) {
+      keeper.addDirect("key1", 100_000_000);
+    }
+    List<Item> items = keeper.listTopN(1);
+    assertThat(items).hasSize(1);
+    assertThat(items.get(0).count()).isPositive().isLessThanOrEqualTo(Integer.MAX_VALUE);
+  }
+
+  /**
+   * Verifies that persisted snapshot counts beyond the int range are clamped
+   * (not wrapped) when injected via {@code warm}.
+   */
+  @Test
+  void warm_hugeSnapshotCount_shouldClampToIntMax() {
+    Map<String, Long> snapshot = new HashMap<>();
+    snapshot.put("key1", Long.MAX_VALUE);
+    keeper.warm(snapshot);
+
+    assertThat(keeper.contains("key1")).isTrue();
+    List<Item> items = keeper.listTopN(1);
+    assertThat(items).hasSize(1);
+    assertThat(items.get(0).count()).isEqualTo(Integer.MAX_VALUE);
+  }
 }

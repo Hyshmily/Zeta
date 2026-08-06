@@ -51,7 +51,17 @@ import java.util.concurrent.ConcurrentHashMap;
 public class DefaultEvaluator implements Evaluator {
 
   /** Number of recent window sums retained for CV computation. Must be a power of two. */
-  private static final int CV_HISTORY_SIZE = 32;
+  /**
+   * Number of window sums retained per key for the CV (coefficient of
+   * variation) estimate.
+   *
+   * <p>16 is a deliberate memory/precision trade-off: the CV needs at least 5
+   * samples and the trend uses the 3 preceding windows, so 16 keeps 3× the
+   * minimum while halving the per-key buffer (was 32). The CV estimation
+   * noise roughly doubles (standard error ∝ 1/√(2n)) — validated by the
+   * worker test suite for decision stability.
+   */
+  private static final int CV_HISTORY_SIZE = 16;
   private static final int CV_HISTORY_MASK = CV_HISTORY_SIZE - 1;
 
   /** Sliding-window detector shared with the evaluation pipeline. */
@@ -280,12 +290,14 @@ public class DefaultEvaluator implements Evaluator {
     long now = TimeSource.monotonicMillis();
     windowSumHistories.values().removeIf(h -> now - h.lastAccessTime > staleAfterMs);
     if (cmsCounts.size() > MAX_TRACKED_CMS_KEYS) {
-      cmsCounts.entrySet().removeIf(e -> {
-        double[] cell = e.getValue();
-        cell[0] *= Math.pow(CMS_ALPHA, Math.max(0, (now - cell[1]) / EVICT_CYCLE_MS));
-        cell[1] = now;
-        return cell[0] < 1.0;
-      });
+      cmsCounts
+        .entrySet()
+        .removeIf(e -> {
+          double[] cell = e.getValue();
+          cell[0] *= Math.pow(CMS_ALPHA, Math.max(0, (now - cell[1]) / EVICT_CYCLE_MS));
+          cell[1] = now;
+          return cell[0] < 1.0;
+        });
     }
   }
 

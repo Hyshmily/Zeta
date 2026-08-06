@@ -262,9 +262,9 @@ class CacheSyncListenerTest {
   void handleSyncMessage_withRefreshAndRedisException_shouldAck() throws IOException {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
-    SyncDecisionHandler h = handler(
-      k -> { throw new RuntimeException("Redis down"); }
-    );
+    SyncDecisionHandler h = handler(k -> {
+      throw new RuntimeException("Redis down");
+    });
     CacheSyncListener failingListener = new CacheSyncListener(props, scheduler, h);
     failingListener.init();
 
@@ -291,7 +291,7 @@ class CacheSyncListenerTest {
   @Test
   void handleSyncMessage_withRefreshExistingDegradedIncomingNormal_shouldAccept()
     throws IOException, InterruptedException {
-    cache.put("key1", entry(1, true, 0));
+    cache.put("key1", entry(-1, true, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
     awaitWorkerTasks();
@@ -353,8 +353,8 @@ class CacheSyncListenerTest {
    */
   @Test
   void handleSyncMessage_withRefreshBothDegradedEqualVersion_shouldSkip() throws IOException, InterruptedException {
-    cache.put("key1", entry(5, true, 0));
-    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, true));
+    cache.put("key1", entry(-5, true, 0));
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, -5L, true));
     verify(channel).basicAck(anyLong(), eq(false));
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).isNotNull();

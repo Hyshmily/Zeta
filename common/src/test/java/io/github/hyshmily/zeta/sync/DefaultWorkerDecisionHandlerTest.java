@@ -192,7 +192,7 @@ class DefaultWorkerDecisionHandlerTest {
    */
   @Test
   void handleHot_redisDown_shouldPromoteFromDegradedL1Entry() {
-    CacheEntry degraded = entry(1, KeyState.NORMAL).toBuilder().isVersionDegraded(true).build();
+    CacheEntry degraded = entry(-1, KeyState.NORMAL);
     cache.put("key1", degraded);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
     handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));

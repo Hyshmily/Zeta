@@ -214,7 +214,9 @@ class WorkerListenerTest {
     props.setWarmupJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     WorkerDecisionHandler h = handler(
-      k -> { throw new RuntimeException("Redis down"); },
+      k -> {
+        throw new RuntimeException("Redis down");
+      },
       null
     );
     WorkerListener failingLoader = new WorkerListener(props, sched, h);
@@ -280,7 +282,7 @@ class WorkerListenerTest {
   void handleWorkerMessage_cool_onDegradedEntry_shouldDowngrade() throws IOException, InterruptedException {
     cache.put(
       "key1",
-      entry(0, true, 0)
+      entry(-1, true, 0)
         .toBuilder()
         .keyState(KeyState.NORMAL)
         .hardTtlMs(300_000)

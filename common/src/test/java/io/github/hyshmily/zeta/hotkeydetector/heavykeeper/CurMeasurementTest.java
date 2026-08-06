@@ -31,8 +31,8 @@ class CurMeasurementTest {
       for (long i = 0; i < totalOps; i++) {
         hk.addDirect(key, 1);
 
-        long[] slotSums = (long[]) slotSumsField.get(hk);
-        for (long cur : slotSums) {
+        int[] slotSums = (int[]) slotSumsField.get(hk);
+        for (int cur : slotSums) {
           if (cur > maxCur) maxCur = cur;
         }
 

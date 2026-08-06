@@ -18,7 +18,6 @@ package io.github.hyshmily.zeta.autoconfigure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import java.util.List;
@@ -49,7 +48,6 @@ class ZetaSchedulingConfigurationTest {
     ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
       List.of(topK1, topK2),
       scheduler,
-      new BroadcastBuffer(scheduler, Optional.empty()),
       Optional.empty()
     );
 
@@ -65,12 +63,7 @@ class ZetaSchedulingConfigurationTest {
   @Test
   void cleanHotKeysHandlesSingleInstance() {
     TopK topK = mock(TopK.class);
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
-      List.of(topK),
-      scheduler,
-      new BroadcastBuffer(scheduler, Optional.empty()),
-      Optional.empty()
-    );
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(topK), scheduler, Optional.empty());
 
     config.cleanHotKeys();
 
@@ -82,12 +75,7 @@ class ZetaSchedulingConfigurationTest {
    */
   @Test
   void cleanHotKeysHandlesEmptyList() {
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
-      List.of(),
-      scheduler,
-      new BroadcastBuffer(scheduler, Optional.empty()),
-      Optional.empty()
-    );
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(), scheduler, Optional.empty());
 
     config.cleanHotKeys();
     // No exception should be thrown
@@ -111,7 +99,6 @@ class ZetaSchedulingConfigurationTest {
     ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
       List.of(topK1, topK2),
       scheduler,
-      new BroadcastBuffer(scheduler, Optional.empty()),
       Optional.empty()
     );
     config.drainExpelled();
@@ -128,12 +115,7 @@ class ZetaSchedulingConfigurationTest {
     TopK topK = mock(TopK.class);
     when(topK.expelled()).thenReturn(new LinkedBlockingQueue<>());
 
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
-      List.of(topK),
-      scheduler,
-      new BroadcastBuffer(scheduler, Optional.empty()),
-      Optional.empty()
-    );
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(topK), scheduler, Optional.empty());
     config.drainExpelled();
     // No exception should be thrown
   }
@@ -150,16 +132,38 @@ class ZetaSchedulingConfigurationTest {
     }
     when(topK.expelled()).thenReturn(queue);
 
-    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
-      List.of(topK),
-      scheduler,
-      new BroadcastBuffer(scheduler, Optional.empty()),
-      Optional.empty()
-    );
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(topK), scheduler, Optional.empty());
     config.drainExpelled();
 
     // drainTo(collection, 100_000) should have drained all 1500 items
     assertThat(queue).isEmpty();
+  }
+
+  /**
+   * Verifies that cleanUpExpiredEntries runs the L1 cache maintenance.
+   */
+  @Test
+  void cleanUpExpiredEntries_shouldCleanUpL1Cache() {
+    @SuppressWarnings("unchecked")
+    com.github.benmanes.caffeine.cache.Cache<String, Object> l1Cache = mock(
+      com.github.benmanes.caffeine.cache.Cache.class
+    );
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(), scheduler, Optional.of(l1Cache));
+
+    config.cleanUpExpiredEntries();
+
+    verify(l1Cache).cleanUp();
+  }
+
+  /**
+   * Verifies that cleanUpExpiredEntries is a no-op when no L1 cache bean exists.
+   */
+  @Test
+  void cleanUpExpiredEntries_withoutL1Cache_shouldDoNothing() {
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(), scheduler, Optional.empty());
+
+    config.cleanUpExpiredEntries();
+    // No exception should be thrown
   }
 
   /**
@@ -170,9 +174,6 @@ class ZetaSchedulingConfigurationTest {
     new ApplicationContextRunner()
       .withBean(TopK.class, () -> mock(TopK.class))
       .withBean("hotKeyScheduler", ScheduledExecutorService.class, () -> mock(ScheduledExecutorService.class))
-      .withBean(BroadcastBuffer.class, () ->
-        new BroadcastBuffer(mock(ScheduledExecutorService.class), Optional.empty())
-      )
       .withConfiguration(AutoConfigurations.of(ZetaSchedulingConfiguration.class))
       .run(ctx -> assertThat(ctx).hasSingleBean(ZetaSchedulingConfiguration.class));
   }

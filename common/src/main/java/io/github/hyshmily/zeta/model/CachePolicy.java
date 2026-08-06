@@ -73,6 +73,18 @@ public record CachePolicy(
   /** Shared zero supplier for "no TTL override". */
   private static final LongSupplier ZERO = () -> 0L;
 
+  /**
+   * Returns the shared {@link #ZERO} supplier for a zero (no-override) TTL,
+   * avoiding a per-call capturing-lambda allocation on the common read path;
+   * otherwise wraps the static value in a constant supplier.
+   *
+   * @param ttlMs the TTL override in milliseconds (0 = use configured default)
+   * @return a supplier returning {@code ttlMs}
+   */
+  private static LongSupplier ttlSupplier(long ttlMs) {
+    return ttlMs == 0L ? ZERO : () -> ttlMs;
+  }
+
   /** Singleton carrying all-default semantics. */
   private static final CachePolicy DEFAULTS = new CachePolicy(
     ZERO,
@@ -185,8 +197,8 @@ public record CachePolicy(
     StalePolicy stalePolicy
   ) {
     return new CachePolicy(
-      () -> hardTtlMs,
-      () -> softTtlMs,
+      ttlSupplier(hardTtlMs),
+      ttlSupplier(softTtlMs),
       nullCaching,
       skipBroadcast,
       stalePolicy,
@@ -222,8 +234,8 @@ public record CachePolicy(
     StalePolicy stalePolicy
   ) {
     return new CachePolicy(
-      () -> hardTtlMs,
-      () -> softTtlMs,
+      ttlSupplier(hardTtlMs),
+      ttlSupplier(softTtlMs),
       nullCaching,
       false,
       stalePolicy,

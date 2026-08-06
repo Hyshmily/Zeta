@@ -415,7 +415,7 @@ class TtlPolicyTest {
     long now = System.currentTimeMillis();
     CacheEntry original = CacheEntry.builder()
       .value("v")
-      .dataVersion(10)
+      .dataVersion(Long.MIN_VALUE + 10)
       .isVersionDegraded(true)
       .decisionVersion(5)
       .hardTtlMs(60_000)
@@ -433,7 +433,7 @@ class TtlPolicyTest {
     assertThat(updated.getHardExpireAtMs()).isGreaterThan(original.getHardExpireAtMs());
     assertThat(updated.getSoftTtlMs()).isEqualTo(30_000);
     assertThat(updated.getSoftExpireAtMs()).isEqualTo(original.getSoftExpireAtMs());
-    assertThat(updated.getDataVersion()).isEqualTo(10);
+    assertThat(updated.getDataVersion()).isEqualTo(Long.MIN_VALUE + 10);
     assertThat(updated.isVersionDegraded()).isTrue();
     assertThat(updated.getDecisionVersion()).isEqualTo(5);
     assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
@@ -448,7 +448,7 @@ class TtlPolicyTest {
     long now = System.currentTimeMillis();
     CacheEntry original = CacheEntry.builder()
       .value("v")
-      .dataVersion(10)
+      .dataVersion(Long.MIN_VALUE + 10)
       .isVersionDegraded(true)
       .decisionVersion(5)
       .hardTtlMs(60_000)
@@ -466,7 +466,7 @@ class TtlPolicyTest {
     assertThat(updated.getSoftExpireAtMs()).isGreaterThan(original.getSoftExpireAtMs());
     assertThat(updated.getHardTtlMs()).isEqualTo(60_000);
     assertThat(updated.getHardExpireAtMs()).isEqualTo(original.getHardExpireAtMs());
-    assertThat(updated.getDataVersion()).isEqualTo(10);
+    assertThat(updated.getDataVersion()).isEqualTo(Long.MIN_VALUE + 10);
     assertThat(updated.getKeyState()).isEqualTo(KeyState.HOT);
   }
 

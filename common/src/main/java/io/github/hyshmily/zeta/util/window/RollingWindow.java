@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.util.window;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 
 /**
@@ -41,6 +42,17 @@ import java.util.concurrent.atomic.AtomicLongArray;
  * bucket that is about to be zeroed (lost increment, acceptable for
  * rate-limiter approximations).  The next tick will converge.
  *
+ * <p>An O(1) running total is maintained alongside the buckets:
+ * {@link #add(long)} mirrors every bucket write into the total and
+ * {@link #tick()} subtracts the value of every bucket it zeroes (via
+ * {@link AtomicLongArray#getAndSet(int, long)}), so {@link #sum()} is a
+ * single volatile read after {@code tick()} instead of an O(windowSize)
+ * rescan.  The total is observationally equivalent to the previous
+ * per-bucket rescan under the same approximate windows documented above:
+ * a stale {@code currentBucket} read lands in a bucket that is still inside
+ * the window (counted by both), and a value is dropped from the total
+ * exactly when the bucket holding it is zeroed on rotation.
+ *
  * @see io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter
  */
 @Internal
@@ -54,6 +66,11 @@ public final class RollingWindow {
   private static final class WindowField extends RwPadding.WindowRef {}
 
   private final WindowField windowField = new WindowField();
+
+  /** Padded holder for the O(1) running total — see {@link RwPadding.SumRef}. */
+  private static final class SumField extends RwPadding.SumRef {}
+
+  private final SumField sumField = new SumField();
 
   /** Private lock for tick() — only acquired when bucket rotation is actually needed. */
   private final Object tickLock = new Object();
@@ -94,24 +111,22 @@ public final class RollingWindow {
   public void add(long value) {
     tick();
     buckets.addAndGet(windowField.currentBucket, value);
+    sumField.value.addAndGet(value);
   }
 
   /**
    * Sum of all buckets in the window.
    *
-   * <p>Expired buckets are zeroed via {@link #tick()} before summing, so the
-   * returned value reflects only the data from the current window. This is an
-   * O(windowSize) operation.
+   * <p>Expired buckets are subtracted from the running total via {@link #tick()}
+   * before reading, so the returned value reflects only the data from the
+   * current window. This is an O(1) operation — a single volatile read of the
+   * running total (no per-bucket scan).
    *
    * @return the sum across all buckets (may be 0 if all buckets are zero)
    */
   public long sum() {
     tick();
-    long s = 0;
-    for (int i = 0; i < windowSize; i++) {
-      s += buckets.get(i);
-    }
-    return s;
+    return sumField.value.get();
   }
 
   /**
@@ -173,6 +188,7 @@ public final class RollingWindow {
       }
       windowField.windowStart = TimeSource.monotonicMillis();
       windowField.currentBucket = 0;
+      sumField.value.set(0);
     }
   }
 
@@ -202,7 +218,10 @@ public final class RollingWindow {
       int steps = (int) Math.min(elapsed / bucketDurationMs, windowSize);
       for (int i = 0; i < steps; i++) {
         windowField.currentBucket = (windowField.currentBucket + 1) & windowMask;
-        buckets.set(windowField.currentBucket, 0);
+        long evicted = buckets.getAndSet(windowField.currentBucket, 0);
+        if (evicted != 0) {
+          sumField.value.addAndGet(-evicted);
+        }
       }
       windowField.windowStart += steps * bucketDurationMs;
     }
@@ -238,5 +257,37 @@ final class RwPadding {
 
     volatile long windowStart;
     volatile int currentBucket;
+  }
+
+  /**
+   * Padded holder for the O(1) running total. The 120-byte lead pad isolates
+   * the {@link AtomicLong} reference from the holder's object header, so
+   * {@code value} stays on a dedicated cache line away from the window-clock
+   * fields — the running total is written by every {@link #add} caller while
+   * {@code windowStart}/{@code currentBucket} are read on every tick fast path.
+   */
+  @SuppressWarnings("all")
+  abstract static class PadSum {
+
+    byte p000, p001, p002, p003, p004, p005, p006, p007;
+    byte p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023;
+    byte p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039;
+    byte p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055;
+    byte p056, p057, p058, p059, p060, p061, p062, p063;
+    byte p064, p065, p066, p067, p068, p069, p070, p071;
+    byte p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087;
+    byte p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103;
+    byte p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119;
+  }
+
+  abstract static class SumRef extends PadSum {
+
+    final AtomicLong value = new AtomicLong();
   }
 }

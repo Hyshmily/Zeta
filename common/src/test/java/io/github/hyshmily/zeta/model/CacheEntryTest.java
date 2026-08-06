@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.model;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
 
@@ -136,7 +137,12 @@ class CacheEntryTest {
 
   @Test
   void isVersionDegradedTrue_combinedWithDecisionVersion() {
-    CacheEntry entry = CacheEntry.builder().value("degraded-hot").isVersionDegraded(true).decisionVersion(10L).build();
+    CacheEntry entry = CacheEntry.builder()
+      .value("degraded-hot")
+      .dataVersion(Long.MIN_VALUE + 10)
+      .isVersionDegraded(true)
+      .decisionVersion(10L)
+      .build();
     assertThat(entry.isVersionDegraded()).isTrue();
     assertThat(entry.getDecisionVersion()).isEqualTo(10L);
   }
@@ -152,13 +158,13 @@ class CacheEntryTest {
   void toBuilder_shouldCopyAllFields() {
     CacheEntry original = CacheEntry.builder()
       .value("original")
-      .dataVersion(1L)
+      .dataVersion(Long.MIN_VALUE + 1)
       .isVersionDegraded(true)
       .keyState(KeyState.HOT)
       .build();
     CacheEntry copy = original.toBuilder().value("modified").build();
     assertThat(copy.getValue()).isEqualTo("modified");
-    assertThat(copy.getDataVersion()).isEqualTo(1L);
+    assertThat(copy.getDataVersion()).isEqualTo(Long.MIN_VALUE + 1);
     assertThat(copy.isVersionDegraded()).isTrue();
     assertThat(copy.getKeyState()).isEqualTo(KeyState.HOT);
   }
@@ -180,7 +186,7 @@ class CacheEntryTest {
 
   @Test
   void dataVersionMinMax_shouldAcceptBoundaryValues() {
-    CacheEntry min = CacheEntry.builder().value("min").dataVersion(Long.MIN_VALUE).build();
+    CacheEntry min = CacheEntry.builder().value("min").dataVersion(Long.MIN_VALUE).isVersionDegraded(true).build();
     CacheEntry max = CacheEntry.builder().value("max").dataVersion(Long.MAX_VALUE).build();
     assertThat(min.getDataVersion()).isEqualTo(Long.MIN_VALUE);
     assertThat(max.getDataVersion()).isEqualTo(Long.MAX_VALUE);
@@ -201,10 +207,10 @@ class CacheEntryTest {
   }
 
   @Test
-  void negativeTtlValues_shouldBeAccepted() {
-    CacheEntry entry = CacheEntry.builder().value("neg").hardTtlMs(-100L).softTtlMs(-50L).build();
-    assertThat(entry.getHardTtlMs()).isNegative();
-    assertThat(entry.getSoftTtlMs()).isNegative();
+  void negativeTtlValues_shouldBeRejected() {
+    assertThatThrownBy(() -> CacheEntry.builder().value("neg").hardTtlMs(-100L).softTtlMs(-50L).build()).isInstanceOf(
+      IllegalArgumentException.class
+    );
   }
 
   @Test
@@ -225,7 +231,7 @@ class CacheEntryTest {
   void toBuilder_shouldPreserveAllFieldsExceptModified() {
     CacheEntry original = CacheEntry.builder()
       .value("orig")
-      .dataVersion(1L)
+      .dataVersion(Long.MIN_VALUE + 1)
       .isVersionDegraded(true)
       .decisionVersion(2L)
       .hardTtlMs(100L)
@@ -238,7 +244,7 @@ class CacheEntryTest {
       .build();
     CacheEntry copy = original.toBuilder().value("modified").build();
     assertThat(copy.getValue()).isEqualTo("modified");
-    assertThat(copy.getDataVersion()).isEqualTo(1L);
+    assertThat(copy.getDataVersion()).isEqualTo(Long.MIN_VALUE + 1);
     assertThat(copy.isVersionDegraded()).isTrue();
     assertThat(copy.getDecisionVersion()).isEqualTo(2L);
     assertThat(copy.getHardTtlMs()).isEqualTo(100L);
@@ -324,7 +330,7 @@ class CacheEntryTest {
   private static CacheEntry fullEntry() {
     return CacheEntry.builder()
       .value("baseValue")
-      .dataVersion(100L)
+      .dataVersion(Long.MIN_VALUE + 100)
       .isVersionDegraded(true)
       .decisionVersion(5L)
       .decisionNodeId("worker-1")
@@ -364,15 +370,211 @@ class CacheEntryTest {
   }
 
   /**
-   * Verifies {@link CacheEntry#withIsVersionDegraded} creates a copy with the
-   * given degraded flag while all other fields are preserved.
+   * Verifies that the degraded flag is derived from the sign bit of
+   * {@code dataVersion} (ADR-0019) rather than stored separately.
    */
   @Test
-  void withIsVersionDegraded_shouldCreateCopyWithNewDegradedFlag() {
-    CacheEntry base = fullEntry();
-    CacheEntry copy = base.withIsVersionDegraded(false);
-    assertThat(copy.isVersionDegraded()).isFalse();
-    assertThat(copy).usingRecursiveComparison().ignoringFields("isVersionDegraded").isEqualTo(base);
+  void isVersionDegraded_shouldBeDerivedFromSignBit() {
+    assertThat(
+      CacheEntry.builder().value("v").dataVersion(1L).isVersionDegraded(false).build().isVersionDegraded()
+    ).isFalse();
+    assertThat(CacheEntry.builder().value("v").dataVersion(Long.MAX_VALUE).build().isVersionDegraded()).isFalse();
+    assertThat(CacheEntry.builder().value("v").dataVersion(0L).build().isVersionDegraded()).isFalse();
+    assertThat(
+      CacheEntry.builder().value("v").dataVersion(-1L).isVersionDegraded(true).build().isVersionDegraded()
+    ).isTrue();
+    assertThat(
+      CacheEntry.builder().value("v").dataVersion(Long.MIN_VALUE).isVersionDegraded(true).build().isVersionDegraded()
+    ).isTrue();
+    assertThat(
+      CacheEntry.builder()
+        .value("v")
+        .dataVersion(Long.MIN_VALUE + 1)
+        .isVersionDegraded(true)
+        .build()
+        .isVersionDegraded()
+    ).isTrue();
+  }
+
+  /**
+   * Verifies that the constructor rejects arguments where the degraded flag
+   * contradicts the sign of {@code dataVersion} — the invariant is explicit.
+   */
+  @Test
+  void inconsistentDegradedFlag_shouldThrow() {
+    assertThatThrownBy(() ->
+      CacheEntry.builder().value("v").dataVersion(1L).isVersionDegraded(true).build()
+    ).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() ->
+      CacheEntry.builder().value("v").dataVersion(-1L).isVersionDegraded(false).build()
+    ).isInstanceOf(IllegalArgumentException.class);
+  }
+
+  /**
+   * Verifies that the decision epoch round-trips through the packed 56-bit
+   * storage, including the timestamp-floored range used by real Workers
+   * ({@code System.currentTimeMillis() * 1000}, see ADR-0010) and the
+   * maximum representable value.
+   */
+  @Test
+  void decisionEpoch_shouldRoundTripThroughPackedStorage() {
+    CacheEntry entry = CacheEntry.builder().value("v").decisionEpoch((1L << 56) - 1).build();
+    assertThat(entry.getDecisionEpoch()).isEqualTo((1L << 56) - 1);
+    assertThat(entry.toBuilder().build().getDecisionEpoch()).isEqualTo((1L << 56) - 1);
+
+    long timestampFlooredEpoch = System.currentTimeMillis() * 1000L;
+    CacheEntry real = CacheEntry.builder().value("v").decisionEpoch(timestampFlooredEpoch).build();
+    assertThat(real.getDecisionEpoch()).isEqualTo(timestampFlooredEpoch);
+    assertThat(real.toBuilder().build().getDecisionEpoch()).isEqualTo(timestampFlooredEpoch);
+  }
+
+  /**
+   * Verifies that decision epochs exceeding the 56-bit range are rejected.
+   */
+  @Test
+  void decisionEpoch_outOfRange_shouldThrow() {
+    assertThatThrownBy(() -> CacheEntry.builder().value("v").decisionEpoch(1L << 56).build()).isInstanceOf(
+      IllegalArgumentException.class
+    );
+    assertThatThrownBy(() -> CacheEntry.builder().value("v").decisionEpoch(-1L).build()).isInstanceOf(
+      IllegalArgumentException.class
+    );
+  }
+
+  // ── TTL packing (2-bit unit + 30-bit mantissa) ──
+
+  /**
+   * Verifies that TTLs up to 2^30 − 1 ms (≈ 12.4 days) round-trip exactly in
+   * milliseconds, including the tier boundary.
+   */
+  @Test
+  void ttl_withinMsTier_shouldRoundTripExactly() {
+    CacheEntry entry = CacheEntry.builder().value("v").hardTtlMs((1L << 30) - 1).build();
+    assertThat(entry.getHardTtlMs()).isEqualTo((1L << 30) - 1);
+    assertThat(entry.toBuilder().build().getHardTtlMs()).isEqualTo((1L << 30) - 1);
+
+    CacheEntry small = CacheEntry.builder().value("v").hardTtlMs(300_000).softTtlMs(30_000).build();
+    assertThat(small.getHardTtlMs()).isEqualTo(300_000);
+    assertThat(small.getSoftTtlMs()).isEqualTo(30_000);
+  }
+
+  /**
+   * Verifies that TTLs beyond the ms tier are stored in seconds: second-aligned
+   * values round-trip exactly, non-aligned values floor to the second with a
+   * sub-second error (relative error < 0.001%).
+   */
+  @Test
+  void ttl_beyondMsTier_shouldRoundToSecondWithTinyError() {
+    long boundary = 1L << 30; // 1,073,741,824 ms = 1,073,741.824 s
+    CacheEntry entry = CacheEntry.builder().value("v").hardTtlMs(boundary).build();
+    assertThat(entry.getHardTtlMs()).isEqualTo(1_073_741_000L);
+
+    long thirtyDays = 30L * 24 * 3600 * 1000; // 2,592,000,000 ms, second-aligned
+    CacheEntry aligned = CacheEntry.builder().value("v").hardTtlMs(thirtyDays).build();
+    assertThat(aligned.getHardTtlMs()).isEqualTo(thirtyDays);
+
+    long withMillis = thirtyDays + 123; // sub-second tail is dropped
+    CacheEntry tail = CacheEntry.builder().value("v").hardTtlMs(withMillis).build();
+    assertThat(tail.getHardTtlMs()).isEqualTo(thirtyDays);
+  }
+
+  /**
+   * Verifies that {@code Long.MAX_VALUE} (permanent entry) round-trips through
+   * the infinite sentinel, and that {@code 0} (no soft expire) is preserved.
+   */
+  @Test
+  void ttl_infiniteAndZero_shouldRoundTrip() {
+    CacheEntry infinite = CacheEntry.builder().value("v").hardTtlMs(Long.MAX_VALUE).build();
+    assertThat(infinite.getHardTtlMs()).isEqualTo(Long.MAX_VALUE);
+    assertThat(infinite.toBuilder().build().getHardTtlMs()).isEqualTo(Long.MAX_VALUE);
+
+    CacheEntry noSoft = CacheEntry.builder().value("v").softTtlMs(0).build();
+    assertThat(noSoft.getSoftTtlMs()).isZero();
+  }
+
+  /**
+   * Verifies that TTLs above the hour-tier maximum (except
+   * {@code Long.MAX_VALUE}) are rejected.
+   */
+  @Test
+  void ttl_aboveHourTier_shouldThrow() {
+    long hourTierMax = (1L << 30) * 3_600_000L; // ≈ 122k years
+    assertThatThrownBy(() -> CacheEntry.builder().value("v").hardTtlMs(hourTierMax).build()).isInstanceOf(
+      IllegalArgumentException.class
+    );
+  }
+
+  /**
+   * Verifies that the hour-tier mantissa maximum — whose encoding would collide
+   * with the {@code Long.MAX_VALUE} sentinel — is rejected, while the largest
+   * representable hour-aligned value still round-trips exactly and a
+   * non-aligned value just below the cap floors to it.
+   */
+  @Test
+  void ttl_hourTierSentinelCollision_shouldBeRejected() {
+    long collision = ((1L << 30) - 1) * 3_600_000L;
+    assertThatThrownBy(() -> CacheEntry.builder().value("v").hardTtlMs(collision).build()).isInstanceOf(
+      IllegalArgumentException.class
+    );
+
+    long maxRepresentable = ((1L << 30) - 2) * 3_600_000L;
+    CacheEntry aligned = CacheEntry.builder().value("v").hardTtlMs(maxRepresentable).build();
+    assertThat(aligned.getHardTtlMs()).isEqualTo(maxRepresentable);
+
+    CacheEntry justBelow = CacheEntry.builder().value("v").hardTtlMs(collision - 1).build();
+    assertThat(justBelow.getHardTtlMs()).isEqualTo(maxRepresentable);
+  }
+
+  /**
+   * Verifies that the TTL encoding is stable under repeated copy operations
+   * (decode → re-encode is idempotent for long TTLs).
+   */
+  @Test
+  void ttl_longValues_shouldBeStableAcrossCopies() {
+    CacheEntry entry = CacheEntry.builder().value("v").hardTtlMs(2_592_000_000L).build();
+    CacheEntry copy = entry.withHardExpireAtMs(System.currentTimeMillis() + 1_000);
+    assertThat(copy.getHardTtlMs()).isEqualTo(2_592_000_000L);
+    assertThat(copy.toBuilder().build().getHardTtlMs()).isEqualTo(2_592_000_000L);
+  }
+
+  /**
+   * Verifies that all key states (including null) round-trip through the
+   * packed 2-bit state code, and that the code is not the enum ordinal.
+   */
+  @Test
+  void keyState_shouldRoundTripThroughPackedStorage() {
+    assertThat(CacheEntry.builder().value("v").keyState(KeyState.HOT).build().getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(CacheEntry.builder().value("v").keyState(KeyState.COOL).build().getKeyState()).isEqualTo(KeyState.COOL);
+    assertThat(CacheEntry.builder().value("v").keyState(KeyState.NORMAL).build().getKeyState()).isEqualTo(
+      KeyState.NORMAL
+    );
+    assertThat(CacheEntry.builder().value("v").build().getKeyState()).isNull();
+    assertThat(
+      CacheEntry.builder()
+        .value("v")
+        .keyState(KeyState.COOL)
+        .decisionEpoch(42L)
+        .build()
+        .toBuilder()
+        .build()
+        .getKeyState()
+    ).isEqualTo(KeyState.COOL);
+  }
+
+  /**
+   * Verifies that {@link CacheEntry#withDataVersion} re-derives the degraded
+   * flag when the new version crosses the sign boundary.
+   */
+  @Test
+  void withDataVersion_crossingSignBoundary_shouldRecomputeDegradedFlag() {
+    CacheEntry degraded = CacheEntry.builder().value("v").dataVersion(-5L).isVersionDegraded(true).build();
+    CacheEntry normal = degraded.withDataVersion(7L);
+    assertThat(normal.isVersionDegraded()).isFalse();
+    assertThat(normal.getDataVersion()).isEqualTo(7L);
+
+    CacheEntry backToDegraded = normal.withDataVersion(-2L);
+    assertThat(backToDegraded.isVersionDegraded()).isTrue();
+    assertThat(backToDegraded.getDataVersion()).isEqualTo(-2L);
   }
 
   /**
@@ -408,7 +610,7 @@ class CacheEntryTest {
     CacheEntry base = fullEntry();
     CacheEntry copy = base.withDecisionEpoch(42L);
     assertThat(copy.getDecisionEpoch()).isEqualTo(42L);
-    assertThat(copy).usingRecursiveComparison().ignoringFields("decisionEpoch").isEqualTo(base);
+    assertThat(copy).usingRecursiveComparison().ignoringFields("decisionEpoch", "packedState").isEqualTo(base);
   }
 
   /**
@@ -468,7 +670,7 @@ class CacheEntryTest {
     CacheEntry base = fullEntry();
     CacheEntry copy = base.withKeyState(KeyState.COOL);
     assertThat(copy.getKeyState()).isEqualTo(KeyState.COOL);
-    assertThat(copy).usingRecursiveComparison().ignoringFields("keyState").isEqualTo(base);
+    assertThat(copy).usingRecursiveComparison().ignoringFields("keyState", "packedState").isEqualTo(base);
   }
 
   /**
@@ -567,7 +769,7 @@ class CacheEntryTest {
     assertThat(copy.getKeyState()).isEqualTo(KeyState.COOL);
     assertThat(copy)
       .usingRecursiveComparison()
-      .ignoringFields("hardTtlMs", "hardExpireAtMs", "softTtlMs", "softExpireAtMs", "keyState")
+      .ignoringFields("hardTtlMs", "hardExpireAtMs", "softTtlMs", "softExpireAtMs", "keyState", "packedState")
       .isEqualTo(base);
   }
 
@@ -598,7 +800,8 @@ class CacheEntryTest {
         "hardExpireAtMs",
         "softTtlMs",
         "softExpireAtMs",
-        "keyState"
+        "keyState",
+        "packedState"
       )
       .isEqualTo(base);
   }
@@ -619,7 +822,7 @@ class CacheEntryTest {
     assertThat(copy.getSoftExpireAtMs()).isEqualTo(99_000L);
     assertThat(copy)
       .usingRecursiveComparison()
-      .ignoringFields("value", "dataVersion", "isVersionDegraded", "hardExpireAtMs", "softExpireAtMs")
+      .ignoringFields("value", "dataVersion", "hardExpireAtMs", "softExpireAtMs")
       .isEqualTo(base);
   }
 
