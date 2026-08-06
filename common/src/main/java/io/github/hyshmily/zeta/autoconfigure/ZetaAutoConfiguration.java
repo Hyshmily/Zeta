@@ -43,6 +43,7 @@ import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
+import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.executor.StandardThreadExecutor;
@@ -277,13 +278,13 @@ public class ZetaAutoConfiguration {
   public BroadcastBuffer broadcastBuffer(
     @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
     Optional<CacheSyncPublisher> syncPublisher,
-    ZetaProperties properties
+    CacheSyncProperties syncProperties
   ) {
     return new BroadcastBuffer(
       hotKeyScheduler,
       syncPublisher,
-      properties.getSync().getFlushDelayMs(),
-      properties.getSync().getMaxDeferMs()
+      syncProperties.getFlushDelayMs(),
+      syncProperties.getMaxDeferMs()
     );
   }
 
@@ -382,7 +383,7 @@ public class ZetaAutoConfiguration {
    * <p>Eviction strategy: {@code max-weight} (> 0) enables memory-weighted
    * eviction with {@link DefaultWeigher}; otherwise {@code max-size} limits
    * entry count. Time-based TTL for entries without an explicit hard-expire
-   * timestamp defaults to {@code zeta.local.local-cache-ttl-minutes}.
+   * timestamp defaults to {@code zeta.local.default-hard-ttl-ms}.
    *
    * <p>Stats recording is always enabled ({@code recordStats()}) so that
    * {@code Zeta#stats()} and the {@code cache.*} Micrometer metrics report
@@ -430,7 +431,7 @@ public class ZetaAutoConfiguration {
             long remainingMs = entry.getHardExpireAtMs() - currentTimeMillis();
             return TimeUnit.MILLISECONDS.toNanos(Math.max(1, remainingMs));
           }
-          return TimeUnit.MINUTES.toNanos(properties.getLocalCacheTtlMinutes());
+          return TimeUnit.MILLISECONDS.toNanos(properties.getDefaultHardTtlMs());
         }
 
         /**

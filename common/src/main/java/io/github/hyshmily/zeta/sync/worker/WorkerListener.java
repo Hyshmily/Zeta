@@ -108,6 +108,12 @@ public class WorkerListener {
    * <p>Cancels any pending tasks and releases the dispatcher's internal
    * resources. Called automatically by the Spring container during
    * application shutdown.
+   *
+   * <p>Queued Worker decisions (and jitter-delayed submissions still pending
+   * on the shared scheduler) are dropped without execution. COOL decisions
+   * are never replayed (ADR-0024) and a dropped HOT leaves the entry to
+   * expire at its hard TTL / be re-promoted by the next broadcast — the
+   * shutdown window is intentionally lossy and self-healing.
    */
   @PreDestroy
   public void destroy() {

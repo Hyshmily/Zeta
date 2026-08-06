@@ -39,7 +39,7 @@ management:
     "sketchDepth": 5,               // Count-Min Sketch 深度
     "minCountThreshold": 10,        // 晋升为热 key 的最小计数
     "expelledQueueSize": 2,         // 驱逐队列积压量
-    "expelledQueueRemaining": 49998,// 驱逐队列剩余容量
+    "expelledQueueRemaining": 9998, // 驱逐队列剩余容量
 
     // ── L1 Caffeine 缓存 ──
     "cacheSize": 87,                // L1 预估大小

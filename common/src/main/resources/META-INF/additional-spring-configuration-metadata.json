@@ -55,18 +55,6 @@
       "defaultValue": 10
     },
     {
-      "name": "zeta.local.local-cache-max-size",
-      "type": "java.lang.Integer",
-      "description": "Maximum size of the L1 Caffeine cache (number of entries).",
-      "defaultValue": 1000
-    },
-    {
-      "name": "zeta.local.local-cache-ttl-minutes",
-      "type": "java.lang.Integer",
-      "description": "Time-to-live in minutes for L1 cache entries (hard expiry).",
-      "defaultValue": 5
-    },
-    {
       "name": "zeta.local.cache.max-size",
       "type": "java.lang.Integer",
       "description": "Maximum number of L1 cache entries (ignored when max-weight > 0).",
@@ -142,7 +130,7 @@
       "name": "zeta.local.expelled-queue-capacity",
       "type": "java.lang.Integer",
       "description": "Capacity of the expelled-key queue (for keys evicted from the top-K ranking).",
-      "defaultValue": 50000
+      "defaultValue": 10000
     },
     {
       "name": "zeta.local.decay-period",
@@ -389,13 +377,13 @@
       "defaultValue": "::"
     },
     {
-      "name": "zeta.local.sync.flush-delay-ms",
+      "name": "zeta.sync.flush-delay-ms",
       "type": "java.lang.Long",
       "description": "Delay in ms before pending sync records are flushed.",
       "defaultValue": 500
     },
     {
-      "name": "zeta.local.sync.max-defer-ms",
+      "name": "zeta.sync.max-defer-ms",
       "type": "java.lang.Long",
       "description": "Maximum deferral in ms before a flush is forced, even under continuous writes.",
       "defaultValue": 2000

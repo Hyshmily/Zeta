@@ -146,7 +146,8 @@ public class ZetaEndpoint {
 
     if (caffeineCache != null) {
       local.put("cacheSize", caffeineCache.estimatedSize());
-      local.put("cacheMaxSize", properties.getLocalCacheMaxSize());
+      local.put("cacheMaxSize", properties.getCache().getMaxSize());
+      local.put("cacheMaxWeight", properties.getCache().getMaxWeight());
     }
 
     if (singleFlight != null) {

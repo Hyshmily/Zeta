@@ -134,7 +134,7 @@ class ZetaAmqpAutoConfigurationTest {
    * Verifies that KeyReporterImpl is created with its required dependencies.
    */
   @Test
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   void hotKeyReporterIsCreatedWithRequiredDependencies() {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
@@ -466,7 +466,7 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   void hotKeyRedisLoaderIsCreated() {
     org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
       org.springframework.data.redis.core.StringRedisTemplate.class
@@ -717,7 +717,7 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   void hotKeyReporter_withHealthViewProvider_shouldCreateClusterHealthViewWithProperties() {
     ReportPublisher reportPublisher = mock(ReportPublisher.class);
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);

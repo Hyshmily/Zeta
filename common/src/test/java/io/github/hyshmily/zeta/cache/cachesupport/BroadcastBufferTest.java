@@ -23,6 +23,7 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import java.util.Optional;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -271,6 +272,95 @@ class BroadcastBufferTest {
     assertThatCode(buf::flush).doesNotThrowAnyException();
     verify(throwingPub).broadcastRefresh("bad-key", 1L, false);
     verify(throwingPub).broadcastRefresh("good-key", 2L, true);
+  }
+
+  // ── Send executor isolation (ADR-0037) ──
+
+  /**
+   * Verifies that with a send executor, flush hands the send loop off asynchronously: the
+   * publisher is invoked on the executor thread, never on the calling thread.
+   */
+  @Test
+  void flush_withSendExecutor_shouldSendOnExecutorThread() throws Exception {
+    ExecutorService sendExecutor = Executors.newSingleThreadExecutor();
+    try {
+      AtomicReference<String> senderThread = new AtomicReference<>();
+      doAnswer(inv -> {
+        senderThread.set(Thread.currentThread().getName());
+        return null;
+      })
+        .when(publisher)
+        .broadcastRefresh("key", 1L, false);
+
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, 2000L, sendExecutor);
+      buf.record("key", 1L, false);
+      buf.flush();
+
+      sendExecutor.shutdown();
+      boolean finished = sendExecutor.awaitTermination(2, TimeUnit.SECONDS);
+      org.junit.jupiter.api.Assertions.assertTrue(finished, "Async send should finish within timeout");
+      verify(publisher).broadcastRefresh("key", 1L, false);
+      assertThat(senderThread.get()).isNotNull().isNotEqualTo(Thread.currentThread().getName());
+    } finally {
+      sendExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that a saturated send executor drops the batch without throwing and without
+   * invoking the publisher — the drop is deliberate backpressure (ADR-0007/0013), the next
+   * flush re-sends.
+   */
+  @Test
+  void flush_whenSendExecutorRejects_shouldDropBatchWithoutThrowing() {
+    Executor rejecting = mock(Executor.class);
+    doThrow(new RejectedExecutionException("saturated")).when(rejecting).execute(any(Runnable.class));
+
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, 2000L, rejecting);
+    buf.record("key", 1L, false);
+
+    assertThatCode(buf::flush).doesNotThrowAnyException();
+    verifyNoInteractions(publisher);
+  }
+
+  /**
+   * Verifies that a dropped batch is not replayed: after a saturation drop, the next flush
+   * delivers only its own entries (ADR-0037 — loss is tolerated, recovery re-sends fresh state).
+   */
+  @Test
+  void flush_whenSendExecutorRejectsOnce_shouldDeliverNextFlush() throws Exception {
+    AtomicInteger attempts = new AtomicInteger(0);
+    ExecutorService sendExecutor = Executors.newSingleThreadExecutor();
+    try {
+      CountDownLatch sent = new CountDownLatch(1);
+      doAnswer(inv -> {
+        sent.countDown();
+        return null;
+      })
+        .when(publisher)
+        .broadcastRefresh("key2", 2L, false);
+
+      Executor flaky = task -> {
+        if (attempts.getAndIncrement() == 0) {
+          throw new RejectedExecutionException("saturated");
+        }
+        sendExecutor.execute(task);
+      };
+
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, 2000L, flaky);
+      buf.record("key1", 1L, false);
+      buf.flush(); // dropped
+
+      buf.record("key2", 2L, false);
+      buf.flush(); // delivered
+
+      boolean delivered = sent.await(2, TimeUnit.SECONDS);
+      org.junit.jupiter.api.Assertions.assertTrue(delivered, "Next flush should be delivered within timeout");
+      verify(publisher).broadcastRefresh("key2", 2L, false);
+      verifyNoMoreInteractions(publisher);
+    } finally {
+      sendExecutor.shutdownNow();
+    }
   }
 
   /**

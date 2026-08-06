@@ -69,7 +69,7 @@ public class WorkerHeartbeatVerifier {
   private ScheduledExecutorService scheduler;
   private final ConcurrentHashMap<String, Long> nextVerifyTime = new ConcurrentHashMap<>();
   private final boolean ownsScheduler;
-  private final Executor probeExecutor;
+  private ExecutorService probeExecutor;
   private ScheduledFuture<?> verifyTask;
 
   private static final String QUEUE_VERIFY_PING_PREFIX = "zeta.verify.ping.";
@@ -90,9 +90,13 @@ public class WorkerHeartbeatVerifier {
    * verification round duration to roughly {@code pingTimeoutMs × ceil(N / 4)}
    * instead of {@code pingTimeoutMs × N}.
    *
+   * <p>The pool is shut down by {@link #stop()} and recreated lazily by
+   * {@link #start()}, mirroring the scheduler lifecycle so a context restart
+   * never leaks the 4 probe threads.
+   *
    * @return a new fixed thread pool for parallel probing
    */
-  private static Executor createProbeExecutor() {
+  private static ExecutorService createProbeExecutor() {
     return Executors.newFixedThreadPool(4, new ZetaThreadFactory("zeta-hb-probe"));
   }
 
@@ -192,7 +196,8 @@ public class WorkerHeartbeatVerifier {
    *
    * <p><b>Restart safety:</b> If the scheduler was shut down by a previous
    * {@link #stop()} call and this verifier owns its scheduler, a new scheduler
-   * is created automatically. This guarantees the verifier is always
+   * is created automatically. The probe executor is likewise recreated when it
+   * was shut down by {@link #stop()}. This guarantees the verifier is always
    * restartable per its lifecycle contract.
    *
    * @see #verifySuspectedWorkers
@@ -205,6 +210,10 @@ public class WorkerHeartbeatVerifier {
     if (ownsScheduler && (scheduler == null || scheduler.isShutdown())) {
       scheduler = Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier"));
       log.info("Re-created heartbeat verifier scheduler for restart");
+    }
+    if (probeExecutor == null || probeExecutor.isShutdown()) {
+      probeExecutor = createProbeExecutor();
+      log.info("Re-created heartbeat verifier probe executor for restart");
     }
     try {
       verifyTask = scheduler.scheduleWithFixedDelay(
@@ -231,6 +240,10 @@ public class WorkerHeartbeatVerifier {
    * When an external scheduler is used (7-argument constructor), the scheduler is
    * left running for the caller to manage.
    *
+   * <p>The internally owned probe executor is always shut down (interrupting any
+   * in-flight probes; blocked AMQP calls return naturally) so a context restart
+   * does not leak its 4 threads. {@link #start()} recreates it on restart.
+   *
    * <p>After {@code stop()}, the verifier can be restarted by calling {@link #start()}
    * again. See {@link #start()} for restart-safety details.
    */
@@ -241,6 +254,14 @@ public class WorkerHeartbeatVerifier {
     }
     if (ownsScheduler && scheduler != null) {
       scheduler.shutdown();
+    }
+    if (probeExecutor != null) {
+      probeExecutor.shutdownNow();
+      try {
+        probeExecutor.awaitTermination(2, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
     }
   }
 

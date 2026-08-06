@@ -63,9 +63,9 @@ class ZetaWriteCommandTest {
   }
 
   @Test
-  void invalidateAfterPut_shouldDelegate() {
+  void invalidateAfterMutation_shouldDelegate() {
     Runnable mutation = () -> {};
-    command.putBeforeInvalidate(mutation);
+    command.invalidateAfterMutation(mutation);
     verify(zeta).invalidateAfterPut("test-key", mutation);
   }
 
@@ -88,8 +88,8 @@ class ZetaWriteCommandTest {
   }
 
   @Test
-  void invalidateAfterPut_shouldThrowWhenExecutedTwice() {
-    command.putBeforeInvalidate(() -> {});
-    assertThatThrownBy(() -> command.putBeforeInvalidate(() -> {})).isInstanceOf(IllegalStateException.class);
+  void invalidateAfterMutation_shouldThrowWhenExecutedTwice() {
+    command.invalidateAfterMutation(() -> {});
+    assertThatThrownBy(() -> command.invalidateAfterMutation(() -> {})).isInstanceOf(IllegalStateException.class);
   }
 }

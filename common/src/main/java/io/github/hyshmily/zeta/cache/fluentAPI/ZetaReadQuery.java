@@ -20,7 +20,6 @@ import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.model.CachePolicy;
 import io.github.hyshmily.zeta.model.StalePolicy;
-import io.github.hyshmily.zeta.rule.Rule;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -242,9 +241,8 @@ public class ZetaReadQuery<T> {
       throw new IllegalStateException("ZetaReadQuery can only be executed once");
     }
 
-    if (zeta.evaluateRule(cacheKey) == Rule.RuleAction.BLOCK) {
-      throw new ZetaBlockedException("ZetaReadQuery", cacheKey);
-    }
+    // BLOCK-rule enforcement is centralized in the cache layer (HotKeyCache.preGuard),
+    // which throws ZetaBlockedException on every read path — no duplicate check here.
 
     // The primary reader returns the raw value: a null result is handled
     // inside the cache layer, which stores a short-TTL NullValue sentinel

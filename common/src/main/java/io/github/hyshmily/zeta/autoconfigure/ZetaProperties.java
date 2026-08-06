@@ -64,14 +64,6 @@ public class ZetaProperties {
   @Min(1)
   private int minCount = 10;
 
-  /** Maximum number of entries in the L1 Caffeine cache. */
-  @Min(1)
-  private int localCacheMaxSize = 1000;
-
-  /** Default TTL in minutes for non-hot entries in the L1 cache. */
-  @Min(1)
-  private int localCacheTtlMinutes = 5;
-
   /** Maximum number of in-flight deduplication entries. */
   @Min(1)
   private int inflightMaxSize = 50_000;
@@ -102,7 +94,7 @@ public class ZetaProperties {
 
   /** Capacity of the expelled-key queue in HeavyKeeper. */
   @Min(1)
-  private int expelledQueueCapacity = 50_000;
+  private int expelledQueueCapacity = 10_000;
 
   /** Number of sliding time windows per sketch slot (ring buffer depth). Default 3. */
   @Min(1)
@@ -448,29 +440,11 @@ public class ZetaProperties {
   }
 
   @Data
-  public static class Sync {
-
-    /** Delay (ms) before pending records are flushed to the sync publisher. */
-    private long flushDelayMs = 500;
-
-    /**
-     * Maximum deferral (ms) before a pending flush is forced to fire, even
-     * when new records keep arriving within the {@link #flushDelayMs} window.
-     * Prevents indefinite debounce starvation under continuous writes.
-     */
-    private long maxDeferMs = 2_000;
-  }
-
-  @Data
   public static class CacheKey {
 
     /** Strip query parameters (?...) from cache keys for normalization. */
     private boolean stripQuery = false;
   }
-
-  /** Cache sync (broadcast) configuration. */
-  @Valid
-  private Sync sync = new Sync();
 
   /** Cache key normalization configuration. */
   @Valid

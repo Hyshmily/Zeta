@@ -87,6 +87,15 @@ public class CacheSyncListener {
     );
   }
 
+  /**
+   * Shuts down the ordered dispatcher.
+   *
+   * <p>Queued sync tasks (and jitter-delayed submissions still pending on the
+   * shared scheduler) are dropped without execution: the shutdown window is
+   * intentionally lossy. Lost INVALIDATE/REFRESH messages self-heal via the
+   * next periodic broadcast / application-level write (ADR-0004), so a drain
+   * is not worth blocking context shutdown for.
+   */
   @PreDestroy
   public void destroy() {
     if (dispatcher != null) {

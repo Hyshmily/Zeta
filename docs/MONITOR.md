@@ -39,7 +39,7 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
     "sketchDepth": 5,               // Count-Min Sketch depth
     "minCountThreshold": 10,        // Minimum count for hot promotion
     "expelledQueueSize": 2,         // Expelled queue backlog
-    "expelledQueueRemaining": 49998,// Expelled queue remaining capacity
+    "expelledQueueRemaining": 9998, // Expelled queue remaining capacity
 
     // ── L1 Caffeine cache ──
     "cacheSize": 87,                // Estimated current L1 size

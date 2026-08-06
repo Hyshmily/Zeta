@@ -183,7 +183,7 @@ class SlidingWindowDetectorTest {
 
     Field latField = SlidingWindowDetector.class.getDeclaredField("lastAccessTime");
     latField.setAccessible(true);
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     Map<String, Long> lastAccessTime = (Map<String, Long>) latField.get(detector);
     lastAccessTime.put("orphan", System.currentTimeMillis() - 100_000);
     detector.evictStale(3600_000);
@@ -218,7 +218,7 @@ class SlidingWindowDetectorTest {
     SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, Long.MAX_VALUE);
     Field windowsField = SlidingWindowDetector.class.getDeclaredField("windows");
     windowsField.setAccessible(true);
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     ConcurrentHashMap<String, AtomicLongArray> windows =
         (ConcurrentHashMap<String, AtomicLongArray>) windowsField.get(detector);
 

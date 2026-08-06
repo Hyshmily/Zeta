@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.worker.config;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import java.util.ArrayList;
@@ -177,7 +178,7 @@ public class WorkerProperties {
   @Data
   public static class Bayesian {
 
-    private double priorMean = 2.3026;
+    private double priorMean = BayesianConfidenceEstimator.PRIOR_MEAN;
     private double priorStd = 2.0;
     private double likelihoodStd = 0.8;
   }

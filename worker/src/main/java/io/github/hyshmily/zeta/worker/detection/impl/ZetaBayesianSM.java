@@ -23,6 +23,7 @@ import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.util.TimeSource;
+import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceLevel;
 import io.github.hyshmily.zeta.worker.confidence.ProbabilityResult;
@@ -1043,10 +1044,11 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     /**
      * Accumulated posterior mean (log scale).
      * Updated after each Bayesian confidence evaluation; initialised to the
-     * global {@code priorMean} when the key is first seen.
+     * global {@code priorMean} when the key is first seen (the fastlane path
+     * falls back to the {@link BayesianConfidenceEstimator#PRIOR_MEAN} default).
      */
     @Builder.Default
-    double posteriorMean = 2.3026;
+    double posteriorMean = BayesianConfidenceEstimator.PRIOR_MEAN;
 
     /**
      * Accumulated posterior precision from previous observations.

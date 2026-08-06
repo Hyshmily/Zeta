@@ -50,7 +50,7 @@ import org.junit.jupiter.api.Test;
  * <p>Covers every field in every section (local, worker, sync), HeavyKeeper-specific
  * algorithm parameters, null-safety for all components, and partial-deployment scenarios.
  */
-@SuppressWarnings("unchecked")
+@SuppressWarnings("all")
 class ZetaEndpointTest {
 
   private TopK hotKeyDetector;
@@ -67,7 +67,7 @@ class ZetaEndpointTest {
   private HealthView healthView;
 
   @BeforeEach
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   void setUp() {
     hotKeyDetector = mock(TopK.class);
     caffeineCache = mock(Cache.class);
@@ -146,7 +146,8 @@ class ZetaEndpointTest {
     assertThat(local).containsKey("topK");
     assertThat(local).containsKey("recentlyExpelled");
     assertThat(local).containsEntry("cacheSize", 42L);
-    assertThat(local).containsEntry("cacheMaxSize", properties.getLocalCacheMaxSize());
+    assertThat(local).containsEntry("cacheMaxSize", properties.getCache().getMaxSize());
+    assertThat(local).containsEntry("cacheMaxWeight", properties.getCache().getMaxWeight());
     assertThat(local).containsEntry("inflightSize", 3L);
     assertThat(local).containsEntry("inflightMaxSize", properties.getInflightMaxSize());
     assertThat(local).containsEntry("inflightTtlSec", properties.getInflightTtlSeconds());

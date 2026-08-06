@@ -11,9 +11,9 @@ import org.junit.jupiter.api.Test;
  */
 class BayesianConfidenceEstimatorTest {
 
-  private static final BayesianConfidenceEstimator DEFAULT = new BayesianConfidenceEstimator(2.3026, 2.0, 0.8);
+  private static final BayesianConfidenceEstimator DEFAULT = new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.8);
 
-  private static final BayesianConfidenceEstimator OPTIMISTIC = new BayesianConfidenceEstimator(2.3026, 2.0, 0.5);
+  private static final BayesianConfidenceEstimator OPTIMISTIC = new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5);
 
   @Nested
   class ConfidenceLevels_defaultParams {
@@ -98,7 +98,7 @@ class BayesianConfidenceEstimatorTest {
     @Test
     void equalPriorAndObservation_shouldYieldFiftyPercent_optimistic() {
       ProbabilityResult r = OPTIMISTIC.evaluate(10, Math.log(10), null);
-      assertThat(r.posteriorMean()).isCloseTo(2.3026, within(0.01));
+      assertThat(r.posteriorMean()).isCloseTo(BayesianConfidenceEstimator.PRIOR_MEAN, within(0.01));
       assertThat(r.probability()).isCloseTo(0.5, within(0.01));
     }
   }
@@ -162,14 +162,14 @@ class BayesianConfidenceEstimatorTest {
 
     @Test
     void firstEvaluation_accumulatedPrecisionShouldBeLikelihoodPrecision() {
-      ProbabilityResult r = DEFAULT.evaluateWithAccumulatedPrior(30, Math.log(10), null, 2.3026, 0.0);
+      ProbabilityResult r = DEFAULT.evaluateWithAccumulatedPrior(30, Math.log(10), null, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0);
       double expectedLp = 1.0 / (0.8 * 0.8);
       assertThat(r.accumulatedPrecision()).isCloseTo(expectedLp, within(1e-12));
     }
 
     @Test
     void repeatedEvaluation_accumulatedPrecisionShouldIncreaseUpToCap() {
-      double mean = 2.3026;
+      double mean = BayesianConfidenceEstimator.PRIOR_MEAN;
       double prec = 0.0;
       double maxPrec = BayesianConfidenceEstimator.MAX_EFFECTIVE_COUNT / (0.8 * 0.8);
       for (int i = 0; i < 10; i++) {
@@ -185,14 +185,14 @@ class BayesianConfidenceEstimatorTest {
     void accumulatedPrior_shouldIncreasePosteriorPrecision() {
       ProbabilityResult single = DEFAULT.evaluate(30, Math.log(10), null);
       ProbabilityResult accumulated = DEFAULT.evaluateWithAccumulatedPrior(
-        30, Math.log(10), null, 2.3026, 3.0 / (0.8 * 0.8)
+        30, Math.log(10), null, BayesianConfidenceEstimator.PRIOR_MEAN, 3.0 / (0.8 * 0.8)
       );
       assertThat(accumulated.posteriorStd()).isLessThan(single.posteriorStd());
     }
 
     @Test
     void consistentlyModerateKey_shouldReachMediumWithAccumulation() {
-      double mean = 2.3026;
+      double mean = BayesianConfidenceEstimator.PRIOR_MEAN;
       double prec = 0.0;
       ProbabilityResult last = null;
       for (int i = 0; i < 5; i++) {
@@ -205,7 +205,7 @@ class BayesianConfidenceEstimatorTest {
 
     @Test
     void cvAdjustment_shouldAffectAccumulatedPrecisionRate() {
-      double mean = 2.3026;
+      double mean = BayesianConfidenceEstimator.PRIOR_MEAN;
       double prec = 0.0;
       ProbabilityResult stable = null;
       ProbabilityResult bursty = null;
@@ -214,7 +214,7 @@ class BayesianConfidenceEstimatorTest {
         mean = stable.posteriorMean();
         prec = stable.accumulatedPrecision();
       }
-      mean = 2.3026;
+      mean = BayesianConfidenceEstimator.PRIOR_MEAN;
       prec = 0.0;
       for (int i = 0; i < 3; i++) {
         bursty = DEFAULT.evaluateWithAccumulatedPrior(30, Math.log(10), 1.0, mean, prec);

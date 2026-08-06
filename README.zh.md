@@ -31,11 +31,11 @@ zeta.tag("product:123");
 zeta.peek("product:123");
 ```
 
-- 双重缓冲计数器（`BufferedCounter`）批量聚合高频增量：`ConcurrentHashMap<String, LongAdder>` 活跃缓冲区达 80% 容量时 CAS 切换，后台线程每 500ms 刷入 `HeavyKeeper`
+- `WaveCounter` 按键热度路由到两条路径：热键合并进写线程本地 map（零共享争用，每 64 次自增批量合并到共享表），冷键直接写入无锁共享表。每 500ms 周期交付一次快照
 
 - 每个应用实例运行一个本地 TopK 草图，跟踪高频访问的键。当键进入本地 TopK 集合时，其 L1 Caffeine 缓存的 TTL 会自动延长——无需等待 Worker 响应。L1 未命中时由 SingleFlight 机制合并同 key 并发请求，避免缓存击穿。同时支持软过期——在硬 TTL 到达之前，软 TTL 过期的条目可返回陈值并触发后台异步刷新，保障响应速度。若后台刷新失败，条目会以衰减续租（`max(剩余/2, 120s)`，ADR-0036）继续存活——源故障从"每次读同步打源"变成后台重试，首次成功刷新后自动自愈。
 
-- `KeyReporter` 将本地计数经第二套 BufferedCounter（50ms 刷新，10 万键上限）聚合后，经 CPU-BBR 速率限制器（CPU 阈值 80%，滑动窗口 10s/100 桶）判定是否放行，通过 `DirectExchange` 批量上报至 RabbitMQ，路由键 `report.{appName}.{nodeId}`
+- `KeyReporter` 将本地计数经第二套 WaveCounter（50ms 刷新节奏）聚合后，经 CPU-BBR 速率限制器（CPU 阈值 80%，滑动窗口 10s/100 桶）判定是否放行，通过 `DirectExchange` 批量上报至 RabbitMQ，路由键 `report.{appName}.{nodeId}`
 
 - Worker 集群聚合所有应用实例的访问报告，运行**双路径评估管线**：
   - **快车道（FastLane）**：对匹配用户配置的 glob 规则的 key（如 `product:*`），滑动窗口求和直接与规则阈值比较。达标即提升为 `CONFIRMED_HOT`——无贝叶斯置信度门控、无确认窗口。默认参数设定下,全链路端到端延迟：**~60ms（P99）**。

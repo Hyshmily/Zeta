@@ -80,7 +80,7 @@ class ZetaMicrometerAutoConfigurationTest {
     cache.getIfPresent("a");
     cache.getIfPresent("missing");
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     ObjectProvider<Cache<String, Object>> provider = mock(ObjectProvider.class);
     doAnswer(inv -> {
       ((Consumer<Cache<String, Object>>) inv.getArgument(0)).accept(cache);
@@ -236,7 +236,7 @@ class ZetaMicrometerAutoConfigurationTest {
     assertThat(registry.find("zeta.sync.dedup.size").gauge()).isNull();
   }
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   private <T> ObjectProvider<T> providerThatReturns(T value) {
     ObjectProvider<T> provider = mock(ObjectProvider.class);
     doAnswer(invocation -> {

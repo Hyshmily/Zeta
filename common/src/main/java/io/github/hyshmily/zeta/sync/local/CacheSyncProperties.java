@@ -48,6 +48,17 @@ public class CacheSyncProperties {
    * backend and should be notified of each other's data mutations. */
   private boolean enabled = false;
 
+  /** Delay (ms) before pending sync records are flushed to the sync publisher.
+   * Combines multiple writes into one batch. */
+  private long flushDelayMs = 500;
+
+  /**
+   * Maximum deferral (ms) before a pending flush is forced to fire, even
+   * when new records keep arriving within the {@link #flushDelayMs} window.
+   * Prevents indefinite debounce starvation under continuous writes.
+   */
+  private long maxDeferMs = 2_000;
+
   /** FanoutExchange name for broadcasting INVALIDATE, REFRESH, and RULES_SYNC messages. */
   private String exchangeName = ZetaConstants.Exchange.SYNC;
 

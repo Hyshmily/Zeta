@@ -39,7 +39,6 @@ public final class TimeSource {
   private static volatile long currentMillis = System.currentTimeMillis();
   private static final AtomicBoolean threadRunning = new AtomicBoolean(false);
   private static final AtomicInteger threadTryCount = new AtomicInteger(0);
-  private static final int THREAD_TRY_MAX = 3;
 
   /** Monotonic baseline: wall clock at JVM start, used to render monotonic values near wall time. */
   private static final long BOOT_WALL_MS = System.currentTimeMillis();
@@ -53,14 +52,21 @@ public final class TimeSource {
 
   /**
    * Start the background clock-cache thread. Idempotent after the thread is
-   * running.  If the thread dies unexpectedly it will be restarted up to
-   * {@link #THREAD_TRY_MAX} times with a 1-second delay between attempts.
+   * running. If the thread dies unexpectedly it is restarted with a 1-second
+   * delay between attempts, indefinitely — a dying clock-cache thread is a
+   * rare fault and restarting costs at most one thread per second, while the
+   * reads fall back to {@link System#currentTimeMillis()} meanwhile.
    * Called automatically during {@code ZetaFacadeAutoConfiguration}
    * initialisation.
    */
   @SuppressWarnings("BusyWait")
   public static void start() {
-    if (threadTryCount.incrementAndGet() <= THREAD_TRY_MAX && threadRunning.compareAndSet(false, true)) {
+    if (threadRunning.compareAndSet(false, true)) {
+      if (threadTryCount.incrementAndGet() == 1) {
+        log.info("TimeSource clock-cache thread starting");
+      } else {
+        log.info("TimeSource clock-cache thread restarted (attempt #{})", threadTryCount.get());
+      }
       Thread t = new ZetaThreadFactory("TimeSource").newThread(() -> {
         while (threadRunning.get()) {
           currentMillis = System.currentTimeMillis();

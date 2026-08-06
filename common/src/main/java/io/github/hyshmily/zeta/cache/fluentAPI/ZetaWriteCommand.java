@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       .putThrough(newValue, dbWriter);
  *
  *   hotKey.write("user:42")
- *       .invalidateAfterPut(dbMutation);
+ *       .invalidateAfterMutation(dbMutation);
  *
  *   hotKey.write("user:42")
  *       .invalidate();
@@ -99,7 +99,7 @@ public class ZetaWriteCommand<T> {
    *
    * @param mutation the mutation to execute
    */
-  public void putBeforeInvalidate(Runnable mutation) {
+  public void invalidateAfterMutation(Runnable mutation) {
     if (!executed.compareAndSet(false, true)) {
       throw new IllegalStateException("ZetaWriteCommand can only be executed once");
     }

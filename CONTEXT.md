@@ -39,7 +39,7 @@
 
 ## Versions
 
-- **dataVersion** — Monotonically increasing counter (Redis INCR or node-local fallback). Orders data mutations across instances. May be **degraded** (local counter) when Redis is unavailable.
+- **dataVersion** — Monotonically increasing counter (Redis INCR, or degraded Snowflake fallback). Orders data mutations across instances. May be **degraded** (Snowflake-based negative space, ADR-0019) when Redis is unavailable.
 - **decisionVersion** — Monotonically increasing `AtomicLong` on the Worker. Orders HOT/COOL decisions. Never degraded. Independent of dataVersion. **Watermark semantics:** allocated before each broadcast attempt, so a failed send burns a version and the sequence contains holes — it is a high-water mark of *attempts*, not a count of delivered messages. Receivers compare with `>=` only and never assume intermediate versions exist.
 - **rulesVersion** — Monotonically increasing `AtomicLong` in `RuleMatcher`. Orders rule set changes across instances. Used to prevent stale rule broadcasts from overwriting newer rule sets. Independent of both dataVersion and decisionVersion.
 - **Degraded Version** — A dataVersion produced when Redis is unavailable. Previously `Long.MIN_VALUE + localCounter` (per-JVM partitioned); now `Long.MIN_VALUE + SnowflakeId` (globally time-sortable, cross-instance comparable). Marked with `isVersionDegraded=true`. Always loses against a normal (Redis) version in broadcast comparisons — the `Long.MIN_VALUE` offset ensures degraded versions sort below any positive Redis INCR value.
@@ -63,7 +63,7 @@
 
 - **L1** — Caffeine cache, App-local. First lookup target.
 - **L2** — Optional Redis cache (or any backend via the `Supplier<T>` reader). Async fallback on L1 miss.
-- **Report** — Per-key frequency count sent from App to Worker via AMQP. Aggregated locally in a 64-slot double-buffered counter (`BufferedCounter`, 100k max keys) before batching; flushed every `zeta.local.report-interval-ms` (default 50ms).
+- **Report** — Per-key frequency count sent from App to Worker via AMQP. Aggregated locally in a `WaveCounter` (hot keys aggregate writer-locally with zero contention, cold keys direct-write to the shared table; one snapshot per 500ms delivery cycle) before batching; flush cadence `zeta.local.report-interval-ms` (default 50ms).
 - **Broadcast** — AMQP exchange `zeta.send.exchange` for cross-instance sync (cache values, HOT/COOL decisions) and Worker-to-App decision delivery.
 - **putLocal** — Local-only L1 write without version bump, broadcast, hot-key detection, or reporting. Preserves existing entry metadata. Useful for fallback caching and cache pre-warming.
 - **Fluent Read API** — `ZetaReadQuery` returned by `hotKey.read(key)`. Builder
@@ -82,4 +82,4 @@
 
 - **Worker Health Gate Failed** — The cluster fails `HealthView.isClusterHealthy()`: fewer than the required threshold of observed Worker shards are alive (default: one third, rounded up, minimum 1 — ADR-0028). Local TopK assumes authority: COOL entries become promotable, `isWorkerManagedEntry` returns false. Worker broadcast on recovery overrides local promotions via decisionVersion.
 - **Worker Partial Dead** — Some shards alive, some not. Alive shards continue normally. Dead shard's keys are routed to other shards via consistent-hashing ring reconciliation.
-- **Redis Degraded** — `nextVersion()` falls back to node-local counter (`Long.MIN_VALUE + counter`). Broadcast carries `isVersionDegraded=true`. Peers apply 4-case comparison to prevent degraded versions overwriting normal ones.
+- **Redis Degraded** — `nextVersion()` falls back to the degraded Snowflake space (`Long.MIN_VALUE | snowflakeId`, globally comparable, ADR-0019). Broadcast carries `isVersionDegraded=true`. Peers apply 4-case comparison to prevent degraded versions overwriting normal ones.

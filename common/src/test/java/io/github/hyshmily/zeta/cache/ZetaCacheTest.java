@@ -119,7 +119,7 @@ class ZetaCacheTest {
    * handling. Typed as {@code Optional<Object>} so the {@code any()} matcher's
    * {@code T=Object} inference accepts it.
    */
-  @SuppressWarnings({ "unchecked", "rawtypes" })
+  @SuppressWarnings("all")
   private static Optional<Object> vv(String value) {
     return (Optional) Optional.of(new VersionedValue(value, 0L, false));
   }
@@ -2327,7 +2327,7 @@ class ZetaCacheTest {
 
     @Test
     @DisplayName("invalidateAfterPut should send when publisher present")
-    void putBeforeInvalidate_shouldBroadcastWhenPublisherPresent() {
+    void invalidateAfterPut_shouldBroadcastWhenPublisherPresent() {
       hotKeyCache.invalidateAfterPut("key1", () -> {}, true);
 
       verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));

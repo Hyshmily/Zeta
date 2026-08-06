@@ -118,6 +118,11 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
   /**
    * Record accesses for multiple keys. Delegates to the underlying HeavyKeeper.
    *
+   * <p><b>Contract:</b> the caller's map is <em>not</em> modified — a filtered
+   * copy is passed downstream, so callers may safely reuse their map after the
+   * call (the copy protects the caller from {@link HeavyKeeper} retaining or
+   * mutating the entry set).
+   *
    * @param keyCounts map of keys to their access counts
    * @return list of {@link AddResult} for keys that entered the TopK set
    */

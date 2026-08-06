@@ -173,8 +173,16 @@ public class SlidingWindowDetector {
 
     // Detect infrequent-call gap: if more than windowSize slices elapsed,
     // all previously written data is stale — reset the entire buffer.
-    long prevTs = lastAccessTime.getOrDefault(key, 0L);
-    lastAccessTime.put(key, now);
+    // Single CHM operation: compute reads the previous timestamp and writes
+    // the new one under one bin-lock, so the read-modify-write cannot interleave
+    // with a concurrent evaluator (two separate get/put calls could lose the
+    // gap signal or reorder the timestamps).
+    long[] prevHolder = new long[1];
+    lastAccessTime.compute(key, (k, prevTs) -> {
+      prevHolder[0] = prevTs == null ? 0L : prevTs;
+      return now;
+    });
+    long prevTs = prevHolder[0];
 
     if (prevTs > 0) {
       long elapsedSlices = (now - prevTs) / timeMillisPerSlice;

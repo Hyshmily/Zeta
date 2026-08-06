@@ -530,7 +530,7 @@ class BufferedCounterTest {
       storm.afterPropertiesSet();
       Field qField = BufferedCounter.class.getDeclaredField("flushQueue");
       qField.setAccessible(true);
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       ArrayBlockingQueue<Object> queue = (ArrayBlockingQueue<Object>) qField.get(storm);
 
       String[] keys = new String[40_000];
@@ -626,6 +626,61 @@ class BufferedCounterTest {
   }
 
   /**
+   * Sealed-buffer protocol regression: once a reclaimer (flusher) seals a
+   * buffer and swaps in a fresh one, a concurrent {@code count()} must
+   * redirect to the new active buffer instead of writing into the sealed
+   * (about-to-be-drained) buffer — otherwise the increment lands in the
+   * discarded snapshot and is silently lost.
+   */
+  @Test
+  void count_shouldRedirectWhenActiveBufferSealed() throws Exception {
+    List<Map<String, Long>> captured = new ArrayList<>();
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    try {
+      BufferedCounter counter = new BufferedCounter(captured::add, 500, 500, 0.75, sched);
+      Field ceilField = BufferedCounter.class.getDeclaredField("ceilCount");
+      ceilField.setAccessible(true);
+      int ceilCount = ceilField.getInt(counter);
+      Field activeField = BufferedCounter.class.getDeclaredField("activeCeils");
+      activeField.setAccessible(true);
+      AtomicReference<Object>[] actives = (AtomicReference<Object>[]) activeField.get(counter);
+      Class<?> cbClass = Class.forName(BufferedCounter.class.getName() + "$CounterBuffer");
+      Field sealedField = cbClass.getDeclaredField("sealed");
+      sealedField.setAccessible(true);
+      Method drainMethod = cbClass.getDeclaredMethod("drain");
+      drainMethod.setAccessible(true);
+      var ctor = cbClass.getDeclaredConstructor();
+      ctor.setAccessible(true);
+
+      // reclaimer: seal then swap every live slot — exactly what flushStandby does
+      List<Object> oldBuffers = new ArrayList<>();
+      for (int i = 0; i < ceilCount; i++) {
+        Object old = actives[i].get();
+        sealedField.setBoolean(old, true);
+        actives[i].set(ctor.newInstance());
+        oldBuffers.add(old);
+      }
+
+      counter.count("redirected", 1);
+
+      // no increment may land in a sealed (drained) buffer
+      for (Object old : oldBuffers) {
+        assertThat((Map<?, ?>) drainMethod.invoke(old)).isEmpty();
+      }
+      // and the increment must be present in exactly one new active buffer
+      long total = 0;
+      for (int i = 0; i < ceilCount; i++) {
+        Map<?, ?> snapshot = (Map<?, ?>) drainMethod.invoke(actives[i].get());
+        Object v = snapshot.get("redirected");
+        total += v instanceof Number n ? n.longValue() : 0L;
+      }
+      assertThat(total).isEqualTo(1L);
+    } finally {
+      sched.shutdownNow();
+    }
+  }
+
+  /**
    * Deterministic regression guard for the stale spill reader window: a
    * writer that read the spill reference before the winner reclaimed it must
    * not lose its {@code add()}.  The spill ticket re-check detects the
@@ -648,7 +703,7 @@ class BufferedCounterTest {
 
       Field spillField = BufferedCounter.class.getDeclaredField("spillCeils");
       spillField.setAccessible(true);
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       AtomicReference<Object>[] spillCeils = (AtomicReference<Object>[]) spillField.get(counter);
       spillCeils[0].set(spill);
 
@@ -670,7 +725,7 @@ class BufferedCounterTest {
       // winner reclaims: CAS-clear + final drain + queue + flusher drains it
       Field queueField = BufferedCounter.class.getDeclaredField("flushQueue");
       queueField.setAccessible(true);
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       ArrayBlockingQueue<Object> queue = (ArrayBlockingQueue<Object>) queueField.get(counter);
       spillCeils[0].compareAndSet(spill, null);
       spillDrain.invoke(spill); // winner's final drain

@@ -322,7 +322,7 @@ public class HotKeyCache {
    * @param cacheKey the key to inspect
    * @return an {@link Optional} containing the raw value if present
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public <T> Optional<T> peek(String cacheKey) {
     String nk = normalize(cacheKey);
     if (preGuard(nk) == null) return Optional.empty();
@@ -449,7 +449,7 @@ public class HotKeyCache {
     if (expireManager.invalidateIfIsLogicallyExpired(cacheKey, raw)) {
       return Optional.empty();
     }
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     T val = raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue(), cacheKey) : (T) raw;
     return process(cacheKey, raw, val, hardTtlMs, softTtlMs, skipReport);
   }
@@ -476,7 +476,7 @@ public class HotKeyCache {
     GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     Supplier<T> reader = (Supplier<T>) policy.reader();
     boolean skipReport = isSkipReport(g.isSkipReport, policy.reportEnabled());
     long hardTtlMs = policy.hardTtlMs().getAsLong();
@@ -599,7 +599,7 @@ public class HotKeyCache {
       return Optional.empty();
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     T cached = raw instanceof CacheEntry vv ? (T) unwrapValue(vv.getValue(), cacheKey) : (T) raw;
     if (stalePolicy == StalePolicy.SOFT_REFRESH) {
       refreshSoftExpire(cacheKey, raw, reader, softTtlMs);
@@ -775,13 +775,13 @@ public class HotKeyCache {
     if (vv.value() == null) {
       return mapEmpty(cacheKey, nullCaching, vv);
     }
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     T value = (T) vv.value();
     return Optional.of(processLoaded(cacheKey, value, vv, hardTtlMs, softTtlMs, skipReport));
   }
 
   /**
-   * Batch variant of {@link #`loadAndCache(String, Supplier, long, long, boolean, boolean)}.
+   * Batch variant of {@link #loadAndCache(String, Supplier, long, long, boolean, boolean)}.
    * Submits all keys to SingleFlight in a single pass, then processes each loaded
    * value through {@link #processLoaded} and calls {@link #mapEmpty} for absent results.
    *
@@ -847,7 +847,7 @@ public class HotKeyCache {
    *         NullValue sentinel is written to L1 unless a hard-expired entry
    *         was present)
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   private <T> Optional<T> mapEmpty(String cacheKey, boolean nullCaching) {
     return mapEmpty(cacheKey, nullCaching, new VersionedValue(null, VERSION_DEFAULT, false));
   }
@@ -873,7 +873,7 @@ public class HotKeyCache {
    *         NullValue sentinel is written to L1 unless a hard-expired entry
    *         was present)
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   private <T> Optional<T> mapEmpty(String cacheKey, boolean nullCaching, VersionedValue vv) {
     if (singleFlight.isBreakerOpen()) {
       Object stale = caffeineCache.getIfPresent(cacheKey);
@@ -891,7 +891,7 @@ public class HotKeyCache {
       }
     }
     if (nullCaching) {
-      builtNullValueEntry(cacheKey, vv);
+      buildNullValueEntry(cacheKey, vv);
     }
     return Optional.empty();
   }
@@ -905,7 +905,7 @@ public class HotKeyCache {
    *                 version when present (ADR-0033), otherwise it stays at
    *                 {@link io.github.hyshmily.zeta.constants.ZetaConstants.Version#VERSION_DEFAULT}
    */
-  private void builtNullValueEntry(String cacheKey, VersionedValue vv) {
+  private void buildNullValueEntry(String cacheKey, VersionedValue vv) {
     long nullExpireAtMs = expireManager.ttlPolicy().computeNullExpireAt(nullTtlMs());
     long dataVersion = vv.stamped() ? vv.dataVersion() : VERSION_DEFAULT;
     caffeineCache.put(
@@ -1173,7 +1173,7 @@ public class HotKeyCache {
       });
     } catch (RejectedExecutionException ree) {
       log.warn(
-        "invalidate executor rejected for key={}, peer invalidation deferred to next cycle: {}",
+        "invalidate executor rejected for key={}, peer invalidation NOT resent (peers self-heal on TTL expiry): {}",
         cacheKey,
         ree.getMessage()
       );
@@ -1703,7 +1703,7 @@ public class HotKeyCache {
    */
   @SuppressWarnings("all")
   private <T> Optional<T> computeInLock(String cacheKey, CachePolicy policy, boolean skipReport) {
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     Supplier<T> reader = (Supplier<T>) policy.reader();
     // Memoized lazy TTL suppliers: the (possibly SpEL-backed) expressions are
     // evaluated at most once per call, and only when a branch below actually
@@ -1803,7 +1803,7 @@ public class HotKeyCache {
 
       dispatcher.report(cacheKey, skipReport);
 
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       T value = (T) valueRef[0];
       if (value == null) {
         // Null-sentinel hit: the access is still counted for hot-key detection,
@@ -1829,7 +1829,7 @@ public class HotKeyCache {
           if (vv.value() == null) {
             return mapEmpty(cacheKey, policy.nullCaching(), vv);
           }
-          @SuppressWarnings("unchecked")
+          @SuppressWarnings("all")
           T t = (T) vv.value();
           return Optional.of(processLoaded(cacheKey, t, vv, rawHardTtl, rawSoftTtl, skipReport));
         })
@@ -1849,7 +1849,7 @@ public class HotKeyCache {
       if (singleFlight.isBreakerOpen()) {
         Object stale = caffeineCache.getIfPresent(cacheKey);
         if (stale instanceof CacheEntry ce && !expireManager.ttlPolicy().isLogicallyExpired(ce)) {
-          @SuppressWarnings("unchecked")
+          @SuppressWarnings("all")
           T val = (T) unwrapValue(ce.getValue(), cacheKey);
 
           log.debug("CB open, returning stale entry in computeInLock for key={}", cacheKey);
@@ -1961,14 +1961,14 @@ public class HotKeyCache {
    * @return the previous value, or empty if none existed
    * @throws ZetaBlockedException when the key matches a blocklist rule
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public <T> Optional<T> getAndSet(String cacheKey, Object newValue, long hardTtlMs, long softTtlMs) {
     String nk = normalize(cacheKey);
     GuardReport g = preGuard(nk);
     if (g == null) return Optional.empty();
 
     return execute(nk, false, () -> {
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       T[] oldValue = (T[]) new Object[1];
       long resolvedHardTtl = expireManager.ttlPolicy().resolveEffectiveHardTtl(hardTtlMs);
       long resolvedSoftTtl = expireManager.ttlPolicy().resolveEffectiveSoftTtl(softTtlMs);

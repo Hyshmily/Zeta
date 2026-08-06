@@ -234,7 +234,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader) {
     return (V) computeIfAbsent(cacheKey, CachePolicy.of(loader, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH)).orElse(
       null
@@ -253,7 +253,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs) {
     return (V) computeIfAbsent(
       cacheKey,
@@ -273,7 +273,7 @@ public class Zeta implements DisposableBean {
    * @throws UnsupportedOperationException when no cache is available (Worker-only mode)
    * @throws ZetaBlockedException when the key matches a blacklist rule
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public <V> V computeIfAbsent(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
     return (V) computeIfAbsent(
       cacheKey,
@@ -306,7 +306,7 @@ public class Zeta implements DisposableBean {
    * configuration (no TTL override, null caching enabled,
    * {@link StalePolicy#SOFT_REFRESH}, reporting enabled).
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader) {
     return (V) computeIfAbsentWithSoftExpire(
       cacheKey,
@@ -323,7 +323,7 @@ public class Zeta implements DisposableBean {
    * @param <V>       the value type
    * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long softTtlMs) {
     return (V) computeIfAbsentWithSoftExpire(
       cacheKey,
@@ -341,7 +341,7 @@ public class Zeta implements DisposableBean {
    * @param <V>       the value type
    * @return the cached (possibly stale) or loaded value, or {@code null} if the loader returned {@code null}
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   public <V> V computeIfAbsentWithSoftExpire(String cacheKey, Supplier<V> loader, long hardTtlMs, long softTtlMs) {
     return (V) computeIfAbsentWithSoftExpire(
       cacheKey,

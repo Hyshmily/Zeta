@@ -102,7 +102,8 @@ public class ZetaRedisAutoConfiguration {
    * Create the Redis-enhanced {@link HotKeyCache} with version-based stale detection.
    *
    * <p>The {@link StringRedisTemplate} is optional — if absent, version tracking falls
-   * back to a node-local counter ({@code Long.MIN_VALUE + nodeId + counter}), ensuring
+   * back to the degraded local version space ({@code Long.MIN_VALUE | snowflakeId},
+   * globally time-sortable, see ADR-0019), ensuring
    * graceful degradation when Redis is temporarily unavailable. The full HotKeyCache
    * pipeline includes: TopK detection, L1 Caffeine, SingleFlight dedup, soft/hard
    * expiry, cross-instance sync, reporting, rule matching, and consistent-hash routing.

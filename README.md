@@ -31,11 +31,11 @@ zeta.tag("product:123");
 zeta.peek("product:123");
 ```
 
-- The double-buffered counter (`BufferedCounter`) batches high-frequency increments: the active `ConcurrentHashMap<String, LongAdder>` is CAS-swapped when it reaches 80% capacity, and a background thread flushes into `HeavyKeeper` every 500ms.
+- The `WaveCounter` routes keys by heat into two paths: hot keys merge into a per-writer local map (zero shared contention, bulk-merged to the shared table every 64 increments) and cold keys write directly to a lock-free shared table. One snapshot is delivered per 500ms cycle.
 
 - Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency. If that background refresh fails, the stale entry is kept alive with a decaying lease (`max(remaining/2, 120s)`, ADR-0036) — a down source becomes background retry instead of a per-read stampede, and the entry self-heals on the first successful refresh.
 
-- `KeyReporter` aggregates local counts through a second BufferedCounter (50ms flush, 100k key cap), then passes them through a CPU-BBR rate limiter (CPU threshold 80%, sliding window 10s/100 buckets) before batch-reporting to RabbitMQ via `DirectExchange` with routing key `report.{appName}.{nodeId}`.
+- `KeyReporter` aggregates local counts through a second `WaveCounter` (50ms flush cadence), then passes them through a CPU-BBR rate limiter (CPU threshold 80%, sliding window 10s/100 buckets) before batch-reporting to RabbitMQ via `DirectExchange` with routing key `report.{appName}.{nodeId}`.
 
 - The Worker cluster aggregates access reports from all application instances and runs a **two-path evaluation pipeline**:
   - **FastLane**: For keys matching user-configured glob rules (e.g. `product:*`), the sliding-window sum is compared directly against the rule's threshold. When the threshold is met, the key is promoted to `CONFIRMED_HOT` immediately — no Bayesian confidence gating, no confirm windows. Under default configuration, end-to-end latency: **~60ms (P99)**.

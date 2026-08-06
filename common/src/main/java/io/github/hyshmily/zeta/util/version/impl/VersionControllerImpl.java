@@ -40,10 +40,13 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
  *       ({@code INCR + EXPIRE}) to produce positive {@code long} values. Guarantees
  *       global monotonic ordering across all application instances.</li>
  *   <li><b>Degraded (local fallback):</b> When Redis is unavailable, versions are
- *       assigned in the <em>negative</em> long space ({@code Long.MIN_VALUE + localCounter}).
- *       This ensures all degraded versions sort below any positive Redis version in
- *       numeric comparison, enabling the 4-case guard in {@link io.github.hyshmily.zeta.util.version.VersionGuard#shouldSkipForSync}
- *       to work correctly without flag-aware comparison logic.</li>
+ *       assigned in the <em>negative</em> long space as
+ *       {@code Long.MIN_VALUE | snowflakeId.nextId()} (see ADR-0019/ADR-0022).
+ *       The Snowflake component makes degraded versions globally comparable
+ *       across instances (time-sortable, collision-free in practice), and the
+ *       negative space keeps them strictly below any positive Redis version so
+ *       the 4-case guard in {@link io.github.hyshmily.zeta.util.version.VersionGuard#shouldSkipForSync}
+ *       works without flag-aware comparison logic.</li>
  * </ul>
  *
  * <p><b>Thread safety:</b> Redis INCR is atomic by nature. The local fallback uses
@@ -75,8 +78,8 @@ public class VersionControllerImpl implements VersionController {
    * successful Redis INCR, the new version is compared against this floor.
    * A new version lower than the floor indicates the Redis version key expired
    * and was re-created (wraparound). This cache is bounded at 10k entries with
-   * weak reference keys — entries are automatically GC'd when version keys
-   * are genuinely abandoned.
+   * LRU eviction on strong keys — the bound keeps memory fixed regardless of
+   * the number of distinct cache keys.
    */
   private final Cache<String, Long> versionFloorCache = Caffeine.newBuilder().maximumSize(10_000).build();
 

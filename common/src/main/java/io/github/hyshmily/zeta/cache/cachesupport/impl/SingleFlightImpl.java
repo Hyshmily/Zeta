@@ -111,7 +111,7 @@ public class SingleFlightImpl implements SingleFlight {
    * @param <T>      the value type
    * @return the loaded value, or empty if the load failed or timed out
    */
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   @Override
   public <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
     if (intercept()) {

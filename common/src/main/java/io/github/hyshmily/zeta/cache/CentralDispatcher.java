@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.cache;
 
 import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalidCacheKey;
+import static io.github.hyshmily.zeta.constants.ZetaConstants.NO_SYNC_PUBLISHER;
 import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
 
 import io.github.hyshmily.zeta.Internal;
@@ -58,8 +59,6 @@ public class CentralDispatcher {
   private final BroadcastBuffer broadcastBuffer;
 
   private final HotKeyDetector hotKeyDetector;
-
-  private static final String NO_SYNC_PUBLISHER = "No sync publisher found, please enable zeta.sync";
 
   /**
    * Increment the local hot-key detector counter and optionally reportToWorker the

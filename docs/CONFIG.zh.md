@@ -34,7 +34,7 @@
 | `putIfAbsent(key, value, hardTtlMs)`                                             | 同上，带显式硬 TTL 覆盖（0 = 使用默认）                                                                                                                                                        |
 | `putIfAbsent(key, value, hardTtlMs, softTtlMs)`                                  | 同上，带显式硬和软 TTL 覆盖                                                                                                                                                                    |
 | `read(key)`                                                                      | 流式读查询构造器：`hotKey.read(key).withPrimary(...).thenExecute(...).withHardTtl(...).execute()` 返回 `Optional<T>`；`executeOrNull()` 直接返回 `T`。支持 fallback 链、广播开关、空值缓存开关 |
-| `write(key)`                                                                     | 流式写命令构造器：`hotKey.write(key).withHardTtl(...).putThrough(value, writer)` / `.putBeforeInvalidate(mutation)` / `.invalidate()`                                                           |
+| `write(key)`                                                                     | 流式写命令构造器：`hotKey.write(key).withHardTtl(...).putThrough(value, writer)` / `.invalidateAfterMutation(mutation)` / `.invalidate()`                                                           |
 | `putLocal(key, value)`                                                           | 仅本地写：将值存入 L1，不 bump 版本号、不广播、不触发热 key 检测、不上报；保留现有 entry 元数据                                                                                                |
 | `putLocal(key, value, hardTtlMs)`                                                | 同上，带显式硬 TTL 覆盖（毫秒）                                                                                                                                                                |
 | `putLocal(key, value, hardTtlMs, softTtlMs)`                                     | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                                    |
@@ -111,14 +111,13 @@
 | `zeta.local.cache.max-weight`         | `0`                            | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重（String/byte[]/Collection/Map 精确；其他类型经 jol GraphLayout 深度测量，POJO 嵌套字段内容计入）                           |
 | `zeta.local.cache.max-value-size`     | `0`                            | 单值字节大小限制；0 = 不限。超过此大小的值不会被缓存                                                                                                                                        |
 | `zeta.local.cache-key.strip-query`    | `false`                        | 在缓存操作前从缓存键中剥离查询参数（`?key=val`），避免相同业务数据因 URL 参数不同而分裂到多个 Caffeine 条目中，从而稀释 HeavyKeeper 热点检测。默认关闭——未启用时零开销                      |
-| `zeta.local.local-cache-ttl-minutes`  | `5`                            | Caffeine L1 写入 TTL（分钟）                                                                                                                                                                |
 | `zeta.local.inflight-max-size`        | `50000`                        | Inflight 去重最大条目数                                                                                                                                                                     |
 | `zeta.local.inflight-ttl-seconds`     | `5`                            | Inflight 去重 TTL（必须超过最慢 L2 响应）                                                                                                                                                   |
 | `zeta.local.inflight-timeout-seconds` | `3`                            | Inflight 超时（必须 < inflight-ttl-seconds）。超时返回 `Optional.empty()`，调用方应回退到 DB。适用于所有读路径，包括 `computeIfAbsent`/`computeIfAbsentWithSoftExpire`（ADR-0030）                                                                                    |
 | `zeta.local.executor-core-pool-size`  | `8`                            | 线程池核心大小                                                                                                                                                                              |
 | `zeta.local.executor-max-pool-size`   | `32`                           | 线程池最大大小                                                                                                                                                                              |
 | `zeta.local.executor-queue-capacity`  | `2000`                         | 线程池队列容量                                                                                                                                                                              |
-| `zeta.local.expelled-queue-capacity`  | `50000`                        | 被驱逐热 key 暂存队列容量（防止 TopK 溢出）                                                                                                                                                 |
+| `zeta.local.expelled-queue-capacity`  | `10000`                        | 被驱逐热 key 暂存队列容量（防止 TopK 溢出）                                                                                                                                                                                            |
 | `zeta.local.default-hard-ttl-ms`      | `300000`（5分钟）              | 普通 key 默认硬 TTL（Caffeine 驱逐）                                                                                                                                                        |
 | `zeta.local.hard-ttl-ms`              | `0`                            | 普通 key 每次调用的硬 TTL 覆盖；0 = 使用 `default-hard-ttl-ms`                                                                                                                              |
 | `zeta.local.default-hot-hard-ttl-ms`  | `3600000`（1小时）             | 热点 key 默认硬 TTL                                                                                                                                                                         |
@@ -172,6 +171,8 @@
 | `zeta.local.circuit-breaker.include-exceptions`            | `[]`    | 只有这些异常才触发熔断（为空表示全部触发）       |
 
 熔断器作用于 `SingleFlight.load()`——打开时 `load()` 立即返回 `Optional.empty()`，`HotKeyCache.get()` 会尝试返回 L1 中**硬 TTL 未过期**的陈旧条目（软过期、硬有效；硬过期的条目绝不作为 stale 返回——硬 TTL 契约不被绕过，见 CONTEXT.md "Expire"）。仅当缓存加载器（数据库查询、远程 API）容易出现级联故障时再启用。
+
+> **默认值有意为 `false`。** 默认启用会改变所有用户的读路径（打开时陈旧回退），因此默认保持关闭，翻转默认值是明确的选择。改为 `true` 保留给未来主版本。
 
 **状态机：** CLOSED → OPEN → HALF_OPEN → CLOSED。CLOSED 状态下滑动窗口记录失败率，超过 `fail-threshold` 且请求量满足 `request-volume-threshold` 时打开熔断。OPEN 状态等待 `single-test-interval-ms` 后允许一个探针进入 HALF_OPEN。HALF_OPEN 需要 `consecutive-success-threshold` 次连续成功才能关闭——任何失败立即回到 OPEN。此防抖动设计借鉴自 `neural-circuitbreaker` 项目。
 

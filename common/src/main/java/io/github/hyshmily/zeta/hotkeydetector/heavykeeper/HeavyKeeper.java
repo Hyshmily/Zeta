@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.hotkeydetector.heavykeeper;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
 import java.nio.charset.StandardCharsets;
@@ -153,6 +155,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   /** Log every Nth "Failed to offer expelled key" warning to avoid log flooding. */
   private static final int EXPELLED_LOG_INTERVAL = 1000;
 
+  /**
+   * Size bound of {@link #nonMemberLocCache}. ~16k entries × (String key +
+   * record) is roughly a few hundred KB per HeavyKeeper instance — the
+   * working set of recently flushed non-member keys, not the full key space.
+   */
+  private static final int NON_MEMBER_LOC_CACHE_SIZE = 16_384;
+
   private final AtomicInteger expelledLogCounter = new AtomicInteger();
 
   @Getter
@@ -212,9 +221,28 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * Per-key fingerprint cache, sized to match the TopK membership set exactly.
    * Entries are added on TopK admission and removed on eviction or decay drop,
    * so the cache size never exceeds {@link #k} (default 100). Non-member keys
-   * compute their fingerprint on the fly in {@link #locate} and are never cached.
+   * compute their fingerprint on the fly in {@link #locate} and are never cached
+   * here.
    */
   private final ConcurrentHashMap<String, SlotLoc> locCache;
+
+  /**
+   * Size-bounded cache of fingerprints for recently seen <em>non-member</em>
+   * keys. {@link #locate} recomputed the Murmur3 fingerprint on every flush
+   * for every non-member key (the TopK membership is only ≤ k, so the vast
+   * majority of the key space is never cached); a high-cardinality workload
+   * paid the hash + UTF-8 encode cost repeatedly per flush cycle. This cache
+   * memoises those fingerprints with LRU eviction and no TTL — the size bound
+   * is the only lifecycle, so no background expiry thread is needed.
+   *
+   * <p>Cache invalidation semantics are deliberately disjoint from
+   * {@link #locCache}: a {@link SlotLoc} is a pure function of the key
+   * (deterministic fingerprint), so a stale non-member entry is always
+   * correct — member admission/eviction only ever touches {@link #locCache}.
+   */
+  private final Cache<String, SlotLoc> nonMemberLocCache = Caffeine.newBuilder()
+    .maximumSize(NON_MEMBER_LOC_CACHE_SIZE)
+    .build();
 
   /**
    * Authoritative TopK membership map. Key → {@link Node} with an
@@ -243,7 +271,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * @param minCount minimum count threshold before a key can enter the TopK set
    */
   public HeavyKeeper(int k, int width, int depth, double decay, int minCount) {
-    this(k, width, depth, decay, minCount, 50_000, 3);
+    this(k, width, depth, decay, minCount, 10_000, 3);
   }
 
   /**
@@ -388,7 +416,16 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   /** Returns cached {@link SlotLoc} for TopK members; computes on the fly for non-members. */
   private SlotLoc locate(String key) {
     SlotLoc loc = locCache.get(key);
-    return loc != null ? loc : new SlotLoc(fingerprint(key));
+    if (loc != null) {
+      return loc;
+    }
+    loc = nonMemberLocCache.getIfPresent(key);
+    if (loc != null) {
+      return loc;
+    }
+    loc = new SlotLoc(fingerprint(key));
+    nonMemberLocCache.put(key, loc);
+    return loc;
   }
 
   /**
@@ -702,7 +739,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * either hand the slot over to the incoming fingerprint (full reset) or
    * proportionally decay every window. Returns the running {@code maxCount}.
    */
-  @SuppressWarnings({ "null", "squid:S2245" })
+  @SuppressWarnings({ "null", "squid:S2245", "java:S1117" })
   private long decayCollisionSlot(
     int index,
     int active,

@@ -71,13 +71,33 @@ public class DefaultEvaluator implements Evaluator {
 
   /**
    * Per-key EMA (Exponential Moving Average) for momentum-based logThreshold
-   * adjustment. Decays each evaluation cycle by {@link #CMS_ALPHA}, providing
-   * a gradual-decay "inertia" signal complementary to the hard-window sum.
+   * adjustment. Each cell is {@code double[2]}: {@code [0]} the EMA value,
+   * {@code [1]} the monotonic timestamp of the last update. Decay is applied
+   * lazily on read as {@code prev × α^(elapsed / EVICT_CYCLE_MS)}, so inactive
+   * keys need no periodic full-map pass — the wall-clock decay is equivalent
+   * to one {@code ×α} tick per 30s eviction cycle.
    */
-  private final ConcurrentHashMap<String, Double> cmsCounts = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, double[]> cmsCounts = new ConcurrentHashMap<>();
 
   /** EMA decay factor: 0.98 ≈ 35-cycle half-life. */
   private static final double CMS_ALPHA = 0.98;
+
+  /**
+   * Reference decay cycle in milliseconds — matches the default of
+   * {@code zeta.worker.state-machine.evict-interval-ms} (30000). The lazy
+   * formula anchors decay to wall time rather than to tick count, so a
+   * different eviction interval stays approximately equivalent to the old
+   * per-tick decay.
+   */
+  private static final double EVICT_CYCLE_MS = 30_000.0;
+
+  /**
+   * Size gate for the periodic sweep of {@link #cmsCounts}: the sweep runs
+   * only when the map exceeds this bound, decaying stale cells by elapsed
+   * time and removing those below 1.0. Bounds the map's memory even when
+   * dead keys (values ≥ 1.0) would otherwise linger between sweeps.
+   */
+  private static final int MAX_TRACKED_CMS_KEYS = 100_000;
 
   /** Global QPS estimator for traffic-normalised trend detection. Nullable. */
   private final GlobalQpsEstimator globalQpsEstimator;
@@ -185,10 +205,10 @@ public class DefaultEvaluator implements Evaluator {
     Double cv = hist.addAndGetCv(windowSum, globalRatio);
     double trendStrength = hist.getTrendStrength();
 
-    // cmsCount = cmsCount * α + count
+    // cmsCount = cmsCount * α^(elapsed/cycle) + count
     // High cmsCount + low windowSum = key was hot but cooling (momentum < 1)
     // Low cmsCount + high windowSum = sudden spike with no history
-    double cms = cmsCounts.compute(key, (k, prev) -> (prev == null ? 0.0 : prev) * CMS_ALPHA + count);
+    double cms = cmsUpdate(key, count);
 
     // Momentum = cmsCount / windowSum — how much "history" the key carries
     // relative to its current burst size.
@@ -212,8 +232,45 @@ public class DefaultEvaluator implements Evaluator {
   }
 
   /**
+   * Lazy time-based EMA update for a key: applies the decay that accumulated
+   * since the key's last evaluation, then adds {@code count}. Atomic per key
+   * (via {@link ConcurrentHashMap#compute}) so concurrent evaluations of the
+   * same key cannot lose an update.
+   *
+   * @param key   the cache key
+   * @param count the access count in this report batch
+   * @return the updated EMA value
+   */
+  private double cmsUpdate(String key, long count) {
+    long now = TimeSource.monotonicMillis();
+    double[] holder = new double[1];
+    cmsCounts.compute(key, (k, cell) -> {
+      double prev = 0.0;
+      double lastUpdate = now;
+      if (cell != null) {
+        prev = cell[0];
+        lastUpdate = cell[1];
+      } else {
+        cell = new double[2];
+      }
+      double decayed = prev * Math.pow(CMS_ALPHA, Math.max(0, (now - lastUpdate) / EVICT_CYCLE_MS));
+      cell[0] = decayed + count;
+      cell[1] = now;
+      holder[0] = cell[0];
+      return cell;
+    });
+    return holder[0];
+  }
+
+  /**
    * Evict stale CV history entries for keys that have not been evaluated
    * within the given time window.
+   *
+   * <p>The EMA map needs no periodic full decay pass — decay is applied
+   * lazily on read (see {@link #cmsUpdate}). A size-gated sweep runs only
+   * when the map exceeds {@link #MAX_TRACKED_CMS_KEYS}, decaying stale cells
+   * by elapsed time and dropping those below 1.0 so dead keys cannot
+   * accumulate past the bound.
    *
    * @param staleAfterMs maximum idle time in milliseconds before an entry
    *                     is considered stale and removed
@@ -222,11 +279,14 @@ public class DefaultEvaluator implements Evaluator {
   public void evictStale(long staleAfterMs) {
     long now = TimeSource.monotonicMillis();
     windowSumHistories.values().removeIf(h -> now - h.lastAccessTime > staleAfterMs);
-    // EMA only decays on evaluate(); apply periodic decay to all entries so inactive
-    // keys eventually fall below 1.0 and are removed. For active keys this adds one
-    // extra 0.98x tick per 30s cycle -- negligible against 600+ evaluation ticks.
-    cmsCounts.replaceAll((k, v) -> v * CMS_ALPHA);
-    cmsCounts.values().removeIf(v -> v < 1.0);
+    if (cmsCounts.size() > MAX_TRACKED_CMS_KEYS) {
+      cmsCounts.entrySet().removeIf(e -> {
+        double[] cell = e.getValue();
+        cell[0] *= Math.pow(CMS_ALPHA, Math.max(0, (now - cell[1]) / EVICT_CYCLE_MS));
+        cell[1] = now;
+        return cell[0] < 1.0;
+      });
+    }
   }
 
   /**

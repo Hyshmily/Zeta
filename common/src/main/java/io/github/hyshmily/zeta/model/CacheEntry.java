@@ -29,10 +29,11 @@ import lombok.ToString;
  * <p>Each {@code CacheEntry} carries two orthogonal version spaces (see ADR-0008):
  * <ul>
  *   <li><b>{@code dataVersion}</b> — monotonically increasing counter obtained
- *       from Redis INCR (normal) or a node-local fallback (degraded). Used by
+ *       from Redis INCR (normal) or the degraded Snowflake fallback (degraded,
+ *       see ADR-0019). Used by
  *       the cache-sync send to resolve concurrent updates across instances.
  *       When {@code isVersionDegraded} is {@code true}, the version originated
- *       from the local fallback ({@code Long.MIN_VALUE + counter}) and carries
+ *       from the local fallback ({@code Long.MIN_VALUE | snowflakeId}) and carries
  *       reduced authority.</li>
  *   <li><b>{@code decisionVersion}</b> — tracks Worker HOT/COOL decisions and is
  *       always monotonically increasing (never degraded). Orthogonal to

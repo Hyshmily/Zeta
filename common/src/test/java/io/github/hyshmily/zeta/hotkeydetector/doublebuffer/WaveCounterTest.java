@@ -350,7 +350,7 @@ class WaveCounterTest {
     try {
       Field f = WaveCounter.class.getDeclaredField("beacon");
       f.setAccessible(true);
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       Set<String> hot = (Set<String>) f.get(c);
       hot.add(key);
     } catch (ReflectiveOperationException e) {
@@ -362,7 +362,7 @@ class WaveCounterTest {
     try {
       Field f = WaveCounter.class.getDeclaredField("beacon");
       f.setAccessible(true);
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       Set<String> hot = (Set<String>) f.get(c);
       return hot.contains(key);
     } catch (ReflectiveOperationException e) {

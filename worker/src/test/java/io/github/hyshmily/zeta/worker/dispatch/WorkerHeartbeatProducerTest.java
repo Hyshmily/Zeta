@@ -401,7 +401,7 @@ class WorkerHeartbeatProducerTest {
     );
   }
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   private static MockedConstruction.MockInitializer<StringRedisTemplate> redisReturning(Long value) {
     return (mock, ctx) -> {
       var ops = (ValueOperations<String, String>) mock(ValueOperations.class);

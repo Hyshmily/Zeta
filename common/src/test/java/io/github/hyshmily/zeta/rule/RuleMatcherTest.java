@@ -423,7 +423,7 @@ class RuleMatcherTest {
     private RuleMatcher ruleMatcher;
 
     @BeforeEach
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     void setUp() {
       redisTemplate = mock(StringRedisTemplate.class);
       valueOps = mock(ValueOperations.class);

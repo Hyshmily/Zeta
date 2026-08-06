@@ -90,9 +90,17 @@ class WorkerListenerTest {
    * Verifies that a HOT worker decision acknowledges and promotes the key to HOT status.
    */
   @Test
-  void handleWorkerMessage_hot_shouldAckAndPromote() throws IOException {
+  void handleWorkerMessage_hot_shouldAckAndPromote() throws IOException, InterruptedException {
     listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 1L));
     verify(channel).basicAck(anyLong(), anyBoolean());
+    awaitWorkerTasks();
+    assertThat(cache.getIfPresent("key1")).satisfies(o -> {
+      CacheEntry ce = (CacheEntry) o;
+      assertThat(ce.getKeyState()).isEqualTo(KeyState.HOT);
+      assertThat(ce.getDecisionVersion()).isEqualTo(1L);
+      assertThat(ce.getValue()).isEqualTo("refreshed");
+      assertThat(ce.getSoftExpireAtMs()).isPositive();
+    });
   }
 
   /**

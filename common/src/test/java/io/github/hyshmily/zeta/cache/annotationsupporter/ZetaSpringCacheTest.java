@@ -43,7 +43,7 @@ class ZetaSpringCacheTest {
   private ZetaSpringCache cache;
 
   @BeforeEach
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   void setUp() {
     zeta = mock(Zeta.class);
     properties = mock(ZetaProperties.class);
@@ -291,7 +291,7 @@ class ZetaSpringCacheTest {
   void get_whenLoaderThrows_wrapsInValueRetrievalException() {
     when(zeta.computeIfAbsentWithSoftExpire(anyString(), any(CachePolicy.class))).thenAnswer(invocation -> {
       CachePolicy p = invocation.getArgument(1);
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       Supplier<Object> supplier = (Supplier<Object>) p.reader();
       supplier.get();
       return null;
@@ -311,7 +311,7 @@ class ZetaSpringCacheTest {
   void get_whenLoaderSucceeds_invokesLoader() {
     when(zeta.computeIfAbsentWithSoftExpire(anyString(), any(CachePolicy.class))).thenAnswer(invocation -> {
       CachePolicy p = invocation.getArgument(1);
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       Supplier<Object> supplier = (Supplier<Object>) p.reader();
       return Optional.ofNullable(supplier.get());
     });

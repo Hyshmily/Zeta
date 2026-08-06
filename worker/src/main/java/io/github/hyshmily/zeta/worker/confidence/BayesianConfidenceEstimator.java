@@ -58,6 +58,13 @@ import lombok.Getter;
 public class BayesianConfidenceEstimator {
 
   /**
+   * Default prior mean: ln(10) ≈ 2.302585. A key with 10 observed accesses in a
+   * window is neutral (posterior mean = prior mean); consistently more than 10
+   * accesses per window are needed to shift the posterior above the hot threshold.
+   */
+  public static final double PRIOR_MEAN = Math.log(10);
+
+  /**
    * Maximum effective sample size per key (κ_max). Once a key's accumulated
    * precision reaches this many base-likelihood-equivalent observations,
    * further observations contribute only to the posterior mean while the

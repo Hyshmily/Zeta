@@ -43,7 +43,7 @@ import org.junit.jupiter.api.Test;
 class ZetaBayesianSMEdgeTest {
 
   private static final ConfidenceEvaluator EVAL = new ConfidenceEvaluator(
-    new BayesianConfidenceEstimator(2.3026, 2.0, 0.5)
+    new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5)
   );
 
   private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null, 0.0);
@@ -72,7 +72,7 @@ class ZetaBayesianSMEdgeTest {
       cool,
       grace,
       EVAL,
-      2.3026,
+      BayesianConfidenceEstimator.PRIOR_MEAN,
       Long.MAX_VALUE
     );
   }
@@ -361,7 +361,7 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackToPreviousState_nonExistentKey_shouldNotThrow() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    StateSnapshot snapshot = new StateSnapshot("never-added", "CONFIRMED_HOT", 3, 0, 2.3026, 0.0, 0, 0);
+    StateSnapshot snapshot = new StateSnapshot("never-added", "CONFIRMED_HOT", 3, 0, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0, 0, 0);
     assertThatCode(() -> m.rollbackToPreviousState("never-added", snapshot)).doesNotThrowAnyException();
   }
 
@@ -406,7 +406,7 @@ class ZetaBayesianSMEdgeTest {
     ZetaBayesianSM m = machineWith(3, 10, 4);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
-    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, 2.3026, 0.0, 0, 1);
+    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0, 0, 1);
     assertThatThrownBy(() -> m.rollbackToPreviousState("key", bad)).isInstanceOf(IllegalArgumentException.class);
   }
 

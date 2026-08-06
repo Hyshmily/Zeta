@@ -25,6 +25,7 @@ import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -329,5 +330,46 @@ class WorkerHeartbeatVerifierTest {
     verifier.stop();
     // After stop(), start() is idempotent — cancelled verifyTask prevents re-scheduling
     verifier.start();
+  }
+
+  // ── lifecycle: probe executor ──
+
+  /**
+   * Regression: {@code stop()} must shut down the internally owned probe executor so a
+   * context restart does not leak its 4 {@code zeta-hb-probe} threads.
+   */
+  @Test
+  void stop_shouldShutdownProbeExecutor() throws Exception {
+    ExecutorService pool = probeExecutorField(verifier);
+    assertThat(pool.isShutdown()).isFalse();
+
+    verifier.stop();
+
+    assertThat(pool.isShutdown()).isTrue();
+  }
+
+  /**
+   * Regression: after {@code stop()} shuts down the probe executor, {@code start()} must
+   * recreate it — otherwise the documented restart contract breaks and probing would fail
+   * with {@link java.util.concurrent.RejectedExecutionException} on every round.
+   */
+  @Test
+  void start_afterStop_shouldRecreateProbeExecutorAndKeepProbing() throws Exception {
+    when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(
+      new Message(new byte[0], new MessageProperties())
+    );
+    verifier.stop();
+
+    verifier.start();
+    verifier.verifySuspectedWorkers();
+
+    verify(healthView).recordPong("w2");
+    verify(healthView).recordPong("w3");
+  }
+
+  private static ExecutorService probeExecutorField(WorkerHeartbeatVerifier v) throws Exception {
+    java.lang.reflect.Field f = WorkerHeartbeatVerifier.class.getDeclaredField("probeExecutor");
+    f.setAccessible(true);
+    return (ExecutorService) f.get(v);
   }
 }

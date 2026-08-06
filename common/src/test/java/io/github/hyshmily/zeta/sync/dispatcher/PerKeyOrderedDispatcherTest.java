@@ -264,7 +264,7 @@ class PerKeyOrderedDispatcherTest {
 
     Field queuesField = PerKeyOrderedDispatcher.class.getDeclaredField("queues");
     queuesField.setAccessible(true);
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     ConcurrentHashMap<Object, ?> queues = (ConcurrentHashMap<Object, ?>) queuesField.get(dispatcher);
 
     assertThat(queues).doesNotContainKey("key1");

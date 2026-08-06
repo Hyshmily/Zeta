@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
+import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.TimeSource;
@@ -40,6 +41,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 
 /**
@@ -60,6 +62,7 @@ import org.springframework.context.annotation.Bean;
  */
 @Internal
 @AutoConfiguration
+@EnableConfigurationProperties(CacheSyncProperties.class)
 @RequiredArgsConstructor
 @Slf4j
 public class ZetaFacadeAutoConfiguration {

@@ -123,6 +123,9 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
   /** Number of tasks dropped by the global budget gate; used for throttled WARN logging. */
   private final AtomicLong dropCounter = new AtomicLong();
 
+  /** Number of tasks rejected because the key's queue was full; used for throttled WARN logging. */
+  private final AtomicLong rejectedPerKeyCounter = new AtomicLong();
+
   private volatile boolean closed = false;
 
   public PerKeyOrderedDispatcher(ScheduledExecutorService executor, String name) {
@@ -226,6 +229,7 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
    * @param weight the task's weight in global pending units (clamped to ≥ 1); charge
    *               ~1 unit per KB of payload so the budget tracks bytes, not message count
    */
+  @SuppressWarnings("all")
   public void submitWithWeight(Object key, Runnable task, int weight) {
     if (closed) {
       return;
@@ -274,7 +278,13 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
     if (outcome[0] != OUTCOME_REJECTED) {
       globalPendingUnits.addAndGet(effectiveWeight);
     } else {
-      log.warn("[{}] Task queue full for key {}. Task rejected.", name, key);
+      // Rate-limited: log the first rejection and then every 1024th — a burst
+      // of same-key submissions must not flood the log (mirrors the global
+      // budget gate's DROP_LOG_SHIFT throttle below).
+      long rejected = rejectedPerKeyCounter.incrementAndGet();
+      if (rejected == 1 || (rejected & ((1 << DROP_LOG_SHIFT) - 1)) == 0) {
+        log.warn("[{}] Task queue full for key {}. Task rejected ({} total rejected).", name, key, rejected);
+      }
     }
 
     // Grant the first executor submission exactly once per worker incarnation.
@@ -382,9 +392,11 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
         // submission creates a fresh worker instead of enqueueing into a dead one.
         return null;
       }
+
       if (first != null) {
         batch.add(first);
       }
+
       while (worker.queue != null && !worker.queue.isEmpty() && batch.size() < maxTasksPerCycle) {
         batch.add(worker.queue.poll());
       }
@@ -398,6 +410,9 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
     closed = true;
     // Clearing the map makes every in-flight runCycle see an empty grant (or a per-task
     // closed check) and self-remove; queued tasks are dropped without executing.
+    // Delayed submissions still pending on the shared scheduler are dropped on arrival
+    // (closed check in submitWithWeight) — the shutdown window is intentionally lossy;
+    // lost messages are bounded by the next periodic broadcast / application write.
     queues.clear();
     // The dropped tasks were charged to the budget; reset it. In-flight runCycle batches
     // discharging after this point may drive the counter transiently negative — harmless,

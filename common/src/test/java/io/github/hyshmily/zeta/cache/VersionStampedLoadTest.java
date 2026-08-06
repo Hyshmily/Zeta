@@ -103,13 +103,13 @@ class VersionStampedLoadTest {
     singleFlight = mock(SingleFlight.class);
     // Run the composite (value read + version probe) supplier inline.
     when(singleFlight.load(anyString(), any())).thenAnswer(inv -> {
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       Supplier<Object> supplier = inv.getArgument(1);
       return Optional.ofNullable(supplier.get());
     });
     when(singleFlight.load(anyIterable(), any(), anyBoolean())).thenAnswer(inv -> {
       Iterable<String> keys = inv.getArgument(0);
-      @SuppressWarnings("unchecked")
+      @SuppressWarnings("all")
       Function<String, Object> fn = inv.getArgument(1);
       Map<String, Optional<Object>> out = new LinkedHashMap<>();
       for (String key : keys) {
@@ -417,7 +417,7 @@ class VersionStampedLoadTest {
   @DisplayName("currentVersions reads all keys in one MGET with per-key fail-open")
   void currentVersions_mget_mapsAndFailOpen() {
     StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     ValueOperations<String, String> ops = mock(ValueOperations.class);
     when(redisTemplate.opsForValue()).thenReturn(ops);
     when(ops.multiGet(anyList())).thenReturn(Arrays.asList("10", null, "abc"));
@@ -436,7 +436,7 @@ class VersionStampedLoadTest {
   @DisplayName("currentVersions maps every key to empty on a batch Redis failure")
   void currentVersions_batchFailure_allEmpty() {
     StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     ValueOperations<String, String> ops = mock(ValueOperations.class);
     when(redisTemplate.opsForValue()).thenReturn(ops);
     when(ops.multiGet(anyList())).thenThrow(new RuntimeException("boom"));

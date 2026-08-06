@@ -17,13 +17,12 @@ package io.github.hyshmily.zeta.cache.cachesupport;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.TimeSource;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
+import jakarta.annotation.Nullable;
 import lombok.extern.slf4j.Slf4j;
+
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.*;
 
 /**
  * Lossy deferred send buffer for cache-sync messages.
@@ -46,6 +45,11 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p>The internal {@code pending} map is lazily initialized on first
  * {@code reportToWorker()} call to avoid allocating maps that are never used.
+ *
+ * <p>Send-failure logging is aggregated and rate-limited to one WARN per 10s
+ * window, and the send loop can be handed off to a dedicated executor
+ * (ADR-0037), so a broker outage neither floods the log nor stalls the
+ * shared scheduler.
  */
 @Slf4j
 @Internal
@@ -53,6 +57,13 @@ public class BroadcastBuffer {
 
   private static final long DEFAULT_FLUSH_DELAY_MS = 500;
   private static final long DEFAULT_MAX_DEFER_MS = 2_000;
+
+  /**
+   * Rate-limits the aggregated flush-failure WARN to one per window (ADR-0037).
+   * Volatile: {@link #flush()} is reachable from the scheduler thread, the calling thread
+   * (scheduler-rejection fallback in {@link #record}) and HotKeyCache's sync-flush fallback.
+   */
+  private static final long FLUSH_ERROR_LOG_WINDOW_MS = 10_000;
 
   /**
    * Maximum number of pending entries before a forced flush is triggered (soft cap: the flush is
@@ -71,6 +82,20 @@ public class BroadcastBuffer {
 
   @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
   private final Optional<CacheSyncPublisher> publisher;
+
+  /**
+   * Optional dedicated send executor (ADR-0037). When present, {@link #flush()} hands the swapped
+   * map off to it and the calling thread only does bookkeeping; a saturated executor drops the
+   * batch (reported via the rate-limited WARN). When {@code null}, sends run synchronously on the
+   * calling thread (legacy path).
+   */
+  @Nullable
+  private final Executor sendExecutor;
+
+  /**
+   * Monotonic timestamp of the last aggregated flush-failure WARN (ADR-0037).
+   */
+  private volatile long lastFlushErrorLoggedAtMs = 0L;
 
   private final long flushDelayMs;
   private ScheduledFuture<?> scheduledFlush;
@@ -103,10 +128,32 @@ public class BroadcastBuffer {
     long flushDelayMs,
     long maxDeferMs
   ) {
+    this(scheduler, publisher, flushDelayMs, maxDeferMs, null);
+  }
+
+  /**
+   * Creates a BroadcastBuffer with explicit flush delay, max deferral and an optional dedicated
+   * send executor (ADR-0037).
+   *
+   * @param scheduler     the shared scheduler ({@code hotKeyScheduler})
+   * @param publisher     the optional sync publisher
+   * @param flushDelayMs  the deferral delay before a scheduled flush fires
+   * @param maxDeferMs    the maximum deferral before a flush is forced
+   * @param sendExecutor  optional executor for the send loop; {@code null} keeps the legacy
+   *                      synchronous send on the calling thread
+   */
+  public BroadcastBuffer(
+    ScheduledExecutorService scheduler,
+    @SuppressWarnings("OptionalUsedAsFieldOrParameterType") Optional<CacheSyncPublisher> publisher,
+    long flushDelayMs,
+    long maxDeferMs,
+    @Nullable Executor sendExecutor
+  ) {
     this.scheduler = scheduler;
     this.publisher = publisher;
     this.flushDelayMs = flushDelayMs;
     this.maxDeferMs = maxDeferMs;
+    this.sendExecutor = sendExecutor;
   }
 
   /**
@@ -146,8 +193,10 @@ public class BroadcastBuffer {
 
   /**
    * Immediately flush all pending entries to the sync publisher.
-   * Safe to call concurrently — swaps the internal map before iterating,
-   * so concurrent {@link #record} calls see a fresh map.
+   * Safe to call concurrently — swaps the internal map before sending, so
+   * concurrent {@link #record} calls see a fresh map. With a {@link #sendExecutor}
+   * the send loop is handed off asynchronously and the calling thread never blocks
+   * on AMQP (ADR-0037); without one, sends run synchronously as before.
    */
   public void flush() {
     ConcurrentHashMap<String, VersionInfo> toFlush;
@@ -161,15 +210,83 @@ public class BroadcastBuffer {
       toFlush = current;
       cancelScheduledFlush();
     }
-    publisher.ifPresent(pub ->
-      toFlush.forEach((key, vi) -> {
-        try {
-          pub.broadcastRefresh(key, vi.version, vi.degraded);
-        } catch (Exception e) {
-          log.warn("Failed to send refresh for key {}", key, e);
+
+    if (sendExecutor != null) {
+      try {
+        sendExecutor.execute(() -> doSend(toFlush));
+      } catch (RejectedExecutionException e) {
+        // Executor saturated or shutting down — drop the batch (ADR-0007/0013:
+        // a lost REFRESH is re-sent by the next flush after recovery).
+        logSaturationDrop(toFlush.size());
+      }
+    } else {
+      doSend(toFlush);
+    }
+  }
+
+  /**
+   * Sends a flushed snapshot to the sync publisher, one attempt per key, never
+   * aborting on a partial failure. Failures are aggregated into a single
+   * rate-limited WARN (one per 10s window, first exception kept) instead of a
+   * per-key WARN with a full stack trace (ADR-0037).
+   *
+   * @param toFlush the flushed snapshot
+   */
+  private void doSend(Map<String, VersionInfo> toFlush) {
+    if (publisher.isEmpty()) {
+      return;
+    }
+    CacheSyncPublisher pub = publisher.get();
+    long failed = 0L;
+    Exception firstError = null;
+    for (Map.Entry<String, VersionInfo> entry : toFlush.entrySet()) {
+      VersionInfo vi = entry.getValue();
+
+      try {
+        pub.broadcastRefresh(entry.getKey(), vi.version, vi.degraded);
+      } catch (Exception e) {
+        failed++;
+        if (firstError == null) {
+          firstError = e;
         }
-      })
-    );
+      }
+    }
+    if (failed > 0 && tryAcquireFlushErrorLog()) {
+      log.warn(
+        "Failed to send {} of {} refresh broadcasts (previous errors suppressed for 10s): {}",
+        failed,
+        toFlush.size(),
+        firstError.toString()
+      );
+    }
+  }
+
+  /**
+   * Reports a saturation drop of the send executor, subject to the same 10s
+   * rate limit as send failures (ADR-0037).
+   *
+   * @param dropped the number of dropped refresh broadcasts
+   */
+  private void logSaturationDrop(int dropped) {
+    if (tryAcquireFlushErrorLog()) {
+      log.warn("Send executor saturated, dropping {} refresh broadcasts (previous drops suppressed for 10s)", dropped);
+    }
+  }
+
+  /**
+   * Rate-limiter shared by the aggregated flush-failure WARN and the saturation-drop WARN:
+   * at most one log per {@value #FLUSH_ERROR_LOG_WINDOW_MS}ms window. Thread-safe via
+   * {@link #lastFlushErrorLoggedAtMs} being volatile.
+   *
+   * @return {@code true} if the caller may log now
+   */
+  private boolean tryAcquireFlushErrorLog() {
+    long now = TimeSource.monotonicMillis();
+    if (now - lastFlushErrorLoggedAtMs < FLUSH_ERROR_LOG_WINDOW_MS) {
+      return false;
+    }
+    lastFlushErrorLoggedAtMs = now;
+    return true;
   }
 
   /**

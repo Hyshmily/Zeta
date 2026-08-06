@@ -20,9 +20,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.model.ZetaDecision.DecisionType;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
 import io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -38,7 +40,7 @@ import org.junit.jupiter.api.Test;
 class ZetaBayesianSMTest {
 
   private static final ConfidenceEvaluator EVAL = new ConfidenceEvaluator(
-    new BayesianConfidenceEstimator(2.3026, 2.0, 0.5)
+    new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5)
   );
 
   private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null, 0.0);
@@ -53,7 +55,12 @@ class ZetaBayesianSMTest {
 
   @BeforeEach
   void setUp() {
-    machine = new ZetaBayesianSM(3, 10, 4, EVAL, 2.3026);
+    machine = new ZetaBayesianSM(3, 10, 4, EVAL, BayesianConfidenceEstimator.PRIOR_MEAN);
+  }
+
+  @AfterEach
+  void tearDown() {
+    TimeSource.setTimeOffsetForTest(0, 0);
   }
 
   @Test
@@ -132,10 +139,10 @@ class ZetaBayesianSMTest {
   }
 
   @Test
-  void evictStale_shouldRemoveOldKeys() throws InterruptedException {
+  void evictStale_shouldRemoveOldKeys() {
     machine.evaluate("staleKey", true, false, CTX);
-    Thread.sleep(50);
+    TimeSource.setTimeOffsetForTest(0, 60_000);
     machine.evictStale(10, k -> {});
-    assertThat(machine.evaluate("staleKey", false, false, CTX).type()).isEqualTo(DecisionType.NONE);
+    assertThat(machine.getStateSnapshot("staleKey")).isNull();
   }
 }

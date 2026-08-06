@@ -50,7 +50,7 @@ class ZetaTest {
   private Zeta zeta;
 
   @BeforeEach
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   void setUp() {
     hotKeyCache = mock(HotKeyCache.class);
     appDetector = mock(HotKeyDetector.class);
@@ -203,7 +203,7 @@ class ZetaTest {
 
   // ── getLocalCache ──
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   @Test
   void getLocalCache_shouldDelegateToCache() {
     Cache<String, Object> caffeine = mock(Cache.class);
@@ -525,7 +525,7 @@ class ZetaTest {
 
   @Test
   void getAndSet_shouldDelegateToCache() {
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     Optional<Object> old = (Optional) Optional.of("old");
     when(hotKeyCache.getAndSet(eq("k"), eq("new"), eq(0L), eq(0L))).thenReturn(old);
     assertThat(zeta.getAndSet("k", "new", 0L, 0L)).isSameAs(old);

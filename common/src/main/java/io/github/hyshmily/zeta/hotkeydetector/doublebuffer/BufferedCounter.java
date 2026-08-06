@@ -38,11 +38,12 @@ import org.springframework.beans.factory.InitializingBean;
  *
  * @deprecated Superseded by {@link WaveCounter}.  The double-buffer
  *             design writes the shared structure on every increment (hot-key
- *             throughput ceiling ~40M/s at 16 threads, active-stale window),
- *             while {@link WaveCounter} routes cold keys to a direct
- *             write and hot keys to zero-contention local aggregation
- *             (measured ~8x faster on hot keys, no active-stale window).
- *             Kept for compatibility and as a fallback; prefer
+ *             throughput ceiling ~40M/s at 16 threads, and a narrow
+ *             active-stale window mitigated by the sealed-buffer protocol
+ *             described below), while {@link WaveCounter} routes cold keys to
+ *             a direct write and hot keys to zero-contention local
+ *             aggregation (measured ~8x faster on hot keys, no active-stale
+ *             window). Kept for compatibility and as a fallback; prefer
  *             {@link WaveCounter} for new code.
  *
  * <p><b>Design:</b> 64 hash-indexed slots, each with an active
@@ -62,6 +63,18 @@ import org.springframework.beans.factory.InitializingBean;
  * re-check the spill reference after taking the ticket and retry via the
  * active path if the spill was recycled in between.  The hot path never
  * touches the ticket counters.
+ *
+ * <p><b>Sealed-buffer protocol (active path):</b> reclaimers (flusher,
+ * {@link #clear()}, {@link #destroy()}) mark the active buffer {@code sealed}
+ * <em>before</em> swapping it out. A {@code count()} that reads a sealed
+ * buffer redirects to the current active buffer instead of writing into a
+ * buffer about to be drained. The reclaimer drains the swapped-out buffer a
+ * second time to catch writers whose seal-check raced the seal. The residual
+ * loss window is the triple coincidence of reading the old reference before
+ * the swap, checking the seal before it was set, and landing after the second
+ * drain — bounded to the sub-microsecond drain window per slot. Fully closing
+ * it would require the ticket protocol on the hot path, which is exactly the
+ * cost that {@link WaveCounter} eliminates by design.
  *
  * <p><b>Safety net:</b> Every flush cycle also drains any leftover spill
  * buffers, bounding worst-case spill data delay to {@code flushIntervalMs}.
@@ -244,7 +257,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     this(batchConsumer, ceilMaxCapacity, flushIntervalMs, eagerSwapRatio, false, scheduler, flushQueueCapacity);
   }
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings("all")
   private BufferedCounter(
     Consumer<Map<String, Long>> batchConsumer,
     int ceilMaxCapacity,
@@ -316,6 +329,16 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     }
 
     CounterBuffer seg = activeCeils[idx].get();
+    if (seg.sealed) {
+      // A reclaimer (flusher/clear/destroy) is draining this buffer: it seals
+      // before swapping, so spin briefly until the fresh unsealed buffer
+      // appears, then write there. The spin is bounded and only taken in the
+      // rare seal window — the swap follows the seal immediately.
+      for (int retries = 0; retries < 128 && seg.sealed; retries++) {
+        Thread.onSpinWait();
+        seg = activeCeils[idx].get();
+      }
+    }
     seg.add(key, delta);
 
     // Sampled size check (1/64 calls) to decide if we need an eager swap
@@ -370,7 +393,9 @@ public class BufferedCounter implements InitializingBean, Destroyable {
   public void clear() {
     // Active buffers (live slots only — orphaned above ceilCount are empty)
     for (int i = 0; i < ceilCount; i++) {
-      activeCeils[i].getAndSet(new CounterBuffer()).drain();
+      CounterBuffer old = activeCeils[i].getAndSet(new CounterBuffer());
+      old.sealed = true; // seal the buffer actually swapped out
+      old.drain();
     }
     // Spill buffers (safety net: drain all 64 slots)
     for (int i = 0; i < MAXS_CEILS; i++) {
@@ -603,7 +628,13 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       // Must iterate MAXS_CEILS, not ceilCount, because previously-active
       // indices above a shrunk ceilCount would be orphaned and leak memory.
       for (int i = 0; i < MAXS_CEILS; i++) {
-        merged = mergeDrain(merged, activeCeils[i].getAndSet(new CounterBuffer()));
+        CounterBuffer old = activeCeils[i].getAndSet(new CounterBuffer());
+        old.sealed = true; // seal the buffer actually swapped out (may differ
+        // from a concurrently trySwap-installed one) so late readers redirect
+        merged = mergeDrain(merged, old);
+        // Second drain: catch a count() whose seal-check raced the seal above
+        // and landed after the first drain (see sealed-buffer protocol).
+        merged = mergeDrain(merged, old);
       }
 
       if (merged != null && !merged.isEmpty()) {
@@ -691,7 +722,9 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     // shutdown=true already makes count() no-op, so ticketed writers are only
     // those already in flight; wait for them so no add() is stranded.
     for (int i = 0; i < MAXS_CEILS; i++) {
-      drainBuffer(activeCeils[i].getAndSet(new CounterBuffer()));
+      CounterBuffer old = activeCeils[i].getAndSet(new CounterBuffer());
+      old.sealed = true; // seal the buffer actually swapped out
+      drainBuffer(old);
       CounterBuffer sp = spillCeils[i].getAndSet(null);
       if (sp != null) {
         waitSpillCeilReaders(i);
@@ -732,6 +765,16 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
     /** Key→counter storage.  Package-visible for spill-merge in the outer class. */
     private final ConcurrentHashMap<String, LongAdder> counters = new ConcurrentHashMap<>();
+
+    /**
+     * Set by a reclaimer (flusher, {@link #clear()}, {@link #destroy()})
+     * <em>before</em> swapping this buffer out of {@code activeCeils}. A
+     * concurrent {@code count()} that observes {@code sealed == true}
+     * redirects to the current active buffer instead of writing into a
+     * buffer about to be drained (see the sealed-buffer protocol in the
+     * class Javadoc).
+     */
+    volatile boolean sealed;
 
     /**
      * Loose sampling counter: incremented on every {@link #add(String, long)}.
