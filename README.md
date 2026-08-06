@@ -49,6 +49,8 @@ When any instance performs a write-through (putThrough) or invalidation, it incr
 
 This version comparison mechanism ensures eventual coherency without the overhead of distributed consensus protocols like Paxos or Raft.
 
+![docs/png/Zeta.drawio.svg](docs/png/Zeta.drawio.svg)
+
 Benchmarks:
 
 - peek ~16M ops/s (pure Caffeine lookup, no side effects)

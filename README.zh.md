@@ -49,6 +49,8 @@ zeta.peek("product:123");
 
 版本比对机制确保最终一致性，无需 Paxos 或 Raft 等分布式共识协议的开销。
 
+![docs/png/Zeta.drawio.svg](docs/png/Zeta.drawio.svg)
+
 基准测试：
 
 - `peek` **约 16M ops/s**（纯 Caffeine 查询，无副作用）
