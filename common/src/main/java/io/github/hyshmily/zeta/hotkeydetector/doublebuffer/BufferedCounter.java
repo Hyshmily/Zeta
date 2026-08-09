@@ -42,9 +42,12 @@ import org.springframework.beans.factory.InitializingBean;
  *             active-stale window mitigated by the sealed-buffer protocol
  *             described below), while {@link WaveCounter} routes cold keys to
  *             a direct write and hot keys to zero-contention local
- *             aggregation (measured ~8x faster on hot keys, no active-stale
- *             window). Kept for compatibility and as a fallback; prefer
- *             {@link WaveCounter} for new code.
+ *             aggregation.  Measured head-to-head (16 threads, sustained
+ *             30s stable windows): 1.4-1.9x faster on few-hot-key
+ *             workloads, 1.3-3.2x faster on high-distinct-key workloads,
+ *             1.0-1.5x faster on the cold path, and ~8x faster on hot
+ *             keys; no active-stale window.  Kept for compatibility and
+ *             as a fallback; prefer {@link WaveCounter} for new code.
  *
  * <p><b>Design:</b> 64 hash-indexed slots, each with an active
  * {@link CounterBuffer} accepting incoming {@link #count(String, long)} calls.

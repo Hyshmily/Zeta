@@ -243,12 +243,14 @@ class ZetaReporterTest {
   }
 
   @Test
-  void record_Report_withEmptyKey_shouldWork() throws Exception {
+  void record_Report_withEmptyKey_shouldBeIgnored() throws Exception {
     registerWorker(healthView, "worker-1");
     reporter.start();
     reporter.reportToWorker("");
-    awaitPublish(1);
-    assertThat(testPublisher.publishCount).isPositive();
+    // The WaveCounter drops blank keys at count() (documented: "blank keys
+    // are silently ignored"), so an empty report must never publish.
+    Thread.sleep(REPORT_INTERVAL_MS * 3 + 200);
+    assertThat(testPublisher.publishCount).isZero();
   }
 
   @Test

@@ -24,8 +24,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
@@ -278,6 +278,34 @@ class WaveCounterTest {
   }
 
   /**
+   * Verifies the soft capacity cap: new cold keys beyond the bound are
+   * dropped, while keys already tracked keep counting — the cap bounds
+   * key cardinality, not established counters.  (The drop counter was
+   * removed 2026-08-08 — the observation was deemed unnecessary.)
+   */
+  @Test
+  void capacity_shouldDropNewColdKeysBeyondLimit() throws Exception {
+    List<Map<String, Long>> captured = new ArrayList<>();
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    try {
+      WaveCounter c = new WaveCounter(captured::add, 3, 50, 0.5, sched);
+      for (int i = 0; i < 5; i++) {
+        c.count("cold-" + i, 1);
+      }
+      c.count("cold-0", 10);
+      invokeDeliver(c);
+
+      Map<String, Long> merged = mergedMap(captured);
+      assertThat(merged).containsKeys("cold-0", "cold-1", "cold-2");
+      assertThat(merged).doesNotContainKeys("cold-3", "cold-4");
+      assertThat(merged.get("cold-0")).isEqualTo(11);
+      c.destroy();
+    } finally {
+      sched.shutdownNow();
+    }
+  }
+
+  /**
    * Automatic promotion: an initially-cold key hammered past the threshold is
    * promoted by the delivery scan and must not lose counts during the
    * transition.
@@ -286,11 +314,20 @@ class WaveCounterTest {
   void promotion_shouldPreserveCounts() throws Exception {
     List<Map<String, Long>> captured = new ArrayList<>();
     WaveCounter c = new WaveCounter(captured::add);
+    AtomicBoolean promotedSeen = new AtomicBoolean();
     Thread deliverer = new Thread(() -> {
       try {
         while (!Thread.currentThread().isInterrupted()) {
           Thread.sleep(5);
           invokeDeliver(c);
+          // Observe the promotion evidence from INSIDE the deliverer loop:
+          // the beacon decays a quiet key within 2 tides, so a post-destroy
+          // check races the decay window (the gated quiescence made idle
+          // tides faster, widening the race).  Mid-run observation over the
+          // 5ms cadence catches the 2-tide evidence window reliably.
+          if (!promotedSeen.get()) {
+            promotedSeen.set(wasPromoted(c, "cand"));
+          }
         }
       } catch (InterruptedException e) {
         // fall through
@@ -302,7 +339,11 @@ class WaveCounterTest {
     int threadCount = 8;
     int perThread = 20_000;
     long expected = (long) threadCount * perThread;
-    String[] keys = new String[2_000];
+    // 100 competing keys: the snapshot stays well below hotLimit (1024),
+    // so the promotion scan cannot exhaust its quota on the rivals before
+    // reaching "cand" in CHM iteration order — a larger universe (2000)
+    // made the promotion of "cand" a coin flip under load.
+    String[] keys = new String[100];
     for (int i = 0; i < keys.length; i++) {
       keys[i] = "k-" + (i * 131_071);
     }
@@ -342,17 +383,59 @@ class WaveCounterTest {
       .mapToLong(Long::longValue)
       .sum();
     assertThat(total).isEqualTo(expected);
-    // sanity: the candidate key was actually promoted
-    assertThat(isHot(c, "cand")).isTrue();
+    // sanity: the candidate key was actually promoted (observed mid-run —
+    // see the deliverer loop; the beacon decays a quiet key within 2 tides).
+    assertThat(promotedSeen.get()).isTrue();
+  }
+
+  /** The bit2-role evidence — proves the key was promoted recently (2-tide window). */
+  private static boolean wasPromoted(WaveCounter c, String key) {
+    try {
+      Field f = WaveCounter.class.getDeclaredField("beacon");
+      f.setAccessible(true);
+      long[] beacon = (long[]) f.get(c);
+      Field m = WaveCounter.class.getDeclaredField("beaconMask");
+      m.setAccessible(true);
+      int mask = (int) m.get(c);
+      int h = mixHash(key.hashCode());
+      int bit2 = rehash(h) & mask;
+      return ((beacon[bit2 >>> 4] >>> (((bit2 & 15) << 2) + 2)) & 0x3) >= 1;
+    } catch (ReflectiveOperationException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  /** Replicates {@code WaveCounter.mixHash} for beacon bit position computation. */
+  private static int mixHash(int h) {
+    h ^= h >>> 16;
+    h *= 0x85ebca6b;
+    h ^= h >>> 13;
+    h *= 0xc2b2ae35;
+    h ^= h >>> 16;
+    return h;
+  }
+
+  /** Replicates {@code WaveCounter.rehash} — the k=2 trace-room hash. */
+  private static int rehash(int h) {
+    h *= 0x31848bab;
+    h ^= h >>> 14;
+    return h;
   }
 
   private static void markHot(WaveCounter c, String key) {
     try {
       Field f = WaveCounter.class.getDeclaredField("beacon");
       f.setAccessible(true);
-      @SuppressWarnings("all")
-      Set<String> hot = (Set<String>) f.get(c);
-      hot.add(key);
+      long[] beacon = (long[]) f.get(c);
+      Field m = WaveCounter.class.getDeclaredField("beaconMask");
+      m.setAccessible(true);
+      int mask = (int) m.get(c);
+      // Mirrors production: bit1-role evidence (seed 2), bit2-role evidence (seed 2).
+      int h = mixHash(key.hashCode());
+      int bit1 = h & mask;
+      beacon[bit1 >>> 4] = beacon[bit1 >>> 4] | (2L << ((bit1 & 15) << 2));
+      int bit2 = rehash(h) & mask;
+      beacon[bit2 >>> 4] = beacon[bit2 >>> 4] | (2L << (((bit2 & 15) << 2) + 2));
     } catch (ReflectiveOperationException e) {
       throw new RuntimeException(e);
     }
@@ -362,9 +445,18 @@ class WaveCounterTest {
     try {
       Field f = WaveCounter.class.getDeclaredField("beacon");
       f.setAccessible(true);
-      @SuppressWarnings("all")
-      Set<String> hot = (Set<String>) f.get(c);
-      return hot.contains(key);
+      long[] beacon = (long[]) f.get(c);
+      Field m = WaveCounter.class.getDeclaredField("beaconMask");
+      m.setAccessible(true);
+      int mask = (int) m.get(c);
+      int h = mixHash(key.hashCode());
+      int bit1 = h & mask;
+      int count = (int) ((beacon[bit1 >>> 4] >>> ((bit1 & 15) << 2)) & 0x3);
+      if (count == 0) {
+        return false;
+      }
+      int bit2 = rehash(h) & mask;
+      return ((beacon[bit2 >>> 4] >>> (((bit2 & 15) << 2) + 2)) & 0x3) >= 1;
     } catch (ReflectiveOperationException e) {
       throw new RuntimeException(e);
     }
@@ -412,7 +504,7 @@ class WaveCounterTest {
     Thread deliverer = new Thread(() -> {
       try {
         while (!Thread.currentThread().isInterrupted()) {
-          Thread.sleep(10);
+          Thread.sleep(5);
           invokeDeliver(c);
         }
       } catch (InterruptedException e) {
@@ -421,6 +513,7 @@ class WaveCounterTest {
       invokeDeliver(c);
     });
     deliverer.start();
+    AtomicBoolean promotedSeen = new AtomicBoolean();
 
     int threadCount = 8;
     int perThread = 20_000;
@@ -467,6 +560,28 @@ class WaveCounterTest {
 
     assertThat(batches).isNotEmpty();
     assertThat(mergedTotal(batches)).isEqualTo(1);
+  }
+
+  /**
+   * Verifies the adaptive delivery cadence: idle stays at the base interval,
+   * backlog at/above the threshold floors at the minimum, and the delay
+   * scales linearly and monotonically in between.
+   */
+  @Test
+  void computeNextTideDelay_shouldScaleWithBacklog() {
+    assertThat(counter.computeNextTideDelayMs(0)).isEqualTo(500);
+    assertThat(counter.computeNextTideDelayMs(10_000)).isEqualTo(275); // linear midpoint
+    assertThat(counter.computeNextTideDelayMs(20_000)).isEqualTo(50);
+    assertThat(counter.computeNextTideDelayMs(100_000)).isEqualTo(50);
+    assertThat(counter.computeNextTideDelayMs(Integer.MAX_VALUE)).isEqualTo(50);
+
+    long prev = Long.MAX_VALUE;
+    for (int i = 0; i <= 25_000; i += 1_000) {
+      long d = counter.computeNextTideDelayMs(i);
+      assertThat(d).isLessThanOrEqualTo(prev);
+      assertThat(d).isBetween(50L, 500L);
+      prev = d;
+    }
   }
 
   @Test

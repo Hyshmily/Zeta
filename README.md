@@ -31,7 +31,8 @@ zeta.tag("product:123");
 zeta.peek("product:123");
 ```
 
-- The `WaveCounter` routes keys by heat into two paths: hot keys merge into a per-writer local map (zero shared contention, bulk-merged to the shared table every 64 increments) and cold keys write directly to a lock-free shared table. One snapshot is delivered per 500ms cycle.
+- The `WaveCounter` routes keys by heat into two paths: hot keys merge into a per-writer local map (zero shared contention, bulk-merged to the shared table every 128 increments) and cold keys write directly to a lock-free shared table. One snapshot is delivered per 500ms cycle.
+- The tide is self-adaptive: the `TidePacer` (hot-spot pilot) folds the delivered backlog into a fast-attack/slow-release smoothed cadence — bursts shorten the cycle to 50ms, idle stretches double it — while the `MoonsTidalForce` (tide-gravity correction) drops the promotion floor to the histogram boundary to admit blocked renewing keys instead of ratcheting it up.
 
 - Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency. If that background refresh fails, the stale entry is kept alive with a decaying lease (`max(remaining/2, 120s)`, ADR-0036) — a down source becomes background retry instead of a per-read stampede, and the entry self-heals on the first successful refresh.
 
