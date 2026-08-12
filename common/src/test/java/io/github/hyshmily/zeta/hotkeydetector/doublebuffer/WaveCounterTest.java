@@ -16,7 +16,6 @@
 package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -609,7 +608,13 @@ class WaveCounterTest {
   }
 
   @Test
-  void count_shouldThrowOnNullKey() {
-    assertThatThrownBy(() -> counter.count(null, 1)).isInstanceOf(NullPointerException.class);
+  void count_shouldSilentlyIgnoreNullAndEmptyKeys() {
+    counter.count(null, 1);
+    counter.count("", 1);
+    counter.count("x", 0);
+    counter.count("x", -1);
+    counter.destroy();
+
+    assertThat(mergedTotal(batches)).isZero();
   }
 }

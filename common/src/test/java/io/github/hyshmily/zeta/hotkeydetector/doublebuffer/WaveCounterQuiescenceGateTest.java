@@ -29,14 +29,17 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
 
 /**
- * Quiescence-gate matrix (2026-08-09): the {@code coldWriteSeen} flag is
- * set by cold first-inserts only, cleared at every tide/clear, and never
- * set by the hot path or the capacity-drop branch; tides with no cold
- * traffic skip the 1ms window without losing hot-path counts.
+ * Quiescence-gate matrix (2026-08-09; extended 2026-08-11): the
+ * {@code coldWriteSeen} flag is set by every shared-table insert — cold
+ * first-inserts AND hot-path merges (hot LOCAL accumulation alone never
+ * marks; the merge into the shared table does, because its entries are
+ * visible to cold hit-writers) — cleared at every tide/clear, and never
+ * set by the capacity-drop branch; tides with no shared-table writes skip
+ * the 1ms window without losing hot-path counts.
  */
 @Tag("performance")
 class WaveCounterQuiescenceGateTest {
@@ -105,11 +108,35 @@ class WaveCounterQuiescenceGateTest {
   }
 
   @Test
-  void hotPath_shouldNotSetFlag() {
+  void hotLocalAccumulation_shouldNotSetFlag() {
     WaveCounter c = new WaveCounter(m -> {});
     markHot(c, "hot-key");
     c.count("hot-key", 1);
     c.count("hot-key", 1);
+    // Local accumulation only — no merge into the shared table yet (the
+    // batch trigger needs opMaxCount distinct keys or the flush clock),
+    // so nothing is visible to cold hit-writers and the flag stays clear.
+    assertThat(readFlag(c)).isFalse();
+    c.destroy();
+  }
+
+  /**
+   * A hot-path MERGE marks the flag: once hot data is drained into the
+   * shared table its entries are visible to cold hit-writers, whose adds
+   * need the window's bound.  The local map fills at {@code opMaxCount}
+   * distinct keys (128), so the 128th add triggers the discharge.
+   */
+  @Test
+  void hotMerge_shouldSetFlag() {
+    WaveCounter c = new WaveCounter(m -> {});
+    for (int i = 0; i < 128; i++) {
+      markHot(c, "hot-" + i);
+    }
+    for (int i = 0; i < 128; i++) {
+      c.count("hot-" + i, 1);
+    }
+    assertThat(readFlag(c)).isTrue();
+    invokeDeliver(c);
     assertThat(readFlag(c)).isFalse();
     c.destroy();
   }
@@ -165,11 +192,13 @@ class WaveCounterQuiescenceGateTest {
   }
 
   /**
-   * Hot-only racing stress: tides skip the quiescence window (no cold
-   * traffic ever sets the flag) while 8 writers hammer promoted keys and a
-   * deliverer thread races tides at 5ms.  The hot path is exact — the
-   * mergesInFlight settle is paid regardless of the gate — so the merged
-   * total must be exact, proving the skip never strands hot merges.
+   * Hot-only racing stress: 8 writers hammer promoted keys while a
+   * deliverer thread races tides at 5ms.  Hot discharges now mark the
+   * flag (their entries are visible to cold hit-writers), so the tide
+   * pays the window on merge cycles — but the hot path is exact
+   * regardless of the gate: the mergesInFlight settle is paid
+   * unconditionally, so the merged total must be exact, proving the
+   * window never strands hot merges.
    */
   @Test
   void hotRacing_shouldBeExactUnderSkippedWindow() throws Exception {
@@ -219,7 +248,11 @@ class WaveCounterQuiescenceGateTest {
     deliverer.join(5000);
     c.destroy();
 
-    long total = captured.stream().flatMap(m -> m.values().stream()).mapToLong(Long::longValue).sum();
+    long total = captured
+      .stream()
+      .flatMap(m -> m.values().stream())
+      .mapToLong(Long::longValue)
+      .sum();
     assertThat(total).isEqualTo(expected);
     assertThat(readFlag(c)).isFalse();
   }
@@ -281,7 +314,11 @@ class WaveCounterQuiescenceGateTest {
     deliverer.join(5000);
     c.destroy();
 
-    long total = captured.stream().flatMap(m -> m.values().stream()).mapToLong(Long::longValue).sum();
+    long total = captured
+      .stream()
+      .flatMap(m -> m.values().stream())
+      .mapToLong(Long::longValue)
+      .sum();
     double lossPct = (100.0 * (expected - total)) / expected;
     assertThat(lossPct).as("cold approximate window loss").isLessThan(0.01);
   }

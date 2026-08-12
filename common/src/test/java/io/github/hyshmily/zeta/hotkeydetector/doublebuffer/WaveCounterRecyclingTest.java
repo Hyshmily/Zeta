@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -185,9 +186,7 @@ class WaveCounterRecyclingTest {
       counter.count("k0", 1); // keep tides alive, "top" stays quiet
       invokeDeliver(counter);
     }
-    assertThat(isBeaconMember(counter, "top"))
-      .as("quiet key must leave the hot set by tide 3")
-      .isFalse();
+    assertThat(isBeaconMember(counter, "top")).as("quiet key must leave the hot set by tide 3").isFalse();
   }
 
   /**
@@ -226,9 +225,7 @@ class WaveCounterRecyclingTest {
       counter.count("k" + i, 5);
     }
     invokeDeliver(counter);
-    assertThat(isBeaconMember(counter, "new"))
-      .as("new relative hot spot must enter on the next tide")
-      .isTrue();
+    assertThat(isBeaconMember(counter, "new")).as("new relative hot spot must enter on the next tide").isTrue();
   }
 
   /**
@@ -445,6 +442,101 @@ class WaveCounterRecyclingTest {
   }
 
   /**
+   * Ceils pooling: a dead writer's fully-drained local map is returned to
+   * the pool at the tide, and the FIRST hot count of a NEW writer claims
+   * the very same instance instead of allocating (identity, not a copy) —
+   * the per-request-thread allocation-churn fix (see
+   * {@code WaveCounter#ceilPool}).
+   */
+  @Test
+  void deadWriter_shouldPoolItsCeils_forReuse() throws Exception {
+    markHot(counter, "dead-key");
+    Thread w = new Thread(() -> counter.count("dead-key", 1));
+    w.start();
+    w.join();
+    Thread.sleep(10);
+    invokeDeliver(counter); // tide 1: reap the dead writer, pool its map
+
+    @SuppressWarnings("unchecked")
+    ConcurrentLinkedQueue<Object> pool =
+      (ConcurrentLinkedQueue<Object>) poolField(counter).get(counter);
+    assertThat(pool).as("dead writer's map enters the pool").hasSize(1);
+    Object pooled = pool.peek();
+
+    // A NEW thread's first hot count must claim the pooled instance.
+    markHot(counter, "hot-key");
+    Thread w2 = new Thread(() -> counter.count("hot-key", 1));
+    w2.start();
+    w2.join();
+    Thread.sleep(10);
+    @SuppressWarnings("unchecked")
+    ConcurrentHashMap<Thread, Object> registry =
+      (ConcurrentHashMap<Thread, Object>) registryField(counter).get(counter);
+    assertThat(registry.get(w2)).as("new writer claims the pooled map").isSameAs(pooled);
+    assertThat(pool).as("claim empties the pool").isEmpty();
+  }
+
+  /**
+   * Ceils pooling: repeated dead-writer churn must not grow the pool — the
+   * reclaimed map is claimed by the next writer, so the pool oscillates
+   * between empty and one, and every cycle's counts are still delivered
+   * exactly (the pooled map's data never crosses writers).
+   */
+  @Test
+  void deadWriterChurn_shouldNotGrowThePool() throws Exception {
+    markHot(counter, "k");
+    for (int cycle = 0; cycle < 3; cycle++) {
+      Thread w = new Thread(() -> counter.count("k", 1));
+      w.start();
+      w.join();
+      Thread.sleep(10);
+      invokeDeliver(counter);
+    }
+    @SuppressWarnings("unchecked")
+    ConcurrentLinkedQueue<Object> pool =
+      (ConcurrentLinkedQueue<Object>) poolField(counter).get(counter);
+    assertThat(pool).as("pool holds at most the last dead writer's map").hasSizeLessThanOrEqualTo(1);
+    assertThat(mergedTotal(batches)).as("churn loses no hot counts").isEqualTo(3);
+  }
+
+  /**
+   * Capacity overshoot headroom: new keys are admitted until the table
+   * reaches {@code capacity + capacity/10} distinct keys — the drop (whose
+   * policy biases against NEW keys) stays off the steady-state edge; the
+   * 111th distinct key at capacity 100 is the first one dropped.
+   */
+  @Test
+  void capacityGuard_overshoot_admitsNewKeysWithinHeadroom() throws Exception {
+    List<Map<String, Long>> captured = new ArrayList<>();
+    WaveCounter c = new WaveCounter(captured::add, 100, 50, 0.5, null);
+    for (int i = 0; i < 110; i++) {
+      c.count("k" + i, 1);
+    }
+    c.destroy();
+    assertThat(captured.get(captured.size() - 1)).as("headroom (10) admits up to 110 keys").hasSize(110);
+
+    captured.clear();
+    WaveCounter c2 = new WaveCounter(captured::add, 100, 50, 0.5, null);
+    for (int i = 0; i < 111; i++) {
+      c2.count("k" + i, 1);
+    }
+    c2.destroy();
+    assertThat(captured.get(captured.size() - 1)).as("the 111th key is dropped").hasSize(110);
+  }
+
+  private static java.lang.reflect.Field poolField(WaveCounter c) throws Exception {
+    java.lang.reflect.Field f = WaveCounter.class.getDeclaredField("ceilPool");
+    f.setAccessible(true);
+    return f;
+  }
+
+  private static java.lang.reflect.Field registryField(WaveCounter c) throws Exception {
+    java.lang.reflect.Field f = WaveCounter.class.getDeclaredField("hotRegistry");
+    f.setAccessible(true);
+    return f;
+  }
+
+  /**
    * tryLock-skip delivery guarantee (proposal A): a writer whose local map
    * is locked mid-add at tide time is skipped for that cycle, but the data
    * must still be delivered — by the writer's own flush-clock discharge
@@ -496,6 +588,7 @@ class WaveCounterRecyclingTest {
 
     assertThat(mergedTotal(batches)).isEqualTo(expected);
   }
+
   private static boolean isBeaconMember(WaveCounter c, String key) {
     try {
       Field f = WaveCounter.class.getDeclaredField("beacon");
@@ -523,7 +616,7 @@ class WaveCounterRecyclingTest {
     m.setAccessible(true);
     int mask = (int) m.get(c);
     int h = mixHash(key.hashCode());
-    return new int[] {h & mask, rehash(h) & mask};
+    return new int[] { h & mask, rehash(h) & mask };
   }
 
   /** Write a 2-bit role evidence (0-3) at the given offset of the room. */
@@ -545,9 +638,9 @@ class WaveCounterRecyclingTest {
   }
 
   private static boolean invokePromote(WaveCounter c, String key) throws Exception {
-    Method m = WaveCounter.class.getDeclaredMethod("promoteToBeacon", String.class);
+    Method m = WaveCounter.class.getDeclaredMethod("promoteToBeacon", int.class);
     m.setAccessible(true);
-    return (boolean) m.invoke(c, key);
+    return (boolean) m.invoke(c, mixHash(key.hashCode()));
   }
 
   private static void markHot(WaveCounter c, String key) {
@@ -567,6 +660,7 @@ class WaveCounterRecyclingTest {
       throw new RuntimeException(e);
     }
   }
+
   private static int mixHash(int h) {
     h ^= h >>> 16;
     h *= 0x85ebca6b;

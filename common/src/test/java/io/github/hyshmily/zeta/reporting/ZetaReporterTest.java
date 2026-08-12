@@ -16,7 +16,6 @@
 package io.github.hyshmily.zeta.reporting;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
@@ -121,8 +120,11 @@ class ZetaReporterTest {
   }
 
   @Test
-  void record_Report_withNullKey_shouldThrow() {
-    assertThatThrownBy(() -> reporter.reportToWorker(null)).isInstanceOf(NullPointerException.class);
+  void record_Report_withNullKey_shouldBeIgnored() {
+    // The underlying WaveCounter silently ignores null/empty keys (see
+    // WaveCounter.count), so the reporter must not throw either.
+    reporter.reportToWorker(null);
+    assertThat(reporter.getPendingKeyCount()).isZero();
   }
 
   @Test

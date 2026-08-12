@@ -23,7 +23,7 @@ divided by active slots (probed: healthy single-key set 1.0, one-drifter pair 0.
 1. **Releases were unadjudicated.** A release step that pushed the floor below the signal-capable
    region was only corrected indirectly (the parked-distress veto or the next audit), with no
    memory of where the release started and no budget bounding a failed descent.
-2. **Audits could be suppressed forever.** The audit run (`auditAge`) was reset to 0 by ANY floor
+2. **Audits could be suppressed forever.** The audit run (`auditTides`) was reset to 0 by ANY floor
    move; a workload whose renewal pulses periodically kept resetting the counter and never
    audited. Caffeine's `AuditClock.tick` decays a moving sample's run instead of zeroing it.
 3. **No experiment budget or retry ledger.** No bound on a release's duration, no "worked vs
@@ -62,14 +62,21 @@ endings judge against. Each walk tide computes a verdict — `WalkEnding`: `CONF
 `FAILED`/`WALKING`, Caffeine's `ProbeEnding` — and the walk branch acts on it in a switch, keeping
 the decision separate from the mutation.
 
-- **Release-walk** (healthy saturated or audit-due, floor above the seed): the bold driver steps
-  the floor down per tide; a tide below the anchor-memory crash bar (`baseRenewal - margin`, not
-  the fixed target — a 0.6 renewal against a 0.85 base reads as below-bar) increments the crash
-  streak; 3 consecutive below-bar tides CRASH the walk (budgeted return to `baseFloor` + backoff);
-  16 healthy samples CONFIRM it (the descended position is kept, becomes the new veto anchor).
+- **Release-walk** (healthy saturated or audit-due, floor above the seed): the stride is priced
+  per tide by the smoothed renewal — the ring-mean signal — against the walk's own crash bar:
+  `stride = clamp(round(16 * (ringMean - bar) / max(0.1, margin)), 1, 32)` where `bar =
+  baseRenewal - margin` — comfortably healthy sets descend at up to 2x the initial step,
+  approaching the bar the stride shrinks toward 1 so the verdict samples the decision zone at
+  fine granularity, and a below-bar descent creeps instead of plunging to the seed before the
+  crash verdict fires.  The bold-driver decay (`step *= 0.98`) is retired for this direction, so
+  the release walk no longer touches the raise-owned step state.  A tide below the anchor-memory
+  crash bar (`baseRenewal - margin`, not the fixed target — a 0.6 renewal against a 0.85 base
+  reads as below-bar) increments the crash streak; 3 consecutive below-bar tides CRASH the walk
+  (budgeted return to `baseFloor` + backoff); 16 healthy samples CONFIRM it (the descended
+  position is kept, becomes the new veto anchor).
 - **Raise-walk** (distress with the hot set under-earning the cold reservoir, `hotColdRatio < 1` —
   the frozen-set signal): confirms only after the set holds the target across
-  `PROBE_CRASH_PERSISTENCE` consecutive at-target tides (durable — a single lucky tide must not
+  `TIDAL_CRASH_PERSISTENCE` consecutive at-target tides (durable — a single lucky tide must not
   keep a raise); 3 consecutive below-target tides CRASH it; spending the 16-tide budget without a
   verdict prices it as FAILED. The bold driver steps only while the set is still distressed;
   at-target tides hold so the confirmation streak accumulates. The confirm plants the veto anchor
@@ -82,7 +89,7 @@ the raise left from, a release-walk confirm at the descended position — a veto
 healthy-confirmed descent. The veto fires when distress survives `GOVERNOR_VETO_STREAK = 4` tides
 while the floor is above the anchor and the current renewal earns less than the anchor's reference
 minus the noise margin; the floor returns to the anchor in 8 budgeted strides. The margin is
-`max(RENEWAL_VETO_MARGIN = 0.1, 2σ)` over the last 8 renewals (a ring buffer — the WindowClimber
+`max(MIN_TIDAL_EVIDENCE = 0.1, 2σ)` over the last 8 renewals (a ring buffer — the WindowClimber
 `Rates` deviation): noisy workloads need a wider evidence gap before a veto/undo fires, quiet ones
 keep the floor margin.
 
@@ -92,12 +99,12 @@ layer that produced it — a crashed raise must not delay the corrective release
 release the re-probe. The empty-set collapse resets both.
 
 **Crash-run ladder pricing.** `RetryLadder.crashStreak` + `PROBE_CRASH_ESCALATION = 2`: `crash()`
-holds the rung (the wait stays at `max(PROBE_BACKOFF_INITIAL = 4, rung)`, refractory hold while
+holds the rung (the wait stays at `max(TIDAL_BACKOFF_INITIAL = 4, rung)`, refractory hold while
 unpaid) — probe damage and an exogenous shift are indistinguishable on one crash, so it is not
 priced as a failed experiment — and only a consecutive crash run doubles it (4→8→16→32).
 `fail()` (budget spent without a verdict) always doubles and resets the run; `reward()` resets it.
 
-**Movement decays the audit run.** Distress and release movement apply `auditAge = max(0, age-1)`
+**Movement decays the audit run.** Distress and release movement apply `auditTides = max(0, tides-1)`
 instead of zeroing it, so one floor move per wait can no longer suppress audits forever. A healthy
 audit (8 still tides) or saturation (≥ 90% of `hotLimit`) arms a release walk.
 
@@ -146,6 +153,20 @@ below `0 - margin`.
 - **Keep the cumulative raise `crashStreak`.** `FAILED` stays dead code and the constant's
   "consecutive" contract stays wrong. Rejected — the streak now resets on at-target tides, truly
   consecutive and symmetric with the release direction.
+- **Keep the bold-driver decay for the release stride.** The pre-existing law (16 initial step,
+  ×0.98 per tide) is time-based — bolder at walk start, cautious as it runs — but blind to the
+  renewal signal: it descends at ~16/tide whether the set is fully healthy or already below the
+  crash bar, so a failing descent plunges ~46 units before the 3-tide crash verdict fires.  The
+  sandbox (`law_sim`, WindowClimber transfer) showed the fixed decay compounded over long runs
+  collapses any signal-driven stride, while a signal-priced stride alone cannot traverse — it
+  needs an external stop, which the walk budget and verdicts provide. Replaced by the noise-
+  priced stride law.
+- **Target-anchored stride (`renewal - 0.5`).** The fixed goal target is the wrong reference for
+  the release direction: the crash bar anchors at `baseRenewal - margin` (≈0.9 against a 1.0
+  base), so the walk crashes long before renewal approaches 0.5 — the 0.5 anchor never binds and
+  the law would stride at the ceiling straight through the boundary. Rejected; the stride
+  anchors at the walk's own crash bar, so the gain self-converges exactly where the verdict
+  needs fine sampling.
 
 ## Consequences
 
@@ -153,17 +174,22 @@ below `0 - margin`.
    release walks and the anchor veto all have reachable arming states, each evidence-based and each
    released by another branch (audit/admit/saturation/veto).
 2. **A failed experiment is bounded and undone; a healthy one is confirmed, not assumed.** Every
-   undo returns to the frozen base (or the anchor) in `GOVERNOR_RETURN_BUDGET = 8` strides; every
+   undo returns to the frozen base (or the anchor) in `RETURN_BUDGET = 8` strides; every
    confirm keeps the position and rewards the layer's ladder.
 3. **Behavior changes are bounded.** No veto can fire before the first walk confirmation; an
    unplanted anchor is inert; the raise crash needs 3 consecutive below-target tides; the ladder
    doubles only on a consecutive crash run or a budget-spent failure.
 4. **Sanity results preserved.** The simulator still reports `driftRotation floor=[10,10]` and
    `stableZipf avgRenewal=1.00` — healthy workloads never move the floor.
-5. **Tests.** `WaveCounterAdaptiveTest` (24 tests, including the no-reflection retreat test, the
-   per-direction backoff isolation and the crash-run escalation) plus the full common module (1762
-   tests) are green. Design changes were validated first on simulated sequences in a desktop
-   sandbox before porting.
+5. **Tests.** `WaveCounterAdaptiveTest` (26 tests, including the no-reflection retreat test, the
+   per-direction backoff isolation, the crash-run escalation and the release-stride law) plus the
+   full common module (1848 tests) are green. Design changes were validated first on simulated
+   sequences in a desktop sandbox before porting.
 6. **Incidental cleanups landed with the rework:** the four near-identical steal+putIfAbsent+add
    merge sites are one `mergeKey` helper; promotion candidates cache their avalanched hash; and
    `estimatedSizeOfKeysCount()` reads the O(1) counter instead of the CHM `size()`.
+7. **The release descent is signal-priced.** Below-bar tides creep (the pre-crash descent is
+   bounded at ~24 units vs ~46 under the bold driver), at-bar renewals converge the walk into the
+   decision zone where the verdict samples at fine granularity (it confirms above the seed
+   instead of plunging to it), and comfortably healthy sets descend at the 2x stride ceiling
+   within the walk budget.
