@@ -54,6 +54,10 @@ class ZetaTest {
   void setUp() {
     hotKeyCache = mock(HotKeyCache.class);
     appDetector = mock(HotKeyDetector.class);
+    // Mirror the real TtlPolicy behaviour (softTtlMs > 0 is used as-is). Without this stub the
+    // mock default 0 would collapse every refresh interval to 1ms, turning destroy_shouldNotThrow
+    // into a race between the scheduled refresh and the cancellation.
+    when(hotKeyCache.resolveEffectiveSoftTtl(anyLong())).thenAnswer(invocation -> invocation.getArgument(0));
     zeta = new Zeta(hotKeyCache, appDetector);
   }
 
