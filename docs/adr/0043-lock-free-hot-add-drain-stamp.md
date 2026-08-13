@@ -45,7 +45,7 @@ The atomic protocol closes this by construction: the take (`getAndSet(0)`) and t
 
 Because the take and the add are serialized per slot, the residual is always precisely the un-merged delta — the information gap of the non-atomic variant is gone by construction, and the recovery is exact in both interleavings.
 
-The `ReentrantLock` remains as the slow path — serializing the deliverer's drains, the writer's batch discharge, the tag-driven reconcile, the residual recovery and `reset()` — and the deliverer still `tryLock()`-skips a busy map. `Ceils` became an inner class to reach `reconcile`/`mergeResidual`; `destroy()` merges via the tag-driven reconcile (a fast add can be mid-flight at shutdown).
+The `ReentrantLock` remains as the slow path — serializing the deliverer's drains, the writer's batch discharge, the tag-driven reconcile, the residual recovery and `reset()` — and the deliverer still `tryLock()`-skips a busy map. `Ceils` became an inner class to reach `reconcile`/`mergeResidual`; `destroy()` merges live writers via the tag-driven reconcile (a fast add can be mid-flight at shutdown) and dead writers via the lock-free `drainDead` path (a dead thread never releases its lock, so the blocking sweep must not be used there).
 
 ## Considered Options
 
@@ -62,7 +62,7 @@ The `ReentrantLock` remains as the slow path — serializing the deliverer's dra
 1. **Hot-path throughput +60% vs the locked baseline** (hotonly 550-657M ops/s vs 350-394M; the first lock-free variant measured +67% at 582-673M — the atomic getAndAdd costs ~8-10% on the pure hot path, skewed +35-40%, cold path neutral; interleaved A/B on 16 threads, JDK 21).
 2. **Correctness model:** the hot path is exact — a racing fast add is recovered (tag-driven reconcile or 0-return residual recovery) into the current table, never lost, never double-counted; at most one tide of delay.
 3. **The ordering is load-bearing:** bit-after-write + release/acquire + atomic slot takes. Future changes to the occupied bitmap, the slot writes, the stamp transitions or the counts' atomicity must preserve them.
-4. **Reconcile/recovery cost:** a 256-slot tag scan per writer per racing tide + a per-writer 0-return recovery (µs-scale, bounded); `destroy()` pays one reconcile per writer.
+4. **Reconcile/recovery cost:** a 256-slot tag scan per writer per racing tide + a per-writer 0-return recovery (µs-scale, bounded); `destroy()` pays one reconcile per live writer and one lock-free drain per dead writer.
 5. **Verified:** all 1742 common-module tests green on the final variant; the racing-drain stress (`tryLockSkip_shouldNeverLoseHotCounts`) 0/60 vs 2/20 and 4/40/11/60 for the broken variants; benchmark harness removed after the run.
 
 ## Measurement: paradigm comparison (three paradigms table)
@@ -99,3 +99,7 @@ Re-measured 2026-08-10 on the original `CounterBench` harness (JDK 26, 16 logica
 | | ATOMIC | 13 | 29.4 | 34.5 | 37.1 | 43.1 | 45.8 |
 
 Reading: cold-path workloads are identical code in both variants and measure neutral (C median 90.8 vs 91.4 — a measurement sanity check). The atomic cost appears only on hot-path workloads: A −10.5%, E −9.7% (median). B is bimodal in BOTH variants (the 64 hot keys either fully promote or fall back to the cold path, 71-597M range) — the medians sit between the modes and the p25 gap (266.8 vs 330.0) suggests the atomic variant's promotion is marginally more stable, within noise. The ~10-12% hot-path margin is the price of the exact contract; the locked baseline sits ~40% below both (see consequence 1).
+
+## Refinement (2026-08-12): asymmetric drainStamp access modes
+
+The drain stamp's access modes were asymmetric-ized for weak memory models: the writer's FIRST read (fast/slow decision + post-check baseline) became OPAQUE via a `VarHandle`, while the post-check and all writes stay VOLATILE. The totality argument that closes the escape cycle depends only on the post-check's total-order participation (a stale first read can only ADD spurious reconciles — the tag-driven sweep is correct and bounded — never remove a legitimate race detection), so the "never loss, never double" contract is unchanged. On AArch64 the first read drops from `ldar` to `ldr` per hot add (~0.5-1ns); on x86 it is a no-op (both lower to `mov`). Re-verified: the full doublebuffer suite plus 5 consecutive runs of the racing-drain stress (`tryLockSkip_shouldNeverLoseHotCounts`) that caught the original race — all green.

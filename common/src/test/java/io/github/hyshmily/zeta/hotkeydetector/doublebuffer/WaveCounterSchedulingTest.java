@@ -17,6 +17,8 @@ package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.hyshmily.zeta.util.TimeSource;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -78,13 +80,22 @@ class WaveCounterSchedulingTest {
   /**
    * Coalescing boundary: a nudge arriving just before the pending fire
    * (still in the future, within the tolerance band) is skipped.
+   *
+   * <p>Time is simulated instead of slept: {@code Thread.sleep} is
+   * timer-granular and overshoots under CI load (the pending 50ms fire
+   * would expire and the nudge would legitimately re-arm), making the
+   * boundary race nondeterministic.  Planting {@code nextFireTimeMs} at
+   * {@code now + 20ms} exercises the same comparison on the same code
+   * path with no wall-clock dependency.
    */
   @Test
   void nudge_withinToleranceBandOfPendingFire_skips() throws Exception {
     counter.afterPropertiesSet();
     counter.nudgeTide(); // pending fires at now + 50ms
-    Thread.sleep(30);
-    counter.nudgeTide(); // proposed now + 50ms, pending in ~20ms: in band
+    Field f = WaveCounter.class.getDeclaredField("nextFireTimeMs");
+    f.setAccessible(true);
+    f.setLong(counter, TimeSource.monotonicMillis() + 20L); // pending in ~20ms
+    counter.nudgeTide(); // proposed now + 50ms: 30ms later than pending: in band
     assertThat(scheduler.delaysMillis).containsExactly(500L, 50L);
   }
 

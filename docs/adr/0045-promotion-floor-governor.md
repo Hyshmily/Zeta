@@ -49,7 +49,11 @@ divided by active slots (probed: healthy single-key set 1.0, one-drifter pair 0.
 **Saturated visibility.** The renewal numerator, the hot-set earnings and the blocked count are
 computed on EVERY promoted tide (`distinctKeys >= MIN_PROMOTION_KEYS`), including saturated ones:
 the saturated path enumerates the post-decay membership directly (one O(n) pass over the snapshot,
-deliverer-only). The governor now sees the full-set distress the scan gate hid.
+deliverer-only). The governor now sees the full-set distress the scan gate hid. Since 2026-08-12
+(adversarial audit M2) the saturated numerator counts ONLY beacon members that earned the
+threshold — snapshot keys that are not members are cold keys waiting for a slot, and counting them
+inflated renewal (1024 stale members + 600 new earners read 0.586 ≥ target, hiding the squatting
+signal); the corrected reading is ~0, and the set self-heals via the 2-tide decay.
 
 **Renewal-disambiguated blockedKeys.** Admit-on-block lives on the HEALTHY branch and only drops:
 `blockedKeys > 0 && floor > max(seed, boundary)` lowers the floor to the boundary in one move (the
@@ -78,7 +82,10 @@ the decision separate from the mutation.
   the frozen-set signal): confirms only after the set holds the target across
   `TIDAL_CRASH_PERSISTENCE` consecutive at-target tides (durable — a single lucky tide must not
   keep a raise); 3 consecutive below-target tides CRASH it; spending the 16-tide budget without a
-  verdict prices it as FAILED. The bold driver steps only while the set is still distressed;
+  verdict prices it as FAILED. The bold driver steps only while the set is still distressed —
+  and since ADR-0046 only while SOME member still earns the threshold (`0 < renewal < target`):
+  a renewal of 0 means the set is quiet or dead, and climbing cannot help it (the un-gated climb
+  outran the earners on oscillating workloads and self-inflicted the empty-set collapse);
   at-target tides hold so the confirmation streak accumulates. The confirm plants the veto anchor
   at the position the raise left from, so a later distress can undo a raise that failed to recover
   the signal.
@@ -96,7 +103,9 @@ keep the floor margin.
 **Per-direction retry ladders.** The raise and release directions own one `RetryLadder` each
 (Caffeine's `Ladder`: rung + tides-left + crash run); an ending may only deepen the ledger of the
 layer that produced it — a crashed raise must not delay the corrective release, nor a crashed
-release the re-probe. The empty-set collapse resets both.
+release the re-probe. The empty-set collapse resets both — except since ADR-0046 a collapse that
+kills an in-flight walk prices the walk's OWN ladder (the backoff survives the reset, throttling
+the oscillation probe loop; a genuine regime change with no walk keeps the full reset).
 
 **Crash-run ladder pricing.** `RetryLadder.crashStreak` + `PROBE_CRASH_ESCALATION = 2`: `crash()`
 holds the rung (the wait stays at `max(TIDAL_BACKOFF_INITIAL = 4, rung)`, refractory hold while
@@ -112,8 +121,10 @@ audit (8 still tides) or saturation (≥ 90% of `hotLimit`) arms a release walk.
 the whole distribution: the floor collapses to the seed immediately, any in-flight walk or budgeted
 return is cancelled (a stale undo would drag the floor back toward its old base), and the full
 regime state — distress history, audit run, step, veto anchor, both ladders, the renewal ring — is
-reset so the new regime starts from a blank slate. An unplanted anchor is inert: renewal is never
-below `0 - margin`.
+reset so the new regime starts from a blank slate. Since ADR-0046 the ladder reset is conditional:
+a collapse that killed an in-flight walk is the walk's own fault (the raised floor outran the
+earners) and is priced as FAILED with the backoff restored after the reset. An unplanted anchor is
+inert: renewal is never below `0 - margin`.
 
 ## Considered Options
 

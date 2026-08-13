@@ -172,7 +172,9 @@ class WaveCounterRecyclingTest {
    * Counting-beacon drift expiry (2026-08-07): a promoted key that stops
    * being counted must leave the hot set within a few tides (the halving
    * decay) — 2-tide memory, so it survives exactly one quiet tide and is
-   * gone by the third.
+   * gone by the third.  The quiet tides count >= MIN_PROMOTION_KEYS
+   * distinct keys so the decay actually runs (sub-minimum snapshots freeze
+   * evidence by design — see the decay gate).
    */
   @Test
   void drift_promotedKey_shouldExpireWithinFewTides() {
@@ -183,7 +185,9 @@ class WaveCounterRecyclingTest {
     invokeDeliver(counter); // tide 1: promote
     assertThat(isBeaconMember(counter, "top")).as("promoted at tide 1").isTrue();
     for (int t = 2; t <= 3; t++) {
-      counter.count("k0", 1); // keep tides alive, "top" stays quiet
+      for (int i = 0; i < 20; i++) {
+        counter.count("k" + i, 1); // >= MIN_PROMOTION_KEYS so the decay runs; "top" stays quiet
+      }
       invokeDeliver(counter);
     }
     assertThat(isBeaconMember(counter, "top")).as("quiet key must leave the hot set by tide 3").isFalse();
@@ -442,6 +446,125 @@ class WaveCounterRecyclingTest {
   }
 
   /**
+   * Decay gate (2026-08-12, adversarial audit H2): a sub-minimum snapshot
+   * (< {@code MIN_PROMOTION_KEYS} distinct keys) skips the promotion scan,
+   * so the halving decay must be skipped with it — otherwise the whole hot
+   * set decays to zero within two tides with nothing to re-seed it
+   * (evidence 2→1→0), silently routing every key down the cold path for
+   * the duration of the small workload.  Evidence stays frozen, exactly
+   * like empty tides (ADR-0038).
+   */
+  @Test
+  void smallWorkload_hotSetShouldSurvive() {
+    markHot(counter, "hot");
+    for (int t = 0; t < 3; t++) {
+      counter.count("hot", 80);
+      for (int i = 0; i < 4; i++) {
+        counter.count("k" + i, 5);
+      }
+      invokeDeliver(counter);
+      assertThat(isBeaconMember(counter, "hot"))
+        .as("sub-minimum tides must not strip the hot set (tide " + (t + 1) + ")")
+        .isTrue();
+    }
+  }
+
+  /**
+   * Drain signal on the cross-thread recovery sweep (2026-08-12,
+   * adversarial audit H1): {@code destroy()} calls
+   * {@code Ceils.reconcile} from the deliverer side, and the sweep must
+   * flip the drainStamp exactly like {@code tryDrainInto} — otherwise a
+   * writer's lock-free fast add races the sweep with no stamp change to
+   * trigger the post-check recovery.  Asserts the flip-restore (fresh even
+   * epoch) and that the sweep drains the map into the shared table.
+   */
+  @Test
+  void reconcile_shouldFlipAndRestoreDrainStamp() throws Exception {
+    markHot(counter, "k");
+    Thread w = new Thread(() -> counter.count("k", 1));
+    w.start();
+    w.join();
+    Thread.sleep(10);
+    @SuppressWarnings("unchecked")
+    ConcurrentHashMap<Thread, Object> registry =
+      (ConcurrentHashMap<Thread, Object>) registryField(counter).get(counter);
+    Object ceils = registry.get(w);
+    Field stampField = ceils.getClass().getDeclaredField("drainStamp");
+    stampField.setAccessible(true);
+    long before = (long) stampField.get(ceils);
+
+    // The cross-thread recovery path destroy() uses (WaveCounter.reconcile).
+    Method m = WaveCounter.class.getDeclaredMethod("reconcile", ceils.getClass());
+    m.setAccessible(true);
+    m.invoke(counter, ceils);
+
+    long after = (long) stampField.get(ceils);
+    assertThat(after).as("stamp restored to a fresh even epoch (s+2)").isEqualTo(before + 2);
+    @SuppressWarnings("unchecked")
+    ConcurrentHashMap<String, LongAdder> table =
+      (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(counter);
+    assertThat(table.get("k").sum()).as("reconcile merges the residual into the shared table").isEqualTo(1);
+    Field sizeField = ceils.getClass().getDeclaredField("size");
+    sizeField.setAccessible(true);
+    assertThat((int) sizeField.get(ceils)).as("local map drained").isZero();
+  }
+
+  /**
+   * Periodic-tide drain bookkeeping: {@code Ceils.tryDrainInto} must reset
+   * both the local-map size and the flush clock after {@code waveTo},
+   * exactly like {@code drainInto}, {@code drainDead} and
+   * {@code reconcile}.  Without the size reset a live hot writer stays
+   * "non-empty" forever, so every later tide pays the lock/drain-stamp/
+   * in-flight path for an already-empty map; without the flush-clock reset
+   * the next sampled hot add can also discharge prematurely.
+   */
+  @Test
+  void tryDrainInto_shouldResetSizeAndFlushClock() throws Exception {
+    markHot(counter, "k");
+    counter.count("k", 3);
+
+    @SuppressWarnings("unchecked")
+    ConcurrentHashMap<Thread, Object> registry =
+      (ConcurrentHashMap<Thread, Object>) registryField(counter).get(counter);
+    Object ceils = registry.get(Thread.currentThread());
+    assertThat(ceils).as("current writer must be registered").isNotNull();
+
+    Field sizeField = ceils.getClass().getDeclaredField("size");
+    sizeField.setAccessible(true);
+    Field flushField = ceils.getClass().getDeclaredField("lastFlushMillis");
+    flushField.setAccessible(true);
+    assertThat((int) sizeField.get(ceils)).as("precondition: local map non-empty").isPositive();
+    flushField.setLong(ceils, 0L);
+
+    @SuppressWarnings("unchecked")
+    ConcurrentHashMap<String, LongAdder> table =
+      (ConcurrentHashMap<String, LongAdder>) reservoirField(counter).get(counter);
+    Field mergesField = WaveCounter.class.getDeclaredField("mergesInFlight");
+    mergesField.setAccessible(true);
+    Object merges = mergesField.get(counter);
+    Field ebbField = WaveCounter.class.getDeclaredField("ebbReservoir");
+    ebbField.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    ConcurrentHashMap<String, LongAdder> ebb =
+      (ConcurrentHashMap<String, LongAdder>) ebbField.get(counter);
+
+    Method m = ceils
+      .getClass()
+      .getDeclaredMethod(
+        "tryDrainInto",
+        ConcurrentHashMap.class,
+        WaveCounter.PaddedMergesInFlight.class,
+        ConcurrentHashMap.class
+      );
+    m.setAccessible(true);
+    assertThat((boolean) m.invoke(ceils, table, merges, ebb)).as("tryLock drain should succeed").isTrue();
+
+    assertThat((int) sizeField.get(ceils)).as("tryDrainInto must reset size").isZero();
+    assertThat((long) flushField.get(ceils)).as("tryDrainInto must re-arm the flush clock").isPositive();
+    assertThat(table.get("k").sum()).as("drained hot count must reach the shared table").isEqualTo(3);
+  }
+
+  /**
    * Ceils pooling: a dead writer's fully-drained local map is returned to
    * the pool at the tide, and the FIRST hot count of a NEW writer claims
    * the very same instance instead of allocating (identity, not a copy) —
@@ -524,6 +647,40 @@ class WaveCounterRecyclingTest {
     assertThat(captured.get(captured.size() - 1)).as("the 111th key is dropped").hasSize(110);
   }
 
+  /**
+   * Saturated renewal numerator (2026-08-12, adversarial audit M2): in
+   * saturation (remain >= hotLimit, scan skipped) the renewal must count
+   * ONLY beacon members that earned the threshold — cold keys waiting for
+   * a slot are not "active hot slots".  With 1200 stale members (≈1178
+   * active bit1 rooms after collision) and 600 new earners, the old
+   * numerator read 600/≈1178 ≈ 0.51 (healthy) and the squatting evidence
+   * never fired; the corrected numerator reads ~0 (distress), and the set
+   * self-heals by the 2-tide decay.
+   */
+  @Test
+  void saturated_renewal_shouldCountOnlyMembers() throws Exception {
+    for (int i = 0; i < 1200; i++) {
+      markHot(counter, "m" + i);
+    }
+    for (int i = 0; i < 600; i++) {
+      counter.count("k" + i, 100);
+    }
+    invokeDeliver(counter);
+    Object governor = governorOf(counter);
+    Field lunarField = governor.getClass().getDeclaredField("lunarMemory");
+    lunarField.setAccessible(true);
+    double[] lunar = (double[]) lunarField.get(governor);
+    assertThat(lunar[0])
+      .as("renewal counts only members, not the 600 new earners")
+      .isLessThan(0.1);
+  }
+
+  private static Object governorOf(WaveCounter c) throws Exception {
+    Field f = WaveCounter.class.getDeclaredField("moonsTidalForce");
+    f.setAccessible(true);
+    return f.get(c);
+  }
+
   private static java.lang.reflect.Field poolField(WaveCounter c) throws Exception {
     java.lang.reflect.Field f = WaveCounter.class.getDeclaredField("ceilPool");
     f.setAccessible(true);
@@ -532,6 +689,12 @@ class WaveCounterRecyclingTest {
 
   private static java.lang.reflect.Field registryField(WaveCounter c) throws Exception {
     java.lang.reflect.Field f = WaveCounter.class.getDeclaredField("hotRegistry");
+    f.setAccessible(true);
+    return f;
+  }
+
+  private static java.lang.reflect.Field reservoirField(WaveCounter c) throws Exception {
+    java.lang.reflect.Field f = WaveCounter.class.getDeclaredField("reservoir");
     f.setAccessible(true);
     return f;
   }
