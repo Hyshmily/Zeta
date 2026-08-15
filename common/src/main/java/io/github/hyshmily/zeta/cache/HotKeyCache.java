@@ -197,7 +197,9 @@ public class HotKeyCache {
       log.debug("isHot: invalid cacheKey");
       return false;
     }
-    final CacheEntry cacheEntry = entry != null ? entry : (CacheEntry) caffeineCache.getIfPresent(cacheKey);
+    final CacheEntry cacheEntry = entry != null
+      ? entry
+      : (caffeineCache.getIfPresent(cacheKey) instanceof CacheEntry ce ? ce : null);
 
     return (
       (cacheEntry != null &&
@@ -502,7 +504,10 @@ public class HotKeyCache {
             }
             case REVALIDATE -> {
               if (expireManager.ttlPolicy().isSoftExpired(ce)) {
-                caffeineCache.invalidate(nk);
+                // Conditional removal: drop the entry only if it is still the
+                // exact instance examined — a concurrent refresh/broadcast may
+                // have replaced it with a fresh entry that must survive.
+                caffeineCache.asMap().computeIfPresent(nk, (k, v) -> v == raw ? null : v);
                 return loadAndCache(nk, reader, hardTtlMs, softTtlMs, nullCaching, skipReport);
               }
             }
@@ -766,7 +771,20 @@ public class HotKeyCache {
     // ADR-0033: the composite supplier runs inside the SingleFlight execution
     // scope, so concurrent waiters share one (value, probedVersion) pair —
     // the version probe is coalesced exactly like the value load.
-    Optional<VersionedValue> result = singleFlight.load(cacheKey, () -> probeVersioned(cacheKey, reader.get()));
+    Optional<VersionedValue> result;
+    try {
+      result = singleFlight.load(cacheKey, () -> probeVersioned(cacheKey, reader.get()));
+    } catch (RuntimeException e) {
+      if (singleFlight.isBreakerOpen()) {
+        // The breaker has opened (fast-failing source): serve a hard-valid
+        // stale entry if one exists, otherwise fall through to the NullValue
+        // sentinel — the graceful-degradation path. Without this, an
+        // exception-mode failure bypassed mapEmpty entirely and the caller
+        // got an empty result even though stale data sat in L1.
+        return mapEmpty(cacheKey, nullCaching);
+      }
+      throw e;
+    }
 
     if (result.isEmpty()) {
       return mapEmpty(cacheKey, nullCaching);
@@ -2132,7 +2150,14 @@ public class HotKeyCache {
       return val == NullValue.INSTANCE ? null : val;
     } catch (IOException e) {
       log.warn("Failed to decompress cache value for key={}, invalidating", cacheKey, e);
-      caffeineCache.invalidate(cacheKey);
+      // Conditional removal: only drop the entry if it still holds the exact
+      // value that failed to decompress — a concurrently written fresh entry
+      // must not be destroyed by this snapshot-based decision.
+      caffeineCache
+        .asMap()
+        .computeIfPresent(cacheKey, (k, existing) ->
+          existing instanceof CacheEntry ce && ce.getValue() == stored ? null : existing
+        );
       return null;
     }
   }

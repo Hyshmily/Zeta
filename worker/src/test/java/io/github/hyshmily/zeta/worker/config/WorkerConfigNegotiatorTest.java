@@ -101,14 +101,39 @@ class WorkerConfigNegotiatorTest {
     assertThat(configTimestampCounter.get()).isEqualTo(10);
   }
 
+  /**
+   * Equal timestamps are broken by nodeId lexicographic order (mirroring the
+   * fast-lane rules gossip tie-break, ADR-0025): a remote with a LOWER nodeId
+   * loses the tie and is ignored — without this, two Workers configured within
+   * the same millisecond would each ignore the other's heartbeat forever and
+   * keep permanently divergent configs.
+   */
   @Test
-  void shouldIgnoreEqualTimestamp() {
+  void shouldIgnoreEqualTimestampFromLowerNodeId() {
+    configTimestampCounter.set(10);
+    Message msg = createHeartbeatMessage("worker-0", 10);
+
+    negotiator.onHeartbeat(msg);
+
+    verifyNoInteractions(stateMachine);
+    assertThat(configTimestampCounter.get()).isEqualTo(10);
+  }
+
+  /**
+   * The winning side of the equal-timestamp tie: a remote with a HIGHER nodeId
+   * applies at the same timestamp, so simultaneous config edits converge
+   * deterministically instead of diverging forever.
+   */
+  @Test
+  void shouldApplyEqualTimestampFromHigherNodeId() {
     configTimestampCounter.set(10);
     Message msg = createHeartbeatMessage("worker-2", 10);
 
     negotiator.onHeartbeat(msg);
 
-    verifyNoInteractions(stateMachine);
+    verify(stateMachine).setConfirmCount(5);
+    verify(stateMachine).setCoolCount(10);
+    verify(stateMachine).setPreCoolGraceCount(3);
     assertThat(configTimestampCounter.get()).isEqualTo(10);
   }
 
@@ -160,11 +185,12 @@ class WorkerConfigNegotiatorTest {
 
   /**
    * Verifies that a heartbeat with zero config timestamp is skipped when the local
-   * counter is also at zero, because {@code remoteTs <= localTs} (0 <= 0).
+   * counter is also at zero and the remote loses the nodeId tie-break
+   * ({@code "worker-0" < "worker-1"}).
    */
   @Test
-  void shouldSkipConfigWithEqualZeroTimestamp() {
-    Message msg = createHeartbeatMessage("worker-2", 0);
+  void shouldSkipConfigWithEqualZeroTimestampFromLowerNodeId() {
+    Message msg = createHeartbeatMessage("worker-0", 0);
     negotiator.onHeartbeat(msg);
 
     verifyNoInteractions(stateMachine);

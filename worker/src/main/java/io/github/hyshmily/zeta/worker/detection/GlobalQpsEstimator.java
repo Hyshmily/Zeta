@@ -80,12 +80,19 @@ public class GlobalQpsEstimator {
    */
   public GlobalQpsEstimator(long windowDurationMs, int slices) {
     if (slices <= 0) throw new IllegalArgumentException("slices must be positive, got " + slices);
-    if (windowDurationMs < slices) throw new IllegalArgumentException(
-      "windowDurationMs (" + windowDurationMs + ") must be >= slices (" + slices + ") to avoid division by zero"
-    );
     int aligned = slices;
     if ((aligned & (aligned - 1)) != 0) {
       aligned = Integer.highestOneBit(aligned - 1) << 1;
+    }
+    // The pre-alignment guard (windowDurationMs >= slices) is NOT sufficient:
+    // aligning slices UP to the next power of two can push timeMillisPerSlice
+    // to 0 (e.g. durationMs=15, slices=10 -> aligned=16 -> 15/16 = 0), which
+    // would throw ArithmeticException on every addTotal and report Infinity
+    // from getQps, discarding every report batch.
+    if (windowDurationMs < aligned) {
+      throw new IllegalArgumentException(
+        "windowDurationMs (" + windowDurationMs + ") must be >= aligned slices (" + aligned + ") to avoid division by zero"
+      );
     }
     this.windowSize = aligned;
     this.lengthMask = (aligned << 1) - 1;

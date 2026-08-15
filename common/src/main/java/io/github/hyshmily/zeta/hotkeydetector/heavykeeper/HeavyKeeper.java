@@ -613,6 +613,14 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * <p>This operation is invoked automatically by a scheduler at a
    * configured interval (typically 20 seconds).
    *
+   * <p><b>Concurrency:</b> the whole method is {@code synchronized} on the
+   * instance. Two concurrent {@code fading()} calls would both advance the
+   * epoch, halve membership and halve the total twice in one interval (and
+   * skip a window rotation); the scheduler normally serializes this, but the
+   * method is public API and must be safe under direct concurrent use. The
+   * critical section is short (one sketch sweep + one membership sweep) and
+   * runs at most once per decay interval, so the lock has no hot-path cost.
+   *
    * <p>The next-epoch window is zeroed <em>before</em> incrementing the epoch,
    * so concurrent {@link #addToSketch} callers still see the old epoch and
    * write to a different window — eliminating the race where a concurrent
@@ -620,7 +628,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * {@code rotateSketchWindows} then zeroes.
    */
   @Override
-  public void fading() {
+  public synchronized void fading() {
     int nextAw = (int) ((epoch.get() + 1) & windowMask);
     rotateSketchWindows(nextAw);
     epoch.incrementAndGet();

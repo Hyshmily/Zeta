@@ -91,7 +91,7 @@ public class ZetaSchedulingConfiguration {
 
   /**
    * Periodically decay the HeavyKeeper counters for all registered TopK instances.
-   * Controlled by {@code zeta.decay-period} (default 20 seconds).
+   * Runs every 20 seconds (fixed interval, see {@link #scheduleTasks()}).
    */
   void cleanHotKeys() {
     try {

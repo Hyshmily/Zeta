@@ -75,7 +75,7 @@ public class ZetaFacadeAutoConfiguration {
    * Wrapped in a {@link SafeScheduledExecutorService} so a throwing periodic task never
    * kills the cadence of the shared scheduler.
    */
-  @Bean("hotKeyScheduler")
+  @Bean(name = "hotKeyScheduler", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "hotKeyScheduler")
   public ScheduledExecutorService hotKeyScheduler() {
     return new SafeScheduledExecutorService(

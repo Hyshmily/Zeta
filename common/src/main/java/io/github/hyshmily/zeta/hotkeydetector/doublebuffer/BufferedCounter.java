@@ -404,6 +404,9 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     for (int i = 0; i < MAXS_CEILS; i++) {
       CounterBuffer sp = spillCeils[i].getAndSet(null);
       if (sp != null) {
+        // Wait for already-ticketed writers to finish before the drain (same
+        // ticket protocol as the flusher) so no count lands after it.
+        waitSpillCeilReaders(i);
         sp.drain();
       }
     }
@@ -452,6 +455,13 @@ public class BufferedCounter implements InitializingBean, Destroyable {
     }
 
     CounterBuffer newBuf = new CounterBuffer();
+    // Seal BEFORE the swap, mirroring the flusher's seal-before-drain protocol
+    // (flushStandby): a count() that read the old reference after this point
+    // sees the seal and spins onto the new active instead of landing in a
+    // buffer that is about to be handed to the flusher. Without the seal, a
+    // writer could land in the swapped-out buffer after the flush queue
+    // drained it — losing its count for up to a full flush interval.
+    buffer.sealed = true;
     if (!activeCeils[idx].compareAndSet(buffer, newBuf)) {
       // Lost: someone else swapped active while we were setting up spill.
       // Merge spill into the winner's current active and clean up.  Writers
@@ -464,7 +474,7 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
     enqueueOrDrop(buffer);
 
-    if (!drainInTo(spill, newBuf)) {
+    if (!drainInTo(spill, activeCeils[idx].get())) {
       // drain failed to complete in a reasonable number of passes, so we leave the spill
       if (spillCeils[idx].compareAndSet(spill, null)) {
         //if CAS successfully cleared, we can safely offer the spill to flushQueue for async draining
@@ -483,7 +493,11 @@ public class BufferedCounter implements InitializingBean, Destroyable {
       // the final drain, proving no add() can land after it.  On timeout the
       // enqueueOrDrop fallback below still catches stragglers.
       waitSpillCeilReaders(idx);
-      drainInTo(spill, newBuf);
+      // Merge into the CURRENT active reference: the flusher may have swapped
+      // newBuf out (seal + drain) while we were draining — merging into the
+      // orphaned newBuf would lose these counts, while the current active is
+      // guaranteed to be drained by a future cycle.
+      drainInTo(spill, activeCeils[idx].get());
       // Safety net: an add() that read the spill reference before the CAS
       // clear but lands after the final drain would be stranded in a detached
       // buffer.  Queueing the spill lets the flusher catch it next cycle
@@ -610,6 +624,10 @@ public class BufferedCounter implements InitializingBean, Destroyable {
 
       CounterBuffer buf;
       while ((buf = flushQueue.poll()) != null) {
+        // Double drain, mirroring the active-buffer protocol below: a count()
+        // that read the old active reference before trySwap's seal can land in
+        // this buffer after the first drain — the second drain catches it.
+        merged = mergeDrain(merged, buf);
         merged = mergeDrain(merged, buf);
       }
 

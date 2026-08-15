@@ -146,9 +146,24 @@ public class CacheSyncListener {
       return;
     }
 
+    long jitterMs = properties.getWarmupJitterMs();
+
+    // The jitter is applied INSIDE the ordered task, not as a pre-enqueue
+    // delay: scheduling the actual submission on the shared scheduler orders
+    // tasks by delay expiry, so two same-key messages with different random
+    // jitters would execute in the OPPOSITE of arrival order — breaking the
+    // dispatcher's per-key FIFO contract (a delayed INVALIDATE could land
+    // after a newer REFRESH). Sleeping inside the task preserves arrival
+    // order (same-key tasks run strictly one after another) while still
+    // spreading the Redis load across instances in time.
     Runnable task = () -> {
       try {
+        if (jitterMs > 0) {
+          Thread.sleep(ThreadLocalRandom.current().nextLong(jitterMs));
+        }
         syncMessageRouter(sm);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
       } catch (Exception e) {
         log.error("Async sync task failed: type={}, key={}, version={}", sm.type(), sm.cacheKey(), sm.version(), e);
       }
@@ -160,9 +175,7 @@ public class CacheSyncListener {
     byte[] body = msg.getBody();
     int weight = 1 + (body == null ? 0 : body.length >> 10);
 
-    long jitterMs = properties.getWarmupJitterMs();
-    long delay = jitterMs > 0 ? ThreadLocalRandom.current().nextLong(jitterMs) : 0L;
-    dispatcher.submitWithWeight(sm.cacheKey(), task, weight, delay);
+    dispatcher.submitWithWeight(sm.cacheKey(), task, weight);
   }
 
   /**

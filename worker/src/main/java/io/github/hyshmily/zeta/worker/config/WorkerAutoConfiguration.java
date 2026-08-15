@@ -690,7 +690,13 @@ public class WorkerAutoConfiguration {
    *
    * <p>The learner runs at the interval specified by
    * {@code zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms}.
-   * The returned placeholder bean keeps the scheduled task alive in the context.
+   * The first run fires immediately (initial delay 0) so that when
+   * {@code zeta.worker.hot-threshold} is unset — the detector threshold sits
+   * at {@code Long.MAX_VALUE}, where NO key can ever be promoted — the
+   * ratio-based threshold is installed as soon as the learner's own learning
+   * period elapses. With the initial delay equal to the interval, the first
+   * threshold could only be applied after ~60s of total blindness. The
+   * returned placeholder bean keeps the scheduled task alive in the context.
    *
    * @param learner    the threshold learner to schedule
    * @param properties worker configuration for the recalculation interval
@@ -706,7 +712,7 @@ public class WorkerAutoConfiguration {
     try {
       scheduler.scheduleAtFixedRate(
         learner,
-        properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
+        0L,
         properties.getGlobalQpsDynamicThreshold().getRecalculateIntervalMs(),
         TimeUnit.MILLISECONDS
       );

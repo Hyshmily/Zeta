@@ -250,7 +250,7 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
       return;
     }
 
-    caffeineCache
+    Object computed = caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
         // DCL second check – atomic with to write
@@ -292,8 +292,10 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
         );
       });
     log.debug("Refreshed by sync: {}", cacheKey);
-    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent(cacheKey);
-    if (entry != null) {
+    // Use the compute's own result instead of re-reading the cache: a
+    // concurrent INVALIDATE/eviction between the compute and a getIfPresent
+    // could otherwise deliver a stale or null entry to the hooks.
+    if (computed instanceof CacheEntry entry) {
       fireAfterRefresh(cacheKey, sm, entry);
     }
   }
@@ -321,10 +323,24 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
   /**
    * Record the highest INVALIDATE version for a key.
    * Used to reject stale REFRESH messages that arrive after the INVALIDATE.
+   *
+   * <p>A version-less (0) invalidation carries no ordering information, so it
+   * must NOT be recorded: the old {@code Long.MAX_VALUE} watermark made
+   * {@link #isInvalidation} reject every finite-version REFRESH for the full
+   * 10-minute {@code recentInvalidated} TTL, and because the watermark is
+   * only cleared when a refresh proceeds, the key could never be re-warmed by
+   * peers. A post-invalidation REFRESH loads the current value from Redis at
+   * execution time anyway, so blocking it buys nothing.
+   *
+   * @param key the invalidated cache key
+   * @param version the data version of the invalidation, or {@code 0} for a
+   *                version-less (clean) invalidation
    */
   private void recordInvalidation(String key, long version) {
-    long watermark = (version == 0L) ? Long.MAX_VALUE : version;
-    recentInvalidated.asMap().merge(key, watermark, Math::max);
+    if (version <= 0L) {
+      return;
+    }
+    recentInvalidated.asMap().merge(key, version, Math::max);
   }
 
   /**

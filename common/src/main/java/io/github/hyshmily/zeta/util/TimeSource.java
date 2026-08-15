@@ -59,7 +59,7 @@ public final class TimeSource {
    * Called automatically during {@code ZetaFacadeAutoConfiguration}
    * initialisation.
    */
-  @SuppressWarnings("BusyWait")
+  @SuppressWarnings("all")
   public static void start() {
     if (threadRunning.compareAndSet(false, true)) {
       if (threadTryCount.incrementAndGet() == 1) {
@@ -69,7 +69,14 @@ public final class TimeSource {
       }
       Thread t = new ZetaThreadFactory("TimeSource").newThread(() -> {
         while (threadRunning.get()) {
-          currentMillis = System.currentTimeMillis();
+          // Monotonic floor: a backward NTP step must never make the cached
+          // wall clock jump backwards. Consumers compute deltas like
+          // hardExpireAt - now and Snowflake's clock-backwards check against
+          // this source; a backwards step would render those negative (early
+          // expiry, spurious clock-moved-backwards exceptions). Clamping to
+          // the last observed value keeps the cached clock monotonic; it
+          // catches up naturally once the wall clock moves past the floor.
+          currentMillis = Math.max(currentMillis, System.currentTimeMillis());
           try {
             Thread.sleep(5);
           } catch (InterruptedException ignored) {

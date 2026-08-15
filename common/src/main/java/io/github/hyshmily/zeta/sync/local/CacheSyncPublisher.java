@@ -234,8 +234,12 @@ public class CacheSyncPublisher {
         String json = OBJECT_MAPPER.writeValueAsString(batch);
 
         // 1s dedup on the payload to avoid flooding peers with identical
-        // batch invalidations (e.g. rule hot-reload).
-        String dedupKey = "INVALIDATE_ALL:" + Integer.toHexString(Objects.hash(json));
+        // batch invalidations (e.g. rule hot-reload). The key mixes the
+        // payload length into the 32-bit hash, so two different payloads
+        // collide only when they share both the length and the hash —
+        // a plain Objects.hash alone would silently suppress one batch's
+        // invalidation on a 32-bit collision.
+        String dedupKey = "INVALIDATE_ALL:" + json.length() + ":" + Integer.toHexString(Objects.hash(json));
         if (invalidateAllDedup.getIfPresent(dedupKey) != null) {
           log.debug("Skip duplicate broadcastInvalidateAll batch (hash {})", dedupKey);
           continue;
@@ -248,7 +252,10 @@ public class CacheSyncPublisher {
 
         rabbitTemplate.send(properties.getExchangeName(), "", message);
         invalidateAllDedup.put(dedupKey, Boolean.TRUE);
-      } catch (AmqpException | JsonProcessingException e) {
+      } catch (RuntimeException | JsonProcessingException e) {
+        // RuntimeException covers AmqpException and any unchecked failure from
+        // a closed/initializing template — the documented contract is
+        // "failures are logged and do not propagate to the caller".
         log.error("Failed to serialize batch invalidate keys", e);
       }
     }
@@ -336,19 +343,41 @@ public class CacheSyncPublisher {
     }
     String compositeKey = degraded ? "D:" + type + ":" + cacheKey : type + ":" + cacheKey;
 
-    Long current = recentBroadcasts.getIfPresent(compositeKey);
-    if (current != null && current >= version) {
+    // Atomic claim: check-and-store in one compute so two concurrent senders
+    // with versions 5 and 3 cannot both pass the check and let the stale 3
+    // land last (which would have allowed a later duplicate send of 4).
+    Long[] previous = new Long[1];
+    boolean[] claimed = new boolean[1];
+    recentBroadcasts
+      .asMap()
+      .compute(compositeKey, (k, current) -> {
+        if (current != null && current >= version) {
+          return current;
+        }
+        previous[0] = current;
+        claimed[0] = true;
+        return version;
+      });
+
+    if (!claimed[0]) {
       log.debug(
-        "Skip sync due to recent send with same or newer version: compositeKey={}, oldVersion={}, newVersion={}",
+        "Skip sync due to recent send with same or newer version: compositeKey={}, newVersion={}",
         compositeKey,
-        current,
         version
       );
       return;
     }
 
     if (doSend(cacheKey, type, version, degraded)) {
-      recentBroadcasts.put(compositeKey, version);
+      // Success — the compute already stored `version`.
+      log.debug("Sync sent: compositeKey={}, version={}", compositeKey, version);
+    } else {
+      // Publish failed — roll the claim back so a retry within the same
+      // window is still possible (dedup advances only on success; a null
+      // previous value removes the entry entirely).
+      recentBroadcasts
+        .asMap()
+        .computeIfPresent(compositeKey, (k, current) -> Objects.equals(current, version) ? previous[0] : current);
     }
   }
 

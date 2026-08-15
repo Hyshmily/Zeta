@@ -112,7 +112,16 @@ public class RuleMatcherImpl implements RuleMatcher {
   /** Thread-safe list of all active rules, evaluated in order. */
   private volatile List<Rule> rulesList = new CopyOnWriteArrayList<>();
 
-  /** Monotonically increasing version for rule set changes. Never degraded. */
+  /**
+   * Every mutation of the rule set ({@link #addRule}, {@link #removeRule},
+   * {@link #removeRulesByAction}, {@link #clearRules}, {@link #syncRules},
+   * {@link #replaceRules}) is {@code synchronized}. The list reference is
+   * volatile and readers ({@link #evaluateRule}) stay lock-free, but
+   * mutations must not interleave: a local add/remove mutating the current
+   * list concurrently with a sync swap ({@code rulesList = replacement})
+   * would silently lose the local change, and two racing syncs could
+   * overwrite a newer rule set with an older one.
+   */
   private final AtomicLong rulesVersion = new AtomicLong(0L);
 
   /**
@@ -144,7 +153,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    *             {@link Rule#prepare() prepared} before insertion to ensure
    *             its internal pattern is compiled
    */
-  public void addRule(Rule rule) {
+  public synchronized void addRule(Rule rule) {
     Objects.requireNonNull(rule, "rule must not be null");
     if (rule.getPattern() == null || rule.getPattern().isEmpty()) {
       throw new IllegalArgumentException("pattern must not be null or empty");
@@ -185,7 +194,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * @return {@code true} if at least one rule was removed; {@code false}
    *         if no matching rule was found
    */
-  public boolean removeRule(String pattern, RuleAction action) {
+  public synchronized boolean removeRule(String pattern, RuleAction action) {
     boolean removed = rulesList.removeIf(
       existing -> existing.getPattern().equals(pattern) && existing.getAction() == action
     );
@@ -213,7 +222,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * to sibling instances. This ensures that all nodes converge to the
    * empty state.
    */
-  public void clearRules() {
+  public synchronized void clearRules() {
     int before = rulesList.size();
     rulesList.clear();
     rulesVersion.incrementAndGet();
@@ -232,7 +241,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    *               removed regardless of their pattern
    * @return the number of rules removed (zero if no matching rules exist)
    */
-  public int removeRulesByAction(RuleAction action) {
+  public synchronized int removeRulesByAction(RuleAction action) {
     int before = rulesList.size();
     rulesList.removeIf(r -> r.getAction() == action);
     int removed = before - rulesList.size();
@@ -261,7 +270,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    *
    * @param index the zero-based index of the rule to remove
    */
-  public void removeRule(int index) {
+  public synchronized void removeRule(int index) {
     if (index >= 0 && index < rulesList.size()) {
       Rule removed = rulesList.remove(index);
       rulesVersion.incrementAndGet();
@@ -293,7 +302,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * @param incomingVersion the rulesVersion from the incoming message header,
    *                        or {@code 0L} for pre-version broadcasts
    */
-  public void syncRules(String json, long incomingVersion) {
+  public synchronized void syncRules(String json, long incomingVersion) {
     if (incomingVersion > 0L && incomingVersion <= rulesVersion.get()) {
       log.debug("Stale rules sync ignored: incomingVersion={}, localVersion={}", incomingVersion, rulesVersion.get());
       return;
@@ -322,7 +331,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * @param newRules the new rule list; each element is {@link Rule#prepare() prepared} before
    *     insertion, must not be {@code null}
    */
-  public void replaceRules(List<Rule> newRules) {
+  public synchronized void replaceRules(List<Rule> newRules) {
     int oldSize = rulesList.size();
     List<Rule> replacement = new CopyOnWriteArrayList<>();
     newRules.forEach(r -> {

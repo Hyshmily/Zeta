@@ -126,6 +126,14 @@ public class WorkerHeartbeatVerifier {
     boolean ownsScheduler
   ) {
     this.rabbitTemplate = rabbitTemplate;
+    // The configured per-PING timeout must actually bound the wait: without
+    // setReplyTimeout the effective bound is the RabbitTemplate's default
+    // reply timeout, so the documented "probe round ≈ pingTimeoutMs × N"
+    // budget was wrong and a hung broker stalled probes far longer. The
+    // injected template is dedicated to verify PING/PONG traffic, so this
+    // setting is scoped to it (replyTimeout only affects RPC-style
+    // sendAndReceive calls; fire-and-forget sends are unaffected).
+    rabbitTemplate.setReplyTimeout(pingTimeoutMs);
     this.healthView = healthView;
     this.appInstanceId = appInstanceId;
     this.verifyIntervalMs = verifyIntervalMs;
@@ -297,10 +305,14 @@ public class WorkerHeartbeatVerifier {
    */
   public void verifySuspectedWorkers() {
     try {
+      // Snapshot the alive set once: getAliveWorkerIds() streams every health
+      // record into a fresh HashSet, so calling it per suspected candidate
+      // would be O(N²) record scans + Set allocations per verification round.
+      Set<String> aliveWorkers = healthView.getAliveWorkerIds();
       Set<String> suspected = healthView
         .getAllWorkerIds()
         .stream()
-        .filter(id -> !healthView.getAliveWorkerIds().contains(id))
+        .filter(id -> !aliveWorkers.contains(id))
         .filter(id -> healthView.getVerifyFailures(id) < MAX_RETRY)
         .collect(Collectors.toSet());
 

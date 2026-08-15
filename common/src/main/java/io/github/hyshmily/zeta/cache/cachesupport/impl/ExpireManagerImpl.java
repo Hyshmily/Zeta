@@ -243,7 +243,13 @@ public class ExpireManagerImpl implements ExpireManager {
   @Override
   public boolean invalidateIfIsLogicallyExpired(String cacheKey, Object raw) {
     if (raw instanceof CacheEntry ce && ttlPolicy.isLogicallyExpired(ce)) {
-      caffeineCache.invalidate(cacheKey);
+      // The snapshot the caller examined is expired, so the caller must reload.
+      // The removal itself is best-effort and identity-guarded: a concurrent
+      // write (broadcast, putThrough, refresh) may have replaced the snapshot
+      // with a fresh entry since it was read — that fresh entry must not be
+      // destroyed by this snapshot-based decision (the reload path replaces it
+      // with an equally fresh value instead).
+      caffeineCache.asMap().computeIfPresent(cacheKey, (k, existing) -> existing == raw ? null : existing);
       log.debug("Cache entry logically expired during processing, reloading: {}", cacheKey);
       return true;
     }

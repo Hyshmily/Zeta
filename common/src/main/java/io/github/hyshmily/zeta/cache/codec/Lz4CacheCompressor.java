@@ -78,6 +78,15 @@ public class Lz4CacheCompressor implements CacheCompressor {
   }
 
   private Object wrapString(String s) {
+    // Char-count fast path: the common small-value case must not pay a full
+    // UTF-8 encode + byte[] allocation for a length check that then discards
+    // it. Char count is an approximation of byte length for multi-byte
+    // characters — a string just below the threshold may skip compression
+    // even if its UTF-8 form would exceed it, which only costs a little
+    // space, never correctness (unwrap returns non-byte[] values verbatim).
+    if (s.length() < MIN_COMPRESS_LENGTH) {
+      return s;
+    }
     byte[] raw = s.getBytes(UTF_8);
     if (raw.length < MIN_COMPRESS_LENGTH) {
       // Small values pass through as the original String: unwrap returns

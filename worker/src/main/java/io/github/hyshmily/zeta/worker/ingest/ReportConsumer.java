@@ -152,8 +152,11 @@ public class ReportConsumer {
       long age = now - message.timestamp();
       if (age > stalenessThresholdMs) {
         long dropped = staleDroppedCount.incrementAndGet();
-        if (dropped == 1 || (dropped & 100) == 0) {
-          staleDroppedCount.set(1);
+        // Log roughly once per 100 drops (dropped=1, 101, 201, ...). The
+        // counter keeps the real cumulative total for metrics — it is never
+        // reset (a previous bitwise check made the log timing random and a
+        // set(1) corrupted the total, defeating the throttle entirely).
+        if (dropped == 1 || dropped % 100 == 1) {
           log.warn("Stale report dropped: appName={}, age={}ms, totalDropped={}", message.appName(), age, dropped);
         }
         return;

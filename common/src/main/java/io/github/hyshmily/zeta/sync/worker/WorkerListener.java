@@ -162,9 +162,24 @@ public class WorkerListener {
       return;
     }
 
+    long jitterMs = properties.getBroadcastJitterMs();
+
+    // The jitter is applied INSIDE the ordered task, not as a pre-enqueue
+    // delay: scheduling the actual submission on the shared scheduler orders
+    // tasks by delay expiry, so two same-key decisions with different random
+    // jitters would execute in the OPPOSITE of arrival order — breaking the
+    // dispatcher's per-key FIFO contract (a stale COOL could land after a
+    // newer HOT from another Worker, and with cross-Worker decisions both
+    // are accepted unconditionally). Sleeping inside the task preserves
+    // arrival order while still spreading Redis reads across instances.
     Runnable task = () -> {
       try {
+        if (jitterMs > 0) {
+          Thread.sleep(ThreadLocalRandom.current().nextLong(jitterMs));
+        }
         workerMessageRouter(wm);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
       } catch (Exception e) {
         log.error(
           "Error processing WorkerMessage: cacheKey={}, type={}, decisionVersion={}, nodeId={}, epoch={}",
@@ -178,9 +193,7 @@ public class WorkerListener {
       }
     };
 
-    long jitterMs = properties.getBroadcastJitterMs();
-    long delay = jitterMs > 0 ? ThreadLocalRandom.current().nextLong(jitterMs) : 0L;
-    dispatcher.submit(wm.cacheKey(), task, delay);
+    dispatcher.submit(wm.cacheKey(), task);
   }
 
   /**

@@ -111,6 +111,14 @@ public class KeyReporterImpl implements KeyReporter {
   /** Cumulative counter of keys dropped because routeNode returned null (ring inconsistency window). */
   private final AtomicLong unroutableDropCounter = new AtomicLong();
 
+  /**
+   * Rate-limits the "no alive Worker" WARN to one per window. The flush callback runs on the
+   * shared scheduler every {@code reportIntervalMs} (default 50ms), so an unthrottled WARN
+   * would flood the log ~20×/s for the whole duration of a Worker outage.
+   */
+  private static final long NO_WORKER_LOG_WINDOW_MS = 10_000;
+  private volatile long lastNoWorkerLoggedAtMs = 0L;
+
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
   /** The reportToWorker dispatcher instance; created on start(). */
@@ -183,7 +191,8 @@ public class KeyReporterImpl implements KeyReporter {
       MAX_BUFFER_SIZE,
       reportIntervalMs,
       EAGER_SWAP_RATIO,
-      scheduler
+      scheduler,
+      reportIntervalMs
     );
   }
 
@@ -302,11 +311,13 @@ public class KeyReporterImpl implements KeyReporter {
       Set<String> aliveNodes = healthView.getAliveWorkerIds();
       if (aliveNodes.isEmpty()) {
         long total = workerDeadDropCounter.addAndGet(keyCounts.size());
-        log.warn(
-          "No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})",
-          keyCounts.size(),
-          total
-        );
+        if (tryAcquireNoWorkerLog()) {
+          log.warn(
+            "No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})",
+            keyCounts.size(),
+            total
+          );
+        }
         return;
       }
 
@@ -485,6 +496,23 @@ public class KeyReporterImpl implements KeyReporter {
   @Override
   public long bbrMaxInFlight() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxInFlight();
+  }
+
+  /**
+   * Rate-limiter for the no-alive-worker WARN: at most one log per
+   * {@value #NO_WORKER_LOG_WINDOW_MS}ms window. Thread-safe via
+   * {@link #lastNoWorkerLoggedAtMs} being volatile (mirrors
+   * {@code BroadcastBuffer.tryAcquireFlushErrorLog}).
+   *
+   * @return {@code true} if the caller may log now
+   */
+  private boolean tryAcquireNoWorkerLog() {
+    long now = currentTimeMillis();
+    if (now - lastNoWorkerLoggedAtMs < NO_WORKER_LOG_WINDOW_MS) {
+      return false;
+    }
+    lastNoWorkerLoggedAtMs = now;
+    return true;
   }
 
   /**
@@ -696,9 +724,12 @@ public class KeyReporterImpl implements KeyReporter {
 
         // Dead-worker guard — discard if target is no longer alive.
         // Covers the window between enqueue and consumption when a Worker dies.
-        if (
-          !healthView.getAliveWorkerIds().contains(batch.target()) || currentTimeMillis() - batch.timestamp() > 5_000
-        ) {
+        // The alive set is snapshotted once per loop iteration instead of per
+        // batch: getAliveWorkerIds() streams every health record into a fresh
+        // HashSet, and a burst of shard batches would otherwise pay that
+        // O(workers) cost per batch on the publish path.
+        Set<String> aliveWorkers = healthView.getAliveWorkerIds();
+        if (!aliveWorkers.contains(batch.target()) || currentTimeMillis() - batch.timestamp() > 5_000) {
           expiredCount.incrementAndGet();
           if (limiter != null) {
             limiter.onConsumerDrop();

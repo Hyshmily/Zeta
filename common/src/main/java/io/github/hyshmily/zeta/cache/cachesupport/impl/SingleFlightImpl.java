@@ -57,6 +57,18 @@ public class SingleFlightImpl implements SingleFlight {
   private final CircuitBreaker circuitBreaker;
 
   /**
+   * Rate-limits the per-key join-failure WARN to one per window. A data-source
+   * outage with a high miss rate would otherwise flood the log with one
+   * stack-trace WARN per read (the project's "never WARN on hot path" rule).
+   */
+  private static final long FAILURE_LOG_WINDOW_MS = 10_000;
+  private volatile long lastFailureLoggedAtMs = 0L;
+
+  /** Rate-limits the high-inflight WARN (same window pattern). */
+  private static final long INFLIGHT_LOG_WINDOW_MS = 10_000;
+  private volatile long lastInflightLoggedAtMs = 0L;
+
+  /**
    * Creates a SingleFlightImpl deduplicator that prevents concurrent in-flight loads
    * for the same key.
    *
@@ -129,9 +141,12 @@ public class SingleFlightImpl implements SingleFlight {
       // reuse the result instead of re-running the supplier.
       return Optional.ofNullable(result);
     } catch (CompletionException e) {
-      if (e.getCause() instanceof TimeoutException) {
-        circuitBreaker.onFailure(e.getCause());
-      }
+      // Record EVERY failure against the breaker — the exception filter inside
+      // CircuitBreakerImpl decides whether the cause is ignorable. Previously
+      // only TimeoutException was recorded, so a fast-failing data source
+      // (connection refused, serialization error) never opened the breaker and
+      // the stale-entry fallback in HotKeyCache never engaged.
+      circuitBreaker.onFailure(e.getCause());
       handleFailure(cacheKey, e);
       return Optional.empty();
     }
@@ -193,22 +208,19 @@ public class SingleFlightImpl implements SingleFlight {
         // expireAfterWrite(ttlSec) naturally evicts it (late callers reuse).
         results.put(key, Optional.ofNullable(result));
       } catch (CompletionException e) {
+        // Every failure is recorded against the breaker (the filter inside
+        // CircuitBreakerImpl decides ignorability) — see the single-key path.
+        circuitBreaker.onFailure(e.getCause());
         if (failOnError) {
-          // Fail-fast batch: mirror the single-key flow — record CB failure on
-          // timeout, then handleFailure invalidates the dedup future and
-          // rethrows the cause (timeouts/interrupts still resolve to empty).
-          if (e.getCause() instanceof TimeoutException) {
-            circuitBreaker.onFailure(e.getCause());
-          }
+          // Fail-fast batch: mirror the single-key flow — handleFailure
+          // invalidates the dedup future and rethrows the cause
+          // (timeouts/interrupts still resolve to empty).
           handleFailure(key, e);
           results.put(key, Optional.empty());
           continue;
         }
-        log.warn("singleflight join failed: key={}", key, e);
+        logFailure(key, e);
 
-        if (e.getCause() instanceof TimeoutException) {
-          circuitBreaker.onFailure(e.getCause());
-        }
         inflightLoads.invalidate(key);
         results.put(key, Optional.empty());
 
@@ -230,8 +242,9 @@ public class SingleFlightImpl implements SingleFlight {
     if (!circuitBreaker.allowRequest()) {
       return true;
     }
-    if (estimatedInflightSize() > inflightMaxSize * 0.8) {
-      log.warn("SingleFlight inflight queue is high: {}/{}", estimatedInflightSize(), inflightMaxSize);
+    long inflight = estimatedInflightSize();
+    if (inflight > inflightMaxSize * 0.8 && tryAcquireInflightLog()) {
+      log.warn("SingleFlight inflight queue is high: {}/{}", inflight, inflightMaxSize);
     }
     return false;
   }
@@ -307,7 +320,7 @@ public class SingleFlightImpl implements SingleFlight {
    * @throws Error          if the cause is an {@link Error}
    */
   private void handleFailure(String cacheKey, CompletionException e) {
-    log.warn("singleflight join failed: key={}", cacheKey, e);
+    logFailure(cacheKey, e);
     inflightLoads.invalidate(cacheKey);
 
     Throwable cause = e.getCause();
@@ -325,5 +338,49 @@ public class SingleFlightImpl implements SingleFlight {
       throw err;
     }
     throw new CompletionException(cause);
+  }
+
+  /**
+   * Rate-limited join-failure WARN: at most one per {@value #FAILURE_LOG_WINDOW_MS}ms
+   * window, keeping the first exception. A failing data source must not flood
+   * the log with one stack-trace WARN per read.
+   *
+   * @param cacheKey the key whose load failed
+   * @param e        the caught {@link CompletionException}
+   */
+  private void logFailure(String cacheKey, CompletionException e) {
+    if (tryAcquireFailureLog()) {
+      log.warn("singleflight join failed: key={}", cacheKey, e);
+    }
+  }
+
+  /**
+   * Rate-limiter for the join-failure WARN (see {@link #logFailure}). Thread-safe
+   * via {@link #lastFailureLoggedAtMs} being volatile; a concurrent double-log in
+   * the same window is benign (approximate throttle, mirrors BroadcastBuffer).
+   *
+   * @return {@code true} if the caller may log now
+   */
+  private boolean tryAcquireFailureLog() {
+    long now = System.currentTimeMillis();
+    if (now - lastFailureLoggedAtMs < FAILURE_LOG_WINDOW_MS) {
+      return false;
+    }
+    lastFailureLoggedAtMs = now;
+    return true;
+  }
+
+  /**
+   * Rate-limiter for the high-inflight WARN (see {@link #intercept()}).
+   *
+   * @return {@code true} if the caller may log now
+   */
+  private boolean tryAcquireInflightLog() {
+    long now = System.currentTimeMillis();
+    if (now - lastInflightLoggedAtMs < INFLIGHT_LOG_WINDOW_MS) {
+      return false;
+    }
+    lastInflightLoggedAtMs = now;
+    return true;
   }
 }

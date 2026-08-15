@@ -74,3 +74,4 @@ CLAUDE.md
 
 .opencode/
 .flattened-pom.xml
+/common/src/main/java/io/github/hyshmily/zeta/hotkeydetector/doublebuffer/WaveCounterSandbox/zeta-tidal-sim/

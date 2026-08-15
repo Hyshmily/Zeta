@@ -58,6 +58,12 @@ public final class NormalCdfTable {
   private NormalCdfTable() {}
 
   public static double phi(double z) {
+    // A NaN z-score (torn EMA reads, degenerate math upstream) must not
+    // propagate: the (int) NaN cast below would index the table at 0 with a
+    // NaN interpolation fraction and return NaN, silently classifying every
+    // such evaluation as LOW. The neutral 0.5 keeps the classification
+    // harmless and self-healing on the next evaluation.
+    if (Double.isNaN(z)) return 0.5;
     if (z <= MIN_Z) return 0.0;
     if (z >= MAX_Z) return 1.0;
     double idx = (z - MIN_Z) / STEP;

@@ -324,7 +324,13 @@ public class RedisLockProvider implements LockProvider {
       if (scheduler == null) {
         return;
       }
-      long interval = Math.max(expireMs / 3, 1000L);
+      // The renewal interval must be strictly shorter than the lock TTL, or
+      // the lock expires before the first renewal and a second client can
+      // acquire it while the first still holds its handle (broken mutual
+      // exclusion for sub-second TTLs — the old max(expireMs/3, 1000) floor
+      // exceeded the TTL whenever expireMs < 1000). The clamp keeps the
+      // interval at expireMs/2 for very short TTLs instead of the 1s floor.
+      long interval = Math.max(1L, Math.min(Math.max(expireMs / 3, 1000L), expireMs / 2));
       watchdogTask = scheduler.scheduleWithFixedDelay(
         () -> {
           try {
@@ -365,7 +371,13 @@ public class RedisLockProvider implements LockProvider {
         }
         try {
           Long result = redisTemplate.execute(UNLOCK_SCRIPT, List.of(lockKey), uuid);
-          if (Objects.equals(result, 1L)) {
+          if (result != null) {
+            // 1 = our lock was deleted; 0 = the lock was already gone or
+            // stolen (UUID mismatch). Either way there is nothing left to
+            // release, so this is idempotent success — retrying a 0 would
+            // keep returning 0 and end in a misleading "Failed to release"
+            // WARN. Only a null result (no information) falls through to
+            // the retry loop.
             return;
           }
         } catch (RedisSystemException e) {

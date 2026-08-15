@@ -228,7 +228,7 @@ public class ZetaAutoConfiguration {
    * @param properties the HotKey configuration properties (never {@code null})
    * @return a configured {@link StandardThreadExecutor}
    */
-  @Bean(name = "hotKeyExecutor")
+  @Bean(name = "hotKeyExecutor", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
   public Executor hotKeyExecutor(ZetaProperties properties) {
     var executor = new StandardThreadExecutor(

@@ -173,6 +173,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
         : 0L;
     boolean actualDegraded = false;
 
+    boolean[] applied = new boolean[1];
     caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
@@ -185,6 +186,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
             return existing;
           }
 
+          applied[0] = true;
           return expireManager
             .ttlPolicy()
             .applyTtl(
@@ -199,6 +201,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
             );
         }
 
+        applied[0] = true;
         return expireManager.createBuilder(
           value,
           new ExpireManager.VersionStamp(actualDataVersion, actualDegraded),
@@ -218,7 +221,11 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
         );
       });
     log.debug("HotKey promoted by Worker: {}", cacheKey);
-    if (sreRateLimiter != null) {
+    // The inner DCL guard may have rejected the promotion as stale — the
+    // limiter must not record a success for a promotion that was not applied
+    // (it would inflate the success rate and weaken the adaptive throttle
+    // exactly when decisions are churning).
+    if (applied[0] && sreRateLimiter != null) {
       sreRateLimiter.onSuccess();
     }
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent(cacheKey);

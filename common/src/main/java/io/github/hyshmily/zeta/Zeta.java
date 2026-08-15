@@ -148,6 +148,7 @@ public class Zeta implements DisposableBean {
    */
   public void tag(String cacheKey) {
     Assert.hasText(cacheKey, "cacheKey must not be empty");
+    requireAppCache("tag");
     hotKeyCache.tag(cacheKey);
   }
 
@@ -163,6 +164,7 @@ public class Zeta implements DisposableBean {
    */
   public void tag(String cacheKey, boolean skipDetection, boolean skipReport) {
     Assert.hasText(cacheKey, "cacheKey must not be empty");
+    requireAppCache("tag");
     hotKeyCache.tag(cacheKey, skipDetection, skipReport);
   }
 
@@ -1480,6 +1482,7 @@ public class Zeta implements DisposableBean {
     Objects.requireNonNull(supplier, "supplier must not be null");
     Assert.isTrue(hardTtlMs >= 0, "hardTtlMs must not be negative");
     Assert.isTrue(softTtlMs >= 0, "softTtlMs must not be negative");
+    requireAppCache("registerRefresh");
     long intervalMs = Math.max(1, hotKeyCache.resolveEffectiveSoftTtl(softTtlMs));
     ScheduledFuture<?> prev = refreshFutures.put(
       key,
@@ -1647,7 +1650,12 @@ public class Zeta implements DisposableBean {
     requireAppCache("refresh");
     Object value = loader.get();
     invalidate(cacheKey, false);
-    putThrough(cacheKey, value, () -> {});
+    // A null loader result must not NPE inside putThrough after the entry was
+    // already evicted — the eviction alone is the refresh contract for a
+    // missing value (the next read reloads through the application reader).
+    if (value != null) {
+      putThrough(cacheKey, value, () -> {});
+    }
   }
 
   /**
@@ -1683,7 +1691,12 @@ public class Zeta implements DisposableBean {
     requireAppCache("refresh");
     V value = loader.get();
     invalidate(cacheKey, false);
-    putThrough(cacheKey, value, () -> {}, hotHardTtlMs, hotSoftTtlMs, true);
+    // A null loader result must not NPE inside putThrough after the entry was
+    // already evicted — the eviction alone is the refresh contract for a
+    // missing value (the next read reloads through the application reader).
+    if (value != null) {
+      putThrough(cacheKey, value, () -> {}, hotHardTtlMs, hotSoftTtlMs, true);
+    }
   }
 
   /**

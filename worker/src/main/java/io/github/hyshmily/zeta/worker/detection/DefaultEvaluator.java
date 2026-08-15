@@ -256,14 +256,23 @@ public class DefaultEvaluator implements Evaluator {
     double[] holder = new double[1];
     cmsCounts.compute(key, (k, cell) -> {
       double prev = 0.0;
-      double lastUpdate = now;
+      long lastUpdate = now;
       if (cell != null) {
         prev = cell[0];
-        lastUpdate = cell[1];
+        // cell[1] stores a millis timestamp as double; the value fits a long
+        // exactly (far below 2^53), so the narrowing cast is lossless.
+        lastUpdate = (long) cell[1];
       } else {
         cell = new double[2];
       }
-      double decayed = prev * Math.pow(CMS_ALPHA, Math.max(0, (now - lastUpdate) / EVICT_CYCLE_MS));
+      // Fast path: keys are re-evaluated every report cycle (tens of ms) while
+      // EVICT_CYCLE_MS is minutes — the integer exponent is 0 and
+      // pow(α, 0) == 1.0, so the ~50-100ns native Math.pow call is pure waste
+      // on every evaluation of every key. Only cross a decay tick when a whole
+      // cycle has actually elapsed (the truncating cast is exact: EVICT_CYCLE_MS
+      // is a whole number, so (long)(elapsed / 30000.0) == elapsed / 30000).
+      long elapsedCycles = (long) ((now - lastUpdate) / EVICT_CYCLE_MS);
+      double decayed = elapsedCycles <= 0 ? prev : prev * Math.pow(CMS_ALPHA, elapsedCycles);
       cell[0] = decayed + count;
       cell[1] = now;
       holder[0] = cell[0];
@@ -290,14 +299,23 @@ public class DefaultEvaluator implements Evaluator {
     long now = TimeSource.monotonicMillis();
     windowSumHistories.values().removeIf(h -> now - h.lastAccessTime > staleAfterMs);
     if (cmsCounts.size() > MAX_TRACKED_CMS_KEYS) {
-      cmsCounts
-        .entrySet()
-        .removeIf(e -> {
-          double[] cell = e.getValue();
-          cell[0] *= Math.pow(CMS_ALPHA, Math.max(0, (now - cell[1]) / EVICT_CYCLE_MS));
-          cell[1] = now;
-          return cell[0] < 1.0;
-        });
+      // Decay must run under the per-key bin lock: the previous removeIf
+      // mutated the live double[] cell in place (cell[0] *= ...) outside any
+      // lock while cmsUpdate's compute read/wrote the same array — a data
+      // race whose torn reads can yield NaN and poison the momentum/z-score
+      // classification. computeIfPresent serializes the decay+remove per key.
+      cmsCounts.forEach((key, ignored) ->
+        cmsCounts.computeIfPresent(key, (k, cell) -> {
+          // cell[1] stores a millis timestamp as double; the narrowing cast is
+          // lossless (see cmsUpdate).
+          long elapsedCycles = (long) ((now - (long) cell[1]) / EVICT_CYCLE_MS);
+          double decayed = elapsedCycles <= 0 ? cell[0] : cell[0] * Math.pow(CMS_ALPHA, elapsedCycles);
+          if (decayed < 1.0) {
+            return null;
+          }
+          return new double[] { decayed, now };
+        })
+      );
     }
   }
 

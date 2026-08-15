@@ -188,7 +188,14 @@ public class WorkerConfigNegotiator {
 
     long remoteTs = hb.configTimestamp();
     long localTs = configTimestampCounter.get();
-    if (remoteTs <= localTs) {
+    // Same-millisecond ties are broken by nodeId lexicographic order, mirroring
+    // the fast-lane rules gossip tie-break (ADR-0025): without it, two Workers
+    // configured within the same millisecond would each ignore the other's
+    // heartbeat (remoteTs <= localTs) and keep two permanently divergent
+    // configs with no convergence path.
+    boolean newer = remoteTs > localTs;
+    boolean tieWin = remoteTs == localTs && hb.workerId().compareTo(nodeId) > 0;
+    if (!newer && !tieWin) {
       return;
     }
 

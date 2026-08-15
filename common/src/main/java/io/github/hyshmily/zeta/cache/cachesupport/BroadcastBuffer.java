@@ -174,7 +174,14 @@ public class BroadcastBuffer {
    */
   @SuppressWarnings("java:S6213")
   public void record(String key, long version, boolean degraded) {
-    pending.merge(key, new VersionInfo(version, degraded), (old, cur) -> cur);
+    // Reuse the existing VersionInfo when the new entry is identical, so a
+    // repeated record for an unchanged key does not allocate on every write.
+    pending.compute(
+      key,
+      (k, old) -> old != null && old.version() == version && old.degraded() == degraded
+        ? old
+        : new VersionInfo(version, degraded)
+    );
     try {
       if (pending.size() > MAX_PENDING_ENTRIES) {
         scheduler.execute(this::flushAndReset);
@@ -304,7 +311,13 @@ public class BroadcastBuffer {
         scheduledFlush = scheduler.schedule(this::flushAndReset, exceedMax ? 0 : flushDelayMs, TimeUnit.MILLISECONDS);
         return;
       }
-      if (!exceedMax) {
+      if (exceedMax) {
+        // A flush is already scheduled, but the max-deferral bound has been
+        // crossed: force it now instead of letting the pending task ride up
+        // to flushDelayMs past the documented bound.
+        cancelScheduledFlush();
+        scheduledFlush = scheduler.schedule(this::flushAndReset, 0, TimeUnit.MILLISECONDS);
+      } else {
         cancelScheduledFlush();
         scheduledFlush = scheduler.schedule(this::flushAndReset, flushDelayMs, TimeUnit.MILLISECONDS);
       }
