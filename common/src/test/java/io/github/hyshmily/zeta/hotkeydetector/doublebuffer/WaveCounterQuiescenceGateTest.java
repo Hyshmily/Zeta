@@ -84,11 +84,11 @@ class WaveCounterQuiescenceGateTest {
   }
 
   private static int mixHash(int h) {
-    h ^= h >>> 16;
-    h *= 0x85ebca6b;
-    h ^= h >>> 13;
-    h *= 0xc2b2ae35;
-    h ^= h >>> 16;
+    h ^= h >>> 17;
+    h *= 0xed5ad4bb;
+    h ^= h >>> 11;
+    h *= 0xac4c1b51;
+    h ^= h >>> 15;
     return h;
   }
 
@@ -114,7 +114,8 @@ class WaveCounterQuiescenceGateTest {
     c.count("hot-key", 1);
     c.count("hot-key", 1);
     // Local accumulation only — no merge into the shared table yet (the
-    // batch trigger needs opMaxCount distinct keys or the flush clock),
+    // batch trigger needs opMaxCount distinct keys; low-traffic residuals
+    // are drained by the tide instead),
     // so nothing is visible to cold hit-writers and the flag stays clear.
     assertThat(readFlag(c)).isFalse();
     c.destroy();

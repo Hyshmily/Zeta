@@ -169,12 +169,13 @@ class WaveCounterRecyclingTest {
   }
 
   /**
-   * Counting-beacon drift expiry (2026-08-07): a promoted key that stops
-   * being counted must leave the hot set within a few tides (the halving
-   * decay) — 2-tide memory, so it survives exactly one quiet tide and is
-   * gone by the third.  The quiet tides count >= MIN_PROMOTION_KEYS
-   * distinct keys so the decay actually runs (sub-minimum snapshots freeze
-   * evidence by design — see the decay gate).
+   * Counting-beacon drift expiry (2026-08-07, amended by ADR-0049): a
+   * promoted key that stops being counted must leave the hot set within a
+   * few tides.  With the ADR-0049 every-other-tide halving sweep the memory
+   * is 4 tides: the key survives up to three quiet tides (still a member
+   * after tide 4) and is gone by the fifth.  The quiet tides count
+   * >= MIN_PROMOTION_KEYS distinct keys so the decay actually runs
+   * (sub-minimum snapshots freeze evidence by design — see the decay gate).
    */
   @Test
   void drift_promotedKey_shouldExpireWithinFewTides() {
@@ -182,15 +183,22 @@ class WaveCounterRecyclingTest {
     for (int i = 0; i < 1000; i++) {
       counter.count("k" + i, 5);
     }
-    invokeDeliver(counter); // tide 1: promote
+    invokeDeliver(counter); // tide 1: promote (decay sweep runs; nothing to decay)
     assertThat(isBeaconMember(counter, "top")).as("promoted at tide 1").isTrue();
-    for (int t = 2; t <= 3; t++) {
+    for (int t = 2; t <= 4; t++) {
       for (int i = 0; i < 20; i++) {
         counter.count("k" + i, 1); // >= MIN_PROMOTION_KEYS so the decay runs; "top" stays quiet
       }
       invokeDeliver(counter);
+      assertThat(isBeaconMember(counter, "top"))
+        .as("4-tide memory: still a member after " + (t - 1) + " quiet tides")
+        .isTrue();
     }
-    assertThat(isBeaconMember(counter, "top")).as("quiet key must leave the hot set by tide 3").isFalse();
+    for (int i = 0; i < 20; i++) {
+      counter.count("k" + i, 1);
+    }
+    invokeDeliver(counter); // tide 5: the second decay sweep of the quiet run
+    assertThat(isBeaconMember(counter, "top")).as("quiet key must leave the hot set by tide 5").isFalse();
   }
 
   /**
@@ -340,7 +348,7 @@ class WaveCounterRecyclingTest {
    * Per-field saturation guard (2026-08-08): a stable member whose count
    * room is saturated must still refresh its trace every tide — the
    * former joint guard let the trace decay out within 2 tides (the
-   * ping-pong the 2-tide memory was designed to prevent).
+   * ping-pong the 4-tide memory was designed to prevent).
    */
   @Test
   void promote_saturatedCountRoom_refreshesMemberTrace() throws Exception {
@@ -511,15 +519,13 @@ class WaveCounterRecyclingTest {
 
   /**
    * Periodic-tide drain bookkeeping: {@code Ceils.tryDrainInto} must reset
-   * both the local-map size and the flush clock after {@code waveTo},
-   * exactly like {@code drainInto}, {@code drainDead} and
-   * {@code reconcile}.  Without the size reset a live hot writer stays
-   * "non-empty" forever, so every later tide pays the lock/drain-stamp/
-   * in-flight path for an already-empty map; without the flush-clock reset
-   * the next sampled hot add can also discharge prematurely.
+   * the local-map size after {@code waveTo}, exactly like {@code drainInto},
+   * {@code drainDead} and {@code reconcile}.  Without the size reset a
+   * live hot writer stays "non-empty" forever, so every later tide pays
+   * the lock/drain-stamp/in-flight path for an already-empty map.
    */
   @Test
-  void tryDrainInto_shouldResetSizeAndFlushClock() throws Exception {
+  void tryDrainInto_shouldResetSize() throws Exception {
     markHot(counter, "k");
     counter.count("k", 3);
 
@@ -531,10 +537,7 @@ class WaveCounterRecyclingTest {
 
     Field sizeField = ceils.getClass().getDeclaredField("size");
     sizeField.setAccessible(true);
-    Field flushField = ceils.getClass().getDeclaredField("lastFlushMillis");
-    flushField.setAccessible(true);
     assertThat((int) sizeField.get(ceils)).as("precondition: local map non-empty").isPositive();
-    flushField.setLong(ceils, 0L);
 
     @SuppressWarnings("unchecked")
     ConcurrentHashMap<String, LongAdder> table =
@@ -560,7 +563,6 @@ class WaveCounterRecyclingTest {
     assertThat((boolean) m.invoke(ceils, table, merges, ebb)).as("tryLock drain should succeed").isTrue();
 
     assertThat((int) sizeField.get(ceils)).as("tryDrainInto must reset size").isZero();
-    assertThat((long) flushField.get(ceils)).as("tryDrainInto must re-arm the flush clock").isPositive();
     assertThat(table.get("k").sum()).as("drained hot count must reach the shared table").isEqualTo(3);
   }
 
@@ -655,7 +657,7 @@ class WaveCounterRecyclingTest {
    * active bit1 rooms after collision) and 600 new earners, the old
    * numerator read 600/≈1178 ≈ 0.51 (healthy) and the squatting evidence
    * never fired; the corrected numerator reads ~0 (distress), and the set
-   * self-heals by the 2-tide decay.
+   * self-heals by the 4-tide decay (ADR-0049 sweep period).
    */
   @Test
   void saturated_renewal_shouldCountOnlyMembers() throws Exception {
@@ -667,10 +669,10 @@ class WaveCounterRecyclingTest {
     }
     invokeDeliver(counter);
     Object governor = governorOf(counter);
-    Field lunarField = governor.getClass().getDeclaredField("lunarMemory");
-    lunarField.setAccessible(true);
-    double[] lunar = (double[]) lunarField.get(governor);
-    assertThat(lunar[0])
+    Field emaField = governor.getClass().getDeclaredField("smoothedRenewal");
+    emaField.setAccessible(true);
+    double smoothed = (double) emaField.get(governor);
+    assertThat(smoothed)
       .as("renewal counts only members, not the 600 new earners")
       .isLessThan(0.1);
   }
@@ -825,11 +827,11 @@ class WaveCounterRecyclingTest {
   }
 
   private static int mixHash(int h) {
-    h ^= h >>> 16;
-    h *= 0x85ebca6b;
-    h ^= h >>> 13;
-    h *= 0xc2b2ae35;
-    h ^= h >>> 16;
+    h ^= h >>> 17;
+    h *= 0xed5ad4bb;
+    h ^= h >>> 11;
+    h *= 0xac4c1b51;
+    h ^= h >>> 15;
     return h;
   }
 

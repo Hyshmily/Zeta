@@ -213,6 +213,31 @@ class WaveCounterSimulatorTest {
     assertThat(maxFloor).as("no ratchet — the admit holds the floor at the boundary").isEqualTo(10);
   }
 
+  // ---------------- workload 4: P1 quiet sub-minimum (ADR-0045 §III) ----------------
+
+  /**
+   * A snapshot below MIN_PROMOTION_KEYS with near-zero volume still
+   * promotes: the scan gate is lifted while the quiet regime holds, so the
+   * "few quiet keys" case routes hot instead of freezing behind the floor
+   * (the ADR-0038 decay freeze must not strand the quiet regime either).
+   * The quiet bypass drops the floor to 1, and every key becomes a beacon
+   * member within a couple of tides.
+   */
+  @Test
+  void quietSubmin_promotesEverything() throws Exception {
+    newCounter();
+    for (int t = 0; t < 10; t++) {
+      for (int i = 0; i < 10; i++) { // 10 keys x 2 counts = 20/tide < QUIET_VOLUME
+        counter.count("q" + i, 2);
+      }
+      invokeDeliver(counter);
+    }
+    assertThat(floorOf(counter)).as("quiet regime drops the floor to 1").isEqualTo(1);
+    for (int i = 0; i < 10; i++) {
+      assertThat(isBeaconMember(counter, "q" + i)).as("quiet key q" + i + " routes hot").isTrue();
+    }
+  }
+
   // ---------------- observation helpers ----------------
 
   /** Records the adaptive controls after a delivered tide (non-mutating). */
@@ -310,11 +335,11 @@ class WaveCounterSimulatorTest {
   }
 
   private static int mixHash(int h) {
-    h ^= h >>> 16;
-    h *= 0x85ebca6b;
-    h ^= h >>> 13;
-    h *= 0xc2b2ae35;
-    h ^= h >>> 16;
+    h ^= h >>> 17;
+    h *= 0xed5ad4bb;
+    h ^= h >>> 11;
+    h *= 0xac4c1b51;
+    h ^= h >>> 15;
     return h;
   }
 

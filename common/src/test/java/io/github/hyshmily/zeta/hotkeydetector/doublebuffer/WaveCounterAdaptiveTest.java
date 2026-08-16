@@ -121,10 +121,37 @@ class WaveCounterAdaptiveTest {
     long boundary,
     double ratio
   ) throws Exception {
+    onTide(c, renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, 2_000L, 100, 500L);
+  }
+
+  /** Drives the governor with explicit volume/scale signals (ADR-0045 §III). */
+  private static void onTide(
+    WaveCounter c,
+    double renewal,
+    int activeSlots,
+    int hotLimit,
+    int blockedKeys,
+    long boundary,
+    double ratio,
+    long snapshotSum,
+    int distinct,
+    long intervalMs
+  ) throws Exception {
     Object governor = governorOf(c);
+    // Mirror the production call order (promote() folds the volume EWMA
+    // BEFORE invoking onTide — the same sample must never be folded twice,
+    // which applied weight 2α−α² instead of α and distorted the P1/P2
+    // regime gates). Without the explicit fold here, vol stays at its seed
+    // and every tide reads as "quiet".
+    Method fold = governor.getClass().getDeclaredMethod("onVolume", long.class);
+    fold.setAccessible(true);
+    fold.invoke(governor, snapshotSum);
     Method m = governor.getClass().getDeclaredMethod("onTide", tideReadingType());
     m.setAccessible(true);
-    m.invoke(governor, newTideReading(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio));
+    m.invoke(
+      governor,
+      newTideReading(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, snapshotSum, distinct, intervalMs)
+    );
   }
 
   /**
@@ -145,10 +172,40 @@ class WaveCounterAdaptiveTest {
     long boundary,
     double ratio
   ) throws Exception {
+    // Defaults that keep the P1/P2 regime switches inert for the classic
+    // governor tests: vol seeds at 2000 -> 4000 counts/sec (below the
+    // FLOOD_RATE_PER_SEC gate, no flood signature) and never below
+    // QUIET_VOLUME (no quiet bypass), and activeSlots is nonzero on the
+    // collapse tests' distress tides.
+    return newTideReading(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, 2_000L, 100, 500L);
+  }
+
+  /** Reflectively constructs a {@code TideReading} with explicit volume/scale signals. */
+  private static Object newTideReading(
+    double renewal,
+    int activeSlots,
+    int hotLimit,
+    int blockedKeys,
+    long boundary,
+    double ratio,
+    long snapshotSum,
+    int distinct,
+    long intervalMs
+  ) throws Exception {
     Constructor<?> ctor = tideReadingType()
-      .getDeclaredConstructor(double.class, int.class, int.class, int.class, long.class, double.class);
+      .getDeclaredConstructor(
+        double.class,
+        int.class,
+        int.class,
+        int.class,
+        long.class,
+        double.class,
+        long.class,
+        int.class,
+        long.class
+      );
     ctor.setAccessible(true);
-    return ctor.newInstance(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio);
+    return ctor.newInstance(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, snapshotSum, distinct, intervalMs);
   }
 
   /** A healthy hot set (renewal at/above target, not saturated) never moves the floor. */
@@ -171,7 +228,7 @@ class WaveCounterAdaptiveTest {
 
   /**
    * Distress with blocked keys but an OVER-EARNING hot set (hotColdRatio
-   * >= 1) must hold: the blocked band is the stale tail of the 2-tide
+   * >= 1) must hold: the blocked band is the stale tail of the 4-tide
    * membership memory, which self-heals by decay — a drop would re-admit
    * pollution, a raise cannot reach it.
    */
@@ -184,7 +241,7 @@ class WaveCounterAdaptiveTest {
   }
 
   /**
-   * ADR-0046 probe hygiene: arming a raise-walk freezes the base but does
+   * ADR-0045 §II probe hygiene: arming a raise-walk freezes the base but does
    * NOT take the first step.  A single noisy distress sample therefore
    * cannot move the floor; the first step happens only on the next
    * distressed tide that still survives the evidence gates.  This removes
@@ -267,9 +324,11 @@ class WaveCounterAdaptiveTest {
     assertThat(floorOf(counter)).isEqualTo(18);
     // Re-distress worse than the anchor reference minus the margin, with
     // nothing blocked so the raise-walk cannot re-arm and mask the veto.
-    // The noise band must wash the confirmation tides out of the ring
-    // before the evidence gap (0.25 - 0.1 = 0.15) admits renewal 0.1.
-    for (int i = 0; i < 8; i++) {
+    // The noise band must wash the confirmation tides out of the deviation
+    // EMA before the evidence gap (0.25 - 0.1 = 0.15) admits renewal 0.1.
+    // The EMA decay (0.8/tide) converges asymptotically, so the veto needs
+    // ~14 distress tides instead of the 8-tide ring wash-out.
+    for (int i = 0; i < 16; i++) {
       onTide(counter, 0.1, 100, 1024, 0, 4, 1.5);
     }
     assertThat(governorField(counter, "retreatTarget")).as("veto armed the retreat to the anchor").isEqualTo(10);
@@ -375,6 +434,14 @@ class WaveCounterAdaptiveTest {
     f.setInt(governor, value);
   }
 
+  /** A double field of the governor (e.g. anchorRenewal). */
+  private static void setGovernorDoubleField(WaveCounter c, String name, double value) throws Exception {
+    Object governor = governorOf(c);
+    Field f = governor.getClass().getDeclaredField(name);
+    f.setAccessible(true);
+    f.setDouble(governor, value);
+  }
+
   private static int ladderField(WaveCounter c, String ladderName, String name) throws Exception {
     Object governor = governorOf(c);
     Field f = governor.getClass().getDeclaredField(ladderName);
@@ -393,6 +460,33 @@ class WaveCounterAdaptiveTest {
     Field g = ladder.getClass().getDeclaredField(name);
     g.setAccessible(true);
     g.setInt(ladder, value);
+  }
+
+  /** A boolean field of one of the governor's ladders. */
+  private static boolean ladderBoolField(WaveCounter c, String ladderName, String name) throws Exception {
+    Object governor = governorOf(c);
+    Field f = governor.getClass().getDeclaredField(ladderName);
+    f.setAccessible(true);
+    Object ladder = f.get(governor);
+    Field g = ladder.getClass().getDeclaredField(name);
+    g.setAccessible(true);
+    return g.getBoolean(ladder);
+  }
+
+  /** A double field of the governor. */
+  private static double governorDoubleField(WaveCounter c, String name) throws Exception {
+    Object governor = governorOf(c);
+    Field f = governor.getClass().getDeclaredField(name);
+    f.setAccessible(true);
+    return f.getDouble(governor);
+  }
+
+  /** The governor's audit due-wait (the R2 escalation law). */
+  private static int auditWaitOf(WaveCounter c) throws Exception {
+    Object governor = governorOf(c);
+    Method m = governor.getClass().getDeclaredMethod("auditWait");
+    m.setAccessible(true);
+    return (int) m.invoke(governor);
   }
 
   /**
@@ -435,11 +529,11 @@ class WaveCounterAdaptiveTest {
     assertThat(floorOf(counter)).isEqualTo(48);
     onTide(counter, 0.6, 100, 1024, 0, 4, 1.5); // below the anchor bar (~0.63-0.75): streak 1
     onTide(counter, 0.6, 100, 1024, 0, 4, 1.5); // streak 2 — the walk keeps stepping
-    // The stride law prices the descent from the ring-mean renewal
+    // The stride law prices the descent from the EMA-smoothed renewal
     // against the crash bar: below-bar tides creep instead of plunging,
     // so the descent over the pre-crash window is bounded (the old bold
     // driver reached the seed here).
-    assertThat(floorOf(counter)).as("below-bar tides creep, not plunge").isBetween(11, 39);
+    assertThat(floorOf(counter)).as("below-bar tides creep, not plunge").isBetween(11, 44);
     onTide(counter, 0.6, 100, 1024, 0, 4, 1.5); // streak 3: crash
     assertThat(ladderField(counter, "releaseLadder", "left"))
       .as("third below-bar tide crashes the walk")
@@ -574,7 +668,7 @@ class WaveCounterAdaptiveTest {
    */
   @Test
   void governor_ladder_singleCrashHoldsRung_consecutiveDoubles() throws Exception {
-    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // arm raise #1: floor 10 -> 26
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // arm raise #1 (deferred step), then 3 distressed tides: crash #1
     for (int i = 0; i < 3; i++) {
       onTide(counter, 0.2, 3, 16, 5, 2, 0.5); // three consecutive below-target: crash #1
     }
@@ -679,7 +773,7 @@ class WaveCounterAdaptiveTest {
     assertThat(walkOf(counter)).as("two consecutive at-target tides still not enough").isNotNull();
     onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // at-target 3: the durable window confirms
     assertThat(walkOf(counter)).as("three consecutive at-target tides confirm the raise").isNull();
-    assertThat(floorOf(counter)).as("the confirmed position is kept").isEqualTo(25);
+    assertThat(floorOf(counter)).as("the confirmed position is kept").isEqualTo(26);
     assertThat(governorField(counter, "anchorFloor")).as("anchor planted at the base the raise left from").isEqualTo(10);
     assertThat(ladderField(counter, "raiseLadder", "rung")).as("confirmation rewards the ladder").isEqualTo(1);
   }
@@ -704,6 +798,107 @@ class WaveCounterAdaptiveTest {
       onTide(counter, 0.1, 0, 1024, 0, 4, 1.5); // would crash the stale walk → re-raise
     }
     assertThat(floorOf(counter)).as("no stale-walk undo re-raises the floor").isEqualTo(10);
+  }
+
+  // ---------------- ADR-0051: probe-machine bounds ----------------
+
+  /**
+   * ADR-0051 confirm-admit: a raise-walk CONFIRM that lands with a
+   * non-empty blocked band (floor above the boundary while the set is
+   * healthy) is over-filtering — the boundary admits the band, the floor
+   * excludes it.  The parked branch would admit next tide; the
+   * confirmation corrects to the boundary immediately, and the veto
+   * anchor plants at the corrected position (a veto back below it changes
+   * nothing — the threshold is max(floor, boundary) — and costs flicker).
+   * The walk still gets its durable 3-tide confirmation.
+   */
+  @Test
+  void governor_raiseConfirm_withBlockedBand_admitsAtConfirmation() throws Exception {
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // under-earning distress: arm, first step deferred
+    assertThat(floorOf(counter)).isEqualTo(10);
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // the next distressed tide steps
+    assertThat(floorOf(counter)).isEqualTo(18);
+    // At-target tides with a non-empty band: the raise would over-filter.
+    for (int i = 0; i < 2; i++) {
+      onTide(counter, 1.0, 3, 16, 4, 16, 1.5); // healthy + blocked, boundary 16
+      assertThat(walkOf(counter)).as("the durable window still needs 3 tides").isNotNull();
+    }
+    onTide(counter, 1.0, 3, 16, 4, 16, 1.5); // third consecutive at-target: CONFIRMED
+    assertThat(walkOf(counter)).as("the raise confirmed").isNull();
+    assertThat(floorOf(counter))
+      .as("the confirmation admits the blocked band to the boundary in the same tide")
+      .isEqualTo(16);
+    assertThat(governorField(counter, "anchorFloor"))
+      .as("the anchor plants at the corrected position")
+      .isEqualTo(16);
+  }
+
+  /**
+   * ADR-0051 confirm shield: a CONFIRMED raise leaves the RAISE ladder
+   * refractory for CONFIRM_SHIELD tides (rung untouched) — the machine
+   * cannot re-arm into an immediate arm-confirm cycle, the
+   * alternating-workload ratchet that climbed the floor step by step
+   * until the empty-set collapse undid the probe.  The release direction
+   * is unaffected (its ladder is separate).
+   */
+  @Test
+  void governor_raiseConfirm_armsConfirmShield() throws Exception {
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // arm, first step deferred
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // step
+    assertThat(floorOf(counter)).isEqualTo(18);
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // durable confirm
+    }
+    assertThat(walkOf(counter)).isNull();
+    assertThat(ladderField(counter, "raiseLadder", "left"))
+      .as("the confirm leaves the raise ladder refractory")
+      .isGreaterThan(0);
+    assertThat(ladderField(counter, "raiseLadder", "rung"))
+      .as("the shield is not an escalation — the rung stays rewarded")
+      .isEqualTo(1);
+    // Immediate re-distress with blocked keys must NOT re-arm while the
+    // shield holds (the stale tail self-heals by decay instead).
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5);
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5);
+    assertThat(walkOf(counter)).as("the shield suppresses the immediate re-arm").isNull();
+    assertThat(floorOf(counter)).as("the floor holds at the confirmed position").isEqualTo(18);
+  }
+
+  /**
+   * ADR-0051 hard budget: the raise walk's TIDAL_WALK_BUDGET binds on BOTH
+   * verdict branches.  The legacy check lived only on the below-target
+   * branch, so an alternating walk (at/below cycles that never reach 3
+   * consecutive of either) outlived the documented budget by up to ~1.5x
+   * — holding the floor hostage in alternating regimes.  An at-target
+   * tide at the budget now ends the walk as FAILED (undo + backoff).
+   */
+  @Test
+  void governor_raiseWalk_atTargetAtBudget_fails() throws Exception {
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // arm, first step deferred
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // step: floor 18, samples 1
+    // Strict 1:1 alternation — at-target runs of 1 never confirm, below
+    // runs of 1 never crash; the budget is the only possible ending.  The
+    // below-target tides step (the gates are open), so the walk is
+    // climbing; samples at tide N = N-1.
+    for (int i = 0; i < 14; i++) {
+      boolean atTarget = (i % 2 == 0);
+      onTide(counter, atTarget ? 1.0 : 0.2, 3, 16, atTarget ? 0 : 5, 2, atTarget ? 1.5 : 0.5);
+      assertThat(walkOf(counter)).as("tide %d: no verdict below the budget", 3 + i).isNotNull();
+    }
+    // The loop ended at samples 15 (tide 17).  The next tide (18) is an
+    // AT-TARGET tide at samples 16: the hard budget ends the walk there —
+    // the legacy at-target branch never checked the budget and the walk
+    // survived to sample 17+.
+    onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // at-target at samples 16: hard budget FAILED
+    assertThat(walkOf(counter)).as("the hard budget ends the walk on an at-target tide").isNull();
+    assertThat(ladderField(counter, "raiseLadder", "left"))
+      .as("FAILED priced the backoff")
+      .isGreaterThan(0);
+    int guard = 0;
+    while (floorOf(counter) != 10 && guard++ < 20) {
+      onTide(counter, 1.0, 3, 16, 0, 2, 1.5);
+    }
+    assertThat(floorOf(counter)).as("the failed walk undid to the frozen base").isEqualTo(10);
   }
 
   /**
@@ -736,10 +931,10 @@ class WaveCounterAdaptiveTest {
     assertThat(walkOf(counter)).as("a fresh raise-walk is in flight").isNotNull();
   }
 
-  // ---------------- ADR-0046: oscillation probe hygiene ----------------
+  // ---------------- ADR-0045 §II: oscillation probe hygiene ----------------
 
   /**
-   * ADR-0046: the raise-walk's bold driver steps only while SOME member
+   * ADR-0045 §II: the raise-walk's bold driver steps only while SOME member
    * still earns the threshold (0 &lt; renewal &lt; target) — a renewal of 0
    * means the set is quiet or dead, and climbing the floor cannot help it.
    * The un-gated step outran the earners on oscillating workloads (every
@@ -768,7 +963,7 @@ class WaveCounterAdaptiveTest {
   }
 
   /**
-   * ADR-0046: an empty-set collapse that kills an in-flight walk prices the
+   * ADR-0045 §II: an empty-set collapse that kills an in-flight walk prices the
    * walk's OWN ladder (the backoff survives the reset) so the oscillation
    * probe loop — ARM → climb → COLLAPSE → ladder reset → ARM, repeating
    * forever with the throttle defeated — is throttled; ANY priced ladder
@@ -809,7 +1004,7 @@ class WaveCounterAdaptiveTest {
   }
 
   /**
-   * ADR-0046: the raise-walk's bold driver steps only while the hot slots
+   * ADR-0045 §II: the raise-walk's bold driver steps only while the hot slots
    * UNDER-EARN the cold reservoir (hotColdRatio &lt; 1) — a ratio at or above
    * 1 means the members are genuinely earning, and a step would push the
    * threshold past the marginal earners and eat the walk's own confirmation
@@ -826,12 +1021,36 @@ class WaveCounterAdaptiveTest {
     assertThat(floorOf(counter)).as("ratio >= 1 never steps the floor").isEqualTo(18);
     onTide(counter, 0.8, 16, 16, 10, 2, 1.5); // at-target: hold (streak resets the crash count)
     onTide(counter, 0.4, 16, 16, 10, 2, 0.5); // under-earning again: steps
-    assertThat(floorOf(counter)).isEqualTo(25);
+    assertThat(floorOf(counter)).isEqualTo(26);
     onTide(counter, 0.8, 16, 16, 10, 2, 1.5); // at-target: hold
     onTide(counter, 0.4, 16, 16, 10, 2, 1.5); // distressed but OVER-earning: held again
-    assertThat(floorOf(counter)).as("ratio >= 1 holds at the raised position").isEqualTo(25);
+    assertThat(floorOf(counter)).as("ratio >= 1 holds at the raised position").isEqualTo(26);
     onTide(counter, 0.4, 16, 16, 10, 2, 0.5); // under-earning: steps
-    assertThat(floorOf(counter)).isEqualTo(32);
+    assertThat(floorOf(counter)).isEqualTo(34);
+  }
+
+  /**
+   * ADR-0053: the raise stride is priced by the hot/cold density ratio
+   * (WindowClimber's {@code DensityClimber.steer} analog): a ratio near
+   * the 1.0 step gate creeps by one count (the walk samples the decision
+   * zone finely), a ratio of 0.5 strides the full initial step, and a
+   * deeper shortfall saturates at {@code STEP_INITIAL}.  The stride is a
+   * pure function of the tide's ratio — no step-state decay, so a long
+   * healthy pause between walks never re-seeds it.
+   */
+  @Test
+  void governor_raiseWalk_densityPricedStride() throws Exception {
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.9); // arm: first step deferred
+    assertThat(floorOf(counter)).isEqualTo(10);
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.9); // -log2(0.9) ~ 0.15 -> stride 1
+    assertThat(floorOf(counter)).as("a ratio near the gate creeps by one").isEqualTo(11);
+    onTide(counter, 1.0, 16, 16, 10, 2, 1.5); // at-target: resets the crash streak, holds
+    assertThat(floorOf(counter)).isEqualTo(11);
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5); // -log2(0.5) = 1 -> full initial step
+    assertThat(floorOf(counter)).as("a ratio of 0.5 strides the full initial step").isEqualTo(19);
+    onTide(counter, 1.0, 16, 16, 10, 2, 1.5); // at-target: holds
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.25); // -log2(0.25) = 2 -> saturated at the ceiling
+    assertThat(floorOf(counter)).as("a deep shortfall saturates at STEP_INITIAL").isEqualTo(27);
   }
 
   // ---------------- integration: real tides ----------------
@@ -868,6 +1087,242 @@ class WaveCounterAdaptiveTest {
       assertThat(isBeaconMember(counter, "top")).as("re-promoted after the drift").isTrue();
     }
     assertThat(floorOf(counter)).as("floor never left the base").isEqualTo(10);
+  }
+
+  // ---------------- P1/P2: volume-gated regime switches (ADR-0045 §III) ----------------
+
+  /**
+   * P1 quiet bypass: a low-volume regime with an empty hot set drops the
+   * floor to 1 after the wall-clock confirm (4 x 500ms tides), so any key
+   * routes hot; the seed floor re-engages once the volume crosses the
+   * hysteresis threshold.
+   */
+  @Test
+  void governor_quietBypass_dropsFloorToOneAndReengages() throws Exception {
+    // quiet: 30 counts/tide over 20 distinct keys, empty hot set
+    for (int i = 0; i < 4; i++) {
+      onTide(counter, 0.0, 0, 1024, 0, 1, Double.MAX_VALUE, 30L, 20, 500L);
+    }
+    assertThat(floorOf(counter)).as("4 x 500ms of quiet -> bypass floor").isEqualTo(1);
+    // sustained quiet keeps the bypass (no churn back and forth)
+    onTide(counter, 0.0, 0, 1024, 0, 1, Double.MAX_VALUE, 30L, 20, 500L);
+    assertThat(floorOf(counter)).as("bypass is sticky while quiet").isEqualTo(1);
+    // burst: the volume crosses the re-engage threshold -> seed floor
+    onTide(counter, 1.0, 300, 1024, 0, 1, 2.0, 10_000L, 300, 500L);
+    assertThat(floorOf(counter)).as("volume up -> seed floor re-engages").isEqualTo(10);
+  }
+
+  /**
+   * P2 flood collapse: a RAISED floor on which NO key earns the threshold
+   * at high volume is stale from another regime — one FLOOD tide collapses
+   * it to the seed (instead of the parked raise-walk plus the slow
+   * decay-driven collapse), and the flood lock suppresses the ARM while the
+   * flood window persists (a stray earner must not re-raise the floor into
+   * an instant collapse).
+   */
+  @Test
+  void governor_floodCollapse_collapsesStaleFloorAndLocksArm() throws Exception {
+    // raise the floor first: distress (renewal 0.2, ratio < 1, blocked)
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5, 2_000L, 100, 500L); // arm (no step yet)
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5, 2_000L, 100, 500L); // first distressed step: 10 -> 18
+    assertThat(floorOf(counter)).as("raise-walk stepped up").isEqualTo(18);
+    // flood: high volume, nothing earns the threshold, floor above the boundary
+    onTide(counter, 0.0, 10, 1024, 40, 4, 0.0, 10_000L, 300, 500L);
+    assertThat(floorOf(counter)).as("flood collapses the stale floor in one tide").isEqualTo(10);
+    // flood lock: a stray earner must NOT re-arm while the volume is at
+    // flood rate (both the ladder backoff and the lock hold the floor)
+    onTide(counter, 0.2, 16, 16, 10, 2, 0.5, 10_000L, 300, 500L);
+    assertThat(floorOf(counter)).as("flood lock suppresses the re-arm").isEqualTo(10);
+    // the volume drops below the flood rate -> the lock clears and the
+    // machinery resumes (the volume EWMA needs a few low tides)
+    for (int i = 0; i < 4; i++) {
+      onTide(counter, 0.2, 16, 16, 10, 2, 0.5, 1_000L, 100, 500L);
+    }
+    assertThat(floorOf(counter)).as("machinery resumes after the flood window").isEqualTo(18);
+  }
+
+  /**
+   * P2 negative: a high-volume quiet window under the SEED floor is the
+   * noise filter's designed job — nothing earns, the floor stays at the
+   * seed, no FLOOD (the collapse gate requires floor > seed) and no ARM
+   * (the flood signature suppresses the pointless raise-walk).
+   */
+  @Test
+  void governor_seedFloor_highVolumeQuietWindowDoesNotFlood() throws Exception {
+    for (int i = 0; i < 5; i++) {
+      onTide(counter, 0.0, 0, 1024, 40, 4, 0.0, 10_000L, 300, 500L);
+    }
+    assertThat(floorOf(counter))
+      .as("seed floor under a high-volume quiet window is designed behavior")
+      .isEqualTo(10);
+  }
+
+  /**
+   * R1 (anchor band, WindowClimber's stableBand): the veto requires the
+   * floor to stand MEASURABLY above the last confirmed anchor — a floor
+   * within {@code ANCHOR_BAND} (5 counts) of it never retreats (the move
+   * would change nothing and costs flicker), while a floor beyond the
+   * band retreats once the noise margin admits the evidence.
+   */
+  @Test
+  void governor_veto_requiresMeasurableDistanceFromAnchor() throws Exception {
+    onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // under-earning distress: arm, first step deferred
+    onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // the next distressed tide steps: floor 18
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // durable confirm: anchor (10, 0.25)
+    }
+    assertThat(floorOf(counter)).isEqualTo(18);
+    setGovernorField(counter, "floor", 13); // within the band of the anchor
+    onTide(counter, 0.1, 100, 1024, 0, 4, 1.5); // the first distress tide is a shift: it discards the in-band anchor (R3)
+    setGovernorField(counter, "anchorFloor", 10); // re-plant the anchor for the band test
+    setGovernorDoubleField(counter, "anchorRenewal", 0.25);
+    for (int i = 0; i < 19; i++) {
+      onTide(counter, 0.1, 100, 1024, 0, 4, 1.5); // persistent distress below the reference
+    }
+    assertThat(governorField(counter, "retreatTarget"))
+      .as("a floor within the anchor band never retreats into itself")
+      .isZero();
+    assertThat(floorOf(counter)).as("the in-band floor is untouched").isEqualTo(13);
+    setGovernorField(counter, "floor", 18); // measurably above the anchor
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 0.1, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(governorField(counter, "retreatTarget"))
+      .as("a floor beyond the band retreats to the anchor")
+      .isEqualTo(10);
+  }
+
+  /**
+   * R2 (audit-clock escalation, WindowClimber's reschedule): a completed
+   * FAILED release walk at the deepest ladder rung plants the deep-fail
+   * mark — the next audit re-test of the release direction waits the
+   * doubled interval (AUDIT_WAIT_MAX = 64) instead of the standard 8.
+   */
+  @Test
+  void governor_deepFailedRelease_doublesAuditWait() throws Exception {
+    setGovernorField(counter, "floor", 56);
+    setLadderField(counter, "releaseLadder", "rung", 32); // deepest rung
+    for (int i = 0; i < 9; i++) {
+      onTide(counter, 0.85, 100, 1024, 0, 4, 1.5); // audit-due arms the walk (base 0.85)
+    }
+    assertThat(floorOf(counter)).isEqualTo(48);
+    // 16 tides above the crash bar (0.75) but below the base (0.85):
+    // the R5 beatBase test never passes, so the budget expires FAILED.
+    for (int i = 0; i < 16; i++) {
+      onTide(counter, 0.8, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(ladderField(counter, "releaseLadder", "rung")).as("fail doubles, clamped at max").isEqualTo(32);
+    assertThat(ladderBoolField(counter, "releaseLadder", "deepFail"))
+      .as("deepest-rung FAILED plants the audit reschedule mark")
+      .isTrue();
+    assertThat(auditWaitOf(counter)).as("the next audit waits the doubled interval").isEqualTo(64);
+    assertThat(governorField(counter, "retreatTarget"))
+      .as("the FAILED release undoes to its frozen base")
+      .isEqualTo(56);
+  }
+
+  /**
+   * R3 (workload-shift stand-down, WindowClimber's standDown + rates
+   * reset): a single-tide goal-metric move >= RESTART_THRESHOLD in the
+   * parked state discards the renewal references and the distress streak,
+   * but the floor stays put, the AUDIT clock survives (position
+   * stillness is orthogonal to the rate), and the shift tide's sample
+   * re-seeds the references (Caffeine's reset-then-update ordering).
+   */
+  @Test
+  void governor_workloadShift_standsDownReferences() throws Exception {
+    for (int i = 0; i < 5; i++) {
+      onTide(counter, 0.85, 100, 1024, 0, 4, 1.5); // healthy: audit run accumulates
+    }
+    assertThat(governorField(counter, "auditTides")).isEqualTo(5);
+    onTide(counter, 0.1, 100, 1024, 0, 4, 1.5); // |0.85 - 0.1| >= 0.05: shift
+    assertThat(governorDoubleField(counter, "smoothedRenewal"))
+      .as("the shift tide's sample seeds the re-learned reference")
+      .isEqualTo(0.1);
+    assertThat(governorDoubleField(counter, "renewalDeviation"))
+      .as("the deviation re-seeds wide (no scatter yet)")
+      .isEqualTo(0.05);
+    assertThat(governorField(counter, "auditTides"))
+      .as("the audit clock survives the shift (decayed, not reset)")
+      .isEqualTo(4);
+    assertThat(floorOf(counter)).as("the floor is deliberately untouched").isEqualTo(10);
+  }
+
+  /** R3 anchor handling: discarded when the shift lands at the anchor, kept otherwise. */
+  @Test
+  void governor_workloadShift_anchorDiscardIsPositional() throws Exception {
+    onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // arm
+    onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // step: floor 18
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // confirm: anchor (10, 0.25)
+    }
+    setGovernorField(counter, "floor", 13); // within the band of the anchor
+    onTide(counter, 0.5, 100, 1024, 0, 4, 1.5); // shift at the anchor position
+    assertThat(governorField(counter, "anchorFloor"))
+      .as("a claim tested at its own position and found wrong is discarded")
+      .isZero();
+    // re-confirm and shift AWAY from the anchor
+    for (int i = 0; i < 9; i++) {
+      onTide(counter, 0.85, 100, 1024, 0, 4, 1.5); // audit-due arms + walk
+    }
+    for (int i = 0; i < 20; i++) {
+      onTide(counter, 0.9, 100, 1024, 0, 4, 1.5);
+    }
+    // release walk confirmed: anchor at the descended position
+    int anchor = governorField(counter, "anchorFloor");
+    assertThat(anchor).isGreaterThan(0);
+    setGovernorField(counter, "floor", Math.min(anchor + 10, 250)); // away from the anchor
+    onTide(counter, 0.5, 100, 1024, 0, 4, 1.5); // shift away from the anchor
+    assertThat(governorField(counter, "anchorFloor"))
+      .as("a shift far from the anchor leaves the reference in place")
+      .isEqualTo(anchor);
+  }
+
+  /**
+   * R5 (beatBase, Caffeine's audit confirm): a release walk whose budget
+   * expires entirely below the arming renewal is a confirm against a
+   * colder reference — it FAILS (undo + ladder escalation) instead of
+   * confirming the descended position.
+   */
+  @Test
+  void governor_releaseWalk_budgetBelowBase_failsInsteadOfConfirming() throws Exception {
+    setGovernorField(counter, "floor", 56);
+    for (int i = 0; i < 9; i++) {
+      onTide(counter, 0.85, 100, 1024, 0, 4, 1.5); // audit-due arms the walk (base 0.85)
+    }
+    assertThat(floorOf(counter)).isEqualTo(48);
+    for (int i = 0; i < 16; i++) {
+      onTide(counter, 0.8, 100, 1024, 0, 4, 1.5); // above the bar, below the base
+    }
+    assertThat(governorField(counter, "retreatTarget"))
+      .as("budget below the base is a failed experiment, not a confirm")
+      .isEqualTo(56);
+    assertThat(ladderField(counter, "releaseLadder", "rung"))
+      .as("FAILED doubles the rung, floored at the initial backoff")
+      .isEqualTo(4);
+    int guard = 0;
+    while (floorOf(counter) != 56 && guard++ < 20) {
+      onTide(counter, 0.85, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(floorOf(counter)).as("the failed release undid to the base").isEqualTo(56);
+  }
+
+  /** R5 control: a walk whose goal metric matched its start confirms normally. */
+  @Test
+  void governor_releaseWalk_matchingBase_confirms() throws Exception {
+    setGovernorField(counter, "floor", 56);
+    for (int i = 0; i < 9; i++) {
+      onTide(counter, 0.85, 100, 1024, 0, 4, 1.5); // audit-due arms the walk (base 0.85)
+    }
+    assertThat(floorOf(counter)).isEqualTo(48);
+    for (int i = 0; i < 16; i++) {
+      onTide(counter, 0.9, 100, 1024, 0, 4, 1.5); // at/above the base: beatBase
+    }
+    assertThat(walkOf(counter)).as("confirmed: no walk in flight").isNull();
+    assertThat(ladderField(counter, "releaseLadder", "rung"))
+      .as("a confirmed walk rewards the ladder")
+      .isEqualTo(1);
+    assertThat(floorOf(counter)).as("the descended position is kept").isEqualTo(10);
   }
 
   // ---------------- helpers ----------------
@@ -914,11 +1369,11 @@ class WaveCounterAdaptiveTest {
   }
 
   private static int mixHash(int h) {
-    h ^= h >>> 16;
-    h *= 0x85ebca6b;
-    h ^= h >>> 13;
-    h *= 0xc2b2ae35;
-    h ^= h >>> 16;
+    h ^= h >>> 17;
+    h *= 0xed5ad4bb;
+    h ^= h >>> 11;
+    h *= 0xac4c1b51;
+    h ^= h >>> 15;
     return h;
   }
 

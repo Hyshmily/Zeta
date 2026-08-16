@@ -25,15 +25,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Density-refined promotion boundary and incumbent-first promotion
- * (ADR-0042): when the log2-boundary bucket overflows the remaining
- * hotLimit slots, a linear sub-histogram refines the threshold to the
- * actual ~k-th largest count (keys below the refined boundary are
- * excluded instead of admitted in HashMap iteration order), and when the
- * refined boundary still cuts a tie-band wider than the remaining slots,
- * renewing members are re-promoted before newcomers — the hot set stays
- * stable under flat distributions instead of rotating a random sample
- * every scan tide.
+ * Promotion boundary precision and incumbent-first promotion (ADR-0042,
+ * boundary mechanism superseded by ADR-0054): when the log2-located
+ * boundary bucket overflows the remaining hotLimit slots, the exact k-th
+ * largest count is selected within the bucket (quickselect — keys below
+ * the exact boundary are excluded instead of admitted in HashMap
+ * iteration order), and when the exact cutoff still cuts a tie-band wider
+ * than the remaining slots, renewing members are re-promoted before
+ * newcomers — the hot set stays stable under flat distributions instead
+ * of rotating a random sample every scan tide.  The behavior contract is
+ * unchanged from the ADR-0042 density refinement (the exact selection
+ * reproduces its threshold semantics to single-count resolution).
  */
 class WaveCounterDensityBoundaryTest {
 
@@ -70,8 +72,9 @@ class WaveCounterDensityBoundaryTest {
    * same count — every promotion is a coin flip in iteration order, so
    * without the renewal-first pass the scan tide re-promotes a NEW random
    * sample (churn); with it, the same 1024 keys renew forever.  Tides:
-   * 1 promotes the first sample, 2 is the saturated skip (decay 2→1), 3 is
-   * the scan tide — the member set must be unchanged.
+   * 1 promotes the first sample, 2-4 are saturated tides (with the
+   * ADR-0049 sweep the evidence survives to tide 5's decay — the member
+   * set must be unchanged on every intervening tide).
    */
   @Test
   void flatDistribution_hotSetStaysStableAcrossScanTides() throws Exception {
@@ -81,41 +84,39 @@ class WaveCounterDensityBoundaryTest {
     assertThat(activeBeaconSize(counter)).isLessThanOrEqualTo(1024);
     Set<String> afterTide1 = members("k-", n);
 
-    countKeys("k-", n, 25);
-    invokeDeliver(counter); // tide 2: saturated skip tide
-    countKeys("k-", n, 25);
-    invokeDeliver(counter); // tide 3: scan tide (renewal-first)
-
-    Set<String> afterTide3 = members("k-", n);
-    assertThat(afterTide3).as("renewals before newcomers — no rotation").isEqualTo(afterTide1);
+    for (int t = 2; t <= 5; t++) { // saturated: skip/decay/skip/decay (ADR-0049)
+      countKeys("k-", n, 25);
+      invokeDeliver(counter);
+      Set<String> after = members("k-", n);
+      assertThat(after).as("renewals before newcomers — no rotation at tide " + t).isEqualTo(afterTide1);
+    }
     assertThat(activeBeaconSize(counter)).as("no capacity ratchet across tides").isLessThanOrEqualTo(1024);
   }
 
   /**
    * A fallen incumbent yields its slot: after the old set drops below the
-   * refined boundary, the new set takes over.  Tide 1 promotes the old set;
-   * tide 2 is the saturated skip (old evidence decays 2→1); tide 3 scans:
-   * the old keys (now below the threshold) are NOT renewed and decay out,
-   * the new keys enter (500 @30 + 524 of the 600 @25 — the break cuts the
-   * @25 tie-band; promoted keys read as members with no false negatives).
+   * refined boundary, the new set takes over.  Tide 1 promotes the old set
+   * (saturated).  With the ADR-0049 every-other-tide sweep the fallen
+   * evidence survives two extra tides (tide 2 skip, tide 3 decay 2→1 —
+   * both saturated skips, no scan), decays out at tide 5's sweep, and the
+   * scan then admits the new set: the old keys (now below the threshold)
+   * are NOT renewed and decay out, the new keys enter (500 @30 + 524 of
+   * the 600 @25 — the break cuts the @25 tie-band; promoted keys read as
+   * members with no false negatives).
    */
   @Test
   void fallenIncumbents_yieldSlots_toNewcomers() throws Exception {
     countKeys("old-", 500, 30);
     countKeys("old2-", 524, 25);
-    invokeDeliver(counter); // tide 1: old set promoted
+    invokeDeliver(counter); // tide 1: old set promoted (saturated)
 
-    countKeys("old-", 500, 20);
-    countKeys("old2-", 524, 20);
-    countKeys("new-", 500, 30);
-    countKeys("new2-", 600, 25);
-    invokeDeliver(counter); // tide 2: saturated skip (old evidence 2→1)
-
-    countKeys("old-", 500, 20);
-    countKeys("old2-", 524, 20);
-    countKeys("new-", 500, 30);
-    countKeys("new2-", 600, 25);
-    invokeDeliver(counter); // tide 3: scan — old falls, new enters
+    for (int t = 2; t <= 5; t++) { // skip / decay / skip / decay (ADR-0049)
+      countKeys("old-", 500, 20);
+      countKeys("old2-", 524, 20);
+      countKeys("new-", 500, 30);
+      countKeys("new2-", 600, 25);
+      invokeDeliver(counter);
+    }
 
     assertThat(memberCount("old-", 500)).as("fallen count-20 keys must leave").isLessThanOrEqualTo(10);
     assertThat(memberCount("old2-", 524)).as("fallen count-20 keys must leave").isLessThanOrEqualTo(12);
@@ -248,11 +249,11 @@ class WaveCounterDensityBoundaryTest {
   }
 
   private static int mixHash(int h) {
-    h ^= h >>> 16;
-    h *= 0x85ebca6b;
-    h ^= h >>> 13;
-    h *= 0xc2b2ae35;
-    h ^= h >>> 16;
+    h ^= h >>> 17;
+    h *= 0xed5ad4bb;
+    h ^= h >>> 11;
+    h *= 0xac4c1b51;
+    h ^= h >>> 15;
     return h;
   }
 

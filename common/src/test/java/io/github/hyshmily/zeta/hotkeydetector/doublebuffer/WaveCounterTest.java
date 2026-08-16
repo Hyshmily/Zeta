@@ -320,10 +320,11 @@ class WaveCounterTest {
           Thread.sleep(5);
           invokeDeliver(c);
           // Observe the promotion evidence from INSIDE the deliverer loop:
-          // the beacon decays a quiet key within 2 tides, so a post-destroy
+          // the beacon decays a quiet key within 4 tides (ADR-0049 sweep
+          // period), so a post-destroy
           // check races the decay window (the gated quiescence made idle
           // tides faster, widening the race).  Mid-run observation over the
-          // 5ms cadence catches the 2-tide evidence window reliably.
+          // 5ms cadence catches the 4-tide evidence window reliably.
           if (!promotedSeen.get()) {
             promotedSeen.set(wasPromoted(c, "cand"));
           }
@@ -383,11 +384,11 @@ class WaveCounterTest {
       .sum();
     assertThat(total).isEqualTo(expected);
     // sanity: the candidate key was actually promoted (observed mid-run —
-    // see the deliverer loop; the beacon decays a quiet key within 2 tides).
+    // see the deliverer loop; the beacon decays a quiet key within 4 tides).
     assertThat(promotedSeen.get()).isTrue();
   }
 
-  /** The bit2-role evidence — proves the key was promoted recently (2-tide window). */
+  /** The bit2-role evidence — proves the key was promoted recently (4-tide window). */
   private static boolean wasPromoted(WaveCounter c, String key) {
     try {
       Field f = WaveCounter.class.getDeclaredField("beacon");
@@ -406,11 +407,11 @@ class WaveCounterTest {
 
   /** Replicates {@code WaveCounter.mixHash} for beacon bit position computation. */
   private static int mixHash(int h) {
-    h ^= h >>> 16;
-    h *= 0x85ebca6b;
-    h ^= h >>> 13;
-    h *= 0xc2b2ae35;
-    h ^= h >>> 16;
+    h ^= h >>> 17;
+    h *= 0xed5ad4bb;
+    h ^= h >>> 11;
+    h *= 0xac4c1b51;
+    h ^= h >>> 15;
     return h;
   }
 
