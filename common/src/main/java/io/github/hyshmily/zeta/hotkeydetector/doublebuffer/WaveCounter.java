@@ -2871,7 +2871,6 @@ public class WaveCounter implements InitializingBean, Destroyable {
         blockedKeys,
         pass.boundary,
         hotColdRatio,
-        snapshotSum,
         distinctKeys,
         tideIntervalMs
       )
@@ -3785,7 +3784,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * The immutable derived view of one promoted tide (WindowClimber's
    * {@code Reading}): the goal-metric signals {@link #promote(Map, long)}
    * computes from the snapshot, bundled so the governor's input contract
-   * is a single typed carrier instead of nine positional primitives.  The
+   * is a single typed carrier instead of eight positional primitives.  The
    * record is the seam between the promotion pass and the governor: the
    * same object the deliverer constructs is the object {@code onTide}
    * consumes, so the two sides cannot drift apart (a signal added here
@@ -3804,8 +3803,6 @@ public class WaveCounter implements InitializingBean, Destroyable {
    *                     count level, before the floor)
    * @param hotColdRatio the hot set's earnings per occupied slot divided
    *                     by the cold reservoir's earnings per key, this tide
-   * @param snapshotSum  total counts of this tide's snapshot — the volume
-   *                     signal of the P1/P2 regime switches (ADR-0045 §III)
    * @param distinct     distinct keys of this tide's snapshot — the flood
    *                     signature's scale gate
    * @param intervalMs   this tide's accumulation interval (the cadence the
@@ -3819,7 +3816,6 @@ public class WaveCounter implements InitializingBean, Destroyable {
     int blockedKeys,
     long boundary,
     double hotColdRatio,
-    long snapshotSum,
     int distinct,
     long intervalMs
   ) {}
@@ -4347,7 +4343,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
      * <p>The reading is the immutable derived view of this tide built by
      * {@link #promote(Map, long)} (WindowClimber's {@code Reading} pattern):
      * the goal-metric signals are bundled into one typed carrier instead
-     * of nine positional primitives, so the promotion pass and the
+     * of eight positional primitives, so the promotion pass and the
      * governor share a single documented contract.
      *
      * <p><b>P1 (quiet bypass, ADR-0045 §III).</b>  A volume-quiet regime

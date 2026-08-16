@@ -133,7 +133,7 @@ class WaveCounterAdaptiveTest {
     int blockedKeys,
     long boundary,
     double ratio,
-    long snapshotSum,
+    long volumeSeed,
     int distinct,
     long intervalMs
   ) throws Exception {
@@ -142,15 +142,17 @@ class WaveCounterAdaptiveTest {
     // BEFORE invoking onTide — the same sample must never be folded twice,
     // which applied weight 2α−α² instead of α and distorted the P1/P2
     // regime gates). Without the explicit fold here, vol stays at its seed
-    // and every tide reads as "quiet".
+    // and every tide reads as "quiet".  The volume is deliberately NOT part
+    // of the TideReading (ADR-0055): the reading carries only the signals
+    // onTide consumes; the volume channel is onVolume.
     Method fold = governor.getClass().getDeclaredMethod("onVolume", long.class);
     fold.setAccessible(true);
-    fold.invoke(governor, snapshotSum);
+    fold.invoke(governor, volumeSeed);
     Method m = governor.getClass().getDeclaredMethod("onTide", tideReadingType());
     m.setAccessible(true);
     m.invoke(
       governor,
-      newTideReading(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, snapshotSum, distinct, intervalMs)
+      newTideReading(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, distinct, intervalMs)
     );
   }
 
@@ -173,14 +175,12 @@ class WaveCounterAdaptiveTest {
     double ratio
   ) throws Exception {
     // Defaults that keep the P1/P2 regime switches inert for the classic
-    // governor tests: vol seeds at 2000 -> 4000 counts/sec (below the
-    // FLOOD_RATE_PER_SEC gate, no flood signature) and never below
-    // QUIET_VOLUME (no quiet bypass), and activeSlots is nonzero on the
-    // collapse tests' distress tides.
-    return newTideReading(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, 2_000L, 100, 500L);
+    // governor tests (the volume seed itself is folded by the onTide
+    // overload above — see its Javadoc).
+    return newTideReading(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, 100, 500L);
   }
 
-  /** Reflectively constructs a {@code TideReading} with explicit volume/scale signals. */
+  /** Reflectively constructs a {@code TideReading} with explicit scale signals. */
   private static Object newTideReading(
     double renewal,
     int activeSlots,
@@ -188,7 +188,6 @@ class WaveCounterAdaptiveTest {
     int blockedKeys,
     long boundary,
     double ratio,
-    long snapshotSum,
     int distinct,
     long intervalMs
   ) throws Exception {
@@ -200,12 +199,11 @@ class WaveCounterAdaptiveTest {
         int.class,
         long.class,
         double.class,
-        long.class,
         int.class,
         long.class
       );
     ctor.setAccessible(true);
-    return ctor.newInstance(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, snapshotSum, distinct, intervalMs);
+    return ctor.newInstance(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, distinct, intervalMs);
   }
 
   /** A healthy hot set (renewal at/above target, not saturated) never moves the floor. */
