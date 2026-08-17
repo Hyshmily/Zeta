@@ -133,7 +133,12 @@ import org.springframework.beans.factory.InitializingBean;
  *       routing-only and cost zero per-op; the deliverer pays the bucket
  *       view pass, the quickselect and the tie/blocked pass on scan tides
  *       (O(bucket) expected) plus the incumbent split on overflowing
- *       tides.</li>
+ *       tides.  A stable-workload shortcut (ADR-0057) reuses the previous
+ *       tide's exact boundary as a sweep filter, so the selection runs
+ *       over the ~hotLimit-key list instead of the bucket whenever the
+ *       list provably holds the k-th largest — the flat-distribution
+ *       worst case (a boundary bucket the size of the snapshot) degrades
+ *       to O(hotLimit) selection on stable workloads.</li>
  *   <li><b>hotLimit = 1024</b> — caps the active promoted hot set so
  *       pathological traffic cannot grow it unboundedly.  The routing
  *       beacon is the compact 2+2 role-evidence array of
@@ -1042,6 +1047,23 @@ public class WaveCounter implements InitializingBean, Destroyable {
   private int[] bucketIdx = new int[1024];
 
   /**
+   * Kth-shortcut candidate list (ADR-0057, deliverer-only, reused like
+   * {@link #bucketIdx}): packed-array indices (into {@link #allValues}) of
+   * every key at or above the previous tide's exact boundary
+   * ({@link #lastKth}), collected in the histogram sweep — one extra
+   * comparison per snapshot entry.  When the list holds at least
+   * {@link #hotLimit} keys, {@link #selectBoundary} selects the exact k-th
+   * largest over THIS
+   * list (quickselect + the {@code >= kth} count) instead of the
+   * boundary-bucket view: the list provably contains every key that can
+   * rank in the top {@code hotLimit} (see the method's Javadoc for the
+   * lemma), so stable workloads skip the in-bucket selection whose size is
+   * the bucket, not the boundary.  Cleared implicitly via the pass-local
+   * size counter (stale tail entries are never read).
+   */
+  private int[] aboveKthIdx = new int[1024];
+
+  /**
    * Promotion candidate index list, reused across tides instead of allocated
    * per tide (the deliverer is the only writer): packed-array indices (into
    * {@link #allValues} / {@link #allHashes}) of the keys at or above the
@@ -1084,6 +1106,20 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * are never observed.
    */
   private int[] newcomerIdx = new int[1024];
+
+  /**
+   * Previous tide's exact promotion boundary ({@code kth}), the
+   * kth-shortcut filter seed (ADR-0057): the sweep collects every key at
+   * or above this value into {@link #aboveKthIdx}, and
+   * {@link #selectBoundary} takes the exact selection over that list when
+   * it provably holds this cycle's k-th largest — stable workloads skip
+   * the in-bucket quickselect entirely.  {@code -1} = no previous boundary
+   * yet (the first scan tide pays the full path; a stale value never
+   * affects correctness — it merely widens or narrows the filter, see the
+   * method's Javadoc).  Deliverer-only; retained across {@link #clear()}
+   * like the governor floor (an adaptive reference, never correctness).
+   */
+  private long lastKth = -1;
 
   /**
    * Packed per-key (value, hash) snapshot arrays, reused across tides instead
@@ -2284,7 +2320,9 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * Promotion pass of a delivered snapshot (tide phase {@code snapshot-promote}):
    * a log2-bucket histogram of the cycle's counts locates the boundary bucket
    * (floor {@link #PROMOTION_FLOOR}), the boundary VALUE is the exact k-th
-   * largest count selected within it (quickselect, ADR-0054), and the keys at
+   * largest count selected within it (quickselect, ADR-0054 — with the
+   * ADR-0057 kth-shortcut: on stable workloads the selection runs over the
+   * previous boundary's filtered list instead of the bucket), and the keys at
    * or above it are promoted to the exact hot path — renewals before newcomers
    * when the exact cutoff cuts a tie-band wider than the remaining slots
    * (the incumbent/newcomer split is decided in the same phase, pre-decay).
@@ -2341,7 +2379,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
       sweepHistogram(snapshot, pass);
       estimateBoundary(pass);
       selectBoundary(pass);
-      decayGate(pass);
+      decay(pass);
       computeReading(pass, distinctKeys, snapshotSum, tideIntervalMs);
     }
   }
@@ -2372,7 +2410,10 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * promotion scan).  Every entry's (value,
    * hash) is packed into {@link #allValues} / {@link #allHashes} in the
    * same sweep — the saturated branch reuses them instead of re-iterating
-   * the snapshot and re-avalanching every key.  The pass runs BEFORE
+   * the snapshot and re-avalanching every key.  The same sweep collects
+   * the kth-shortcut list ({@link #aboveKthIdx}: the keys at or above the
+   * previous tide's exact boundary, one comparison per entry — ADR-0057).
+   * The pass runs BEFORE
    * {@link #decayCounts()} (the incumbent capture needs the pre-decay
    * beacon state); on gate-failing (saturated) tides it is wasted work —
    * bounded, see the class doc.
@@ -2425,6 +2466,18 @@ public class WaveCounter implements InitializingBean, Destroyable {
       }
 
       histogram[bucket]++;
+      // (kth-shortcut filter, ADR-0057): collect every key at or above the
+      // previous tide's exact boundary — the list {@link #selectBoundary}
+      // selects over when it provably holds this cycle's k-th largest (see
+      // the method's Javadoc).  One comparison per snapshot entry, paid on
+      // every scan tide; the first tide (lastKth = -1) skips the branch.
+      if (lastKth >= 0 && v >= lastKth) {
+        if (aboveKthIdx.length == pass.aboveKthSize) {
+          aboveKthIdx = Arrays.copyOf(aboveKthIdx, aboveKthIdx.length << 1);
+        }
+        aboveKthIdx[pass.aboveKthSize++] = pass.packedSize - 1;
+      }
+
       if (v >= pass.threshold) {
         if (candidateIdx.length == pass.candSize) {
           candidateIdx = Arrays.copyOf(candidateIdx, candidateIdx.length << 1);
@@ -2506,17 +2559,47 @@ public class WaveCounter implements InitializingBean, Destroyable {
    *       (the ADR-0042 split ran on the bucket edge {@code v >= 2^b}).</li>
    * </ul>
    *
+   * <p><b>Kth-shortcut (ADR-0057).</b>  The sweep collects every key at or
+   * above the PREVIOUS tide's exact boundary ({@link #lastKth}) into
+   * {@link #aboveKthIdx} — one comparison per entry.  When that list holds
+   * at least {@code hotLimit} keys, the exact selection runs over the LIST
+   * instead of the bucket view.  The lemma: the shipped boundary is the
+   * exact {@code hotLimit}-th largest of the snapshot on every reachable
+   * path — the quickselect branch by construction, the bucket-fits branch
+   * because the crossing invariant (the top-down accumulation stops at the
+   * first bucket that reaches {@code hotLimit}) makes
+   * {@code bucketSize < need} unreachable, so a fitting bucket either
+   * holds exactly {@code need} keys (its minimum IS the k-th largest) or
+   * the snapshot holds fewer than {@code hotLimit} keys (its minimum IS
+   * the k-th largest by definition).  A list of {@code >= hotLimit} keys
+   * above the previous boundary cannot sit below this cycle's k-th largest
+   * (else fewer than {@code hotLimit} keys could qualify — contradiction),
+   * so it contains every key that can rank in the top {@code hotLimit} and
+   * its {@code hotLimit}-th largest IS the exact k-th largest of the
+   * snapshot.  The {@code >= kth} count over the list is the
+   * whole-snapshot count (the list also holds the {@code above} keys;
+   * nothing below the kth can rank).  On
+   * stable workloads the selection and the tie pass therefore scale with
+   * the list (~{@code hotLimit} keys + the tie band) instead of the whole
+   * boundary bucket; a drifted workload (the previous boundary above this
+   * cycle's k-th largest) empties the list and falls back to the reference
+   * path, never a wrong boundary.  A stale seed only widens or narrows the
+   * filter — the gate self-validates the lemma every tide.
+   *
    * <p><b>Cost.</b>  Deliverer-only: the bucket view pass (from the
    * candidate view when the floor sits at or below the bucket edge — the
    * common case — so the pass scales with the candidates, not the whole
-   * snapshot), a quickselect (O(bucket) expected, ~2-3n comparisons), a
+   * snapshot), a quickselect (O(bucket) expected, ~2-3n comparisons; on
+   * the shortcut path O(aboveKthSize) instead, ~{@code hotLimit} keys on
+   * stable workloads), a
    * tie pass over the bucket view (skipped when the bucket fits: every
    * bucket key qualifies by construction), and — on overflowing tides —
    * the incumbent split (one membership test per candidate with
    * {@code v >= kth}, see {@link #splitIncumbents}).  The quickselect
    * partitions the bucket VIEW (index swaps), never the packed arrays, so
    * the (value, hash) pairing survives for the split and the promotion
-   * scans.
+   * scans.  Plus the one-comparison kth filter per snapshot entry in the
+   * sweep.
    */
   @SuppressWarnings("all")
   private void selectBoundary(PromotionPass pass) {
@@ -2524,61 +2607,96 @@ public class WaveCounter implements InitializingBean, Destroyable {
       return;
     }
 
-    // The bucket's keys are all candidates when the floor sits at or below
-    // the bucket edge (cand = v >= floor), so the cheaper candidate scan
-    // covers it; with the floor INSIDE the bucket, keys below the floor
-    // still shape the exact k-th largest and the blocked band, so the
-    // whole packed array is scanned.  Non-positive counts cannot match:
-    // their unsigned shift is never 1.
-    boolean floorBelowBucketEdge = pass.floor <= pass.boundary;
-    int bucketSize = 0;
-    int limit = floorBelowBucketEdge ? pass.candSize : pass.packedSize;
-    for (int i = 0; i < limit; i++) {
-      int packedIdx = floorBelowBucketEdge ? candidateIdx[i] : i;
-      if ((allValues[packedIdx] >>> pass.boundaryBucket) == 1) {
-        if (bucketIdx.length == bucketSize) {
-          bucketIdx = Arrays.copyOf(bucketIdx, bucketIdx.length << 1);
-        }
-        bucketIdx[bucketSize++] = packedIdx;
-      }
-    }
-
-    if (bucketSize == 0) {
-      return;
-    }
-
     int need = (int) (hotLimit - pass.above);
     long kth;
-    long bucketGe;
-    if (bucketSize > need) {
-      // (exact selection): the need-th largest within the bucket IS the
-      // k-th largest of the snapshot — the `above` keys in higher buckets
-      // all qualify.  Partitions the view only; the >= kth count follows
-      // (the tie band of the incumbent-first gate).
-      kth = selectKthLargest(allValues, bucketIdx, 0, bucketSize - 1, need);
-      bucketGe = 0;
-      for (int i = 0; i < bucketSize; i++) {
-        if (allValues[bucketIdx[i]] >= kth) {
-          bucketGe++;
+    long qualifying;
+    if (pass.aboveKthSize >= hotLimit) {
+      // (kth-shortcut, ADR-0057): the sweep collected every key at or above
+      // the PREVIOUS tide's exact boundary ({@link #lastKth}) into
+      // {@link #aboveKthIdx}.  The lemma: the shipped boundary is the exact
+      // hotLimit-th largest of the snapshot on every reachable path — the
+      // quickselect branch by construction, the bucket-fits branch because
+      // the crossing invariant (the top-down accumulation stops at the
+      // first bucket that reaches hotLimit) makes bucketSize < need
+      // unreachable, so a fitting bucket either holds exactly `need` keys
+      // (its minimum IS the hotLimit-th largest) or the snapshot holds
+      // fewer than hotLimit keys (its minimum IS the k-th largest by
+      // definition).  A list of >= hotLimit keys above the previous
+      // boundary cannot sit below this cycle's k-th largest (else fewer
+      // than hotLimit keys could qualify — contradiction), so it contains
+      // every key that can rank in the top hotLimit and its hotLimit-th
+      // largest IS the exact k-th largest of the snapshot.  The
+      // {@code >= kth} count runs over the list too: it contains the
+      // `above` keys (all strictly above the kth) and nothing below the
+      // kth can rank, so the count IS the whole-snapshot count — no
+      // {@code pass.above} addition (the fallback counts the bucket
+      // separately).
+      kth = selectKthLargest(allValues, aboveKthIdx, 0, pass.aboveKthSize - 1, (int) hotLimit);
+      qualifying = 0;
+      for (int i = 0; i < pass.aboveKthSize; i++) {
+        if (allValues[aboveKthIdx[i]] >= kth) {
+          qualifying++;
         }
       }
     } else {
-      // the bucket fits: the k-th largest is the bucket minimum and every
-      // bucket key qualifies — the >= kth count IS the bucket size, no
-      // second pass.
-      kth = allValues[bucketIdx[0]];
-      for (int i = 1; i < bucketSize; i++) {
-        long v = allValues[bucketIdx[i]];
-        if (v < kth) {
-          kth = v;
+      // (bucket view): the boundary-bucket keys [2^b, 2^(b+1)) — from the
+      // candidates when the floor sits at or below the bucket edge, else
+      // the whole packed array (keys below the floor still shape the exact
+      // k-th largest and the blocked band).  Non-positive counts cannot
+      // match: their unsigned shift is never 1.
+      boolean floorBelowBucketEdge = pass.floor <= pass.boundary;
+      int bucketSize = 0;
+      int limit = floorBelowBucketEdge ? pass.candSize : pass.packedSize;
+      for (int i = 0; i < limit; i++) {
+        int packedIdx = floorBelowBucketEdge ? candidateIdx[i] : i;
+        if ((allValues[packedIdx] >>> pass.boundaryBucket) == 1) {
+          if (bucketIdx.length == bucketSize) {
+            bucketIdx = Arrays.copyOf(bucketIdx, bucketIdx.length << 1);
+          }
+          bucketIdx[bucketSize++] = packedIdx;
         }
       }
-      bucketGe = bucketSize;
+
+      if (bucketSize == 0) {
+        return;
+      }
+
+      long bucketGe;
+      if (bucketSize > need) {
+        // (exact selection): the need-th largest within the bucket IS the
+        // k-th largest of the snapshot — the `above` keys in higher buckets
+        // all qualify.  Partitions the view only; the >= kth count follows
+        // (the tie band of the incumbent-first gate).
+        kth = selectKthLargest(allValues, bucketIdx, 0, bucketSize - 1, need);
+        bucketGe = 0;
+        for (int i = 0; i < bucketSize; i++) {
+          if (allValues[bucketIdx[i]] >= kth) {
+            bucketGe++;
+          }
+        }
+      } else {
+        // the bucket fits: the k-th largest is the bucket minimum and every
+        // bucket key qualifies — the >= kth count IS the bucket size, no
+        // second pass.
+        kth = allValues[bucketIdx[0]];
+        for (int i = 1; i < bucketSize; i++) {
+          long v = allValues[bucketIdx[i]];
+          if (v < kth) {
+            kth = v;
+          }
+        }
+        bucketGe = bucketSize;
+      }
+      qualifying = pass.above + bucketGe;
     }
-    long qualifying = pass.above + bucketGe;
 
     pass.boundary = kth;
     pass.threshold = Math.max(pass.floor, kth);
+    // (kth-shortcut seed): the exact boundary of THIS tide becomes the next
+    // tide's filter — the pass's output is the only memory the shortcut
+    // needs (a skipped tide leaves the previous seed in place; stale seeds
+    // only widen or narrow the filter, never break the lemma).
+    lastKth = kth;
     if (kth >= pass.floor) {
       // the boundary dominates: the threshold is the exact k-th largest,
       // the blocked band is empty, and the incumbent-first gate is the
@@ -2693,7 +2811,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * decay-equivalent basis).
    */
   @SuppressWarnings("all")
-  private void decayGate(PromotionPass pass) {
+  private void decay(PromotionPass pass) {
     pass.sweepDecay = sweepCountdown == 1;
     if (pass.sweepDecay) {
       pass.remain = decayCounts();
@@ -2797,8 +2915,8 @@ public class WaveCounter implements InitializingBean, Destroyable {
             memberKeys++;
             memberEarnings += v;
             promotedCount++;
-            if (promoteToBeacon(allHashes[candidateIdx[cIdx]]) && ++pass.remain >= hotLimit) {
-              break;
+            if (promoteToBeacon(allHashes[candidateIdx[cIdx]])) {
+              pass.remain++;
             }
           }
         }
@@ -3823,7 +3941,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
   /**
    * Mutable per-tide state of one promotion pass (deliverer-only, one
    * instance per promoted tide): the phase outputs thread through the pass
-   * methods (sweepHistogram, estimateBoundary, selectBoundary, decayGate,
+   * methods (sweepHistogram, estimateBoundary, selectBoundary, decay,
    * computeReading) instead of nine positional primitives — each phase
    * fills the fields the next phase reads, mirroring the original method
    * locals exactly.
@@ -3836,6 +3954,8 @@ public class WaveCounter implements InitializingBean, Destroyable {
     int packedSize;
     /** Candidate index-view size, parallel to candidateIdx. */
     int candSize;
+    /** Kth-shortcut view size, parallel to aboveKthIdx (0 while lastKth < 0). */
+    int aboveKthSize;
     /** Incumbent index-view size, parallel to incumbentIdx. */
     int incSize;
     /** Newcomer index-view size, parallel to newcomerIdx. */
@@ -4558,7 +4678,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
         floor = retreatTarget;
         retreating = false;
       } else {
-        floor += (int) Math.signum(retreatTarget - floor) * Math.min(STEP_RETURN_MAX, stride / 2 + 1);
+        floor += (retreatTarget > floor ? 1 : -1) * Math.min(STEP_RETURN_MAX, stride / 2 + 1);
         retreatStepsLeft--;
       }
       return true;
