@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.ref.SoftReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -141,8 +142,10 @@ class WaveCounterRecyclingTest {
     invokeDeliver(counter);
     Field poolField = WaveCounter.class.getDeclaredField("ebbReservoir");
     poolField.setAccessible(true);
-    ConcurrentHashMap<String, LongAdder> pool = (ConcurrentHashMap<String, LongAdder>) poolField.get(counter);
-    LongAdder original = pool.get("k");
+    @SuppressWarnings("unchecked")
+    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef =
+      (SoftReference<ConcurrentHashMap<String, LongAdder>>) poolField.get(counter);
+    LongAdder original = poolRef.get().get("k");
     assertThat(original).isNotNull();
     counter.count("k", 1);
     Field resField = WaveCounter.class.getDeclaredField("reservoir");
@@ -406,13 +409,17 @@ class WaveCounterRecyclingTest {
     invokeDeliver(counter);
     Field poolField = WaveCounter.class.getDeclaredField("ebbReservoir");
     poolField.setAccessible(true);
-    ConcurrentHashMap<String, LongAdder> pool = (ConcurrentHashMap<String, LongAdder>) poolField.get(counter);
-    LongAdder original = pool.get("hot");
+    @SuppressWarnings("unchecked")
+    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef =
+      (SoftReference<ConcurrentHashMap<String, LongAdder>>) poolField.get(counter);
+    LongAdder original = poolRef.get().get("hot");
     assertThat(original).isNotNull();
     counter.count("hot", 1);
     invokeDeliver(counter);
-    ConcurrentHashMap<String, LongAdder> pool2 = (ConcurrentHashMap<String, LongAdder>) poolField.get(counter);
-    assertThat(pool2.get("hot")).as("tide 2 waveTo must steal the pooled adder").isSameAs(original);
+    @SuppressWarnings("unchecked")
+    SoftReference<ConcurrentHashMap<String, LongAdder>> poolRef2 =
+      (SoftReference<ConcurrentHashMap<String, LongAdder>>) poolField.get(counter);
+    assertThat(poolRef2.get().get("hot")).as("tide 2 waveTo must steal the pooled adder").isSameAs(original);
   }
 
   /**
@@ -548,8 +555,8 @@ class WaveCounterRecyclingTest {
     Field ebbField = WaveCounter.class.getDeclaredField("ebbReservoir");
     ebbField.setAccessible(true);
     @SuppressWarnings("unchecked")
-    ConcurrentHashMap<String, LongAdder> ebb =
-      (ConcurrentHashMap<String, LongAdder>) ebbField.get(counter);
+    SoftReference<ConcurrentHashMap<String, LongAdder>> ebb =
+      (SoftReference<ConcurrentHashMap<String, LongAdder>>) ebbField.get(counter);
 
     Method m = ceils
       .getClass()
@@ -557,7 +564,7 @@ class WaveCounterRecyclingTest {
         "tryDrainInto",
         ConcurrentHashMap.class,
         WaveCounter.PaddedMergesInFlight.class,
-        ConcurrentHashMap.class
+        SoftReference.class
       );
     m.setAccessible(true);
     assertThat((boolean) m.invoke(ceils, table, merges, ebb)).as("tryLock drain should succeed").isTrue();
@@ -669,9 +676,12 @@ class WaveCounterRecyclingTest {
     }
     invokeDeliver(counter);
     Object governor = governorOf(counter);
-    Field emaField = governor.getClass().getDeclaredField("smoothedRenewal");
+    Field ratesField = governor.getClass().getDeclaredField("rates");
+    ratesField.setAccessible(true);
+    Object rates = ratesField.get(governor);
+    Field emaField = rates.getClass().getDeclaredField("smoothedRenewal");
     emaField.setAccessible(true);
-    double smoothed = (double) emaField.get(governor);
+    double smoothed = (double) emaField.get(rates);
     assertThat(smoothed)
       .as("renewal counts only members, not the 600 new earners")
       .isLessThan(0.1);

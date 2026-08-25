@@ -283,9 +283,11 @@ class WaveCounterSimulatorTest {
 
   private static int floorOf(WaveCounter c) throws Exception {
     Object governor = fieldOf(c, "moonsTidalForce");
-    Method m = governor.getClass().getDeclaredMethod("floor");
-    m.setAccessible(true);
-    return (int) m.invoke(governor);
+    Field f = governor.getClass().getDeclaredField("positions");
+    f.setAccessible(true);
+    Field floor = f.get(governor).getClass().getDeclaredField("floor");
+    floor.setAccessible(true);
+    return floor.getInt(f.get(governor));
   }
 
   private static Object fieldOf(WaveCounter c, String name) throws Exception {

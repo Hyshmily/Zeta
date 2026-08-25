@@ -202,6 +202,38 @@
           </plugin>
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <version>3.1.0</version>
+            <executions>
+              <execution>
+                <id>delombok</id>
+                <phase>generate-sources</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <target>
+                    <pathconvert property="delombok.classpath" refid="maven.compile.classpath" pathsep="${path.separator}" />
+                    <java classname="lombok.launch.Main" fork="true" failonerror="true">
+                      <arg value="delombok" />
+                      <arg value="-n" />
+                      <arg value="--encoding=UTF-8" />
+                      <arg value="--classpath=${delombok.classpath}" />
+                      <arg value="--sourcepath=${project.basedir}/src/main/java" />
+                      <arg value="-d" />
+                      <arg value="${project.build.directory}/delombok" />
+                      <arg value="${project.basedir}/src/main/java" />
+                      <classpath>
+                        <path refid="maven.compile.classpath" />
+                      </classpath>
+                    </java>
+                  </target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-source-plugin</artifactId>
             <version>3.3.1</version>
             <executions>
@@ -228,6 +260,7 @@
             <configuration>
               <encoding>${project.build.sourceEncoding}</encoding>
               <doclint>none</doclint>
+              <sourcepath>${project.build.directory}/delombok</sourcepath>
             </configuration>
           </plugin>
           <plugin>

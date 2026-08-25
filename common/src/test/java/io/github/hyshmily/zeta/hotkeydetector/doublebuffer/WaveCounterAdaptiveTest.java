@@ -105,11 +105,76 @@ class WaveCounterAdaptiveTest {
     return f.get(c);
   }
 
-  private static int floorOf(WaveCounter c) throws Exception {
+  /** Reads one of the governor's packed-state wrappers (positions/state/ladder). */
+  private static Object governorWrapperField(WaveCounter c, String name) throws Exception {
     Object governor = governorOf(c);
-    Method m = governor.getClass().getDeclaredMethod("floor");
-    m.setAccessible(true);
-    return (int) m.invoke(governor);
+    Field f = governor.getClass().getDeclaredField(name);
+    f.setAccessible(true);
+    return f.get(governor);
+  }
+
+  /** The governor's packed position-domain wrapper. */
+  private static Object positionsOf(WaveCounter c) throws Exception {
+    return governorWrapperField(c, "positions");
+  }
+
+  /** The governor's packed retreat/persistence wrapper. */
+  private static Object stateOf(WaveCounter c) throws Exception {
+    return governorWrapperField(c, "state");
+  }
+
+  /** The governor's packed retry-ledger wrapper. */
+  private static Object ladderOf(WaveCounter c) throws Exception {
+    return governorWrapperField(c, "ladder");
+  }
+
+  /** The governor's smoothed-renewal EMA pair wrapper. */
+  private static Object ratesOf(WaveCounter c) throws Exception {
+    return governorWrapperField(c, "rates");
+  }
+
+  /**
+   * Maps a legacy test accessor to the renamed production field (the flat
+   * fields converged into the {@code MoonsTidalForce} position/state/rates
+   * wrappers; the alias layer keeps the old accessor names working).
+   */
+  private static String renamedField(String accessor) {
+    switch (accessor) {
+      case "anchorFloor":
+        return "anchorD";
+      case "anchorConfirmFloor":
+        return "anchorS";
+      case "retreatWorseStreak":
+        return "retreatWorseCount";
+      case "anchorRenewal":
+        return "anchorD_Renewal";
+      default:
+        return accessor;
+    }
+  }
+
+  /** The wrapper instance owning the given packed accessor. */
+  private static Object governorWrapper(WaveCounter c, String accessor) throws Exception {
+    switch (renamedField(accessor)) {
+      case "floor":
+      case "retreatTarget":
+      case "anchorD":
+      case "anchorS":
+      case "anchorD_Renewal":
+        return positionsOf(c);
+      case "smoothedRenewal":
+      case "renewalDeviation":
+        return ratesOf(c);
+      default:
+        return stateOf(c);
+    }
+  }
+
+  private static int floorOf(WaveCounter c) throws Exception {
+    Object positions = positionsOf(c);
+    Field f = positions.getClass().getDeclaredField("floor");
+    f.setAccessible(true);
+    return f.getInt(positions);
   }
 
   private static void onTide(
@@ -191,17 +256,16 @@ class WaveCounterAdaptiveTest {
     int distinct,
     long intervalMs
   ) throws Exception {
-    Constructor<?> ctor = tideReadingType()
-      .getDeclaredConstructor(
-        double.class,
-        int.class,
-        int.class,
-        int.class,
-        long.class,
-        double.class,
-        int.class,
-        long.class
-      );
+    Constructor<?> ctor = tideReadingType().getDeclaredConstructor(
+      double.class,
+      int.class,
+      int.class,
+      int.class,
+      long.class,
+      double.class,
+      int.class,
+      long.class
+    );
     ctor.setAccessible(true);
     return ctor.newInstance(renewal, activeSlots, hotLimit, blockedKeys, boundary, ratio, distinct, intervalMs);
   }
@@ -403,11 +467,13 @@ class WaveCounterAdaptiveTest {
 
   // ---------------- release WALK (WindowClimber borrowings) ----------------
 
-  private static int governorField(WaveCounter c, String name) throws Exception {
-    Object governor = governorOf(c);
-    Field f = governor.getClass().getDeclaredField(name);
+  /** An int field of the governor's state wrapper (positions/state). */
+  private static int governorField(WaveCounter c, String accessor) throws Exception {
+    String field = renamedField(accessor);
+    Object wrapper = governorWrapper(c, field);
+    Field f = wrapper.getClass().getDeclaredField(field);
     f.setAccessible(true);
-    return f.getInt(governor);
+    return f.getInt(wrapper);
   }
 
   /** The governor's in-flight {@code Walk}, or {@code null} when parked. */
@@ -418,6 +484,30 @@ class WaveCounterAdaptiveTest {
     return f.get(governor);
   }
 
+  /**
+   * A boolean field of the governor's state wrapper; "retreating" is
+   * computed — a retreat is in flight while {@code state.retreatStage}
+   * differs from {@code RETREAT_STAGE_STOPPED} (there is no flag field).
+   */
+  private static boolean booleanGovernorField(WaveCounter c, String accessor) throws Exception {
+    if ("retreating".equals(accessor)) {
+      Object governor = governorOf(c);
+      Field stateField = governor.getClass().getDeclaredField("state");
+      stateField.setAccessible(true);
+      Object state = stateField.get(governor);
+      Field stageField = state.getClass().getDeclaredField("retreatStage");
+      stageField.setAccessible(true);
+      Field stoppedField = governor.getClass().getDeclaredField("RETREAT_STAGE_STOPPED");
+      stoppedField.setAccessible(true);
+      return stageField.getInt(state) != stoppedField.getInt(null);
+    }
+    String field = renamedField(accessor);
+    Object wrapper = governorWrapper(c, field);
+    Field f = wrapper.getClass().getDeclaredField(field);
+    f.setAccessible(true);
+    return f.getBoolean(wrapper);
+  }
+
   /** An int field of the in-flight {@code Walk} (only while a walk is active). */
   private static int walkIntField(WaveCounter c, String name) throws Exception {
     Field f = walkOf(c).getClass().getDeclaredField(name);
@@ -425,58 +515,68 @@ class WaveCounterAdaptiveTest {
     return f.getInt(walkOf(c));
   }
 
-  private static void setGovernorField(WaveCounter c, String name, int value) throws Exception {
-    Object governor = governorOf(c);
-    Field f = governor.getClass().getDeclaredField(name);
+  /** Sets an int field of the governor's state wrapper (e.g. floor). */
+  private static void setGovernorField(WaveCounter c, String accessor, int value) throws Exception {
+    String field = renamedField(accessor);
+    Object wrapper = governorWrapper(c, field);
+    Field f = wrapper.getClass().getDeclaredField(field);
     f.setAccessible(true);
-    f.setInt(governor, value);
+    f.setInt(wrapper, value);
   }
 
-  /** A double field of the governor (e.g. anchorRenewal). */
+  /** Sets a double field of the governor (e.g. anchorRenewal — doubles live in the wrappers now). */
   private static void setGovernorDoubleField(WaveCounter c, String name, double value) throws Exception {
-    Object governor = governorOf(c);
-    Field f = governor.getClass().getDeclaredField(name);
+    String field = renamedField(name);
+    Object wrapper = governorWrapper(c, field);
+    Field f = wrapper.getClass().getDeclaredField(field);
     f.setAccessible(true);
-    f.setDouble(governor, value);
+    f.setDouble(wrapper, value);
   }
 
-  private static int ladderField(WaveCounter c, String ladderName, String name) throws Exception {
-    Object governor = governorOf(c);
-    Field f = governor.getClass().getDeclaredField(ladderName);
+  /** The ledger of one of the governor's ladder directions (raiseLadder -> raise, releaseLadder -> release). */
+  private static Object ladderLedgerOf(WaveCounter c, String ladderName) throws Exception {
+    Object ladder = ladderOf(c);
+    Field f = ladder.getClass().getDeclaredField("raiseLadder".equals(ladderName) ? "raise" : "release");
     f.setAccessible(true);
-    Object ladder = f.get(governor);
-    Field g = ladder.getClass().getDeclaredField(name);
-    g.setAccessible(true);
-    return g.getInt(ladder);
+    return f.get(ladder);
   }
 
-  private static void setLadderField(WaveCounter c, String ladderName, String name, int value) throws Exception {
-    Object governor = governorOf(c);
-    Field f = governor.getClass().getDeclaredField(ladderName);
+  /** An int field of one of the governor's ladder ledgers. */
+  private static int ladderField(WaveCounter c, String ladderName, String fieldName) throws Exception {
+    Object ledger = ladderLedgerOf(c, ladderName);
+    Field f = ledger.getClass().getDeclaredField(fieldName);
     f.setAccessible(true);
-    Object ladder = f.get(governor);
-    Field g = ladder.getClass().getDeclaredField(name);
-    g.setAccessible(true);
-    g.setInt(ladder, value);
+    return f.getInt(ledger);
   }
 
-  /** A boolean field of one of the governor's ladders. */
-  private static boolean ladderBoolField(WaveCounter c, String ladderName, String name) throws Exception {
-    Object governor = governorOf(c);
-    Field f = governor.getClass().getDeclaredField(ladderName);
+  /** Sets an int field of one of the governor's ladder ledgers. */
+  private static void setLadderField(
+    WaveCounter c,
+    String ladderName,
+    String fieldName,
+    int value
+  ) throws Exception {
+    Object ledger = ladderLedgerOf(c, ladderName);
+    Field f = ledger.getClass().getDeclaredField(fieldName);
     f.setAccessible(true);
-    Object ladder = f.get(governor);
-    Field g = ladder.getClass().getDeclaredField(name);
-    g.setAccessible(true);
-    return g.getBoolean(ladder);
+    f.setInt(ledger, value);
   }
 
-  /** A double field of the governor. */
+  /** A boolean field of the governor's ladder.  The release-only {@code deepFail} flag was lifted from the ledgers onto the Ladder itself, so booleans are read from the ladder root (the ledgers carry none). */
+  private static boolean ladderBoolField(WaveCounter c, String ladderName, String fieldName) throws Exception {
+    Object ladder = ladderOf(c);
+    Field f = ladder.getClass().getDeclaredField(fieldName);
+    f.setAccessible(true);
+    return f.getBoolean(ladder);
+  }
+
+  /** A double field of the governor (e.g. smoothedRenewal — doubles live in the wrappers now). */
   private static double governorDoubleField(WaveCounter c, String name) throws Exception {
-    Object governor = governorOf(c);
-    Field f = governor.getClass().getDeclaredField(name);
+    String field = renamedField(name);
+    Object wrapper = governorWrapper(c, field);
+    Field f = wrapper.getClass().getDeclaredField(field);
     f.setAccessible(true);
-    return f.getDouble(governor);
+    return f.getDouble(wrapper);
   }
 
   /** The governor's audit due-wait (the R2 escalation law). */
@@ -772,7 +872,9 @@ class WaveCounterAdaptiveTest {
     onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // at-target 3: the durable window confirms
     assertThat(walkOf(counter)).as("three consecutive at-target tides confirm the raise").isNull();
     assertThat(floorOf(counter)).as("the confirmed position is kept").isEqualTo(26);
-    assertThat(governorField(counter, "anchorFloor")).as("anchor planted at the base the raise left from").isEqualTo(10);
+    assertThat(governorField(counter, "anchorFloor"))
+      .as("anchor planted at the base the raise left from")
+      .isEqualTo(10);
     assertThat(ladderField(counter, "raiseLadder", "rung")).as("confirmation rewards the ladder").isEqualTo(1);
   }
 
@@ -826,9 +928,7 @@ class WaveCounterAdaptiveTest {
     assertThat(floorOf(counter))
       .as("the confirmation admits the blocked band to the boundary in the same tide")
       .isEqualTo(16);
-    assertThat(governorField(counter, "anchorFloor"))
-      .as("the anchor plants at the corrected position")
-      .isEqualTo(16);
+    assertThat(governorField(counter, "anchorFloor")).as("the anchor plants at the corrected position").isEqualTo(16);
   }
 
   /**
@@ -889,9 +989,7 @@ class WaveCounterAdaptiveTest {
     // survived to sample 17+.
     onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // at-target at samples 16: hard budget FAILED
     assertThat(walkOf(counter)).as("the hard budget ends the walk on an at-target tide").isNull();
-    assertThat(ladderField(counter, "raiseLadder", "left"))
-      .as("FAILED priced the backoff")
-      .isGreaterThan(0);
+    assertThat(ladderField(counter, "raiseLadder", "left")).as("FAILED priced the backoff").isGreaterThan(0);
     int guard = 0;
     while (floorOf(counter) != 10 && guard++ < 20) {
       onTide(counter, 1.0, 3, 16, 0, 2, 1.5);
@@ -1150,9 +1248,7 @@ class WaveCounterAdaptiveTest {
     for (int i = 0; i < 5; i++) {
       onTide(counter, 0.0, 0, 1024, 40, 4, 0.0, 10_000L, 300, 500L);
     }
-    assertThat(floorOf(counter))
-      .as("seed floor under a high-volume quiet window is designed behavior")
-      .isEqualTo(10);
+    assertThat(floorOf(counter)).as("seed floor under a high-volume quiet window is designed behavior").isEqualTo(10);
   }
 
   /**
@@ -1188,6 +1284,238 @@ class WaveCounterAdaptiveTest {
     assertThat(governorField(counter, "retreatTarget"))
       .as("a floor beyond the band retreats to the anchor")
       .isEqualTo(10);
+  }
+
+  /**
+   * ADR-0058 direction probe, recovery: a veto fires (stage 1) burns a
+   * probe tide HOLDING the raised position with the live renewal — when
+   * the renewal recovers inside the {@code PROBE_STREAK} window, the
+   * retreat settles at the held position and RE-PLANTS the anchor there
+   * (WindowClimber's "only keep a position on a clear verdict"): the
+   * confirmed raise was a real equilibrium, the veto a noise streak, and
+   * the floor does not give back the confirmation's evidence.
+   */
+  @Test
+  void governor_vetoProbe_recoveryKeepsRaiseAndReplantsAnchor() throws Exception {
+    onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // under-earning distress: arm, first step deferred
+    onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // the next distressed tide steps
+    assertThat(floorOf(counter)).isEqualTo(18);
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // at-target: durable confirm, anchor (10, 0.25)
+    }
+    assertThat(governorField(counter, "anchorConfirmFloor"))
+      .as("the raise confirm plants the interval anchor at the verified position")
+      .isEqualTo(18);
+    // Persistent below-target distress: the veto fires, HOLDING position 18
+    // (the probe's stage 1) instead of committing straight to the anchor.
+    int guard = 0;
+    while (governorField(counter, "retreatStage") != 1 && guard++ < 40) {
+      onTide(counter, 0.1, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(governorField(counter, "retreatStage"))
+      .as("the veto opens the direction probe instead of retreating blindly")
+      .isEqualTo(1);
+    assertThat(governorField(counter, "retreatTarget"))
+      .as("stage 1 holds the veto position as the retreat target")
+      .isEqualTo(18);
+    assertThat(booleanGovernorField(counter, "retreating")).isTrue();
+    // Recovery inside the probe window: the probe's verdict keeps the raise.
+    onTide(counter, 1.0, 3, 16, 0, 2, 1.5);
+    assertThat(floorOf(counter)).as("the confirmed raise is kept").isEqualTo(18);
+    assertThat(booleanGovernorField(counter, "retreating")).as("the retreat is cancelled").isFalse();
+    assertThat(governorField(counter, "anchorFloor"))
+      .as("the anchor is re-planted at the VERIFIED position")
+      .isEqualTo(18);
+    assertThat(governorField(counter, "anchorConfirmFloor")).isEqualTo(18);
+  }
+
+  /**
+   * ADR-0058 direction probe, persistent shortfall DEEPENING to the
+   * interval anchor: when the floor stands measurably ABOVE the confirmed
+   * position ({@code anchorConfirmFloor}), a probe window that keeps
+   * under-earning deepens to the last VERIFIED position (the interval
+   * anchor) instead of straight to the raise's base — the retreat stages
+   * through the confirm floor before it commits the full descent.
+   */
+  @Test
+  void governor_vetoProbe_persistentShortfallDeepensToIntervalAnchor() throws Exception {
+    onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // arm
+    onTide(counter, 0.25, 16, 16, 10, 2, 0.5); // step: floor 18
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 1.0, 3, 16, 0, 2, 1.5); // confirm: anchor (10, 0.25), interval (18)
+    }
+    // A higher floor above the confirmed position (a second raise ladder
+    // climb or a constructed state): the interval covers [10, 18], and the
+    // floor at 26 stands measurably above the 18 confirm.
+    setGovernorField(counter, "floor", 26);
+    // Persistent distress with no recovery: the probe window burns, then
+    // deepens to the interval anchor 18 — not to the base 10.  The veto
+    // needs ~14 distress tides (the EMA noise margin wash-out), so wait
+    // for the probe to open, then let the window expire.
+    int guard = 0;
+    while (governorField(counter, "retreatStage") != 1 && guard++ < 40) {
+      onTide(counter, 0.1, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(governorField(counter, "retreatStage")).as("the veto opened the direction probe").isEqualTo(1);
+    assertThat(booleanGovernorField(counter, "retreating")).as("the veto armed a retreat").isTrue();
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 0.1, 100, 1024, 0, 4, 1.5); // the probe window expires without recovery
+    }
+    assertThat(governorField(counter, "retreatTarget"))
+      .as("the probe deepens to the VERIFIED position while it stands above")
+      .isEqualTo(18);
+    int settle = 0;
+    while (floorOf(counter) > 18 && settle++ < 20) {
+      onTide(counter, 0.1, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(floorOf(counter)).as("the retreat settles at the interval anchor 18, not the base").isEqualTo(18);
+  }
+
+  /** Scenario G's renewal law: strictly improves as the floor rises (the
+   *  optimum sits ABOVE the veto position; descending under-earns the
+   *  descent's own start). */
+  private static double renewalImprovingUpward(int floor) {
+    return floor > 26 ? 0.55 : Math.max(0.05, 0.48 - 0.05 * (26 - floor));
+  }
+
+  /**
+   * ADR-0059 descent slope probe, mid-descent recovery: a veto retreat
+   * whose descent crosses a healthy band parks at the FIRST rung that
+   * earns the target and RE-PLANTS the anchor there — the blind descent
+   * walked past the first healthy rung to an interval/base that was never
+   * re-measured.
+   */
+  @Test
+  void governor_retreatSlope_midDescentRecoveryParks() throws Exception {
+    setGovernorField(counter, "floor", 26);
+    setGovernorField(counter, "anchorFloor", 10);
+    setGovernorDoubleField(counter, "anchorRenewal", 0.2);
+    setGovernorField(counter, "anchorConfirmFloor", 18);
+    // Distressed at/above 23 (the veto position and the probe hold),
+    // healthy below it: the descent's first stride (26 -> 21) lands in
+    // the healthy band and must park there instead of striding on to 18.
+    // The guard exits as soon as the probe OPENS (stage 2 — the arm), so
+    // both probe samples and the deepen burn inside the expire loop below
+    // and the descent loop below measures the rung the first stride lands
+    // on (21) with the floor-dependent renewal.
+    int guard = 0;
+    while (governorField(counter, "retreatStage") != 2 && guard++ < 40) {
+      onTide(counter, 0.05, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(booleanGovernorField(counter, "retreating")).as("the veto opened the descent").isTrue();
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 0.05, 100, 1024, 0, 4, 1.5); // probe sample 1, probe sample 2 + deepen to 18, first stride 26 -> 21
+    }
+    assertThat(governorField(counter, "retreatTarget")).isEqualTo(18);
+    int descent = 0;
+    while (booleanGovernorField(counter, "retreating") && descent++ < 20) {
+      onTide(counter, floorOf(counter) >= 23 ? 0.05 : 0.6, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(floorOf(counter))
+      .as("the descent parks at the first healthy rung, not the unre-measured interval")
+      .isEqualTo(21);
+    assertThat(governorField(counter, "anchorFloor")).as("the anchor re-plants at the parked rung").isEqualTo(21);
+    assertThat(governorField(counter, "anchorConfirmFloor")).isEqualTo(21);
+    assertThat(booleanGovernorField(counter, "retreating")).isFalse();
+  }
+
+  /**
+   * ADR-0059 descent slope probe, direction falsified (the user's "deep
+   * anchor health > 0.5" case): the anchor claim is a STALE 0.7 and the
+   * renewal only improves UPWARD — the descent keeps under-earning its OWN
+   * start, so after {@code SLOPE_STREAK} tides the down hypothesis is
+   * refuted by the slope: the retreat PIVOTS at the current rung, discards
+   * the stale claim, and the parked distress re-arms the RAISE direction
+   * (the reverse attempt), which re-climbs and durable-confirms — the
+   * retreat never dumps to the stale base.  Pre-pivot the ARM's own gates
+   * (ratio < 1, blocked > 0) are held OFF so the veto streak can
+   * accumulate — the machine's fresh-confirm shield / ladder backoff
+   * suppresses the arm in the real flow.
+   */
+  @Test
+  void governor_retreatSlope_persistentWorseningPivots() throws Exception {
+    setGovernorField(counter, "floor", 26);
+    setGovernorField(counter, "anchorFloor", 10);
+    setGovernorDoubleField(counter, "anchorRenewal", 0.7); // stale claim
+    setGovernorField(counter, "anchorConfirmFloor", 18);
+    int guard = 0;
+    while (governorField(counter, "retreatStage") != 1 && guard++ < 40) {
+      onTide(counter, renewalImprovingUpward(floorOf(counter)), 100, 1024, 0, 26, 1.5);
+    }
+    assertThat(booleanGovernorField(counter, "retreating")).isTrue();
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, renewalImprovingUpward(floorOf(counter)), 100, 1024, 0, 26, 1.5);
+    }
+    assertThat(governorField(counter, "retreatTarget"))
+      .as("the probe deepens toward the interval anchor")
+      .isEqualTo(18);
+    // The descent: 26 -> 21 (in-band), 21 -> 19 (worse 1), 19 (worse 2 =
+    // SLOPE_STREAK) -> PIVOT.  The pivot discards the anchor; the parked
+    // distress then RE-ARMS the raise (the ARM gates re-engage).
+    int descent = 0;
+    while (booleanGovernorField(counter, "retreating") && descent++ < 20) {
+      onTide(counter, renewalImprovingUpward(floorOf(counter)), 100, 1024, 0, 26, 1.5);
+    }
+    assertThat(floorOf(counter))
+      .as("the pivot holds the falsified rung instead of dumping to the stale base")
+      .isEqualTo(19);
+    assertThat(booleanGovernorField(counter, "retreating")).isFalse();
+    assertThat(governorField(counter, "anchorFloor")).as("the stale claim is discarded with the pivot").isZero();
+    assertThat(governorField(counter, "anchorConfirmFloor")).isZero();
+    assertThat(governorField(counter, "retreatWorseStreak")).as("the pivot consumed the slope's persistence").isZero();
+    // The reverse attempt: the raise direction re-arms and re-climbs to
+    // the healthier heights, confirming durably at 27.
+    int climb = 0;
+    do {
+      onTide(counter, renewalImprovingUpward(floorOf(counter)), 100, 1024, 10, 32, 0.5);
+    } while ((booleanGovernorField(counter, "retreating") || walkOf(counter) != null) && climb++ < 40);
+    assertThat(floorOf(counter)).as("the reverse raise re-climbs and confirms at the healthier rung").isEqualTo(27);
+    assertThat(governorField(counter, "anchorConfirmFloor"))
+      .as("the re-confirmed raise re-plants its interval")
+      .isEqualTo(27);
+  }
+
+  /**
+   * ADR-0059 descent slope probe, flat regime: a regime-wide decay (stale
+   * claim 0.7, renewal flat at 0.35 on every rung) neither recovers
+   * mid-descent (0.35 < target) nor under-earns the descent's start
+   * (0.35 > 0.35 - margin): the descent completes EXACTLY as the blind
+   * walk — first to the interval 18, then, after a second veto, to the
+   * base 10 — with no invented park/pivot verdicts and no slope
+   * persistence accumulating.
+   */
+  @Test
+  void governor_retreatSlope_flatBandCompletesDescent() throws Exception {
+    setGovernorField(counter, "floor", 26);
+    setGovernorField(counter, "anchorFloor", 10);
+    setGovernorDoubleField(counter, "anchorRenewal", 0.7);
+    setGovernorField(counter, "anchorConfirmFloor", 18);
+    int guard = 0;
+    while (governorField(counter, "retreatStage") != 1 && guard++ < 40) {
+      onTide(counter, 0.35, 100, 1024, 0, 4, 1.5);
+    }
+    for (int i = 0; i < 3; i++) {
+      onTide(counter, 0.35, 100, 1024, 0, 4, 1.5); // the probe expires: deepen to 18
+    }
+    assertThat(governorField(counter, "retreatTarget")).isEqualTo(18);
+    int descent = 0;
+    while (booleanGovernorField(counter, "retreating") && descent++ < 20) {
+      onTide(counter, 0.35, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(floorOf(counter))
+      .as("a flat band parks nowhere mid-descent — the interval anchor is reached")
+      .isEqualTo(18);
+    assertThat(governorField(counter, "anchorFloor")).as("a flat band does not discard the anchor").isEqualTo(10);
+    // The persistent flat decay re-vetoes at the interval; the second
+    // retreat (flat again) deepens to the base — still no invented
+    // verdicts.
+    int settle = 0;
+    while (floorOf(counter) > 10 && settle++ < 60) {
+      onTide(counter, 0.35, 100, 1024, 0, 4, 1.5);
+    }
+    assertThat(floorOf(counter)).as("the second retreat completes to the base on the flat decay").isEqualTo(10);
+    assertThat(governorField(counter, "retreatWorseStreak")).as("no worse samples accumulated on a flat band").isZero();
+    assertThat(booleanGovernorField(counter, "retreating")).isFalse();
   }
 
   /**
@@ -1317,9 +1645,7 @@ class WaveCounterAdaptiveTest {
       onTide(counter, 0.9, 100, 1024, 0, 4, 1.5); // at/above the base: beatBase
     }
     assertThat(walkOf(counter)).as("confirmed: no walk in flight").isNull();
-    assertThat(ladderField(counter, "releaseLadder", "rung"))
-      .as("a confirmed walk rewards the ladder")
-      .isEqualTo(1);
+    assertThat(ladderField(counter, "releaseLadder", "rung")).as("a confirmed walk rewards the ladder").isEqualTo(1);
     assertThat(floorOf(counter)).as("the descended position is kept").isEqualTo(10);
   }
 
