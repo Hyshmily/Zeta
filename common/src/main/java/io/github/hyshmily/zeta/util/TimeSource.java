@@ -26,8 +26,10 @@ import lombok.extern.slf4j.Slf4j;
  * {@code native} call on every read via {@link #currentTimeMillis()}.
  * <p>
  * The background daemon thread is started once via {@link #start()} and runs
- * for the lifetime of the JVM.  If the thread is interrupted it silently falls
- * back to calling {@link System#currentTimeMillis()} directly.
+ * for the lifetime of the JVM.  If the thread is interrupted or dies
+ * unexpectedly it is restarted with a 1-second backoff; reads fall back to
+ * calling {@link System#currentTimeMillis()} directly until the replacement
+ * thread is up.
  * <p>
  * All time-sensitive components in the hot-path (expiry, rate limiting, circuit
  * breaker) use this source instead of {@code System.currentTimeMillis()}.
@@ -52,10 +54,10 @@ public final class TimeSource {
 
   /**
    * Start the background clock-cache thread. Idempotent after the thread is
-   * running. If the thread dies unexpectedly it is restarted with a 1-second
-   * delay between attempts, indefinitely — a dying clock-cache thread is a
-   * rare fault and restarting costs at most one thread per second, while the
-   * reads fall back to {@link System#currentTimeMillis()} meanwhile.
+   * running. If the thread dies unexpectedly or is interrupted it is restarted
+   * with a 1-second delay between attempts, indefinitely — a dying clock-cache
+   * thread is a rare fault and restarting costs at most one thread per second,
+   * while the reads fall back to {@link System#currentTimeMillis()} meanwhile.
    * Called automatically during {@code ZetaFacadeAutoConfiguration}
    * initialisation.
    */
@@ -80,23 +82,36 @@ public final class TimeSource {
           try {
             Thread.sleep(5);
           } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-            threadRunning.set(false);
+            // An interrupted clock thread must not degrade every read to a native
+            // call forever — take the same 1s-backoff restart as an unexpected death.
+            restartWithBackoff();
+            return;
           }
         }
       });
       t.setUncaughtExceptionHandler((th, ex) -> {
         log.error("TimeSource thread terminated unexpectedly, will restart after 1s.", ex);
-        threadRunning.set(false);
-        try {
-          Thread.sleep(1000);
-        } catch (InterruptedException ignored) {
-          Thread.currentThread().interrupt();
-        }
-        start();
+        restartWithBackoff();
       });
       t.start();
     }
+  }
+
+  /**
+   * Marks the clock-cache thread dead, waits the 1-second restart backoff
+   * (best-effort: an interrupted backoff still proceeds to the restart), then
+   * starts a replacement via {@link #start()}. Runs on the dying thread itself;
+   * a concurrent {@code start()} winning the CAS during the backoff makes the
+   * final {@code start()} a no-op.
+   */
+  private static void restartWithBackoff() {
+    threadRunning.set(false);
+    try {
+      Thread.sleep(1000);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+    start();
   }
 
   /**

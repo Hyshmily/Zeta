@@ -39,4 +39,9 @@ public final class NullValue implements Serializable {
   private Object readResolve() {
     return INSTANCE;
   }
+
+  @Override
+  public String toString() {
+    return "NullValue";
+  }
 }

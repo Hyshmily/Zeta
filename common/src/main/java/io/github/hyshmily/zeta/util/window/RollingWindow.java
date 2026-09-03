@@ -25,10 +25,13 @@ import java.util.concurrent.atomic.AtomicLongArray;
  * circular buffer.
  *
  * <p>The window is divided into {@code windowSize} equally-sized buckets spanning
- * {@code windowDurationMs} milliseconds. Each bucket represents a time slice and
- * holds a cumulative value. On every access ({@link #add(long)}, {@link #sum()},
- * etc.), expired buckets are detected and zeroed before the operation proceeds
- * via the internal {@link #tick()} method.
+ * {@code windowDurationMs} milliseconds. Non-power-of-two sizes are rounded UP to the
+ * next power of two (the mask-based indexing needs a power of two): a requested size of
+ * 1000 becomes 1024 buckets, so the effective bucket duration is
+ * {@code windowDurationMs / 1024}, not {@code windowDurationMs / 1000}. Each bucket
+ * represents a time slice and holds a cumulative value. On every access
+ * ({@link #add(long)}, {@link #sum()}, etc.), expired buckets are detected and zeroed
+ * before the operation proceeds via the internal {@link #tick()} method.
  *
  * <p>{@link AtomicLongArray} provides lock-free atomic access to individual
  * buckets, and {@code tick()} uses a private lock only when buckets actually
@@ -78,22 +81,53 @@ public final class RollingWindow {
   /**
    * Creates a sliding window with the given number of buckets spanning the given duration.
    *
-   * <p>Each bucket covers {@code windowDurationMs / windowSize} milliseconds.
-   * The window clock starts at construction time. All buckets are initially zero.
+   * <p>Each bucket covers {@code windowDurationMs / alignedWindowSize} milliseconds,
+   * where {@code alignedWindowSize} is {@code windowSize} rounded UP to the next power
+   * of two (e.g. 1000 → 1024): the mask-based indexing requires a power of two, and the
+   * rounding changes the effective bucket duration accordingly. The window clock starts
+   * at construction time. All buckets are initially zero.
    *
    * @param windowSize       number of buckets that form one full window; must be positive
-   * @param windowDurationMs total duration of the sliding window in milliseconds; must be
-   *                         positive and evenly divisible by {@code windowSize} for
-   *                         precise bucket boundaries
+   *                         (rounded up to the next power of two if not already one)
+   * @param windowDurationMs total duration of the sliding window in milliseconds; must be at
+   *                         least the aligned window size so every bucket covers at least
+   *                         one millisecond — a larger duration is distributed in whole
+   *                         milliseconds across the aligned buckets, truncating the remainder
+   *                         (e.g. windowSize 1000 → 1024 aligned buckets, 1024ms → 1ms per
+   *                         bucket, 2047ms → also 1ms per bucket)
+   * @throws IllegalArgumentException if {@code windowSize} is zero or negative, or
+   *                                  {@code windowDurationMs} is smaller than the aligned
+   *                                  window size (zero-length buckets would crash rotation)
    */
+  @SuppressWarnings("all")
   public RollingWindow(int windowSize, long windowDurationMs) {
+    if (windowSize <= 0) {
+      // Zero previously crashed with an ArithmeticException (division by the aligned
+      // size below); negative sizes corrupted the highestOneBit alignment math.
+      throw new IllegalArgumentException("windowSize must be positive, got " + windowSize);
+    }
     int aligned = windowSize;
     if ((aligned & (aligned - 1)) != 0) {
       aligned = Integer.highestOneBit(aligned - 1) << 1;
     }
     this.windowSize = aligned;
     this.windowMask = aligned - 1;
-    this.bucketDurationMs = windowDurationMs / aligned;
+    long bucketDuration = windowDurationMs / aligned;
+    if (bucketDuration <= 0) {
+      // A non-positive bucket duration would crash tick() with ArithmeticException on
+      // the first rotation (elapsed / 0) — reject it at construction with a clear message.
+      throw new IllegalArgumentException(
+        "windowDurationMs must be at least the aligned window size " +
+          aligned +
+          " (one millisecond per bucket); got windowSize=" +
+          windowSize +
+          " → aligned=" +
+          aligned +
+          ", windowDurationMs=" +
+          windowDurationMs
+      );
+    }
+    this.bucketDurationMs = bucketDuration;
     this.buckets = new AtomicLongArray(aligned);
     windowField.windowStart = TimeSource.monotonicMillis();
   }

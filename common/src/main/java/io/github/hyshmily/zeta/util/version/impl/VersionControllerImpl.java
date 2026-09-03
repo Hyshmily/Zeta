@@ -15,10 +15,12 @@
  */
 package io.github.hyshmily.zeta.util.version.impl;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Redis.VERSION_KEY_PREFIX;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
@@ -80,10 +82,28 @@ public class VersionControllerImpl implements VersionController {
    * and was re-created (wraparound). This cache is bounded at 10k entries with
    * LRU eviction on strong keys — the bound keeps memory fixed regardless of
    * the number of distinct cache keys.
+   * <p><b>Update protocol:</b> the floor is only ever merged upwards via an
+   * atomic {@code asMap().compute()} max-merge (see {@link #nextVersion}) —
+   * a smaller observed value can never lower the floor.
    */
   private final Cache<String, Long> versionFloorCache = Caffeine.newBuilder().maximumSize(10_000).build();
 
+  /**
+   * Window (ms) for the rate-limited wraparound ERROR — the standard 10s
+   * window used across the codebase (e.g. BroadcastBuffer flush failures).
+   * Concurrent {@link #nextVersion} interleavings legitimately produce a
+   * version below the observed floor (a later INCR can commit its floor
+   * update before an earlier INCR observes it), so v &lt; floor is not always
+   * a genuine wraparound — an unthrottled ERROR would log false alarms at
+   * concurrency rate.
+   */
+  private static final long WRAPAROUND_LOG_WINDOW_MS = 10_000;
+
+  /** Last time (monotonic ms) the wraparound ERROR was logged; volatile for lock-free rate limiting. Seeded negative so the first alarm always fires ({@code TimeSource} starts near 0). */
+  private volatile long lastWraparoundLoggedAtMs = -WRAPAROUND_LOG_WINDOW_MS;
+
   /** Holder for the Redis INCR script — lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
+  @SuppressWarnings("java:S3985")
   private static class IncrScriptHolder {
 
     static final DefaultRedisScript<Long> SCRIPT = new DefaultRedisScript<>(
@@ -101,6 +121,14 @@ public class VersionControllerImpl implements VersionController {
    * {@code EXPIRE} with the configured TTL ({@code versionKeyTtlMinutes}).
    * The Lua atomicity guarantees that the INCR and EXPIRE happen together.
    *
+   * <p><b>Floor observation:</b> the INCR result is merged into the per-key
+   * wraparound floor inside a single atomic {@code compute()} that only ever
+   * moves the floor upwards (max-merge). Observing and updating in one step
+   * closes the race where a concurrent higher version commits its floor update
+   * between this thread's read and write: a read-then-put pair would raise a
+   * false wraparound alarm <em>and</em> regress the floor with the stale put,
+   * hiding a later genuine INCR restart.
+   *
    * <p><b>Fallback path:</b> If {@link StringRedisTemplate} is not configured
    * (Redis dependency absent), or if any Redis operation throws an exception
    * (connection failure, timeout), the method falls back to the local degraded
@@ -116,26 +144,30 @@ public class VersionControllerImpl implements VersionController {
     return redisTemplate
       .map(t -> {
         try {
-          Long v = t.execute(
+          long v = t.execute(
+            // IncrScriptHolder is private, so its member cannot be static-imported.
             IncrScriptHolder.SCRIPT,
-            List.of(ZetaConstants.Redis.VERSION_KEY_PREFIX + cacheKey),
+            List.of(VERSION_KEY_PREFIX + cacheKey),
             String.valueOf(versionKeyTtlMinutes * 60L)
           );
-          Long floor = versionFloorCache.getIfPresent(cacheKey);
-          if (floor != null && v < floor) {
-            log.error(
-              "dataVersion wraparound detected for key {}: {} < floor {}. " +
-                "The Redis version key (zeta:version:{}) expired before the L1 entry, " +
-                "causing INCR to restart from 1. Increase versionKeyTtlMinutes (currently {} min) " +
-                "or avoid Long.MAX_VALUE hard TTL on this key.",
-              cacheKey,
-              v,
-              floor,
-              cacheKey,
-              versionKeyTtlMinutes
-            );
+          // Atomic max-merge: the floor is observed and raised in one step and
+          // can never regress. `regression` marks a v below the already-observed
+          // floor — either a genuine INCR restart (version key expired, see
+          // ADR-0022) or a benign concurrent interleaving; the alarm is
+          // rate-limited either way (see WRAPAROUND_LOG_WINDOW_MS).
+          boolean[] regression = new boolean[1];
+          versionFloorCache
+            .asMap()
+            .compute(cacheKey, (k, current) -> {
+              if (current == null || v > current) {
+                return v;
+              }
+              regression[0] = true;
+              return current;
+            });
+          if (regression[0]) {
+            reportWraparound(cacheKey, v);
           }
-          versionFloorCache.put(cacheKey, v);
           return new VersionResult(v, false);
         } catch (Exception e) {
           log.warn("Redis version increment failed, fallback to local counter: {}", cacheKey, e);
@@ -143,6 +175,43 @@ public class VersionControllerImpl implements VersionController {
         }
       })
       .orElse(fallbackVersion());
+  }
+
+  /**
+   * Logs the wraparound ERROR, rate-limited to one per
+   * {@value #WRAPAROUND_LOG_WINDOW_MS}ms window. Within the window the alarm
+   * is suppressed: under concurrency, benign interleavings (a later INCR
+   * committing its floor update before an earlier INCR observes it) produce
+   * the same v &lt; floor signature as a genuine wraparound, and a genuine
+   * wraparound repeats on every subsequent allocation until the floor
+   * re-climbs — an unthrottled ERROR would flood the log at allocation rate.
+   *
+   * @param cacheKey the cache key whose version regressed below the floor
+   * @param v        the observed (lower) version
+   */
+  private void reportWraparound(String cacheKey, long v) {
+    long now = TimeSource.monotonicMillis();
+    if (now - lastWraparoundLoggedAtMs < WRAPAROUND_LOG_WINDOW_MS) {
+      log.debug(
+        "dataVersion below observed floor for key {}: {} (wraparound alarm suppressed within {}ms window)",
+        cacheKey,
+        v,
+        WRAPAROUND_LOG_WINDOW_MS
+      );
+      return;
+    }
+    lastWraparoundLoggedAtMs = now;
+    log.error(
+      "dataVersion wraparound detected for key {}: {} < floor {}. " +
+        "The Redis version key (zeta:version:{}) expired before the L1 entry, " +
+        "causing INCR to restart from 1. Increase versionKeyTtlMinutes (currently {} min) " +
+        "or avoid Long.MAX_VALUE hard TTL on this key.",
+      cacheKey,
+      v,
+      versionFloorCache.getIfPresent(cacheKey),
+      cacheKey,
+      versionKeyTtlMinutes
+    );
   }
 
   /**
@@ -186,7 +255,7 @@ public class VersionControllerImpl implements VersionController {
     return redisTemplate
       .map(t -> {
         try {
-          String v = t.opsForValue().get(ZetaConstants.Redis.VERSION_KEY_PREFIX + cacheKey);
+          String v = t.opsForValue().get(VERSION_KEY_PREFIX + cacheKey);
           return v != null ? Optional.of(Long.parseLong(v)) : Optional.<Long>empty();
         } catch (Exception e) {
           log.warn("Failed to read current version for key {}", cacheKey, e);
@@ -216,7 +285,7 @@ public class VersionControllerImpl implements VersionController {
         try {
           List<String> versionKeys = keys
             .stream()
-            .map(k -> ZetaConstants.Redis.VERSION_KEY_PREFIX + k)
+            .map(k -> VERSION_KEY_PREFIX + k)
             .toList();
           List<String> values = t.opsForValue().multiGet(versionKeys);
           Map<String, Optional<Long>> out = new LinkedHashMap<>();

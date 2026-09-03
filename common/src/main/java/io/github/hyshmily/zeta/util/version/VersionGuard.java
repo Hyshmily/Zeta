@@ -21,6 +21,7 @@ import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import java.util.Objects;
+import java.util.function.Predicate;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -147,11 +148,9 @@ public final class VersionGuard {
     String incomingNodeId,
     long incomingEpoch
   ) {
-    Object existing = cache.getIfPresent(cacheKey);
-    if (existing instanceof CacheEntry existingCacheEntry) {
-      return shouldSkipForWorker(existingCacheEntry, incomingDecisionVersion, incomingNodeId, incomingEpoch);
-    }
-    return false;
+    return shouldSkip(cache, cacheKey, existing ->
+      shouldSkipForWorker(existing, incomingDecisionVersion, incomingNodeId, incomingEpoch)
+    );
   }
 
   /**
@@ -210,10 +209,21 @@ public final class VersionGuard {
     long incomingDataVersion,
     boolean incomingDegraded
   ) {
+    return shouldSkip(cache, cacheKey, existing -> shouldSkipForSync(existing, incomingDataVersion, incomingDegraded));
+  }
+
+  /**
+   * Cache-level fast path shared by both guard families: resolves the existing
+   * {@link CacheEntry} for the key and applies {@code guard} to it. Absent keys
+   * and values that are not {@link CacheEntry} (raw user values) never skip.
+   *
+   * @param cache    the local Caffeine L1 cache; must not be null
+   * @param cacheKey the cache key to look up; must not be null
+   * @param guard    the entry-level guard to apply to the resolved entry
+   * @return the guard's verdict, or {@code false} when no {@link CacheEntry} exists
+   */
+  private static boolean shouldSkip(Cache<String, Object> cache, String cacheKey, Predicate<CacheEntry> guard) {
     Object existing = cache.getIfPresent(cacheKey);
-    if (existing instanceof CacheEntry existingCacheEntry) {
-      return shouldSkipForSync(existingCacheEntry, incomingDataVersion, incomingDegraded);
-    }
-    return false;
+    return existing instanceof CacheEntry entry && guard.test(entry);
   }
 }

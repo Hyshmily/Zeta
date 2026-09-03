@@ -46,6 +46,8 @@ public class ZetaThreadFactory implements ThreadFactory {
 
   @Override
   public Thread newThread(@NonNull Runnable r) {
+    // New threads inherit the creating thread's daemon flag and priority — both
+    // are forced back to the documented daemon/NORM defaults regardless of caller.
     Thread t = new Thread(r, namePrefix + threadNumber.getAndIncrement());
     t.setDaemon(true);
     if (t.getPriority() != Thread.NORM_PRIORITY) {

@@ -545,12 +545,6 @@
       "defaultValue": true
     },
     {
-      "name": "zeta.worker-listener.warmup-jitter-ms",
-      "type": "java.lang.Integer",
-      "description": "Maximum random jitter in ms before processing each Worker decision (anti-thundering-herd).",
-      "defaultValue": 50
-    },
-    {
       "name": "zeta.worker-listener.broadcast-jitter-ms",
       "type": "java.lang.Integer",
       "description": "Maximum random jitter in ms before applying Worker broadcasts. 0 = immediate.",

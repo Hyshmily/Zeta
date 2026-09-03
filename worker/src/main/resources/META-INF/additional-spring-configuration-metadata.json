@@ -117,7 +117,13 @@
     {
       "name": "zeta.worker.state-machine.evict-interval-ms",
       "type": "java.lang.Long",
-      "description": "Staleness threshold — a key is evicted after this many ms without any report. Default = 2 × coolDurationMs = 20 minutes.",
+      "description": "Staleness threshold (ms): a key is evicted after this many ms without any report. Only the correctness bound — the scan cadence is evict-scan-interval-ms (ADR-0060). Default = 2 × coolDurationMs = 20 minutes.",
+      "defaultValue": 1200000
+    },
+    {
+      "name": "zeta.worker.state-machine.evict-scan-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Interval (ms) between periodic eviction scans over the detector, state machine, and evaluator maps. Housekeeping cadence knob, deliberately separate from the staleness threshold evict-interval-ms (ADR-0060). Minimum 1.",
       "defaultValue": 1200000
     },
     {
@@ -197,6 +203,24 @@
       "type": "java.lang.Long",
       "description": "Interval (ms) between periodic full-set rule gossip broadcasts to peer Workers.",
       "defaultValue": 60000
+    },
+    {
+      "name": "zeta.worker.state-machine.cold-evict-interval-ms",
+      "type": "java.lang.Long",
+      "description": "Tiered staleness threshold (ms) for COLD-state keys: evicted early because their retained state is only meaningful while the key is still reported. CONFIRMED_HOT / PRE_COOLING keys keep evict-interval-ms (their eviction discharges the COOL broadcast obligation). A value >= evict-interval-ms disables the tiering.",
+      "defaultValue": 300000
+    },
+    {
+      "name": "zeta.worker.broadcast.buffer-enabled",
+      "type": "java.lang.Boolean",
+      "description": "Send HOT/COOL decisions from a dedicated bounded single-threaded executor (ADR-0061, ADR-0037 conventions) so a mass-heat event cannot stall report consumption behind serial AMQP publishes. false restores the legacy synchronous send on the AMQP consumer thread.",
+      "defaultValue": true
+    },
+    {
+      "name": "zeta.worker.broadcast.buffer-capacity",
+      "type": "java.lang.Integer",
+      "description": "Capacity of the pending-decision queue; a decision arriving when full is dropped immediately with its state rolled back on the caller thread (lenient per ADR-0007/ADR-0024; the next evaluation re-emits it).",
+      "defaultValue": 10000
     }
   ]
 }

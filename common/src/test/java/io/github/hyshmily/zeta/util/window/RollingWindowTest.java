@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.util.window;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.Test;
@@ -156,5 +157,37 @@ class RollingWindowTest {
     w.add(Long.MAX_VALUE);
     w.add(1);
     assertEquals(Long.MIN_VALUE, w.sum());
+  }
+
+  @Test
+  void constructor_windowSizeZero_shouldThrow() {
+    // Zero previously crashed with an ArithmeticException (division by the aligned
+    // bucket count); the constructor now rejects it eagerly.
+    assertThrows(IllegalArgumentException.class, () -> new RollingWindow(0, 500));
+  }
+
+  @Test
+  void constructor_windowSizeNegative_shouldThrow() {
+    assertThrows(IllegalArgumentException.class, () -> new RollingWindow(-3, 500));
+  }
+
+  @Test
+  void constructor_durationBelowAlignedBucketCount_shouldThrow() {
+    // windowSize 1000 aligns to 1024 buckets; a 500ms duration leaves 0ms per
+    // bucket, which previously crashed tick() with ArithmeticException (elapsed
+    // / 0) on the first rotation — the constructor now rejects it eagerly.
+    assertThrows(IllegalArgumentException.class, () -> new RollingWindow(1000, 500));
+    assertThrows(IllegalArgumentException.class, () -> new RollingWindow(4, 3));
+    // Exactly one millisecond per aligned bucket is the accepted minimum.
+    assertEquals(1024, new RollingWindow(1000, 1024).size());
+  }
+
+  @Test
+  void constructor_nonPowerOfTwo_shouldRoundUpToNextPowerOfTwo() {
+    // 1000 → 1024: the mask-based indexing needs a power of two; the documented
+    // rounding behaviour is part of the constructor contract.
+    assertEquals(1024, new RollingWindow(1000, 1024_000).size());
+    assertEquals(8, new RollingWindow(5, 500).size());
+    assertEquals(4, new RollingWindow(3, 300).size());
   }
 }

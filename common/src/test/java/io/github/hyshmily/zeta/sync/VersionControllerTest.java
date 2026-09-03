@@ -20,15 +20,29 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
+import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionController.VersionResult;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
+import java.lang.reflect.Field;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 
 /**
  * Tests for {@link VersionController}, covering Redis INCR Lua execution,
@@ -225,20 +239,137 @@ class VersionControllerTest {
   }
 
   /**
-   * Verifies that wraparound detection logs an error when a Redis version key
-   * expires (simulated by returning a lower version than previous calls) but
-   * still returns the new version. After the wraparound, the floor resets to
-   * the new version so subsequent normal increments pass without error.
+   * Verifies that wraparound detection still returns the new (lower) version
+   * when a Redis version key expires (simulated by returning a lower version
+   * than previous calls). The floor is never lowered by the regression — it
+   * keeps the pre-wraparound maximum, so subsequent increments below it take
+   * the (rate-limited) alarm path until the counter climbs back.
    */
   @Test
-  void nextVersion_whenWraparound_shouldDetectAndRecover() {
+  void nextVersion_whenWraparound_shouldDetectAndRecover() throws Exception {
     when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
       .thenReturn(100L, 1L, 2L);
     assertThat(controller.nextVersion("wrap-key").dataVersion()).isEqualTo(100L);
-    // Simulate wraparound: version key expired, INCR restarts from 1
+    // Simulate wraparound: version key expired, INCR restarts from 1.
+    // Alarm fires (rate-limited); the floor stays at 100 (max-merge).
     assertThat(controller.nextVersion("wrap-key").dataVersion()).isEqualTo(1L);
-    // Floor resets to 1; next increment (2) is >= floor so no error
+    // Subsequent increments are still returned normally.
     assertThat(controller.nextVersion("wrap-key").dataVersion()).isEqualTo(2L);
+    assertThat(floorCache(controller).getIfPresent("wrap-key")).isEqualTo(100L);
+  }
+
+  /**
+   * Verifies the floor race fix: a version below an already-observed higher
+   * floor must never lower the floor (atomic max-merge in compute). The old
+   * read-then-put implementation raised a false wraparound alarm AND regressed
+   * the floor to the stale value when a concurrent higher version committed
+   * its floor update in between.
+   */
+  @Test
+  void nextVersion_whenVersionBelowFloor_shouldNotRegressFloor() throws Exception {
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString())).thenReturn(5L, 6L, 5L);
+    assertThat(controller.nextVersion("race-key").dataVersion()).isEqualTo(5L);
+    assertThat(controller.nextVersion("race-key").dataVersion()).isEqualTo(6L);
+    // Simulates the interleaving: another thread's 6 is already in the floor
+    // cache when this thread's 5 is observed — the alarm path may fire, but
+    // the floor must stay at 6.
+    assertThat(controller.nextVersion("race-key").dataVersion()).isEqualTo(5L);
+    assertThat(floorCache(controller).getIfPresent("race-key")).isEqualTo(6L);
+  }
+
+  /**
+   * Verifies {@link VersionControllerImpl#nextVersion} under concurrency: N
+   * threads allocating versions for the same key must (a) receive distinct
+   * positive INCR values, (b) never regress the per-key floor (it ends at the
+   * maximum allocated version), and (c) rate-limit the wraparound ERROR — a
+   * later INCR committing its floor update before an earlier INCR observes it
+   * legitimately produces v &lt; observed-floor, so the alarm must fire at
+   * most once per 10s window, never once per allocation.
+   */
+  @Test
+  void nextVersion_concurrentSameKey_floorNeverRegressesAndAlarmRateLimited() throws Exception {
+    StubRedisTemplate stub = new StubRedisTemplate();
+    VersionControllerImpl impl = new VersionControllerImpl(Optional.of(stub), 10, snowflake);
+
+    CollectingAppender appender = new CollectingAppender();
+    LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
+    ch.qos.logback.classic.Logger logbackLogger = context.getLogger(VersionControllerImpl.class);
+    appender.start();
+    logbackLogger.addAppender(appender);
+    try {
+      int threads = 8;
+      int callsPerThread = 100;
+      ExecutorService pool = Executors.newFixedThreadPool(threads);
+      CountDownLatch start = new CountDownLatch(1);
+      CountDownLatch done = new CountDownLatch(threads);
+      ConcurrentLinkedQueue<Long> results = new ConcurrentLinkedQueue<>();
+      for (int t = 0; t < threads; t++) {
+        pool.submit(() -> {
+          try {
+            start.await();
+            for (int i = 0; i < callsPerThread; i++) {
+              results.add(impl.nextVersion("hot-key").dataVersion());
+            }
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          } finally {
+            done.countDown();
+          }
+        });
+      }
+      start.countDown();
+      assertThat(done.await(30, TimeUnit.SECONDS)).isTrue();
+      pool.shutdownNow();
+
+      // Every allocation got a distinct positive value from the atomic stub INCR.
+      assertThat(results).hasSize(threads * callsPerThread);
+      assertThat(results).allMatch(v -> v > 0);
+      assertThat(results.stream().distinct().count()).isEqualTo(results.size());
+
+      // The floor must equal the highest observed version — never regressed.
+      long max = results.stream().mapToLong(Long::longValue).max().orElse(0L);
+      assertThat(floorCache(impl).getIfPresent("hot-key")).isEqualTo(max);
+
+      // The wraparound ERROR is rate-limited: at most one per 10s window.
+      long errors = appender.events.stream().filter(e -> e.getLevel() == Level.ERROR).count();
+      assertThat(errors).isLessThanOrEqualTo(1);
+    } finally {
+      logbackLogger.detachAppender(appender);
+    }
+  }
+
+  /**
+   * Thread-safe Redis stub: {@code execute} simulates an atomic Redis INCR
+   * (Mockito's consecutive-return stubbing is not safe for concurrent calls).
+   */
+  static class StubRedisTemplate extends StringRedisTemplate {
+
+    final AtomicLong counter = new AtomicLong();
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public <T> T execute(RedisScript<T> script, java.util.List<String> keys, Object... args) {
+      return (T) Long.valueOf(counter.incrementAndGet());
+    }
+  }
+
+  /** Thread-safe log collector for asserting on ERROR emission counts. */
+  static class CollectingAppender extends AppenderBase<ILoggingEvent> {
+
+    final ConcurrentLinkedQueue<ILoggingEvent> events = new ConcurrentLinkedQueue<>();
+
+    @Override
+    protected void append(ILoggingEvent eventObject) {
+      events.add(eventObject);
+    }
+  }
+
+  /** Reflection accessor for the private per-key floor cache. */
+  @SuppressWarnings("unchecked")
+  private static Cache<String, Long> floorCache(Object impl) throws Exception {
+    Field f = VersionControllerImpl.class.getDeclaredField("versionFloorCache");
+    f.setAccessible(true);
+    return (Cache<String, Long>) f.get(impl);
   }
 
   /**

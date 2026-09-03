@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.util.version;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -74,7 +75,7 @@ public interface VersionController {
    * @param cacheKey the cache key whose version to look up; must not be null
    * @return the current version, or empty if absent/unavailable
    */
-  java.util.Optional<Long> currentVersion(String cacheKey);
+  Optional<Long> currentVersion(String cacheKey);
 
   /**
    * Batch variant of {@link #currentVersion(String)}.
@@ -91,8 +92,8 @@ public interface VersionController {
    * @return an ordered map of key → current version, or empty when
    *         absent/unavailable
    */
-  default Map<String, java.util.Optional<Long>> currentVersions(Iterable<String> cacheKeys) {
-    Map<String, Optional<Long>> out = new java.util.LinkedHashMap<>();
+  default Map<String, Optional<Long>> currentVersions(Iterable<String> cacheKeys) {
+    Map<String, Optional<Long>> out = new LinkedHashMap<>();
     for (String cacheKey : cacheKeys) {
       out.put(cacheKey, currentVersion(cacheKey));
     }
