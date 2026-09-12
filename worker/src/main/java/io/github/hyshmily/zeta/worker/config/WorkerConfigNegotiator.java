@@ -19,12 +19,9 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_TYPE;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
-import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRulesMessage;
-import jakarta.annotation.PostConstruct;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -44,9 +41,11 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
  *       {@link FastLaneRuleManager#replaceAll} (ADR-0025).</li>
  * </ul>
  *
- * <p>On startup, waits up to 3 seconds for the first heartbeat to arrive.
- * If none is received, the Worker continues with the values from
- * {@link io.github.hyshmily.zeta.worker.config.WorkerProperties} — this can happen when all other Workers are down.
+ * <p>On startup, the auto-configuration schedules a one-shot check (~3s) on
+ * the shared scheduler that logs a warning when no heartbeat has arrived
+ * (see {@link #hasReceivedConfig}). The Worker then continues with the values
+ * from {@link io.github.hyshmily.zeta.worker.config.WorkerProperties} — this
+ * can happen when all other Workers are down.
  */
 @Slf4j
 public class WorkerConfigNegotiator {
@@ -94,27 +93,18 @@ public class WorkerConfigNegotiator {
   }
 
   /**
-   * Waits up to 3 seconds for the first heartbeat from a peer Worker.
+   * Whether a valid config heartbeat has arrived from a peer Worker.
    *
-   * <p>The waiting thread simply counts down the latch when a valid config
-   * heartbeat arrives via the async {@link #onHeartbeat} listener.  Config
-   * is applied asynchronously by the listener; if no heartbeat arrives
-   * within 3 seconds, a warning is logged and the Worker proceeds with
-   * configured defaults.
+   * <p>The startup check is scheduled externally (the auto-configuration
+   * schedules a one-shot on the shared {@code hotKeyScheduler} ~3s after
+   * context start) rather than by a dedicated sleeping thread here — the
+   * check exists only to log a warning when no peer heartbeat arrived, and
+   * the latch makes the query lock-free.
+   *
+   * @return {@code true} if at least one valid heartbeat has been applied
    */
-  @PostConstruct
-  void syncOnStartup() {
-    Thread waitThread = new ZetaThreadFactory("zeta-config-sync-startup").newThread(() -> {
-      try {
-        boolean received = startupLatch.await(3000, TimeUnit.MILLISECONDS);
-        if (!received) {
-          log.warn("No config heartbeat received within 3s, using WorkerProperties defaults");
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
-    });
-    waitThread.start();
+  public boolean hasReceivedConfig() {
+    return startupLatch.getCount() == 0;
   }
 
   /**

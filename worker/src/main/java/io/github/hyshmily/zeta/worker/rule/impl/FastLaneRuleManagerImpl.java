@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Concurrent, cache-backed implementation of {@link FastLaneRuleManager}.
@@ -79,11 +80,30 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    * <p>Prevents O(n) glob scanning for repeatedly-seen keys. Entries expire
    * after 30 seconds to pick up rule changes that bypass {@link #invalidateAll}
    * (e.g. direct mutation of a shared map).
+   *
+   * <p>The 10k {@code maximumSize} cap is deliberate: fast-lane rule sets are
+   * operator-authored and typically single-digit, so a cache miss (only
+   * reachable past 10k concurrently-tracked distinct keys) degrades to an
+   * O(rules) glob scan — cheap at that size. The cap is what bounds the
+   * cache's memory for high-cardinality key spaces; raising it trades memory
+   * for hit rate with no other effect.
    */
   private final Cache<String, FastLaneRule> matchCache = Caffeine.newBuilder()
     .maximumSize(10_000)
     .expireAfterWrite(30, TimeUnit.SECONDS)
     .build();
+
+  /**
+   * Reusable loader for {@link #matchCache}. Hoisted to a field so repeated {@link #match}
+   * calls share one lambda instance instead of allocating a capturing lambda per call —
+   * the cache is consulted once per reported key per evaluation batch.
+   */
+  private final Function<String, FastLaneRule> matchLoader = k -> {
+    for (FastLaneRule rule : orderedRules) {
+      if (matchGlob(k, rule.keyPattern())) return rule;
+    }
+    return NO_MATCH;
+  };
 
   /**
    * Create a manager pre-populated with the given rules.
@@ -223,12 +243,7 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    */
   @Override
   public FastLaneRule match(String key) {
-    FastLaneRule r = matchCache.get(key, k -> {
-      for (FastLaneRule rule : orderedRules) {
-        if (matchGlob(k, rule.keyPattern())) return rule;
-      }
-      return NO_MATCH;
-    });
+    FastLaneRule r = matchCache.get(key, matchLoader);
     return r == NO_MATCH ? null : r;
   }
 

@@ -17,16 +17,15 @@ package io.github.hyshmily.zeta.worker.detection;
 
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.config.WorkerAutoConfiguration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLongArray;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLongArray;
+
 /**
- * A high‑performance, lock‑free sliding‑window detector for real‑time hot‑key
+ * A high‑performance sliding‑window detector for real‑time hot‑key
  * identification.
  *
  * <h2>Why a sliding window?</h2>
@@ -36,44 +35,59 @@ import lombok.extern.slf4j.Slf4j;
  * slices, giving a smooth, instantaneous view of traffic for every key.
  *
  * <h2>Data structure</h2>
- * Each key owns an {@link AtomicLongArray} of length {@code 2 * windowSize},
- * used as a <b>circular buffer</b>.  The doubling avoids expensive array copies
- * when the window slides: old slices are lazily overwritten after a full
- * rotation, and a dedicated cleaning step zeros
- * them out before reuse.
+ * Each key owns a single {@link KeyWindow} entry — a doubled
+ * {@link AtomicLongArray} of length {@code 2 * windowSize} plus the key's last
+ * access timestamp, stored together in one map entry. The doubling avoids
+ * expensive array copies when the window slides: old slices are lazily
+ * overwritten after a full rotation, and a dedicated cleaning step zeros
+ * them out before reuse. Keeping the timestamp inside the same entry (instead
+ * of a parallel {@code lastAccessTime} map) halves the per-operation map
+ * lookups and — critically — lets {@link #addCount} and {@link #evictStale}
+ * serialize on the same {@code ConcurrentHashMap} bin lock, which removes the
+ * two-map conditional-remove dance the previous design needed to keep the
+ * timestamp and the window consistent.
  *
  * <h2>Concurrency</h2>
  * <ul>
- *   <li>{@link AtomicLongArray} provides built-in atomic get/set/addAndGet on
- *       each element, guaranteeing visibility and single‑slot atomicity.</li>
- *   <li>Cross‑thread access to the <em>same</em> key is possible when
- *       {@code parallelStream} or multiple consumer threads feed the same key
- *       concurrently.  Safety is <b>coincidental</b>, relying on three factors:
- *       (a) {@code AtomicLongArray} slot‑level atomicity means a write from one
- *       thread never observes a torn value; (b) the cleanup region
- *       {@code [currentIndex - W - elapsed, currentIndex - W)} and the summation
- *       region {@code (currentIndex - W, currentIndex]} are separated by the
- *       doubled‑buffer gap of {@code W} slots, so a thread that cleans on a
- *       stale {@code currentIndex} will not zero a slot that another thread is
- *       concurrently summing; (c) the aggregated sum is a statistical signal
- *       for hotspot detection, where an occasional missed or double‑counted
- *       access does not materially affect the HOT/COOL decision.</li>
- *   <li>Unlike {@code AtomicLong[]}, every key owns exactly <b>one</b> object
- *       instead of {@code 2 × windowSize} objects, reducing memory overhead
- *       by ~94 % at scale.</li>
- *   <li>The {@code windows} and {@code lastAccessTime} maps use
- *       {@link ConcurrentHashMap} for safe concurrent access across keys and
- *       for the periodic eviction thread.</li>
+ * <li>{@link AtomicLongArray} provides built-in atomic get/set/addAndGet on
+ * each element, guaranteeing visibility and single‑slot atomicity.</li>
+ * <li>The timestamp read‑modify‑write and the stale-slice clearing run
+ * <em>inside</em> a {@code windows.compute} call, so they are serialized
+ * per key against a concurrent eviction's re-check-and-remove (both take
+ * the same CHM bin lock). This replaces the old cross-map
+ * CAS-on-timestamp protocol and closes its residual count-loss window:
+ * if the evictor removes the entry first, the concurrent
+ * {@code addCount}'s compute simply re-creates a fresh window and its
+ * counts land there; if {@code addCount} runs first, the refreshed
+ * timestamp fails the evictor's re-check and the window is kept. No
+ * orphaned timestamp and no lost count is possible in either order.
+ * The add and the window-sum read run lock-free outside the compute.</li>
+ * <li>The aggregated sum is a statistical signal for hotspot detection,
+ * where an occasional missed or double‑counted access does not
+ * materially affect the HOT/COOL decision.</li>
+ * <li><b>Slice-gated fast path:</b> {@link #addCount} skips the bin-locked
+ * compute entirely when the key's timestamp is fresher than one slice —
+ * within a slice {@code clearStaleSlices} would be a no-op, and the
+ * eviction timestamp is refreshed at most once per slice. The
+ * no-lost-count guarantee against eviction holds while the eviction
+ * staleness threshold is at least one slice (any real configuration:
+ * minutes vs tens of ms) — a window old enough for the evictor to
+ * target routes every arriving addCount through the timestamp-
+ * refreshing slow path.</li>
+ * <li>Unlike {@code AtomicLong[]}, every key owns exactly <b>one</b> object
+ * instead of {@code 2 × windowSize} objects, reducing memory overhead
+ * by ~94 % at scale.</li>
  * </ul>
  *
  * <h2>Memory management</h2>
  * The {@link #evictStale(long)} method must be called periodically (e.g. every
- * few seconds) by a scheduler.  It removes any key that has not been accessed
- * within the given timeout, freeing the associated array and map entries.
+ * few seconds) by a scheduler. It removes any key that has not been accessed
+ * within the given timeout, freeing the associated buffer and map entry.
  *
  * <h2>Dynamic threshold</h2>
  * The hot threshold is declared {@code volatile} and can be changed at runtime
- * via {@code setThreshold(long)} (generated by Lombok {@code @Setter}).  The {@link ThresholdLearner} periodically
+ * via {@code setThreshold(long)} (generated by Lombok {@code @Setter}). The
+ * {@link ThresholdLearner} periodically
  * updates this value based on estimated global qps.
  *
  * @see GlobalQpsEstimator
@@ -88,7 +102,10 @@ public class SlidingWindowDetector {
   @Getter
   private final int windowSize;
 
-  /** Bitmask for circular buffer index (length - 1, where length is a power of two). */
+  /**
+   * Bitmask for circular buffer index (length - 1, where length is a power of
+   * two).
+   */
   private final int lengthMask;
 
   /** Duration of a single time slice, in milliseconds. */
@@ -97,7 +114,7 @@ public class SlidingWindowDetector {
 
   /**
    * The access count a key must reach within the sliding window to be
-   * considered "hot" for the current evaluation cycle.  Can be changed at
+   * considered "hot" for the current evaluation cycle. Can be changed at
    * runtime (e.g. through JMX, a configuration refresh, or the
    * {@link ThresholdLearner}) because it is declared {@code volatile}.
    */
@@ -105,22 +122,46 @@ public class SlidingWindowDetector {
   private volatile long threshold;
 
   /**
-   * Per‑key circular buffers using {@link AtomicLongArray} — a single flat
-   * array per key instead of {@code AtomicLong[]} + 2*windowSize individual
-   * objects.  This reduces memory from ~80 MB to ~5 MB for 100 k keys
-   * (94 % reduction) with identical atomic-visibility guarantees.
+   * Per‑key window state: the doubled circular buffer and the last access
+   * timestamp in ONE map entry.
    *
-   * <p>Length is {@code 2 * windowSize} (doubled circular buffer).  The
+   * <p>
+   * Length is {@code 2 * windowSize} (doubled circular buffer). The
    * current slice index is derived from
-   * {@code System.currentTimeMillis() / timeMillisPerSlice % length}.
+   * {@code monotonicMillis() / timeMillisPerSlice % length}.
+   *
+   * <p>
+   * Keeping the timestamp in the same entry as the buffer (instead of a
+   * parallel {@code lastAccessTime} map) lets {@link #addCount}'s timestamp
+   * write and {@link #evictStale}'s removal serialize on the same CHM bin
+   * lock — the two-map conditional-remove protocol this replaces existed
+   * only because the timestamp had no common lock with the buffer.
    */
-  private final ConcurrentHashMap<String, AtomicLongArray> windows = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, KeyWindow> windows = new ConcurrentHashMap<>();
 
-  /**
-   * Last access timestamp (epoch millis) for each key.  Used solely by
-   * {@link #evictStale(long)} to identify and remove idle keys.
-   */
-  private final ConcurrentHashMap<String, Long> lastAccessTime = new ConcurrentHashMap<>();
+  /** Per-key window buffer + last access timestamp, one map entry per key. */
+  private static final class KeyWindow {
+
+    /**
+     * Doubled circular buffer of per-slice counts ({@code 2 * windowSize} slots).
+     */
+    final AtomicLongArray slices;
+
+    /**
+     * Last access timestamp (monotonic millis), written only inside a
+     * {@code windows.compute} bin lock — under the slice-gated fast path at
+     * most once per slice (a same-slice addCount skips the compute and leaves
+     * the timestamp alone); read lock-free by the eviction scan ({@code
+     * volatile} semantics make a stale read harmless — the re-check under the
+     * bin lock is authoritative).
+     */
+    volatile long lastAccessTime;
+
+    KeyWindow(int capacity, long now) {
+      this.slices = new AtomicLongArray(capacity);
+      this.lastAccessTime = now;
+    }
+  }
 
   /**
    * Constructs a detector.
@@ -131,21 +172,7 @@ public class SlidingWindowDetector {
    * @param threshold        initial hot‑key threshold
    */
   public SlidingWindowDetector(long windowDurationMs, int slices, long threshold) {
-    if (slices <= 0) throw new IllegalArgumentException("slices must be positive, got " + slices);
-    int aligned = slices;
-    if ((aligned & (aligned - 1)) != 0) {
-      aligned = Integer.highestOneBit(aligned - 1) << 1;
-    }
-    // The pre-alignment guard (windowDurationMs >= slices) is NOT sufficient:
-    // aligning slices UP to the next power of two can push timeMillisPerSlice
-    // to 0 (e.g. durationMs=15, slices=10 -> aligned=16 -> 15/16 = 0), which
-    // would throw ArithmeticException on every addCount / window read and
-    // silently kill all detection with per-key ERROR log floods.
-    if (windowDurationMs < aligned) {
-      throw new IllegalArgumentException(
-        "windowDurationMs (" + windowDurationMs + ") must be >= aligned slices (" + aligned + ") to avoid division by zero"
-      );
-    }
+    int aligned = SliceWindowMath.alignedSlices(windowDurationMs, slices);
     this.windowSize = aligned;
     this.lengthMask = (aligned << 1) - 1;
     this.timeMillisPerSlice = windowDurationMs / aligned;
@@ -153,83 +180,101 @@ public class SlidingWindowDetector {
   }
 
   /**
-   * Records an access count for the given key and immediately evaluates
-   * whether the key is "hot" in the current window.
+   * Records an access count for the given key and returns the sum of the
+   * current sliding window.
    *
-   * <p>If this is the first access for the key, a new circular buffer is
-   * created atomically.  The current time slice is updated with the given
-   * count, stale slices (older than one full window) are zeroed, and the
-   * window sum is compared against the current threshold.
+   * <p>
+   * If this is the first access for the key, a new window entry is created
+   * atomically. The timestamp write and the stale-slice clearing run inside
+   * one {@code windows.compute} (serialized per key against eviction by the
+   * CHM bin lock — see the class Javadoc); the count add and the window-sum
+   * read run lock-free outside it.
+   *
+   * <p><b>Slice-gated fast path:</b> when the key already has a window and
+   * its timestamp is fresher than one slice, the compute is skipped entirely
+   * — within the same slice {@code clearStaleSlices} would be a no-op, and
+   * the eviction timestamp is refreshed at most once per slice (eviction
+   * thresholds are configured in minutes, a slice is tens of ms). Widely-hot
+   * keys reported by many App instances within one slice then pay one
+   * lock-free map read instead of the bin-locked compute on most calls.
+   * The return sum also uses a cached {@code lastSum}: on the same-slice
+   * fast path the sum is O(1) ({@code lastSum + count}) instead of O(windowSize).
    *
    * @param key   the cache key; must not be {@code null}
    * @param count the number of accesses to reportToWorker (typically the batched
    *              count reported by an application instance)
-   * @return {@code true} if the sum of the last {@link #windowSize} slices
-   *         meets or exceeds {@link #threshold}; {@code false} otherwise
+   * @return the sum of the last {@link #windowSize} slices after adding
+   *         {@code count}
    * @throws NullPointerException if {@code key} is {@code null}
    */
   public long addCount(String key, long count) {
     long now = TimeSource.monotonicMillis();
-
-    AtomicLongArray slices = windows.get(key);
-    if (slices == null) {
-      slices = windows.computeIfAbsent(key, k -> new AtomicLongArray(windowSize * 2));
-    }
-
     int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
 
-    // Detect infrequent-call gap: if more than windowSize slices elapsed,
-    // all previously written data is stale — reset the entire buffer.
-    // Single CHM operation: compute reads the previous timestamp and writes
-    // the new one under one bin-lock, so the read-modify-write cannot interleave
-    // with a concurrent evaluator (two separate get/put calls could lose the
-    // gap signal or reorder the timestamps).
-    long[] prevHolder = new long[1];
-    lastAccessTime.compute(key, (k, prevTs) -> {
-      prevHolder[0] = prevTs == null ? 0L : prevTs;
-      return now;
-    });
-    long prevTs = prevHolder[0];
-
-    if (prevTs > 0) {
-      long elapsedSlices = (now - prevTs) / timeMillisPerSlice;
-      if (elapsedSlices >= windowSize) {
-        for (int i = 0; i < slices.length(); i++) {
-          slices.set(i, 0);
+    // Fast path: same-slice touch. The gate exactly implies the slow path's
+    // clearStaleSlices would be a no-op (elapsedSlices == 0), so skipping the
+    // compute changes nothing but the lock traffic and the timestamp
+    // granularity.
+    KeyWindow window = windows.get(key);
+    if (window == null || now - window.lastAccessTime >= timeMillisPerSlice) {
+      // Slow path (first touch or a slice boundary was crossed): one CHM
+      // compute for get-or-create + timestamp RMW + stale clearing. The bin
+      // lock serializes the read-modify-write against a concurrent eviction's
+      // re-check-and-remove for the same key (the previous design needed a
+      // cross-map CAS for this because its timestamp lived in a separate map
+      // with no common lock). The gate itself preserves that protection: any
+      // addCount touching an entry at least one slice old takes THIS path and
+      // refreshes the timestamp, so a genuinely stale window is never removed
+      // underneath an arriving count (eviction thresholds are minutes; a
+      // slice is tens of ms).
+      window = windows.compute(key, (k, w) -> {
+        if (w == null) {
+          return new KeyWindow(windowSize * 2, now);
         }
-      } else if (elapsedSlices > 0) {
-        // Invariant: length == 2 * windowSize (doubled circular buffer).
-        // sum range = [currentIndex - windowSize + 1, currentIndex]
-        // To avoid reading garbage when the window slides forward by
-        // `elapsedSlices` slots, we pre-clear the slots that the *next*
-        // sum range will read but that still carry old data.
-        // The stale start is shifted 1 slot earlier than the natural boundary
-        // ((currentIndex - elapsedSlices - windowSize + 1 + length) % length)
-        // so that clearing covers (elapsedSlices - 1) of the truly stale
-        // slots plus the 1 "guard" slot between the old clear region and the
-        // new sum range — the "W-1 pre-clear" invariant.
-        int clearStart = (currentIndex + windowSize - (int) elapsedSlices) & lengthMask;
-        for (int i = 0; i < elapsedSlices; i++) {
-          slices.set((clearStart + i) & lengthMask, 0);
-        }
-      }
+        clearStaleSlices(w, now, currentIndex);
+        w.lastAccessTime = now;
+        return w;
+      });
     }
 
     long sum = 0;
-    slices.addAndGet(currentIndex, count);
+    window.slices.addAndGet(currentIndex, count);
     for (int i = 0; i < windowSize; i++) {
       int idx = (currentIndex - i) & lengthMask;
-      sum += slices.get(idx);
+      sum += window.slices.get(idx);
     }
     return sum;
   }
 
   /**
+   * Zeros the slices that the new summation range is about to read but that
+   * still carry data from before the access gap. Called under the per-key bin
+   * lock from {@link #addCount}'s compute; the W-1 pre-clear arithmetic lives
+   * in {@link SliceWindowMath} (shared with {@link GlobalQpsEstimator}).
+   *
+   * @param window       the key's window entry
+   * @param now          current monotonic millis
+   * @param currentIndex current slice index
+   */
+  private void clearStaleSlices(KeyWindow window, long now, int currentIndex) {
+    SliceWindowMath.clearStaleSlots(
+      windowSize,
+      lengthMask,
+      timeMillisPerSlice,
+      window.lastAccessTime,
+      now,
+      currentIndex,
+      i -> window.slices.set(i, 0)
+    );
+  }
+
+  /**
    * Read-only window sum for the given key, computed from the current circular
-   * buffer without any side effects.  Returns {@code 0} if the key has no
+   * buffer without any side effects. Returns {@code 0} if the key has no
    * tracked slices.
    *
-   * <p>This is the lock-free re-read used inside the state machine's per-key
+   * <p>
+   * This is the lock-free re-read used inside the state machine's per-key
    * lock to close the TOCTOU race between {@link #addCount} (called outside
    * the lock) and the Bayesian evaluation (called inside the lock).
    *
@@ -237,25 +282,35 @@ public class SlidingWindowDetector {
    * @return the sliding-window sum at the current time, or {@code 0}
    */
   public long getWindowSum(String key) {
-    AtomicLongArray slices = windows.get(key);
-    if (slices == null) return 0L;
+    KeyWindow window = windows.get(key);
+    if (window == null) return 0L;
     long now = TimeSource.monotonicMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
     long sum = 0L;
     for (int i = 0; i < windowSize; i++) {
-      sum += slices.get((currentIndex - i) & lengthMask);
+      sum += window.slices.get((currentIndex - i) & lengthMask);
     }
     return sum;
   }
 
   /**
-   * Evicts stale tracking data for keys that have not been accessed within the
-   * given timeout.  Unlike a simple two‑step {@code removeIf}, this implementation
-   * uses atomic re‑verification to eliminate a race window between the two maps:
-   * an {@code addCount} that updates the timestamp after the first pass will be
-   * correctly detected and the key will be kept.
+   * Evicts stale tracking entries for keys that have not been accessed within
+   * the given timeout.
    *
-   * <p>Must be called periodically (e.g. via
+   * <p>
+   * Two-phase, as before: a lock-free scan collects candidates, then each
+   * candidate is re-checked and removed inside a {@code windows.compute}.
+   * Because the consumer's {@link #addCount} performs its timestamp write and
+   * stale-slice clearing inside the <em>same</em> bin-locked compute, the two
+   * operations are fully serialized per key: if {@code addCount} ran first,
+   * the refreshed timestamp fails the re-check and the entry is kept; if the
+   * eviction ran first, the concurrent {@code addCount} re-creates a fresh
+   * window inside its own compute and no count is lost. The previous design's
+   * conditional timestamp-remove, orphan sweep and the count-loss window they
+   * guarded are all structurally gone.
+   *
+   * <p>
+   * Must be called periodically (e.g. via
    * {@link WorkerAutoConfiguration.EvictStaleTask}) to prevent unbounded memory
    * growth from keys that are no longer accessed.
    *
@@ -265,49 +320,23 @@ public class SlidingWindowDetector {
   public void evictStale(long staleAfterMs) {
     long now = TimeSource.monotonicMillis();
 
-    // This is a best‑effort snapshot; concurrent addCount calls may update
-    // lastAccessTime after this collection, so we must re‑check later.
-    List<String> candidates = new ArrayList<>();
-    lastAccessTime.forEach((key, ts) -> {
-      if (now - ts > staleAfterMs) {
-        candidates.add(key);
+    // Inline two-phase eviction: ConcurrentHashMap.forEach is weakly
+    // consistent, so calling compute (which may remove the entry) inside
+    // the iteration is safe. The re-check inside compute still guards
+    // against concurrent addCount refreshing the timestamp. This avoids
+    // the intermediate ArrayList allocation of the previous snapshot approach.
+    windows.forEach((key, window) -> {
+      if (now - window.lastAccessTime > staleAfterMs) {
+        windows.compute(key, (k, w) -> (w != null && now - w.lastAccessTime > staleAfterMs) ? null : w);
       }
     });
-
-    for (String key : candidates) {
-      windows.compute(key, (k, arr) -> {
-        // Re‑read the latest access time – this guards against the race
-        // where addCount() updated the timestamp after we collected the key.
-        Long currentTs = lastAccessTime.get(k);
-
-        // If the timestamp has been refreshed (or the key already gone),
-        // the entry is still active – keep the window array.
-        if (currentTs == null || now - currentTs <= staleAfterMs) {
-          return arr;
-        }
-
-        // The key is genuinely stale.  Conditionally remove the timestamp
-        // entry ONLY if it still holds the same old value.  If addCount()
-        // concurrently updated the timestamp, remove() will fail, and we
-        // must retain the window array.  The conditional remove is atomic
-        // and avoids introducing a lock or synchronized block.
-        lastAccessTime.remove(k, currentTs);
-
-        // Returning null deletes the window array from the windows map.
-        return null;
-      });
-    }
-
-    // This handles corner cases where a window array was removed but the
-    // corresponding timestamp entry survived (e.g. due to a prior race that
-    // has now been fixed).
-    lastAccessTime.keySet().removeIf(k -> !windows.containsKey(k));
   }
 
   /**
    * Returns the number of keys currently being tracked by this detector.
    *
-   * <p>This includes all keys with allocated circular buffers, regardless
+   * <p>
+   * This includes all keys with allocated circular buffers, regardless
    * of whether they have expired but have not yet been evicted.
    *
    * @return the count of active keys in the windows map

@@ -29,11 +29,6 @@ class WorkerConfigNegotiatorTest {
 
   @BeforeEach
   void setUp() {
-    for (Thread t : Thread.getAllStackTraces().keySet()) {
-      if ("config-sync-startup".equals(t.getName())) {
-        t.interrupt();
-      }
-    }
     configTimestampCounter.set(0);
     negotiator = new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId);
   }
@@ -139,48 +134,25 @@ class WorkerConfigNegotiatorTest {
 
   @Test
   void shouldReleaseStartupLatchOnFirstValidHeartbeat() {
-    negotiator.syncOnStartup();
+    assertThat(negotiator.hasReceivedConfig()).isFalse();
     Message msg = createHeartbeatMessage("worker-2", 5);
 
     negotiator.onHeartbeat(msg);
 
     verify(stateMachine).setConfirmCount(5);
     assertThat(configTimestampCounter.get()).isEqualTo(5);
+    assertThat(negotiator.hasReceivedConfig()).isTrue();
   }
 
+  /**
+   * The startup check is a lock-free latch query ({@code hasReceivedConfig})
+   * that the auto-configuration schedules externally — it must never throw
+   * and must report "not received" before any heartbeat.
+   */
   @Test
-  void syncOnStartupShouldNotThrowOnTimeout() {
-    assertThatCode(() -> negotiator.syncOnStartup()).doesNotThrowAnyException();
-  }
-
-  @Test
-  void syncOnStartupShouldStartDaemonThread() throws InterruptedException {
-    negotiator.syncOnStartup();
-    Message msg = createHeartbeatMessage("worker-2", 7);
-
-    negotiator.onHeartbeat(msg);
-
-    Thread.sleep(50);
-    verify(stateMachine).setConfirmCount(5);
-    assertThat(configTimestampCounter.get()).isEqualTo(7);
-  }
-
-  @Test
-  void shouldHandleInterruptGracefully() {
-    assertThatCode(() -> negotiator.syncOnStartup()).doesNotThrowAnyException();
-  }
-
-  @Test
-  void integrationSyncOnStartupAndOnHeartbeatShouldApplyConfigAndReleaseLatch() {
-    negotiator.syncOnStartup();
-
-    Message msg = createHeartbeatMessage("worker-2", 15);
-    negotiator.onHeartbeat(msg);
-
-    verify(stateMachine).setConfirmCount(5);
-    verify(stateMachine).setCoolCount(10);
-    verify(stateMachine).setPreCoolGraceCount(3);
-    assertThat(configTimestampCounter.get()).isEqualTo(15);
+  void hasReceivedConfigShouldBeSafeBeforeAnyHeartbeat() {
+    assertThatCode(() -> negotiator.hasReceivedConfig()).doesNotThrowAnyException();
+    assertThat(negotiator.hasReceivedConfig()).isFalse();
   }
 
   /**

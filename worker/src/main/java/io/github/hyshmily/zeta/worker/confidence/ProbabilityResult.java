@@ -72,11 +72,18 @@ package io.github.hyshmily.zeta.worker.confidence;
  * for borderline keys, and &lt; 2% memory increase from extra CANDIDATE_HOT
  * entries.  Tests done at various traffic scenarios (2026-07-29).
  *
+ * <p>The defaults below are exactly these recommended values. Production
+ * deployments can override both thresholds per-estimator via
+ * {@code zeta.worker.bayesian.high-confidence-threshold} /
+ * {@code zeta.worker.bayesian.medium-confidence-threshold}; the estimator
+ * then classifies with {@link #classify(double, double, double)} and always
+ * populates the {@code level} component itself. The convenience constructor
+ * classifies with the documented defaults.
+ *
  * @param probability          P(true frequency &gt; threshold) — the key output decision value
  * @param level                {@link ConfidenceLevel} derived from {@code probability} via {@link #classify}
  * @param posteriorMean        mean of the posterior log-frequency distribution
  * @param posteriorStd         standard deviation of the posterior log-frequency distribution
- * @param cv                   coefficient of variation of the observed window sums (may be {@code null})
  * @param accumulatedPrecision sum of likelihood precisions across evaluations for this key, capped at
  *                             {@link BayesianConfidenceEstimator#MAX_EFFECTIVE_COUNT} times base
  *                             likelihood precision; used as the prior precision for the next evaluation
@@ -86,28 +93,40 @@ public record ProbabilityResult(
   ConfidenceLevel level,
   double posteriorMean,
   double posteriorStd,
-  Double cv,
   double accumulatedPrecision
 ) {
   /** Posterior probability at or above which the level is {@link ConfidenceLevel#HIGH} (see class doc). */
-  private static final double HIGH_THRESHOLD = 0.95;
+  static final double HIGH_THRESHOLD = 0.95;
 
   /** Posterior probability at or above which the level is {@link ConfidenceLevel#MEDIUM} (see class doc). */
-  private static final double MEDIUM_THRESHOLD = 0.76;
+  static final double MEDIUM_THRESHOLD = 0.76;
 
   public ProbabilityResult(
     double probability,
     double posteriorMean,
     double posteriorStd,
-    Double cv,
     double accumulatedPrecision
   ) {
-    this(probability, classify(probability), posteriorMean, posteriorStd, cv, accumulatedPrecision);
+    this(probability, classify(probability), posteriorMean, posteriorStd, accumulatedPrecision);
   }
 
   private static ConfidenceLevel classify(double p) {
-    if (p >= HIGH_THRESHOLD) return ConfidenceLevel.HIGH;
-    if (p >= MEDIUM_THRESHOLD) return ConfidenceLevel.MEDIUM;
+    return classify(p, HIGH_THRESHOLD, MEDIUM_THRESHOLD);
+  }
+
+  /**
+   * Classifies a posterior probability into a {@link ConfidenceLevel} tier
+   * using the given split thresholds. Package-visible so the estimator can
+   * classify with its configured (non-default) thresholds.
+   *
+   * @param p               the posterior probability
+   * @param highThreshold   HIGH tier lower bound
+   * @param mediumThreshold MEDIUM tier lower bound
+   * @return the confidence level
+   */
+  static ConfidenceLevel classify(double p, double highThreshold, double mediumThreshold) {
+    if (p >= highThreshold) return ConfidenceLevel.HIGH;
+    if (p >= mediumThreshold) return ConfidenceLevel.MEDIUM;
     return ConfidenceLevel.LOW;
   }
 }

@@ -40,6 +40,36 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties(prefix = "zeta.worker")
 public class WorkerProperties {
 
+  /**
+   * Dedicated send buffer for HOT/COOL decision broadcasts (ADR-0061). Default constructor.
+   *
+   * <p>When enabled, {@code ReportConsumer} hands decision sends to a bounded
+   * single-threaded executor instead of publishing synchronously on the AMQP
+   * consumer thread, so a mass-heat event (thousands of keys transitioning in
+   * one batch) cannot stall report consumption behind serial AMQP publishes.
+   * Same ADR-0037 conventions as the App-side broadcast flush: drop-on-saturation
+   * and one aggregated WARN per 10s window.
+   */
+  @Data
+  public static class Broadcast {
+
+    /**
+     * Whether decision broadcasts are sent from the dedicated buffered
+     * executor. {@code false} restores the legacy synchronous send on the
+     * AMQP consumer thread.
+     */
+    private boolean bufferEnabled = true;
+
+    /**
+     * Capacity of the pending-decision queue. A decision arriving when the
+     * queue is full is dropped immediately and its state rolled back on the
+     * caller thread (the next evaluation re-emits it) — a lost decision
+     * fails lenient per ADR-0007/ADR-0024.
+     */
+    @Min(1)
+    private int bufferCapacity = 10_000;
+  }
+
   /** Routing configuration for app-level reportToWorker queue naming. Default constructor. */
   @Data
   public static class Routing {
@@ -131,21 +161,65 @@ public class WorkerProperties {
   @Data
   public static class StateMachine {
 
+    /**
+     * State-machine base window duration (ms). Each slice is
+     * {@code smDurationMs / smSlices}; the confirm/cool/pre-cool window counts
+     * derive from this slice size, so {@code 0} would make every window count
+     * degenerate ({@code ceil(x/0.0) = Integer.MAX_VALUE}).
+     */
+    @Min(1)
     private long smDurationMs = 500;
 
     @Min(1)
     private int smSlices = 10;
 
+    /** Total duration (ms) for HOT confirmation. */
+    @Min(1)
     private long confirmDurationMs = 50;
 
+    /** Duration (ms) a key must stay below threshold to be considered COLD. */
+    @Min(1)
     private long coolDurationMs = 600_000;
+
+    /** Grace period (ms) at the end of cool-down during which a key can silently revive. */
+    @Min(1)
     private long preCoolGraceMs = 60_000;
+
     /**
-     * Staleness threshold and eviction schedule interval.
-     * A key is evicted after this many milliseconds without any report.
-     * Default = 2 × coolDurationMs = 20 minutes.
+     * Staleness threshold (ms): a key is evicted after this many milliseconds
+     * without any report. Default = 2 × coolDurationMs = 20 minutes.
+     *
+     * <p>This property is <b>only</b> the staleness threshold — the cadence of
+     * the periodic eviction scan is {@link #evictScanIntervalMs} (ADR-0060).
      */
     private long evictIntervalMs = 1_200_000;
+
+    /**
+     * Tiered staleness threshold (ms) for COLD-state keys: a COLD key that has
+     * not been reported for this long is evicted on the periodic scan, while
+     * CONFIRMED_HOT / PRE_COOLING keys keep the full {@link #evictIntervalMs}
+     * retention (their eviction is what discharges the COOL broadcast
+     * obligation). A COLD key's retained state only matters while it is still
+     * being reported — a resumed key re-evaluates from scratch exactly as it
+     * would after the full-threshold eviction — so the short tier bounds the
+     * state map's memory under high key cardinality without touching any
+     * broadcast semantics. Default 300_000 (5 min); a value
+     * {@code >= evict-interval-ms} disables the tiering.
+     */
+    @Min(1)
+    private long coldEvictIntervalMs = 300_000;
+
+    /**
+     * Interval (ms) between periodic eviction SCANs over the detector, state
+     * machine, and evaluator maps (ADR-0060). Deliberately a separate knob from
+     * {@link #evictIntervalMs} (the staleness threshold): the scan cadence is a
+     * housekeeping-cost decision, the threshold a correctness decision (it must
+     * stay &gt;= 2 × coolDurationMs so cooling keys are not evicted prematurely).
+     * Default 1_200_000 (20 min) — equal to the staleness default so a stale key
+     * is collected on the first scan after crossing the threshold.
+     */
+    @Min(1)
+    private long evictScanIntervalMs = 1_200_000;
 
     /**
      * Minimum interval (ms) between periodic HOT rebroadcasts for a key that
@@ -181,6 +255,23 @@ public class WorkerProperties {
     private double priorMean = BayesianConfidenceEstimator.PRIOR_MEAN;
     private double priorStd = 2.0;
     private double likelihoodStd = 0.8;
+
+    /**
+     * Posterior probability at or above which a decision is HIGH confidence
+     * (gates the expensive HOT broadcast); must be in (0, 1) and strictly
+     * above {@link #mediumConfidenceThreshold}. The tuning protocol behind
+     * the default is documented on
+     * {@link io.github.hyshmily.zeta.worker.confidence.ProbabilityResult}.
+     */
+    private double highConfidenceThreshold = 0.95;
+
+    /**
+     * Posterior probability at or above which a decision is MEDIUM confidence
+     * (gates CANDIDATE_HOT tracking); must be in (0, 1). The tuning protocol
+     * behind the default is documented on
+     * {@link io.github.hyshmily.zeta.worker.confidence.ProbabilityResult}.
+     */
+    private double mediumConfidenceThreshold = 0.76;
   }
 
   /** Fast-lane rules — bypass Bayesian state machine, broadcast on sliding-window threshold only. */
@@ -215,6 +306,9 @@ public class WorkerProperties {
 
   @Valid
   private Messaging messaging = new Messaging();
+
+  @Valid
+  private Broadcast broadcast = new Broadcast();
 
   @Valid
   private ReportConsumer reportConsumer = new ReportConsumer();

@@ -46,11 +46,11 @@ class ZetaBayesianSMEdgeTest {
     new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5)
   );
 
-  private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null, 0.0);
+  private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, Double.NaN, 0.0);
 
-  private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, null, 0.0);
+  private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, Double.NaN, 0.0);
 
-  private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null, 0.0);
+  private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, Double.NaN, 0.0);
 
   // Lower adjustedLogThreshold (1.0 ≈ e^1 ≈ 2.7) simulates the momentum from a
   // sustained key — Evaluator would produce this when EMA cmsCount >> windowSum.
@@ -58,13 +58,13 @@ class ZetaBayesianSMEdgeTest {
     100L,
     5L,
     10L,
-    null,
+    Double.NaN,
     Math.log(10),
     0.8,
     0.0
   );
 
-  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null, 0.0);
+  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, Double.NaN, 0.0);
 
   private static ZetaBayesianSM machineWith(int confirm, int cool, int grace) {
     return new io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM(
@@ -499,7 +499,7 @@ class ZetaBayesianSMEdgeTest {
 
   @Test
   void isHotRecheckInsideLock_shouldRouteToHotWhenCallerSaysCold() {
-    EvaluationContext hotCtx = new EvaluationContext(100L, 100L, 10L, null, 0.0);
+    EvaluationContext hotCtx = new EvaluationContext(100L, 100L, 10L, Double.NaN, 0.0);
 
     ZetaBayesianSM m = machineWith(2, 5, 2);
     assertThat(m.evaluate("k", true, false, hotCtx).type()).isEqualTo(DecisionType.NONE);
@@ -510,7 +510,7 @@ class ZetaBayesianSMEdgeTest {
 
   @Test
   void isHotRecheck_shouldNotUpgradeWhenWindowSumBelowThreshold() {
-    EvaluationContext belowThresholdCtx = new EvaluationContext(100L, 5L, 10L, null, 0.0);
+    EvaluationContext belowThresholdCtx = new EvaluationContext(100L, 5L, 10L, Double.NaN, 0.0);
 
     ZetaBayesianSM m = machineWith(2, 5, 2);
     assertThat(m.evaluate("k", true, false, CTX).type()).isEqualTo(DecisionType.NONE);

@@ -37,7 +37,7 @@ class BayesianEvaluatorTest {
 
   @BeforeEach
   void setUp() {
-    evaluator = new DefaultEvaluator(detector, stateMachine, new FastLaneRuleManagerImpl(List.of()), null);
+    evaluator = new DefaultEvaluator(detector, stateMachine, new FastLaneRuleManagerImpl(List.of()));
   }
 
   @Nested
@@ -134,7 +134,7 @@ class BayesianEvaluatorTest {
     }
 
     EvaluationContext ctx = ctxCaptor.getValue();
-    assertThat(ctx.cv()).isNotNull();
+    assertThat(ctx.cv()).isFinite();
   }
 
   @Nested
@@ -147,7 +147,7 @@ class BayesianEvaluatorTest {
       FastLaneRuleManager ruleManager = new FastLaneRuleManagerImpl(
         List.of(new FastLaneRuleManager.FastLaneRule("hot:*", 500))
       );
-      fastLaneEvaluator = new DefaultEvaluator(detector, stateMachine, ruleManager, null);
+      fastLaneEvaluator = new DefaultEvaluator(detector, stateMachine, ruleManager);
     }
 
     @Test
@@ -181,6 +181,79 @@ class BayesianEvaluatorTest {
       );
       fastLaneEvaluator.evaluate("normal:key", 10L);
       verify(stateMachine).evaluate(eq("normal:key"), eq(true), eq(false), any(), any());
+    }
+  }
+
+  @Nested
+  class FastLaneGate {
+
+    @Test
+    void disabledGate_shouldNotConsultRuleManagerEvenWhenRuleWouldMatch() {
+      FastLaneRuleManager manager = org.mockito.Mockito.mock(FastLaneRuleManager.class);
+      Evaluator gated = new DefaultEvaluator(detector, stateMachine, manager, false);
+
+      when(detector.addCount("hot:key", 10L)).thenReturn(600L);
+      when(detector.getThreshold()).thenReturn(10L);
+      when(stateMachine.evaluate(eq("hot:key"), eq(true), eq(false), any(), any())).thenReturn(
+        new ZetaDecision(DecisionType.NONE, "hot:key", null)
+      );
+
+      gated.evaluate("hot:key", 10L);
+
+      org.mockito.Mockito.verifyNoInteractions(manager);
+      verify(stateMachine).evaluate(eq("hot:key"), eq(true), eq(false), any(), any());
+    }
+
+    @Test
+    void explicitlyEnabledGate_consultsRuleManager() {
+      FastLaneRuleManager manager = org.mockito.Mockito.mock(FastLaneRuleManager.class);
+      Evaluator gated = new DefaultEvaluator(detector, stateMachine, manager, true);
+
+      when(detector.addCount("k", 1L)).thenReturn(10L);
+      when(manager.match("k")).thenReturn(new FastLaneRuleManager.FastLaneRule("k", 5L));
+      when(stateMachine.evaluate(eq("k"), eq(true), eq(true), any(), any())).thenReturn(
+        new ZetaDecision(DecisionType.HOT, "k", null)
+      );
+
+      ZetaDecision result = gated.evaluate("k", 1L);
+      assertThat(result.type()).isEqualTo(DecisionType.HOT);
+    }
+  }
+
+  @Nested
+  class BatchGlobalRatio {
+
+    @Test
+    void nonPositiveRatio_isNeutral_noTrendInflation() {
+      when(detector.addCount(any(), anyLong())).thenReturn(100L);
+      when(detector.getThreshold()).thenReturn(10L);
+      when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), ctxCaptor.capture(), any())).thenReturn(
+        new ZetaDecision(DecisionType.NONE, "key", null)
+      );
+
+      for (int i = 0; i < 6; i++) {
+        evaluator.evaluate("key", 1L, 0.0);
+      }
+
+      // Constant window sums with a neutral ratio -> flat trend (1.0), never
+      // the 10x inflation the old windowSum/0.1 clamp produced.
+      assertThat(ctxCaptor.getValue().trendStrength()).isCloseTo(1.0, org.assertj.core.data.Offset.offset(1e-9));
+    }
+
+    @Test
+    void positiveRatio_normalisesTrend() {
+      when(detector.addCount(any(), anyLong())).thenReturn(100L);
+      when(detector.getThreshold()).thenReturn(10L);
+      when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), ctxCaptor.capture(), any())).thenReturn(
+        new ZetaDecision(DecisionType.NONE, "key", null)
+      );
+
+      for (int i = 0; i < 6; i++) {
+        evaluator.evaluate("key", 1L, 2.0);
+      }
+
+      // windowSum/2.0 = 50 vs preceding mean 100 -> trend 0.5.
+      assertThat(ctxCaptor.getValue().trendStrength()).isCloseTo(0.5, org.assertj.core.data.Offset.offset(1e-9));
     }
   }
 }

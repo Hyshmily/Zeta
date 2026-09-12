@@ -182,4 +182,42 @@ class WorkerPropertiesTest {
     assertThat(properties.getThreshold().getHotThresholdRatio()).isEqualTo(0.05);
     assertThat(properties.getStateMachine().getEvictIntervalMs()).isEqualTo(60000);
   }
+
+  /**
+   * Verifies the default of the dedicated eviction-scan cadence property
+   * (ADR-0060): 1_200_000 ms (20 min), matching the bound staleness-threshold
+   * default so a stale key is collected on the first scan after crossing it.
+   */
+  @Test
+  void shouldDefaultEvictScanIntervalToTwentyMinutes() {
+    assertThat(properties.getStateMachine().getEvictScanIntervalMs()).isEqualTo(1_200_000);
+  }
+
+  /**
+   * Verifies fail-fast validation of the state-machine durations: a
+   * {@code 0} duration would make {@code sliceMs = 0} and degenerate every
+   * derived window count into {@code Integer.MAX_VALUE} silently, so each
+   * duration carries {@code @Min(1)}.
+   */
+  @Test
+  void shouldFlagNonPositiveDurationsAsConstraintViolations() {
+    try (jakarta.validation.ValidatorFactory factory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+      jakarta.validation.Validator validator = factory.getValidator();
+
+      for (String durationProperty : new String[] {"smDurationMs", "confirmDurationMs", "coolDurationMs", "preCoolGraceMs"}) {
+        WorkerProperties candidate = new WorkerProperties();
+        switch (durationProperty) {
+          case "smDurationMs" -> candidate.getStateMachine().setSmDurationMs(0);
+          case "confirmDurationMs" -> candidate.getStateMachine().setConfirmDurationMs(0);
+          case "coolDurationMs" -> candidate.getStateMachine().setCoolDurationMs(0);
+          default -> candidate.getStateMachine().setPreCoolGraceMs(0);
+        }
+        java.util.Set<jakarta.validation.ConstraintViolation<WorkerProperties>> violations = validator.validate(candidate);
+        assertThat(violations)
+          .as("zero %s must be rejected", durationProperty)
+          .extracting(v -> v.getPropertyPath().toString())
+          .contains("stateMachine." + durationProperty);
+      }
+    }
+  }
 }

@@ -99,6 +99,16 @@ public class WorkerBroadcaster {
    * <p>Note: {@code put} happens <em>after</em> a successful
    * {@link #sendBroadcast}, so a failed send leaves the cache clean and the
    * next cycle will retry.
+   *
+   * <p>The check-then-put pair is not atomic: two concurrent consumers can
+   * both miss the cache and send the same key+type within the window. This is
+   * accepted, not fixed — same-key decisions are serialized by the state
+   * machine's striped lock, so the overlap window is a rebroadcast-interval
+   * boundary race that requires two decisions for one key from two consumer
+   * threads within 100 ms; the receiver's {@code decisionVersion >=} guard
+   * makes the duplicate harmless (the second send is simply a no-op there),
+   * and closing the gap with a putIfAbsent reservation would add a
+   * failed-send cleanup path for no observable gain.
    */
   private final Cache<String, Boolean> broadcastDedupCache = Caffeine.newBuilder()
     .expireAfterWrite(100, TimeUnit.MILLISECONDS)
@@ -106,9 +116,13 @@ public class WorkerBroadcaster {
     .build();
 
   /**
-   * Atomically allocates the next decision version without sending.
-   * Called from within {@link io.github.hyshmily.zeta.worker.ingest.ReportConsumer#doOnReport}
-   * to pre-allocate a version before enqueuing an async send.
+   * Atomically allocates the next decision version for this Worker.
+   *
+   * <p>Sole allocation point for broadcast ordering, called internally by
+   * {@link #broadcastHot} and {@link #broadcastCool} immediately before each
+   * send (sends are synchronous on the consumer thread — historically
+   * {@code ReportConsumer} pre-allocated versions before an async send, which
+   * no longer exists).
    *
    * @return the next monotonically increasing decision version
    */
@@ -132,7 +146,9 @@ public class WorkerBroadcaster {
       broadcastDedupCache.put(dedupKey, Boolean.TRUE);
       log.debug("Broadcast HOT: key={}, dv={}", cacheKey, dv);
     } catch (Exception e) {
-      log.error("Failed to broadcast HOT decision for key {}: {}", cacheKey, e.getMessage());
+      // Single failure log at the send site, with the full stack — callers
+      // (ReportConsumer) only aggregate the rollback side-effects.
+      log.error("Failed to broadcast HOT decision for key={}", cacheKey, e);
       return false;
     }
     return true;
@@ -154,7 +170,9 @@ public class WorkerBroadcaster {
       broadcastDedupCache.put(dedupKey, Boolean.TRUE);
       log.info("Broadcast COOL: key={}, dv={}", cacheKey, dv);
     } catch (Exception e) {
-      log.error("Failed to broadcast COOL decision for key {}: {}", cacheKey, e.getMessage());
+      // Single failure log at the send site, with the full stack — callers
+      // (ReportConsumer) only aggregate the rollback side-effects.
+      log.error("Failed to broadcast COOL decision for key={}", cacheKey, e);
       return false;
       // no throw — ADR-0007 fire-and-forget
     }

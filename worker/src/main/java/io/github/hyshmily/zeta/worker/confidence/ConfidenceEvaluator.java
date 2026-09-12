@@ -26,14 +26,19 @@ import lombok.RequiredArgsConstructor;
  * ({@link ZetaBayesianSM})
  * decoupled from the specific estimator implementation.
  *
- * <p>The three parameters (CMS count, threshold, CV) mirror the three
+ * <p>The three parameters (observed count, threshold, CV) mirror the three
  * dimensions of evidence available at decision time:
  * <ol>
- *   <li><b>CMS count</b> — global frequency estimate from the
- *       HeavyKeeper sketch (multi-instance)</li>
+ *   <li><b>Observed count</b> — the raw count observed for the key in the
+ *       current sliding window. Callers pass the (trend-scaled) window sum
+ *       from {@link io.github.hyshmily.zeta.model.EvaluationContext#windowSum()};
+ *       the momentum EMA in {@code cmsCount} feeds the adjusted threshold
+ *       instead. The Worker never sees a HeavyKeeper sketch, which lives
+ *       only in the App-side detector.</li>
  *   <li><b>Threshold</b> — the hot threshold the sliding window uses</li>
  *   <li><b>CV</b> — coefficient of variation for dynamic likelihood
- *       std adjustment (traffic stability signal)</li>
+ *       std adjustment (traffic stability signal); {@code Double.NaN}
+ *       when no window history is available</li>
  * </ol>
  */
 @Internal
@@ -42,7 +47,7 @@ public class ConfidenceEvaluator {
 
   private final BayesianConfidenceEstimator estimator;
 
-  public ProbabilityResult evaluate(long cmsCount, double logThreshold, Double cv) {
+  public ProbabilityResult evaluate(long cmsCount, double logThreshold, double cv) {
     return estimator.evaluate(cmsCount, logThreshold, cv);
   }
 
@@ -51,7 +56,8 @@ public class ConfidenceEvaluator {
    *
    * @param observedCount    current window raw count
    * @param logThreshold     hot threshold in log space
-   * @param cv               coefficient of variation (may be {@code null})
+   * @param cv               coefficient of variation ({@code Double.NaN} when
+   *                         no window history is available)
    * @param accumulatedMean  key's posterior mean from previous evaluation
    * @param accumulatedPrec  key's accumulated precision from previous evaluations
    * @return updated {@link ProbabilityResult} with new accumulatedPrecision
@@ -60,7 +66,7 @@ public class ConfidenceEvaluator {
   public ProbabilityResult evaluateWithAccumulatedPrior(
     long observedCount,
     double logThreshold,
-    Double cv,
+    double cv,
     double accumulatedMean,
     double accumulatedPrec
   ) {

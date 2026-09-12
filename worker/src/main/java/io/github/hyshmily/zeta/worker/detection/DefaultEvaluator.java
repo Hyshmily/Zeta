@@ -33,7 +33,11 @@ import java.util.concurrent.ConcurrentHashMap;
  *       {@code CONFIRMED_HOT} immediately via {@link ZetaBayesianSM#fastlane},
  *       bypassing all Bayesian confidence gating. Below the fast-lane threshold
  *       the evaluation falls through to the Bayesian path — the same standard
- *       cooling pipeline used for non-fast-lane keys.</li>
+ *       cooling pipeline used for non-fast-lane keys. The path is active only
+ *       when the evaluator is constructed with {@code fastLaneEnabled=true}
+ *       (wired from {@code zeta.worker.fast-lane.enabled}); when disabled the
+ *       rule manager is not consulted at all — rules gossip and storage keep
+ *       running elsewhere, so re-enabling needs only the property flip.</li>
  *   <li><b>Bayesian path:</b> For non-matching keys, the standard two-stage
  *       pipeline runs: sliding-window sum → Bayesian confidence-gated
  *       state machine.</li>
@@ -44,16 +48,25 @@ import java.util.concurrent.ConcurrentHashMap;
  * CV history for Bayesian likelihood adjustment is maintained only for
  * non-fast-lane keys.
  *
+ * <p>Trend normalisation: {@code ReportConsumer} samples the
+ * {@link GlobalQpsEstimator} window total <b>once per report batch</b> and
+ * passes the sampled ratio (vs the previous batch's sample) into
+ * {@link #evaluate(String, long, double)}. A per-key (per-message) sample
+ * would be microseconds apart and yield a ratio of ≈1.000 always, so the
+ * documented global-fluctuation normalisation never engaged — batch
+ * granularity makes the signal meaningful, and a sampled total of
+ * {@code <= 0} maps to the neutral ratio {@code 1.0} (no division, no
+ * trend inflation).
+ *
  * <p>Fast-lane rules are managed by a {@link FastLaneRuleManager} that
  * supports runtime CRUD via {@link
  * io.github.hyshmily.zeta.worker.endpoint.FastLaneEndpoint}.
  */
 public class DefaultEvaluator implements Evaluator {
 
-  /** Number of recent window sums retained for CV computation. Must be a power of two. */
   /**
    * Number of window sums retained per key for the CV (coefficient of
-   * variation) estimate.
+   * variation) estimate. Must be a power of two.
    *
    * <p>16 is a deliberate memory/precision trade-off: the CV needs at least 5
    * samples and the trend uses the 3 preceding windows, so 16 keeps 3× the
@@ -74,73 +87,102 @@ public class DefaultEvaluator implements Evaluator {
   private final FastLaneRuleManager fastLaneRuleManager;
 
   /**
-   * Per-key CV history for Bayesian likelihood adjustment.
-   * Only populated for keys that go through the Bayesian path.
+   * Whether the fast-lane path is active. Wired from
+   * {@code zeta.worker.fast-lane.enabled}. When {@code false} the rule manager
+   * is never consulted by {@link #evaluate} — rules gossip/storage keep running
+   * elsewhere, so re-enabling is a property flip.
    */
-  private final ConcurrentHashMap<String, WindowSumHistory> windowSumHistories = new ConcurrentHashMap<>();
+  private final boolean fastLaneEnabled;
 
   /**
-   * Per-key EMA (Exponential Moving Average) for momentum-based logThreshold
-   * adjustment. Each cell is {@code double[2]}: {@code [0]} the EMA value,
-   * {@code [1]} the monotonic timestamp of the last update. Decay is applied
-   * lazily on read as {@code prev × α^(elapsed / EVICT_CYCLE_MS)}, so inactive
-   * keys need no periodic full-map pass — the wall-clock decay is equivalent
-   * to one {@code ×α} tick per 30s eviction cycle.
+   * Per-key evaluation state (CV history + EMA momentum) in ONE map entry.
+   *
+   * <p>Merging the previous two parallel maps ({@code windowSumHistories} and
+   * {@code cmsCounts}) halves the per-evaluation map lookups: both components
+   * are always touched together by the Bayesian path, so one freshness
+   * timestamp serves both. All per-key mutation runs under the entry's
+   * intrinsic monitor ({@code synchronized (state)}), which replaces both the
+   * old CHM bin-lock lambda (EMA) and the old per-key {@code synchronized}
+   * history method (CV) with a single lock acquisition and removes the
+   * per-call holder allocation the EMA lambda needed.
    */
-  private final ConcurrentHashMap<String, double[]> cmsCounts = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, PerKeyEvalState> evalStates = new ConcurrentHashMap<>();
+
+  /**
+   * The detector threshold's log, cached: {@code Math.log} was recomputed per
+   * key per batch while the threshold itself changes at most once per
+   * {@code recalculate-interval-ms} (60 s default). Recomputed lazily when the
+   * volatile source field moves; a racing recompute is idempotent.
+   */
+  private volatile long cachedLogThresholdSource = Long.MIN_VALUE;
+  private volatile double cachedLogThreshold = 0.0;
 
   /** EMA decay factor: 0.98 ≈ 35-cycle half-life. */
   private static final double CMS_ALPHA = 0.98;
 
   /**
-   * Reference decay cycle in milliseconds — matches the default of
-   * {@code zeta.worker.state-machine.evict-interval-ms} (30000). The lazy
+   * Reference decay cycle in milliseconds for the lazy EMA decay. The lazy
    * formula anchors decay to wall time rather than to tick count, so a
-   * different eviction interval stays approximately equivalent to the old
-   * per-tick decay.
+   * different eviction cadence stays approximately equivalent to the old
+   * per-tick decay. Deliberately independent of the eviction scan cadence
+   * ({@code zeta.worker.state-machine.evict-scan-interval-ms}, default
+   * 20 min — ADR-0060) and of the staleness threshold
+   * ({@code evict-interval-ms}); 30 s is simply the fixed decay tick the
+   * momentum inertia is tuned against.
    */
   private static final double EVICT_CYCLE_MS = 30_000.0;
 
   /**
-   * Size gate for the periodic sweep of {@link #cmsCounts}: the sweep runs
+   * Size gate for the periodic sweep of {@link #evalStates}: the sweep runs
    * only when the map exceeds this bound, decaying stale cells by elapsed
    * time and removing those below 1.0. Bounds the map's memory even when
    * dead keys (values ≥ 1.0) would otherwise linger between sweeps.
    */
   private static final int MAX_TRACKED_CMS_KEYS = 100_000;
 
-  /** Global QPS estimator for traffic-normalised trend detection. Nullable. */
-  private final GlobalQpsEstimator globalQpsEstimator;
-
-  /** Previous snapshot of {@link GlobalQpsEstimator#getWindowTotal} for ratio computation. */
-  private volatile long prevGlobalWindowTotal;
-
   /**
-   * Constructs the evaluator with the given dependencies.
+   * Constructs the evaluator with the given dependencies, keeping the
+   * pre-gate behaviour (fast-lane rules always consulted). Prefer the
+   * 4-arg constructor wired from {@code zeta.worker.fast-lane.enabled}.
    *
    * @param detector             the sliding-window detector
    * @param stateMachine         the per-key lifecycle state machine
    * @param fastLaneRuleManager  runtime-managed fast-lane rules
-   * @param globalQpsEstimator   global QPS estimator for trend normalisation (may be {@code null})
+   */
+  public DefaultEvaluator(
+    SlidingWindowDetector detector,
+    ZetaBayesianSM stateMachine,
+    FastLaneRuleManager fastLaneRuleManager
+  ) {
+    this(detector, stateMachine, fastLaneRuleManager, true);
+  }
+
+  /**
+   * Constructs the evaluator with the given dependencies and the fast-lane gate.
+   *
+   * @param detector             the sliding-window detector
+   * @param stateMachine         the per-key lifecycle state machine
+   * @param fastLaneRuleManager  runtime-managed fast-lane rules
+   * @param fastLaneEnabled      {@code true} to consult fast-lane rules on every
+   *                             evaluation; {@code false} to bypass the fast-lane
+   *                             path entirely (the rule manager is not consulted)
    */
   public DefaultEvaluator(
     SlidingWindowDetector detector,
     ZetaBayesianSM stateMachine,
     FastLaneRuleManager fastLaneRuleManager,
-    GlobalQpsEstimator globalQpsEstimator
+    boolean fastLaneEnabled
   ) {
     this.detector = detector;
     this.stateMachine = stateMachine;
     this.fastLaneRuleManager = fastLaneRuleManager;
-    this.globalQpsEstimator = globalQpsEstimator;
+    this.fastLaneEnabled = fastLaneEnabled;
   }
 
   /**
-   * Evaluate a single key access report and return the action to take.
-   *
-   * <p>The sliding window is always updated first. Then the fast-lane rules
-   * are consulted. If the key matches a rule the fast-lane path is taken;
-   * otherwise the full Bayesian pipeline runs.
+   * Evaluate a single key access report with a neutral global ratio (no
+   * normalisation). Prefer {@link #evaluate(String, long, double)} — this
+   * overload is the compatibility entry point.
    *
    * @param key   the cache key being reported
    * @param count the access count in this report batch
@@ -149,20 +191,42 @@ public class DefaultEvaluator implements Evaluator {
    */
   @Override
   public ZetaDecision evaluate(String key, long count) {
+    return evaluate(key, count, 1.0);
+  }
+
+  /**
+   * Evaluate a single key access report and return the action to take.
+   *
+   * <p>The sliding window is always updated first. Then — when the fast-lane
+   * gate is enabled — the fast-lane rules are consulted. If the key matches a
+   * rule the fast-lane path is taken; otherwise the full Bayesian pipeline
+   * runs with the batch-sampled {@code globalRatio} trend normalisation.
+   *
+   * @param key         the cache key being reported
+   * @param count       the access count in this report batch
+   * @param globalRatio batch-sampled global traffic ratio (see
+   *                    {@link Evaluator#evaluate(String, long, double)});
+   *                    non-positive values are treated as the neutral {@code 1.0}
+   * @return a non-null {@link ZetaDecision} — {@code HOT}, {@code COOL},
+   *         or {@code NONE}
+   */
+  @Override
+  public ZetaDecision evaluate(String key, long count, double globalRatio) {
     long windowSum = detector.addCount(key, count);
 
-    FastLaneRuleManager.FastLaneRule rule = fastLaneRuleManager.match(key);
+    FastLaneRuleManager.FastLaneRule rule = fastLaneEnabled ? fastLaneRuleManager.match(key) : null;
     boolean isFastlane = rule != null && windowSum >= rule.threshold();
 
-    return isFastlane ? toFastlane(key) : toBayesianlane(key, count, windowSum);
+    return isFastlane ? toFastlane(key) : toBayesianlane(key, count, windowSum, globalRatio);
   }
 
   /**
    * Fast-lane path: promote unconditionally, bypassing all Bayesian gating.
    *
-   * <p>Called when the key matched a fast-lane rule and the current window sum
-   * meets or exceeds the rule threshold. Promotes the key to CONFIRMED_HOT
-   * without consulting the confidence estimator.
+   * <p>Called when the fast-lane gate is enabled, the key matched a fast-lane
+   * rule, and the current window sum meets or exceeds the rule threshold.
+   * Promotes the key to CONFIRMED_HOT without consulting the confidence
+   * estimator.
    *
    * @param key the cache key being evaluated
    * @return a non-null {@link ZetaDecision} — {@code HOT} if promoted
@@ -183,8 +247,9 @@ public class DefaultEvaluator implements Evaluator {
    *       (primary observation)</li>
    *   <li><b>CV</b> — coefficient of variation for dynamic likelihood std
    *       adjustment</li>
-   *   <li><b>trendStrength</b> — ratio of current window sum to the mean of
-   *       the three preceding windows (upward/downward momentum)</li>
+   *   <li><b>trendStrength</b> — ratio of the current window sum (normalised
+   *       by the batch-sampled {@code globalRatio}) to the mean of the three
+   *       preceding windows (upward/downward momentum)</li>
    *   <li><b>EMA cmsCount</b> — per-key exponential moving average
    *       ({@code cms = prev × CMS_ALPHA + count}) for gradual-decay
    *       inertia</li>
@@ -195,30 +260,42 @@ public class DefaultEvaluator implements Evaluator {
    *       evidence)</li>
    * </ul>
    *
-   * @param key       the cache key being evaluated
-   * @param count     the access count in this report batch
-   * @param windowSum the current sliding-window sum (pre-computed by caller)
+   * @param key         the cache key being evaluated
+   * @param count       the access count in this report batch
+   * @param windowSum   the current sliding-window sum (pre-computed by caller)
+   * @param globalRatio batch-sampled global traffic ratio; non-positive values
+   *                    are treated as the neutral {@code 1.0}
    * @return a non-null {@link ZetaDecision} — {@code HOT}, {@code COOL},
    *         or {@code NONE}
    */
-  public ZetaDecision toBayesianlane(String key, long count, long windowSum) {
+  @SuppressWarnings("all")
+  public ZetaDecision toBayesianlane(String key, long count, long windowSum, double globalRatio) {
     long threshold = detector.getThreshold();
     boolean isWindowHot = windowSum >= threshold;
 
-    // Compute global traffic ratio for trend normalisation.
-    // When global QPS doubles, a key that doubles is not trending — it is keeping pace.
-    long globalTotal = globalQpsEstimator != null ? Math.max(0, globalQpsEstimator.getWindowTotal()) : 0L;
-    double globalRatio = globalTotal / (prevGlobalWindowTotal > 0 ? prevGlobalWindowTotal : 1.0);
-    prevGlobalWindowTotal = globalTotal;
+    // Normalise per-key trend by global traffic: when global QPS doubles, a
+    // key that doubles is not trending — it is keeping pace. The ratio is
+    // sampled ONCE per report batch by ReportConsumer and passed down here;
+    // a non-positive sample (estimator absent, cold shard, first batch) maps
+    // to the neutral 1.0 — no division, no trend inflation.
+    double ratio = globalRatio > 0 && !Double.isNaN(globalRatio) ? globalRatio : 1.0;
 
-    WindowSumHistory hist = windowSumHistories.computeIfAbsent(key, k -> new WindowSumHistory());
-    Double cv = hist.addAndGetCv(windowSum, globalRatio);
-    double trendStrength = hist.getTrendStrength();
+    PerKeyEvalState state = evalStates.computeIfAbsent(key, k -> new PerKeyEvalState());
+    long now = TimeSource.monotonicMillis();
+    double cv;
+    double trendStrength;
+    double ema;
+    synchronized (state) {
+      state.lastEvalTime = now;
+      cv = state.history.addAndGetCv(windowSum, ratio);
+      trendStrength = state.history.getTrendStrength();
+      ema = state.updateEma(count, now);
+    }
 
     // cmsCount = cmsCount * α^(elapsed/cycle) + count
     // High cmsCount + low windowSum = key was hot but cooling (momentum < 1)
     // Low cmsCount + high windowSum = sudden spike with no history
-    double cms = cmsUpdate(key, count);
+    double cms = ema;
 
     // Momentum = cmsCount / windowSum — how much "history" the key carries
     // relative to its current burst size.
@@ -226,8 +303,10 @@ public class DefaultEvaluator implements Evaluator {
 
     // Adjusted logThreshold: momentum > 1 lowers the bar (sustained key),
     // momentum < 1 raises it (first-time spike needs more confidence).
-    double rawLogThresh = Math.log(Math.max(threshold, 1.0));
-    double adjustedLogThresh = rawLogThresh - Math.log(momentum);
+    double rawLogThresh = logThreshold(threshold);
+    // momentum == 1.0 (no history yet: cms or windowSum is zero) makes the
+    // adjustment exactly zero — skip the native log call on that common path.
+    double adjustedLogThresh = momentum == 1.0 ? rawLogThresh : rawLogThresh - Math.log(momentum);
     EvaluationContext ctx = new EvaluationContext(
       (long) cms,
       windowSum,
@@ -242,54 +321,32 @@ public class DefaultEvaluator implements Evaluator {
   }
 
   /**
-   * Lazy time-based EMA update for a key: applies the decay that accumulated
-   * since the key's last evaluation, then adds {@code count}. Atomic per key
-   * (via {@link ConcurrentHashMap#compute}) so concurrent evaluations of the
-   * same key cannot lose an update.
+   * Returns {@code log(max(threshold, 1))}, recomputed only when the detector
+   * threshold changes (at most once per recalculate interval).
    *
-   * @param key   the cache key
-   * @param count the access count in this report batch
-   * @return the updated EMA value
+   * @param threshold the current detector threshold
+   * @return the cached natural log of the threshold
    */
-  private double cmsUpdate(String key, long count) {
-    long now = TimeSource.monotonicMillis();
-    double[] holder = new double[1];
-    cmsCounts.compute(key, (k, cell) -> {
-      double prev = 0.0;
-      long lastUpdate = now;
-      if (cell != null) {
-        prev = cell[0];
-        // cell[1] stores a millis timestamp as double; the value fits a long
-        // exactly (far below 2^53), so the narrowing cast is lossless.
-        lastUpdate = (long) cell[1];
-      } else {
-        cell = new double[2];
-      }
-      // Fast path: keys are re-evaluated every report cycle (tens of ms) while
-      // EVICT_CYCLE_MS is minutes — the integer exponent is 0 and
-      // pow(α, 0) == 1.0, so the ~50-100ns native Math.pow call is pure waste
-      // on every evaluation of every key. Only cross a decay tick when a whole
-      // cycle has actually elapsed (the truncating cast is exact: EVICT_CYCLE_MS
-      // is a whole number, so (long)(elapsed / 30000.0) == elapsed / 30000).
-      long elapsedCycles = (long) ((now - lastUpdate) / EVICT_CYCLE_MS);
-      double decayed = elapsedCycles <= 0 ? prev : prev * Math.pow(CMS_ALPHA, elapsedCycles);
-      cell[0] = decayed + count;
-      cell[1] = now;
-      holder[0] = cell[0];
-      return cell;
-    });
-    return holder[0];
+  private double logThreshold(long threshold) {
+    if (threshold == cachedLogThresholdSource) {
+      return cachedLogThreshold;
+    }
+    double computed = Math.log(Math.max(threshold, 1.0));
+    cachedLogThresholdSource = threshold;
+    cachedLogThreshold = computed;
+    return computed;
   }
 
   /**
-   * Evict stale CV history entries for keys that have not been evaluated
+   * Evicts stale evaluation state for keys that have not been evaluated
    * within the given time window.
    *
-   * <p>The EMA map needs no periodic full decay pass — decay is applied
-   * lazily on read (see {@link #cmsUpdate}). A size-gated sweep runs only
-   * when the map exceeds {@link #MAX_TRACKED_CMS_KEYS}, decaying stale cells
-   * by elapsed time and dropping those below 1.0 so dead keys cannot
-   * accumulate past the bound.
+   * <p>The merged per-key state needs no periodic EMA decay pass — decay is
+   * applied lazily on read (see {@link PerKeyEvalState#updateEma}). A
+   * size-gated sweep still runs when the map exceeds
+   * {@link #MAX_TRACKED_CMS_KEYS}, decaying stale EMA cells by elapsed time
+   * and dropping entries whose EMA has decayed below 1.0 so dead keys cannot
+   * accumulate past the bound between eviction scans.
    *
    * @param staleAfterMs maximum idle time in milliseconds before an entry
    *                     is considered stale and removed
@@ -297,25 +354,88 @@ public class DefaultEvaluator implements Evaluator {
   @Override
   public void evictStale(long staleAfterMs) {
     long now = TimeSource.monotonicMillis();
-    windowSumHistories.values().removeIf(h -> now - h.lastAccessTime > staleAfterMs);
-    if (cmsCounts.size() > MAX_TRACKED_CMS_KEYS) {
-      // Decay must run under the per-key bin lock: the previous removeIf
-      // mutated the live double[] cell in place (cell[0] *= ...) outside any
-      // lock while cmsUpdate's compute read/wrote the same array — a data
-      // race whose torn reads can yield NaN and poison the momentum/z-score
-      // classification. computeIfPresent serializes the decay+remove per key.
-      cmsCounts.forEach((key, ignored) ->
-        cmsCounts.computeIfPresent(key, (k, cell) -> {
-          // cell[1] stores a millis timestamp as double; the narrowing cast is
-          // lossless (see cmsUpdate).
-          long elapsedCycles = (long) ((now - (long) cell[1]) / EVICT_CYCLE_MS);
-          double decayed = elapsedCycles <= 0 ? cell[0] : cell[0] * Math.pow(CMS_ALPHA, elapsedCycles);
-          if (decayed < 1.0) {
-            return null;
-          }
-          return new double[] { decayed, now };
-        })
-      );
+    evalStates.values().removeIf(state -> now - state.lastEvalTime > staleAfterMs);
+    if (evalStates.size() > MAX_TRACKED_CMS_KEYS) {
+      // The sweep's decay runs under the entry's monitor — the same one
+      // updateEma uses — so it can never mutate a live cell concurrently with
+      // an evaluation. (The pre-merge sweep mutated the double[] cell in
+      // place outside any lock; torn reads could yield NaN and poison the
+      // momentum/z-score classification.)
+      evalStates.values().removeIf(state -> state.decayAndCheckDead(now));
+    }
+  }
+
+  /**
+   * Per-key evaluation state: CV history + EMA momentum + freshness, guarded
+   * by the entry's intrinsic monitor. Callers synchronize on the state for
+   * every mutation ({@link #updateEma}, {@link WindowSumHistory#addAndGetCv},
+   * {@link #decayAndCheckDead}), so concurrent evaluations of the same key
+   * serialize without a second lock.
+   */
+  private static final class PerKeyEvalState {
+
+    /** Sliding-window sum history for the CV estimate. */
+    final WindowSumHistory history = new WindowSumHistory();
+
+    /** EMA of reported counts (momentum signal). Mutated under the state monitor. */
+    double ema;
+
+    /**
+     * Monotonic timestamp of the last EMA update (the lazy-decay anchor);
+     * {@code 0} until the first update. Mutated under the state monitor.
+     */
+    long emaUpdateMillis;
+
+    /**
+     * Monotonic timestamp of the last evaluation (volatility: the eviction
+     * scan reads it lock-free; a stale read only delays removal by one scan).
+     */
+    volatile long lastEvalTime;
+
+    /**
+     * Lazy time-based EMA update: applies the decay accumulated since the
+     * last update, then adds {@code count}. Must be called under the state
+     * monitor so concurrent evaluations of the same key cannot lose an update.
+     *
+     * @param count the access count in this report batch
+     * @param now   current monotonic millis
+     * @return the updated EMA value
+     */
+    double updateEma(long count, long now) {
+      long last = emaUpdateMillis == 0 ? now : emaUpdateMillis;
+      // Fast path: keys are re-evaluated every report cycle (tens of ms) while
+      // EVICT_CYCLE_MS is minutes — the integer exponent is 0 and
+      // pow(α, 0) == 1.0, so the ~50-100ns native Math.pow call is pure waste
+      // on every evaluation of every key. Only cross a decay tick when a whole
+      // cycle has actually elapsed (the truncating cast is exact: EVICT_CYCLE_MS
+      // is a whole number, so (long)(elapsed / 30000.0) == elapsed / 30000).
+      long elapsedCycles = (long) ((now - last) / EVICT_CYCLE_MS);
+      double decayed = elapsedCycles <= 0 ? ema : ema * Math.pow(CMS_ALPHA, elapsedCycles);
+      ema = decayed + count;
+      emaUpdateMillis = now;
+      return ema;
+    }
+
+    /**
+     * Decay-sweep step for one entry: advances the EMA's lazy decay to
+     * {@code now} and reports whether the value has decayed below 1.0 (the
+     * entry is dead and the caller may remove it). Must run under the state
+     * monitor — {@code removeIf} invokes it, so the method itself takes the
+     * monitor to serialize against {@link #updateEma}.
+     *
+     * @param now current monotonic millis
+     * @return {@code true} if the decayed EMA is below 1.0 (entry removable)
+     */
+    synchronized boolean decayAndCheckDead(long now) {
+      if (emaUpdateMillis == 0) {
+        return true;
+      }
+      long elapsedCycles = (long) ((now - emaUpdateMillis) / EVICT_CYCLE_MS);
+      if (elapsedCycles > 0) {
+        ema *= Math.pow(CMS_ALPHA, elapsedCycles);
+        emaUpdateMillis = now;
+      }
+      return ema < 1.0;
     }
   }
 
@@ -324,8 +444,12 @@ public class DefaultEvaluator implements Evaluator {
    * variation (CV) for Bayesian likelihood adjustment.
    *
    * <p>Maintains a circular buffer of the last {@link #CV_HISTORY_SIZE}
-   * window sums. The CV is returned as {@code null} until at least 5
+   * window sums. The CV is returned as {@code Double.NaN} until at least 5
    * samples have been collected or the mean is below 1.0.
+   *
+   * <p>Not internally synchronized: callers mutate it under the owning
+   * {@link PerKeyEvalState}'s monitor, which also covers the EMA — one lock
+   * acquisition serves the whole per-key evaluation.
    */
   private static final class WindowSumHistory {
 
@@ -334,11 +458,10 @@ public class DefaultEvaluator implements Evaluator {
     private final double[] buffer = new double[CV_HISTORY_SIZE];
     private int writeIndex = 0;
     private int count = 0;
-    volatile long lastAccessTime;
 
     /**
      * Cached trend strength (current / mean of preceding three windows).
-     * Written inside {@link #addAndGetCv} (under the intrinsic lock for
+     * Written inside {@link #addAndGetCv} (under the state monitor for
      * buffer safety), read outside the lock via {@link #getTrendStrength}.
      */
     private volatile double trendStrength = 0.0;
@@ -356,17 +479,20 @@ public class DefaultEvaluator implements Evaluator {
      * <p>Global ratio normalisation prevents global traffic fluctuations
      * from being mistaken for per-key trends: if the overall QPS doubles
      * and a key's window sum also doubles, the normalised trend strength
-     * is 1.0 (flat) rather than 2.0 (strong upward).
+     * is 1.0 (flat) rather than 2.0 (strong upward). The ratio is sampled
+     * once per report batch by {@code ReportConsumer} (not per key), and is
+     * always strictly positive — a non-meaningful sample arrives as the
+     * neutral {@code 1.0}, never as {@code 0} or {@code NaN}.
      *
      * @param windowSum   the latest sliding-window sum
-     * @param globalRatio the ratio of current global QPS to the previous
-     *                    window (1.0 = no change, &gt;1.0 = traffic increase)
-     * @return the coefficient of variation, or {@code null} if insufficient
+     * @param globalRatio the batch-sampled global traffic ratio
+     *                    ({@code 1.0} = no change, {@code >1.0} = traffic increase;
+     *                    guaranteed strictly positive)
+     * @return the coefficient of variation, or {@code Double.NaN} if insufficient
      *         data is available
      */
     @SuppressWarnings("all")
-    synchronized Double addAndGetCv(long windowSum, double globalRatio) {
-      lastAccessTime = TimeSource.monotonicMillis();
+    double addAndGetCv(long windowSum, double globalRatio) {
       buffer[writeIndex] = windowSum;
       writeIndex = (writeIndex + 1) & CV_HISTORY_MASK;
       if (count < CV_HISTORY_SIZE) {
@@ -392,24 +518,25 @@ public class DefaultEvaluator implements Evaluator {
       }
 
       if (count < 5) {
-        return null;
+        return Double.NaN;
       }
 
-      double sum = 0;
+      // Welford's single-pass mean/variance: one pass over the buffer instead
+      // of two (sum, then sum of squared deviations around the mean), and
+      // numerically at least as stable.
+      double mean = 0.0;
+      double m2 = 0.0;
       for (int i = 0; i < count; i++) {
-        sum += buffer[i];
+        double value = buffer[i];
+        double delta = value - mean;
+        mean += delta / (i + 1);
+        m2 += delta * (value - mean);
       }
-      double mean = sum / count;
       if (mean < 1.0) {
-        return null;
+        return Double.NaN;
       }
 
-      double sumSq = 0;
-      for (int i = 0; i < count; i++) {
-        double d = buffer[i] - mean;
-        sumSq += d * d;
-      }
-      return Math.sqrt(sumSq / count) / mean;
+      return Math.sqrt(m2 / count) / mean;
     }
 
     /**

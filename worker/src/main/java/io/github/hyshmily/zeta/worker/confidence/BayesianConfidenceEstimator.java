@@ -45,6 +45,8 @@ import lombok.Getter;
  * (stable traffic) reduces &#x03C3;, increasing confidence; a high CV
  * (bursty traffic) increases &#x03C3;, dampening confidence. This makes
  * the estimator robust to traffic pattern changes without manual tuning.
+ * A non-finite CV (including {@code Double.NaN}, the "no window history"
+ * sentinel) falls back to the base likelihoodStd.
  *
  * <h3>Prior calibration</h3>
  * The default prior mean of ln(10) &asymp; 2.3026 was chosen so that a key
@@ -52,9 +54,15 @@ import lombok.Getter;
  * mean). A key needs consistently more than 10 accesses per window to
  * shift the posterior above the hot threshold. Configured via
  * {@code zeta.worker.bayesian.*} properties.
+ *
+ * <h3>Confidence classification</h3>
+ * The posterior probability is classified into the three
+ * {@link ConfidenceLevel} tiers. The split thresholds are configurable
+ * ({@code zeta.worker.bayesian.high-confidence-threshold} /
+ * {@code medium-confidence-threshold}); the tuning protocol behind the
+ * defaults is documented on {@link ProbabilityResult}.
  */
 @Internal
-@SuppressWarnings("all")
 public class BayesianConfidenceEstimator {
 
   /**
@@ -84,54 +92,119 @@ public class BayesianConfidenceEstimator {
   @Getter
   private final double likelihoodStd;
 
+  /**
+   * Posterior probability at or above which a decision is {@link ConfidenceLevel#HIGH}
+   * (gates the expensive HOT broadcast). Configured via
+   * {@code zeta.worker.bayesian.high-confidence-threshold}.
+   */
+  @Getter
+  private final double highConfidenceThreshold;
+
+  /**
+   * Posterior probability at or above which a decision is {@link ConfidenceLevel#MEDIUM}
+   * (gates CANDIDATE_HOT tracking). Configured via
+   * {@code zeta.worker.bayesian.medium-confidence-threshold}.
+   */
+  @Getter
+  private final double mediumConfidenceThreshold;
+
   /** Base likelihood precision = 1 / likelihoodStd². */
   private final double baseLikelihoodPrecision;
+
+  /** Prior precision = 1 / priorStd² (invariant — precomputed once). */
+  private final double priorPrecision;
 
   /** Maximum accumulated precision = MAX_EFFECTIVE_COUNT × baseLikelihoodPrecision. */
   private final double maxAccumulatedPrecision;
 
   /**
-   * Constructs the estimator with the given Normal-Normal conjugate parameters.
+   * Constructs the estimator with the default confidence-classification
+   * thresholds documented on {@link ProbabilityResult}.
    *
    * @param priorMean     prior mean (log scale)
    * @param priorStd      prior standard deviation (log scale)
    * @param likelihoodStd base likelihood standard deviation (log scale);
-   *                      adjusted dynamically when CV is provided
+   *                      adjusted dynamically when a finite CV is provided
    */
   public BayesianConfidenceEstimator(double priorMean, double priorStd, double likelihoodStd) {
+    this(priorMean, priorStd, likelihoodStd, ProbabilityResult.HIGH_THRESHOLD, ProbabilityResult.MEDIUM_THRESHOLD);
+  }
+
+  /**
+   * Constructs the estimator with the given Normal-Normal conjugate parameters
+   * and confidence-classification thresholds.
+   *
+   * @param priorMean                prior mean (log scale)
+   * @param priorStd                 prior standard deviation (log scale)
+   * @param likelihoodStd            base likelihood standard deviation (log scale);
+   *                                 adjusted dynamically when a finite CV is provided
+   * @param highConfidenceThreshold  posterior probability at or above which a decision is
+   *                                 {@link ConfidenceLevel#HIGH}; must be in (0, 1) and
+   *                                 strictly above {@code mediumConfidenceThreshold}
+   * @param mediumConfidenceThreshold posterior probability at or above which a decision is
+   *                                 {@link ConfidenceLevel#MEDIUM}; must be in (0, 1)
+   */
+  public BayesianConfidenceEstimator(
+    double priorMean,
+    double priorStd,
+    double likelihoodStd,
+    double highConfidenceThreshold,
+    double mediumConfidenceThreshold
+  ) {
     if (priorStd <= 0) throw new IllegalArgumentException("priorStd must be positive, got " + priorStd);
     if (likelihoodStd <= 0) throw new IllegalArgumentException("likelihoodStd must be positive, got " + likelihoodStd);
+    if (highConfidenceThreshold <= 0.0 || highConfidenceThreshold >= 1.0) {
+      throw new IllegalArgumentException("highConfidenceThreshold must be in (0, 1), got " + highConfidenceThreshold);
+    }
+    if (mediumConfidenceThreshold <= 0.0 || mediumConfidenceThreshold >= 1.0) {
+      throw new IllegalArgumentException("mediumConfidenceThreshold must be in (0, 1), got " + mediumConfidenceThreshold);
+    }
+    if (mediumConfidenceThreshold >= highConfidenceThreshold) {
+      throw new IllegalArgumentException(
+        "mediumConfidenceThreshold ("
+          + mediumConfidenceThreshold
+          + ") must be strictly below highConfidenceThreshold ("
+          + highConfidenceThreshold
+          + ")"
+      );
+    }
     this.priorMean = priorMean;
     this.priorStd = priorStd;
     this.likelihoodStd = likelihoodStd;
+    this.highConfidenceThreshold = highConfidenceThreshold;
+    this.mediumConfidenceThreshold = mediumConfidenceThreshold;
     this.baseLikelihoodPrecision = 1.0 / (likelihoodStd * likelihoodStd);
+    this.priorPrecision = 1.0 / (priorStd * priorStd);
     this.maxAccumulatedPrecision = MAX_EFFECTIVE_COUNT * this.baseLikelihoodPrecision;
   }
 
   /**
    * Computes the posterior probability that the key's true log-frequency
-   * exceeds the hot threshold.
+   * exceeds the hot threshold, using the fixed global prior (no accumulated
+   * per-key evidence).
    *
-   * <p>If {@code cv} is non-null, the likelihood standard deviation is
-   * scaled via {@link #adjustLikelihoodStd} to account for traffic
-   * variability. A null CV uses the base likelihoodStd directly.
+   * <p>If {@code cv} is finite, the likelihood standard deviation is scaled
+   * via {@link #adjustLikelihoodStd} to account for traffic variability.
+   * A non-finite CV (including the {@code Double.NaN} "no history" sentinel)
+   * uses the base likelihoodStd directly.
    *
    * @param observedCount the raw count observed for this key in the
    *                      current sliding window
    * @param logThreshold  the hot threshold in log space (natural log of raw count)
    * @param cv            coefficient of variation of the per-key
-   *                      sliding-window sums (may be {@code null})
+   *                      sliding-window sums ({@code Double.NaN} when no
+   *                      window history is available)
    * @return a {@link ProbabilityResult} with the posterior probability,
    *         confidence level, and distribution parameters
    */
-  public ProbabilityResult evaluate(long observedCount, double logThreshold, Double cv) {
+  public ProbabilityResult evaluate(long observedCount, double logThreshold, double cv) {
     return evaluateWithAccumulatedPrior(observedCount, logThreshold, cv, priorMean, 0.0);
   }
 
   /**
    * Computes posterior probability with per-key accumulated prior.
    *
-   * <p>Unlike {@link #evaluate(long, double, Double)} which always uses the
+   * <p>Unlike {@link #evaluate(long, double, double)} which always uses the
    * fixed global prior, this overload accepts a key-specific accumulated
    * posterior from previous evaluations. The estimator combines it with the
    * current observation via the Normal-Normal conjugate update, caps the
@@ -148,7 +221,8 @@ public class BayesianConfidenceEstimator {
    *                         current sliding window
    * @param logThreshold     the hot threshold in log space (natural log of raw count)
    * @param cv               coefficient of variation of the per-key
-   *                         sliding-window sums (may be {@code null})
+   *                         sliding-window sums ({@code Double.NaN} when no
+   *                         window history is available)
    * @param accumulatedMean  the key's accumulated posterior mean from
    *                         previous evaluations (initially {@link #priorMean})
    * @param accumulatedPrec  the key's accumulated precision from previous
@@ -157,15 +231,14 @@ public class BayesianConfidenceEstimator {
    *         parameters and the new accumulated precision
    */
   public ProbabilityResult evaluateWithAccumulatedPrior(
-    long observedCount, double logThreshold, Double cv,
+    long observedCount, double logThreshold, double cv,
     double accumulatedMean, double accumulatedPrec
   ) {
     double y = Math.log(Math.max(observedCount, 1.0));
 
-    double sigma = (cv != null && Double.isFinite(cv)) ? adjustLikelihoodStd(likelihoodStd, cv) : likelihoodStd;
+    double sigma = Double.isFinite(cv) ? adjustLikelihoodStd(likelihoodStd, cv) : likelihoodStd;
 
     double likelihoodPrecision = 1.0 / (sigma * sigma);
-    double priorPrecision = 1.0 / (priorStd * priorStd);
 
     double totalPriorPrecision = priorPrecision + accumulatedPrec;
     double posteriorPrecision = totalPriorPrecision + likelihoodPrecision;
@@ -175,7 +248,13 @@ public class BayesianConfidenceEstimator {
     double newAccPrec = Math.min(accumulatedPrec + likelihoodPrecision, maxAccumulatedPrecision);
     double z = (logThreshold - posteriorMean) / posteriorStd;
     double hotProbability = 1.0 - NormalCdfTable.phi(z);
-    return new ProbabilityResult(hotProbability, posteriorMean, posteriorStd, cv, newAccPrec);
+    return new ProbabilityResult(
+      hotProbability,
+      ProbabilityResult.classify(hotProbability, highConfidenceThreshold, mediumConfidenceThreshold),
+      posteriorMean,
+      posteriorStd,
+      newAccPrec
+    );
   }
 
   private static double adjustLikelihoodStd(double baseStd, double cv) {

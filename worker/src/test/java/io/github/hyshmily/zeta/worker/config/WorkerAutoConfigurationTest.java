@@ -46,6 +46,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
@@ -267,12 +268,12 @@ class WorkerAutoConfigurationTest {
   }
 
   /**
-   * Verifies that {@code EvictStaleTask.evictStale()} calls both
-   * {@link SlidingWindowDetector#evictStale(long)} and
-   * {@link ZetaBayesianSM#evictStale(long)} with the expected stale threshold.
+   * Verifies that {@code EvictStaleTask.evictStale()} applies the tiered
+   * thresholds: the detector and evaluator get the short COLD tier, the state
+   * machine gets both tiers ({@code evictStale(hot, cold, callback)}).
    */
   @Test
-  @DisplayName("EvictStaleTask.evictStale should call evictStale on detector and stateMachine")
+  @DisplayName("EvictStaleTask.evictStale should apply tiered thresholds to detector, stateMachine and evaluator")
   void evictStaleTaskShouldCallEvictStaleOnDetectorAndStateMachine() {
     SlidingWindowDetector detector = Mockito.mock(SlidingWindowDetector.class);
     ZetaBayesianSM stateMachine = Mockito.mock(ZetaBayesianSM.class);
@@ -290,8 +291,10 @@ class WorkerAutoConfigurationTest {
     task.evictStale();
 
     long expectedStaleAfterMs = properties.getStateMachine().getEvictIntervalMs();
-    Mockito.verify(detector).evictStale(expectedStaleAfterMs);
-    Mockito.verify(stateMachine).evictStale(Mockito.eq(expectedStaleAfterMs), Mockito.any());
+    long expectedColdStaleAfterMs = properties.getStateMachine().getColdEvictIntervalMs();
+    Mockito.verify(detector).evictStale(expectedColdStaleAfterMs);
+    Mockito.verify(evaluator).evictStale(expectedColdStaleAfterMs);
+    Mockito.verify(stateMachine).evictStale(Mockito.eq(expectedStaleAfterMs), Mockito.eq(expectedColdStaleAfterMs), Mockito.any());
   }
 
   /**
@@ -412,6 +415,75 @@ class WorkerAutoConfigurationTest {
     ).doesNotThrowAnyException();
   }
 
+
+  /**
+   * Verifies the {@code EvictStaleTask} schedule is bound to the dedicated
+   * {@code zeta.worker.state-machine.evict-scan-interval-ms} property
+   * (ADR-0060) — not to the staleness threshold {@code evict-interval-ms} —
+   * and that its fallback mirrors the bean default (20 min).
+   */
+  @Test
+  @DisplayName("EvictStaleTask schedule reads the dedicated evict-scan-interval-ms property")
+  void evictStaleTaskScheduleReadsDedicatedScanProperty() throws Exception {
+    Scheduled scheduled = WorkerAutoConfiguration.EvictStaleTask.class
+      .getDeclaredMethod("evictStale")
+      .getAnnotation(Scheduled.class);
+    assertThat(scheduled).isNotNull();
+    assertThat(scheduled.fixedDelayString())
+      .isEqualTo("${zeta.worker.state-machine.evict-scan-interval-ms:1200000}");
+  }
+
+  /**
+   * Verifies a {@code workerEpochCounter} override wins over the
+   * auto-configured bean ({@code @ConditionalOnMissingBean} invariant).
+   */
+  @Test
+  @DisplayName("user-defined configTimestampCounter overrides the auto bean")
+  void userBeanOverridesConfigTimestampCounter() {
+    new ApplicationContextRunner()
+      .withPropertyValues("zeta.worker.enabled=true")
+      .withUserConfiguration(MinimalMockConfiguration.class, CustomCounterConfiguration.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx).hasBean("configTimestampCounter");
+        AtomicLong counter = ctx.getBean("configTimestampCounter", AtomicLong.class);
+        assertThat(counter.get()).isEqualTo(42L);
+      });
+  }
+
+  /**
+   * Verifies the Worker context starts WITHOUT a {@link RedisConnectionFactory}
+   * bean: {@code workerEpochCounter} resolves the factory through an
+   * {@code ObjectProvider} and passes {@code null}, engaging the tested
+   * local-file epoch fallback instead of failing startup.
+   */
+  @Test
+  @DisplayName("workerEpochCounter falls back to local file when Redis is absent")
+  void workerEpochCounterFallsBackWithoutRedis() {
+    new ApplicationContextRunner()
+      .withPropertyValues("zeta.worker.enabled=true")
+      .withUserConfiguration(MinimalMockConfigurationNoRedis.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx).hasBean("workerEpochCounter");
+        AtomicLong epoch = ctx.getBean("workerEpochCounter", AtomicLong.class);
+        assertThat(epoch.get()).isGreaterThanOrEqualTo(0);
+      });
+  }
+
+  /**
+   * Overrides the shared config-timestamp counter to verify the name-based
+   * {@code @ConditionalOnMissingBean} back-off.
+   */
+  @Configuration
+  static class CustomCounterConfiguration {
+
+    @Bean("configTimestampCounter")
+    AtomicLong customConfigTimestampCounter() {
+      return new AtomicLong(42L);
+    }
+  }
+
   /**
    * Minimal configuration providing mocked RabbitTemplate, ConnectionFactory, and
    * the shared scheduler for the context runner.
@@ -452,4 +524,40 @@ class WorkerAutoConfigurationTest {
     }
   }
 
+
+  /**
+   * Same mocks as {@link MinimalMockConfiguration} but WITHOUT a
+   * {@link RedisConnectionFactory} bean — used to verify the Redis-less
+   * Worker startup path (local-file epoch fallback).
+   */
+  @Configuration
+  static class MinimalMockConfigurationNoRedis {
+
+    @Bean
+    @org.springframework.context.annotation.Primary
+    RabbitTemplate rabbitTemplate() {
+      return org.mockito.Mockito.mock(RabbitTemplate.class);
+    }
+
+    @Bean("rabbitConnectionFactory")
+    @org.springframework.context.annotation.Primary
+    ConnectionFactory rabbitConnectionFactory() {
+      return org.mockito.Mockito.mock(ConnectionFactory.class);
+    }
+
+    @Bean("zetaHeartbeatConnectionFactory")
+    ConnectionFactory zetaHeartbeatConnectionFactory() {
+      return org.mockito.Mockito.mock(ConnectionFactory.class);
+    }
+
+    @Bean("hotKeyScheduler")
+    ScheduledExecutorService hotKeyScheduler() {
+      return Executors.newSingleThreadScheduledExecutor();
+    }
+
+    @Bean
+    SnowflakeIdGenerator snowflakeIdGenerator() {
+      return org.mockito.Mockito.mock(SnowflakeIdGenerator.class);
+    }
+  }
 }

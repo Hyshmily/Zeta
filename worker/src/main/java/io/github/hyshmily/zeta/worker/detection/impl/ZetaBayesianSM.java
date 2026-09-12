@@ -58,35 +58,41 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <h3>State diagram with fast-lane</h3>
  * <pre>
- *       fastlane: windowSum >= ruleThreshold ───────────────────┐
- *                                                               │
- *                                                               ▼
- *               ┌── accumulate ────────────────────────-──┐
- *               │  posteriorMean, accumulatedPrecision    │
- *               ▼                                         │
- *   COLD ──hotStreak >= confirm──► CANDIDATE_HOT ──accumulate + HIGH ──► CONFIRMED_HOT
- *              + LOW retention (MAX_LOW_RESETS)            │
- *              + MEDIUM → CANDIDATE_HOT                    │ coolStreak >= grace
- *    ▲                                                     ▼
- *    │                                            ┌───────────────┐
- *    │                                            │  PRE_COOLING  │
- *    │                                            │  posterior    │
- *    │                                            │  reset to     │
- *    │                                            │  global prior │
- *    │                                            └───────┬───────┘
- *    │                                                    │
- *    │                              coolStreak >= cool ───┤
- *    │                              + MEDIUM/LOW ────────► COLD (broadcast COOL)
- *    │                              + HIGH ──────────────► stay (coolStreak--)
- *    │                                                    │
- *    │                              evictStale (stale) ───┤
- *    │                              (CONFIRMED_HOT or     └──► broadcast COOL ──► (removed)
- *    │                               PRE_COOLING,
- *    │                               staleAfterMs =
- *    │                               evictIntervalMs)
- *    │
- *    └──── hotStreak > 0 ──────────────────────────────────┘
- *                     (silent revive, no broadcast)
+ *   fast-lane (ANY state): rule match + windowSum >= ruleThreshold ──► CONFIRMED_HOT
+ *                                                                     (broadcast HOT, debounced when already HOT)
+ *
+ *   Bayesian path — COLD (streak met) and CANDIDATE_HOT hot windows run the Bayesian update,
+ *   accumulating (posteriorMean, accumulatedPrecision):
+ *
+ *     COLD ──hotStreak >= confirmCount──┬─ HIGH ─────────────────────────► CONFIRMED_HOT (broadcast HOT)
+ *                                       │
+ *                                       ├─ MEDIUM ──► CANDIDATE_HOT
+ *                                       │
+ *                                       └─ LOW ──► retention (hotStreak = confirmCount - 1) for the
+ *                                                 first MAX_LOW_RESETS times, then full reset
+ *                                                 (hotStreak = 0) — stay COLD either way
+ *     (hotStreak &lt; confirmCount: keep counting, stay COLD)
+ *
+ *     CANDIDATE_HOT ──accumulate + HIGH──► CONFIRMED_HOT (broadcast HOT)
+ *     CANDIDATE_HOT ──cold window────────► COLD (no broadcast)
+ *
+ *     CONFIRMED_HOT ──hot window──► stay + periodic HOT rebroadcast at most once per
+ *                                   rebroadcastIntervalMs (ADR-0024)
+ *
+ *     CONFIRMED_HOT ──cold window──► coolStreak >= grace (coolCount - preCoolGraceCount,
+ *                                     trend-shortened)
+ *                                   │
+ *                                   ▼
+ *                              ┌─────────────┐
+ *                              │ PRE_COOLING │  posterior reset to global prior
+ *                              └──────┬──────┘
+ *                                     ├── coolStreak >= coolCount + MEDIUM/LOW ──► COLD (broadcast COOL)
+ *                                     ├── coolStreak >= coolCount + HIGH ────────► stay (coolStreak--)
+ *                                     └── hot window ────────────────────────────► CONFIRMED_HOT
+ *                                                                                (silent revive, no broadcast)
+ *
+ *   evictStale scan: CONFIRMED_HOT / PRE_COOLING idle > staleAfterMs ──► broadcast COOL, state removed
+ *   evictStale scan: COLD idle > coldStaleAfterMs ──────────────────────► removed (no broadcast)
  * </pre>
  *
  * <p><b>Fast-lane bypass:</b> When the window sum meets a configured fast-lane
@@ -148,7 +154,8 @@ import lombok.extern.slf4j.Slf4j;
  *       COOL to all app instances. Callbacks run outside the per-key lock
  *       (a slow AMQP publish must not stall eviction) and are isolated from
  *       the removal: a failed callback leaves the key evicted, and the
- *       broadcast is skipped if the key was re-evaluated in the meantime.
+ *       broadcast is skipped if the key was re-evaluated in the meantime
+ *       (liveness re-verified under the per-key lock before each send).
  *       This is the safety net that cleans up keys left in HOT state after
  *       the worker has stopped receiving reports (e.g. the app instance died
  *       or the network partition healed).</li>
@@ -182,12 +189,14 @@ import lombok.extern.slf4j.Slf4j;
  * lock). The state machine depends only on {@code LongSupplier}, not on
  * {@code SlidingWindowDetector} itself — zero coupling.
  *
- * <p>{@link #confidenceEvaluator} performs only reads of pre-computed
- * HeavyKeeper sketch data (carried in {@link EvaluationContext#cmsCount})
- * and never acquires any HeavyKeeper lock. This invariant is critical:
- * acquiring a HeavyKeeper lock while holding a {@code keyLocks} would
- * invert the hierarchy and create a deadlock path with
- * {@code HeavyKeeper.fading()}.
+ * <p>{@link #confidenceEvaluator} performs only pure arithmetic on the
+ * observation values carried in {@link EvaluationContext} (window sum,
+ * thresholds, CV) — it holds no locks and touches no shared structures,
+ * so it cannot participate in a deadlock cycle. (The Worker never sees a
+ * HeavyKeeper sketch; the observation is the sliding-window sum.) This
+ * invariant is critical: acquiring a HeavyKeeper lock while holding a
+ * {@code keyLocks} would invert the hierarchy and create a deadlock path
+ * with {@code HeavyKeeper.fading()}.
  *
  * <p>{@link #evictStale} uses a two-phase approach: a lock-free scan
  * collects candidates (relying on {@code volatile} semantics of {@link
@@ -311,6 +320,16 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   private final ConcurrentHashMap<String, KeyState> states = new ConcurrentHashMap<>();
 
   /**
+   * Rate limiter for the per-key transition visibility line: transitions are
+   * logged at DEBUG, and at most one aggregate INFO per
+   * {@link TransitionLogThrottle#WINDOW_MS} window summarizes the volume — a
+   * mass-heat event (thousands of keys transitioning in one batch) emits one
+   * summary, not one log per key (design principle: never INFO on the hot
+   * path; ADR-0037 log convention).
+   */
+  private final TransitionLogThrottle transitionLogThrottle = new TransitionLogThrottle();
+
+  /**
    * Per-key striped lock — serializes evaluations of the same key when
    * multiple consumer threads process overlapping messages, preventing
    * lost increments on {@code hotStreak++} / {@code coolStreak++}.
@@ -396,16 +415,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         // then carries this evaluation's epoch, so a rollback of its decision
         // is valid only while no later evaluation has advanced the state.
         state.mutationSeq++;
-        snapShot = new StateSnapshot(
-          key,
-          state.currentState.name(),
-          state.hotStreak,
-          state.coolStreak,
-          state.posteriorMean,
-          state.accumulatedPrecision,
-          state.lowResetCount,
-          state.mutationSeq
-        );
+        snapShot = snapshotOf(key, state);
       }
       state.lastUpdateTime = TimeSource.monotonicMillis();
 
@@ -428,6 +438,49 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       return ZetaDecision.NONE;
     } finally {
       lock.unlock();
+    }
+  }
+
+  /**
+   * Runs the accumulated-prior Bayesian update for a key and folds the
+   * posterior back into its state. Shared by the COLD and CANDIDATE_HOT
+   * promotion paths, which perform the identical call + state writeback.
+   *
+   * @param state the per-key state whose posterior is both the input prior
+   *              and the output accumulator (mutated in place)
+   * @param obs   the effective observation (trend-scaled window sum)
+   * @param ctx   the evaluation context supplying threshold and CV
+   * @return the fresh posterior result
+   */
+  private ProbabilityResult bayesianUpdate(KeyState state, long obs, EvaluationContext ctx) {
+    ProbabilityResult pr = confidenceEvaluator.evaluateWithAccumulatedPrior(
+      obs,
+      ctx.adjustedLogThreshold(),
+      ctx.cv(),
+      state.posteriorMean,
+      state.accumulatedPrecision
+    );
+    state.posteriorMean = pr.posteriorMean();
+    state.accumulatedPrecision = pr.accumulatedPrecision();
+    return pr;
+  }
+
+  /**
+   * Emits the aggregate visibility line for per-key state transitions: the
+   * transition itself is logged at DEBUG by the call site, and this throttle
+   * emits at most one aggregate INFO per
+   * {@link TransitionLogThrottle#WINDOW_MS} window — a mass-heat event
+   * (thousands of keys transitioning in one batch) produces one summary
+   * line, not one log per key (design principle: never INFO on the hot path;
+   * ADR-0037 log convention).
+   *
+   * @param transition human-readable transition label for the summary sample
+   * @param key        the key of the transition being summarized
+   */
+  private void summarizeTransition(String transition, String key) {
+    long due = transitionLogThrottle.record(TimeSource.monotonicMillis());
+    if (due >= 0) {
+      log.info("State transitions: {} since last summary (latest: {} key={})", due, transition, key);
     }
   }
 
@@ -475,22 +528,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
           return ZetaDecision.none(key, snapShot);
         }
 
-        ProbabilityResult pr = confidenceEvaluator.evaluateWithAccumulatedPrior(
-          obs,
-          ctx.adjustedLogThreshold(),
-          ctx.cv(),
-          state.posteriorMean,
-          state.accumulatedPrecision
-        );
-        state.posteriorMean = pr.posteriorMean();
-        state.accumulatedPrecision = pr.accumulatedPrecision();
+        ProbabilityResult pr = bayesianUpdate(state, obs, ctx);
 
         switch (pr.level()) {
           case HIGH -> {
             state.currentState = CONFIRMED_HOT;
             state.lowResetCount = 0;
             state.lastBroadcastAt = TimeSource.monotonicMillis();
-            log.info("State transition: COLD -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
+            log.debug("State transition: COLD -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
+            summarizeTransition("COLD -> CONFIRMED_HOT", key);
             return ZetaDecision.hot(key, snapShot);
           }
           case MEDIUM -> {
@@ -518,22 +564,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         }
       }
       case CANDIDATE_HOT -> {
-        ProbabilityResult pr = confidenceEvaluator.evaluateWithAccumulatedPrior(
-          obs,
-          ctx.adjustedLogThreshold(),
-          ctx.cv(),
-          state.posteriorMean,
-          state.accumulatedPrecision
-        );
-        state.posteriorMean = pr.posteriorMean();
-        state.accumulatedPrecision = pr.accumulatedPrecision();
+        ProbabilityResult pr = bayesianUpdate(state, obs, ctx);
 
         if (pr.level() == ConfidenceLevel.HIGH) {
           state.currentState = CONFIRMED_HOT;
           state.lowResetCount = 0;
           state.lastBroadcastAt = TimeSource.monotonicMillis();
 
-          log.info("State transition: CANDIDATE_HOT -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
+          log.debug("State transition: CANDIDATE_HOT -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
+          summarizeTransition("CANDIDATE_HOT -> CONFIRMED_HOT", key);
           return ZetaDecision.hot(key, snapShot);
         }
         return ZetaDecision.none(key, snapShot);
@@ -542,7 +581,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         state.currentState = CONFIRMED_HOT;
         state.lowResetCount = 0;
 
-        log.info("State transition: PRE_COOLING -> CONFIRMED_HOT (silent revive) key={}", key);
+        log.debug("State transition: PRE_COOLING -> CONFIRMED_HOT (silent revive) key={}", key);
+        summarizeTransition("PRE_COOLING -> CONFIRMED_HOT (silent revive)", key);
         return ZetaDecision.none(key, snapShot);
       }
       default -> {
@@ -661,13 +701,36 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
 
       if (pr.level() != ConfidenceLevel.HIGH) {
         state.currentState = COLD;
-        log.info("State transition: PRE_COOLING -> COLD key={} obs={} pct={}", key, obs, pr.probability());
+        log.debug("State transition: PRE_COOLING -> COLD key={} obs={} pct={}", key, obs, pr.probability());
+        summarizeTransition("PRE_COOLING -> COLD", key);
         return ZetaDecision.cool(key, snapShot);
       }
       state.coolStreak--;
       return ZetaDecision.none(key, snapShot);
     }
     return ZetaDecision.none(key, snapShot);
+  }
+
+  /**
+   * Builds a {@link StateSnapshot} carrying the key state's current fields
+   * and evaluation epoch. Sole construction point — the evaluate, fastlane
+   * and introspection paths all need the same 8-field capture.
+   *
+   * @param key   the cache key
+   * @param state the state to capture (read under the per-key lock)
+   * @return a snapshot of the state
+   */
+  private static StateSnapshot snapshotOf(String key, KeyState state) {
+    return new StateSnapshot(
+      key,
+      state.currentState.name(),
+      state.hotStreak,
+      state.coolStreak,
+      state.posteriorMean,
+      state.accumulatedPrecision,
+      state.lowResetCount,
+      state.mutationSeq
+    );
   }
 
   /**
@@ -715,19 +778,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       states.put(key, state);
       state.mutationSeq++;
 
-      snapShot = new StateSnapshot(
-        key,
-        state.currentState.name(),
-        state.hotStreak,
-        state.coolStreak,
-        state.posteriorMean,
-        state.accumulatedPrecision,
-        state.lowResetCount,
-        state.mutationSeq
-      );
-
-      log.info("Fast-lane promotion: key={} state={}", key, state);
-      return ZetaDecision.hot(key, snapShot);
+      log.debug("Fast-lane promotion: key={} state={}", key, state);
+      summarizeTransition("fast-lane promotion", key);
+      return ZetaDecision.hot(key, snapshotOf(key, state));
     }
 
     if (state.currentState != CONFIRMED_HOT) {
@@ -744,17 +797,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       states.put(key, state);
       state.mutationSeq++;
 
-      snapShot = new StateSnapshot(
-        key,
-        state.currentState.name(),
-        state.hotStreak,
-        state.coolStreak,
-        state.posteriorMean,
-        state.accumulatedPrecision,
-        state.lowResetCount,
-        state.mutationSeq
-      );
-      return ZetaDecision.hot(key, snapShot);
+      return ZetaDecision.hot(key, snapshotOf(key, state));
     }
 
     // Already CONFIRMED_HOT — refresh liveness, then apply the rebroadcast
@@ -762,16 +805,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     state.lastUpdateTime = now;
     state.mutationSeq++;
 
-    snapShot = new StateSnapshot(
-      key,
-      state.currentState.name(),
-      state.hotStreak,
-      state.coolStreak,
-      state.posteriorMean,
-      state.accumulatedPrecision,
-      state.lowResetCount,
-      state.mutationSeq
-    );
+    snapShot = snapshotOf(key, state);
     if (now - state.lastBroadcastAt >= rebroadcastIntervalMs) {
       state.lastBroadcastAt = now;
 
@@ -819,36 +853,74 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
 
   /**
    * Garbage-collects state for keys that have not been evaluated within
-   * {@code staleAfterMs} milliseconds.
-   *
-   * <p>Should be invoked periodically (e.g. every 5 seconds) from a
-   * scheduled task. Uses a two-phase approach to avoid TOCTOU races:
-   * phase 1 collects candidate keys via a lock-free scan (relying on
-   * {@code volatile} semantics of {@link KeyState#lastUpdateTime});
-   * phase 2 acquires the per-key lock via {@code tryLock()} and
-   * re-verifies staleness before removing. If the lock is contended
-   * the key is preserved until the next cycle.
-   *
-   * <p>Phase 3 broadcasts COOL for the evicted hot keys <em>outside</em> the
-   * per-key lock, so a slow AMQP publish cannot stall eviction of other keys
-   * or evaluations sharing the same stripe. Callbacks are per-key isolated:
-   * a throwing callback aborts neither the remaining keys nor the enclosing
-   * eviction cycle, and state cleanup is unaffected by broadcast failure (a
-   * lost COOL fails lenient — Apps hold the hot TTL until hard expiry, see
-   * ADR-0024). If a key is re-evaluated between removal and broadcast, the
-   * COOL is skipped — its fresh state re-broadcasts HOT on its own.
+   * {@code staleAfterMs} milliseconds, using the same staleness threshold for
+   * every state (the pre-tiering behaviour — see {@link #evictStale(long, long, Consumer)},
+   * whose Javadoc documents the two-phase scan and the out-of-lock COOL
+   * broadcast in full).
    *
    * @param staleAfterMs maximum idle time in milliseconds before a key is evicted
    */
   @Override
-  @SuppressWarnings("all")
   public void evictStale(long staleAfterMs, Consumer<String> onCoolEvict) {
+    evictStale(staleAfterMs, staleAfterMs, onCoolEvict);
+  }
+
+  /**
+   * Garbage-collects state with tiered staleness: COLD-state keys are evicted
+   * after {@code coldStaleAfterMs} of inactivity, every other state after
+   * {@code staleAfterMs}.
+   *
+   * <p>A COLD key's retained state (streak counters, accumulated posterior)
+   * only matters while the key is still being reported — a resumed key
+   * re-evaluates from scratch exactly as it would after the full-threshold
+   * eviction, so evicting COLD keys early only shortens a transition that
+   * was already semantically inert. CONFIRMED_HOT/PRE_COOLING keys keep the
+   * long threshold: their eviction is what discharges the COOL broadcast
+   * obligation (see ADR-0024), and premature eviction would leave Apps
+   * holding the hot TTL with no signal.
+   *
+   * <p>The {@code lastBroadcastAt} guard only applies to non-COLD keys: it
+   * protects keys whose HOT rebroadcast may have landed between the scan and
+   * the removal, while a COLD key never rebroadcasts (its COOL, if any, went
+   * out when it cooled — before {@code lastUpdateTime} went stale).
+   *
+   * <p>Should be invoked periodically from a scheduled task. Uses a two-phase
+   * approach to avoid TOCTOU races: phase 1 collects candidate keys via a
+   * lock-free scan (relying on {@code volatile} semantics of {@link
+   * KeyState#lastUpdateTime}); phase 2 acquires the per-key lock via
+   * {@code tryLock()} and re-verifies staleness before removing. If the lock
+   * is contended the key is preserved until the next cycle.
+   *
+   * <p>Phase 3 broadcasts COOL for the evicted hot keys <em>outside</em> the
+   * per-key locks, so a slow AMQP publish cannot stall eviction of other keys
+   * or evaluations sharing the same stripe. Callbacks are per-key isolated:
+   * a throwing callback aborts neither the remaining keys nor the enclosing
+   * eviction cycle, and state cleanup is unaffected by broadcast failure (a
+   * lost COOL fails lenient — Apps hold the hot TTL until hard expiry, see
+   * ADR-0024). Before each callback the key's liveness is re-verified under
+   * the per-key lock (see {@link #isKeyLive}): if the key was re-evaluated
+   * between removal and broadcast, the COOL is skipped — its fresh state
+   * re-broadcasts HOT on its own.
+   *
+   * @param staleAfterMs     maximum idle time in milliseconds before a
+   *                         non-COLD key is evicted
+   * @param coldStaleAfterMs maximum idle time in milliseconds before a COLD
+   *                         key is evicted; {@code >= staleAfterMs} disables
+   *                         the tiering
+   * @param onCoolEvict      callback invoked for every evicted key in
+   *                         CONFIRMED_HOT or PRE_COOLING state
+   */
+  @Override
+  @SuppressWarnings("all")
+  public void evictStale(long staleAfterMs, long coldStaleAfterMs, Consumer<String> onCoolEvict) {
     long now = TimeSource.monotonicMillis();
 
-    // Phase 1: lock-free scan to collect candidates that appear stale.
+    // Phase 1: lock-free scan to collect candidates that appear stale under
+    // their state's own threshold.
     List<String> candidates = new ArrayList<>();
     states.forEach((key, state) -> {
-      if (now - state.lastUpdateTime > staleAfterMs) {
+      long threshold = state.currentState == COLD ? coldStaleAfterMs : staleAfterMs;
+      if (now - state.lastUpdateTime > threshold) {
         candidates.add(key);
       }
     });
@@ -864,16 +936,20 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         if (lock.tryLock()) {
           try {
             KeyState state = states.get(key);
-            if (
-              state != null && now - state.lastUpdateTime > staleAfterMs && now - state.lastBroadcastAt > staleAfterMs
-            ) {
-              if (state.currentState == CONFIRMED_HOT || state.currentState == PRE_COOLING) {
-                // Collected for the COOL broadcast in phase 3 — the send itself
-                // runs outside the lock so a slow AMQP publish cannot stall the
-                // eviction of other keys or evaluations sharing this stripe.
-                evictedHotKeys.add(key);
+            if (state != null) {
+              boolean cold = state.currentState == COLD;
+              long threshold = cold ? coldStaleAfterMs : staleAfterMs;
+              boolean stale =
+                now - state.lastUpdateTime > threshold && (cold || now - state.lastBroadcastAt > staleAfterMs);
+              if (stale) {
+                if (!cold) {
+                  // Collected for the COOL broadcast in phase 3 — the send itself
+                  // runs outside the lock so a slow AMQP publish cannot stall the
+                  // eviction of other keys or evaluations sharing this stripe.
+                  evictedHotKeys.add(key);
+                }
+                states.remove(key);
               }
-              states.remove(key);
             }
           } finally {
             lock.unlock();
@@ -888,17 +964,52 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     // cycle (a lost COOL fails lenient — Apps hold the hot TTL until hard
     // expiry, see ADR-0024).
     for (String key : evictedHotKeys) {
-      if (states.containsKey(key)) {
+      if (isKeyLive(key)) {
         // The key was re-evaluated after removal and is live again: skip the
-        // COOL — its fresh state will re-broadcast HOT on its own.
+        // COOL — its fresh state re-broadcasts HOT on its own.
         continue;
       }
       try {
         onCoolEvict.accept(key);
-        log.info("Stale HOT key evicted, COOL broadcast triggered: key={}", key);
+        log.debug("Stale HOT key evicted, COOL broadcast triggered: key={}", key);
+        summarizeTransition("stale-HOT-evict COOL broadcast", key);
       } catch (Exception e) {
         log.warn("COOL broadcast failed for evicted key={}", key, e);
       }
+    }
+  }
+
+  /**
+   * Re-verifies — under the per-key lock — that an evicted key has not been
+   * re-created by a concurrent evaluation before its eviction COOL is sent.
+   *
+   * <p>The liveness check must hold the same per-key lock that
+   * {@link #evaluate} and {@link #fastlane} hold while inserting fresh state:
+   * a lock-free {@code states.containsKey(key)} could observe "absent" while a
+   * re-evaluation that just broadcast a fresh HOT is between its lock
+   * acquisition and its {@code states.put}, and the eviction COOL would then
+   * clobber that fresh HOT. With the lock held, any concurrent evaluation
+   * either completed its put before our check (key present → skip) or is
+   * serialized after our unlock (its own HOT ordering wins, and ADR-0024's
+   * periodic rebroadcast self-heals the residual send-time race). A contended
+   * {@code tryLock()} means an evaluation or reset for this key is running
+   * right now — treat the key as live and skip the COOL, matching the phase-2
+   * convention. The lock is never held across the AMQP send itself (I/O must
+   * not run under a state-machine lock).
+   *
+   * @param key the evicted key to re-check
+   * @return {@code true} if the key has live state again (or its lock is
+   *         contended) and the eviction COOL must be skipped
+   */
+  private boolean isKeyLive(String key) {
+    Lock lock = keyLocks.get(key);
+    if (!lock.tryLock()) {
+      return true;
+    }
+    try {
+      return states.containsKey(key);
+    } finally {
+      lock.unlock();
     }
   }
 
@@ -917,17 +1028,7 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       if (keyState == null) {
         return null;
       }
-
-      return new StateSnapshot(
-        key,
-        keyState.currentState.name(),
-        keyState.hotStreak,
-        keyState.coolStreak,
-        keyState.posteriorMean,
-        keyState.accumulatedPrecision,
-        keyState.lowResetCount,
-        keyState.mutationSeq
-      );
+      return snapshotOf(key, keyState);
     } finally {
       lock.unlock();
     }
@@ -954,12 +1055,14 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    */
   @Override
   public void rollbackToPreviousState(String key, StateSnapshot previousState) {
-    log.warn("Rolling back state for key: {}", key);
     Lock lock = keyLocks.get(key);
     lock.lock();
     try {
       if (previousState == null) {
         reset(key);
+        // An actual rollback (full reset) — WARN is warranted, and the send
+        // failure that caused it is itself rate-limited by the caller.
+        log.warn("Rolled back state for key={} to empty (null snapshot)", key);
         return;
       }
 
@@ -988,6 +1091,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       // Clear the broadcast stamp so the next evaluation retries the (failed)
       // broadcast immediately instead of waiting out the rebroadcast interval.
       keyState.lastBroadcastAt = 0L;
+      // Applied rollback only — skipped rollbacks (evicted / advanced seq) are
+      // expected edge cases and stay at DEBUG.
+      log.warn("Rolled back state for key={} to snapshot seq={} after broadcast failure", key, previousState.mutationSeq());
     } finally {
       lock.unlock();
     }

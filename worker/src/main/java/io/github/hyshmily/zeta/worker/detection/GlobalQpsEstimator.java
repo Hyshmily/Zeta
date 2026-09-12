@@ -79,21 +79,7 @@ public class GlobalQpsEstimator {
    * @param slices           number of slices within the window; must be at least 1
    */
   public GlobalQpsEstimator(long windowDurationMs, int slices) {
-    if (slices <= 0) throw new IllegalArgumentException("slices must be positive, got " + slices);
-    int aligned = slices;
-    if ((aligned & (aligned - 1)) != 0) {
-      aligned = Integer.highestOneBit(aligned - 1) << 1;
-    }
-    // The pre-alignment guard (windowDurationMs >= slices) is NOT sufficient:
-    // aligning slices UP to the next power of two can push timeMillisPerSlice
-    // to 0 (e.g. durationMs=15, slices=10 -> aligned=16 -> 15/16 = 0), which
-    // would throw ArithmeticException on every addTotal and report Infinity
-    // from getQps, discarding every report batch.
-    if (windowDurationMs < aligned) {
-      throw new IllegalArgumentException(
-        "windowDurationMs (" + windowDurationMs + ") must be >= aligned slices (" + aligned + ") to avoid division by zero"
-      );
-    }
+    int aligned = SliceWindowMath.alignedSlices(windowDurationMs, slices);
     this.windowSize = aligned;
     this.lengthMask = (aligned << 1) - 1;
     this.timeMillisPerSlice = windowDurationMs / aligned;
@@ -119,26 +105,18 @@ public class GlobalQpsEstimator {
     long now = TimeSource.monotonicMillis();
     int currentIndex = (int) ((now / timeMillisPerSlice) & lengthMask);
 
-    // Detect infrequent-call gap: if more than windowSize slices elapsed,
-    // all previously written data is stale — reset the entire buffer.
-    if (lastAddTotalTime > 0) {
-      long elapsedSlices = (now - lastAddTotalTime) / timeMillisPerSlice;
-      if (elapsedSlices >= windowSize) {
-        for (QpsSlice slice : slices) {
-          slice.value = 0;
-        }
-      } else if (elapsedSlices > 0) {
-        // Invariant: length == 2 * windowSize (doubled circular buffer).
-        // Same invariant as SlidingWindowDetector.addCount: stale slices that
-        // have rolled outside the new summation range are the elapsedSlices
-        // oldest slots of the previous window, starting at:
-        //   (currentIndex + windowSize - elapsedSlices + length) % length
-        int clearStart = (currentIndex + windowSize - (int) elapsedSlices) & lengthMask;
-        for (int i = 0; i < elapsedSlices; i++) {
-          slices[(clearStart + i) & lengthMask].value = 0;
-        }
-      }
-    }
+    // Stale-slot maintenance for the doubled circular buffer (the W-1
+    // pre-clear invariant, shared arithmetic in SliceWindowMath; the
+    // prevTs <= 0 no-op guard covers the first-call case).
+    SliceWindowMath.clearStaleSlots(
+      windowSize,
+      lengthMask,
+      timeMillisPerSlice,
+      lastAddTotalTime,
+      now,
+      currentIndex,
+      i -> slices[i].value = 0
+    );
     lastAddTotalTime = now;
 
     slices[currentIndex].value += totalCount;

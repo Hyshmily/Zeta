@@ -43,13 +43,13 @@ class ZetaBayesianSMTest {
     new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5)
   );
 
-  private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, null, 0.0);
+  private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, Double.NaN, 0.0);
 
-  private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, null, 0.0);
+  private static final EvaluationContext COLD_CTX = new EvaluationContext(1L, 1L, 10L, Double.NaN, 0.0);
 
-  private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, null, 0.0);
+  private static final EvaluationContext MEDIUM_CTX = new EvaluationContext(20L, 20L, 10L, Double.NaN, 0.0);
 
-  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, null, 0.0);
+  private static final EvaluationContext COLD_MEDIUM_CTX = new EvaluationContext(20L, 5L, 10L, Double.NaN, 0.0);
 
   private ZetaBayesianSM machine;
 
@@ -144,5 +144,109 @@ class ZetaBayesianSMTest {
     TimeSource.setTimeOffsetForTest(0, 60_000);
     machine.evictStale(10, k -> {});
     assertThat(machine.getStateSnapshot("staleKey")).isNull();
+  }
+
+  /**
+   * Tiered staleness (ADR-0061 companion): a COLD-state key is evicted at the
+   * short threshold while a CONFIRMED_HOT key survives it — COLD keys carry
+   * no broadcast obligation, HOT keys keep the long retention that guards the
+   * COOL broadcast.
+   */
+  @Test
+  void evictStale_shouldUseColdTierForColdStateAndHotTierForHotState() {
+    // keyCold: evaluated once with a cold window → stays COLD (state created
+    // only for a hot window, so first give it a hot window then a cold one).
+    machine.evaluate("keyCold", true, false, CTX);
+    machine.evaluate("keyCold", false, false, CTX); // CANDIDATE? no: hotStreak(1) < confirm(3) → still COLD, coolStreak=1
+    // Force it to COLD-with-state: it already is COLD (promotion needs 3 hot
+    // windows). keyHot: promoted to CONFIRMED_HOT.
+    ZetaDecision last = null;
+    for (int i = 0; i < 3; i++) {
+      last = machine.evaluate("keyHot", true, false, CTX);
+    }
+    assertThat(last.type()).isEqualTo(DecisionType.HOT);
+    assertThat(machine.getStateSnapshot("keyCold")).isNotNull();
+
+    TimeSource.setTimeOffsetForTest(0, 60_000);
+    java.util.List<String> cooled = new java.util.ArrayList<>();
+    // coldStaleAfterMs = 1_000: the COLD key (60s idle) is evicted; the HOT
+    // key (same idle time) needs staleAfterMs = 120_000 and survives.
+    machine.evictStale(120_000, 1_000, cooled::add);
+
+    assertThat(machine.getStateSnapshot("keyCold")).as("COLD key evicted at the cold tier").isNull();
+    assertThat(machine.getStateSnapshot("keyHot")).as("HOT key kept at the hot tier").isNotNull();
+    assertThat(cooled).as("no COOL for the early COLD eviction").isEmpty();
+  }
+
+  /**
+   * The tiered eviction keeps the full-threshold safety net: a CONFIRMED_HOT
+   * key evoked with coldStale == staleAfterMs (2-arg overload) is evicted and
+   * its COOL broadcast obligation discharged exactly as before tiering.
+   */
+  @Test
+  void evictStale_twoArgOverload_shouldPreserveLegacyBehavior() {
+    ZetaDecision last = null;
+    for (int i = 0; i < 3; i++) {
+      last = machine.evaluate("hotKey", true, false, CTX);
+    }
+    assertThat(last.type()).isEqualTo(DecisionType.HOT);
+
+    TimeSource.setTimeOffsetForTest(0, 60_000);
+    java.util.List<String> cooled = new java.util.ArrayList<>();
+    machine.evictStale(10, cooled::add);
+
+    assertThat(cooled).containsExactly("hotKey");
+    assertThat(machine.getStateSnapshot("hotKey")).isNull();
+  }
+
+  @Test
+  void evictStale_shouldBroadcastCoolForEvictedHotKey() {
+    ZetaDecision last = null;
+    for (int i = 0; i < 3; i++) {
+      last = machine.evaluate("hotKey", true, false, CTX);
+    }
+    assertThat(last.type()).isEqualTo(DecisionType.HOT);
+
+    TimeSource.setTimeOffsetForTest(0, 60_000);
+    java.util.List<String> cooled = new java.util.ArrayList<>();
+    machine.evictStale(10, cooled::add);
+
+    assertThat(cooled).containsExactly("hotKey");
+    assertThat(machine.getStateSnapshot("hotKey")).isNull();
+  }
+
+  /**
+   * Pins the phase-3 liveness re-verification contract: a key whose state was
+   * re-created after phase-2 removal (here, re-evaluated from an earlier key's
+   * COOL callback — the re-check runs under the per-key lock) must NOT receive
+   * an eviction COOL, which would clobber its fresh HOT.
+   */
+  @Test
+  void evictStale_shouldSkipCoolForKeyRecreatedAfterEviction() {
+    // Exactly confirmCount(3) hot windows: the third emits HOT; a fourth
+    // evaluation would hit the ADR-0024 rebroadcast debounce and return NONE.
+    ZetaDecision lastA = null;
+    ZetaDecision lastB = null;
+    for (int i = 0; i < 3; i++) {
+      lastA = machine.evaluate("keyA", true, false, CTX);
+      lastB = machine.evaluate("keyB", true, false, CTX);
+    }
+    assertThat(lastA.type()).isEqualTo(DecisionType.HOT);
+    assertThat(lastB.type()).isEqualTo(DecisionType.HOT);
+
+    TimeSource.setTimeOffsetForTest(0, 60_000);
+    java.util.List<String> cooled = new java.util.ArrayList<>();
+    machine.evictStale(10, key -> {
+      cooled.add(key);
+      if ("keyA".equals(key)) {
+        // Re-create keyB in the window between phase-2 removal and the
+        // phase-3 liveness check (evaluations are serialized per key, so
+        // this lands before keyB's own re-check in the phase-3 loop).
+        machine.evaluate("keyB", true, false, CTX);
+      }
+    });
+
+    assertThat(cooled).as("keyB was live again — its COOL must be skipped").containsExactly("keyA");
+    assertThat(machine.getStateSnapshot("keyB")).isNotNull();
   }
 }

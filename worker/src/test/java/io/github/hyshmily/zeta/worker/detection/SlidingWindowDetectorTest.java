@@ -3,7 +3,6 @@ package io.github.hyshmily.zeta.worker.detection;
 import static org.assertj.core.api.Assertions.*;
 
 import java.lang.reflect.Field;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLongArray;
 import org.junit.jupiter.api.Tag;
@@ -176,20 +175,95 @@ class SlidingWindowDetectorTest {
     assertThat(detector.getActiveKeyCount()).isOne();
   }
 
+  /**
+   * Pins the merged single-map eviction invariant: a consumer's
+   * {@code addCount} landing between the evictor's candidate scan and the
+   * removal compute must keep the window — the refreshed timestamp fails the
+   * re-check inside the bin-locked compute.
+   *
+   * <p>Deterministic simulation: a hook map fires the consumer's addCount
+   * while the evictor's phase-1 {@code forEach} visits the key, so the
+   * timestamp is refreshed before the evictor's phase-2 compute runs. The
+   * window must survive with its counts intact (no orphaned timestamp and no
+   * lost count is possible in the merged design — the previous two-map
+   * conditional-remove protocol this replaces needed exactly this guard).
+   *
+   * <p>The sleep crosses at least one full slice (625 ms) so the hooked
+   * addCount takes the slow path: under the slice-gated fast path, only a
+   * touch at least one slice old refreshes the timestamp — which is exactly
+   * the production interleaving, since an evictor can only target a window
+   * whose timestamp is already far older than a slice (staleAfterMs is
+   * configured in minutes; the gate routes every arriving count for such a
+   * window through the timestamp-refreshing slow path).
+   */
   @Test
-  void evictStale_shouldCleanupOrphanedLastAccessTimeEntries() throws Exception {
+  void evictStale_shouldKeepWindowWhenTimestampRefreshedBetweenScanAndRemove() throws Exception {
     SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
-    detector.addCount("normal", 1);
+    detector.addCount("race", 100);
 
-    Field latField = SlidingWindowDetector.class.getDeclaredField("lastAccessTime");
-    latField.setAccessible(true);
-    @SuppressWarnings("all")
-    Map<String, Long> lastAccessTime = (Map<String, Long>) latField.get(detector);
-    lastAccessTime.put("orphan", System.currentTimeMillis() - 100_000);
-    detector.evictStale(3600_000);
+    Field windowsField = SlidingWindowDetector.class.getDeclaredField("windows");
+    windowsField.setAccessible(true);
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    ConcurrentHashMap<String, Object> realWindows =
+        (ConcurrentHashMap<String, Object>) windowsField.get(detector);
 
-    assertThat(lastAccessTime).doesNotContainKey("orphan");
-    assertThat(lastAccessTime).containsKey("normal");
+    // Hook map: the evictor's phase-1 forEach triggers the consumer's
+    // addCount ("timestamp refresh + count write") while visiting "race" —
+    // exactly the interleaving the re-check must tolerate. One-shot.
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    ConcurrentHashMap<String, Object> hooked =
+        new ConcurrentHashMap<String, Object>(realWindows) {
+          private boolean fired = false;
+
+          @Override
+          public void forEach(java.util.function.BiConsumer<? super String, ? super Object> action) {
+            super.forEach((key, value) -> {
+              if ("race".equals(key) && !fired) {
+                fired = true;
+                detector.addCount("race", 7);
+              }
+              action.accept(key, value);
+            });
+          }
+        };
+
+    windowsField.set(detector, hooked);
+    try {
+      // ≥ 1 slice (625 ms): "race" is stale relative to staleAfterMs = 10 AND
+      // old enough that the hooked addCount crosses a slice into the slow path.
+      Thread.sleep(640);
+      detector.evictStale(10);
+    } finally {
+      windowsField.set(detector, realWindows);
+    }
+
+    // The re-check observed the refreshed timestamp, so the window survived
+    // with its counts intact — the refreshed count of 7 was written into the
+    // live window mid-eviction.
+    assertThat(detector.getActiveKeyCount()).as("window survives the refreshed re-check").isEqualTo(1);
+    assertThat(detector.addCount("race", 0)).as("counts preserved (100 + 7)").isEqualTo(107);
+  }
+
+  /**
+   * Pins the merged single-map removal order: a concurrent {@code addCount}
+   * that arrives AFTER the evictor's removal re-creates a fresh window inside
+   * its own compute — no orphaned entry is left behind and the new count is
+   * visible (the previous design's orphan sweep existed for the two-map
+   * equivalent of this case).
+   */
+  @Test
+  void evictStale_thenAddCount_recreatesFreshWindowWithoutOrphans() throws Exception {
+    SlidingWindowDetector detector = new SlidingWindowDetector(10_000, 10, 1000);
+    detector.addCount("stale-key", 100);
+    Thread.sleep(30);
+
+    detector.evictStale(10);
+    assertThat(detector.getActiveKeyCount()).isZero();
+
+    // addCount after eviction rebuilds cleanly: no orphaned timestamp, the
+    // new count is the whole window.
+    assertThat(detector.addCount("stale-key", 42)).isEqualTo(42);
+    assertThat(detector.getActiveKeyCount()).isOne();
   }
 
   @Test
@@ -219,11 +293,16 @@ class SlidingWindowDetectorTest {
     Field windowsField = SlidingWindowDetector.class.getDeclaredField("windows");
     windowsField.setAccessible(true);
     @SuppressWarnings("all")
-    ConcurrentHashMap<String, AtomicLongArray> windows =
-        (ConcurrentHashMap<String, AtomicLongArray>) windowsField.get(detector);
+    ConcurrentHashMap<String, Object> windows =
+        (ConcurrentHashMap<String, Object>) windowsField.get(detector);
 
     detector.addCount("k", 0);
-    AtomicLongArray buf = windows.get("k");
+    // The merged map's value is the private KeyWindow holder — extract its
+    // slices array reflectively.
+    Object keyWindow = windows.get("k");
+    Field slicesField = keyWindow.getClass().getDeclaredField("slices");
+    slicesField.setAccessible(true);
+    AtomicLongArray buf = (AtomicLongArray) slicesField.get(keyWindow);
     int len = buf.length();
     int win = detector.getWindowSize();
     long sliceMs = detector.getTimeMillisPerSlice();
@@ -268,5 +347,70 @@ class SlidingWindowDetectorTest {
           .as("sum after step %d", step)
           .isBetween((long) step * 10, 100L + (long) step * 10);
     }
+  }
+
+  /**
+   * Pins the slice-gated fast path: repeated {@code addCount} calls within
+   * one slice skip the bin-locked compute entirely — every count must still
+   * land exactly and the returned window sum must include the full history.
+   */
+  @Test
+  void addCount_repeatedAddsInSameSlice_produceExactSums() {
+    SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, Long.MAX_VALUE);
+    long sum = 0;
+    for (int i = 1; i <= 500; i++) {
+      sum = detector.addCount("burst", 2);
+    }
+    assertThat(sum).as("500 fast-path adds of 2, all inside the window").isEqualTo(1000);
+  }
+
+  /**
+   * Pins the fast/slow interleaving: same-slice bursts (fast path) followed
+   * by slice crossings (slow path, W-1 pre-clear) must keep the window sum
+   * exact — the fast path neither loses the slow path's cleared history nor
+   * skips a stale-slot clear that is still needed.
+   */
+  @Test
+  void addCount_sameSliceBurstsAcrossSliceCrossings_keepSumExact() throws InterruptedException {
+    SlidingWindowDetector detector = new SlidingWindowDetector(5000, 5, Long.MAX_VALUE);
+    long sliceMs = detector.getTimeMillisPerSlice();
+    long sum = 0;
+    for (int round = 0; round < 3; round++) {
+      for (int i = 0; i < 50; i++) {
+        sum = detector.addCount("burst-cross", 1);
+      }
+      if (round < 2) {
+        Thread.sleep(sliceMs + 10);
+      }
+    }
+    // All 150 counts land inside the 5-slice window (~3.1 s), so the final
+    // sum is exact regardless of where the crossings fell.
+    assertThat(sum).isEqualTo(150);
+  }
+
+  /**
+   * Pins the eviction contract under the slice-gated fast path: a key touched
+   * continuously — mostly via the fast path, which defers the timestamp
+   * refresh to slice crossings — must never be evicted while every crossing
+   * refreshes the timestamp within the staleness threshold, and must be
+   * evicted once genuinely idle.
+   */
+  @Test
+  void evictStale_continuouslyAccessedKeySurvives_thenIdleKeyIsEvicted() throws Exception {
+    // 1 ms slices: the tight add loop crosses slices repeatedly, so both the
+    // fast-path touches and the per-crossing timestamp refreshes run against
+    // a 50 ms staleness threshold.
+    SlidingWindowDetector detector = new SlidingWindowDetector(8, 8, Long.MAX_VALUE);
+    long deadline = System.nanoTime() + 5_000_000L; // ~5 ms of continuous access
+    while (System.nanoTime() < deadline) {
+      detector.addCount("hot-loop", 1);
+    }
+
+    detector.evictStale(50);
+    assertThat(detector.getActiveKeyCount()).as("continuously accessed key survives").isEqualTo(1);
+
+    Thread.sleep(100);
+    detector.evictStale(50);
+    assertThat(detector.getActiveKeyCount()).as("idle key is evicted").isZero();
   }
 }
