@@ -196,6 +196,10 @@ public class WorkerBroadcaster {
     props.setHeader(HEADER_IS_VERSION_DEGRADED, false);
     props.setHeader(HEADER_NODE_ID, nodeId);
     props.setHeader(HEADER_EPOCH, epochCounter.get());
+    // ADR-0068: the fanout exchange ignores the routing key, so appName travels as a
+    // header and receivers drop decisions addressed to a different app (shared-broker
+    // isolation). Pre-0068 receivers ignore the unknown header.
+    props.setHeader(HEADER_APP_NAME, appName);
     props.setHeader(HEADER_MESSAGE_ID, snowflakeIdGenerator.nextId());
 
     Message msg = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);

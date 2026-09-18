@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.cache;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -26,9 +27,11 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
+import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
@@ -45,6 +48,7 @@ import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
+import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import java.util.Arrays;
 import java.util.List;
@@ -57,6 +61,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
@@ -79,6 +84,7 @@ class ZetaCacheTest {
   private HotKeyCache hotKeyCache;
   private ScheduledExecutorService scheduler;
   private HealthView healthView;
+  private ZetaProperties ttlConfig;
 
   @BeforeEach
   void setUp() {
@@ -87,7 +93,7 @@ class ZetaCacheTest {
     caffeineCache = Caffeine.newBuilder().maximumSize(100).build();
     singleFlight = mock(SingleFlight.class);
     executor = Runnable::run;
-    ZetaProperties ttlConfig = new ZetaProperties();
+    ttlConfig = new ZetaProperties();
     healthView = mock(HealthView.class);
     expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10, CacheCompressor.NONE, healthView);
     scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -360,6 +366,135 @@ class ZetaCacheTest {
     );
     assertThat(result).contains("loadedValue");
     assertThat(caffeineCache.getIfPresent("key1")).isNotNull();
+  }
+
+  /**
+   * Lazy TTL contract (ADR-0030 / {@link CachePolicy}): a plain NORMAL-entry
+   * hit must never evaluate the TTL suppliers. The previous eager resolution
+   * at the {@code get} entry ran the (possibly SpEL-backed) suppliers on every
+   * hit; the read path now resolves them only when an entry is created,
+   * promoted, or refreshed.
+   */
+  @Test
+  void get_shouldNotEvaluateTtlSuppliersOnPlainNORMALHit() {
+    AtomicInteger hardEvals = new AtomicInteger();
+    AtomicInteger softEvals = new AtomicInteger();
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stored")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(Long.MAX_VALUE)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    when(hotKeyDetector.contains("key1")).thenReturn(false);
+
+    Optional<String> result = hotKeyCache.get(
+      "key1",
+      new CachePolicy(
+        hardEvals::incrementAndGet,
+        softEvals::incrementAndGet,
+        true,
+        false,
+        StalePolicy.SOFT_REFRESH,
+        () -> "loaded",
+        true,
+        false
+      )
+    );
+
+    assertThat(result).contains("stored");
+    assertThat(hardEvals.get()).isZero();
+    assertThat(softEvals.get()).isZero();
+  }
+
+  /**
+   * At-most-once TTL evaluation on the load path (the {@link CachePolicy}
+   * contract): a miss that builds an entry consumes both overrides exactly
+   * once, even though the effective and hot-TTL resolutions derive from the
+   * same raw override.
+   */
+  @Test
+  void get_shouldEvaluateTtlSuppliersAtMostOnceOnMiss() {
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("loadedValue"));
+    AtomicInteger hardEvals = new AtomicInteger();
+    AtomicInteger softEvals = new AtomicInteger();
+
+    Optional<String> result = hotKeyCache.get(
+      "key1",
+      new CachePolicy(
+        hardEvals::incrementAndGet,
+        softEvals::incrementAndGet,
+        true,
+        false,
+        StalePolicy.SOFT_REFRESH,
+        () -> "loadedValue",
+        true,
+        false
+      )
+    );
+
+    assertThat(result).contains("loadedValue");
+    assertThat(hardEvals.get()).isEqualTo(1);
+    assertThat(softEvals.get()).isEqualTo(1);
+  }
+
+  /**
+   * At-most-once TTL evaluation across the SOFT_REFRESH composition of
+   * {@code getWithSoftExpire}: one call triggers both the background refresh
+   * (consuming the soft override) and the local promotion probe (consuming
+   * both overrides), yet each supplier is evaluated exactly once thanks to the
+   * per-call memoized read context. A naive policy-threading refactor without
+   * the shared memo would evaluate the soft supplier twice here.
+   */
+  @Test
+  void getWithSoftExpire_softRefreshPlusPromotion_shouldEvaluateTtlSuppliersAtMostOnce() {
+    when(hotKeyDetector.contains("key1")).thenReturn(true);
+    when(healthView.isClusterHealthy()).thenReturn(false);
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(5)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 1000)
+        .keyState(KeyState.COOL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    AtomicInteger hardEvals = new AtomicInteger();
+    AtomicInteger softEvals = new AtomicInteger();
+
+    Optional<String> result = hotKeyCache.getWithSoftExpire(
+      "key1",
+      new CachePolicy(
+        hardEvals::incrementAndGet,
+        softEvals::incrementAndGet,
+        true,
+        false,
+        StalePolicy.SOFT_REFRESH,
+        () -> "fresh",
+        true,
+        false
+      )
+    );
+
+    assertThat(result).contains("stale");
+    assertThat(hardEvals.get()).isEqualTo(1);
+    assertThat(softEvals.get()).isEqualTo(1);
   }
 
   /**
@@ -904,6 +1039,62 @@ class ZetaCacheTest {
     verify(singleFlight, never()).load(anyString(), any());
   }
 
+  /**
+   * Executor-aware sentinel regression: a {@code NullValue} sentinel hit in
+   * {@code computeIfAbsent} must neither arm a background refresh nor promote
+   * the sentinel to HOT. Sentinels carry {@code softExpireAtMs = 0} which
+   * {@code isSoftExpired} reports as expired, so without the in-compute guard
+   * the SOFT_REFRESH branch would re-invoke the loader on every sentinel hit,
+   * and the promotion branch would extend the null block to the hot hard TTL.
+   * The setUp executor is synchronous ({@code Runnable::run}), so an armed
+   * refresh would have run the reader and replaced the entry before the call
+   * returned — the reader counter and the stored entry are the observables.
+   */
+  @Test
+  void computeIfAbsent_nullSentinelHit_shouldNotArmRefreshOrPromoteSentinel() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value(NullValue.INSTANCE)
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(10_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 10_000)
+        .softTtlMs(0L)
+        .softExpireAtMs(0L)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(10_000)
+        .normalSoftTtlMs(0L)
+        .build()
+    );
+    // TopK membership: makes the promotion branch reachable for this entry.
+    when(hotKeyDetector.contains("key1")).thenReturn(true);
+    AtomicInteger readerCalls = new AtomicInteger();
+
+    assertThat(
+      hotKeyCache.computeIfAbsent(
+        "key1",
+        CachePolicy.of(
+          () -> {
+            readerCalls.incrementAndGet();
+            return "should-not-load";
+          },
+          0L,
+          0L,
+          true,
+          true,
+          StalePolicy.SOFT_REFRESH
+        )
+      )
+    ).isEmpty();
+
+    assertThat(readerCalls.get()).isZero();
+    CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat((Object) entry.getValue()).isEqualTo(NullValue.INSTANCE);
+    assertThat(entry.getKeyState()).isEqualTo(KeyState.NORMAL);
+  }
+
   @Test
   void getAll_withFailOnError_shouldPropagateReaderFailure() {
     when(singleFlight.load(any(Iterable.class), any(), anyBoolean())).thenThrow(new IllegalStateException("boom"));
@@ -1140,6 +1331,72 @@ class ZetaCacheTest {
     assertThatCode(() -> cache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true)).doesNotThrowAnyException();
     assertThat(cache.peek("key1")).contains("newValue");
     verify(publisher).broadcastRefresh(eq("key1"), anyLong(), anyBoolean());
+  }
+
+  /**
+   * Degraded-fallback path (version controller fails after the writer ran):
+   * the L1 is updated with a degraded version, and a caller that opted OUT of
+   * broadcasting gets no REFRESH broadcast — the same opt-out contract as the
+   * success path.
+   */
+  @Test
+  void putThrough_degradedFallback_optOut_shouldNotBroadcast() {
+    VersionController failing = mock(VersionController.class);
+    when(failing.nextVersion("key1")).thenThrow(new IllegalStateException("redis down"));
+    when(failing.fallbackVersion()).thenReturn(new VersionController.VersionResult(-100L, true));
+
+    CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
+    BroadcastBuffer buffer = new BroadcastBuffer(scheduler, Optional.of(publisher));
+    HotKeyCache cache = new HotKeyCache(
+      hotKeyDetector,
+      caffeineCache,
+      singleFlight,
+      expireManager,
+      executor,
+      new CentralDispatcher(Optional.empty(), Optional.of(publisher), buffer, hotKeyDetector),
+      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
+      failing,
+      ttlConfig,
+      mock(HealthView.class),
+      CacheCompressor.NONE
+    );
+
+    cache.putThrough("key1", "degradedValue", () -> {}, 0L, 0L, false);
+
+    // The degraded local update still lands (coherence with the mutation).
+    assertThat(cache.peek("key1")).contains("degradedValue");
+    buffer.flush();
+    verify(publisher, never()).broadcastRefresh(anyString(), anyLong(), anyBoolean());
+  }
+
+  /** Control: the same degraded path with broadcast opted in sends the degraded REFRESH. */
+  @Test
+  void putThrough_degradedFallback_optIn_shouldBroadcastDegradedVersion() {
+    VersionController failing = mock(VersionController.class);
+    when(failing.nextVersion("key1")).thenThrow(new IllegalStateException("redis down"));
+    when(failing.fallbackVersion()).thenReturn(new VersionController.VersionResult(-100L, true));
+
+    CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
+    BroadcastBuffer buffer = new BroadcastBuffer(scheduler, Optional.of(publisher));
+    HotKeyCache cache = new HotKeyCache(
+      hotKeyDetector,
+      caffeineCache,
+      singleFlight,
+      expireManager,
+      executor,
+      new CentralDispatcher(Optional.empty(), Optional.of(publisher), buffer, hotKeyDetector),
+      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
+      failing,
+      ttlConfig,
+      mock(HealthView.class),
+      CacheCompressor.NONE
+    );
+
+    cache.putThrough("key1", "degradedValue", () -> {}, 0L, 0L, true);
+
+    assertThat(cache.peek("key1")).contains("degradedValue");
+    buffer.flush();
+    verify(publisher).broadcastRefresh(eq("key1"), eq(-100L), eq(true));
   }
 
   /**
@@ -1398,6 +1655,98 @@ class ZetaCacheTest {
     ).contains("fresh");
   }
 
+  // ── get with StalePolicy.REVALIDATE: caller policy wired through the hit path ──
+
+  /**
+   * A caller-supplied {@link StalePolicy#REVALIDATE} on a plain {@code get} is
+   * honored like on {@code getWithSoftExpire}: a soft-expired entry is
+   * dropped-and-reloaded and the fresh value serves the caller. The old
+   * behavior silently treated REVALIDATE as RETURN (stale served, loader
+   * never invoked).
+   */
+  @Test
+  void get_revalidate_softExpiredEntry_shouldReloadViaLoader() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+    when(singleFlight.load(eq("key1"), any())).thenReturn(vv("fresh"));
+
+    assertThat(hotKeyCache.get("key1", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE)))
+      .contains("fresh");
+    verify(singleFlight, times(1)).load(eq("key1"), any());
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo("fresh");
+  }
+
+  /** Control: {@link StalePolicy#RETURN} on the same entry serves the stale value without a reload. */
+  @Test
+  void get_return_softExpiredEntry_shouldServeStaleWithoutReload() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stale")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 300_000)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 10_000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    assertThat(hotKeyCache.get("key1", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.RETURN)))
+      .contains("stale");
+    verify(singleFlight, never()).load(anyString(), any());
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo("stale");
+  }
+
+  /**
+   * REVALIDATE must keep the sentinel's penetration protection: sentinels
+   * carry {@code softExpireAtMs = 0} (always reported soft-expired) and must
+   * not be dropped-and-reloaded by the REVALIDATE branch.
+   */
+  @Test
+  void get_revalidate_nullSentinelHit_shouldKeepPenetrationProtection() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value(NullValue.INSTANCE)
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(10_000)
+        .hardExpireAtMs(System.currentTimeMillis() + 10_000)
+        .softTtlMs(0L)
+        .softExpireAtMs(0L)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(10_000)
+        .normalSoftTtlMs(0L)
+        .build()
+    );
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("loaded"));
+
+    assertThat(hotKeyCache.get("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.REVALIDATE)))
+      .isEmpty();
+    verify(singleFlight, never()).load(anyString(), any());
+    assertThat(((CacheEntry) caffeineCache.getIfPresent("key1")).getValue()).isEqualTo(NullValue.INSTANCE);
+  }
+
   // ── getWithSoftExpire: invalid key ──
 
   @Test
@@ -1501,6 +1850,81 @@ class ZetaCacheTest {
     );
 
     assertThat(result).contains("stale");
+  }
+
+  // ── getWithSoftExpire REVALIDATE: worker-managed keep-and-renew ──
+
+  /** Build a Worker-stamped COOL entry whose soft TTL has expired. */
+  private static CacheEntry workerCoolSoftExpiredEntry() {
+    return CacheEntry.builder()
+      .value("stored")
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(5)
+      .decisionNodeId("w1")
+      .decisionEpoch(7)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(System.currentTimeMillis() + 300_000)
+      .softTtlMs(30_000)
+      .softExpireAtMs(System.currentTimeMillis() - 10_000)
+      .keyState(KeyState.COOL)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
+      .build();
+  }
+
+  /**
+   * REVALIDATE keep-and-renew (loadCacheEntry's worker-managed branch): a
+   * soft-expired COOL entry is kept (decision stamp intact) instead of being
+   * overwritten, and its soft expiry is renewed to the entry's own soft
+   * cadence — clamped by the hard TTL — so subsequent reads do NOT re-invoke
+   * the loader at read rate (COOL entries are never rebroadcast by a Worker).
+   */
+  @Test
+  void getWithSoftExpire_revalidate_workerManagedCoolEntry_shouldKeepAndRenewWithoutReloadRate() {
+    caffeineCache.put("key1", workerCoolSoftExpiredEntry());
+    when(singleFlight.load(eq("key1"), any())).thenReturn(vv("fresh"));
+
+    // First read: the kept entry's reload re-invokes the loader once; the
+    // fresh value serves this caller while the Worker-managed entry survives.
+    assertThat(
+      hotKeyCache.getWithSoftExpire("key1", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE))
+    ).contains("fresh");
+
+    CacheEntry after = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat((Object) after.getValue()).isEqualTo("stored");
+    assertThat(after.getKeyState()).isEqualTo(KeyState.COOL);
+    assertThat(after.getDecisionNodeId()).isEqualTo("w1");
+    assertThat(after.getDecisionVersion()).isEqualTo(5L);
+    // Soft expiry renewed within the hard TTL: no longer soft-expired.
+    assertThat(expireManager.ttlPolicy().isSoftExpired(after)).isFalse();
+    assertThat(after.getSoftExpireAtMs()).isLessThanOrEqualTo(after.getHardExpireAtMs());
+
+    // Subsequent reads serve the kept entry — the loader is NOT re-invoked.
+    assertThat(
+      hotKeyCache.getWithSoftExpire("key1", CachePolicy.of(() -> "fresh2", 0L, 0L, true, true, StalePolicy.REVALIDATE))
+    ).contains("stored");
+    verify(singleFlight, times(1)).load(anyString(), any());
+  }
+
+  /**
+   * A null load must not erase a Worker decision: the {@code NullValue}
+   * sentinel written over the kept entry carries the existing entry's decision
+   * stamp so {@code decisionVersion} stays comparable for later broadcasts.
+   */
+  @Test
+  void get_revalidate_workerManagedEntry_nullLoad_shouldPreserveDecisionStampOnSentinel() {
+    caffeineCache.put("key1", workerCoolSoftExpiredEntry());
+    when(singleFlight.load(eq("key1"), any())).thenReturn(Optional.empty());
+
+    assertThat(hotKeyCache.get("key1", CachePolicy.of(() -> null, 0L, 0L, true, true, StalePolicy.REVALIDATE)))
+      .isEmpty();
+
+    CacheEntry sentinel = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat((Object) sentinel.getValue()).isEqualTo(NullValue.INSTANCE);
+    assertThat(sentinel.getDecisionNodeId()).isEqualTo("w1");
+    assertThat(sentinel.getDecisionVersion()).isEqualTo(5L);
+    assertThat(sentinel.getDecisionEpoch()).isEqualTo(7L);
   }
 
   // ── putLocal ──
@@ -1645,6 +2069,145 @@ class ZetaCacheTest {
     assertThat(hotKeyCache.compareAndInvalidate(null, "old")).isFalse();
   }
 
+  // ── compareAndSet / compareAndInvalidate: latched concurrent writer ──
+
+  /**
+   * Latched race wiring for the CAS family: a real Caffeine cache backs a
+   * delegating mock whose {@code getIfPresent} parks after capturing the
+   * snapshot, handing the writer the exact race window between the snapshot
+   * read and the in-lock re-judgment. The suite previously covered only the
+   * single-threaded branches — that is how the inverted
+   * {@code compareAndInvalidate} guard survived.
+   */
+  @SuppressWarnings("unchecked")
+  private HotKeyCache newLatchedCasCache(
+    Cache<String, Object> realCache,
+    CountDownLatch snapshotTaken,
+    CountDownLatch writerCommitted
+  ) {
+    AtomicBoolean gated = new AtomicBoolean(true);
+    Cache<String, Object> gatedCache = mock(
+      Cache.class,
+      withSettings().defaultAnswer(delegatesTo(realCache))
+    );
+    doAnswer(inv -> {
+      Object snapshot = realCache.getIfPresent(inv.getArgument(0));
+      if (gated.compareAndSet(true, false)) {
+        snapshotTaken.countDown();
+        writerCommitted.await(5, TimeUnit.SECONDS);
+      }
+      return snapshot;
+    }).when(gatedCache).getIfPresent(anyString());
+
+    return new HotKeyCache(
+      hotKeyDetector,
+      gatedCache,
+      singleFlight,
+      expireManager,
+      executor,
+      new CentralDispatcher(
+        Optional.empty(),
+        Optional.empty(),
+        new BroadcastBuffer(scheduler, Optional.empty()),
+        hotKeyDetector
+      ),
+      new RuleMatcherImpl(Optional.empty(), Optional.empty()),
+      new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
+      ttlConfig,
+      healthView,
+      CacheCompressor.NONE
+    );
+  }
+
+  /**
+   * Latched race: the writer commits a DIFFERENT value while the
+   * {@code compareAndSet} is in flight. The in-lock re-judgment must refuse
+   * the replacement (no lost update) — the newer entry survives.
+   */
+  @Test
+  void compareAndSet_concurrentWriterSwapsValue_shouldNotOverwriteNewerEntry() throws Exception {
+    Cache<String, Object> real = Caffeine.newBuilder().maximumSize(100).build();
+    CountDownLatch snapshotTaken = new CountDownLatch(1);
+    CountDownLatch writerCommitted = new CountDownLatch(1);
+    HotKeyCache cache = newLatchedCasCache(real, snapshotTaken, writerCommitted);
+    real.put("k", CacheEntry.builder().value("old").build());
+
+    CompletableFuture<Boolean> cas =
+      CompletableFuture.supplyAsync(() -> cache.compareAndSet("k", "old", "new"));
+    assertThat(snapshotTaken.await(5, TimeUnit.SECONDS)).isTrue();
+
+    // Writer commits a newer value while the CAS call is in flight.
+    real.put("k", CacheEntry.builder().value("swapped").build());
+    writerCommitted.countDown();
+
+    assertThat(cas.get(5, TimeUnit.SECONDS)).isFalse();
+    assertThat(((CacheEntry) real.getIfPresent("k")).getValue()).isEqualTo("swapped");
+  }
+
+  /**
+   * Latched race, matching direction: the writer replaces the entry with a
+   * NEW instance carrying the SAME user value. The instance-identity fast
+   * path misses, the re-judgment matches, and the replacement proceeds.
+   */
+  @Test
+  void compareAndSet_concurrentWriterSwapsToEqualValue_shouldStillReplace() throws Exception {
+    Cache<String, Object> real = Caffeine.newBuilder().maximumSize(100).build();
+    CountDownLatch snapshotTaken = new CountDownLatch(1);
+    CountDownLatch writerCommitted = new CountDownLatch(1);
+    HotKeyCache cache = newLatchedCasCache(real, snapshotTaken, writerCommitted);
+    real.put("k", CacheEntry.builder().value("old").build());
+
+    CompletableFuture<Boolean> cas =
+      CompletableFuture.supplyAsync(() -> cache.compareAndSet("k", "old", "new"));
+    assertThat(snapshotTaken.await(5, TimeUnit.SECONDS)).isTrue();
+
+    real.put("k", CacheEntry.builder().value("old").dataVersion(9).build());
+    writerCommitted.countDown();
+
+    assertThat(cas.get(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(((CacheEntry) real.getIfPresent("k")).getValue()).isEqualTo("new");
+  }
+
+  /** Latched race on {@code compareAndInvalidate}: a newer non-matching value must NOT be invalidated. */
+  @Test
+  void compareAndInvalidate_concurrentWriterSwapsValue_shouldNotInvalidateNewerEntry() throws Exception {
+    Cache<String, Object> real = Caffeine.newBuilder().maximumSize(100).build();
+    CountDownLatch snapshotTaken = new CountDownLatch(1);
+    CountDownLatch writerCommitted = new CountDownLatch(1);
+    HotKeyCache cache = newLatchedCasCache(real, snapshotTaken, writerCommitted);
+    real.put("k", CacheEntry.builder().value("old").build());
+
+    CompletableFuture<Boolean> invalidate =
+      CompletableFuture.supplyAsync(() -> cache.compareAndInvalidate("k", "old"));
+    assertThat(snapshotTaken.await(5, TimeUnit.SECONDS)).isTrue();
+
+    real.put("k", CacheEntry.builder().value("swapped").build());
+    writerCommitted.countDown();
+
+    assertThat(invalidate.get(5, TimeUnit.SECONDS)).isFalse();
+    assertThat(((CacheEntry) real.getIfPresent("k")).getValue()).isEqualTo("swapped");
+  }
+
+  /** Latched race on {@code compareAndInvalidate}: a newer instance with the matching value IS invalidated. */
+  @Test
+  void compareAndInvalidate_concurrentWriterSwapsToEqualValue_shouldStillInvalidate() throws Exception {
+    Cache<String, Object> real = Caffeine.newBuilder().maximumSize(100).build();
+    CountDownLatch snapshotTaken = new CountDownLatch(1);
+    CountDownLatch writerCommitted = new CountDownLatch(1);
+    HotKeyCache cache = newLatchedCasCache(real, snapshotTaken, writerCommitted);
+    real.put("k", CacheEntry.builder().value("old").build());
+
+    CompletableFuture<Boolean> invalidate =
+      CompletableFuture.supplyAsync(() -> cache.compareAndInvalidate("k", "old"));
+    assertThat(snapshotTaken.await(5, TimeUnit.SECONDS)).isTrue();
+
+    real.put("k", CacheEntry.builder().value("old").dataVersion(9).build());
+    writerCommitted.countDown();
+
+    assertThat(invalidate.get(5, TimeUnit.SECONDS)).isTrue();
+    assertThat(real.getIfPresent("k")).isNull();
+  }
+
   // ── putIfAbsent ──
 
   @Test
@@ -1713,6 +2276,26 @@ class ZetaCacheTest {
     CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("k");
     assertThat(entry.getValue()).isEqualTo("workerVal");
     assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  @Test
+  void putIfAbsent_whenInserted_shouldInvalidateSingleFlightDedup() {
+    // ADR-0067: the committed write obsoletes every load result recorded before
+    // it, so a later miss must re-invoke the reader instead of replaying a dedup
+    // future that carries the pre-write value. putIfAbsent writes with
+    // VERSION_DEFAULT and does not bump the version, so loadCacheEntry's
+    // VersionGuard cannot reject the stale replay — the dedup invalidation is the
+    // only thing standing between this write and a silent read-your-old-value.
+    assertThat(hotKeyCache.putIfAbsent("k", "v", 0L, 0L)).isTrue();
+    verify(singleFlight).invalidate("k");
+  }
+
+  @Test
+  void putIfAbsent_whenKeyAlreadyPresent_shouldNotInvalidateSingleFlightDedup() {
+    assertThat(hotKeyCache.putIfAbsent("k", "first", 0L, 0L)).isTrue();
+    assertThat(hotKeyCache.putIfAbsent("k", "second", 0L, 0L)).isFalse();
+    // The second call is a no-op, so it must not discard a warm dedup entry.
+    verify(singleFlight, times(1)).invalidate("k");
   }
 
   @Test
@@ -1937,6 +2520,7 @@ class ZetaCacheTest {
     private CacheSyncPublisher publisher;
     private BroadcastBuffer broadcastBuffer;
     private HealthView healthView;
+    private KeyReporter reporter;
 
     @BeforeEach
     void setUp() {
@@ -1956,7 +2540,7 @@ class ZetaCacheTest {
         Optional.of(publisher)
       );
       healthView = mock(HealthView.class);
-      KeyReporter reporter = mock(KeyReporter.class);
+      reporter = mock(KeyReporter.class);
       hotKeyCache = new HotKeyCache(
         hotKeyDetector,
         caffeineCache,
@@ -2296,7 +2880,7 @@ class ZetaCacheTest {
       CacheEntry entry = (CacheEntry) raw;
       assertThat(entry.getKeyState()).isEqualTo(KeyState.HOT);
       // Normal path (non-Redis fallback within nextVersion) still respects version guard;
-      // only the Exception catch block bypasses it via forceUpdate=true.
+      // the degraded fallback rewrite keeps the same guard (forceUpdate=false, ADR-0066).
       assertThat(entry.getValue()).isEqualTo("old");
     }
 
@@ -2309,11 +2893,16 @@ class ZetaCacheTest {
     }
 
     @Test
-    @DisplayName("invalidateAllLocal should send when publisher present")
+    @DisplayName("invalidateAllLocal should send per-key versioned invalidates when publisher present")
     void invalidateAll_shouldBroadcastWhenPublisherPresent() {
       hotKeyCache.invalidate(List.of("key1", "key2"), true);
 
-      verify(publisher).broadcastLocalInvalidateAll(eq(List.of("key1", "key2")));
+      // ADR-0066: the batch path now sends the same per-key versioned INVALIDATE
+      // messages as the single-key path (the unversioned INVALIDATE_ALL broadcast
+      // could not be ordered against a newer REFRESH on the same key).
+      verify(publisher).broadcastLocalInvalidate(eq("key1"), anyLong(), eq(true));
+      verify(publisher).broadcastLocalInvalidate(eq("key2"), anyLong(), eq(true));
+      verify(publisher, never()).broadcastLocalInvalidateAll(anyList());
     }
 
     @Test
@@ -2576,6 +3165,37 @@ class ZetaCacheTest {
       CacheEntry entry = (CacheEntry) raw;
       assertThat(entry.getValue()).isEqualTo("workerValue");
     }
+
+    /**
+     * peekAndTag on a whitelisted key keeps the detection half (the whitelist
+     * semantics are "detect without reporting", never "ignore") while the
+     * Worker report is skipped — the exact flag combination
+     * {@code tag(key, false, true)} would produce.
+     */
+    @Test
+    @DisplayName("peekAndTag on a whitelisted key detects without reporting")
+    void peekAndTag_whitelistedKey_detectsWithoutReporting() {
+      hotKeyCache.addWhitelist("wl::key");
+      caffeineCache.put(
+        "wl::key",
+        CacheEntry.builder()
+          .value("stored")
+          .dataVersion(1)
+          .isVersionDegraded(false)
+          .decisionVersion(0)
+          .hardTtlMs(300_000)
+          .hardExpireAtMs(Long.MAX_VALUE)
+          .softTtlMs(30_000)
+          .softExpireAtMs(Long.MAX_VALUE)
+          .keyState(KeyState.HOT)
+          .build()
+      );
+
+      assertThat(hotKeyCache.peekAndTag("wl::key")).isEqualTo("stored");
+
+      verify(hotKeyDetector).add("wl::key");
+      verify(reporter, never()).reportToWorker("wl::key");
+    }
   }
 
   // ── putThrough with existing CacheEntry: buildPutThroughEntry deeper branches ──
@@ -2780,5 +3400,569 @@ class ZetaCacheTest {
     assertThat(entry.getDataVersion()).isEqualTo(100);
     assertThat(entry.getDecisionVersion()).isEqualTo(50);
     assertThat(entry.getValue()).isEqualTo("new");
+  }
+
+  @Test
+  void getAndSet_shouldInvalidateSingleFlightDedup() {
+    // Same ADR-0067 contract as putIfAbsent: getAndSet replaces the stored value
+    // on every path (its compute never returns null) while writing
+    // VERSION_DEFAULT, so the dedup invalidation is what prevents an in-flight
+    // pre-write load result from being replayed over this write.
+    hotKeyCache.getAndSet("k", "new", 0L, 0L);
+    verify(singleFlight).invalidate("k");
+  }
+
+  @Test
+  void getAndSet_whenKeyAbsent_shouldStillInvalidateSingleFlightDedup() {
+    // The absent-key path creates a fresh VERSION_DEFAULT entry, which is exactly
+    // the case VersionGuard cannot reject on replay — so it must invalidate too.
+    assertThat(hotKeyCache.getAndSet("absentKey", "v", 0L, 0L)).isEmpty();
+    verify(singleFlight).invalidate("absentKey");
+  }
+
+  // ── Batch null-sentinel penetration protection (single-key parity) ──
+
+  /**
+   * Batch null-sentinel parity (cache-penetration protection): a batch
+   * {@code get} over a key holding a valid {@link NullValue} sentinel serves an
+   * empty value <b>without</b> invoking the reader or SingleFlight — the batch
+   * loop used to treat the sentinel as a miss and reload it on every call,
+   * unlike the single-key {@code get} contract.
+   */
+  @Test
+  void getAll_sentinelHit_shouldServeEmptyWithoutReload() {
+    AtomicInteger readerCalls = new AtomicInteger();
+    caffeineCache.put("sentinel", nullSentinelEntry());
+    caffeineCache.put("hit", "rawHit");
+
+    Map<String, Optional<String>> results = hotKeyCache.get(
+      List.of("sentinel", "hit"),
+      key -> {
+        readerCalls.incrementAndGet();
+        return "loaded";
+      },
+      0L,
+      0L,
+      false,
+      false
+    );
+
+    assertThat(results.get("sentinel")).isEmpty();
+    assertThat(results.get("hit")).contains("rawHit");
+    assertThat(readerCalls.get()).isZero();
+    verifyNoInteractions(singleFlight);
+  }
+
+  /**
+   * Batch null-sentinel parity for {@code getWithSoftExpire}: same contract as
+   * the batch {@code get} — a sentinel hit is served empty without a reload.
+   */
+  @Test
+  void getAllWithSoftExpire_sentinelHit_shouldServeEmptyWithoutReload() {
+    AtomicInteger readerCalls = new AtomicInteger();
+    caffeineCache.put("sentinel", nullSentinelEntry());
+    caffeineCache.put("hit", "rawHit");
+
+    Map<String, Optional<String>> results = hotKeyCache.getWithSoftExpire(
+      List.of("sentinel", "hit"),
+      key -> {
+        readerCalls.incrementAndGet();
+        return "loaded";
+      },
+      0L,
+      0L,
+      false,
+      false
+    );
+
+    assertThat(results.get("sentinel")).isEmpty();
+    assertThat(results.get("hit")).contains("rawHit");
+    assertThat(readerCalls.get()).isZero();
+    verifyNoInteractions(singleFlight);
+  }
+
+  /**
+   * A valid {@link NullValue} sentinel entry within its hard TTL (shape shared
+   * with {@code computeIfAbsent_nullSentinelHit_shouldReturnEmptyWithoutInvokingReader}).
+   */
+  private static CacheEntry nullSentinelEntry() {
+    return CacheEntry.builder()
+      .value(NullValue.INSTANCE)
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(0)
+      .hardTtlMs(10_000)
+      .hardExpireAtMs(System.currentTimeMillis() + 10_000)
+      .softTtlMs(0L)
+      .softExpireAtMs(0L)
+      .keyState(KeyState.NORMAL)
+      .normalHardTtlMs(10_000)
+      .normalSoftTtlMs(0L)
+      .build();
+  }
+
+  /**
+   * Contract parity with {@code get}: a {@link ZetaBlockedException} raised on
+   * the load path (a blocked reader surfaced through SingleFlight, or the
+   * post-load BLOCK re-check) propagates out of {@code computeIfAbsent} even
+   * with {@code failOnError = false} — the computeInLock catch used to swallow
+   * it into an empty result.
+   */
+  @Test
+  void computeIfAbsent_blockedKeyOnLoad_shouldPropagateZetaBlockedException() {
+    when(singleFlight.load(anyString(), any())).thenThrow(new ZetaBlockedException("test", "key1"));
+
+    assertThatThrownBy(() ->
+      hotKeyCache.computeIfAbsent("key1", CachePolicy.of(() -> "loaded", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
+    ).isInstanceOf(ZetaBlockedException.class);
+  }
+
+  /**
+   * {@code tag} normalizes like every other entry point: with query stripping
+   * enabled, tagging {@code "a?x=1"} counts the same key identity ({@code "a"})
+   * that {@code get("a")} sees — previously the un-normalized key reached the
+   * detector and split the count.
+   */
+  @Test
+  void tag_shouldNormalizeKeyWhenStripQueryEnabled() {
+    ttlConfig.getCacheKey().setStripQuery(true);
+
+    hotKeyCache.tag("a?x=1");
+    hotKeyCache.tag("b?y=2", false, false);
+
+    verify(hotKeyDetector).add("a");
+    verify(hotKeyDetector).add("b");
+    verify(hotKeyDetector, never()).add("a?x=1");
+    verify(hotKeyDetector, never()).add("b?y=2");
+  }
+
+  /**
+   * REVALIDATE on a soft-expired Worker-managed entry keeps the entry (and its
+   * decision stamp) in L1 while still serving a freshly loaded value — the
+   * former drop-and-reload rebuilt the entry locally without Worker metadata,
+   * diverging from computeInLock's REVALIDATE and loadCacheEntry's
+   * Worker-managed guard. Keep-and-renew: the kept entry's soft expiry is
+   * renewed (within the untouched hard TTL) so the loader is not re-invoked
+   * at read rate — COOL entries never rebroadcast, and HOT entries only get
+   * renewal from the Worker on the ADR-0024 cadence.
+   */
+  @Test
+  void getWithSoftExpire_revalidateOnSoftExpiredWorkerHotEntry_shouldKeepEntryAndDecisionStamp() {
+    when(healthView.isAlive("w1")).thenReturn(true);
+    when(healthView.epochOf("w1")).thenReturn(5L);
+    CacheEntry hotEntry = softExpiredWorkerHotEntry("w1", 5L);
+    caffeineCache.put("key1", hotEntry);
+    when(singleFlight.load(anyString(), any())).thenReturn(vv("loadedValue"));
+
+    Optional<String> result = hotKeyCache.getWithSoftExpire(
+      "key1",
+      CachePolicy.of(() -> "loadedValue", 0L, 0L, true, true, StalePolicy.REVALIDATE)
+    );
+
+    assertThat(result).contains("loadedValue");
+    CacheEntry kept = (CacheEntry) caffeineCache.getIfPresent("key1");
+    assertThat(kept.getDecisionNodeId()).isEqualTo("w1");
+    assertThat(kept.getKeyState()).isEqualTo(KeyState.HOT);
+    assertThat(kept.getHardExpireAtMs()).isEqualTo(Long.MAX_VALUE);
+    // Keep-and-renew: the soft expiry moved past the read (clamped by the
+    // hard TTL — Long.MAX_VALUE here), so the loader is not re-invoked at
+    // read rate and the entry instance was rewritten by the renewal.
+    assertThat(expireManager.ttlPolicy().isSoftExpired(kept)).isFalse();
+    assertThat(kept).isNotSameAs(hotEntry);
+  }
+
+  // ── peekAndTag: the annotation-path peek (single lookup + single rule evaluation) ──
+
+  /**
+   * A served hit (value) tags the detector — the annotation path's "every read
+   * triggers detection" invariant delivered in the merged peekAndTag form.
+   */
+  @Test
+  void peekAndTag_hit_returnsValueAndTagsDetector() {
+    caffeineCache.put(
+      "key1",
+      CacheEntry.builder()
+        .value("stored")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(Long.MAX_VALUE)
+        .keyState(KeyState.HOT)
+        .build()
+    );
+
+    assertThat(hotKeyCache.peekAndTag("key1")).isEqualTo("stored");
+    verify(hotKeyDetector).add("key1");
+  }
+
+  /** A raw (non-CacheEntry) L1 value is served as-is and still counted. */
+  @Test
+  void peekAndTag_rawValue_servedAndTagged() {
+    caffeineCache.put("raw1", "plain");
+
+    assertThat(hotKeyCache.peekAndTag("raw1")).isEqualTo("plain");
+    verify(hotKeyDetector).add("raw1");
+  }
+
+  /** A true miss does neither detection nor reporting. */
+  @Test
+  void peekAndTag_miss_doesNotTag() {
+    assertThat(hotKeyCache.peekAndTag("absent")).isNull();
+    verify(hotKeyDetector, never()).add("absent");
+  }
+
+  /** A cached-null sentinel hit returns the sentinel itself and is still counted. */
+  @Test
+  void peekAndTag_nullSentinel_returnsSentinelAndTags() {
+    caffeineCache.put(
+      "nk",
+      CacheEntry.builder()
+        .value(NullValue.INSTANCE)
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(30_000)
+        .softExpireAtMs(Long.MAX_VALUE)
+        .keyState(KeyState.NORMAL)
+        .build()
+    );
+
+    assertThat(hotKeyCache.peekAndTag("nk")).isSameAs(NullValue.INSTANCE);
+    verify(hotKeyDetector).add("nk");
+  }
+
+  /** A blocked key throws via preGuard — before any lookup or tagging. */
+  @Test
+  void peekAndTag_blockedKey_throwsAndDoesNotTag() {
+    hotKeyCache.addBlacklist("blk");
+    caffeineCache.put("blk", "v");
+
+    assertThatThrownBy(() -> hotKeyCache.peekAndTag("blk")).isInstanceOf(ZetaBlockedException.class);
+    verify(hotKeyDetector, never()).add("blk");
+  }
+
+  /** A Worker-stamped HOT entry whose soft TTL has passed while the hard TTL is still valid. */
+  private static CacheEntry softExpiredWorkerHotEntry(String nodeId, long epoch) {
+    return CacheEntry.builder()
+      .value("stored")
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(42)
+      .decisionNodeId(nodeId)
+      .decisionEpoch(epoch)
+      .hardTtlMs(3_600_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(300_000)
+      .softExpireAtMs(1L)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(60_000)
+      .normalSoftTtlMs(15_000)
+      .build();
+  }
+
+  /**
+   * Write/invalidation → dedup-cache coherence and load-path version guards
+   * (ADR-0067). Uses a REAL {@link SingleFlightImpl} so the completed-future
+   * reuse window (ADR-0002) is exercised end-to-end against the invalidation
+   * and write paths.
+   */
+  @Nested
+  @DisplayName("Dedup coherence and load guards (ADR-0067)")
+  class DedupCoherenceTest {
+
+    private HotKeyCache realFlightCache;
+    private Cache<String, Object> realFlightL1;
+    private VersionController versionController;
+
+    @BeforeEach
+    void setUp() {
+      realFlightL1 = Caffeine.newBuilder().maximumSize(100).build();
+      CircuitBreaker breaker = mock(CircuitBreaker.class);
+      when(breaker.isOpen()).thenReturn(false);
+      when(breaker.allowRequest()).thenReturn(true);
+      SingleFlight realSingleFlight = new SingleFlightImpl(1000, 5, 5, Runnable::run, breaker);
+      versionController = mock(VersionController.class);
+      // Default probe: withheld (unstamped). Tests re-stub per scenario.
+      when(versionController.currentVersion(anyString())).thenReturn(Optional.empty());
+      when(versionController.nextVersion(anyString())).thenReturn(new VersionController.VersionResult(4L, false));
+
+      realFlightCache = new HotKeyCache(
+        hotKeyDetector,
+        realFlightL1,
+        realSingleFlight,
+        new ExpireManagerImpl(realFlightL1, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, healthView),
+        Runnable::run,
+        new CentralDispatcher(
+          Optional.empty(),
+          Optional.empty(),
+          new BroadcastBuffer(scheduler, Optional.empty()),
+          hotKeyDetector
+        ),
+        new RuleMatcherImpl(Optional.empty(), Optional.empty()),
+        versionController,
+        ttlConfig,
+        healthView,
+        CacheCompressor.NONE
+      );
+    }
+
+    /**
+     * The AUDIT-2 regression: a completed dedup future carrying the pre-write
+     * value must not be replayed onto a post-write miss — putThrough
+     * invalidates the dedup entry, so the next miss re-invokes the reader.
+     */
+    @Test
+    void putThrough_invalidatesDedupEntry_postWriteMissRereadsSource() {
+      AtomicInteger readerCalls = new AtomicInteger();
+      assertThat(realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "A";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("A");
+
+      realFlightCache.putThrough("k", "B", () -> {}, 0, 0, true);
+      assertThat(realFlightCache.peek("k")).contains("B");
+
+      // Simulate the L1 loss the dedup replay would ride on: an eviction, a
+      // peer INVALIDATE, or (pre-ADR-0067) the sender's own REFRESH drop.
+      realFlightL1.invalidate("k");
+
+      Optional<String> after = realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "B-fresh";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      assertThat(after).contains("B-fresh");
+      assertThat(readerCalls.get()).as("the post-write miss must re-invoke the reader").isEqualTo(2);
+    }
+
+    /** Same dedup contract for {@code invalidate}: the next miss re-reads. */
+    @Test
+    void invalidate_invalidatesDedupEntry_nextMissRereadsSource() {
+      AtomicInteger readerCalls = new AtomicInteger();
+      assertThat(realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "A";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("A");
+
+      realFlightCache.invalidate("k", false);
+
+      Optional<String> after = realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "fresh";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      assertThat(after).contains("fresh");
+      assertThat(readerCalls.get()).isEqualTo(2);
+    }
+
+    /**
+     * The load-path version guard: a load whose reader raced a concurrent
+     * putThrough (read pre-commit, ADR-0033 probe stamped post-INCR at the
+     * same version) must not regress L1 — the write's value survives.
+     */
+    @Test
+    void stampedLoad_notNewerThanExisting_refusesToRegressConcurrentWrite() {
+      when(versionController.currentVersion("k")).thenReturn(Optional.of(4L));
+
+      Optional<String> served = realFlightCache.get("k", CachePolicy.of(() -> {
+        // Concurrent write landing mid-load, before the load's own probe.
+        realFlightCache.putThrough("k", "B", () -> {}, 0, 0, false);
+        return "A-old";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      // The caller still sees what its reader loaded (the read raced the
+      // commit), but L1 must hold the write's value, not the stale reload.
+      assertThat(served).contains("A-old");
+      CacheEntry kept = (CacheEntry) realFlightL1.getIfPresent("k");
+      assertThat(kept.getDataVersion()).isEqualTo(4L);
+      assertThat(kept.getValue()).isEqualTo("B");
+    }
+
+    /**
+     * A null load replaces a Worker-managed entry that landed mid-load — the
+     * source's null answer is authoritative for the VALUE — but the decision
+     * stamp is carried into the sentinel (the pinned stamp-preservation
+     * semantics): state NORMAL, short null TTL, stamp intact for later
+     * decisionVersion ordering.
+     */
+    @Test
+    void nullLoad_replacesWorkerManagedEntry_preservingDecisionStamp() {
+      when(versionController.currentVersion("k")).thenReturn(Optional.of(6L));
+
+      Optional<String> served = realFlightCache.get("k", CachePolicy.of(() -> {
+        realFlightL1.put("k", workerHotEntry("w1", 1L));
+        return null;
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      assertThat(served).isEmpty();
+      CacheEntry sentinel = (CacheEntry) realFlightL1.getIfPresent("k");
+      assertThat(sentinel.getValue()).isEqualTo(NullValue.INSTANCE);
+      assertThat(sentinel.getKeyState()).isEqualTo(KeyState.NORMAL);
+      assertThat(sentinel.getDecisionNodeId()).isEqualTo("w1");
+      assertThat(sentinel.getDecisionEpoch()).isEqualTo(1L);
+      assertThat(sentinel.getDataVersion()).isEqualTo(6L);
+    }
+
+    /** A null load at the same version must not clobber an existing normal entry. */
+    @Test
+    void nullLoad_doesNotClobberSameVersionEntry() {
+      when(versionController.currentVersion("k")).thenReturn(Optional.of(4L));
+
+      realFlightCache.get("k", CachePolicy.of(() -> {
+        realFlightL1.put("k", normalEntry(4L));
+        return null;
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      CacheEntry kept = (CacheEntry) realFlightL1.getIfPresent("k");
+      assertThat(kept.getValue()).isEqualTo("v");
+      assertThat(kept.getDataVersion()).isEqualTo(4L);
+    }
+
+    /** An unstamped (fail-open) null load carries no version authority: it never replaces an entry. */
+    @Test
+    void unstampedNullLoad_doesNotReplaceExistingEntry() {
+      realFlightCache.get("k", CachePolicy.of(() -> {
+        realFlightL1.put("k", normalEntry(3L));
+        return null;
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      CacheEntry kept = (CacheEntry) realFlightL1.getIfPresent("k");
+      assertThat(kept.getValue()).isEqualTo("v");
+      assertThat(kept.getDataVersion()).isEqualTo(3L);
+    }
+
+    /** A null load probed strictly newer than the entry replaces it with a stamped sentinel. */
+    @Test
+    void nullLoad_probedNewer_replacesOlderEntryWithSentinel() {
+      when(versionController.currentVersion("k")).thenReturn(Optional.of(4L));
+
+      realFlightCache.get("k", CachePolicy.of(() -> {
+        realFlightL1.put("k", normalEntry(3L));
+        return null;
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      CacheEntry sentinel = (CacheEntry) realFlightL1.getIfPresent("k");
+      assertThat(sentinel.getValue()).isEqualTo(NullValue.INSTANCE);
+      assertThat(sentinel.getDataVersion()).isEqualTo(4L);
+      assertThat(sentinel.getKeyState()).isEqualTo(KeyState.NORMAL);
+    }
+
+    /**
+     * Same dedup contract for {@code compareAndInvalidate}: the removed key's
+     * completed dedup future must not be replayed onto the next miss — the
+     * replay would re-cache the value the caller just invalidated (the
+     * ADR-0067 compound repro shape on a second removal path).
+     */
+    @Test
+    void compareAndInvalidate_invalidatesDedupEntry_nextMissRereadsSource() {
+      AtomicInteger readerCalls = new AtomicInteger();
+      assertThat(realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "A";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("A");
+
+      assertThat(realFlightCache.compareAndInvalidate("k", "A")).isTrue();
+      assertThat(realFlightL1.getIfPresent("k")).isNull();
+
+      Optional<String> after = realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "fresh";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      assertThat(after).contains("fresh");
+      assertThat(readerCalls.get()).as("the post-invalidation miss must re-invoke the reader").isEqualTo(2);
+    }
+
+    /** A mismatching compareAndInvalidate removes nothing and must not touch the dedup cache. */
+    @Test
+    void compareAndInvalidate_mismatch_keepsEntryAndDedupFuture() {
+      AtomicInteger readerCalls = new AtomicInteger();
+      assertThat(realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "A";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("A");
+
+      assertThat(realFlightCache.compareAndInvalidate("k", "other")).isFalse();
+      assertThat(realFlightCache.peek("k")).contains("A");
+
+      // The entry survived, so its still-valid dedup future may serve the next hit.
+      assertThat(readerCalls.get()).isEqualTo(1);
+    }
+
+    /**
+     * Same dedup contract for {@code invalidateAllLocal}: the emergency flush
+     * must also clear the dedup cache — otherwise every flushed key with a
+     * completed future is re-cached from the replay within the dedup TTL.
+     */
+    @Test
+    void invalidateAllLocal_clearsDedupCache_nextMissRereadsSource() {
+      AtomicInteger readerCalls = new AtomicInteger();
+      assertThat(realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "A";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("A");
+
+      realFlightCache.invalidateAllLocal();
+      assertThat(realFlightL1.getIfPresent("k")).isNull();
+
+      Optional<String> after = realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "fresh";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+      assertThat(after).contains("fresh");
+      assertThat(readerCalls.get()).as("the post-flush miss must re-invoke the reader").isEqualTo(2);
+    }
+
+    /**
+     * REVALIDATE drop-and-reload of a soft-expired NORMAL entry must re-invoke
+     * the loader: the drop removes the L1 entry, so the ADR-0067 contract
+     * requires dropping the dedup entry too — without it, the reload replays
+     * the completed future (the pre-drop value) instead of the fresh load.
+     */
+    @Test
+    void revalidateDropOfSoftExpiredEntry_reinvokesLoader() {
+      AtomicInteger readerCalls = new AtomicInteger();
+      assertThat(realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "A";
+      }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains("A");
+
+      // Age the entry past its soft TTL (hard TTL stays valid) so the next
+      // REVALIDATE read takes the drop-and-reload branch.
+      CacheEntry stale = ((CacheEntry) realFlightL1.getIfPresent("k")).withSoftTtl(30_000, 1L);
+      realFlightL1.put("k", stale);
+
+      Optional<String> after = realFlightCache.get("k", CachePolicy.of(() -> {
+        readerCalls.incrementAndGet();
+        return "fresh";
+      }, 0L, 0L, true, true, StalePolicy.REVALIDATE));
+
+      assertThat(after).contains("fresh");
+      assertThat(readerCalls.get()).as("the drop-and-reload must re-invoke the loader").isEqualTo(2);
+      assertThat(realFlightL1.getIfPresent("k")).isInstanceOf(CacheEntry.class);
+      assertThat(((CacheEntry) realFlightL1.getIfPresent("k")).getValue()).isEqualTo("fresh");
+    }
+
+    private static CacheEntry normalEntry(long dataVersion) {
+      return CacheEntry.builder()
+        .value("v")
+        .dataVersion(dataVersion)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(300_000)
+        .hardExpireAtMs(Long.MAX_VALUE)
+        .softTtlMs(0)
+        .softExpireAtMs(0)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(0)
+        .build();
+    }
   }
 }

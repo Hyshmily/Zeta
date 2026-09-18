@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.cache.annotationsupporter;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheManager;
@@ -39,6 +40,9 @@ class ZetaCacheManagerTest {
   void setUp() {
     zeta = mock(Zeta.class);
     properties = mock(ZetaProperties.class);
+    // ZetaSpringCache captures the key prefix from the nested config at
+    // construction — stub the nested object the real properties always carry.
+    when(properties.getSpringCache()).thenReturn(new ZetaProperties.SpringCache());
     manager = new ZetaCacheManager(zeta, properties);
   }
 

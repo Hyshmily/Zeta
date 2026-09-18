@@ -120,7 +120,7 @@ public class ZetaFacadeAutoConfiguration {
     view.setMinAliveWorkers(properties.getHeartbeat().getMinAliveWorkers());
     if (properties.getHeartbeat().getMinAliveWorkers() <= 0) {
       log.warn(
-        "zeta.heartbeat.min-alive-workers is not configured; cluster health threshold defaults to one third of " +
+        "zeta.local.heartbeat.min-alive-workers is not configured; cluster health threshold defaults to one third of " +
           "observed Workers (minimum 1). A single surviving Worker is treated as a healthy cluster — see ADR-0028."
       );
     }

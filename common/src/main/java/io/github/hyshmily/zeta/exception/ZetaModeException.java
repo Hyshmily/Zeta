@@ -46,6 +46,8 @@ import lombok.Getter;
 @Getter
 public class ZetaModeException extends ZetaContextException {
 
+  private static final String SOURCE_CLASS = "ZetaModeException";
+
   private final String operation;
 
   private final String currentMode;
@@ -62,10 +64,7 @@ public class ZetaModeException extends ZetaContextException {
    *                      the operation (e.g. {@code "App-mode cache"})
    */
   public ZetaModeException(String operation, String currentMode, String requiredMode) {
-    super(
-      "ZetaModeException",
-      "HotKey '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode
-    );
+    super(SOURCE_CLASS, "HotKey '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode);
     this.operation = operation;
     this.currentMode = currentMode;
     this.requiredMode = requiredMode;

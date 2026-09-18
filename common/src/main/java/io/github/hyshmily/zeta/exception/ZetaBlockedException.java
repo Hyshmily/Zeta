@@ -24,6 +24,13 @@ import lombok.Getter;
  * callers from silently bypassing the block via
  * {@link java.util.Optional#orElseGet}.  The calling code must either
  * catch this exception or let it propagate.
+ * <p>
+ * Blacklisted keys are typically high-QPS keys and this exception is
+ * constructed per read, so it is built <b>without a stack trace</b>
+ * ({@code writableStackTrace=false}, ADR-0063): the throw sites are fixed
+ * guards inside {@code HotKeyCache} and {@link #getSourceClass()},
+ * {@link #getCacheKey()} and {@link #getTimestamp()} already carry the full
+ * diagnostics. {@code getStackTrace()} returns an empty array by design.
  */
 @Getter
 public class ZetaBlockedException extends ZetaContextException {
@@ -38,7 +45,7 @@ public class ZetaBlockedException extends ZetaContextException {
    * @param cacheKey    the key that was blocked by a blacklist rule
    */
   public ZetaBlockedException(String sourceClass, String cacheKey) {
-    super(sourceClass, "Cache key blocked by rule: " + cacheKey);
+    super(sourceClass, "Cache key blocked by rule: " + cacheKey, null, false, false);
     this.cacheKey = cacheKey;
   }
 }

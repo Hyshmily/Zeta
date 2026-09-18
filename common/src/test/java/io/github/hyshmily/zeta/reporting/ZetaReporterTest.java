@@ -18,6 +18,8 @@ package io.github.hyshmily.zeta.reporting;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -30,17 +32,19 @@ import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
+import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
-@Tag("performance")
 class ZetaReporterTest {
 
   private static final long REPORT_INTERVAL_MS = 50;
@@ -370,5 +374,76 @@ class ZetaReporterTest {
     failingReporter.start();
     assertThat(failingReporter.dispatcherDepth()).isNotNegative();
     failingReporter.stop();
+  }
+
+  /**
+   * Verifies the detached-routing-task failure guard: a throwing
+   * {@code routeNode} previously vanished with the discarded Future — no log,
+   * no counter bump, and recurring failures silenced ALL reporting. Now the
+   * failure is counted on the unroutable-drop counter (rate-limited ERROR)
+   * and the flush loop keeps routing later batches normally.
+   */
+  @Test
+  void flush_routeNodeThrows_shouldCountFailureAndKeepFlushLoopAlive() throws Exception {
+    AtomicInteger routeCalls = new AtomicInteger();
+    RingManager failingRing = mock(RingManager.class);
+    // onFlush() first materialises the alive set via reconcileFromHealthView; without this stub
+    // the mock returns null, onFlush NPEs on aliveNodes.isEmpty() and the routing-failure counter
+    // path is never exercised. Production routing calls routeNode(key, Predicate) (not the Set
+    // overload), so the stub must match that overload to let the good-key batch publish.
+    when(failingRing.reconcileFromHealthView(any())).thenReturn(Set.of("worker-1"));
+    when(failingRing.routeNode(anyString(), any(java.util.function.Predicate.class)))
+      .thenAnswer(inv -> {
+        if (routeCalls.incrementAndGet() <= 1) {
+          throw new IllegalStateException("ring boom");
+        }
+        return "worker-1";
+      });
+
+    KeyReporterImpl failing = new KeyReporterImpl(
+      testPublisher,
+      scheduler,
+      REPORT_INTERVAL_MS,
+      "testApp",
+      QUEUE_CAPACITY,
+      100,
+      1,
+      failingRing,
+      healthView,
+      mock(SnowflakeIdGenerator.class)
+    );
+    registerWorker(healthView, "worker-1");
+    failing.start();
+    try {
+      // First flush: routeNode throws inside the detached routing task.
+      failing.reportToWorker("boom-key");
+
+      AtomicLong unroutable = new AtomicLong(-1);
+      long deadline = System.currentTimeMillis() + AWAIT_TIMEOUT_MS;
+      while (System.currentTimeMillis() < deadline) {
+        unroutable.set(unroutableDropCounter(failing).get());
+        if (unroutable.get() > 0) {
+          break;
+        }
+        Thread.sleep(10);
+      }
+      // The failed batch's key was counted, not silently lost.
+      assertThat(unroutable.get()).isPositive();
+      assertThat(testPublisher.publishCount).isZero();
+
+      // A later batch routes normally — the flush loop survived the failure.
+      failing.reportToWorker("good-key");
+      awaitPublish(1);
+      assertThat(testPublisher.publishCount).isPositive();
+    } finally {
+      failing.stop();
+    }
+  }
+
+  /** Reflection accessor for the private unroutable-drop counter. */
+  private static AtomicLong unroutableDropCounter(KeyReporterImpl reporter) throws Exception {
+    Field f = KeyReporterImpl.class.getDeclaredField("unroutableDropCounter");
+    f.setAccessible(true);
+    return (AtomicLong) f.get(reporter);
   }
 }

@@ -20,7 +20,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Redis.VERSION_KEY_
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.util.TimeSource;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
@@ -97,10 +97,15 @@ public class VersionControllerImpl implements VersionController {
    * a genuine wraparound — an unthrottled ERROR would log false alarms at
    * concurrency rate.
    */
-  private static final long WRAPAROUND_LOG_WINDOW_MS = 10_000;
-
-  /** Last time (monotonic ms) the wraparound ERROR was logged; volatile for lock-free rate limiting. Seeded negative so the first alarm always fires ({@code TimeSource} starts near 0). */
-  private volatile long lastWraparoundLoggedAtMs = -WRAPAROUND_LOG_WINDOW_MS;
+  /**
+   * Strict one-per-window admission for the wraparound ERROR. Within the
+   * window the alarm is suppressed: an unthrottled ERROR would log false
+   * alarms at concurrency rate. Admission is strict — {@link LogThrottle}
+   * claims the window with a compare-and-set, so exactly one caller per window
+   * logs. The atomicity and the monotonic clock are provided by
+   * {@link LogThrottle}.
+   */
+  private final LogThrottle wraparoundLogThrottle = LogThrottle.perDefaultWindow();
 
   /** Holder for the Redis INCR script — lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
   @SuppressWarnings("java:S3985")
@@ -134,6 +139,13 @@ public class VersionControllerImpl implements VersionController {
    * (connection failure, timeout), the method falls back to the local degraded
    * counter via {@link #fallbackVersion()}.
    *
+   * <p>The fallback supplier is resolved <b>lazily</b> ({@code orElseGet}, never
+   * {@code orElse}): {@link #fallbackVersion()} has side effects — it bumps
+   * {@code fallbackVersionCounter} and consumes a Snowflake ID under a
+   * {@code synchronized} generator — so evaluating it on the healthy Redis path
+   * would inflate the degraded-version metric and burn a sequence number on every
+   * single write.
+   *
    * @param cacheKey the key to version; must not be null or empty
    * @return a {@link VersionResult} containing the new version number and a
    *         {@code degraded} flag indicating whether the version came from the
@@ -154,7 +166,7 @@ public class VersionControllerImpl implements VersionController {
           // can never regress. `regression` marks a v below the already-observed
           // floor — either a genuine INCR restart (version key expired, see
           // ADR-0022) or a benign concurrent interleaving; the alarm is
-          // rate-limited either way (see WRAPAROUND_LOG_WINDOW_MS).
+          // rate-limited either way (see LogThrottle.DEFAULT_WINDOW_MS).
           boolean[] regression = new boolean[1];
           versionFloorCache
             .asMap()
@@ -174,12 +186,12 @@ public class VersionControllerImpl implements VersionController {
           return fallbackVersion();
         }
       })
-      .orElse(fallbackVersion());
+      .orElseGet(this::fallbackVersion);
   }
 
   /**
    * Logs the wraparound ERROR, rate-limited to one per
-   * {@value #WRAPAROUND_LOG_WINDOW_MS}ms window. Within the window the alarm
+   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window. Within the window the alarm
    * is suppressed: under concurrency, benign interleavings (a later INCR
    * committing its floor update before an earlier INCR observes it) produce
    * the same v &lt; floor signature as a genuine wraparound, and a genuine
@@ -190,27 +202,25 @@ public class VersionControllerImpl implements VersionController {
    * @param v        the observed (lower) version
    */
   private void reportWraparound(String cacheKey, long v) {
-    long now = TimeSource.monotonicMillis();
-    if (now - lastWraparoundLoggedAtMs < WRAPAROUND_LOG_WINDOW_MS) {
-      log.debug(
-        "dataVersion below observed floor for key {}: {} (wraparound alarm suppressed within {}ms window)",
+    if (wraparoundLogThrottle.tryAcquire()) {
+      log.error(
+        "dataVersion wraparound detected for key {}: {} < floor {}. " +
+          "The Redis version key (zeta:version:{}) expired before the L1 entry, " +
+          "causing INCR to restart from 1. Increase versionKeyTtlMinutes (currently {} min) " +
+          "or avoid Long.MAX_VALUE hard TTL on this key.",
         cacheKey,
         v,
-        WRAPAROUND_LOG_WINDOW_MS
+        versionFloorCache.getIfPresent(cacheKey),
+        cacheKey,
+        versionKeyTtlMinutes
       );
       return;
     }
-    lastWraparoundLoggedAtMs = now;
-    log.error(
-      "dataVersion wraparound detected for key {}: {} < floor {}. " +
-        "The Redis version key (zeta:version:{}) expired before the L1 entry, " +
-        "causing INCR to restart from 1. Increase versionKeyTtlMinutes (currently {} min) " +
-        "or avoid Long.MAX_VALUE hard TTL on this key.",
+    log.debug(
+      "dataVersion below observed floor for key {}: {} (wraparound alarm suppressed within {}ms window)",
       cacheKey,
       v,
-      versionFloorCache.getIfPresent(cacheKey),
-      cacheKey,
-      versionKeyTtlMinutes
+      LogThrottle.DEFAULT_WINDOW_MS
     );
   }
 

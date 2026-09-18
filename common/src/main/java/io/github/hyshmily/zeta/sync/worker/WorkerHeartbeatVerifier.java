@@ -72,7 +72,7 @@ public class WorkerHeartbeatVerifier {
   private ExecutorService probeExecutor;
   private ScheduledFuture<?> verifyTask;
 
-  private static final String QUEUE_VERIFY_PING_PREFIX = "zeta.verify.ping.";
+  private static final String QUEUE_VERIFY_PING_PREFIX = ZetaConstants.Routing.QUEUE_PREFIX_VERIFY_PING;
   private static final int MAX_BACKOFF_SHIFT = 30;
   private static final int MAX_RETRY = 5;
   private static final int VERIFY_BATCH_TIMEOUT_SECONDS = 30;
@@ -196,7 +196,7 @@ public class WorkerHeartbeatVerifier {
    * <p>Every {@code verifyIntervalMs} milliseconds, iterates over all Workers in
    * {@link HealthView} that have exceeded {@code heartbeatTimeoutMs} without
    * a heartbeat and sends each a PING via Direct reply-to. On PONG, the Worker's
-   * health reportToWorker is restored; on timeout, the failure counter is incremented.
+   * health record is restored; on timeout, the failure counter is incremented.
    * <p>
    * The verification runs on a daemon background thread. The task is idempotent:
    * subsequent calls to this method after the verifier is already running are
@@ -255,7 +255,7 @@ public class WorkerHeartbeatVerifier {
    * <p>After {@code stop()}, the verifier can be restarted by calling {@link #start()}
    * again. See {@link #start()} for restart-safety details.
    */
-  public void stop() {
+  public synchronized void stop() {
     if (verifyTask != null) {
       verifyTask.cancel(false);
       verifyTask = null;
@@ -354,6 +354,12 @@ public class WorkerHeartbeatVerifier {
       } catch (InterruptedException ie) {
         Thread.currentThread().interrupt();
       }
+
+      // One health verdict per round, not per probe: with N suspected Workers all
+      // failing, a per-probe check would log the same WARN N times per round.
+      if (!healthView.isClusterHealthy()) {
+        log.warn("Cluster is unhealthy after verifying {} suspected workers", futures.size());
+      }
     } catch (Exception e) {
       log.error("Scheduled verifySuspectedWorkers failed", e);
     }
@@ -381,10 +387,6 @@ public class WorkerHeartbeatVerifier {
         nextVerifyTime.remove(workerId);
         healthView.recordPong(workerId);
       }
-
-      if (!healthView.isClusterHealthy()) {
-        log.warn("Cluster is unhealthy after verifying worker {}", workerId);
-      }
     } catch (Exception e) {
       log.error("Failed to probe worker {}", workerId, e);
       handleProbeFailure(workerId);
@@ -407,7 +409,7 @@ public class WorkerHeartbeatVerifier {
 
     int attempt = healthView.getVerifyFailures(workerId);
     if (attempt >= MAX_RETRY) {
-      log.warn("Worker {} confirmed dead ({} failures), removing reportToWorker", workerId, MAX_RETRY);
+      log.warn("Worker {} confirmed dead ({} failures), removing health record", workerId, MAX_RETRY);
       healthView.removeRecord(workerId);
       nextVerifyTime.remove(workerId);
       return;

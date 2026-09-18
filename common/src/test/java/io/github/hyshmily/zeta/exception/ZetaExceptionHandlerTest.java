@@ -46,8 +46,9 @@ class ZetaExceptionHandlerTest {
   void noHandler_shouldFallbackToWarnLog_withoutThrowing() {
     // No handler configured anywhere: handleException must degrade to the WARN-log fallback
     // and never throw on the caller's thread.
-    assertThatCode(() -> ZetaExceptionHandler.handleException("ctx", new IllegalStateException("boom")))
-      .doesNotThrowAnyException();
+    assertThatCode(() ->
+      ZetaExceptionHandler.handleException("ctx", new IllegalStateException("boom"))
+    ).doesNotThrowAnyException();
   }
 
   @Test
@@ -124,15 +125,34 @@ class ZetaExceptionHandlerTest {
 
   @Test
   void throwingHandler_shouldNotPropagate() {
-    ZetaExceptionHandler.setDefaultExceptionHandler(
-      t -> {
-        throw new IllegalStateException("handler is broken");
-      }
-    );
+    ZetaExceptionHandler.setDefaultExceptionHandler(t -> {
+      throw new IllegalStateException("handler is broken");
+    });
 
     // A misbehaving handler must never escape: the original failure is logged at ERROR level
     // and the caller's thread continues.
-    assertThatCode(() -> ZetaExceptionHandler.handleException("ctx", new IllegalStateException("boom")))
-      .doesNotThrowAnyException();
+    assertThatCode(() ->
+      ZetaExceptionHandler.handleException("ctx", new IllegalStateException("boom"))
+    ).doesNotThrowAnyException();
+  }
+
+  @Test
+  void fallbackDisabled_noHandler_shouldBeSilentNoOp() {
+    // Call sites that own their fallback logging (HotKeyCache read paths) disable the WARN
+    // fallback: without a handler nothing happens, and it never throws.
+    assertThatCode(() ->
+      ZetaExceptionHandler.handleException("ctx", new IllegalStateException("boom"), false)
+    ).doesNotThrowAnyException();
+  }
+
+  @Test
+  void fallbackDisabled_handlerPresent_shouldStillRoute() {
+    // The overload only disables the WARN fallback — a configured handler is still invoked.
+    AtomicInteger calls = new AtomicInteger(0);
+    ZetaExceptionHandler.setThreadExceptionHandler(t -> calls.incrementAndGet());
+
+    ZetaExceptionHandler.handleException("ctx", new IllegalStateException("boom"), false);
+
+    assertThat(calls.get()).isEqualTo(1);
   }
 }

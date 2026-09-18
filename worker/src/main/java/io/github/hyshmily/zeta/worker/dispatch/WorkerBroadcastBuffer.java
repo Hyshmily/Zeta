@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.worker.dispatch;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.util.TimeSource;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import jakarta.annotation.PreDestroy;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -57,7 +57,7 @@ import lombok.extern.slf4j.Slf4j;
  * </ul>
  *
  * <p>Send failures and saturation drops are aggregated into at most one WARN
- * per {@value #ERROR_LOG_WINDOW_MS}ms window (first send site keeps its own
+ * per {@value LogThrottle#DEFAULT_WINDOW_MS}ms window (first send site keeps its own
  * detailed log), so a RabbitMQ outage neither floods the log nor produces a
  * per-decision WARN storm.
  *
@@ -70,18 +70,17 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class WorkerBroadcastBuffer {
 
-  /** Window (ms) for the rate-limited aggregated failure/drop WARN (ADR-0037 convention). */
-  private static final long ERROR_LOG_WINDOW_MS = 10_000;
-
   private final ThreadPoolExecutor sendExecutor;
   private final AtomicInteger failedSinceLastLog = new AtomicInteger();
 
   /**
-   * Monotonic timestamp of the last aggregated failure/drop WARN. Volatile:
-   * {@code submit} is reachable from every AMQP consumer thread while the
-   * drain thread reports send failures.
+   * Rate-limits the aggregated failure/drop WARN to one per
+   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window (ADR-0037 convention).
+   * Admission is strict — {@link LogThrottle} claims the window with a compare-and-set,
+   * so exactly one caller per window logs. The atomicity and the monotonic
+   * clock are provided by {@link LogThrottle}.
    */
-  private volatile long lastErrorLoggedAtMs = -ERROR_LOG_WINDOW_MS;
+  private final LogThrottle errorLogThrottle = LogThrottle.perDefaultWindow();
 
   /**
    * Creates the buffer with a bounded single-threaded drain executor.
@@ -142,21 +141,19 @@ public class WorkerBroadcastBuffer {
 
   /**
    * Aggregates one failure (send failure or saturation drop) into the
-   * rate-limited WARN: at most one log per {@value #ERROR_LOG_WINDOW_MS}ms
+   * rate-limited WARN: at most one log per {@value LogThrottle#DEFAULT_WINDOW_MS}ms
    * window, reporting the number of failures accumulated since the last log.
    */
   private void noteFailure() {
     int failed = failedSinceLastLog.incrementAndGet();
-    long now = TimeSource.monotonicMillis();
-    if (now - lastErrorLoggedAtMs < ERROR_LOG_WINDOW_MS) {
+    if (!errorLogThrottle.tryAcquire()) {
       return;
     }
-    lastErrorLoggedAtMs = now;
     log.warn(
       "Failed to broadcast {} decision(s) since last report (send failures and saturation drops; " +
         "states rolled back, next evaluation re-emits; further failures suppressed for {}s)",
       failed,
-      ERROR_LOG_WINDOW_MS / 1000
+      LogThrottle.DEFAULT_WINDOW_MS / 1000
     );
     failedSinceLastLog.set(0);
   }

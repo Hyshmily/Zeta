@@ -35,7 +35,7 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
 
     // ── HeavyKeeper algorithm config ──
     "topKCapacity": 100,            // Max hot keys (HeavyKeeper K)
-    "sketchWidth": 50000,           // Count-Min Sketch width
+    "sketchWidth": 65536,           // Count-Min Sketch width (configured 50000, auto-aligned up to a power of two)
     "sketchDepth": 5,               // Count-Min Sketch depth
     "minCountThreshold": 10,        // Minimum count for hot promotion
     "expelledQueueSize": 2,         // Expelled queue backlog
@@ -54,7 +54,7 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
     // ── Reporter (app→Worker) ──
     "reportQueueDepth": 0,          // Reporter dispatcher queue depth
     "reportQueueCapacity": 10000,   // Reporter dispatcher queue capacity
-    "reportExpiredCount": 0,        // Cumulative expired batches
+    "reportExpiredCount": 0,        // Cumulative expired batches (dead routing target OR stale >5s in queue)
     "reportQueueFullCount": 0,      // Cumulative dropped batches (queue full)
     "reportPendingKeys": 0,         // Keys buffered in counter cache
 
@@ -118,7 +118,7 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.singleflight.inflight`        | Gauge | —                    | SingleFlight in-flight dedup count      |
 | `zeta.reporter.queue.depth`         | Gauge | —                    | Reporter queue backlog                  |
 | `zeta.reporter.queue.dropped.total` | Gauge | —                    | Cumulative dropped batches (queue full) |
-| `zeta.reporter.queue.expired.total` | Gauge | —                    | Cumulative expired batches              |
+| `zeta.reporter.queue.expired.total` | Gauge | —                    | Cumulative expired batches (dead target or stale >5s) |
 | `zeta.reporter.pending.keys`        | Gauge | —                    | Keys buffered in reporter counter cache |
 | `zeta.reporter.bbr.passed`          | Gauge | —                    | Reporter BBR passed count              |
 | `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR dropped count             |
@@ -183,3 +183,5 @@ curl -X POST http://localhost:8080/actuator/hotkey/worker/state \
   "status": "ok"
 }
 ```
+
+**Validation:** the POST-applied combination must satisfy the same invariant the config-negotiation layer enforces on heartbeat gossip — `confirmCount >= 1`, `preCoolGraceCount >= 1` and `coolCount > preCoolGraceCount` (provided fields override, the others keep their current values). A violating POST is rejected with `"status": "error"` and nothing is applied: a locally-accepted but gossip-rejected config would leave this Worker permanently divergent with no reconciliation path. A POST with no recognized fields is a pure no-op (no rewrite, no timestamp bump).

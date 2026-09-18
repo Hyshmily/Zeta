@@ -92,7 +92,9 @@ public class ZetaAutoConfiguration {
    * threshold and exponential decay to track the top-K hottest keys with high
    * accuracy and low memory footprint. Configuration parameters (width, depth,
    * decay, minCount, topK capacity, expelled queue capacity) are read from
-   * {@link ZetaProperties}.
+   * {@link ZetaProperties}. The configured width is auto-aligned up to the
+   * nearest power of two so bucket indexing takes the mask fast path (the
+   * aligned value is logged at INFO).
    *
    * @param properties the HotKey configuration properties (never {@code null})
    * @return a new HeavyKeeper TopK instance
@@ -107,7 +109,8 @@ public class ZetaAutoConfiguration {
       properties.getDecay(),
       properties.getMinCount(),
       properties.getExpelledQueueCapacity(),
-      properties.getSketchWindowCount()
+      properties.getSketchWindowCount(),
+      true
     );
   }
 
@@ -373,8 +376,8 @@ public class ZetaAutoConfiguration {
    * Create the L1 Caffeine cache instance.
    *
    * <p>Time-based expiry operates at the <em>Caffeine</em> level via a custom
-   * {@link Expiry} implementation, computing remaining nanoseconds from
-   * . Entries with
+   * {@link Expiry} implementation, computing remaining nanoseconds from the
+   * entry's {@code hardExpireAtMs} wall-clock deadline. Entries with
    * {@code hardExpireAtMs == Long.MAX_VALUE} are purely logical-expiry
    * — Caffeine never evicts them by time; they live until size eviction or
    * manual invalidation. Reads never extend the expiry duration (no read-based

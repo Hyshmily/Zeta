@@ -30,6 +30,9 @@ import java.io.Serializable;
 @Internal
 public final class NullValue implements Serializable {
 
+  @Serial
+  private static final long serialVersionUID = 1L;
+
   /** Singleton instance. */
   public static final NullValue INSTANCE = new NullValue();
 

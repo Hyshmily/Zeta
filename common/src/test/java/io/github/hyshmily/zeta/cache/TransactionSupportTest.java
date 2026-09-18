@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.TransactionSupport;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
@@ -40,6 +41,26 @@ class TransactionSupportTest {
     AtomicBoolean executed = new AtomicBoolean(false);
     TransactionSupport.runNowOrAfterCommit(() -> executed.set(true));
     assertThat(executed).isTrue();
+  }
+
+  /**
+   * Verifies that a <em>submit-time</em> rejection is absorbed instead of propagating.
+   * {@code CompletableFuture.runAsync} throws {@link RejectedExecutionException} synchronously when
+   * the executor refuses the task, and {@code exceptionally()} is attached to the future — it never
+   * sees a submit-time failure. Unhandled, that would surface as an exception on a business call
+   * whose method body already ran, while the deferred work (including the data-source write) never
+   * happened.
+   */
+  @Test
+  void runAsyncAfterCommit_whenExecutorRejects_shouldNotPropagate() {
+    AtomicBoolean executed = new AtomicBoolean(false);
+    Executor rejecting = task -> {
+      throw new RejectedExecutionException("queue full");
+    };
+
+    TransactionSupport.runAsyncAfterCommit(() -> executed.set(true), rejecting);
+
+    assertThat(executed).isFalse();
   }
 
   /**

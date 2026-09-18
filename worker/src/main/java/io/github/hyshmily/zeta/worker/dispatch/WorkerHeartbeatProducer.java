@@ -19,6 +19,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTB
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
@@ -37,7 +38,6 @@ import lombok.AccessLevel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.context.annotation.DependsOn;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -53,8 +53,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  */
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 @Slf4j
-@DependsOn("rabbitAdmin")
-@SuppressWarnings("SpringDependsOnUnresolvedBeanInspection")
 public class WorkerHeartbeatProducer {
 
   /** RabbitMQ template for publishing heartbeat messages. */
@@ -83,8 +81,11 @@ public class WorkerHeartbeatProducer {
   /** Handle for the scheduled heartbeat task. */
   private ScheduledFuture<?> heartbeatTask;
 
-  /** Timestamp of the last ERROR log for heartbeat send failure (rate-limiting). */
-  private long lastErrorLogMs;
+  /** Window (ms) for the rate-limited heartbeat send-failure WARN (ADR-0037 convention). */
+  private static final long HEARTBEAT_ERROR_LOG_WINDOW_MS = 60_000L;
+
+  /** Rate-limits the heartbeat send-failure WARN to one per window. */
+  private final LogThrottle heartbeatErrorLogThrottle = new LogThrottle(HEARTBEAT_ERROR_LOG_WINDOW_MS);
 
   private static final String EPOCH_REDIS_KEY_PREFIX = "zeta:worker:epoch:";
 
@@ -392,10 +393,8 @@ public class WorkerHeartbeatProducer {
       );
       rabbitTemplate.send(heartbeatExchange, KEY_HEARTBEAT + workerId, hb.toMessage());
     } catch (Exception e) {
-      long now = TimeSource.monotonicMillis();
-      if (now - lastErrorLogMs > 60_000L) {
+      if (heartbeatErrorLogThrottle.tryAcquire()) {
         log.warn("Scheduled sendHeartbeat failed (rate-limited, next WARN in 60s)", e);
-        lastErrorLogMs = now;
       }
     }
   }

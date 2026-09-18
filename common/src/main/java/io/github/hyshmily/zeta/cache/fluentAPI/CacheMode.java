@@ -25,7 +25,10 @@ import io.github.hyshmily.zeta.Zeta;
  * {@link Zeta#getWithSoftExpire} semantics.
  */
 public enum CacheMode {
-  /** Standard cache read — returns immediately if the key is not in L1. */
+  /**
+   * Standard cache read — on a miss the primary reader is invoked synchronously
+   * and the caller waits for the loaded value.
+   */
   GET,
 
   /**

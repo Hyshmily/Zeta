@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.worker.detection.impl;
 
+import io.github.hyshmily.zeta.util.LogThrottle;
+
 /**
  * Counts per-key state transitions and tells the caller when a rate-limited
  * aggregate summary is due — at most one per {@value #WINDOW_MS}ms window,
@@ -24,29 +26,24 @@ package io.github.hyshmily.zeta.worker.detection.impl;
  * throttle bounds the accompanying INFO visibility line so a mass-heat event
  * (thousands of keys transitioning in one report batch) emits a single
  * summary instead of one log per key — the design principle "never INFO on
- * the hot path". Package-private: an internal detail of the state machine's
- * logging, unit-tested directly with synthetic clocks.
+ * the hot path".
+ *
+ * <p>The window/admission logic lives in {@link LogThrottle.Accumulator}, the
+ * shared log-throttling utility; this adapter keeps the state machine's call
+ * sites and synthetic-clock tests unchanged. Package-private: an internal
+ * detail of the state machine's logging.
  */
 final class TransitionLogThrottle {
 
   /** Window between aggregate transition summaries ({@value #WINDOW_MS}ms). */
-  static final long WINDOW_MS = 10_000;
+  public static final long WINDOW_MS = 10_000;
 
-  /** Transitions recorded since the last emitted summary. Guarded by {@code this}. */
-  private long countSinceSummary = 0;
-
-  /**
-   * Monotonic timestamp of the last summary. Initialized to {@code -WINDOW_MS}
-   * (the ReportConsumer broadcast-failure WARN convention) so the very first
-   * transition always emits a summary.
-   */
-  private long lastSummaryAtMs = -WINDOW_MS;
+  /** Shared accumulating throttle; owns the count and window state. */
+  private final LogThrottle.Accumulator delegate = new LogThrottle.Accumulator(WINDOW_MS);
 
   /**
    * Records one transition and reports whether the summary window has
-   * elapsed. Synchronized: report consumers evaluate keys concurrently, and
-   * transitions must neither lose counts nor emit two summaries for one
-   * window.
+   * elapsed.
    *
    * @param now current monotonic millis
    * @return the number of transitions since the last summary when a summary
@@ -54,16 +51,7 @@ final class TransitionLogThrottle {
    *         accounted into exactly one returned count, so the sum of all
    *         returned counts equals the total number of records.
    */
-  @SuppressWarnings("java:S6213")
-  synchronized long record(long now) {
-    countSinceSummary++;
-    if (now - lastSummaryAtMs < WINDOW_MS) {
-      return -1;
-    }
-
-    long due = countSinceSummary;
-    countSinceSummary = 0;
-    lastSummaryAtMs = now;
-    return due;
+  long record(long now) {
+    return delegate.record(now);
   }
 }

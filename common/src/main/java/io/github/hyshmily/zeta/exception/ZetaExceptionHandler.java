@@ -64,9 +64,9 @@ public final class ZetaExceptionHandler {
 
   private static final ThreadLocal<ExceptionHandler> THREAD_LOCAL_HANDLER = new ThreadLocal<>();
 
-  private static final InheritableThreadLocal<ExceptionHandler> INHERITED_HANDLER =
-    new InheritableThreadLocal<>();
+  private static final InheritableThreadLocal<ExceptionHandler> INHERITED_HANDLER = new InheritableThreadLocal<>();
 
+  @SuppressWarnings("java:S3077") // volatile is enough for a single reference, no need for AtomicReference
   private static volatile ExceptionHandler defaultHandler = null;
 
   private ZetaExceptionHandler() {
@@ -158,6 +158,28 @@ public final class ZetaExceptionHandler {
    * @param t       the throwable to handle; may be {@code null} (no-op)
    */
   public static void handleException(String context, Throwable t) {
+    handleException(context, t, true);
+  }
+
+  /**
+   * Resolves the handler <b>exactly once</b> and routes the throwable to it. Call sites that
+   * own their fallback logging (e.g. {@code HotKeyCache} read paths log their own rate-limited
+   * ERROR) pass {@code fallbackToWarn=false} so that a missing handler is a silent no-op here
+   * instead of the WARN fallback — this also avoids the duplicate-log race of a
+   * {@link #getExceptionHandler()} pre-check followed by {@link #handleException(String, Throwable)},
+   * where a handler being installed or cleared between the two resolutions could produce both
+   * the handler route and a fallback log for one failure.
+   *
+   * <p>Same never-throws guarantee as {@link #handleException(String, Throwable)}: a throwing
+   * handler is caught and reported at ERROR level, and {@code null} input is a no-op.
+   *
+   * @param context         human-readable description of where the failure occurred
+   * @param t               the throwable to handle; may be {@code null} (no-op)
+   * @param fallbackToWarn  {@code true} to log at WARN when no handler is configured (the
+   *                        {@link #handleException(String, Throwable)} behaviour);
+   *                        {@code false} to do nothing when no handler is configured
+   */
+  public static void handleException(String context, Throwable t, boolean fallbackToWarn) {
     if (t == null) {
       return;
     }
@@ -165,7 +187,7 @@ public final class ZetaExceptionHandler {
       ExceptionHandler handler = getExceptionHandler();
       if (handler != null) {
         handler.handleException(t);
-      } else {
+      } else if (fallbackToWarn) {
         log.warn("{} — uncaught exception", context, t);
       }
     } catch (Throwable handlerError) {

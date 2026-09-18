@@ -30,7 +30,7 @@ import io.github.hyshmily.zeta.Zeta;
  *       always enables Caffeine's {@code recordStats()}. If a custom
  *       {@code Cache} bean is supplied without {@code recordStats()}, all
  *       four fields report {@code 0}.</li>
- *   <li>{@code estimatedSizeOfKeysCount} is always available — it reflects the
+ *   <li>{@code estimatedSize} is always available — it reflects the
  *       underlying Caffeine estimate and does not require stats recording.</li>
  * </ul>
  *

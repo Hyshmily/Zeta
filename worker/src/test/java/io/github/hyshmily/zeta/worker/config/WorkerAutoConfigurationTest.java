@@ -79,6 +79,59 @@ class WorkerAutoConfigurationTest {
   }
 
   /**
+   * ADR-0024/0068 addendum: the rebroadcast interval is the self-healing upper bound
+   * for a lost HOT decision, so an out-of-range value (below 1s = broadcast storm,
+   * above 60s = minutes-long preheat loss) must abort startup. Enforced declaratively
+   * by {@code @Min(1000)}/{@code @Max(60000)} on
+   * {@code WorkerProperties.StateMachine.rebroadcastIntervalMs} at binding time.
+   */
+  @Test
+  @DisplayName("rebroadcast interval outside [1000, 60000] fails startup")
+  void rebroadcastIntervalOutsideBoundsFailsStartup() {
+    new ApplicationContextRunner()
+      .withPropertyValues(
+        "zeta.worker.enabled=true",
+        "zeta.worker.state-machine.rebroadcast-interval-ms=61000"
+      )
+      .withUserConfiguration(MinimalMockConfiguration.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx.getStartupFailure()).isNotNull();
+        assertThat(ctx.getStartupFailure()).hasStackTraceContaining("rebroadcastIntervalMs");
+      });
+
+    new ApplicationContextRunner()
+      .withPropertyValues(
+        "zeta.worker.enabled=true",
+        "zeta.worker.state-machine.rebroadcast-interval-ms=999"
+      )
+      .withUserConfiguration(MinimalMockConfiguration.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        assertThat(ctx.getStartupFailure()).isNotNull();
+        assertThat(ctx.getStartupFailure()).hasStackTraceContaining("rebroadcastIntervalMs");
+      });
+  }
+
+  /**
+   * Verifies the boundary values of the rebroadcast interval validation are accepted.
+   */
+  @Test
+  @DisplayName("rebroadcast interval boundary values are accepted")
+  void rebroadcastIntervalBoundaryValuesAreAccepted() {
+    for (String value : new String[] {"1000", "60000"}) {
+      new ApplicationContextRunner()
+        .withPropertyValues(
+          "zeta.worker.enabled=true",
+          "zeta.worker.state-machine.rebroadcast-interval-ms=" + value
+        )
+        .withUserConfiguration(MinimalMockConfiguration.class)
+        .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+        .run(ctx -> assertThat(ctx).hasSingleBean(ReportConsumer.class));
+    }
+  }
+
+  /**
    * Verifies no worker beans are created when {@code zeta.worker.enabled=false}.
    */
   @Test

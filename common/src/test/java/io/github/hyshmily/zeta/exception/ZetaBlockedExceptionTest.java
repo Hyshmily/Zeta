@@ -40,6 +40,14 @@ class ZetaBlockedExceptionTest {
   }
 
   @Test
+  void shouldNotCarryStackTrace() {
+    // ADR-0063: constructed per read on high-QPS blocked keys, so stack filling is
+    // disabled — getStackTrace() is empty by design; fields carry the diagnostics.
+    var ex = new ZetaBlockedException("Test", "k");
+    assertThat(ex.getStackTrace()).isEmpty();
+  }
+
+  @Test
   void shouldSupportCauseChaining() {
     // ZetaBlockedException has no cause constructor; getCause() must be null
     var ex = new ZetaBlockedException("Test", "k");

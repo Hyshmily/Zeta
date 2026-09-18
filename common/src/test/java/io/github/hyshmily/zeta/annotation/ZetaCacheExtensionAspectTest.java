@@ -1152,7 +1152,10 @@ class ZetaCacheExtensionAspectTest {
     aspect.aroundCacheable(pjp);
 
     verify(zeta).notifyLocalDetectorDirect(
-      Map.of("test::preload-key-a", Long.MAX_VALUE, "test::preload-key-b", Long.MAX_VALUE)
+      Map.of(
+        "test::preload-key-a", (long) Integer.MAX_VALUE,
+        "test::preload-key-b", (long) Integer.MAX_VALUE
+      )
     );
   }
 
@@ -1175,7 +1178,7 @@ class ZetaCacheExtensionAspectTest {
 
     aspect.aroundCacheable(pjp);
 
-    verify(zeta).notifyLocalDetectorDirect("test::myDynamicKey", Long.MAX_VALUE);
+    verify(zeta).notifyLocalDetectorDirect("test::myDynamicKey", Integer.MAX_VALUE);
   }
 
   @Test
@@ -1200,7 +1203,10 @@ class ZetaCacheExtensionAspectTest {
     aspect.aroundCacheable(pjp);
 
     verify(zeta, times(1)).notifyLocalDetectorDirect(
-      Map.of("test::preload-key-a", Long.MAX_VALUE, "test::preload-key-b", Long.MAX_VALUE)
+      Map.of(
+        "test::preload-key-a", (long) Integer.MAX_VALUE,
+        "test::preload-key-b", (long) Integer.MAX_VALUE
+      )
     );
   }
 }

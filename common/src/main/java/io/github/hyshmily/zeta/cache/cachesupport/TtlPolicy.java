@@ -325,12 +325,23 @@ public final class TtlPolicy {
   /**
    * Check whether the given key's soft TTL has expired.
    *
-   * @return {@code true} if the entry's soft TTL has expired or the entry is absent
+   * <p>{@code softExpireAtMs == 0} is the documented "disabled" value
+   * ({@link #toSoftExpireTimestamp(long)} returns 0 for a non-positive soft
+   * TTL): a disabled soft TTL never goes stale, so no stale-policy branch
+   * (SOFT_REFRESH / REVALIDATE) may fire for such an entry — the former
+   * {@code <= 0} reading armed a background refresh (reader + Redis version
+   * probe) on <b>every</b> hit and never healed, the exact load storm the
+   * "disabled" contract exists to prevent. {@code NullValue} sentinels carry
+   * 0 as well; their short HARD TTL remains the penetration guard, so they
+   * are unaffected.
+   *
+   * @return {@code true} if the entry's soft TTL is enabled and has expired,
+   *         or the entry is absent
    */
   public boolean isSoftExpired(@Nullable Object cacheEntry) {
     if (cacheEntry instanceof CacheEntry ce) {
       long expireAt = ce.getSoftExpireAtMs();
-      return expireAt <= 0 || expireAt < TimeSource.currentTimeMillis();
+      return expireAt > 0 && expireAt < TimeSource.currentTimeMillis();
     }
     return true;
   }

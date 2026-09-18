@@ -74,10 +74,7 @@ public class ZetaCacheManager implements CacheManager {
   @Override
   public Cache getCache(@NonNull String name) {
     Cache cache = cacheMap.get(name);
-    if (cache != null) {
-      return cache;
-    }
-    return createAndRegisterCache(name);
+    return cache != null ? cache : createAndRegisterCache(name);
   }
 
   private synchronized Cache createAndRegisterCache(String name) {

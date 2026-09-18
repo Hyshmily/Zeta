@@ -45,12 +45,12 @@ import org.springframework.context.annotation.Bean;
  *
  * <p>Creates three endpoint beans:
  * <ul>
- *   <li>{@link ZetaEndpoint} &mdash; {@code /actuator/zeta}: comprehensive
+ *   <li>{@link ZetaEndpoint} &mdash; {@code /actuator/hotkey}: comprehensive
  *       diagnostics including TopK rankings, cache metrics, SingleFlight, reporter
  *       stats, rules, TTLs, version tracking, and cluster health.</li>
  *   <li>{@link RingEndpoint} &mdash; {@code /actuator/hotkeyring}: consistent-hash
  *       ring CRUD (requires MVC and consistent-hashing enabled).</li>
- *   <li>{@link StateMachineEndpoint} &mdash; {@code /actuator/zeta/worker/state}:
+ *   <li>{@link StateMachineEndpoint} &mdash; {@code /actuator/hotkey/worker/state}:
  *       Worker state-machine configuration (requires Worker mode and MVC).</li>
  * </ul>
  *
@@ -150,7 +150,7 @@ public class ZetaActuatorAutoConfiguration {
    *
    * <p>Only active when a {@link ZetaBayesianSM} bean is present
    * (i.e. in Worker mode) and Spring MVC is on the classpath.
-   * Exposes REST endpoints at {@code /actuator/zeta/worker/state}
+   * Exposes REST endpoints at {@code /actuator/hotkey/worker/state}
    * for GET (read config) and POST (update config) operations.
    * Configuration changes propagate to peer Workers via heartbeat send.
    *

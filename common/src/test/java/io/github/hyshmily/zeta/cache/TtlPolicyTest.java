@@ -262,11 +262,13 @@ class TtlPolicyTest {
   }
 
   /**
-   * Verifies that isSoftExpired with softExpireAtMs=0 returns true
-   * (zero means immediately expired).
+   * Verifies that isSoftExpired with softExpireAtMs=0 returns false — zero is
+   * the documented "disabled" value of toSoftExpireTimestamp, and a disabled
+   * soft TTL never reads as stale (the former "zero = immediately expired"
+   * reading armed a background refresh on every hit and never healed).
    */
   @Test
-  void isSoftExpired_withZeroExpireAt_shouldReturnTrue() {
+  void isSoftExpired_withZeroExpireAt_shouldReturnFalse() {
     CacheEntry entry = CacheEntry.builder()
       .value("v")
       .dataVersion(1)
@@ -280,7 +282,7 @@ class TtlPolicyTest {
       .normalHardTtlMs(300_000)
       .normalSoftTtlMs(30_000)
       .build();
-    assertThat(ttlPolicy.isSoftExpired(entry)).isTrue();
+    assertThat(ttlPolicy.isSoftExpired(entry)).isFalse();
   }
 
   /**

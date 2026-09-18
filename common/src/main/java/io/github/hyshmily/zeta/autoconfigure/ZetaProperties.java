@@ -194,9 +194,18 @@ public class ZetaProperties {
   @Min(1)
   private int versionKeyTtlMinutes = 10080;
 
+  /**
+   * Default application name. Kept for backward compatibility, but note that a
+   * <em>shared</em> default silently disables ADR-0068 application isolation: two
+   * applications that both keep it consider each other "the same app" and keep
+   * processing one another's broadcasts. Deployments that share a broker must set a
+   * unique {@code zeta.local.app-name}; a startup WARN flags the default.
+   */
+  public static final String DEFAULT_APP_NAME = "default";
+
   /** Application name used for queue naming and routing keys. Must match {@code [A-Za-z0-9_-]+}. */
   @Pattern(regexp = "^[A-Za-z0-9_-]+$", message = "appName must match ^[A-Za-z0-9_-]+$")
-  private String appName = "default";
+  private String appName = DEFAULT_APP_NAME;
 
   /** Exchange name for app-to-Worker reportToWorker routing. */
   private String reportExchange = ZetaConstants.Exchange.REPORT;

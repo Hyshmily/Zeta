@@ -68,6 +68,7 @@ class WorkerBroadcasterTest {
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_HOT);
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_IS_VERSION_DEGRADED)).isEqualTo(false);
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("testApp");
     assertThat((Long) sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isPositive();
   }
 
@@ -82,6 +83,7 @@ class WorkerBroadcasterTest {
     assertThat(new String(sent.getBody())).isEqualTo("myKey");
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_TYPE)).isEqualTo(WorkerMessage.TYPE_COOL);
     assertThat(sent.getMessageProperties().getHeaders().get(HEADER_IS_VERSION_DEGRADED)).isEqualTo(false);
+    assertThat(sent.getMessageProperties().getHeaders().get(HEADER_APP_NAME)).isEqualTo("testApp");
     assertThat((Long) sent.getMessageProperties().getHeaders().get(HEADER_VERSION)).isPositive();
   }
 

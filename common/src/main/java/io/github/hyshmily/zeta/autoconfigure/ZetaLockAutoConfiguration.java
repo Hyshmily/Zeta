@@ -42,7 +42,10 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  * {@code null} / {@code false}.
  */
 @Internal
-@AutoConfiguration(after = ZetaFacadeAutoConfiguration.class)
+@AutoConfiguration(
+  after = ZetaFacadeAutoConfiguration.class,
+  afterName = "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration"
+)
 @ConditionalOnClass(name = "org.springframework.data.redis.core.StringRedisTemplate")
 public class ZetaLockAutoConfiguration {
 

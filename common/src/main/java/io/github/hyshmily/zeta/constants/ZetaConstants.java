@@ -36,6 +36,14 @@ public interface ZetaConstants {
     String HEADER_IS_VERSION_DEGRADED = "isVersionDegraded";
     /** Origin node identifier. */
     String HEADER_NODE_ID = "nodeId";
+    /**
+     * Sending Worker's appName on HOT/COOL decision broadcasts (ADR-0068). Receivers
+     * configured with their own appName drop decisions whose appName header differs —
+     * the fanout exchange ignores the routing key, so on a shared broker every bound
+     * queue receives every app's decisions. Absent on messages from pre-0068 Workers
+     * (rolling upgrade); an absent appName is always processed.
+     */
+    String HEADER_APP_NAME = "appName";
     /** Message creation timestamp. */
     String HEADER_TIMESTAMP = "timestamp";
     /** Worker epoch (restart generation counter). */
@@ -72,6 +80,16 @@ public interface ZetaConstants {
     String HEADER_FASTLANE_RULES_VERSION = "fastlaneRulesVersion";
     /** Snowflake message ID for end-to-end tracing. */
     String HEADER_MESSAGE_ID = "messageId";
+    /**
+     * Publishing app instance's {@code InstanceIdGenerator.get()} instance ID on
+     * instance-to-instance sync messages (ADR-0067). Receivers drop their own
+     * REFRESH broadcasts — the sender's entry at the broadcast version is
+     * definitionally current — while self-INVALIDATE is still processed (it
+     * heals invalidate-vs-reload repopulations stamped with older versions).
+     * Absent on messages from pre-0067 senders (rolling upgrade); an absent
+     * origin is always processed.
+     */
+    String HEADER_ORIGIN_INSTANCE = "originInstance";
   }
 
   /** Thread name prefixes for zeta thread pools. */
@@ -106,6 +124,10 @@ public interface ZetaConstants {
     String KEY_FASTLANE_RULES = "fastlane.rules";
     /** Queue name prefix for reportToWorker queues (appended with app name). */
     String QUEUE_PREFIX_REPORT = "zeta.reportToWorker.";
+    /** Queue name prefix for the Worker's per-node config gossip queue (appended with nodeId). */
+    String QUEUE_PREFIX_WORKER_CONFIG = "zeta.worker.config.";
+    /** Queue name prefix for the Worker's per-node verify PING queue (appended with nodeId). */
+    String QUEUE_PREFIX_VERIFY_PING = "zeta.verify.ping.";
   }
 
   /** Source identifiers for decision origins. */

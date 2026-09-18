@@ -21,11 +21,7 @@ import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import io.github.hyshmily.zeta.worker.confidence.ConfidenceEvaluator;
-import io.github.hyshmily.zeta.worker.detection.DefaultEvaluator;
-import io.github.hyshmily.zeta.worker.detection.Evaluator;
-import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
-import io.github.hyshmily.zeta.worker.detection.SlidingWindowDetector;
-import io.github.hyshmily.zeta.worker.detection.ThresholdLearner;
+import io.github.hyshmily.zeta.worker.detection.*;
 import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
@@ -48,8 +44,8 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -59,6 +55,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.util.Assert;
 
 /**
  * Auto‑configuration for the <b>hot‑key Worker</b>.
@@ -126,6 +123,28 @@ public class WorkerAutoConfiguration {
   }
 
   /**
+   * Bounds the periodic HOT rebroadcast interval (ADR-0024 / ADR-0068 addendum).
+   *
+   * <p>The rebroadcast interval is the self-healing upper bound for a lost HOT
+   * decision (the whole pipeline is fire-and-forget, ADR-0007), so a misconfigured
+   * value directly widens the preheat loss window. Unlike the cosmetic
+   * window-divisibility check above, this is a correctness knob and fails fast:
+   * below 1s the rebroadcast degenerates into a per-report broadcast storm for
+   * every continuously-hot key; above 60s a lost HOT can leave new instances
+   * un-prewarmed for minutes. Values outside {@code [1_000, 60_000]} abort startup.
+   */
+  @PostConstruct
+  void validateRebroadcastInterval() {
+    long interval = properties.getStateMachine().getRebroadcastIntervalMs();
+    Assert.state(
+      interval >= 1_000 && interval <= 60_000,
+      "zeta.worker.state-machine.rebroadcast-interval-ms must be within [1000, 60000] " +
+        "(self-healing upper bound for a lost HOT decision; default 10000), got: " +
+        interval
+    );
+  }
+
+  /**
    * Creates the sliding‑window detector.
    *
    * <p>If an absolute hot threshold is configured via
@@ -143,6 +162,7 @@ public class WorkerAutoConfiguration {
     if (threshold <= 0) {
       threshold = Long.MAX_VALUE;
     }
+
     return new SlidingWindowDetector(
       properties.getSlidingWindow().getDurationMs(),
       properties.getSlidingWindow().getSlices(),
@@ -276,7 +296,12 @@ public class WorkerAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  @ConditionalOnProperty(prefix = "zeta.worker.broadcast", name = "buffer-enabled", havingValue = "true", matchIfMissing = true)
+  @ConditionalOnProperty(
+    prefix = "zeta.worker.broadcast",
+    name = "buffer-enabled",
+    havingValue = "true",
+    matchIfMissing = true
+  )
   public WorkerBroadcastBuffer workerBroadcastBuffer(WorkerProperties properties) {
     return new WorkerBroadcastBuffer(properties.getBroadcast().getBufferCapacity());
   }
@@ -321,9 +346,10 @@ public class WorkerAutoConfiguration {
    * queues. The routing key set by {@link WorkerBroadcaster} ({@code send.}
    * + appName) is purely decorative. If multiple appName clusters share the
    * same broker, every app queue bound to this exchange receives every
-   * decision — there is no per-appName isolation at the exchange level.
-   * Per-appName filtering must be implemented by the receiver (e.g. by
-   * checking the message headers).
+   * decision — since ADR-0068 each broadcast carries the sender's appName
+   * header and receivers drop foreign-app decisions, so per-appName isolation
+   * now exists at the receiver. Pre-0068 receivers (no appName configured)
+   * process everything, exactly as before.
    *
    * @param properties worker configuration providing the broadcast exchange name
    * @return a durable, non-auto-delete {@link FanoutExchange}
@@ -408,7 +434,7 @@ public class WorkerAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean(name = "workerConfigQueue")
   public Queue workerConfigQueue() {
-    return QueueBuilder.nonDurable("zeta.worker.config." + nodeId).autoDelete().build();
+    return QueueBuilder.nonDurable(ZetaConstants.Routing.QUEUE_PREFIX_WORKER_CONFIG + nodeId).autoDelete().build();
   }
 
   /**
@@ -491,7 +517,7 @@ public class WorkerAutoConfiguration {
     } catch (Exception e) {
       log.error("Failed to schedule fast-lane rules gossip task; rules will only propagate on local mutation.", e);
     }
-    return (Runnable) () -> {};
+    return () -> {};
   }
 
   /**
@@ -763,7 +789,12 @@ public class WorkerAutoConfiguration {
     FastLaneRuleManager fastLaneRuleManager,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler
   ) {
-    WorkerConfigNegotiator negotiator = new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId, fastLaneRuleManager);
+    WorkerConfigNegotiator negotiator = new WorkerConfigNegotiator(
+      stateMachine,
+      configTimestampCounter,
+      nodeId,
+      fastLaneRuleManager
+    );
     try {
       scheduler.schedule(
         () -> {
@@ -815,7 +846,7 @@ public class WorkerAutoConfiguration {
     } catch (Exception e) {
       log.error("Failed to schedule threshold learning task; dynamic threshold " + "adjustment will not run.", e);
     }
-    return (Runnable) () -> {};
+    return () -> {};
   }
 
   /**
@@ -827,13 +858,34 @@ public class WorkerAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean(name = "verifyPingQueue")
   public Queue verifyPingQueue() {
-    return QueueBuilder.nonDurable("zeta.verify.ping." + nodeId).autoDelete().build();
+    return QueueBuilder.nonDurable(ZetaConstants.Routing.QUEUE_PREFIX_VERIFY_PING + nodeId).autoDelete().build();
   }
 
   /**
    * Dedicated {@link RabbitTemplate} for control-plane traffic (heartbeat + PING/PONG),
    * backed by the dedicated heartbeat connection factory from the common module.
    * Isolated from the data-plane template used by broadcasts and reports.
+   *
+   * <p>Pre-declares the heartbeat exchange before the template is handed to any
+   * publisher. The exchange is otherwise declared lazily by Spring Boot's
+   * {@code RabbitAdmin}, and that declaration is not ordered against the control-plane
+   * connection the heartbeat producer opens — on an empty broker the first Worker to
+   * start published to a not-yet-existing exchange, RabbitMQ answered
+   * {@code 404 NOT_FOUND} and closed the channel, losing that tick's heartbeat and
+   * fast-lane rule gossip. Self-healing one interval later, but an ERROR on every cold
+   * cluster start (and only ever on the first Worker, which is why it is easy to miss).
+   *
+   * <p>Doing it here rather than in a second {@code RabbitAdmin} bean is deliberate:
+   * Boot's {@code amqpAdmin} is {@code @ConditionalOnMissingBean} with the return type
+   * {@code AmqpAdmin}, so any admin Zeta registers would silently switch it off and
+   * leave every data-plane exchange/queue/binding undeclared. Declaring from the
+   * template's own construction is also deterministic — every control-plane publish
+   * goes through this instance, so no publish can precede the declaration.
+   *
+   * <p>A failure is non-fatal: the broker may legitimately be unreachable during
+   * context refresh, in which case {@code RabbitAdmin} declares the exchange on
+   * (re)connect exactly as before. This closes the cold-start race; it does not change
+   * reconnect behaviour.
    *
    * @param connectionFactory the dedicated heartbeat connection factory
    * @return a new {@link RabbitTemplate} for control-plane messaging
@@ -843,7 +895,22 @@ public class WorkerAutoConfiguration {
   public RabbitTemplate heartbeatRabbitTemplate(
     @Qualifier("zetaHeartbeatConnectionFactory") ConnectionFactory connectionFactory
   ) {
-    return new RabbitTemplate(connectionFactory);
+    RabbitTemplate template = new RabbitTemplate(connectionFactory);
+    String exchange = properties.getMessaging().getHeartbeatExchange();
+    try {
+      template.execute(channel -> {
+        channel.exchangeDeclare(exchange, "topic", true);
+        return null;
+      });
+    } catch (Exception e) {
+      log.warn(
+        "Could not pre-declare heartbeat exchange {} on the control-plane connection; " +
+          "relying on RabbitAdmin to declare it on connect (early heartbeats may be dropped)",
+        exchange,
+        e
+      );
+    }
+    return template;
   }
 
   /**

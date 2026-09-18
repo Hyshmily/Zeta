@@ -35,7 +35,7 @@ management:
 
     // ── HeavyKeeper 算法配置 ──
     "topKCapacity": 100,            // 最大热 key 数（HeavyKeeper K）
-    "sketchWidth": 50000,           // Count-Min Sketch 宽度
+    "sketchWidth": 65536,           // Count-Min Sketch 宽度（配置 50000，自动向上对齐到 2 的幂）
     "sketchDepth": 5,               // Count-Min Sketch 深度
     "minCountThreshold": 10,        // 晋升为热 key 的最小计数
     "expelledQueueSize": 2,         // 驱逐队列积压量
@@ -183,3 +183,5 @@ curl -X POST http://localhost:8080/actuator/hotkey/worker/state \
   "status": "ok"
 }
 ```
+
+**校验规则：** POST 应用后的参数组合必须满足与配置协商层对心跳 gossip 相同的不变量——`confirmCount >= 1`、`preCoolGraceCount >= 1` 且 `coolCount > preCoolGraceCount`（提供的字段覆盖，其余字段保持当前值）。违反不变量的 POST 会被拒绝并返回 `"status": "error"`，不做任何修改：本地接受但被 gossip 拒绝的配置会让该 Worker 永久偏离集群且无法自动收敛。不含任何可识别字段的 POST 是纯 no-op（不重写、不递增时间戳）。

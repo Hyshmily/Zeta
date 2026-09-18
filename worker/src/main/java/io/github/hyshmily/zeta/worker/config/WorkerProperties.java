@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.worker.config;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import java.util.ArrayList;
 import java.util.List;
@@ -225,9 +226,16 @@ public class WorkerProperties {
      * Minimum interval (ms) between periodic HOT rebroadcasts for a key that
      * stays in {@code CONFIRMED_HOT}. Recovers lost HOT broadcasts (ADR-0007
      * fire-and-forget) and caps fast-lane steady-state emission to one HOT
-     * decision per interval (ADR-0024). Default 10 s; minimum 1 s.
+     * decision per interval (ADR-0024). Default 10 s; range [1s, 60s].
+     *
+     * <p>Bounds are correctness constraints (ADR-0068 addendum): below 1s the
+     * rebroadcast degenerates into a per-report broadcast storm for every
+     * continuously-hot key; above 60s a lost HOT decision — the whole pipeline
+     * is fire-and-forget — can leave new instances un-prewarmed for minutes.
+     * Enforced at binding time via {@code @Min}/{@code @Max}.
      */
     @Min(1000)
+    @Max(60_000)
     private long rebroadcastIntervalMs = 10_000;
   }
 

@@ -29,6 +29,7 @@ import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -41,7 +42,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Actuator {@code /actuator/zeta} endpoint that exposes runtime diagnostics
+ * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics
  * and rule management operations.
  *
  * <p>The response includes both app-side and Worker-side TopK rankings, L1
@@ -219,6 +220,12 @@ public class ZetaEndpoint {
 
     if (healthView != null) {
       worker.put("health", healthView.isClusterHealthy() ? "healthy" : "unhealthy");
+      // Heartbeat freshness in elapsed-monotonic form (the raw timestamp is a
+      // monotonic-clock value, meaningless outside this process); -1 = no
+      // heartbeat ever received. Gives the HealthView#getLastAnyHeartbeatTime
+      // signal an observation surface for debugging Reporter routing dropouts.
+      long last = healthView.getLastAnyHeartbeatTime();
+      worker.put("msSinceLastAnyHeartbeat", last == 0 ? -1 : TimeSource.monotonicMillis() - last);
     }
 
     if (zetaBayesianSM != null) {
