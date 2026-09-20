@@ -69,6 +69,8 @@ M = method, M/T = method or type.
 
 "Ignored" means: the annotation is silently a no-op today, and the aspect logs a one-time WARN (rule R2) so the mistake is visible.
 
+**Detection on the annotation read path (all `@Cacheable` routes):** every `@Cacheable` read counts for hot-key detection, upholding the core invariant that every read triggers detection AND reporting. The non-sync route (`cache.get(key)` → `lookup`) serves the hit — value or null sentinel — through the single rule-aware `peekAndTag` lookup (one hash lookup + one rule evaluation per read), which feeds the local HeavyKeeper detector and the Worker reporter on every served hit (whitelist matches detect without reporting, a blocked key throws, a miss does neither); the sync route (`get(key, Callable)`) enters the detecting compute path. On a miss the method body runs and the result is stored through the write path (no detection on the store itself). Serving a non-sync hit from L1 only is intentional: the lookup never invokes a loader.
+
 **`@CachePut` cross-instance semantics:** `@CachePut` writes through (`putThrough`) and broadcasts a REFRESH sync message. Zeta itself never writes the cache-key namespace in Redis, so in the default wiring the receiver cannot load the new value — the REFRESH handler falls back to a **local invalidation** (ADR-0031): the peer's copy is evicted and the next read reloads through the application reader. If your integration maintains the value in Redis itself, the push path is used instead. Use `@SkipBroadcast` for local-only writes.
 
 ---
@@ -121,9 +123,9 @@ For a given read operation:
 
 ## 6. Null-caching semantics
 
-- **Default (no annotation or `@NullCaching(true)`)**: a `null` result is stored as an internal `NullValue` sentinel with `zeta.local.null-value-ttl-seconds` (short TTL). Hits on a valid sentinel return `null` **without re-invoking the method**; the access is still counted for hot-key detection.
+- **Default (no annotation or `@NullCaching(true)`)**: a `null` result is stored as Zeta's internal `NullValue` sentinel with `zeta.local.null-value-ttl-seconds` (short TTL). Every write path uses the same sentinel and TTL — the loader path and the annotation store path (`@CachePut` returning null, non-sync `@Cacheable` stores, explicit Spring `NullValue` writes) — so Spring's own `NullValue` marker is never persisted. Hits on a valid sentinel return `null` **without re-invoking the method**; the access is still counted for hot-key detection.
 - **`@NullCaching(false)`**: a `null` result leaves no entry; the next call re-invokes the method.
-- Identical semantics apply on all three read paths (`get`, `getWithSoftExpire`, `computeIfAbsent[WithSoftExpire]`) and in the fluent API (`read(key).notAllowNull()`).
+- Identical semantics apply on all three read paths (`get`, `getWithSoftExpire`, `computeIfAbsent[WithSoftExpire]`) and in the fluent API (`read(key).nullCaching(false)`).
 
 ---
 

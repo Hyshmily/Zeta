@@ -50,6 +50,7 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
+import io.github.hyshmily.zeta.model.EntryDraft;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -3935,7 +3936,9 @@ class ZetaCacheTest {
 
       // Age the entry past its soft TTL (hard TTL stays valid) so the next
       // REVALIDATE read takes the drop-and-reload branch.
-      CacheEntry stale = ((CacheEntry) realFlightL1.getIfPresent("k")).withSoftTtl(30_000, 1L);
+      // Age the entry past its soft expiry with an explicit timestamp: the
+      // REVALIDATE branch only consults softExpireAtMs, so the duration stays as stored.
+      CacheEntry stale = EntryDraft.of((CacheEntry) realFlightL1.getIfPresent("k")).softExpiryAt(1L).build();
       realFlightL1.put("k", stale);
 
       Optional<String> after = realFlightCache.get("k", CachePolicy.of(() -> {

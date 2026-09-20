@@ -21,10 +21,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -34,7 +34,6 @@ import org.junit.jupiter.api.Test;
  * the {@code submittedTasksCount} accounting, the {@link StandardExecutorQueue#force}
  * fallback, and the rejection path.
  */
-@Tag("performance")
 class StandardThreadExecutorTest {
 
   private StandardThreadExecutor newExecutor(int core, int max, int queueCapacity) {
@@ -347,6 +346,111 @@ class StandardThreadExecutorTest {
     var executor = newExecutor(2, 8, 500);
     try {
       assertThat(executor.getMaxSubmittedTaskCount()).isEqualTo(508);
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void callerRunsPolicy_onPoolInternalReject_shouldNotLeakSubmittedCount() throws Exception {
+    // Pins the accounting wrapper for NON-throwing rejection handlers: the pool itself
+    // rejects (shutdown) and CallerRunsPolicy returns without throwing, so
+    // super.execute() returns normally and afterExecute never fires. Without the
+    // wrapper the submit-time increment would leak permanently, eventually wedging the
+    // executor into permanent rejection despite a free queue.
+    var executor = newExecutor(1, 2, 10, new ThreadPoolExecutor.CallerRunsPolicy());
+    try {
+      executor.shutdown();
+      executor.execute(() -> {}); // pool-internal reject → handler returns → compensate
+      assertThat(executor.getSubmittedTasksCount()).isZero();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void discardPolicy_onPoolInternalReject_shouldNotLeakSubmittedCount() throws Exception {
+    // Same compensation contract for a silently-dropping handler: the task is discarded
+    // (never queued, never executed, afterExecute never fires), so the increment must
+    // be rolled back by the accounting wrapper.
+    var executor = newExecutor(1, 2, 10, new ThreadPoolExecutor.DiscardPolicy());
+    try {
+      executor.shutdown();
+      executor.execute(() -> {});
+      assertThat(executor.getSubmittedTasksCount()).isZero();
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void callerRunsPolicy_overCapInlineRun_shouldRestoreCounterToPriorValue() throws Exception {
+    // Over-cap rejection with a non-throwing handler: the handler runs the task inline
+    // in the submitting thread and the counter must return to its prior (pre-submission)
+    // value — the inline run never reaches afterExecute.
+    var executor = newExecutor(1, 1, 1, new ThreadPoolExecutor.CallerRunsPolicy());
+    var firstStarted = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var inlineRuns = new AtomicInteger(0);
+    try {
+      executor.execute(() -> {
+        firstStarted.countDown();
+        try {
+          release.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+      assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+      executor.execute(() -> {}); // queued — in-flight = 2 = cap (queue 1 + max 1)
+      int before = executor.getSubmittedTasksCount();
+      executor.execute(inlineRuns::incrementAndGet); // over cap → CallerRunsPolicy runs inline
+      assertThat(inlineRuns.get()).isEqualTo(1);
+      assertThat(executor.getSubmittedTasksCount()).isEqualTo(before);
+    } finally {
+      release.countDown();
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void rejectedExecutionHandler_accessors_shouldBypassAccountingWrapper() {
+    // getRejectedExecutionHandler() must return the user's handler, not the internal
+    // accounting wrapper; setRejectedExecutionHandler() must swap the user handler
+    // while the wrapper stays installed.
+    var original = new ThreadPoolExecutor.DiscardPolicy();
+    var executor = newExecutor(1, 1, 10, original);
+    try {
+      assertThat(executor.getRejectedExecutionHandler()).isSameAs(original);
+      var replacement = new ThreadPoolExecutor.CallerRunsPolicy();
+      executor.setRejectedExecutionHandler(replacement);
+      assertThat(executor.getRejectedExecutionHandler()).isSameAs(replacement);
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
+  void queue_attachNullExecutor_shouldThrowNpe() {
+    // Locks in the attach contract: a null executor is rejected eagerly instead of
+    // surfacing later as an NPE from offer().
+    var queue = new StandardExecutorQueue();
+    assertThatThrownBy(() -> queue.setStandardThreadExecutor(null)).isInstanceOf(NullPointerException.class);
+  }
+
+  @Test
+  void queue_reattach_shouldThrowIllegalState() {
+    // Locks in the single-use attach contract: maxPoolSize is snapshotted at attach,
+    // so silently re-attaching to another executor would mix two executors' states.
+    var executor = newExecutor(1, 2, 10);
+    try {
+      var queue = (StandardExecutorQueue) executor.getQueue();
+      var other = newExecutor(1, 2, 10);
+      try {
+        assertThatThrownBy(() -> queue.setStandardThreadExecutor(other)).isInstanceOf(IllegalStateException.class);
+      } finally {
+        other.shutdownNow();
+      }
     } finally {
       executor.shutdownNow();
     }

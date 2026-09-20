@@ -21,6 +21,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.zeta.sync.distributedlock.LockProvider;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
@@ -29,7 +30,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.RedisSystemException;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
@@ -52,11 +53,28 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
  *       if the value is our UUID the lock is considered acquired
  *       (optimistic recovery)</li>
  *   <li>{@link RedisLockHandle} starts a <b>watchdog</b> that renews the
- *       TTL every {@code ttl / 3} via Lua {@code GET + PEXPIRE}, keeping
- *       the lock alive while the caller holds the handle</li>
+ *       TTL via Lua {@code GET + PEXPIRE}, keeping the lock alive while the
+ *       caller holds the handle</li>
  *   <li>{@code close()} — Lua {@code GET + DEL} with UUID comparison
  *       for safe release, with retry on transient Redis errors</li>
  * </ol>
+ *
+ * <p><b>Watchdog semantics:</b> the watchdog is active by default (it is
+ * disabled only by passing a {@code null} scheduler to the constructor) and
+ * renews every {@code max(expireMs / 3, 1s)} milliseconds, clamped down to
+ * {@code expireMs / 2} for sub-second TTLs and floored at
+ * {@value #MIN_WATCHDOG_INTERVAL_MS}ms to bound the Redis renewal rate. It
+ * runs from acquisition until
+ * {@link RedisLockHandle#close()} cancels it. Renewal is conditional on the
+ * caller's token (Lua {@code GET + PEXPIRE}), so a stolen or released lock is
+ * never renewed. <b>A handle that is never closed keeps the lock alive
+ * indefinitely</b> — the watchdog renews past every TTL for the lifetime of
+ * the JVM (the scheduler's threads are daemons, so on JVM exit the lock
+ * expires after one final TTL). Always release in a {@code finally} block or
+ * via try-with-resources.
+ *
+ * <p><b>Not reentrant:</b> a second {@code tryLock} on the same key fails even
+ * when the same caller already holds the lock (see {@link LockProvider}).
  */
 @Slf4j
 @Internal
@@ -73,6 +91,15 @@ public class RedisLockProvider implements LockProvider {
   );
 
   /**
+   * Floor for the watchdog renewal interval. Without it, a pathological TTL
+   * (e.g. 4ms) degraded to a 2ms renewal cadence — 500 PEXPIRE/s per held
+   * lock, flooding Redis. A TTL too short for this floor is warned about at
+   * handle construction: the lock still works for the caller's critical
+   * section, but background renewal can no longer be guaranteed before expiry.
+   */
+  private static final long MIN_WATCHDOG_INTERVAL_MS = 50;
+
+  /**
    * Generates a random 128-bit hex lock token using {@link ThreadLocalRandom}.
    *
    * <p>Two consecutive {@code long} values from {@code ThreadLocalRandom} are
@@ -84,8 +111,8 @@ public class RedisLockProvider implements LockProvider {
    */
   private static String lockId() {
     return (
-      Long.toHexString(ThreadLocalRandom.current().nextLong()) +
-      Long.toHexString(ThreadLocalRandom.current().nextLong())
+      String.format("%016x", ThreadLocalRandom.current().nextLong()) +
+      String.format("%016x", ThreadLocalRandom.current().nextLong())
     );
   }
 
@@ -94,6 +121,17 @@ public class RedisLockProvider implements LockProvider {
   private final int defaultInquiryCount;
   private final int defaultUnlockCount;
   private final ScheduledExecutorService scheduler;
+
+  /**
+   * Rate-limits the acquire-path Redis error. Widening the catch to
+   * {@link DataAccessException} means this branch now fires on the <em>most
+   * common</em> failure (Redis unreachable during an outage) instead of only on
+   * the rarest one, and {@code tryLock} is a per-request API — so an unthrottled
+   * ERROR here would emit one line per attempt (up to {@code lockCount}) per
+   * call for the whole outage. Counts suppressed lines so the next emitted line
+   * carries them; repo standard, see {@link LogThrottle}.
+   */
+  private final LogThrottle.Counting acquireFailureLog = new LogThrottle.Counting();
 
   /**
    * Constructs a {@code RedisLockProvider} with the given template and default retry counts.
@@ -253,20 +291,47 @@ public class RedisLockProvider implements LockProvider {
             }
           }
         }
-      } catch (RedisSystemException e) {
-        log.error("Redis system error occurred while acquiring lock '{}'", key, e);
+      } catch (DataAccessException e) {
+        // DataAccessException, not the narrower RedisSystemException: connection
+        // failures and command timeouts (RedisConnectionFailureException,
+        // QueryTimeoutException) are SIBLINGS of RedisSystemException under
+        // DataAccessException, not subclasses — catching only RedisSystemException
+        // let exactly the most common failure (Redis unreachable) escape and
+        // break tryLock's documented "returns null when unavailable" contract.
+        LogThrottle.Counting.Attempt attempt = acquireFailureLog.record();
+        if (!attempt.admitted()) {
+          log.debug("Redis access error while acquiring lock '{}' ({} in current window)", key, attempt.count(), e);
+        } else if (attempt.count() > 0) {
+          log.error(
+            "Redis access error while acquiring lock '{}' ({} suppressed in the last window)",
+            key,
+            attempt.count(),
+            e
+          );
+        } else {
+          log.error("Redis access error occurred while acquiring lock '{}'", key, e);
+        }
       }
     }
-    log.warn("Failed to acquire lock '{}' after {} attempts", key, lockCount);
+    // tryLock is a try-style API: returning null because another caller holds
+    // the lock is its NORMAL outcome under contention, not an operational risk —
+    // log at DEBUG so a contended workload does not flood the log at try-rate.
+    log.debug("Failed to acquire lock '{}' after {} attempts", key, lockCount);
     return null;
   }
 
   /**
-   * Handle for an acquired Redis lock with optional watchdog auto-renewal.
+   * Handle for an acquired Redis lock with watchdog auto-renewal.
    *
    * <p>Starts a watchdog upon construction that periodically extends the lock
-   * TTL via Lua {@code GET + PEXPIRE} at {@code expireMs / 3} intervals.
-   * The watchdog is cancelled when {@link #close()} is called.
+   * TTL via Lua {@code GET + PEXPIRE}. The watchdog runs for as long as the
+   * handle lives — every {@code max(expireMs / 3, 1s)} milliseconds, clamped
+   * down to {@code expireMs / 2} for sub-second TTLs — and is cancelled when
+   * {@link #close()} is called. Renewal is conditional on this handle's UUID,
+   * so a stolen or already-released lock is never renewed (the watchdog then
+   * silently stops extending). <b>Consequence:</b> a leaked handle (never
+   * closed) keeps the lock alive indefinitely — always release in a
+   * {@code finally} block or via try-with-resources.
    *
    * <p>Release uses Lua {@code GET + DEL} with UUID comparison for safe,
    * idempotent unlocking — no client-clock-based guard is needed.
@@ -280,6 +345,13 @@ public class RedisLockProvider implements LockProvider {
     private final int unlockCount;
     private final ScheduledExecutorService scheduler;
     private final long expireMs;
+
+    /**
+     * Rate-limits the release-path WARN. A Redis outage now reaches this branch
+     * (widened catch) and every {@code close()} would otherwise emit one line per
+     * unlock attempt plus the summary — see {@link #acquireFailureLog}.
+     */
+    private final LogThrottle.Counting unlockFailureLog = new LogThrottle.Counting();
 
     @SuppressWarnings("java:S3077")
     private volatile ScheduledFuture<?> watchdogTask;
@@ -329,8 +401,22 @@ public class RedisLockProvider implements LockProvider {
       // acquire it while the first still holds its handle (broken mutual
       // exclusion for sub-second TTLs — the old max(expireMs/3, 1000) floor
       // exceeded the TTL whenever expireMs < 1000). The clamp keeps the
-      // interval at expireMs/2 for very short TTLs instead of the 1s floor.
-      long interval = Math.max(1L, Math.min(Math.max(expireMs / 3, 1000L), expireMs / 2));
+      // interval at expireMs/2 for very short TTLs instead of the 1s floor,
+      // and the {@value #MIN_WATCHDOG_INTERVAL_MS}ms floor bounds the Redis
+      // renewal rate (a 2ms floor used to renew a 4ms lock 500×/s). A TTL
+      // below the floor cannot be renewed reliably and is warned about.
+      long interval = Math.max(
+        MIN_WATCHDOG_INTERVAL_MS,
+        Math.min(Math.max(expireMs / 3, 1000L), expireMs / 2)
+      );
+      if (interval >= expireMs) {
+        log.warn(
+          "Lock TTL {}ms is below the {}ms watchdog renewal floor for key {}; the lock may expire before renewal",
+          expireMs,
+          interval,
+          lockKey
+        );
+      }
       watchdogTask = scheduler.scheduleWithFixedDelay(
         () -> {
           try {
@@ -380,11 +466,29 @@ public class RedisLockProvider implements LockProvider {
             // the retry loop.
             return;
           }
-        } catch (RedisSystemException e) {
-          log.warn("Redis unlock attempt {}/{} failed for key {}", i + 1, unlockCount, lockKey, e);
+        } catch (DataAccessException e) {
+          // Same widened catch as the acquire path: a connection-level failure on
+          // release must fall into the retry loop (and finally the "lock may
+          // persist until TTL" WARN), not escape close() — AutoReleaseLock's
+          // contract is idempotent, best-effort release. Per-attempt detail is
+          // DEBUG because a Redis outage would otherwise emit one WARN per attempt
+          // per close(); the summary below is the rate-limited line.
+          log.debug("Redis unlock attempt {}/{} failed for key {}", i + 1, unlockCount, lockKey, e);
         }
       }
-      log.warn("Failed to release lock '{}' after {} attempts; lock may persist until TTL", lockKey, unlockCount);
+      LogThrottle.Counting.Attempt releaseAttempt = unlockFailureLog.record();
+      if (!releaseAttempt.admitted()) {
+        log.debug("Failed to release lock '{}' after {} attempts (WARN suppressed this window)", lockKey, unlockCount);
+      } else if (releaseAttempt.count() > 0) {
+        log.warn(
+          "Failed to release lock '{}' after {} attempts; lock may persist until TTL ({} suppressed since the last WARN)",
+          lockKey,
+          unlockCount,
+          releaseAttempt.count()
+        );
+      } else {
+        log.warn("Failed to release lock '{}' after {} attempts; lock may persist until TTL", lockKey, unlockCount);
+      }
     }
   }
 }

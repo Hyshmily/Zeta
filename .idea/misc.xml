@@ -10,6 +10,7 @@
         <option value="$PROJECT_DIR$/pom.xml" />
         <option value="$PROJECT_DIR$/integration-tests/pom.xml" />
         <option value="$PROJECT_DIR$/demo-app/pom.xml" />
+        <option value="$PROJECT_DIR$/benchmark/pom.xml" />
       </list>
     </option>
     <option name="ignoredFiles">

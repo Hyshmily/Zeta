@@ -1,3 +1,11 @@
 # 32-bit Murmur3 for Consistent Hash Ring
 
 Zeta's `ConsistentHashRing` uses Guava's `murmur3_32_fixed()` (32-bit) instead of a 128+ bit hash like MD5 or SHA-256. Rationale: (1) with default 500 virtual nodes per physical Worker and typical cluster sizes (3–100 nodes), collision probability is well under 3% and each collision loses only one virtual node — negligible impact on distribution uniformity; (2) 32-bit Murmur3 is an order of magnitude faster than MD5/SHA-256, critical because `locateNode()` is on the hot path (every cache `get()` and `getWithSoftExpire()` call routes through the ring); (3) the signed `int` result maps directly to `TreeMap<Integer, String>` with no wrapping or custom comparator. MD5 or SHA-256 would add measurable CPU and memory overhead for no practical gain.
+
+## Amendment (2026-08-29): collision-probability claim corrected
+
+The original rationale above states the collision probability is "well under 3%" at 500 virtual nodes per Worker. That number fails the birthday bound and is corrected here; the decision itself stands, for the per-node impact reasons below.
+
+**The accurate bound.** With n virtual nodes in a 2³² space, the probability of at least one collision is approximately `1 − e^(−n²/2³³)`. At the stated 500 vnodes × 100 Workers = 50,000 vnodes this is ≈ 25% — not <3%. The <3% figure only holds for small clusters (it is roughly the bound at ~15 Workers: 1 − e^(−7500²/2³³) ≈ 0.6%; even 20 Workers ≈ 1.1%; 30 Workers ≈ 2.5%; 50 Workers ≈ 6.9%).
+
+**Why the decision is unchanged.** A collision merges two virtual nodes into a single ring position (the sorted-map insert keeps the position), so each collision costs one node one of its 500 vnode slots — a deterministic ≈0.2% skew in that node's share of the keyspace, fixed for the ring's lifetime (no churn, no rebalancing, no correctness impact: routing stays deterministic and total order is unchanged). The uniformity loss is within vnode-count noise. Rationale (2) — the order-of-magnitude speed win on the routing hot path — and (3) — the signed-`int`/`TreeMap` fit — are unaffected. Moving to a 64-bit hash would cost hot-path throughput for a uniformity gain that is not observable at the application level.

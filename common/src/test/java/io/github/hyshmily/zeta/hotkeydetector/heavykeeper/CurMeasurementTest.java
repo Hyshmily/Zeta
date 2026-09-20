@@ -1,13 +1,15 @@
 package io.github.hyshmily.zeta.hotkeydetector.heavykeeper;
 
 import java.lang.reflect.Field;
-import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
- * Measure slot-sum (cur) values that occur in practice under load.
+ * Manual measurement tool (NOT a test): hammers HeavyKeeper at fixed QPS for ~90s and prints
+ * observed slot-sum (cur) values. It has no assertions and would inflate CI time, so it is
+ * disabled from the surefire run. Run it manually when tuning HeavyKeeper decay.
  */
-@Tag("performance")
+@Disabled("manual measurement tool, not a test — run manually when tuning HeavyKeeper decay")
 class CurMeasurementTest {
 
   @Test

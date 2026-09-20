@@ -14,6 +14,7 @@
         <outputRelativeToContentRoot value="true" />
         <processorPath useClasspath="false">
           <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/1.18.38/lombok-1.18.38.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/1.18.38/lombok-1.18.38.jar" />
         </processorPath>
         <module name="zeta-worker" />
       </profile>
@@ -25,8 +26,35 @@
           <entry name="$MAVEN_REPOSITORY$/org/springframework/boot/spring-boot-configuration-processor/3.5.3/spring-boot-configuration-processor-3.5.3.jar" />
           <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/1.18.38/lombok-1.18.38.jar" />
         </processorPath>
-        <module name="zeta" />
         <module name="demo-app" />
+      </profile>
+      <profile name="Annotation profile for zeta" enabled="true">
+        <sourceOutputDir name="target/generated-sources/annotations" />
+        <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
+        <outputRelativeToContentRoot value="true" />
+        <processorPath useClasspath="false">
+          <entry name="$MAVEN_REPOSITORY$/org/springframework/boot/spring-boot-configuration-processor/3.5.3/spring-boot-configuration-processor-3.5.3.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/1.18.38/lombok-1.18.38.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/springframework/boot/spring-boot-configuration-processor/3.5.3/spring-boot-configuration-processor-3.5.3.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/projectlombok/lombok/1.18.38/lombok-1.18.38.jar" />
+        </processorPath>
+        <module name="zeta" />
+      </profile>
+      <profile name="Annotation profile for zeta-benchmark" enabled="true">
+        <sourceOutputDir name="target/generated-sources/annotations" />
+        <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
+        <outputRelativeToContentRoot value="true" />
+        <processorPath useClasspath="false">
+          <entry name="$MAVEN_REPOSITORY$/org/openjdk/jmh/jmh-generator-annprocess/1.37/jmh-generator-annprocess-1.37.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/openjdk/jmh/jmh-core/1.37/jmh-core-1.37.jar" />
+          <entry name="$MAVEN_REPOSITORY$/net/sf/jopt-simple/jopt-simple/5.0.4/jopt-simple-5.0.4.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/openjdk/jmh/jmh-generator-annprocess/1.37/jmh-generator-annprocess-1.37.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/openjdk/jmh/jmh-core/1.37/jmh-core-1.37.jar" />
+          <entry name="$MAVEN_REPOSITORY$/net/sf/jopt-simple/jopt-simple/5.0.4/jopt-simple-5.0.4.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/apache/commons/commons-math3/3.6.1/commons-math3-3.6.1.jar" />
+        </processorPath>
+        <module name="zeta-benchmark" />
       </profile>
     </annotationProcessing>
     <bytecodeTargetLevel>
@@ -41,6 +69,7 @@
       <module name="hotkey-integration-tests" options="-parameters" />
       <module name="hotkey-spring-boot-starter" options="-parameters" />
       <module name="zeta" options="-parameters" />
+      <module name="zeta-benchmark" options="-parameters" />
       <module name="zeta-parent" options="-parameters" />
       <module name="zeta-worker" options="-parameters" />
     </option>

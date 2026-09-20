@@ -90,9 +90,19 @@ import org.springframework.beans.factory.InitializingBean;
  *
  * <p>Thread-safe. All public methods can be called concurrently from
  * multiple threads.
+ *
+ * <p><b>Deprecated and slated for removal.</b> {@link WaveCounter} replaced this
+ * class in production and no production code instantiates it any more — the only
+ * remaining caller is {@code BufferedCounterTest}. Keeping it costs a full second
+ * double-buffer implementation to maintain (its {@code destroy()} body and
+ * constructor family are near-duplicates of {@code WaveCounter}'s), and it invites
+ * the question "which double buffer is the real one?" on every change in this
+ * package. Marked {@code forRemoval} so the compiler advertises the deadline.
+ *
+ * @deprecated superseded by {@link WaveCounter}; delete together with its test.
  */
 @Slf4j
-@Deprecated
+@Deprecated(since = "1.1.57", forRemoval = true)
 @Internal
 public class BufferedCounter implements InitializingBean, Destroyable {
 

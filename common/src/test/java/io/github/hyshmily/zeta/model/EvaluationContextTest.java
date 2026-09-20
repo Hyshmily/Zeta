@@ -20,16 +20,16 @@ class EvaluationContextTest {
 
   @Test
   void shouldCreateWithConvenienceConstructorAndThresholdAboveOne() {
-    var ctx = new EvaluationContext(50L, 100L, 10L, null, 1.5);
+    var ctx = new EvaluationContext(50L, 100L, 10L, Double.NaN, 1.5);
     assertThat(ctx.threshold()).isEqualTo(10L);
     assertThat(ctx.logThreshold()).isEqualTo(Math.log(10));
     assertThat(ctx.adjustedLogThreshold()).isEqualTo(Math.log(10));
-    assertThat(ctx.cv()).isNull();
+    assertThat(ctx.cv()).isNaN();
   }
 
   @Test
   void shouldCreateWithConvenienceConstructorAndThresholdBelowOne() {
-    var ctx = new EvaluationContext(50L, 100L, 0L, null, 0.8);
+    var ctx = new EvaluationContext(50L, 100L, 0L, Double.NaN, 0.8);
     assertThat(ctx.threshold()).isZero();
     assertThat(ctx.logThreshold()).isEqualTo(Math.log(1));
     assertThat(ctx.adjustedLogThreshold()).isEqualTo(Math.log(1));
@@ -43,8 +43,8 @@ class EvaluationContextTest {
   }
 
   @Test
-  void shouldCreateWithCvNull() {
-    var ctx = new EvaluationContext(1L, 2L, 3L, null, 4L, 5L, 6.0);
-    assertThat(ctx.cv()).isNull();
+  void shouldCreateWithCvNaN() {
+    var ctx = new EvaluationContext(1L, 2L, 3L, Double.NaN, 4L, 5L, 6.0);
+    assertThat(ctx.cv()).isNaN();
   }
 }

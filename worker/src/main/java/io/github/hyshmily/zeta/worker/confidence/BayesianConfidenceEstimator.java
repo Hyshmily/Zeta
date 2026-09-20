@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.worker.confidence;
 
 import io.github.hyshmily.zeta.Internal;
 import lombok.Getter;
+import org.springframework.util.Assert;
 
 /**
  * Normal-Normal conjugate Bayesian estimator for log-frequency hotness.
@@ -61,9 +62,13 @@ import lombok.Getter;
  * ({@code zeta.worker.bayesian.high-confidence-threshold} /
  * {@code medium-confidence-threshold}); the tuning protocol behind the
  * defaults is documented on {@link ProbabilityResult}.
+ *
+ * <p>This class is the default {@link ConfidenceEvaluator} strategy — register
+ * a different {@code ConfidenceEvaluator} Bean to swap the confidence model,
+ * or override this Bean to retune the Normal-Normal conjugate parameters.
  */
 @Internal
-public class BayesianConfidenceEstimator {
+public class BayesianConfidenceEstimator implements ConfidenceEvaluator {
 
   /**
    * Default prior mean: ln(10) ≈ 2.302585. A key with 10 observed accesses in a
@@ -108,9 +113,6 @@ public class BayesianConfidenceEstimator {
   @Getter
   private final double mediumConfidenceThreshold;
 
-  /** Base likelihood precision = 1 / likelihoodStd². */
-  private final double baseLikelihoodPrecision;
-
   /** Prior precision = 1 / priorStd² (invariant — precomputed once). */
   private final double priorPrecision;
 
@@ -151,31 +153,31 @@ public class BayesianConfidenceEstimator {
     double highConfidenceThreshold,
     double mediumConfidenceThreshold
   ) {
-    if (priorStd <= 0) throw new IllegalArgumentException("priorStd must be positive, got " + priorStd);
-    if (likelihoodStd <= 0) throw new IllegalArgumentException("likelihoodStd must be positive, got " + likelihoodStd);
-    if (highConfidenceThreshold <= 0.0 || highConfidenceThreshold >= 1.0) {
-      throw new IllegalArgumentException("highConfidenceThreshold must be in (0, 1), got " + highConfidenceThreshold);
-    }
-    if (mediumConfidenceThreshold <= 0.0 || mediumConfidenceThreshold >= 1.0) {
-      throw new IllegalArgumentException("mediumConfidenceThreshold must be in (0, 1), got " + mediumConfidenceThreshold);
-    }
-    if (mediumConfidenceThreshold >= highConfidenceThreshold) {
-      throw new IllegalArgumentException(
-        "mediumConfidenceThreshold ("
-          + mediumConfidenceThreshold
-          + ") must be strictly below highConfidenceThreshold ("
-          + highConfidenceThreshold
-          + ")"
-      );
-    }
+    Assert.isTrue(priorStd > 0, "priorStd must be positive, got " + priorStd);
+    Assert.isTrue(likelihoodStd > 0, "likelihoodStd must be positive, got " + likelihoodStd);
+    Assert.isTrue(
+      highConfidenceThreshold > 0.0 && highConfidenceThreshold < 1.0,
+      "highConfidenceThreshold must be in (0, 1), got " + highConfidenceThreshold
+    );
+    Assert.isTrue(
+      mediumConfidenceThreshold > 0.0 && mediumConfidenceThreshold < 1.0,
+      "mediumConfidenceThreshold must be in (0, 1), got " + mediumConfidenceThreshold
+    );
+    Assert.isTrue(
+      mediumConfidenceThreshold < highConfidenceThreshold,
+      "mediumConfidenceThreshold (" +
+        mediumConfidenceThreshold +
+        ") must be strictly below highConfidenceThreshold (" +
+        highConfidenceThreshold +
+        ")"
+    );
     this.priorMean = priorMean;
     this.priorStd = priorStd;
     this.likelihoodStd = likelihoodStd;
     this.highConfidenceThreshold = highConfidenceThreshold;
     this.mediumConfidenceThreshold = mediumConfidenceThreshold;
-    this.baseLikelihoodPrecision = 1.0 / (likelihoodStd * likelihoodStd);
     this.priorPrecision = 1.0 / (priorStd * priorStd);
-    this.maxAccumulatedPrecision = MAX_EFFECTIVE_COUNT * this.baseLikelihoodPrecision;
+    this.maxAccumulatedPrecision = MAX_EFFECTIVE_COUNT * (1.0 / (likelihoodStd * likelihoodStd));
   }
 
   /**
@@ -231,8 +233,11 @@ public class BayesianConfidenceEstimator {
    *         parameters and the new accumulated precision
    */
   public ProbabilityResult evaluateWithAccumulatedPrior(
-    long observedCount, double logThreshold, double cv,
-    double accumulatedMean, double accumulatedPrec
+    long observedCount,
+    double logThreshold,
+    double cv,
+    double accumulatedMean,
+    double accumulatedPrec
   ) {
     double y = Math.log(Math.max(observedCount, 1.0));
 

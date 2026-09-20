@@ -250,6 +250,43 @@ class ReportMessageCodecTest {
   }
 
   @Test
+  void decode_varint32LengthBeyondTheUnsignedIntRange_rejected() {
+    // 2^63 + 5 as a raw ten-byte varint: readVarlong returns it as a negative
+    // long, which an upper-bound-only check lets through, truncating the forged
+    // length to its low 32 bits (5) — a wrong value accepted as success.
+    byte[] rawLength = new byte[10];
+    rawLength[0] = (byte) 0x85;
+    Arrays.fill(rawLength, 1, 9, (byte) 0x80);
+    rawLength[9] = (byte) 0x01; // payload 1 at shift 63, terminator — the canonical encoding of 2^63+5
+    byte[] body = concat(
+      new byte[] { ReportMessageCodec.MAGIC, ReportMessageCodec.VERSION },
+      varint(1L), // id
+      varint(1L), // timestamp
+      rawLength // appName length, forged past the unsigned 32-bit range
+    );
+    assertThatThrownBy(() -> ReportMessageCodec.decode(body))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("varint32 exceeds 32 bits");
+  }
+
+  @Test
+  void decode_duplicateKeys_keepTheLastValue() {
+    // The encoder never emits duplicates, but a forged body can carry them;
+    // the pinned behavior is last-wins, matching map semantics.
+    byte[] body = concat(
+      new byte[] { ReportMessageCodec.MAGIC, ReportMessageCodec.VERSION },
+      varint(1L),
+      varint(1L),
+      lengthPrefixed("app"),
+      varint(2L),
+      entry("k", 10L),
+      entry("k", 20L)
+    );
+    ReportMessage decoded = ReportMessageCodec.decode(body);
+    assertThat(decoded.counts()).containsEntry("k", 20L).hasSize(1);
+  }
+
+  @Test
   void decode_malformedUtf8InKey_rejected() {
     // 0xC3 0x28 is an ill-formed sequence: the JDK decoder would substitute
     // U+FFFD, letting a forged body invent a key that was never sent.

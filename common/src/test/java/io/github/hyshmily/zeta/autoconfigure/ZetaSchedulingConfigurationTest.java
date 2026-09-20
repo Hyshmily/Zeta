@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.autoconfigure;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
+import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import java.util.List;
@@ -137,6 +138,32 @@ class ZetaSchedulingConfigurationTest {
 
     // drainTo(collection, 100_000) should have drained all 1500 items
     assertThat(queue).isEmpty();
+  }
+
+  /**
+   * Regression: {@link HotKeyDetector} implements TopK by delegating to its
+   * wrapped HeavyKeeper bean, which is itself registered as a TopK — iterating
+   * both beans applied HeavyKeeper decay twice per tick (2× decay rate). The
+   * facade must be excluded from both maintenance passes.
+   */
+  @Test
+  void maintenanceSkipsHotKeyDetectorFacade() {
+    TopK heavyKeeper = mock(TopK.class);
+    when(heavyKeeper.expelled()).thenReturn(new LinkedBlockingQueue<>());
+    HotKeyDetector detector = mock(HotKeyDetector.class);
+
+    ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(
+      List.of(heavyKeeper, detector),
+      scheduler,
+      Optional.empty()
+    );
+
+    config.cleanHotKeys();
+    config.drainExpelled();
+
+    verify(heavyKeeper).fading();
+    verify(detector, never()).fading();
+    verify(detector, never()).expelled();
   }
 
   /**

@@ -15,6 +15,7 @@ All cross-instance communication falls into three categories, all of which toler
 The inconsistency window is bounded by the shortest periodic interval among the affected paths: 1s (Worker heartbeat/evaluation), configurable `reportIntervalMs` (default 50ms for Reporter), or the next write transaction for sync.
 
 We explicitly choose **not** to provide:
+
 - Message-level idempotency (no dedup hash)
 - Distributed locking (no leader election, no lease)
 - Exactly-once delivery (at-most-once for sync/decisions, fire-and-forget for reports)
@@ -28,6 +29,6 @@ We explicitly choose **not** to provide:
 ## Consequences
 
 - A process-crash between ack and update causes a one-cycle delay in cache sync or decision application — never permanent divergence.
-- Under extreme network partition (>broadcast interval), some instances may serve stale data. The next heatbeat from a live Worker re-converges all instances.
+- Under extreme network partition (>broadcast interval), some instances may serve stale data. The next heartbeat from a live Worker re-converges all instances.
 - No need for persistent message store or replay infrastructure in the library.
-- The acceptable window is configurable via `zeta.worker-listener.warmup-jitter-ms`, `zeta.sync.dedup-window-seconds`, etc.
+- The acceptable window is configurable via `zeta.sync.warmup-jitter-ms`, `zeta.sync.dedup-window-seconds`, etc.

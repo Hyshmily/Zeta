@@ -36,10 +36,10 @@ import lombok.extern.slf4j.Slf4j;
  * Aggregates three responsibilities that were previously spread across
  * {@link HotKeyCache}:
  * <ul>
- *   <li>Reporting key accesses to the Worker via {@link KeyReporter}</li>
- *   <li>Broadcasting INVALIDATE/REFRESH operations to peer instances
- *       via {@link CacheSyncPublisher}</li>
- *   <li>Deferred buffering of REFRESH messages via {@link BroadcastBuffer}</li>
+ * <li>Reporting key accesses to the Worker via {@link KeyReporter}</li>
+ * <li>Broadcasting INVALIDATE/REFRESH operations to peer instances
+ * via {@link CacheSyncPublisher}</li>
+ * <li>Deferred buffering of REFRESH messages via {@link BroadcastBuffer}</li>
  * </ul>
  * <p>
  * This reduces {@link HotKeyCache}'s constructor dependencies and centralizes
@@ -61,19 +61,17 @@ public class CentralDispatcher {
   private final HotKeyDetector hotKeyDetector;
 
   /**
-   * Increment the local hot-key detector counter and optionally reportToWorker the
+   * Increment the local hot-key detector counter and optionally reportToWorker
+   * the
    * access to the Worker via the {@link KeyReporter}.
    *
-   * @param cacheKey       the accessed cache key
+   * @param cacheKey      the accessed cache key
    * @param skipBroadcast if {@code true}, skip reporting to Worker
    */
   @SuppressWarnings("java:S6213")
   public void report(String cacheKey, boolean skipBroadcast) {
     hotKeyDetector.add(cacheKey);
-    if (!skipBroadcast) {
-      // Detector buffer and reporter buffer are two independent aggregation paths
-      hotKeyReporter.ifPresent(r -> r.reportToWorker(cacheKey));
-    }
+    reportToWorkerIf(!skipBroadcast, cacheKey);
   }
 
   /**
@@ -82,18 +80,33 @@ public class CentralDispatcher {
    * independently skip the local HeavyKeeper count and/or the Worker
    * report.
    *
-   * @param cacheKey       the key to tag
-   * @param skipDetection  if {@code true}, skip the local HeavyKeeper
-   *                       increment
-   * @param skipReport     if {@code true}, skip the Worker report
+   * @param cacheKey      the key to tag
+   * @param skipDetection if {@code true}, skip the local HeavyKeeper
+   *                      increment
+   * @param skipReport    if {@code true}, skip the Worker report
    */
   public void tag(String cacheKey, boolean skipDetection, boolean skipReport) {
     if (!skipDetection) {
       hotKeyDetector.add(cacheKey);
     }
-    if (!skipReport) {
-      // Detector buffer and reporter buffer are two independent aggregation paths
-      hotKeyReporter.ifPresent(r -> r.reportToWorker(cacheKey));
+    reportToWorkerIf(!skipReport, cacheKey);
+  }
+
+  /**
+   * Shared tail of {@link #report} and {@link #tag}: conditionally hand the
+   * key to the Worker reporter.
+   *
+   * <p>Direct {@code isPresent()}/ {@code get()} avoids the per-call lambda
+   * allocation of {@code Optional.ifPresent} — this sits behind the ~15M ops/s
+   * read-path {@link #report} method. The detector buffer and the reporter
+   * buffer are two independent aggregation paths.
+   *
+   * @param shouldReport whether to report (caller's skip flag inverted)
+   * @param cacheKey     the accessed cache key
+   */
+  private void reportToWorkerIf(boolean shouldReport, String cacheKey) {
+    if (shouldReport && hotKeyReporter.isPresent()) {
+      hotKeyReporter.get().reportToWorker(cacheKey);
     }
   }
 
@@ -103,10 +116,10 @@ public class CentralDispatcher {
    * The actual send method invoked on {@link CacheSyncPublisher} depends
    * on the operation type:
    * <ul>
-   *   <li>{@link SyncMessage#TYPE_INVALIDATE} — calls
-   *       {@link CacheSyncPublisher#broadcastLocalInvalidate}</li>
-   *   <li>{@link SyncMessage#TYPE_REFRESH} — buffers via
-   *       {@link BroadcastBuffer#record} for deferred flush</li>
+   * <li>{@link SyncMessage#TYPE_INVALIDATE} — calls
+   * {@link CacheSyncPublisher#broadcastLocalInvalidate}</li>
+   * <li>{@link SyncMessage#TYPE_REFRESH} — buffers via
+   * {@link BroadcastBuffer#record} for deferred flush</li>
    * </ul>
    *
    * @param cacheKey the affected cache key
@@ -121,14 +134,20 @@ public class CentralDispatcher {
       return;
     }
     switch (type) {
-      case TYPE_INVALIDATE -> cacheSyncPublisher.ifPresentOrElse(
-        p -> p.broadcastLocalInvalidate(cacheKey, version, degraded),
-        () -> log.debug("send INVALIDATE: {}", NO_SYNC_PUBLISHER)
-      );
-      case TYPE_REFRESH -> cacheSyncPublisher.ifPresentOrElse(
-        p -> broadcastBuffer.record(cacheKey, version, degraded),
-        () -> log.debug("send REFRESH: {}", NO_SYNC_PUBLISHER)
-      );
+      case TYPE_INVALIDATE -> {
+        if (cacheSyncPublisher.isPresent()) {
+          cacheSyncPublisher.get().broadcastLocalInvalidate(cacheKey, version, degraded);
+        } else if (log.isDebugEnabled()) {
+          log.debug("send INVALIDATE: {}", NO_SYNC_PUBLISHER);
+        }
+      }
+      case TYPE_REFRESH -> {
+        if (cacheSyncPublisher.isPresent()) {
+          broadcastBuffer.record(cacheKey, version, degraded);
+        } else if (log.isDebugEnabled()) {
+          log.debug("send REFRESH: {}", NO_SYNC_PUBLISHER);
+        }
+      }
       default -> throw new IllegalArgumentException("Unknown send type: " + type);
     }
   }
@@ -147,10 +166,11 @@ public class CentralDispatcher {
       return;
     }
     if (type.equals(TYPE_INVALIDATE_ALL)) {
-      cacheSyncPublisher.ifPresentOrElse(
-        p -> p.broadcastLocalInvalidateAll(cacheKeys),
-        () -> log.debug("send INVALIDATE_ALL: {}", NO_SYNC_PUBLISHER)
-      );
+      if (cacheSyncPublisher.isPresent()) {
+        cacheSyncPublisher.get().broadcastLocalInvalidateAll(cacheKeys);
+      } else if (log.isDebugEnabled()) {
+        log.debug("send INVALIDATE_ALL: {}", NO_SYNC_PUBLISHER);
+      }
     }
   }
 }

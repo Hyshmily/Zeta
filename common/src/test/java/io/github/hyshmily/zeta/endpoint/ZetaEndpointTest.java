@@ -34,7 +34,10 @@ import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
+import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
+import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import java.util.List;
 import java.util.Map;
@@ -257,6 +260,63 @@ class ZetaEndpointTest {
     assertThat(info).doesNotContainKeys("local", "worker");
     assertThat(info).containsKey("sync");
     assertThat(((Map<String, Object>) info.get("sync"))).containsEntry("dedupCacheSize", 5L);
+  }
+
+  /* per-key dispatcher gate (ADR-0072 D-1) */
+
+  /**
+   * Verifies that each plane's section reports that plane's own dispatcher gate, so a saturated gate
+   * can be told apart from an idle one without waiting for a drop WARN.
+   */
+  @Test
+  void hotKeyInfo_shouldReportDispatchGatePerPlane() {
+    CacheSyncListener syncListener = mock(CacheSyncListener.class);
+    when(syncListener.dispatcherStats()).thenReturn(new DispatcherStats(120L, 500L, 3, 7L, 2L));
+    WorkerListener workerListener = mock(WorkerListener.class);
+    when(workerListener.dispatcherStats()).thenReturn(new DispatcherStats(0L, 200L, 0, 1L, 0L));
+    ZetaEndpoint ep = ZetaEndpoint.builder()
+      .properties(properties)
+      .cacheSyncPublisher(cacheSyncPublisher)
+      .syncListener(syncListener)
+      .workerListener(workerListener)
+      .build();
+
+    Map<String, Object> info = ep.hotKeyInfo(100);
+
+    assertThat((Map<String, Object>) info.get("sync"))
+      .containsEntry("dispatchPendingUnits", 120L)
+      .containsEntry("dispatchRemainingUnits", 380L)
+      .containsEntry("dispatchMaxPendingUnits", 500L)
+      .containsEntry("dispatchActiveKeys", 3)
+      .containsEntry("dispatchBacklogged", true)
+      .containsEntry("dispatchDropped", 7L)
+      .containsEntry("dispatchRejected", 2L);
+
+    assertThat((Map<String, Object>) info.get("worker"))
+      .containsEntry("dispatchPendingUnits", 0L)
+      .containsEntry("dispatchRemainingUnits", 200L)
+      .containsEntry("dispatchBacklogged", false)
+      .containsEntry("dispatchDropped", 1L);
+  }
+
+  /**
+   * Verifies that a plane whose dispatcher does not exist yet contributes no dispatch keys and does
+   * not break the response.
+   */
+  @Test
+  void hotKeyInfo_shouldOmitDispatchKeysWhenDispatcherAbsent() {
+    CacheSyncListener syncListener = mock(CacheSyncListener.class);
+    when(syncListener.dispatcherStats()).thenReturn(null);
+    ZetaEndpoint ep = ZetaEndpoint.builder()
+      .properties(properties)
+      .cacheSyncPublisher(cacheSyncPublisher)
+      .syncListener(syncListener)
+      .build();
+
+    Map<String, Object> info = ep.hotKeyInfo(100);
+    Map<String, Object> sync = (Map<String, Object>) info.get("sync");
+    assertThat(sync).containsKey("dedupCacheSize");
+    assertThat(sync).doesNotContainKey("dispatchPendingUnits");
   }
 
   /* worker section with multiple shards */

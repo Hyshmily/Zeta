@@ -29,7 +29,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -41,7 +40,6 @@ import org.junit.jupiter.api.Test;
  * set by the capacity-drop branch; tides with no shared-table writes skip
  * the 1ms window without losing hot-path counts.
  */
-@Tag("performance")
 class WaveCounterQuiescenceGateTest {
 
   private static boolean readFlag(WaveCounter c) {

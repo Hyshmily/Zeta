@@ -16,10 +16,13 @@
 package io.github.hyshmily.zeta.util.executor;
 
 import io.github.hyshmily.zeta.Internal;
+import org.jspecify.annotations.NonNull;
+import org.springframework.util.Assert;
+
+import java.util.Objects;
 import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
-import org.jspecify.annotations.NonNull;
 
 /**
  * A {@link LinkedTransferQueue} whose {@link #offer(Runnable)} method cooperates with
@@ -41,8 +44,12 @@ import org.jspecify.annotations.NonNull;
  * same snapshot — the previous formulation read them independently, leaving a TOCTOU window
  * in which the two values could be observed from different instants. {@code maximumPoolSize}
  * is snapshotted when the executor is attached ({@link #setStandardThreadExecutor}) and is
- * assumed stable for the executor's lifetime (no runtime {@code setMaximumPoolSize}),
- * removing a third volatile read from the hot path.
+ * assumed stable for the executor's lifetime: a later {@code setMaximumPoolSize} call is
+ * NOT observed (the thread-creation decision keeps using the value from attach time).
+ *
+ * <p>The queue must be attached to a {@link StandardThreadExecutor} before use — {@link #offer}
+ * and {@link #force} dereference the attached executor and fail otherwise. The queue is
+ * single-use: it attaches to exactly one executor and cannot be re-attached.
  *
  * <p>Unlike a standard {@link java.util.concurrent.LinkedBlockingQueue}, this queue has no
  * capacity limit — the upper bound on in-flight tasks is enforced by
@@ -55,12 +62,27 @@ public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
 
   /**
    * Snapshot of the executor's maximum pool size, taken when the executor is attached.
-   * Stable for the lifetime of the executor (see class Javadoc).
+   * Taken once — a later {@code setMaximumPoolSize} on the executor is not observed
+   * (see class Javadoc).
    */
   private volatile int maxPoolSize;
 
+  /**
+   * Attaches this queue to its executor and snapshots {@code maxPoolSize} for the
+   * lock-free {@link #offer} decision. The queue is single-use: a second attach — even
+   * to the same executor — throws.
+   *
+   * @param executor the owning executor; must not be {@code null}
+   * @throws NullPointerException  if {@code executor} is {@code null}
+   * @throws IllegalStateException if the queue is already attached to an executor
+   */
   public void setStandardThreadExecutor(StandardThreadExecutor executor) {
-    this.executorRef.set(executor);
+    Objects.requireNonNull(executor, "executor must not be null");
+    Assert.state(
+      executorRef.compareAndSet(null, executor),
+      "StandardExecutorQueue is already attached to " + executorRef.get() + "; queues are single-use"
+    );
+
     this.maxPoolSize = executor.getMaximumPoolSize();
   }
 
@@ -86,6 +108,12 @@ public class StandardExecutorQueue extends LinkedTransferQueue<Runnable> {
     return super.offer(o);
   }
 
+  /**
+   * Tomcat-style queue-or-force-thread decision. Requires an attached executor —
+   * the executor's {@code submittedTasksCount} and pool size drive the decision (see
+   * class Javadoc); a queue used without {@link #setStandardThreadExecutor} fails with
+   * a {@link NullPointerException} on the missing executor reference.
+   */
   @Override
   public boolean offer(@NonNull Runnable o) {
     StandardThreadExecutor executor = executorRef.get();

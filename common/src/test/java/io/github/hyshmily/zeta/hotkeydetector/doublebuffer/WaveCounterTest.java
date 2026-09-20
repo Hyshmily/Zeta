@@ -29,7 +29,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -37,7 +36,6 @@ import org.junit.jupiter.api.Test;
  * local aggregation, automatic promotion, concurrent delivery, dead-writer
  * reclamation and slow consumers.
  */
-@Tag("performance")
 class WaveCounterTest {
 
   private List<Map<String, Long>> batches;

@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import jakarta.annotation.PostConstruct;
@@ -40,8 +41,12 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
  * maintenance so expired entries are physically reclaimed even when the
  * cache is idle (Segcache-style eager expiration).  Uses {@link List
  * List&#60;TopK&#62;} injection
- * to support both the app-side and Worker-side TopK instances when they
- * coexist in the same JVM.
+ * so every registered TopK implementation is maintained; the
+ * {@link HotKeyDetector} facade is excluded (see the constructor) because
+ * it carries no independent state — including it would apply the decay
+ * twice to the same underlying HeavyKeeper.  (This configuration is
+ * disabled entirely in Worker-only mode, so the Worker's own TopK is
+ * maintained by the Worker's scheduling.)
  *
  * <p>Rather than relying on Spring's {@code @Scheduled} (which uses the
  * global single-threaded {@code taskScheduler}), tasks are submitted
@@ -72,7 +77,15 @@ public class ZetaSchedulingConfiguration {
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
     Optional<Cache<String, Object>> l1Cache
   ) {
-    this.topKInstances = topKInstances;
+    // HotKeyDetector implements TopK by delegating every call — fading() and
+    // expelled() included — to its wrapped HeavyKeeper bean, which is itself
+    // registered as a TopK.  Iterating both beans called HeavyKeeper.fading()
+    // twice per tick (2× decay rate, halved sliding-window depth), so the
+    // facade is filtered out here; its delegate is always present in the list
+    // because the detector bean cannot be created without a HeavyKeeper.
+    this.topKInstances = topKInstances.stream()
+      .filter(topK -> !(topK instanceof HotKeyDetector))
+      .toList();
     this.scheduler = scheduler;
     this.l1Cache = l1Cache;
   }
@@ -105,6 +118,14 @@ public class ZetaSchedulingConfiguration {
   /**
    * Periodically drain expelled hot keys from all registered TopK instances.
    * Logs a truncated summary of up to 20 sample keys. Runs every 10 seconds.
+   *
+   * <p><b>Competing consumer warning:</b> this drain shares the expelled
+   * queue handed out by {@code Zeta#returnLocalExpelledHotKeys()} to user
+   * consumers. The drain is a memory-protection measure — without it, an
+   * undrained queue grows unbounded — but it silently swallows expelled-key
+   * events: up to {@code 100_000} items per TopK per pass may be consumed
+   * here before a user consumer observes them. Documented on both sides; do
+   * not rely on this queue for guaranteed event delivery.
    */
   void drainExpelled() {
     try {

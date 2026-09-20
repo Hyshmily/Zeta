@@ -37,6 +37,11 @@ class BayesianEvaluatorTest {
 
   @BeforeEach
   void setUp() {
+    // The momentum time constant is derived from the detector's window span in
+    // the constructor — stub a realistic span (16 slices × 63ms ≈ 1s) so the
+    // moving-average math in the tests below is exercised at production scale.
+    when(detector.getWindowSize()).thenReturn(16);
+    when(detector.getTimeMillisPerSlice()).thenReturn(63L);
     evaluator = new DefaultEvaluator(detector, stateMachine, new FastLaneRuleManagerImpl(List.of()));
   }
 
@@ -56,7 +61,7 @@ class BayesianEvaluatorTest {
     }
 
     @Test
-    void shouldPassEmaCmsCount() {
+    void shouldSeedWindowAverageWithWindowSum() {
       when(detector.addCount("key", 5L)).thenReturn(100L);
       when(detector.getThreshold()).thenReturn(10L);
       when(stateMachine.evaluate(eq("key"), eq(true), eq(false), ctxCaptor.capture(), any())).thenReturn(
@@ -66,23 +71,70 @@ class BayesianEvaluatorTest {
       evaluator.evaluate("key", 5L);
 
       EvaluationContext ctx = ctxCaptor.getValue();
-      assertThat(ctx.cmsCount()).isEqualTo(5L);
+      // First evaluation seeds the window average with one full window sum —
+      // momentum 1.0 (neutral) is exactly the right first impression.
+      assertThat(ctx.cmsCount()).isEqualTo(100L);
       assertThat(ctx.windowSum()).isEqualTo(100L);
       assertThat(ctx.threshold()).isEqualTo(10L);
+      assertThat(ctx.adjustedLogThreshold()).isEqualTo(ctx.logThreshold());
     }
 
     @Test
-    void shouldEmaGrowsWithCount() {
-      when(detector.addCount("key", 5L)).thenReturn(100L);
+    void momentumIsNeutralForSustainedKey() {
+      when(detector.addCount(eq("key"), anyLong())).thenReturn(1000L);
       when(detector.getThreshold()).thenReturn(10L);
-      when(stateMachine.evaluate(eq("key"), eq(true), eq(false), ctxCaptor.capture(), any())).thenReturn(
+      when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), ctxCaptor.capture(), any())).thenReturn(
         new ZetaDecision(DecisionType.NONE, "key", null)
       );
 
+      for (int i = 0; i < 30; i++) {
+        evaluator.evaluate("key", 50L);
+      }
+
+      // Sustained window level: average ≈ windowSum → momentum ≈ 1 → the bar
+      // is unadjusted (the old unit-broken EMA pegged momentum at a clamp and
+      // shifted the bar by a constant ln(10) for every key with history).
+      EvaluationContext ctx = ctxCaptor.getValue();
+      assertThat(ctx.adjustedLogThreshold()).isCloseTo(ctx.logThreshold(), org.assertj.core.data.Offset.offset(0.05));
+    }
+
+    @Test
+    void momentumRaisesBarForBurstSpike() {
+      when(detector.addCount(eq("key"), anyLong())).thenReturn(1000L);
+      when(detector.getThreshold()).thenReturn(10L);
+      when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), ctxCaptor.capture(), any())).thenReturn(
+        new ZetaDecision(DecisionType.NONE, "key", null)
+      );
+      for (int i = 0; i < 30; i++) {
+        evaluator.evaluate("key", 50L);
+      }
+
+      // Sudden 5× spike: the average lags behind → momentum < 1 → bar raised.
+      when(detector.addCount(eq("key"), anyLong())).thenReturn(5000L);
+      evaluator.evaluate("key", 250L);
+
+      EvaluationContext ctx = ctxCaptor.getValue();
+      assertThat(ctx.adjustedLogThreshold()).isGreaterThan(ctx.logThreshold() + 1.0);
+    }
+
+    @Test
+    void momentumLowersBarForCoolingKey() {
+      when(detector.addCount(eq("key"), anyLong())).thenReturn(1000L);
+      when(detector.getThreshold()).thenReturn(10L);
+      when(stateMachine.evaluate(any(), anyBoolean(), anyBoolean(), ctxCaptor.capture(), any())).thenReturn(
+        new ZetaDecision(DecisionType.NONE, "key", null)
+      );
+      for (int i = 0; i < 30; i++) {
+        evaluator.evaluate("key", 50L);
+      }
+
+      // Window collapses to 1/10 while the average still carries history →
+      // momentum > 1 → bar lowered (sustained key stays HOT more easily).
+      when(detector.addCount(eq("key"), anyLong())).thenReturn(100L);
       evaluator.evaluate("key", 5L);
 
       EvaluationContext ctx = ctxCaptor.getValue();
-      assertThat(ctx.cmsCount()).isEqualTo(5L);
+      assertThat(ctx.adjustedLogThreshold()).isLessThan(ctx.logThreshold() - 2.0);
     }
   }
 

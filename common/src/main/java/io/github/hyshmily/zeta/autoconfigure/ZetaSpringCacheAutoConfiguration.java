@@ -40,7 +40,7 @@ import org.springframework.context.annotation.Bean;
  * to type hot-key detection, soft-expire, and cross-instance send.
  */
 @Internal
-@AutoConfiguration
+@AutoConfiguration(after = ZetaFacadeAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "zeta.spring-cache", name = "enabled", havingValue = "true")
 @ConditionalOnClass(name = "org.springframework.cache.support.AbstractValueAdaptingCache")
 @ConditionalOnBean(Zeta.class)

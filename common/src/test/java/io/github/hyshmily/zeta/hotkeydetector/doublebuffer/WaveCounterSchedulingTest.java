@@ -169,14 +169,17 @@ class WaveCounterSchedulingTest {
     deliveryStartedField.setBoolean(failing, true);
     int schedulesBefore = scheduler.delaysMillis.size();
 
-    // Plant an expired window so the FIRST failure surely opens it:
-    // TimeSource.monotonicMillis() can be < 10s on a fresh JVM, which
-    // would make the zero-initialized timestamp read as "inside the
-    // window" and shift the expected suppression count.
-    Field openedAt = WaveCounter.class.getDeclaredField("lastTideErrorLoggedAtMs");
-    openedAt.setAccessible(true);
+    // Plant an expired window so the FIRST failure surely opens it. The stamp now
+    // lives inside a LogThrottle (an AtomicLong claimed by compare-and-set), so the
+    // test reaches through the throttle to it rather than touching the field directly.
+    Field throttleField = WaveCounter.class.getDeclaredField("tideErrorLogThrottle");
+    throttleField.setAccessible(true);
+    Object throttle = throttleField.get(failing);
+    Field openedAtField = throttle.getClass().getDeclaredField("lastAcquiredAtMs");
+    openedAtField.setAccessible(true);
+    AtomicLong openedAt = (AtomicLong) openedAtField.get(throttle);
     long before = TimeSource.monotonicMillis();
-    openedAt.setLong(failing, before - 60_000L);
+    openedAt.set(before - 60_000L);
 
     Method tide = WaveCounter.class.getDeclaredMethod("tide");
     tide.setAccessible(true);
@@ -197,7 +200,7 @@ class WaveCounterSchedulingTest {
     suppressedField.setAccessible(true);
     AtomicLong suppressed = (AtomicLong) suppressedField.get(failing);
     assertThat(suppressed.get()).as("failures suppressed inside the window").isEqualTo(2);
-    assertThat(openedAt.getLong(failing)).as("window timestamp refreshed by the opening failure").isGreaterThanOrEqualTo(before);
+    assertThat(openedAt.get()).as("window timestamp refreshed by the opening failure").isGreaterThanOrEqualTo(before);
     assertThat(scheduler.delaysMillis).as("delivery chain re-armed once per failing tide").hasSize(schedulesBefore + 3);
   }
 

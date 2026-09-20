@@ -27,7 +27,10 @@ import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
+import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.version.VersionController;
@@ -48,7 +51,8 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>The response includes both app-side and Worker-side TopK rankings, L1
  * cache metrics, SingleFlight in-flight sizes, recently expelled keys,
  * algorithm configuration, TTL settings, version tracking state, send
- * dedup, identity, and instance-level health. Each section is produced only
+ * dedup, per-key dispatcher gate/backlog (ADR-0072 D-1), identity, and
+ * instance-level health. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
  *
  * <p><b>Security:</b> This endpoint returns sensitive runtime data including
@@ -89,11 +93,23 @@ public class ZetaEndpoint {
   private final HealthView healthView;
 
   /**
+   * Sync-plane listener whose ordered dispatcher gate is reported in the "sync" section
+   * (ADR-0072 D-1); {@code null} when the sync plane is absent.
+   */
+  private final CacheSyncListener syncListener;
+
+  /**
+   * Decision-plane listener whose ordered dispatcher gate is reported in the "worker" section
+   * (ADR-0072 D-1); {@code null} when Worker mode is off.
+   */
+  private final WorkerListener workerListener;
+
+  /**
    * Collect all diagnostic metrics into a three-section response map:
    * <ul>
    *   <li><b>local</b> — app-side detection, cache, reporting, rules, TTLs, version
-   *   <li><b>worker</b> — worker-side TopK, health, state machine
-   *   <li><b>sync</b> — send dedup cache
+   *   <li><b>worker</b> — worker-side TopK, health, state machine, decision-plane dispatch gate
+   *   <li><b>sync</b> — send dedup cache, sync-plane dispatch gate
    * </ul>
    * Each section is populated only when the required components are available.
    *
@@ -116,12 +132,40 @@ public class ZetaEndpoint {
       info.put("worker", worker);
     }
 
+  if (cacheSyncPublisher != null || syncListener != null) {
+    Map<String, Object> sync = new LinkedHashMap<>();
     if (cacheSyncPublisher != null) {
-      info.put("sync", Map.of("dedupCacheSize", cacheSyncPublisher.getDedupCacheSize()));
+      sync.put("dedupCacheSize", cacheSyncPublisher.getDedupCacheSize());
     }
-
-    return info;
+    putDispatchStats(sync, syncListener == null ? null : syncListener.dispatcherStats());
+    if (!sync.isEmpty()) {
+      info.put("sync", sync);
+    }
   }
+
+  return info;
+}
+
+/**
+ * Flatten a dispatcher gate snapshot into {@code dispatch*} keys of the given section
+ * (ADR-0072 D-1). A {@code null} or not-yet-initialized dispatcher contributes nothing, so a
+ * deployment mode without that plane simply omits the keys.
+ *
+ * @param section the endpoint section to append to
+ * @param stats   the gate snapshot, or {@code null} when the plane is absent
+ */
+private static void putDispatchStats(Map<String, Object> section, DispatcherStats stats) {
+  if (stats == null) {
+    return;
+  }
+  section.put("dispatchPendingUnits", stats.pendingUnits());
+  section.put("dispatchRemainingUnits", stats.remainingUnits());
+  section.put("dispatchMaxPendingUnits", stats.maxPendingUnits());
+  section.put("dispatchActiveKeys", stats.activeKeys());
+  section.put("dispatchBacklogged", stats.backlogged());
+  section.put("dispatchDropped", stats.dropped());
+  section.put("dispatchRejected", stats.rejected());
+}
 
   /**
    * Build the "local" section of the actuator response containing app-side
@@ -230,6 +274,10 @@ public class ZetaEndpoint {
 
     if (zetaBayesianSM != null) {
       worker.put("trackedKeys", zetaBayesianSM.getTrackedKeys());
+    }
+
+    if (workerListener != null) {
+      putDispatchStats(worker, workerListener.dispatcherStats());
     }
 
     return worker;

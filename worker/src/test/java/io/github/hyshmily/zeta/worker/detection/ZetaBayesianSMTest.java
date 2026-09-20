@@ -39,8 +39,8 @@ import org.junit.jupiter.api.Test;
  */
 class ZetaBayesianSMTest {
 
-  private static final ConfidenceEvaluator EVAL = new ConfidenceEvaluator(
-    new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5)
+  private static final ConfidenceEvaluator EVAL = new BayesianConfidenceEstimator(
+    BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5
   );
 
   private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, Double.NaN, 0.0);

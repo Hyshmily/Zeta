@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.worker.detection;
 
 import java.util.function.IntConsumer;
+import org.springframework.util.Assert;
 
 /**
  * Shared arithmetic for the doubled circular slice windows used by
@@ -46,18 +47,20 @@ public final class SliceWindowMath {
    *                                  duration zero
    */
   public static int alignedSlices(long windowDurationMs, int slices) {
-    if (slices <= 0) {
-      throw new IllegalArgumentException("slices must be positive, got " + slices);
-    }
+    Assert.isTrue(slices > 0, "slices must be positive, got " + slices);
 
     int aligned = slices;
     if ((aligned & (aligned - 1)) != 0) {
       aligned = Integer.highestOneBit(aligned - 1) << 1;
     }
-    if (windowDurationMs < aligned) {
-      throw new IllegalArgumentException(
-        "windowDurationMs (" + windowDurationMs + ") must be >= aligned slices (" + aligned + ") to avoid division by zero");
-    }
+    Assert.isTrue(
+      windowDurationMs >= aligned,
+      "windowDurationMs (" +
+        windowDurationMs +
+        ") must be >= aligned slices (" +
+        aligned +
+        ") to avoid division by zero"
+    );
     return aligned;
   }
 

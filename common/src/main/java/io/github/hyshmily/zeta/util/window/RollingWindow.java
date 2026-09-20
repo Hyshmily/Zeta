@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
+import org.springframework.util.Assert;
 
 /**
  * A fixed-size time-based sliding window backed by an {@link AtomicLongArray}
@@ -101,11 +102,9 @@ public final class RollingWindow {
    */
   @SuppressWarnings("all")
   public RollingWindow(int windowSize, long windowDurationMs) {
-    if (windowSize <= 0) {
-      // Zero previously crashed with an ArithmeticException (division by the aligned
-      // size below); negative sizes corrupted the highestOneBit alignment math.
-      throw new IllegalArgumentException("windowSize must be positive, got " + windowSize);
-    }
+    // Zero previously crashed with an ArithmeticException (division by the aligned
+    // size below); negative sizes corrupted the highestOneBit alignment math.
+    Assert.isTrue(windowSize > 0, "windowSize must be positive, got " + windowSize);
     int aligned = windowSize;
     if ((aligned & (aligned - 1)) != 0) {
       aligned = Integer.highestOneBit(aligned - 1) << 1;
@@ -113,20 +112,19 @@ public final class RollingWindow {
     this.windowSize = aligned;
     this.windowMask = aligned - 1;
     long bucketDuration = windowDurationMs / aligned;
-    if (bucketDuration <= 0) {
-      // A non-positive bucket duration would crash tick() with ArithmeticException on
-      // the first rotation (elapsed / 0) — reject it at construction with a clear message.
-      throw new IllegalArgumentException(
-        "windowDurationMs must be at least the aligned window size " +
-          aligned +
-          " (one millisecond per bucket); got windowSize=" +
-          windowSize +
-          " → aligned=" +
-          aligned +
-          ", windowDurationMs=" +
-          windowDurationMs
-      );
-    }
+    // A non-positive bucket duration would crash tick() with ArithmeticException on
+    // the first rotation (elapsed / 0) — reject it at construction with a clear message.
+    Assert.isTrue(
+      bucketDuration > 0,
+      "windowDurationMs must be at least the aligned window size "
+        + aligned
+        + " (one millisecond per bucket); got windowSize="
+        + windowSize
+        + " → aligned="
+        + aligned
+        + ", windowDurationMs="
+        + windowDurationMs
+    );
     this.bucketDurationMs = bucketDuration;
     this.buckets = new AtomicLongArray(aligned);
     windowField.windowStart = TimeSource.monotonicMillis();

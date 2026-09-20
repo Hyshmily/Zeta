@@ -20,3 +20,7 @@ Introduce a third version space (`rulesVersion`, `AtomicLong`), make `persistAnd
 - The Lua CAS guards against stale-write races but does not prevent concurrent additions from different instances — merge-on-receive handles that.
 - `rulesVersion` space is per-rule-set (global), not per-rule. A single `AtomicLong` suffices because rule changes are administrative operations (low frequency, small payload).
 - Backward compatible: if a peer broadcasts the old array-only format (`String[]` of patterns with implicit BLOCK action), the listener detects it via `instanceof` check and wraps into the versioned envelope.
+
+## 2026-08-29 Amendment
+
+The merge-on-receive half of this decision is **superseded by ADR-0062** (version-authoritative full replace). The trace that forced the change: union merge + re-persist-after-sync resurrects deleted rules on every peer holding a stale copy and writes them back to Redis at a higher version, so deletions never converged — the "eventually consistent" expectation above was unreachable, since no later merge cycle can express deletion. The Lua CAS gate, both-write pattern, `rulesVersion` space, and legacy-format compatibility of this ADR all remain in force; only the merge-on-receive semantics changed (fresh versioned broadcasts now full-replace; unversioned legacy broadcasts keep the union merge).

@@ -17,11 +17,12 @@ package io.github.hyshmily.zeta.endpoint;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.web.bind.annotation.*;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.web.bind.annotation.*;
 
 /**
  * Actuator endpoint for reading and updating the Worker's state-machine
@@ -31,7 +32,7 @@ import org.springframework.web.bind.annotation.*;
  * (see {@code AMQP_HEADER_HEARTBEAT_CONFIG_FP} / {@code hbConfigFp} in
  * {@code WorkerHeartbeatProducer}).
  *
- * <p>Endpoint path: {@code /actuator/zeta/worker/state}.
+ * <p>Endpoint path: {@code /actuator/hotkey/worker/state}.
  *
  * <p><b>Security:</b> The {@code POST} endpoint allows callers to modify
  * detection thresholds ({@code confirmCount}, {@code coolCount},
@@ -91,29 +92,74 @@ public class StateMachineEndpoint {
    *   <li>{@code preCoolGraceCount}
    * </ul>
    *
+   * <p>The POST-applied combination must satisfy the same invariant the
+   * config-negotiation layer enforces on heartbeat gossip
+   * ({@code confirmCount >= 1, preCoolGraceCount >= 1, coolCount > preCoolGraceCount}):
+   * without the check, a malformed POST would be applied locally but rejected
+   * by every peer's gossip validation, leaving the originating Worker on a
+   * permanently divergent config with no reconciliation path.</p>
+   *
    * @param body a map of parameter names to string values
    * @return a status map confirming the applied changes
    */
   @PostMapping
   public Map<String, Object> set(@RequestBody Map<String, String> body) {
+    int confirmCount = stateMachine.getConfirmCount();
+    int coolCount = stateMachine.getCoolCount();
+    int preCoolGraceCount = stateMachine.getPreCoolGraceCount();
+    boolean anyProvided = false;
     try {
       if (body.containsKey("confirmCount")) {
-        int v = Integer.parseInt(body.get("confirmCount"));
-        if (v < 0) return Map.of("status", "error", "message", "confirmCount must be >= 0");
-        stateMachine.setConfirmCount(v);
+        confirmCount = Integer.parseInt(body.get("confirmCount"));
+        anyProvided = true;
       }
       if (body.containsKey("coolCount")) {
-        int v = Integer.parseInt(body.get("coolCount"));
-        if (v < 0) return Map.of("status", "error", "message", "coolCount must be >= 0");
-        stateMachine.setCoolCount(v);
+        coolCount = Integer.parseInt(body.get("coolCount"));
+        anyProvided = true;
       }
       if (body.containsKey("preCoolGraceCount")) {
-        int v = Integer.parseInt(body.get("preCoolGraceCount"));
-        if (v < 0) return Map.of("status", "error", "message", "preCoolGraceCount must be >= 0");
-        stateMachine.setPreCoolGraceCount(v);
+        preCoolGraceCount = Integer.parseInt(body.get("preCoolGraceCount"));
+        anyProvided = true;
       }
     } catch (NumberFormatException e) {
       return Map.of("status", "error", "message", "Invalid number format: " + e.getMessage());
+    }
+
+    // Nothing requested: pure no-op — no rewrite, no timestamp bump.
+    if (!anyProvided) {
+      return Map.of("status", "ok");
+    }
+
+    // Mirror of the WorkerConfigNegotiator gossip predicate — validate the
+    // POST-APPLIED combination (provided fields override, others keep their
+    // current values) before mutating anything, so the endpoint can never
+    // mint a config the cluster would refuse to adopt. The predicate itself
+    // is defined once on {@link ZetaBayesianSM#isValidConfig} so the two
+    // call sites cannot drift.
+    if (!ZetaBayesianSM.isValidConfig(confirmCount, preCoolGraceCount, coolCount)) {
+      return Map.of(
+        "status",
+        "error",
+        "message",
+        "Config rejected: confirmCount >= 1, preCoolGraceCount >= 1 and " +
+          "coolCount > preCoolGraceCount are required (confirmCount=" +
+          confirmCount +
+          ", coolCount=" +
+          coolCount +
+          ", preCoolGraceCount=" +
+          preCoolGraceCount +
+          ")"
+      );
+    }
+
+    if (body.containsKey("confirmCount")) {
+      stateMachine.setConfirmCount(confirmCount);
+    }
+    if (body.containsKey("coolCount")) {
+      stateMachine.setCoolCount(coolCount);
+    }
+    if (body.containsKey("preCoolGraceCount")) {
+      stateMachine.setPreCoolGraceCount(preCoolGraceCount);
     }
     var counter = configTimestampCounter.getIfAvailable();
     if (counter != null) {

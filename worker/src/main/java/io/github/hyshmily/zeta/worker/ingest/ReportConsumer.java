@@ -21,7 +21,7 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.model.StateSnapshot;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
-import io.github.hyshmily.zeta.util.TimeSource;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer;
@@ -109,17 +109,13 @@ public class ReportConsumer {
   private static final int CHUNK_SIZE = 1000;
 
   /**
-   * Window (ms) for the rate-limited broadcast-failure WARN
-   * ({@value #BROADCAST_ERROR_LOG_WINDOW_MS}ms, ADR-0037 convention).
+   * Rate-limits the aggregated broadcast-failure WARN to one per
+   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window (ADR-0037 convention).
+   * Admission is strict — {@link LogThrottle} claims the window with a
+   * compare-and-set, so exactly one caller per window logs. The atomicity and
+   * the monotonic clock are provided by {@link LogThrottle}.
    */
-  private static final long BROADCAST_ERROR_LOG_WINDOW_MS = 10_000;
-
-  /**
-   * Monotonic timestamp of the last rate-limited broadcast-failure WARN.
-   * Volatile: report consumers are concurrent ({@code concurrentConsumers}),
-   * so the throttle must be visible across threads.
-   */
-  private volatile long lastBroadcastErrorLoggedAtMs = -BROADCAST_ERROR_LOG_WINDOW_MS;
+  private final LogThrottle broadcastErrorLogThrottle = LogThrottle.perDefaultWindow();
 
   /**
    * Previous batch's per-thread sample of
@@ -357,7 +353,7 @@ public class ReportConsumer {
     // sendBroadcast no longer throws — errors are logged and swallowed.
     // Each failure still rolls the key's state back (guarded by the state
     // machine's mutationSeq), but the per-failure WARN is aggregated into
-    // at most one log per {@link #BROADCAST_ERROR_LOG_WINDOW_MS} window so a
+    // at most one log per {@link LogThrottle#DEFAULT_WINDOW_MS} window so a
     // RabbitMQ outage cannot flood the log (ADR-0037 convention). The
     // broadcast failure itself (with full stack) is logged once at the send
     // site in {@link WorkerBroadcaster}.
@@ -377,32 +373,16 @@ public class ReportConsumer {
       }
     }
 
-    if (failed > 0 && tryAcquireBroadcastErrorLog()) {
+    if (failed > 0 && broadcastErrorLogThrottle.tryAcquire()) {
       log.warn(
         "Failed to broadcast {} decision(s), rolled back to previous state (first key={}, first snapshot={}; " +
           "further failures suppressed for {}s)",
         failed,
         firstFailureKey,
         firstFailureSnapshot,
-        BROADCAST_ERROR_LOG_WINDOW_MS / 1000
+        LogThrottle.DEFAULT_WINDOW_MS / 1000
       );
     }
-  }
-
-  /**
-   * Rate limiter for the aggregated broadcast-failure WARN: at most one log
-   * per {@link #BROADCAST_ERROR_LOG_WINDOW_MS}ms window. Thread-safe via
-   * {@link #lastBroadcastErrorLoggedAtMs} being volatile.
-   *
-   * @return {@code true} if the caller may log now
-   */
-  private boolean tryAcquireBroadcastErrorLog() {
-    long now = TimeSource.monotonicMillis();
-    if (now - lastBroadcastErrorLoggedAtMs < BROADCAST_ERROR_LOG_WINDOW_MS) {
-      return false;
-    }
-    lastBroadcastErrorLoggedAtMs = now;
-    return true;
   }
 
   @Builder

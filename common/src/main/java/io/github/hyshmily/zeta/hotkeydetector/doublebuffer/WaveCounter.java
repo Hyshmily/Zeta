@@ -20,6 +20,7 @@
 package io.github.hyshmily.zeta.hotkeydetector.doublebuffer;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
@@ -38,6 +39,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import javax.security.auth.Destroyable;
+import org.springframework.util.Assert;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.InitializingBean;
 
@@ -997,24 +999,16 @@ public class WaveCounter implements InitializingBean, Destroyable {
   private volatile boolean deliveryStarted;
 
   /**
-   * Rate-limits the tide-failure ERROR to one per window (the ADR-0037
-   * rate-limited-WARN pattern): a persistently throwing consumer fires a
-   * tide every ~50ms, and an unthrottled full-stack ERROR per tide floods
-   * the log unboundedly.
+   * Rate-limits the tide-failure ERROR to one per window. Admission is
+   * strict — {@code LogThrottle} claims the window with a compare-and-set, so
+   * exactly one caller per window logs. The atomicity and the monotonic clock
+   * are provided by {@link LogThrottle}.
    */
-  private static final long TIDE_ERROR_LOG_WINDOW_MS = 10_000;
-
-  /**
-   * Monotonic timestamp of the last window-opening tide-failure ERROR.
-   * Volatile: the self-rescheduling chain serializes the tide with itself,
-   * but tests may drive tides from other threads (same benign
-   * check-then-act race as the BroadcastBuffer pattern this mirrors).
-   */
-  private volatile long lastTideErrorLoggedAtMs = -TIDE_ERROR_LOG_WINDOW_MS;
+  private final LogThrottle tideErrorLogThrottle = LogThrottle.perDefaultWindow();
 
   /**
    * Tide failures suppressed inside the current
-   * {@link #TIDE_ERROR_LOG_WINDOW_MS}ms
+   * {@link LogThrottle#DEFAULT_WINDOW_MS}ms
    * window — reported by the next window-opening ERROR line so the true
    * failure volume stays visible at the throttled cadence.
    */
@@ -1039,6 +1033,25 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * while the memory bound stays O(capacity).
    */
   private long capacityHeadroom;
+
+  /**
+   * Counts the cold-key counts discarded by the soft capacity guard — the one
+   * loss path in the reporting chain with no counter (every other drop is
+   * counted: dead-worker, unroutable, routing-queue, dispatcher, BBR). At high
+   * key cardinality the Worker's view under-counts by exactly the dropped
+   * tail, so the counter is the operator's signal that {@code capacity} is too
+   * small for the workload. Read via {@link #coldCapacityDropCount()}.
+   */
+  private final LongAdder coldCapacityDrops = new LongAdder();
+
+  /**
+   * Rate-limits the capacity-drop WARN to one line per
+   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window — the drop fires per add
+   * under sustained overload, so the log is rate-limited (ADR-0037 log
+   * convention; never per-key on the hot path). Admission is strict —
+   * {@link LogThrottle} claims the window with a compare-and-set.
+   */
+  private final LogThrottle capacityDropWarnThrottle = LogThrottle.perDefaultWindow();
 
   /**
    * O(1) distinct-key counter for the cold-path capacity guard —
@@ -1101,10 +1114,13 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * the entry becomes visible, cleared by the deliverer at table swap.
    * When unset, no insert has happened this cycle — the old table at the
    * swap is empty and nothing can be lost — and the tide skips the 1ms
-   * quiescence window; when set, the window is paid. A miss-path writer
-   * preempted across the swap re-targets
-   * the NEW table (its computeIfAbsent re-reads the field), so the flag
-   * cannot lose a write by itself.
+   * quiescence window; when set, the window is paid. The flag does not
+   * prevent a loss by itself: the cold path captures the table reference
+   * once into a local and writes to THAT table, never re-reading the
+   * field (see {@code count}) — so a writer preempted across the swap
+   * still targets the old table, and only a mark captured by the swap
+   * buys it a window. A mark landing after the swap's clear arms nothing
+   * for that cycle; it persists into the next one.
    *
    * <p>
    * Set by EVERY real insert into the shared table: the cold-miss
@@ -1474,15 +1490,12 @@ public class WaveCounter implements InitializingBean, Destroyable {
     // the beacon room space (hotLimit * 32) stays within a positive-int
     // power of two — beyond 2^30 rooms the sizing loop overflows to a
     // negative mask and mis-indexes the array.
-    if (opMaxCount <= 0 || opMaxCount > LOCAL_CAPACITY / 2) {
-      throw new IllegalArgumentException(
-          "opMaxCount must be in (0, " +
-              (LOCAL_CAPACITY / 2) +
-              "] so the open-addressing probe can never fill the local map");
-    }
-    if (hotLimit < 0 || hotLimit > MAX_HOT_LIMIT) {
-      throw new IllegalArgumentException("hotLimit must be in [0, " + MAX_HOT_LIMIT + "]");
-    }
+    Assert.isTrue(
+        opMaxCount > 0 && opMaxCount <= LOCAL_CAPACITY / 2,
+        "opMaxCount must be in (0, " +
+            (LOCAL_CAPACITY / 2) +
+            "] so the open-addressing probe can never fill the local map");
+    Assert.isTrue(hotLimit >= 0 && hotLimit <= MAX_HOT_LIMIT, "hotLimit must be in [0, " + MAX_HOT_LIMIT + "]");
     this.batchConsumer = batchConsumer;
     this.opMaxCount = opMaxCount;
     // ignoredFlushIntervalMs is deliberately NOT stored: retained as a
@@ -1631,6 +1644,18 @@ public class WaveCounter implements InitializingBean, Destroyable {
           // size check)" semantics. Keeping the guard BEFORE the flag/insert
           // keeps the dominant drop path at one get + one atomic read.
           if (capacity > 0 && (long) APPROXIMATE_SIZE.getOpaque(this) >= capacity + capacityHeadroom) {
+            coldCapacityDrops.increment();
+            // One WARN per 10s window (ADR-0037 convention): the drop fires
+            // per add under sustained overload and must stay off the per-key
+            // log path. {@code LogThrottle} keeps concurrent droppers to a
+            // single line via compare-and-set.
+            if (capacityDropWarnThrottle.tryAcquire()) {
+              log.warn(
+                "Reporter cold-key capacity exceeded: {} distinct keys tracked, new cold keys are being dropped "
+                  + "({} drops cumulative) — the Worker's view under-counts the dropped tail",
+                capacity + capacityHeadroom,
+                coldCapacityDrops.sum());
+            }
             return;
           }
           // (quiescence-gate): a cold writer that may land in the CURRENT
@@ -2279,11 +2304,14 @@ public class WaveCounter implements InitializingBean, Destroyable {
       reservoir = nextCapacity > 16 ? new ConcurrentHashMap<>(nextCapacity) : new ConcurrentHashMap<>();
       APPROXIMATE_SIZE.setOpaque(this, 0L);
       // (quiescence-gate): capture and clear the cold-write flag under
-      // the same mutex as the swap. A writer that observed the OLD
-      // reference and set the flag before the swap is captured here and
-      // the window is paid; a writer whose flag lands after the swap
-      // targets the NEW table (its computeIfAbsent re-reads the field),
-      // so clearing under the gate cannot lose a write.
+      // the same mutex as the swap. A writer that marked before the swap
+      // is captured here, so the window below is paid and a writer
+      // preempted in the capture-to-mark gap still lands in `old` in
+      // time. A mark landing after this clear arms no window this cycle
+      // — the cold path writes to the table it captured and never
+      // re-reads the field (see count) — so that write targets a drained
+      // `old` and is lost; the mark merely persists into the next cycle
+      // and makes it pay a spare window (idempotent, harmless).
       quiesce = (boolean) COLD_WRITE_SEEN.getAcquire(this);
       COLD_WRITE_SEEN.setRelease(this, false);
     }
@@ -2387,6 +2415,19 @@ public class WaveCounter implements InitializingBean, Destroyable {
   }
 
   /**
+   * Return the number of cold-key counts discarded by the soft capacity guard
+   * since construction — the reporting chain's "every loss is observable"
+   * invariant applied to the one drop path that had no counter. A rising
+   * value means {@code capacity} is too small for the workload's key
+   * cardinality and the Worker's view is under-counting the dropped tail.
+   *
+   * @return cumulative discarded cold-key count additions
+   */
+  public long coldCapacityDropCount() {
+    return coldCapacityDrops.sum();
+  }
+
+  /**
    * Drop all aggregated counts without calling the consumer.
    * After this call the counter is ready for reuse.
    */
@@ -2473,7 +2514,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * <p>
    * A failure anywhere in the tide — including an {@link Error} thrown
    * by the consumer — is logged rate-limited (one full-stack ERROR per
-   * {@value #TIDE_ERROR_LOG_WINDOW_MS}ms window, repeats one-line with the
+   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window, repeats one-line with the
    * suppressed count, DEBUG inside the window; see {@link #logTideFailure})
    * and the chain re-arms in a {@code finally}, so a persistently throwing
    * consumer degrades to one log per window instead of killing delivery or
@@ -2618,7 +2659,7 @@ public class WaveCounter implements InitializingBean, Destroyable {
 
   /**
    * Logs a tide failure rate-limited to one ERROR per
-   * {@value #TIDE_ERROR_LOG_WINDOW_MS}ms window (the ADR-0037
+   * {@value LogThrottle#DEFAULT_WINDOW_MS}ms window (the ADR-0037
    * rate-limited-WARN pattern): the window-opening ERROR carries the full
    * stack, a repeat that re-opens the window logs a single line with the
    * failures suppressed since the previous ERROR, and failures inside the
@@ -2628,15 +2669,13 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * {@link #tide()}).
    */
   private void logTideFailure(Throwable t) {
-    long now = TimeSource.monotonicMillis();
-    if (now - lastTideErrorLoggedAtMs < TIDE_ERROR_LOG_WINDOW_MS) {
+    if (!tideErrorLogThrottle.tryAcquire()) {
       long suppressed = tideErrorsSuppressed.incrementAndGet();
       log.debug("Scheduled delivery failed ({} failures suppressed within the current window)", suppressed, t);
       return;
     }
 
     long suppressed = tideErrorsSuppressed.getAndSet(0);
-    lastTideErrorLoggedAtMs = now;
     if (suppressed == 0) {
       // Window opened fresh (first failure, or the previous window lapsed
       // long ago) — keep the stack for diagnosis.

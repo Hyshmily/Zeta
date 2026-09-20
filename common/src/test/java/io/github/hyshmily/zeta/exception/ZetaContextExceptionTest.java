@@ -60,4 +60,22 @@ class ZetaContextExceptionTest {
     var ex = new ZetaContextException("MyClass", "my message");
     assertThat(ex.getMessage()).isEqualTo(ex.getLogMessage());
   }
+
+  @Test
+  void logMessageShouldBeMemoized() {
+    // The log message is formatted lazily on first access (ADR-0063); repeated
+    // access must return the same memoized instance.
+    var ex = new ZetaContextException("Src", "hello");
+    var first = ex.getLogMessage();
+    assertThat(ex.getLogMessage()).isSameAs(first);
+    assertThat(ex.getMessage()).isSameAs(first);
+  }
+
+  @Test
+  void defaultConstructorShouldCarryStackTrace() {
+    // Only control-flow subclasses (ZetaBlockedException) opt out of stack filling;
+    // the base class keeps the standard Throwable behaviour.
+    var ex = new ZetaContextException("Src", "hello");
+    assertThat(ex.getStackTrace()).isNotEmpty();
+  }
 }

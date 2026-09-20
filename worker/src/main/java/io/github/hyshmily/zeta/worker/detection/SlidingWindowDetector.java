@@ -197,11 +197,12 @@ public class SlidingWindowDetector {
    * thresholds are configured in minutes, a slice is tens of ms). Widely-hot
    * keys reported by many App instances within one slice then pay one
    * lock-free map read instead of the bin-locked compute on most calls.
-   * The return sum also uses a cached {@code lastSum}: on the same-slice
-   * fast path the sum is O(1) ({@code lastSum + count}) instead of O(windowSize).
+   * The return sum is always the honest O(windowSize) loop over the circular
+   * buffer: concurrent adders from many App instances share the same window,
+   * so a cached sum would go stale between adds.
    *
    * @param key   the cache key; must not be {@code null}
-   * @param count the number of accesses to reportToWorker (typically the batched
+   * @param count the number of accesses to record (typically the batched
    *              count reported by an application instance)
    * @return the sum of the last {@link #windowSize} slices after adding
    *         {@code count}

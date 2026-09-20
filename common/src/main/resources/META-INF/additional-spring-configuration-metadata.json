@@ -1,12 +1,6 @@
 {
   "properties": [
     {
-      "name": "zeta.annotation.enabled",
-      "type": "java.lang.Boolean",
-      "description": "Enable @HotKey annotation AOP support.",
-      "defaultValue": false
-    },
-    {
       "name": "zeta.instance-id",
       "type": "java.lang.String",
       "description": "Explicit instance ID for queue naming. Falls back to <server.port>-<HOSTNAME> (or <server.port>-<UUID> if HOSTNAME is unset) if empty.",
@@ -121,6 +115,12 @@
       "defaultValue": 2000
     },
     {
+      "name": "zeta.local.executor-rejection",
+      "type": "io.github.hyshmily.zeta.autoconfigure.ZetaProperties$ExecutorRejection",
+      "description": "Rejection policy when the executor queue and max pool are saturated: abort throws RejectedExecutionException (load failures are swallowed as cache misses), caller-runs runs the task on the submitting thread.",
+      "defaultValue": "abort"
+    },
+    {
       "name": "zeta.local.scheduler-pool-size",
       "type": "java.lang.Integer",
       "description": "Pool size for the shared HotKey scheduler (periodic tasks).",
@@ -205,8 +205,8 @@
     {
       "name": "zeta.local.version-key-ttl-minutes",
       "type": "java.lang.Integer",
-      "description": "TTL in minutes for Redis version tracking keys.",
-      "defaultValue": 60
+      "description": "TTL in minutes for Redis version tracking keys. MUST be far greater than the maximum lifetime of any L1 entry for the same key: if a version key expires while a peer still holds an L1 entry, the Redis INCR restarts from 1 and peers reject the lower version as stale, so updates silently stop syncing.",
+      "defaultValue": 10080
     },
     {
       "name": "zeta.local.app-name",
@@ -229,7 +229,7 @@
     {
       "name": "zeta.local.shard-count",
       "type": "java.lang.Integer",
-      "description": "Thread count divisor for auto consumer calculation (max(4, availableProcessors/2) when 0).",
+      "description": "Deprecated legacy knob: no code path reads this property (superseded by consistent-hashing routing and auto consumer count). Setting it has no effect.",
       "defaultValue": 1
     },
     {

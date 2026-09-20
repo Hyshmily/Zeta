@@ -38,22 +38,10 @@ import java.util.function.LongSupplier;
  * — Bayesian confidence is. The streak check exists only to ensure at least
  * one observation before consulting the Bayesian posterior.
  *
- * <h3>States</h3>
- * <pre>
- *   COLD ──hotStreak >= confirmCount──► CANDIDATE_HOT ──HIGH confidence──► CONFIRMED_HOT
- *                           + LOW/MEDIUM ────────────────► COLD (reset)
- *    ▲                                                                        │
- *    │                                  PRE_COOLING ◄──────coolStreak >= grace─┤
- *    │                                   │                                   │
- *    │                                   ├──coolStreak >= coolCount──► COLD──┘
- *    │                                   │        (MEDIUM/LOW confidence)
- *    │                                   │
- *    │                                   └──evictStale (stale)──► broadcast COOL ──► (removed)
- *    │                                                                         (CONFIRMED_HOT or PRE_COOLING,
- *    │                                                                          staleAfterMs = 2 × coolDurationMs)
- *    └──── hotStreak > 0 ───────────────────────────┘
- *                              (silent revive, no broadcast)
- * </pre>
+ * <p>The full state transition diagram (including the Worker fast-lane
+ * bypass) is documented on the default implementation
+ * ({@code io.github.hyshmily.zeta.worker.detection.impl.ZetaBayesianSM}).
+ *
  * <ul>
  *   <li><b>Bayesian-primary gating:</b> {@code confirmCount} is a minimal
  *       floor (1 window by default). Bayesian confidence is the sole
@@ -70,16 +58,31 @@ import java.util.function.LongSupplier;
  *   <li><b>Silent revive:</b> during PRE_COOLING, a single hot window silently
  *       returns the key to CONFIRMED_HOT without broadcasting, preventing
  *       HOT/COOL oscillation.</li>
- *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs every
- *       {@code evict-interval-ms} (default 30s) and scans for keys whose
- *       {@code lastUpdateTime} exceeds {@code 2 × coolDurationMs}. Any
- *       key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
+ *   <li><b>Periodic stale eviction:</b> {@link #evictStale} runs on a
+ *       periodic schedule (the Worker's {@code EvictStaleTask}, cadence
+ *       {@code zeta.worker.state-machine.evict-scan-interval-ms}, ADR-0060)
+ *       and scans for keys whose {@code lastUpdateTime} exceeds the staleness
+ *       threshold ({@code evict-interval-ms}, default 2 × coolDurationMs).
+ *       Any key in CONFIRMED_HOT or PRE_COOLING state at eviction triggers
  *       the {@code onCoolEvict} callback to broadcast COOL to all app
  *       instances, then removes the key from the state map. This is the
  *       safety net that cleans up keys left in HOT state after the
  *       worker has stopped receiving reports (e.g. the app instance died
  *       or the network partition healed).</li>
  * </ul>
+ *
+ * <p><b>Replacing the default implementation:</b> implement this interface and
+ * register it as a Spring Bean — the Worker auto-configuration creates the
+ * default under {@code @ConditionalOnMissingBean}, so a custom Bean replaces
+ * the decision policy entirely (the same convention as the Worker-side
+ * {@code Evaluator}). Custom implementations need not be aware of the
+ * Normal-Normal posterior internals: the default implementation consumes
+ * confidence through the {@code ConfidenceEvaluator} abstraction (worker
+ * module), so the confidence model itself can be swapped independently of
+ * the state machine. One contract must be preserved: decision
+ * {@code decisionVersion} values feed the monotonicity checks behind config
+ * gossip (ADR-0003) and the peer-side version guards, so a custom policy must
+ * keep emitting decisions whose per-key decision versions never regress.
  */
 @Internal
 public interface ZetaBayesianSM {
@@ -122,8 +125,10 @@ public interface ZetaBayesianSM {
    *
    * <p>This is the sole evaluation entry point. It combines the binary
    * hot/cold verdict from the sliding window with the multi-dimensional
-   * evidence in {@code ctx} (HeavyKeeper sketch count, window sum,
-   * threshold, CV) to produce a confidence-gated decision.
+   * evidence in {@code ctx} (window sum, threshold, CV, and the per-key
+   * accumulated posterior — on the Worker the {@code cmsCount} field carries
+   * the evaluator's per-key EMA of reported counts, not a HeavyKeeper sketch)
+   * to produce a confidence-gated decision.
    *
    * @param key             the cache key (must not be {@code null})
    * @param isFastlane      {@code true} if the key is in fastlane mode; {@code false} otherwise
@@ -161,6 +166,29 @@ public interface ZetaBayesianSM {
   void evictStale(long staleAfterMs, Consumer<String> onCoolEvict);
 
   /**
+   * Garbage-collects stale keys with tiered staleness: COLD-state keys are
+   * evicted after {@code coldStaleAfterMs} of inactivity, every other state
+   * after {@code staleAfterMs}.
+   *
+   * <p>A COLD key's retained state (streak counters, accumulated posterior)
+   * only matters while the key is still being reported; once reports stop,
+   * a resumed key re-evaluates from scratch anyway (exactly as it would
+   * after the full {@code staleAfterMs} eviction). Evicting COLD keys early
+   * bounds the state map's memory under high key cardinality without
+   * touching the CONFIRMED_HOT/PRE_COOLING retention that guards the COOL
+   * broadcast obligation.
+   *
+   * @param staleAfterMs      maximum idle time before a non-COLD key is evicted
+   * @param coldStaleAfterMs  maximum idle time before a COLD key is evicted;
+   *                          values {@code >= staleAfterMs} disable the tiering
+   * @param onCoolEvict       callback invoked (outside the per-key lock) for every
+   *                          evicted key that owes a COOL broadcast
+   */
+  default void evictStale(long staleAfterMs, long coldStaleAfterMs, Consumer<String> onCoolEvict) {
+    evictStale(staleAfterMs, onCoolEvict);
+  }
+
+  /**
    * Return a snapshot of the current state for a key.
    *
    * @param key the cache key
@@ -182,4 +210,26 @@ public interface ZetaBayesianSM {
    * @param previousState the snapshot to restore (must not be {@code null})
    */
   void rollbackToPreviousState(StateSnapshot previousState);
+
+  /**
+   * Validates a state-machine configuration triple: both confirmation counts
+   * must be at least 1, and the COOL confirmation count must be strictly
+   * greater than the pre-COOL grace count (otherwise a key could transition
+   * to COOL with no convergence path).
+   *
+   * <p>This is the single source of the predicate: the gossip receiver
+   * (worker's {@code WorkerConfigNegotiator}) and the actuator endpoint
+   * ({@code StateMachineEndpoint}) must accept exactly the configs the
+   * cluster converges on, so the check lives here instead of being restated
+   * — and drifted — at each site.
+   *
+   * @param confirmCount      HOT confirmation threshold; must be &gt;= 1
+   * @param preCoolGraceCount pre-COOL grace threshold; must be &gt;= 1
+   * @param coolCount         COOL confirmation threshold; must be &gt; preCoolGraceCount
+   * @return {@code true} when the combination is adoptable
+   */
+  @SuppressWarnings("all")
+  static boolean isValidConfig(int confirmCount, int preCoolGraceCount, int coolCount) {
+    return confirmCount >= 1 && preCoolGraceCount >= 1 && coolCount > preCoolGraceCount;
+  }
 }

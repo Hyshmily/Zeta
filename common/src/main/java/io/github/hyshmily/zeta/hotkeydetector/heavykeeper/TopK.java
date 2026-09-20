@@ -118,9 +118,20 @@ public interface TopK {
   }
 
   /**
-   * Return the total number of data streams (accesses) tracked since startup.
+   * Return the tracked access volume, <b>decay-adjusted rather than
+   * since-startup</b>.
    *
-   * @return total access count
+   * <p>Not a monotonic lifetime counter: each {@link #fading()} cycle halves the
+   * running total before adding the next window's volume, so the returned value
+   * converges on a weighted recent-traffic figure (roughly the last
+   * {@code windowCount × decayInterval} of activity) and moves <em>down</em> as
+   * traffic subsides. It is still an aggregate "how much traffic is this
+   * instance seeing" signal, which is how {@code Zeta#returnLocalTotalDataStreams()}
+   * and the {@code zeta.topk.total} gauge use it — but it must not be read as a
+   * cumulative request count, and it is not used in any hot-key threshold or
+   * ratio.
+   *
+   * @return decay-adjusted tracked access volume
    */
   long total();
 

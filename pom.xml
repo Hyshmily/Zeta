@@ -41,6 +41,7 @@
   <modules>
     <module>common</module>
     <module>worker</module>
+    <module>benchmark</module>
   </modules>
 
   <properties>

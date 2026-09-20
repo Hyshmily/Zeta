@@ -30,29 +30,32 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
  * adjustment.
  *
  * <p>{@code adjustedLogThreshold} is a momentum-adjusted version of
- * {@code logThreshold}. When the per-key EMA (cmsCount) is high relative to
- * the current window sum, the adjusted threshold is lowered — a key with
- * sustained history needs less evidence to stay HOT. Created by the
+ * {@code logThreshold}. When the per-key window moving average (cmsCount) is
+ * high relative to the current window sum, the adjusted threshold is lowered —
+ * a key with sustained history needs less evidence to stay HOT. Created by the
  * {@code Evaluator} before each call to
  * {@link ZetaBayesianSM#evaluate(String, boolean, boolean, EvaluationContext)}.
  *
- * @param cmsCount              HeavyKeeper / EMA frequency estimate (global, cross-instance)
+ * @param cmsCount              per-key time-decayed moving average of the
+ *                              sliding-window sums — the sustained window level
+ *                              (cross-instance); same unit as {@code windowSum}
  * @param windowSum             total access count in the current sliding window (local);
  *                              primary {@code observedCount} for the Bayesian model
  * @param threshold             the hot threshold (raw count) for the binary is-hot flag
- * @param cv                    coefficient of variation (may be {@code null})
+ * @param cv                    coefficient of variation for dynamic likelihood adjustment;
+ *                              {@code Double.NaN} when insufficient window history is available
  * @param logThreshold          the hot threshold in log space
  * @param adjustedLogThreshold  momentum-adjusted logThreshold (lower = easier HOT)
  * @param trendStrength         ratio of current / mean of preceding 3 windows
  */
 public record EvaluationContext(
-  long cmsCount, long windowSum, long threshold, Double cv,
+  long cmsCount, long windowSum, long threshold, double cv,
   double logThreshold, double adjustedLogThreshold, double trendStrength
 ) {
-  public EvaluationContext(long cmsCount, long windowSum, long threshold, Double cv, double trendStrength) {
+  public EvaluationContext(long cmsCount, long windowSum, long threshold, double cv, double trendStrength) {
     this(cmsCount, windowSum, threshold, cv, Math.log(Math.max(threshold, 1.0)), Math.log(Math.max(threshold, 1.0)), trendStrength);
   }
 
   /** Sentinel for fast-lane evaluation where no Bayesian context is needed. */
-  public static final EvaluationContext FASTLANE = new EvaluationContext(0L, 0L, 0L, null, 0.0, 0.0, 0.0);
+  public static final EvaluationContext FASTLANE = new EvaluationContext(0L, 0L, 0L, Double.NaN, 0.0, 0.0, 0.0);
 }

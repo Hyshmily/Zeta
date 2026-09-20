@@ -31,7 +31,7 @@ A previous version of this ADR specified rule 2 ("existing entry degraded → ac
 Rules 2–5 above already provide complete coverage for the scenarios the degraded check was meant to protect:
 
 | Scenario | Guard |
-|---|---|
+| --------------------------------------------------- | ------------------------------ |
 | Worker restarted, entry has stale decision metadata | Rule 2 (higher epoch → accept) |
 | First Worker contact on a locally-written entry | Rule 5 (different/null nodeId → accept) |
 | Same Worker, same incarnation | Rule 4 (`decisionVersion` comparison) |
@@ -58,3 +58,39 @@ Removing `@Primary` was considered and rejected: with two non-primary `Connectio
 | Data | `rabbitConnectionFactory` (Boot) | Report publish/consume, cache-sync publish/consume, Worker decision consume, Worker HOT/COOL broadcast |
 
 **Operational note:** `@Qualifier("rabbitConnectionFactory")` relies on Spring Boot's default bean name. If a consuming application defines its own `ConnectionFactory` bean (causing Boot to back off), these injection points fail fast at startup with an explicit `NoSuchBeanDefinitionException` — acceptable, since silent mis-routing is worse than a loud startup failure.
+
+## 2026-09-17 Addendum: Control-Plane Exchange Pre-Declaration (Cold-Start `404`)
+
+A cluster E2E run on a freshly created broker (`docker compose down -v`, so no exchanges existed) reproducibly logged two `ERROR`s from the **first** Worker to start, and none from the second:
+
+```
+ERROR o.s.a.r.c.CachingConnectionFactory - Shutdown Signal: channel error;
+  protocol method: #method<channel.close>(reply-code=404,
+  reply-text=NOT_FOUND - no exchange 'zeta.heartbeat.exchange' in vhost '/', class-id=60, method-id=40)
+```
+
+**Cause.** The heartbeat exchange was declared only by Spring Boot's `RabbitAdmin`, which declares lazily when a connection is created. The control-plane publishers (`WorkerHeartbeatProducer`, `FastLaneRulesBroadcaster`) open their own connection through `zetaHeartbeatConnectionFactory`, and nothing ordered the two. On an empty broker the first publish won the race, RabbitMQ closed the channel, and that tick's heartbeat plus fast-lane rule gossip were lost. Self-healing one interval later — which is exactly why it survived this long: only the first Worker of a cold cluster ever shows it.
+
+**Decision.** Pre-declare the heartbeat exchange on the control-plane connection **before that connection is handed to a publisher** — `WorkerAutoConfiguration#heartbeatRabbitTemplate` runs an idempotent `exchangeDeclare` through the template's own `execute` while constructing the bean. Ordering then follows from dependency injection (no control-plane publish can precede the template instance that carries it) rather than from a timing assumption. A failure is logged at `WARN` and degrades to the previous behaviour, so an unreachable broker during context refresh cannot break startup. The earlier mitigation — delaying the first heartbeat by `pingIntervalMs` — is retained but is not what makes this correct.
+
+**Rejected: registering a second `RabbitAdmin`.** This is the obvious fix and it silently destroys the cluster. Boot's admin is guarded by `@ConditionalOnMissingBean` **without attributes**, so the condition matches on the method's **return type**, `AmqpAdmin`:
+
+```java
+@Bean
+@ConditionalOnSingleCandidate(ConnectionFactory.class)
+@ConditionalOnBooleanProperty(name = "spring.rabbitmq.dynamic", matchIfMissing = true)
+@ConditionalOnMissingBean                       // ← return type AmqpAdmin
+public AmqpAdmin amqpAdmin(ConnectionFactory connectionFactory) { ... }
+```
+
+`RabbitAdmin implements AmqpAdmin`, so any admin Zeta registers would switch Boot's off and leave **every** report / broadcast / sync exchange, queue and binding undeclared — with no error pointing at the cause. Verified with `javap -v` against `spring-boot-autoconfigure:3.5.3`. Declaring from the publishing template avoids the question entirely.
+
+**Verification.** Cold cluster (empty broker), `zeta-worker:1.1.57` rebuilt from this revision:
+
+|                                 | Before | After |
+| ------------------------------- | ------ | ----- |
+| `404 NOT_FOUND` lines, worker-1 | 2      | **0** |
+| `404 NOT_FOUND` lines, worker-2 | 0      | 0     |
+| worker-1 startup `ERROR` count  | 2      | **0** |
+
+Control plane confirmed intact: `rabbitmqctl list_exchanges` shows `zeta.heartbeat.exchange topic`; the App logs `Worker joined cluster: worker-1 / worker-2`; an end-to-end run still yields `state=HOT, decisionVersion=1, decisionNodeId=worker-1` on the App's L1 entry. The same cold-start race remains possible for the data-plane entities Boot's admin declares — documented as a remaining caveat under `zeta.worker-listener.*` in [CONFIG.md](../CONFIG.md).

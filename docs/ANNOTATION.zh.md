@@ -67,6 +67,8 @@ Zeta / HotKeyCache
 
 "忽略"指：该注解今天是静默 no-op，切面会记录一次性 WARN（规则 R2）让错误可见。
 
+**注解读路径上的检测（所有 `@Cacheable` 路由）：** 每次 `@Cacheable` 读取都计入热 key 检测，恪守"每次读取同时触发检测与上报"的核心不变量。非 sync 路由（`cache.get(key)` → `lookup`）经由单次规则感知的 `peekAndTag` 查找（每次读一次哈希查找 + 一次规则评估）服务命中——值或 null 哨兵——并在每次命中时同时馈入本地 HeavyKeeper 检测器与 Worker 上报器（白名单命中只检测不上报，阻断键抛出异常，miss 两者皆无）；sync 路由（`get(key, Callable)`）进入带检测的 compute 路径。未命中时执行方法体，结果经写路径入库（写入本身不触发检测）。非 sync 命中仅从 L1 服务是有意为之：lookup 绝不调用 loader。
+
 **`@CachePut` 跨实例语义：** `@CachePut` 写透（`putThrough`）并广播 REFRESH 同步消息。Zeta 自身从不向 Redis 的缓存键命名空间写值，因此在默认装配下接收方无法加载新值——REFRESH 处理器回退为**本地失效**（ADR-0031）：对端副本被逐出，下次读经应用 reader 重新加载。若集成方自行在 Redis 中维护该键的值，则走推送路径。本地写请使用 `@SkipBroadcast`。
 
 ---
@@ -119,9 +121,9 @@ Zeta / HotKeyCache
 
 ## 6. null 缓存语义
 
-- **默认（无注解或 `@NullCaching(true)`）**：`null` 结果以内部 `NullValue` 哨兵存储，TTL 为 `zeta.local.null-value-ttl-seconds`（短 TTL）。命中有效哨兵返回 `null` 且**不再调用方法体**；该访问仍计入热 key 检测。
+- **默认（无注解或 `@NullCaching(true)`）**：`null` 结果以 Zeta 的内部 `NullValue` 哨兵存储，TTL 为 `zeta.local.null-value-ttl-seconds`（短 TTL）。所有写路径使用同一哨兵与 TTL——loader 路径与注解存储路径（`@CachePut` 返回 null、非 sync `@Cacheable` 入库、显式写入 Spring `NullValue`）——因此 Spring 自带的 `NullValue` 标记永远不会被持久化。命中有效哨兵返回 `null` 且**不再调用方法体**；该访问仍计入热 key 检测。
 - **`@NullCaching(false)`**：`null` 结果不留条目；下次调用重新执行方法。
-- 三条读路径（`get`、`getWithSoftExpire`、`computeIfAbsent[WithSoftExpire]`）与 fluent API（`read(key).notAllowNull()`）语义一致。
+- 三条读路径（`get`、`getWithSoftExpire`、`computeIfAbsent[WithSoftExpire]`）与 fluent API（`read(key).nullCaching(false)`）语义一致。
 
 ---
 

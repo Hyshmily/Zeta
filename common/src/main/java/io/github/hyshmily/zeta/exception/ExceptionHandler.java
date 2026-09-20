@@ -49,7 +49,6 @@ import io.github.hyshmily.zeta.Internal;
 @FunctionalInterface
 @Internal
 public interface ExceptionHandler {
-
   /**
    * Handles a throwable produced by a Zeta-managed task.
    *

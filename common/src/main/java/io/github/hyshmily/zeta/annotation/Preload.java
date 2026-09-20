@@ -53,7 +53,7 @@ import java.lang.annotation.Target;
  *
  * <pre>{@code
  * @Cacheable("products")
- * @HotKeyPreload(keys = {"flash-item-001", "flash-item-002"})
+ * @Preload(keys = {"flash-item-001", "flash-item-002"})
  * @Intercept
  * Product getProduct(String id) { ... }
  * }</pre>
@@ -81,8 +81,10 @@ public @interface Preload {
 
   /**
    * Inflated access count injected into the detection engine per key.
-   * {@code 0} means {@link Long#MAX_VALUE} — virtually guaranteed to
-   * be classified as hot by the HeavyKeeper sketch.
+   * {@code 0} means a large saturating count ({@code Integer.MAX_VALUE}) —
+   * virtually guaranteed to be classified as hot by the HeavyKeeper sketch,
+   * and safe to re-add after the preload dedup window expires without
+   * overflowing the detector's {@code long} counter.
    */
   int count() default 0;
 }

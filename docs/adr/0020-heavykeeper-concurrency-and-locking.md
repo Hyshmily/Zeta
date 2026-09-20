@@ -4,43 +4,53 @@ Merges and supersedes ADR-0006, ADR-0014, and ADR-0017.
 
 ---
 
+> **2026-09-12 amendment:** the stripe-count cascade was simplified in `a9a1b72` to
+> `min(2048, max(64, totalSlots >> 4))` — the current cap is **2048** stripes, not the
+> "up to 4096" figure quoted in the table below (and formerly in the class Javadoc).
+> The cap bounds monitor allocation; collision contention stays negligible per the
+> benchmark below. No behavioral change beyond the cap.
+
+---
+
 ## Per-Stripe Lock in HeavyKeeper Fading (from ADR-0006)
 
-`HeavyKeeper.fading()` rotates the sliding-window ring buffer under per-stripe locks (`synchronized (lockStripes[i & lockMask])`) to prevent concurrent `addDirect()` from observing torn `long` writes (JLS 17.17). The decay cycle has two distinct halves, each with its own concurrency story:
+`HeavyKeeper.fading()` rotates the sliding-window ring buffer under per-stripe locks (`synchronized (lockStripes[i & lockMask])`) to keep the three sketch arrays mutually consistent while `addDirect()` updates them concurrently. The decay cycle has two distinct halves, each with its own concurrency story.
+
+> **Correction (2026-09-17).** This section previously justified the lock as protection against *torn `long` writes* (JLS 17.17). That rationale no longer applies: the three arrays were narrowed to `int[]` in v1.1.56 (see "Width-matched counters" at the end), and a non-volatile `int` write is **already atomic** under the JMM (JLS 17.6/17.7) — there is no torn `int` to observe. The lock remains mandatory, but for the *compound* reason argued below: the three arrays must be updated together.
 
 ### Sketch half — rotating the window ring buffer
 
-The sketch maintains, per slot, a ring buffer of `windowCount` time windows. `fading()` zeroes the now-stale window index for every slot, keeping the running `slotSums[index]` in sync. Three flat `long[]` arrays share the same stripe protection:
+The sketch maintains, per slot, a ring buffer of `windowCount` time windows. `fading()` zeroes the now-stale window index for every slot, keeping the running `slotSums[index]` in sync. Three flat `int[]` arrays share the same stripe protection:
 
-- `long[] windows` (flattened 1D ring buffer, indexed `slot * windowCount + w`)
-- `long[] slotSums` (per-slot O(1) running sum across all windows)
-- `long[] fingerprints` (per-slot collision-verification fingerprint)
+- `int[] windows` (flattened 1D ring buffer, indexed `slot * windowCount + w`)
+- `int[] slotSums` (per-slot O(1) running sum across all windows)
+- `int[] fingerprints` (per-slot collision-verification fingerprint)
 
-Without the per-stripe lock, a 32-bit JVM torn read on any of these three arrays can produce a value that is neither the old nor the new state — a corrupted intermediate that propagates through every subsequent cycle for that bucket until a coincidental zero-write resets it. The per-stripe lock is therefore mandatory for correctness, not optional.
+Without the per-stripe lock, a reader can observe a *trio* from two different instants — e.g. the new `fingerprint` next to the pre-rotation `slotSums` — and treat it as a consistent slot. Individual element writes are atomic, so no single value is ever torn; what the lock buys is that the three-element compound update is seen as one unit. The per-stripe lock is therefore mandatory for correctness, not optional.
 
-We explicitly chose NOT to use `AtomicLongArray` for `windows` / `slotSums` / `fingerprints` because:
+We explicitly chose NOT to use `AtomicIntegerArray` for `windows` / `slotSums` / `fingerprints` because:
 
-1. It would bloat every element (object header per cell on top of the array backing), and the arrays together are `depth * width * (windowCount + 1)` longs — non-trivial.
+1. It would bloat every element (object header per cell on top of the array backing), and the arrays together are `depth * width * (windowCount + 1)` ints — non-trivial.
 2. It would degrade `addToSketch()` cache locality (contiguous cache lines prefer dense plain arrays).
 3. It does not actually remove the lock — the three arrays are read together in the fast path (`adjacent reads/writes`), and an atomic on one element does not prevent another atomic on an adjacent slot from creating an inconsistent trio (fingerprint vs slotSums vs windows). The compound update is what needs atomicity, and only a lock can provide that.
 
 **Lock the compound update, not the individual counters.**
 
-The contention cost is negligible because `fading()` runs once per decay interval (~30s) while `addDirect()` holds the same stripe lock for a single compound update lasting nanoseconds.
+The contention cost is negligible because `fading()` runs once per decay interval — currently a **hard-coded 20 s** in `ZetaSchedulingConfiguration.scheduleTasks()` (there is no configuration property for it) — while `addDirect()` holds the same stripe lock for a single compound update lasting nanoseconds.
 
 ### TopK membership half — halving membership counts
 
 The same `fading()` call also halves each TopK member's count (`node.count >> 1`), dropping members whose halved value falls to zero. This half is guarded by the separate `admissionLock` (ReentrantLock), not the sketch stripes. Lock order is *sketch stripes → admissionLock*, identical to the admission path, so no deadlock is possible with concurrent `addDirect` callers.
 
-`Node.count` is now `final AtomicLong count` — reverted from `LongAccumulator` after v1.1.55 because `reset()` silently drops concurrent `accumulate()` calls. The hot path uses `accumulateAndGet(maxCount, Math::max)` for atomic max-raise (single CAS under no contention). `fading()` lowers each member's count via a CAS retry loop in `decayMembership()` under `admissionLock`: it reads `count`, halves it, and retries if a concurrent raise causes the CAS to fail — never losing a write **during halving**. Membership removal (count halved to zero) uses an atomic check-and-remove inside the map's per-key critical section, so a lock-free fast-path raise that revives the count before the removal decision keeps the member. A residual sub-microsecond window remains between the final count read and the mapping removal (the fast path is lock-free by design); a key hit by it is re-admitted on its next `addDirect` — a bounded, self-healing transient, not a permanent loss.
+`Node.count` is now `final AtomicInteger count` — the final step of the `LongAccumulator → AtomicLong → AtomicInteger` evolution (v1.1 → v1.1.55 → v1.1.56; see the Revised Decision sections at the end). The hot path uses `accumulateAndGet(maxCount, Math::max)` for atomic max-raise (single CAS under no contention). `fading()` lowers each member's count via a CAS retry loop in `decayMembership()` under `admissionLock`: it reads `count`, halves it, and retries if a concurrent raise causes the CAS to fail — never losing a write **during halving**. Membership removal (count halved to zero) uses an atomic check-and-remove inside the map's per-key critical section, so a lock-free fast-path raise that revives the count before the removal decision keeps the member. A residual sub-microsecond window remains between the final count read and the mapping removal (the fast path is lock-free by design); a key hit by it is re-admitted on its next `addDirect` — a bounded, self-healing transient, not a permanent loss.
 
 ---
 
 ## HeavyKeeper Concurrency Data-Structure Choices (from ADR-0014)
 
-**Note:** Node.count reverted to `AtomicLong` in v1.1.55 (see "Revised Decision" at end).
+**Note:** Node.count reverted to `AtomicLong` in v1.1.55 and was narrowed to `AtomicInteger` in v1.1.56 (see the Revised Decision sections at end).
 
-The per-Node counter is now an `AtomicLong` using `accumulateAndGet(maxCount, Math::max)` on the hot path and a CAS retry loop during `decayMembership()`. The `LongAccumulator` was originally chosen for its 2.63× same-key-contention throughput advantage, but `reset()` has no atomic equivalent — concurrent `accumulate()` calls between `get()` and `reset()` are permanently lost on every decay cycle.
+The per-Node counter became an `AtomicLong` in v1.1.55 (later narrowed to `AtomicInteger`, same CAS protocol) using `accumulateAndGet(maxCount, Math::max)` on the hot path and a CAS retry loop during `decayMembership()`. The `LongAccumulator` was originally chosen for its 2.63× same-key-contention throughput advantage, but `reset()` has no atomic equivalent — concurrent `accumulate()` calls between `get()` and `reset()` are permanently lost on every decay cycle.
 
 The remaining decisions in this section (stripe locks, flattened window array, admission decomposition) are unchanged.
 
@@ -136,6 +146,14 @@ The 2.63× worst-case throughput is surrendered, but `AtomicLong.accumulateAndGe
 
 Memory per `Node` drops from ~150–400 B (`LongAccumulator` + lazily-allocated Striped64 cells) to ~24 B (`AtomicLong`).
 
+### Revised Decision (v1.1.56): Node.count narrowed to `AtomicInteger`
+
+The member counter's `long` range is dead weight: every count a member can hold is bounded by the sketch. `admit()` raises the membership count to the maximum cross-row slot sum returned by `addToSketch()`, and the sketch's window counters and slot sums are `int[]` with an explicit saturation guard at `Integer.MAX_VALUE` (reaching the cap requires >10⁸ increments/s on a single slot — a stop condition, not a working state). Persisted counts injected by `warm()` are clamped at `Integer.MAX_VALUE` for the same reason. A member count can therefore never exceed the `int` range, so `AtomicInteger` expresses the identical protocol — `accumulateAndGet(max, Math::max)` for the lock-free max-raise and the `compareAndSet` halving retry loop in `decayMembership()` — while halving the counter's memory on every Node (members are also scanned per admission/decay by `findMinMember()` and per introspection by the sorted snapshot, so the narrower counter is cache-adjacent, not just stored).
+
+The concurrency protocol is unchanged, so the v1.1.55 measurements carry over: a single CAS under no contention on the fast path, the same 0.38× worst-case same-key-contention regression vs `LongAccumulator` (already accepted for correctness in v1.1.55). Per-Node counter memory drops from ~24 B (`AtomicLong`) to ~16 B (`AtomicInteger`) on a compressed-oops JVM, and the sketch-side int cap makes an overflow impossible rather than merely unlikely.
+
+The full evolution: `LongAccumulator` (v1.1 — max-merge throughput, but `reset()` loses concurrent writes) → `AtomicLong` (v1.1.55 — correctness fix) → `AtomicInteger` (v1.1.56 — width matched to the provable `int` range, counter memory halved). Rejected: keeping `AtomicLong` "for safety" — the sketch's saturation guard makes a count above `Integer.MAX_VALUE` unreachable, so the wider counter protects nothing.
+
 ---
 
 ## Lock Hierarchy and Ordering (from ADR-0017)
@@ -147,7 +165,7 @@ Zeta uses three independent locking domains across the hot-path detection and st
 | Domain | Guard | Implementation | Scope |
 |---|---|---|---|
 | **HeavyKeeper admission** | TopK membership mutations (`admitOrEvict`, `decayMembership`) | `ReentrantLock` (`admissionLock`) | Global — one per HeavyKeeper instance |
-| **HeavyKeeper sketch stripes** | Per-slot sketch state (`windows[]`, `slotSums[]`, `fingerprints[]`) | `synchronized(Object[])` (up to 4096 stripes) | Per-stripe — stripes are distinct objects |
+| **HeavyKeeper sketch stripes** | Per-slot sketch state (`windows[]`, `slotSums[]`, `fingerprints[]`) | `synchronized(Object[])` (up to 2048 stripes) | Per-stripe — stripes are distinct objects |
 | **State machine per-key** | Per-key hot/cold streaks and state transitions | `Striped.lock(4096)` (`keyLocks`) | Per-key — 4096 stripes via Guava |
 
 ### Lock Hierarchy (strict total order)

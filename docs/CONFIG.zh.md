@@ -8,6 +8,7 @@
 | `peekAll(Collection)`                                                            | 批量 peek——返回 `Map<String, Object>` 的存在的键值对；缺失的 key 静默忽略                                                                                                                      |
 | `tag(key)`                                                                       | 标记 key 为可能热点，不执行缓存读取；更新本地 TopK + 加入 Worker 报告队列                                                                                                                   |
 | `tag(key, skipDetection, skipReport)`                                            | 带精细控制标记：独立控制是否跳过本地 HeavyKeeper 增量 和/或 Worker 报告                                                                                                                      |
+| `peekAndTag(key)`                                                                | 注解路径 peek（Spring Cache 适配层内部）：单次查找 + 单次规则评估；命中（值或空哨兵）即计入检测/上报（白名单只检测不上报，阻塞 key 抛异常），miss 两者皆无；哨兵命中返回 `NullValue.INSTANCE`，miss 返回 null                                         |
 | `getLocalCache()`                                                                | 暴露原始 Caffeine {@code Cache<String, Object>}，用于 Caffeine 特定操作（asMap、policy、cleanUp）。⚠️ 绕过 Zeta 编排层——版本追踪、广播和过期管理均被跳过。仅操作本地 L1。                      |
 | `estimatedSize()`                                                                | L1 缓存当前条目的估算数量（最佳估算）                                                                                                                                                          |
 | `stats()`                                                                        | L1 缓存统计快照：命中数、未命中数、命中率、驱逐数、估算大小                                                                                                                                    |
@@ -22,7 +23,8 @@
 | `get(key, reader)`                                                               | 从 L1 或 L2 reader 读取；每次访问触发本地 TopK 追踪 + App→Worker 上报；热点 key 提升到 L1（使用热点 TTL），普通 key 使用普通 TTL                                                               |
 | `get(key, reader, hardTtlMs, softTtlMs)`                                         | 同上，带 per-entry 硬和软 TTL 覆盖（传入 0 使用配置默认值）                                                                                                                                    |
 | `get(key, CachePolicy)`                                                          | 带解析后的 per-invocation CachePolicy 读取（延迟 TTL 求值）                                                                                                                                     |
-| `CachePolicy.of(reader).withFailOnError()`                                       | 快速失败读：loader/内部失败以异常形式抛给调用方，而不是被吞成 miss，使"数据源故障"与"key 不存在"可区分。loader 返回 null 仍是空结果（缓存为 NullValue 哨兵）。批量：`get(cacheKeys, reader, hardTtlMs, softTtlMs, report, failOnError)` |
+| `CachePolicy.of(reader).withFailOnError()`                                       | 快速失败读：loader/内部失败以异常形式抛给调用方，而不是被吞成 miss，使"数据源故障"与"key 不存在"可区分。loader 返回 null 仍是空结果（缓存为 NullValue 哨兵）。executor 拒绝（饱和）不算 loader 失败——与超时、熔断拦截一致，两种模式下都按空结果处理。批量：`get(cacheKeys, reader, hardTtlMs, softTtlMs, report, failOnError)` |
+| `CachePolicy.withReader(reader)`                                                 | 返回替换值供应商后的策略副本（TTL、空值缓存、广播、陈旧策略、上报、失败语义原样保留）——Spring Cache sync 读借此把 `valueLoader` 注入线程绑定的策略                                                                                   |
 | `getWithSoftExpire(key, reader)`                                                 | 软失效——返回过期旧值+触发异步刷新；每次访问触发本地 TopK 追踪 + App→Worker 上报；根据 key 状态使用全局默认 TTL。后台刷新失败时改为对陈旧条目续租——硬过期延长为 `max(剩余/2, 120s)`，软过期延至租约中点（重试窗口，ADR-0036），把源故障变成后台重试 |
 | `getWithSoftExpire(key, reader, softTtlMs)`                                      | 同上，带 per-call 软 TTL 覆盖（毫秒）                                                                                                                                                          |
 | `getWithSoftExpire(key, reader, hardTtlMs, softTtlMs)`                           | 同上，同时带 per-entry 硬 TTL 和 per-call 软 TTL 覆盖（毫秒）                                                                                                                                  |
@@ -60,7 +62,7 @@
 | `invalidate(cacheKey, isBroadcastByThisTime)`                                    | 显式控制是否广播的失效                                                                                                                                                                         |
 | `invalidate(Collection)`                                                         | 批量失效多个 key                                                                                                                                                                               |
 | `invalidate(Collection, isBroadcastByThisTime)`                                  | 批量失效带显式广播控制                                                                                                                                                                         |
-| `invalidateAllLocal()`                                                           | 紧急清空——无广播地失效所有 L1 条目                                                                                                                                                             |
+| `invalidateAllLocal()`                                                           | 紧急清空——无广播地失效所有 L1 条目；同时清空 SingleFlight 去重缓存（ADR-0067），刷新后的读取直接回源                                                                                                               |
 | `refresh(key, reader)`                                                           | 本地驱逐后通过 supplier 加载并缓存；使用默认 TTL                                                                                                                                               |
 | `refresh(key, reader, hardTtlMs, softTtlMs)`                                     | 本地驱逐后通过 supplier 加载并缓存，带显式 TTL 覆盖                                                                                                                                            |
 | `refreshAll(Map)`                                                                | 批量刷新——本地驱逐所有 key 后通过提供的 suppliers 加载                                                                                                                                         |
@@ -97,18 +99,18 @@
 
 ### 核心配置（`zeta.local.*`）
 
-> **设计说明：** 应用端 HeavyKeeper 使用更宽（50k）但更浅（depth 5）的 Sketch，衰减稍慢（0.92）。较宽的 Sketch 在单 key 插入时减少指纹冲突概率。较浅的深度足以满足应用端快速*启发式*本地升级判断的需要——它不做权威的 HOT/COOL 决策。
+> **设计说明：** 应用端 HeavyKeeper 使用更宽（配置 50k，创建 Bean 时自动向上对齐到最接近的 2 的幂——默认即 65,536，使桶下标走位掩码快速路径）但更浅（depth 5）的 Sketch，衰减稍慢（0.92）。较宽的 Sketch 在单 key 插入时减少指纹冲突概率。较浅的深度足以满足应用端快速*启发式*本地升级判断的需要——它不做权威的 HOT/COOL 决策。
 
 | 属性                                  | 默认值                         | 说明                                                                                                                                                                                        |
 | ------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `zeta.local.top-k`                    | `100`                          | Top-K 集合大小                                                                                                                                                                              |
-| `zeta.local.width`                    | `50000`                        | Count-Min Sketch 宽度                                                                                                                                                                       |
+| `zeta.local.width`                    | `50000`                        | Count-Min Sketch 宽度（创建 Bean 时自动向上对齐到最接近的 2 的幂）                                                                                                                                          |
 | `zeta.local.depth`                    | `5`                            | Count-Min Sketch 深度（行数）                                                                                                                                                               |
 | `zeta.local.decay`                    | `0.92`                         | 冲突衰减因子                                                                                                                                                                                |
 | `zeta.local.min-count`                | `10`                           | 热点 key 最低计数阈值                                                                                                                                                                       |
 | `zeta.local.sketch-window-count`      | `3`                            | 每 sketch slot 的滑动窗口数（环形缓冲区）。W=3 覆盖 3×衰减周期的数据，消除热点漂移。范围 1–10                                                                                               |
 | `zeta.local.cache.max-size`           | `100000`                       | Caffeine L1 最大条目数（`max-weight` 为 0 时生效）                                                                                                                                          |
-| `zeta.local.cache.max-weight`         | `0`                            | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重（String/byte[]/Collection/Map 精确；其他类型经 jol GraphLayout 深度测量，POJO 嵌套字段内容计入）                           |
+| `zeta.local.cache.max-weight`         | `0`                            | 内存权重限制（字节）；0 = 禁用。当 >0 时替代 `max-size`，使用 `DefaultWeigher` 估算权重：值引用图深度测量（容器按元素、其他对象按字段走查、带环检测），每条目另计 ≈114 B 的 Caffeine 开销；元素数超过 8 的容器按采样计价——数组与随机访问列表取等距样本、其余取前几个元素——余量按安全系数外推，整轮遍历上限 128 节点，超限的图按保守启发式计价（已走查部分的 8 倍，下限 1 MiB）而非精确值                                        |
 | `zeta.local.cache.max-value-size`     | `0`                            | 单值字节大小限制；0 = 不限。超过此大小的值不会被缓存                                                                                                                                        |
 | `zeta.local.cache-key.strip-query`    | `false`                        | 在缓存操作前从缓存键中剥离查询参数（`?key=val`），避免相同业务数据因 URL 参数不同而分裂到多个 Caffeine 条目中，从而稀释 HeavyKeeper 热点检测。默认关闭——未启用时零开销                      |
 | `zeta.local.inflight-max-size`        | `50000`                        | Inflight 去重最大条目数                                                                                                                                                                     |
@@ -117,6 +119,7 @@
 | `zeta.local.executor-core-pool-size`  | `8`                            | 线程池核心大小                                                                                                                                                                              |
 | `zeta.local.executor-max-pool-size`   | `32`                           | 线程池最大大小                                                                                                                                                                              |
 | `zeta.local.executor-queue-capacity`  | `2000`                         | 线程池队列容量                                                                                                                                                                              |
+| zeta.local.executor-rejection         | `abort`                        | 队列与最大线程池全满时的拒绝策略：`abort` 抛异常（加载失败按 miss 吞掉）、`caller-runs` 提交线程执行（背压）                                                                                |
 | `zeta.local.expelled-queue-capacity`  | `10000`                        | 被驱逐热 key 暂存队列容量（防止 TopK 溢出）                                                                                                                                                                                            |
 | `zeta.local.default-hard-ttl-ms`      | `300000`（5分钟）              | 普通 key 默认硬 TTL（Caffeine 驱逐）                                                                                                                                                        |
 | `zeta.local.hard-ttl-ms`              | `0`                            | 普通 key 每次调用的硬 TTL 覆盖；0 = 使用 `default-hard-ttl-ms`                                                                                                                              |
@@ -126,14 +129,15 @@
 | `zeta.local.soft-ttl-ms`              | `0`                            | 普通 key 每次调用的软 TTL 覆盖；0 = 使用 `default-soft-ttl-ms`                                                                                                                              |
 | `zeta.local.default-hot-soft-ttl-ms`  | `300000`（5分钟）              | 热点 key 默认软 TTL                                                                                                                                                                         |
 | `zeta.local.hot-soft-ttl-ms`          | `0`                            | 热点 key 每次调用的软 TTL 覆盖；0 = 使用 `default-hot-soft-ttl-ms`                                                                                                                          |
-| `zeta.local.null-value-ttl-seconds`   | `10`                           | null 缓存条目 TTL（秒）；避免长时间缓存负结果                                                                                                                                               |
+| `zeta.local.null-value-ttl-seconds`   | `10`                           | null 缓存条目 TTL（秒）；避免长时间缓存负结果。同样作用于 Spring Cache 注解路径写入的 null 值（`@Cacheable`/`@CachePut` 返回 null）                                                                                         |
 | `zeta.local.ttl-jitter-ratio`         | `0.05`                         | 偏移比例（0.0–1.0）；例如 0.05 表示对 TTL 计算施加 ±5% 的随机偏移。始终启用。                                                                                                               |
 | `zeta.local.refresh-max-pools`        | `100`                          | 软过期最大并发异步刷新数（信号量）                                                                                                                                                          |
 | `zeta.local.version-key-ttl-minutes`  | `10080`（7 天）                | Redis 版本 key TTL（分钟），最小值为 1。必须大于同一 key 在任何实例上 L1 entry 的最大存活时间，否则 dataVersion 回绕会导致写入被 VersionGuard 静默丢弃。默认 7 天覆盖所有实际 L1 生命周期。 |
 | `zeta.local.report-exchange`          | `zeta.reportToWorker.exchange` | App 向 Worker 发送报告消息的 RabbitMQ 交换机                                                                                                                                                |
-| `zeta.local.report-interval-ms`       | `50`                           | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）                                                                                                                                      |
+| `zeta.local.report-encoding`          | `json`                         | App 向 Worker 报告消息的线上编码：`json`（Jackson 报文体）或 `compact`（二进制 varint 报文体，ADR-0074）。解码侧始终同时支持两种格式（按首字节嗅探）——升级顺序为先全量升级 Worker，再把 App 切到 `compact` |
+| `zeta.local.report-interval-ms`       | `50`                           | App 实例批量发送 TopK 报告到 Worker 的时间间隔（毫秒）；低于 50 的值会被 WaveCounter 潮汐节奏的自适应下界向上钳制到 50ms（调度器强制）                                                                                                 |
 | `zeta.local.app-name`                 | `"default"`                    | 逻辑应用名，用于 Worker 路由的租户区分                                                                                                                                                      |
-| `zeta.local.shard-count`              | `1`                            | 消费者线程数自动计算的除数（max(4, availableProcessors/2)；路由默认使用一致性哈希                                                                                                           |
+| `zeta.local.shard-count`              | `1`                            | 已无任何代码路径读取（被一致性哈希路由 + 消费者线程自动计算取代）；设置它没有任何效果                                                                                                       |
 | `zeta.local.instance-id`              | `""`（自动检测）               | 用于队列命名的显式实例 ID；为空时自动检测为 `server.port-HOSTNAME`（或 `server.port-UUID`）                                                                                                 |
 | `zeta.local.queue-capacity`           | `10000`                        | 报告分发器队列容量（内部有界队列）                                                                                                                                                          |
 | `zeta.local.queue-offer-timeout-ms`   | `100`                          | 报告队列写入超时（毫秒）——阻塞此时长后丢弃                                                                                                                                                  |
@@ -152,7 +156,7 @@
 | `zeta.local.heartbeat.verify-max-backoff-ms`  | `600000`                  | 单 Worker 指数退避最大间隔（毫秒，10 分钟）                              |
 | `zeta.local.heartbeat.min-alive-workers`      | `0`                       | 集群健康所需最小存活 Worker 数；0（默认）= 推导阈值：观测 Worker 数的三分之一，向上取整，下限 1（如观测 3 台→1 台存活即健康；观测 5 台→2 台；观测 9 台→3 台）。单幸存 Worker 有意视为健康——见 ADR-0028。设为正数以绝对存活数覆盖 |
 
-> **连接隔离：** 心跳（生产者 + PING/PONG 验证）使用**专用的 `CachingConnectionFactory`**（`zetaHeartbeatConnectionFactory`）和**专用的 `RabbitTemplate`**（`zetaVerifyRabbitTemplate` / `zetaHeartbeatRabbitTemplate`），与数据面（report、broadcast、sync）完全隔离。防止数据面拥塞或 broker 流控延迟心跳投递——心跳 TCP 连接拥有独立于数据面流量的 channel 池。代价是每节点多一条 TCP 连接。专用工厂继承与数据面工厂相同的 `spring.rabbitmq.*` 配置（凭据、virtual host、`ssl.*`），因此 TLS 配置共享。
+> **连接隔离：** 心跳（生产者 + PING/PONG 验证）使用**专用的 `CachingConnectionFactory`**（`zetaHeartbeatConnectionFactory`）和**专用的 `RabbitTemplate`**（`zetaVerifyRabbitTemplate` / `zetaHeartbeatRabbitTemplate`），与数据面（report、broadcast、sync）完全隔离。防止数据面拥塞或 broker 流控延迟心跳投递——心跳 TCP 连接拥有独立于数据面流量的 channel 池。代价是每节点多一条 TCP 连接。专用工厂继承与数据面工厂相同的 `spring.rabbitmq.*` 配置（凭据、virtual host、`ssl.*`），因此 TLS 配置共享。专用工厂（及其 `@Primary` 标记）仅在 `zeta.worker-listener.enabled=true` 或 `zeta.worker.enabled=true` 时创建——仅使用 report/sync 的应用不会获得额外的 `ConnectionFactory`。此外，Worker 的控制面模板会在任何发布者使用该连接之前**在此连接上预声明心跳交换机**，使首次发布不可能与声明竞争——参见 `zeta.worker-listener.*` 下的声明顺序说明。
 
 ### 熔断器配置（`zeta.local.circuit-breaker.*`）
 
@@ -204,7 +208,6 @@
 | `zeta.worker-listener.exchange-name`         | `zeta.send.exchange` | 接收 Worker HOT/COOL 决策和心跳的 FanoutExchange 名称；必须与 Worker 侧 `zeta.worker.messaging.broadcast-exchange` 一致           |
 | `zeta.worker-listener.queue-prefix`          | `zeta.worker`        | 实例级 Worker 监听队列前缀；最终队列名 `{prefix}:{instanceId}`                                                                    |
 | `zeta.worker-listener.auto-startup`          | `true`               | Worker 监听器容器是否随应用自动启动                                                                                               |
-| `zeta.worker-listener.warmup-jitter-ms`      | `50`                 | 处理每个 Worker 决策前的随机延迟（毫秒）；分散各实例的 Redis 读取，避免惊群效应                                                   |
 | `zeta.worker-listener.broadcast-jitter-ms`   | `0`                  | 应用 Worker 广播前的随机 jitter（毫秒）；0 = 收到后立即应用                                                                       |
 | `zeta.worker-listener.concurrent-consumers`  | `2`                  | Worker 决策队列的并发消费者数                                                                                                     |
 | `zeta.worker-listener.scheduler-pool-size`   | `4`                  | 执行 Worker 缓存更新任务的调度线程池大小                                                                                          |
@@ -216,18 +219,32 @@
 | `zeta.worker-listener.sre.min-samples`       | `20`                 | SRE 速率限制器开始主动限流前的最小样本数（防止预热期过早限流）                                                                    |
 | `zeta.worker-listener.sre.success-threshold` | `0.6`                | 成功率低于此值时概率性丢弃 HOT 提升                                                                                               |
 
-> **⚠️ 重要：启动顺序** — `zeta.heartbeat.exchange` 和 `zeta.send.exchange` 由 App（common 模块）创建。Worker 节点**必须在 App 之后启动**，否则心跳会因 `NOT_FOUND` 错误失败，集群健康环将始终为空。使用 Docker Compose 时，请为 Worker 服务添加 `depends_on: app-1: { condition: service_started }`。或者，Worker 的心跳生产者延迟首次发送 `pingIntervalMs`（默认 1000ms）以使 RabbitAdmin 有足够时间声明 exchange。
+> **ℹ️ 启动顺序** — `zeta.heartbeat.exchange`、`zeta.send.exchange`（App 侧需 `worker-listener.enabled=true`）与 `zeta.reportToWorker.exchange` 均**由 App 与 Worker 各自声明**，参数一致（durable、非 autoDelete），因此 App 与 Worker **没有启动顺序要求**，Worker 先启动不会让健康环长期为空。
+
+> **ℹ️ 声明顺序——心跳交换机** — 心跳交换机在**控制面连接被用于发布之前就已在该连接上预声明**（`WorkerAutoConfiguration#heartbeatRabbitTemplate` 通过模板自身的 `execute` 执行一次幂等的 `exchangeDeclare`）。由于所有心跳与 fast-lane 规则 gossip 的发布都经过这一个模板实例，"先声明后发布"由依赖注入保证，而非依赖时序假设——全新（空 broker）集群的**第一个** Worker 不再打印 `NOT_FOUND - no exchange 'zeta.heartbeat.exchange'`。该声明是 durable 且幂等的，因此也顺带满足 App 侧。详见 [ADR-0010](adr/0010-epoch-driven-heartbeat.md)。
+
+> **ℹ️ 仍然存在的冷启动 `NOT_FOUND`** — 其余对象（report / broadcast / sync 的交换机与队列）仍由 Spring Boot 的 `RabbitAdmin` 在连接建立时惰性声明。因此冷启动窗口内仍可能出现一次性 `NOT_FOUND`：该趟声明若失败会中断后续声明，且并发建立的第二条连接会整趟跳过，其上的首次绑定/发布即 404。该错误是 channel 级、只影响单次操作，并随下一次连接建立重跑声明而自愈。**判据是 App 侧 `ClusterHealthView` / 一致性哈希环是否在数个心跳周期内变为非空**，而不是该 404 是否复现；若它持续出现，应核对两侧 exchange 名是否一致（`zeta.worker.messaging.heartbeat-exchange` 对应 `zeta.local.heartbeat.exchange-name`）。
+
+> **⚠️ 不要再注册第二个 `AmqpAdmin`** — Boot 的 `RabbitAutoConfiguration#amqpAdmin` 由 `@ConditionalOnMissingBean` 按**返回类型**（`AmqpAdmin`）把关，而 `RabbitAdmin` 正是 `AmqpAdmin`。因此 Zeta 若自己注册任何一个 admin，都会**静默顶掉** Boot 的那个，导致数据面所有交换机、队列、绑定都不再被声明——而且不会有任何报错指向它。心跳交换机之所以放在发布模板里声明，正是为了绕开这一点。
+> **ℹ️ 共享 broker 的 appName 隔离（ADR-0068）** — 每条 HOT/COOL 决策广播都携带 `appName` 头，App 侧监听器会丢弃 `appName` 与自身 `zeta.local.app-name` 不同的决策（fanout 交换机忽略 routing key，共享 broker 时每个绑定的队列都会收到所有应用的决策）。**不带**该头的消息（1.1.58 之前的 Worker，滚动升级窗口）一律照常处理。请保持 Worker 侧 `zeta.worker.routing.app-name` 与应用侧 `zeta.local.app-name` 一致——不一致时决策会被静默丢弃（DEBUG 日志可见）。`zeta.sync.exchange` 的 fanout 同型但危害较低（外来 INVALIDATE 对无关 key 是无害 no-op），暂未过滤。
 
 > **⚠️ 未启用时的影响：** 不设置 `worker-listener.enabled=true`，App 不消费 Worker 心跳 → `ClusterHealthView` 记录为空 → `getAliveWorkerIds()` 返回空集 → Reporter 的 `routeNode()` 返回 `null` → 所有 report 批次被**静默丢弃**。Worker 永远收不到任何数据，也永远不会广播 HOT/COOL 决策。这是部署了 Worker 集群时最常见的配置错误。
 
-### 调度配置（`zeta.scheduling.*`，`zeta.decay-period`）
+### 调度配置（`zeta.scheduling.*`）
 
 | 属性                      | 默认值 | 说明                                                                           |
 | ------------------------- | ------ | ------------------------------------------------------------------------------ |
-| `zeta.scheduling.enabled` | `true` | 启用内部定时器（HeavyKeeper 衰减 + 挤出队列清空 + L1 过期条目周期清理（`cleanUp()`，每 5 秒）） |
-| `zeta.decay-period`       | `20`   | HeavyKeeper 衰减周期（秒），通过 `@Scheduled` 直接解析，不在 `zeta.local.*` 下 |
+| `zeta.scheduling.enabled` | `true` | 内部定时器的总开关（HeavyKeeper 衰减 + 挤出队列清空 + L1 过期条目周期清理）                             |
 
-> ⚠️ 当前硬编码为 20 秒——尚未通过属性可配置。
+三个调度周期是**编译期常量**，不是配置项（见 `ZetaSchedulingConfiguration#scheduleTasks`）：
+
+| 任务                           | 周期  | 首次延迟 |
+| ------------------------------ | ----- | -------- |
+| HeavyKeeper 衰减（`fading()`） | 20 秒 | 20 秒    |
+| 挤出队列清空                   | 10 秒 | 10 秒    |
+| L1 过期条目清理（`cleanUp()`） | 5 秒  | 5 秒     |
+
+> ⚠️ `zeta.decay-period`（以及它的旧形式 `zeta.local.decay-period`，后者仍带 deprecated 警告出现在 IDE 元数据中）**已废弃且被忽略**：没有任何代码读取这两个键。要改衰减周期必须改代码。
 
 ### 一致性哈希（`zeta.local.consistent-hashing.*`）
 
@@ -236,14 +253,14 @@
 | `zeta.local.consistent-hashing.enabled`       | `true` | 启用一致性哈希动态 Worker 路由（默认）；设为 `false` 禁用 |
 | `zeta.local.consistent-hashing.virtual-nodes` | `500`  | 每个物理 Worker 节点的虚拟节点数，用于哈希空间分布        |
 
-### Spring Cache 集成（`zeta.spring-cache.*`）
+### Spring Cache 集成（`zeta.spring-cache.enabled` / `zeta.local.spring-cache.*`）
 
-| 属性                              | 默认值  | 说明                                                                |
-| --------------------------------- | ------- | ------------------------------------------------------------------- |
-| `zeta.spring-cache.enabled`       | `false` | 启用 Spring Cache 集成（将 `ZetaCacheManager` 暴露为 CacheManager） |
-| `zeta.spring-cache.key-separator` | `::`    | 缓存区名称与 key 之间的分隔符（例如 `"users::123"`）                |
+| 属性                                    | 默认值  | 说明                                                                                                                                                                   |
+| --------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `zeta.spring-cache.enabled`             | `false` | 启用 Spring Cache 集成（将 `ZetaCacheManager` 暴露为 CacheManager）                                                                                                    |
+| `zeta.local.spring-cache.key-separator` | `::`    | 缓存区名称与 key 之间的分隔符（例如 `"users::123"`）。经 `ZetaProperties` 绑定在 `zeta.local.*` 下；上方的 `enabled` 开关是独立的 `@ConditionalOnProperty`，不走该绑定 |
 
-支持标准 `@Cacheable` / `@CachePut` / `@CacheEvict` 触发热键检测、软过期和跨实例广播。同伴注解 `@HotKeyCacheTTL`、`@Intercept`、`@Fallback` 和 `@NullCaching` 在 `@Cacheable` 上继续有效。
+支持标准 `@Cacheable` / `@CachePut` / `@CacheEvict` 触发热键检测、软过期和跨实例广播。同伴注解 `@CacheTTL`、`@Intercept`、`@Fallback`、`@NullCaching`、`@Preload`、`@CacheCondition`、`@Tag` 和 `@SkipBroadcast` 扩展 `@Cacheable` 操作——详见 [ANNOTATION.zh.md](ANNOTATION.zh.md)。
 
 ### 缓存同步（`zeta.sync.*`）
 
@@ -277,11 +294,14 @@
 | **`zeta.worker.report-consumer.*`**                                |                                | **上报消费者**                                                                                                                                      |
 | `zeta.worker.report-consumer.concurrent-consumers`                 | `8`                            | 上报队列的并发消费者数，最小为 1                                                                                                                    |
 | `zeta.worker.report-consumer.prefetch-count`                       | `50`                           | 每个消费者的预取数，平衡吞吐量与内存压力                                                                                                            |
-| `zeta.worker.report-consumer.staleness-threshold-ms`                | `0`                            | 可选的消费端陈旧过滤（毫秒）；`0` 表示禁用——陈旧性改由队列 `x-message-ttl` 兜底，避免跨主机墙钟比较。启用时仅丢弃超过阈值的正向年龄报告；负年龄（上报端时钟超前）始终放行 |
+| `zeta.worker.report-consumer.staleness-threshold-ms`               | `0`                            | 可选的消费端陈旧过滤（毫秒）；`0` 表示禁用——陈旧性改由队列 `x-message-ttl` 兜底，避免跨主机墙钟比较。启用时仅丢弃超过阈值的正向年龄报告；负年龄（上报端时钟超前）始终放行 |
 | **`zeta.worker.report-queue.*`**                                   |                                | **上报队列积压护栏**                                                                                                                                |
 | `zeta.worker.report-queue.max-length`                              | `10000`                        | 每分片上报队列的最大缓冲消息数；超出后 broker 丢弃最旧消息（`drop-head`），保留最新统计信号。消费停滞时保护 broker 内存；丢失的上报按 ADR-0007 容忍 |
 | `zeta.worker.report-queue.message-ttl-ms`                          | `60000`                        | 队列内单条消息的 TTL（毫秒）；超时由 broker 丢弃。消费端陈旧过滤默认禁用（见 `staleness-threshold-ms`）                                               |
 | **`zeta.worker.sliding-window.*`**                                 |                                | **滑动窗口**                                                                                                                                        |
+| **`zeta.worker.broadcast.*`**                                      |                                | **决策广播缓冲（ADR-0061）**                                                                                                                    |
+| `zeta.worker.broadcast.buffer-enabled`                             | `true`                         | HOT/COOL 决策改由专用的有界单线程 executor 发送（ADR-0061，沿用 ADR-0037 约定），大面积起热时不会让报告消费阻塞在串行 AMQP 发布之后。`false` 恢复在 AMQP 消费线程上同步发送的旧路径                  |
+| `zeta.worker.broadcast.buffer-capacity`                            | `10000`                        | 待发送决策队列容量；队列满时新决策立即丢弃并在调用线程上回滚其状态（ADR-0007/ADR-0024 的宽松失败语义，下次评估会重新发出）。最小 1                                                             |
 | `zeta.worker.sliding-window.duration-ms`                           | `1000`                         | 滑动窗口时长（毫秒）                                                                                                                                |
 | `zeta.worker.sliding-window.slices`                                | `10`                           | 每个窗口的时间片数；自动向上对齐到 2 的幂以实现位运算索引优化                                                                                        |
 | **`zeta.worker.threshold.*`**                                      |                                | **热点阈值**                                                                                                                                        |
@@ -293,8 +313,10 @@
 | `zeta.worker.state-machine.confirm-duration-ms`                    | `50`                           | HOT 确认总时长。confirmCount = ceil(confirm-duration-ms / slice-ms)                                                                                 |
 | `zeta.worker.state-machine.cool-duration-ms`                       | `600000`                       | key 持续低于阈值才确认 COLD 的时长                                                                                                                  |
 | `zeta.worker.state-machine.pre-cool-grace-ms`                      | `60000`                        | COOL 结束时的宽限期，允许静默恢复                                                                                                                   |
-| `zeta.worker.state-machine.evict-interval-ms`                      | `30000`                        | 过期状态擦除间隔（毫秒）；建议 >= cool-duration-ms \* 2 以免过早擦除冷却中的 key                                                                    |
-| `zeta.worker.state-machine.rebroadcast-interval-ms`                | `10000`                        | key 持续处于 CONFIRMED_HOT 时周期性重播 HOT 决策的最小间隔（毫秒）；用于恢复丢失的 HOT 广播并抑制 fast-lane 稳态放大（ADR-0024）。最小 1000         |
+| `zeta.worker.state-machine.evict-interval-ms`                      | `1200000`                      | 过期阈值（毫秒）：key 超过该时长无任何上报即被擦除；仅作为正确性界限，建议 >= cool-duration-ms \* 2 以免过早擦除冷却中的 key。扫描节奏是独立属性（ADR-0060）                                     |
+| `zeta.worker.state-machine.cold-evict-interval-ms`                 | `300000`                       | COLD 状态 key 的分层过期阈值（毫秒）：无广播义务、其保留状态仅在 key 持续上报时才有意义，因此提前淘汰（默认 5 分钟）。CONFIRMED_HOT / PRE_COOLING 仍使用 `evict-interval-ms`（其淘汰即触发 COOL 广播义务的释放）。取值 >= `evict-interval-ms` 时分层失效。最小 1 |
+| `zeta.worker.state-machine.evict-scan-interval-ms`                 | `1200000`                      | 对检测器 / 状态机 / 评估器映射进行周期性过期扫描的间隔（毫秒）。属于清理节奏旋钮，与上面的过期阈值相互独立；key 过期后会在第一次扫描时被回收（ADR-0060）。最小 1                                              |
+| `zeta.worker.state-machine.rebroadcast-interval-ms`                | `10000`                        | key 持续处于 CONFIRMED_HOT 时周期性重播 HOT 决策的最小间隔（毫秒）；用于恢复丢失的 HOT 广播并抑制 fast-lane 稳态放大（ADR-0024）。1s–60s（ADR-0068）|
 | **`zeta.worker.global-qps-dynamic-threshold.*`**                   |                                | **动态阈值（全局 QPS）**                                                                                                                            |
 | `zeta.worker.global-qps-dynamic-threshold.recalculate-interval-ms` | `60000`                        | 动态阈值重新计算的时间间隔                                                                                                                          |
 | `zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance`    | `0.5`                          | 触发阈值更新的 QPS 变化容忍度（±50%）                                                                                                               |
@@ -304,8 +326,10 @@
 | `zeta.worker.bayesian.prior-mean`                                  | `2.3026`                       | 对数频率分布的先验均值（ln(10)——每个窗口≈10次访问的 key 为中性）                                                                                    |
 | `zeta.worker.bayesian.prior-std`                                   | `2.0`                          | 先验标准差；越大越依赖观测数据，越小越锚定先验                                                                                                      |
 | `zeta.worker.bayesian.likelihood-std`                              | `0.8`                          | 基础似然标准差；由滑动窗口和的变异系数（CV）动态调整，实现流量自适应的置信度估计                                                                    |
+| `zeta.worker.bayesian.high-confidence-threshold`                   | `0.95`                         | 判定为 HIGH 置信度的后验概率下限（门控 HOT 广播）；取值须在 (0, 1) 且严格大于 `medium-confidence-threshold`——调参协议见 `ProbabilityResult` Javadoc                       |
+| `zeta.worker.bayesian.medium-confidence-threshold`                 | `0.76`                         | 判定为 MEDIUM 置信度的后验概率下限（门控 CANDIDATE_HOT 追踪）；取值须在 (0, 1)——调参协议见 `ProbabilityResult` Javadoc                                               |
 | **`zeta.worker.fast-lane.*`**                                      |                                | **快速通道规则（绕过贝叶斯门控）**                                                                                                                  |
-| `zeta.worker.fast-lane.enabled`                                    | `false`                        | 绕过贝叶斯状态机，仅基于滑动窗口阈值广播                                                                                                            |
+| `zeta.worker.fast-lane.enabled`                                    | `false`                        | 快速通道开关：为 `true` 时，匹配快速通道规则的 key 绕过贝叶斯状态机、仅凭滑动窗口阈值立即提升；为 `false` 时评估器不再查询规则管理器（规则 gossip/存储仍然维护，重新启用只需翻转该属性）                             |
 | `zeta.worker.fast-lane.rules`                                      | `[]`                           | 快速通道规则列表（key 模式 + 阈值）                                                                                                                 |
 | `zeta.worker.fast-lane.rules[].key-pattern`                        | `""`                           | 快速通道规则的 key 模式                                                                                                                             |
 | `zeta.worker.fast-lane.rules[].threshold`                          | `100`                          | 快速通道规则的计数阈值；匹配的 key 超过此值立即提升                                                                                                 |

@@ -1,5 +1,14 @@
 # SingleFlight: Exception-Only Invalidate
 
+> **2026-09-12 amendment (ADR-0067):** invalidation is no longer
+> *exception-only*. A new `SingleFlight.invalidate(key)` also evicts the dedup
+> entry from the write/invalidation paths (`putThrough` after its mutation,
+> every L1 removal, and applied sync-receiver removals): a completed future
+> must not be replayed onto a post-invalidation miss, or the pre-invalidation
+> value would be served and re-cached. The catch-only behavior *on the load
+> path itself* is unchanged — a completed future is still reused within its
+> TTL window; only a value invalidation now cuts that reuse short.
+
 Zeta's SingleFlight invalidates completed futures **only on exception** (catch block), not on success. This differs from a naive try-finally approach that would always remove the future after completion.
 
 ## Decision

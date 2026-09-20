@@ -41,11 +41,31 @@ import org.jspecify.annotations.NonNull;
  *   ThreadPoolExecutor:       coreThread → queue → maxThread → reject  (CPU-bound)
  *   StandardThreadExecutor:   coreThread → maxThread → queue → reject  (I/O-bound)
  * </pre>
+ *
+ * <p><b>Rejection accounting.</b> The counter is incremented per submission and decremented in
+ * {@link #afterExecute} (worker execution) plus on every path where a task is known never to
+ * execute. Rejection handlers that return WITHOUT throwing — {@link ThreadPoolExecutor.CallerRunsPolicy}
+ * runs the task inline in the submitting thread and discard-style handlers drop it, and neither
+ * path reaches {@code afterExecute} — are compensated by an internal accounting wrapper
+ * ({@code RejectionAccountingHandler}) installed around the user's handler, so the counter is
+ * symmetric for arbitrary handlers. Documented edge cases that are intentionally not detected:
+ * {@link ThreadPoolExecutor.DiscardOldestPolicy} purges a QUEUED task that already counted and
+ * will never run (a residual +1 leak per purge), and a handler that throws a non-{@link
+ * RejectedExecutionException} bypasses the compensation chain entirely.
  */
 @Internal
 public class StandardThreadExecutor extends ThreadPoolExecutor {
 
   private final AtomicInteger submittedTasksCount = new AtomicInteger(0);
+
+  /**
+   * The user-supplied rejection handler (unwrapped). The pool itself always runs
+   * {@code RejectionAccountingHandler}, which delegates here and compensates the
+   * {@code submittedTasksCount} increment when the delegate returns without throwing.
+   * Volatile: replaceable at runtime via {@link #setRejectedExecutionHandler}.
+   */
+  @SuppressWarnings("java:S3077")
+  private volatile RejectedExecutionHandler userHandler;
 
   @Getter
   private final int maxSubmittedTaskCount;
@@ -72,7 +92,12 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
   ) {
     super(coreThreads, maxThreads, keepAliveTime, unit, new StandardExecutorQueue(), threadFactory, handler);
     ((StandardExecutorQueue) getQueue()).setStandardThreadExecutor(this);
+    this.userHandler = handler;
     this.maxSubmittedTaskCount = queueCapacity + maxThreads;
+    // Install the accounting wrapper only after the counter and handler fields are
+    // initialized. The executor is not yet published, so no task can be rejected
+    // before this line runs.
+    super.setRejectedExecutionHandler(new RejectionAccountingHandler());
   }
 
   @Override
@@ -133,7 +158,50 @@ public class StandardThreadExecutor extends ThreadPoolExecutor {
     return drained;
   }
 
+  /**
+   * Returns the user-supplied rejection handler, not the internal accounting wrapper —
+   * the wrapper is a counter-compensation detail of this class, invisible to callers.
+   *
+   * @return the handler passed to the constructor or {@link #setRejectedExecutionHandler}
+   */
+  @Override
+  public RejectedExecutionHandler getRejectedExecutionHandler() {
+    return userHandler;
+  }
+
+  /**
+   * Replaces the user-supplied rejection handler. The internal accounting wrapper stays
+   * installed in the pool (it reads the handler through the volatile field), so the
+   * {@code submittedTasksCount} compensation contract holds for any handler.
+   *
+   * @param handler the new rejection handler
+   */
+  @Override
+  public void setRejectedExecutionHandler(@NonNull RejectedExecutionHandler handler) {
+    this.userHandler = handler;
+  }
+
   public int getSubmittedTasksCount() {
     return submittedTasksCount.get();
+  }
+
+  /**
+   * Wraps the user's rejection handler for the rejections raised inside
+   * {@link ThreadPoolExecutor#execute(Runnable)} itself (shutdown, or the
+   * offer → addWorker race). When the delegate returns WITHOUT throwing, the task either
+   * ran inline in the submitting thread (CallerRunsPolicy) or was silently dropped
+   * (discard-style policies) — it will never reach a worker's {@code afterExecute}, so
+   * the submit-time increment is compensated here. When the delegate throws, the
+   * increment is intentionally left in place: the exception propagates to
+   * {@link #execute(Runnable)}, whose force() fallback resolves it (task queued →
+   * {@code afterExecute} decrements; rejected → explicit compensation).
+   */
+  private final class RejectionAccountingHandler implements RejectedExecutionHandler {
+
+    @Override
+    public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+      userHandler.rejectedExecution(r, executor);
+      submittedTasksCount.decrementAndGet();
+    }
   }
 }

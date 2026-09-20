@@ -24,10 +24,12 @@ import io.github.hyshmily.zeta.sync.distributedlock.AutoReleaseLock;
 import io.github.hyshmily.zeta.sync.distributedlock.impl.RedisLockProvider;
 import java.time.Duration;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -201,6 +203,33 @@ class RedisLockProviderTest {
     lock.close();
   }
 
+  // ── Connection-level failures (RedisConnectionFailureException) ─────
+  //
+  // Regression guard: the catch used to name RedisSystemException only, and
+  // RedisConnectionFailureException / QueryTimeoutException are SIBLINGS of it
+  // under DataAccessException — not subclasses. The tests above (and the only
+  // Redis-exception test that existed) stubbed RedisSystemException, i.e. exactly
+  // the one variant the old catch handled, so the most common failure mode
+  // (Redis unreachable) was never exercised.
+
+  @Test
+  void tryLock_whenRedisConnectionFails_shouldReturnNullInsteadOfThrowing() {
+    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+      .thenThrow(new RedisConnectionFailureException("Connection refused"));
+    assertThat(provider.tryLock(KEY, 10, TimeUnit.SECONDS)).isNull();
+  }
+
+  @Test
+  void close_whenRedisConnectionFails_shouldNotThrow() {
+    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
+    when(redisTemplate.execute(any(DefaultRedisScript.class), anyList(), anyString()))
+      .thenThrow(new RedisConnectionFailureException("Connection refused"));
+    AutoReleaseLock lock = provider.tryLock(KEY, 10, TimeUnit.SECONDS);
+    assertThat(lock).isNotNull();
+    lock.close();
+    verify(redisTemplate, times(UNLOCK_COUNT)).execute(any(DefaultRedisScript.class), anyList(), anyString());
+  }
+
   @Test
   void close_alwaysAttemptsUnlockRegardlessOfClock() {
     var handle = new RedisLockProvider.RedisLockHandle(redisTemplate, "zeta:lock:expired", "uuid", 3, null, 0);
@@ -226,5 +255,85 @@ class RedisLockProviderTest {
     when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(false, false, true); // 3rd attempt succeeds (default lockCount=3)
     AutoReleaseLock lock = provider.tryLock(KEY, 10, TimeUnit.SECONDS);
     assertThat(lock).isNotNull();
+  }
+
+  // ── Watchdog lifecycle ────────────────────────────────────────
+
+  /**
+   * Verifies that acquiring a lock schedules the watchdog renewal at the
+   * documented cadence: {@code expireMs / 3}, floored at 1s (a 10s TTL →
+   * 10000/3 = 3333ms). The watchdog re-arms the TTL for as long as the handle
+   * lives — the lock does NOT expire unconditionally after {@code expire}.
+   */
+  @Test
+  void watchdog_shouldScheduleRenewalAtDocumentedCadence() {
+    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
+    provider.tryLock(KEY, 10, TimeUnit.SECONDS);
+    verify(scheduler).scheduleWithFixedDelay(any(Runnable.class), eq(3333L), eq(3333L), eq(TimeUnit.MILLISECONDS));
+  }
+
+  /**
+   * Verifies the sub-second clamp: for TTLs below the 1s renewal floor the
+   * interval is clamped down to {@code expireMs / 2} (500ms TTL → 250ms) so
+   * the first renewal lands strictly before expiry.
+   */
+  @Test
+  void watchdog_subSecondTtl_shouldClampIntervalToHalfTtl() {
+    when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
+    provider.tryLock(KEY, 500, TimeUnit.MILLISECONDS);
+    verify(scheduler).scheduleWithFixedDelay(any(Runnable.class), eq(250L), eq(250L), eq(TimeUnit.MILLISECONDS));
+  }
+
+  /**
+   * Verifies that running the watchdog renewal task re-arms the TTL while the
+   * lock is held: the conditional Lua renewal (GET + PEXPIRE on the caller's
+   * token) executes with the handle's UUID and the full TTL.
+   */
+  @Test
+  void watchdog_renewalTask_shouldReArmTtlWhileHeld() {
+    RedisLockProvider.RedisLockHandle handle = new RedisLockProvider.RedisLockHandle(
+      redisTemplate,
+      "zeta:lock:" + KEY,
+      "uuid-1",
+      3,
+      scheduler,
+      10_000L
+    );
+    ArgumentCaptor<Runnable> renewalTask = ArgumentCaptor.forClass(Runnable.class);
+    verify(scheduler).scheduleWithFixedDelay(renewalTask.capture(), anyLong(), anyLong(), eq(TimeUnit.MILLISECONDS));
+
+    renewalTask.getValue().run();
+
+    verify(redisTemplate).execute(any(DefaultRedisScript.class), anyList(), eq("uuid-1"), eq("10000"));
+    handle.close();
+  }
+
+  /**
+   * Verifies that close() cancels the watchdog before releasing: after release
+   * no further renewal is armed. This pins the leaked-handle consequence from
+   * the other side — while the handle lives the watchdog renews forever, so
+   * close() is the only thing that stops it.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void close_shouldCancelWatchdog() {
+    ScheduledFuture<Void> future = mock(ScheduledFuture.class);
+    doReturn(future)
+      .when(scheduler)
+      .scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
+    RedisLockProvider.RedisLockHandle handle = new RedisLockProvider.RedisLockHandle(
+      redisTemplate,
+      "zeta:lock:" + KEY,
+      "uuid-1",
+      3,
+      scheduler,
+      10_000L
+    );
+
+    handle.close();
+
+    verify(future).cancel(false);
+    // The watchdog was armed exactly once (at construction) and never re-armed.
+    verify(scheduler, times(1)).scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class));
   }
 }

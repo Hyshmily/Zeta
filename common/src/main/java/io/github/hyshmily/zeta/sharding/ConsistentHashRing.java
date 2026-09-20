@@ -17,8 +17,10 @@ package io.github.hyshmily.zeta.sharding;
 
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import lombok.RequiredArgsConstructor;
@@ -110,6 +112,20 @@ public class ConsistentHashRing {
   private static final int MAX_PROBES = 512;
 
   /**
+   * Rate-limiter for the probe-exhaustion WARN: one per window (repo standard: never WARN
+   * on the hot path). {@link #locateNode} runs on every routed key, so the per-key
+   * detail is DEBUG-only and the WARN aggregates the suppressed count without the key.
+   * Admission is strict — {@link LogThrottle}
+   * claims the window with a compare-and-set, so exactly one caller per window logs.
+   * The atomicity and the monotonic clock are provided by {@link LogThrottle}, which
+   * seeds the first window as already open so the first exhaustion always logs.
+   */
+  private final LogThrottle probeExhaustionLogThrottle = LogThrottle.perDefaultWindow();
+
+  /** Keys discarded due to probe exhaustion since the last WARN. */
+  private final AtomicLong suppressedProbeExhaustions = new AtomicLong();
+
+  /**
    * Atomically replace the ring with one built from the given live nodes.
    * Each node is replicated {@code virtualNodeCount} times on the ring.
    *
@@ -182,17 +198,43 @@ public class ConsistentHashRing {
       }
       if (++idx >= len) idx = 0; // circular advancement
       if (++probes > MAX_PROBES) {
-        log.warn(
+        // Hot path (every routed key): the per-key detail is DEBUG-only; the WARN is
+        // aggregated and rate-limited to one per window, never once per key.
+        log.debug(
           "Exhausted {} probes in consistent hash ring for key '{}', " +
             "all workers appear dead or ring is corrupt. Discarding this key.",
           MAX_PROBES,
           key
         );
+        reportProbeExhaustion();
         break;
       }
     } while (idx != startIdx);
 
     return null;
+  }
+
+  /**
+   * Aggregates probe exhaustion into a rate-limited WARN — one per
+   * {@link LogThrottle#DEFAULT_WINDOW_MS} window, without the key, with the number of
+   * discarded routings suppressed since the previous WARN. A rolling restart (all alive-set
+   * snapshots disjoint from the ring nodes) previously logged one full WARN per routed key,
+   * which violated the hot-path logging rule and flooded the log with unbounded key
+   * cardinality.
+   */
+  private void reportProbeExhaustion() {
+    long discarded = suppressedProbeExhaustions.incrementAndGet();
+    if (!probeExhaustionLogThrottle.tryAcquire()) {
+      return;
+    }
+    suppressedProbeExhaustions.addAndGet(-discarded);
+    log.warn(
+      "Exhausted {} probes in consistent hash ring: every ring node failed the liveness " +
+        "predicate (rolling restart?) or the ring is corrupt. Discarded {} key routing(s) " +
+        "in the last window.",
+      MAX_PROBES,
+      discarded
+    );
   }
 
   /**

@@ -1,8 +1,13 @@
-# Periodic HOT Decision Rebroadcast from the State Machine
 
-The Worker emits a HOT broadcast exactly once per promotion (COLD/CANDIDATE_HOT → CONFIRMED_HOT). Under ADR-0007 (fire-and-forget, no publisher confirms), a single lost HOT message is never recovered: the state machine already sits in CONFIRMED_HOT, subsequent hot windows return `NONE`, and Apps never learn the key is hot. The App-side Local TopK (ADR-0001/0021) is the only safety net. ADR-0013 states that transient inconsistencies are "bounded by the next periodic cycle" — but for the Worker→App decision plane, no such cycle existed.
+## Addendum (2026-09-17, ADR-0068): configuration bounds
 
-Conversely, the fast-lane path accidentally obtained loss recovery by returning a HOT decision on *every* evaluation of an already-CONFIRMED_HOT key. With one report per App per 50 ms, each fast-lane key produced up to ~10 fanout broadcasts per second, absorbed only by the broadcaster's 100 ms debounce cache — steady-state broadcast amplification across every App queue.
+The rebroadcast interval is the self-healing upper bound for a lost HOT decision under ADR-0007's fire-and-forget semantics, so a misconfigured value directly widens the preheat loss window. `WorkerProperties.StateMachine.rebroadcastIntervalMs` now carries `@Min(1000)` (pre-existing) **and `@Max(60_000)`** (new), enforced fail-fast at properties-binding time:
+
+- below 1s the rebroadcast degenerates into a per-report broadcast storm for every continuously-hot key (only the broadcaster's 100 ms local debounce caps it);
+- above 60s a lost HOT can leave new instances un-prewarmed for minutes — beyond that, a units mix-up (ms vs s) is the overwhelmingly likely cause.
+
+Default remains 10s. See ADR-0068 for the full context (shared-broker MQ link review, 2026-09-17).
+anout broadcasts per second, absorbed only by the broadcaster's 100 ms debounce cache — steady-state broadcast amplification across every App queue.
 
 ## Decision
 

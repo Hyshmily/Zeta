@@ -128,7 +128,10 @@ public final class ReportMessageCodec {
    * Encode a report into the compact binary body.
    *
    * <p>Sizes the body in a first pass and writes it into that single array, so
-   * the method allocates only the result plus one {@code byte[]} per key.
+   * the method allocates only the result plus one {@code byte[]} per key. The
+   * map is iterated twice — once to size, once to write — so {@code counts}
+   * must not be mutated while the encode runs; the production report path
+   * encodes a drained snapshot. Null keys or values fail with a named error.
    *
    * @param message the report to encode
    * @return the encoded body
@@ -152,9 +155,16 @@ public final class ReportMessageCodec {
       appName.length +
       varlongLength(entryCount);
     for (Map.Entry<String, Long> entry : counts.entrySet()) {
-      int keyLength = utf8Length(entry.getKey());
-      size += varlongLength(keyLength) + keyLength + varlongLength(entry.getValue());
+      // Named failures before any arithmetic: a null here would otherwise
+      // surface as a bare NPE from utf8Length or from Long unboxing.
+      String key = Objects.requireNonNull(entry.getKey(), "count key must be non-null");
+      Long count = Objects.requireNonNull(entry.getValue(), "count value must be non-null");
+      int keyLength = utf8Length(key);
+      size += varlongLength(keyLength) + keyLength + varlongLength(count);
     }
+    // Reachable only with a map far beyond any real batch; a wrapped size
+    // would otherwise die as NegativeArraySizeException at the allocation.
+    UNSAFE.check(size < 0, "Compact report message is too large: encoded size overflows int");
 
     byte[] out = new byte[size];
     int p = 0;
@@ -181,7 +191,9 @@ public final class ReportMessageCodec {
 
   /**
    * Decode a compact binary body back into a report. Every field is
-   * bounds-checked against the body length before it is read.
+   * bounds-checked against the body length before it is read. A duplicated
+   * key keeps the last occurrence — the encoder never emits duplicates, so
+   * the behavior only matters for forged bodies.
    *
    * @param body the raw body, must start with {@link #MAGIC}
    * @return the decoded report
@@ -209,7 +221,7 @@ public final class ReportMessageCodec {
     // before it can size the result map.
     UNSAFE.DECODE.checkRemaining(pos, end, entryCount, "entry count");
 
-    Map<String, Long> counts = new HashMap<>(Math.max(4, (Math.min(entryCount, MAX_PRESIZE) >> 2) / 3 + 1));
+    Map<String, Long> counts = new HashMap<>(Math.max(4, Math.min(entryCount, MAX_PRESIZE)));
     for (int i = 0; i < entryCount; i++) {
       int keyLength = readVarint32(body, pos, end);
       UNSAFE.requireRemaining(pos, end, keyLength, "key");
@@ -317,7 +329,10 @@ public final class ReportMessageCodec {
    */
   private static int readVarint32(byte[] body, int[] pos, int end) {
     long value = readVarlong(body, pos, end);
-    UNSAFE.check((value > Integer.MAX_VALUE), MALFORMED_MESSAGE + "varint32 exceeds 32 bits");
+    // A value in [2^63, 2^64) returns from readVarlong as a negative long and
+    // would slip past an upper-bound-only check, truncating a forged length to
+    // its low 32 bits — a wrong value accepted as success instead of failing.
+    UNSAFE.check((value < 0 || value > Integer.MAX_VALUE), MALFORMED_MESSAGE + "varint32 exceeds 32 bits");
     return (int) value;
   }
 
@@ -332,7 +347,12 @@ public final class ReportMessageCodec {
    * @throws IllegalArgumentException when the range is not well-formed UTF-8
    */
   private static String readUtf8(byte[] body, int offset, int length, String what) {
-    UNSAFE.check(!isWellFormedUtf8(body, offset, length), MALFORMED_MESSAGE + what + " is not well-formed UTF-8");
+    // Inline throw, not a guard-helper call: `what` is a runtime value, so a
+    // helper would concatenate the message on every successful key decode —
+    // the eager-message cost the class javadoc forbids (ADR-0074, item 1).
+    if (!isWellFormedUtf8(body, offset, length)) {
+      throw new IllegalArgumentException(MALFORMED_MESSAGE + what + " is not well-formed UTF-8");
+    }
     return new String(body, offset, length, StandardCharsets.UTF_8);
   }
 
@@ -405,9 +425,20 @@ public final class ReportMessageCodec {
     return true;
   }
 
+  /**
+   * Shared validation guards. Despite the name, nothing here touches
+   * {@code sun.misc.Unsafe}: the class only centralizes {@code throw} sites so
+   * hot paths build no error message on the success path. That guarantee holds
+   * for {@link #check} call sites whose message is a compile-time constant
+   * (javac folds it into one interned string); guards with a dynamic message
+   * part must inline their {@code throw} instead (see {@link #readUtf8}).
+   */
   private static class UNSAFE {
 
-    /** Checks if a varint is well-formed. */
+    /**
+     * Throws {@code IllegalArgumentException} carrying {@code what} when
+     * {@code error} is true.
+     */
     public static void check(boolean error, String what) {
       if (error) {
         throw new IllegalArgumentException(what);

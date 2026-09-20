@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.ThreadLocalRandom;
+import org.springframework.util.Assert;
 
 /**
  * Twitter-Snowflake style ID generator producing 64-bit, time-sortable, cluster-unique IDs.
@@ -39,15 +40,21 @@ import java.util.concurrent.ThreadLocalRandom;
  *
  * <p>Zeta-specific adaptations over the canonical reference:
  * <ul>
- *   <li>Clock source: {@link TimeSource#currentTimeMillis()} – cached, avoids native JNI overhead</li>
+ *   <li>Clock source: {@link TimeSource#currentTimeMillis()} – cached (5 ms granularity)
+ *       and clamped monotonic, avoids native JNI overhead. In normal operation the
+ *       clamped clock never moves backwards, so the classic "clock moved backwards"
+ *       failure mode is not observed; if one ever is (raw wall-clock fallback after the
+ *       cache thread died), it is tolerated by busy-waiting on the frozen/lagging clock
+ *       rather than throwing</li>
  *   <li>Worker seed: {@link InstanceIdGenerator#getNodeId()} XOR the process
  *       id — unique per JVM even on a shared host (containers)</li>
- *   <li>Small clock rewinds (up to {@code timeOffset} ms) are tolerated by busy-wait</li>
  *   <li>Optionally randomises the per-millisecond sequence start to avoid even-number bias
  *       in the lowest 12 bits (useful when IDs are used for hash-based partitioning)</li>
  * </ul>
  *
- * <p>Thread-safe (synchronized).</p>
+ * <p>Thread safety: {@code synchronized} per generator instance. The monitor is held
+ * across the clock busy-wait (see {@link #nextId()}), so callers of the same generator
+ * serialize behind a waiting holder instead of all spinning.
  */
 @Internal
 public class SnowflakeIdGenerator {
@@ -105,12 +112,14 @@ public class SnowflakeIdGenerator {
    * @param randomSequence if true, randomise per-millisec sequence start to avoid even bias
    */
   public SnowflakeIdGenerator(long dataCenterId, long workerId, long timeOffset, boolean randomSequence) {
-    if (dataCenterId < 0 || dataCenterId > MAX_DATA_CENTER_ID) {
-      throw new IllegalArgumentException("dataCenterId must be 0.." + MAX_DATA_CENTER_ID + ", got " + dataCenterId);
-    }
-    if (workerId < 0 || workerId > MAX_WORKER_ID) {
-      throw new IllegalArgumentException("workerId must be 0.." + MAX_WORKER_ID + ", got " + workerId);
-    }
+    Assert.isTrue(
+      dataCenterId >= 0 && dataCenterId <= MAX_DATA_CENTER_ID,
+      "dataCenterId must be 0.." + MAX_DATA_CENTER_ID + ", got " + dataCenterId
+    );
+    Assert.isTrue(
+      workerId >= 0 && workerId <= MAX_WORKER_ID,
+      "workerId must be 0.." + MAX_WORKER_ID + ", got " + workerId
+    );
     this.dataCenterId = dataCenterId;
     this.workerId = workerId;
     this.timeOffset = timeOffset;
@@ -121,19 +130,34 @@ public class SnowflakeIdGenerator {
   /**
    * Generate the next unique ID.
    *
+   * <p><b>Clock behaviour.</b> The clock source ({@link TimeSource#currentTimeMillis()})
+   * is cached at 5 ms granularity and clamped monotonic, so the rewind check below is
+   * effectively a no-op in normal operation: what used to surface as a "clock moved
+   * backwards" exception is now a flat-clock busy-wait in {@link #waitForNextMillis}
+   * (up to ~5 ms per wait, longer while the wall clock is clamped). A genuine rewind
+   * can only be observed if the {@link TimeSource} cache thread has died and reads fall
+   * back to the raw wall clock; even then, rewinds up to {@code timeOffset} ms are
+   * tolerated by busy-waiting, not thrown.
+   *
+   * <p><b>Blocking.</b> The method holds the generator's monitor across the busy-wait,
+   * so callers of the same generator serialize behind a waiting holder rather than all
+   * spinning on the clock.
+   *
    * @return a 64-bit, time-sortable, cluster-unique ID (always positive)
-   * @throws RuntimeException if the system clock has moved backwards by more than {@code timeOffset} ms
+   * @throws IllegalStateException only if the raw wall-clock fallback observes a rewind
+   *         larger than {@code timeOffset} ms — unreachable while the {@link TimeSource}
+   *         cache thread is alive (its clock is clamped monotonic)
    */
   public synchronized long nextId() {
     long current = TimeSource.currentTimeMillis();
 
     if (current < lastTimestamp) {
       long offset = lastTimestamp - current;
-      if (offset > timeOffset) {
-        throw new IllegalStateException(
-          "Clock moved backwards by " + offset + "ms (max allowed: " + timeOffset + "ms)"
-        );
-      }
+      Assert.state(
+        offset <= timeOffset,
+        "Clock moved backwards by " + offset + " ms, exceeds tolerance of " + timeOffset + " ms"
+      );
+
       current = waitForNextMillis(lastTimestamp);
     }
 
@@ -155,9 +179,19 @@ public class SnowflakeIdGenerator {
     );
   }
 
+  /**
+   * Busy-waits until the cached clock advances past {@code last}.
+   *
+   * <p>The clock source advances in ~5 ms steps, so each wait spins up to ~5 ms
+   * (longer while the wall clock is clamped or genuinely behind). Deliberately does
+   * NOT release the generator's monitor — the {@code synchronized} caller holds it
+   * across the wait, so concurrent {@code nextId()} callers serialize behind the
+   * waiting thread instead of all spinning on the clock.
+   */
   private static long waitForNextMillis(long last) {
     long timestamp = TimeSource.currentTimeMillis();
     while (timestamp <= last) {
+      Thread.onSpinWait();
       timestamp = TimeSource.currentTimeMillis();
     }
     return timestamp;

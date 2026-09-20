@@ -18,11 +18,16 @@ package io.github.hyshmily.zeta.sharding;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests for {@link ConsistentHashRing}, covering node management, key routing, distribution
@@ -272,5 +277,62 @@ class ConsistentHashRingTest {
   void nodeCount_withNoNodes_shouldReturnZero() {
     ConsistentHashRing ring = new ConsistentHashRing(10);
     assertThat(ring.nodeCount()).isZero();
+  }
+
+  /**
+   * Verifies the probe-exhaustion logging contract: {@code locateNode} runs on every
+   * routed key (hot path), so exhausting all probes for many keys must produce a single
+   * rate-limited WARN per window — without the key, with a suppressed count — while the
+   * per-key detail stays at DEBUG.
+   */
+  @Test
+  void probeExhaustion_warnIsRateLimitedAndNeverPerKey() {
+    // More vnodes than MAX_PROBES (512): the probe walk must hit the exhaustion
+    // gate BEFORE it wraps back to the start vnode, or the WARN path is unreachable.
+    ConsistentHashRing ring = new ConsistentHashRing(1000);
+    ring.rebuild(Set.of("node-a"));
+
+    CollectingAppender appender = new CollectingAppender();
+    LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
+    ch.qos.logback.classic.Logger logbackLogger = context.getLogger(ConsistentHashRing.class);
+    // The DEBUG assertion below requires DEBUG to actually be emitted — pin the
+    // level for the duration of the test (the effective level may be INFO).
+    Level originalLevel = logbackLogger.getLevel();
+    logbackLogger.setLevel(Level.DEBUG);
+    appender.start();
+    logbackLogger.addAppender(appender);
+    try {
+      for (int i = 0; i < 20; i++) {
+        assertThat(ring.locateNode("dead-key-" + i, s -> false)).isNull();
+      }
+
+      // One WARN per 10s window (never one per key), and it must not leak the key.
+      assertThat(appender.events)
+        .filteredOn(e -> e.getLevel() == Level.WARN)
+        .hasSize(1)
+        .allSatisfy(e -> assertThat(e.getFormattedMessage()).doesNotContain("dead-key"));
+
+      // The per-key detail is DEBUG.
+      assertThat(appender.events)
+        .filteredOn(e -> e.getLevel() == Level.DEBUG)
+        .extracting(ILoggingEvent::getFormattedMessage)
+        .anySatisfy(msg -> assertThat(msg).contains("dead-key-0"));
+    } finally {
+      logbackLogger.detachAppender(appender);
+      if (originalLevel != null) {
+        logbackLogger.setLevel(originalLevel);
+      }
+    }
+  }
+
+  /** Minimal logback capture appender (same pattern as {@code VersionControllerTest}). */
+  private static class CollectingAppender extends AppenderBase<ILoggingEvent> {
+
+    final java.util.List<ILoggingEvent> events = new java.util.ArrayList<>();
+
+    @Override
+    protected void append(ILoggingEvent event) {
+      events.add(event);
+    }
   }
 }
