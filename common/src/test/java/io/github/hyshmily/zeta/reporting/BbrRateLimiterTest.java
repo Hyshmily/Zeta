@@ -234,7 +234,7 @@ class BbrRateLimiterTest {
   }
 
   @Test
-  void maxInFlight_whenZeroRt_shouldReturnMaxValue() throws Exception {
+  void maxInFlight_whenZeroRt_shouldFallBackToMinInFlight() throws Exception {
     Field mpmrField = BbrRateLimiterImpl.class.getDeclaredField("maxPassMinRtField");
     mpmrField.setAccessible(true);
     Object mpmr = mpmrField.get(limiter);
@@ -242,7 +242,10 @@ class BbrRateLimiterTest {
     cacheField.setAccessible(true);
     AtomicLong cache = (AtomicLong) cacheField.get(mpmr);
     cache.set(0);
-    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(Long.MAX_VALUE);
+    // A degenerate zero-RT reading must not unlock unbounded admission (the
+    // old Long.MAX_VALUE let a degenerate window bypass CPU throttling
+    // entirely) — the budget falls back to the minInFlight floor (1 here).
+    assertThat(limiter.getCurrentMaxInFlight()).isEqualTo(1);
   }
 
   // ── maxPASS ──

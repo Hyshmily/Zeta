@@ -62,11 +62,35 @@ public interface KeyReporter {
   int dispatcherCapacity();
 
   /**
-   * Return the total number of batches discarded due to staleness in the dispatcher queue.
+   * Return the total number of batches discarded by the consumer — this
+   * counter <b>conflates two discard causes</b>: batches whose target Worker
+   * was no longer alive at consumption time, and batches that waited longer
+   * than 5 seconds in the dispatcher queue (staleness expiry). The two
+   * halves are exposed separately by {@link #dispatcherExpiredDeadTarget()}
+   * and {@link #dispatcherExpiredStale()}; this sum is kept for metric
+   * continuity.
    *
    * @return total expired count since startup, or {@code -1} if the dispatcher has not been started
    */
   long dispatcherExpired();
+
+  /**
+   * Return the total number of discarded batches whose target Worker was no
+   * longer alive at consumption time (the worker-partition stall signal
+   * behind {@code zeta.stall.worker_partition.stopped}).
+   *
+   * @return total dead-target discard count since startup, or {@code -1} if the dispatcher has not been started
+   */
+  long dispatcherExpiredDeadTarget();
+
+  /**
+   * Return the total number of batches discarded because they waited longer
+   * than 5 seconds in the dispatcher queue (staleness expiry under
+   * backpressure — the report-backpressure stall signal).
+   *
+   * @return total stale-discard count since startup, or {@code -1} if the dispatcher has not been started
+   */
+  long dispatcherExpiredStale();
 
   /**
    * Return the total number of batches rejected because the dispatcher queue was full.

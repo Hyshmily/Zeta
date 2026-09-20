@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import java.util.concurrent.atomic.AtomicLong;
+import org.springframework.util.Assert;
 
 /**
  * BBR (Bottleneck Bandwidth and Round-trip) adaptive rate limiter.
@@ -88,13 +89,9 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     int bucketCount,
     long cooldownMs
   ) {
-    if (bucketCount <= 0 || windowMs <= 0) {
-      throw new IllegalArgumentException("windowMs and bucketCount must be positive");
-    }
+    Assert.isTrue(bucketCount > 0 && windowMs > 0, "windowMs and bucketCount must be positive");
     long duration = windowMs / bucketCount;
-    if (duration <= 0) {
-      throw new IllegalArgumentException("windowMs(" + windowMs + ") must be >= bucketCount(" + bucketCount + ")");
-    }
+    Assert.isTrue(duration > 0, "windowMs(" + windowMs + ") must be >= bucketCount(" + bucketCount + ")");
     this.cpuMonitor = cpuMonitor;
     this.cpuThreshold = cpuThreshold;
     this.cooldownMs = cooldownMs;
@@ -118,13 +115,17 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
    */
   @Override
   public boolean tryAcquire() {
+    // Read the EMA outside the bucket lock: the monitor may aggregate samples
+    // itself, and holding bucketLock across it would amplify lock contention
+    // on every flush cycle. The value is a smoothed average, so a read taken
+    // a few microseconds before the admission decision is not stale.
+    double cpuLoad = cpuMonitor.getCpuLoadEMA() * 1000.0; // convert 0-1 → 0-1000
     synchronized (bucketLock) {
       tick();
 
       long currentInFlight = inFlightField.value.get();
       long maxInFlight = maxInFlight();
 
-      double cpuLoad = cpuMonitor.getCpuLoadEMA() * 1000.0; // convert 0-1 → 0-1000
       if (cpuLoad < cpuThreshold) {
         return currentInFlight <= maxInFlight || !isCooldown();
       } else {
@@ -188,13 +189,13 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     totalDropped.incrementAndGet();
   }
 
-  /** Total flush cycles that passed the limiter. */
+  /** Total batches that passed the limiter (one increment per completed publish — not per flush cycle). */
   @Override
   public long getTotalPassed() {
     return totalPassed.get();
   }
 
-  /** Total flush cycles that were dropped by the limiter. */
+  /** Total batches dropped by the limiter (gate drops + consumer drops, one increment per batch). */
   @Override
   public long getTotalDropped() {
     return totalDropped.get();
@@ -239,13 +240,24 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     windowStart += steps * bucketDurationMs;
   }
 
-  /** Compute the concurrency budget: floor(maxPASS × minRT × bucketPerSecond / 1000 + 0.5). Caller must hold bucketLock. */
+  /**
+   * Compute the concurrency budget: floor(maxPASS × minRT × bucketPerSecond / 1000 + 0.5).
+   * Caller must hold bucketLock.
+   *
+   * <p>When no usable samples exist (a degenerate zero-RT reading is the only
+   * way to get here — {@link #maxPASS} and {@link #minRT} both fall back to
+   * caches seeded at 1), the budget falls back to the configured
+   * {@code minInFlight} floor rather than unbounded admission: the previous
+   * {@code Long.MAX_VALUE} let a cold or degenerate window bypass CPU
+   * throttling entirely, contradicting the "CPU above threshold ⇒ strict"
+   * contract of {@link #tryAcquire}.
+   */
   private long maxInFlight() {
     long mp = maxPASS();
     long mr = minRT();
 
     if (mp == 0 || mr == 0) {
-      return Long.MAX_VALUE;
+      return dropTimeMinFlightField.minInFlight;
     }
     return Math.max(
       dropTimeMinFlightField.minInFlight,

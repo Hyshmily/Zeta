@@ -58,7 +58,7 @@ import org.springframework.beans.factory.InitializingBean;
 public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
 
   private final HeavyKeeper heavyKeeper;
-  private final WaveCounter cacheBufferedCounter;
+  private final WaveCounter cacheWaveCounter;
 
   /**
    * Creates a detector that wraps the given HeavyKeeper instance.
@@ -68,7 +68,11 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   public HotKeyDetector(HeavyKeeper heavyKeeper) {
     this.heavyKeeper = heavyKeeper;
-    this.cacheBufferedCounter = new WaveCounter(heavyKeeper::addDirect);
+    // Route the buffered flush through the facade's own addDirect (not
+    // heavyKeeper::addDirect) so the flush path keeps the invalidCacheKey
+    // guard: any future validation/instrumentation added to the facade entry
+    // point must also cover the buffer's flush, not silently bypass it.
+    this.cacheWaveCounter = new WaveCounter(this::addDirect);
   }
 
   /**
@@ -79,7 +83,8 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   public HotKeyDetector(HeavyKeeper heavyKeeper, ScheduledExecutorService scheduler) {
     this.heavyKeeper = heavyKeeper;
-    this.cacheBufferedCounter = new WaveCounter(heavyKeeper::addDirect, scheduler);
+    // Same facade-routing rationale as the single-arg constructor.
+    this.cacheWaveCounter = new WaveCounter(this::addDirect, scheduler);
   }
 
   /**
@@ -88,7 +93,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   @Override
   public void afterPropertiesSet() {
-    cacheBufferedCounter.afterPropertiesSet();
+    cacheWaveCounter.afterPropertiesSet();
   }
 
   /**
@@ -97,7 +102,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   @Override
   public void destroy() {
-    cacheBufferedCounter.destroy();
+    cacheWaveCounter.destroy();
   }
 
   /**
@@ -142,7 +147,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
     if (invalidCacheKey(key)) {
       return;
     }
-    cacheBufferedCounter.count(key, TOPK_INCR);
+    cacheWaveCounter.count(key, TOPK_INCR);
   }
 
   /**
@@ -155,7 +160,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
     if (invalidCacheKey(key)) {
       return;
     }
-    cacheBufferedCounter.count(key, delta);
+    cacheWaveCounter.count(key, delta);
   }
 
   /**
@@ -168,7 +173,7 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
       if (invalidCacheKey(entry.getKey())) {
         continue;
       }
-      cacheBufferedCounter.count(entry.getKey(), entry.getValue());
+      cacheWaveCounter.count(entry.getKey(), entry.getValue());
     }
   }
 

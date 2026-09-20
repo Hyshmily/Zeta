@@ -26,12 +26,14 @@ import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -71,7 +73,7 @@ public class KeyReporterImpl implements KeyReporter {
   private static final double EAGER_SWAP_RATIO = 0.8;
 
   /** Double-buffered counter aggregating per-key access counts between flushes. */
-  private final WaveCounter reportBufferedCounter;
+  private final WaveCounter reportWaveCounter;
 
   /** Publishes aggregated reports to RabbitMQ. */
   private final ReportPublisher reportPublisher;
@@ -116,8 +118,23 @@ public class KeyReporterImpl implements KeyReporter {
    * shared scheduler every {@code reportIntervalMs} (default 50ms), so an unthrottled WARN
    * would flood the log ~20×/s for the whole duration of a Worker outage.
    */
-  private static final long NO_WORKER_LOG_WINDOW_MS = 10_000;
-  private volatile long lastNoWorkerLoggedAtMs = 0L;
+  private final LogThrottle noWorkerLogThrottle = LogThrottle.perDefaultWindow();
+
+  /**
+   * Rate-limits the routing-failure ERROR to the standard 10s window
+   * ({@link LogThrottle#DEFAULT_WINDOW_MS}) used across the codebase
+   * (e.g. BroadcastBuffer flush failures).
+   */
+  private final LogThrottle routingFailureLogThrottle = LogThrottle.perDefaultWindow();
+
+  /** Rate-limits the routing-executor rejection WARN (ADR-0037 one-per-window convention). */
+  private final LogThrottle routingDropLogThrottle = LogThrottle.perDefaultWindow();
+
+  /** Rate-limits the unroutable-key DEBUG line (ADR-0037 one-per-window convention). */
+  private final LogThrottle unroutableLogThrottle = LogThrottle.perDefaultWindow();
+
+  /** Rate-limits the dispatcher queue-full WARN (ADR-0037 one-per-window convention). */
+  private final LogThrottle dispatcherDropLogThrottle = LogThrottle.perDefaultWindow();
 
   /** Guards start() idempotency. */
   private final AtomicBoolean started = new AtomicBoolean(false);
@@ -177,16 +194,14 @@ public class KeyReporterImpl implements KeyReporter {
       new ZetaThreadFactory("zeta-report-routing"),
       (r, executor) -> {
         long dropped = routingDropCounter.incrementAndGet();
-        // Log roughly once per 100 drops (dropped=1, 101, 201, ...). The
-        // counter keeps the real cumulative total for metrics — it is never
-        // reset (a previous bitwise check made the log timing random and a
-        // set(1) corrupted the total).
-        if (dropped % 100 == 1) {
+        // One WARN per window (ADR-0037 one-per-window convention). The counter
+        // keeps the real cumulative total for metrics — it is never reset.
+        if (routingDropLogThrottle.tryAcquire()) {
           log.warn("routing queue full, dropping report batch; totalDropped={}", dropped);
         }
       }
     );
-    this.reportBufferedCounter = new WaveCounter(
+    this.reportWaveCounter = new WaveCounter(
       this::onFlush,
       MAX_BUFFER_SIZE,
       reportIntervalMs,
@@ -216,7 +231,7 @@ public class KeyReporterImpl implements KeyReporter {
    */
   @Override
   public void reportToWorker(String cacheKey) {
-    reportBufferedCounter.count(cacheKey, TOPK_INCR);
+    reportWaveCounter.count(cacheKey, TOPK_INCR);
   }
 
   /**
@@ -238,7 +253,7 @@ public class KeyReporterImpl implements KeyReporter {
       dispatcher = new ReportDispatcher();
       dispatcher.start();
 
-      reportBufferedCounter.afterPropertiesSet();
+      reportWaveCounter.afterPropertiesSet();
 
       log.info(
         "KeyReporterImpl started: appName={}, intervalMs={}, queueCapacity={}, consumers={}",
@@ -257,23 +272,23 @@ public class KeyReporterImpl implements KeyReporter {
   }
 
   /**
-   * Gracefully shut down the reportToWorker dispatcher.
+   * Gracefully shut down the reporter.
    *
-   * <p>Interrupts all consumer threads and waits for them to finish
-   * (with a 2-second timeout per thread). Any batches remaining in the
-   * work queue are discarded. This method is typically registered as
-   * the Spring bean {@code destroyMethod}.
+   * <p>Stops the periodic flush loop (via {@code WaveCounter.destroy()}), so no
+   * further flush cycles are driven after this call. Then interrupts the
+   * routing executor and all dispatcher consumer threads and waits for them to
+   * finish (2-second timeout per pool). Any batches remaining in the work
+   * queue are discarded. This method is typically registered as the Spring
+   * bean {@code destroyMethod}.
    *
    * <p>After shutdown, the reporter no longer publishes reports.
-   * The periodic flush loop continues to run but its output is silently
-   * dropped because the dispatcher queue is no longer being consumed.
    *
    * <p>Idempotent — safe to call multiple times.
    */
   @Override
   @SuppressWarnings("all")
   public void stop() {
-    reportBufferedCounter.destroy();
+    reportWaveCounter.destroy();
     routingExecutor.shutdownNow();
     try {
       routingExecutor.awaitTermination(1, TimeUnit.SECONDS);
@@ -306,12 +321,13 @@ public class KeyReporterImpl implements KeyReporter {
     }
 
     try {
-      ringManager.reconcileFromHealthView(healthView);
-
-      Set<String> aliveNodes = healthView.getAliveWorkerIds();
+      // One alive-set materialisation per flush: the reconcile's returned snapshot
+      // doubles as the routing liveness source, so it is consistent with the ring
+      // that was just rebuilt (a second getAliveWorkerIds() here raced the first).
+      Set<String> aliveNodes = ringManager.reconcileFromHealthView(healthView);
       if (aliveNodes.isEmpty()) {
         long total = workerDeadDropCounter.addAndGet(keyCounts.size());
-        if (tryAcquireNoWorkerLog()) {
+        if (noWorkerLogThrottle.tryAcquire()) {
           log.warn(
             "No alive Worker nodes for routing; dropping {} keys in this flush (cumulative: {})",
             keyCounts.size(),
@@ -337,7 +353,26 @@ public class KeyReporterImpl implements KeyReporter {
       // Defer O(keys × log vnodes) routing computation to dedicated executor
       // so the shared scheduler thread is not starved (SystemLoadMonitor, decay, etc.)
       long now = currentTimeMillis();
-      routingExecutor.submit(() -> routeAndEnqueue(keyCounts, aliveNodes, now, limiter));
+      routingExecutor.submit(() -> {
+        try {
+          routeAndEnqueue(keyCounts, aliveNodes, now, limiter);
+        } catch (Exception e) {
+          // The submitted lambda's Future is discarded, so an uncaught exception
+          // here would previously vanish silently — a recurring failure (e.g.
+          // routeNode throwing) killed every flush's routing with no log and no
+          // counter, and ALL reporting went dark. Count every key of the batch
+          // as unroutable and surface the failure as a rate-limited ERROR.
+          long dropped = unroutableDropCounter.addAndGet(keyCounts.size());
+          if (routingFailureLogThrottle.tryAcquire()) {
+            log.error(
+              "Routing failed for a flush batch of {} keys; all keys dropped (cumulativeUnroutable={})",
+              keyCounts.size(),
+              dropped,
+              e
+            );
+          }
+        }
+      });
     } catch (Exception e) {
       log.error("Flush callback failed", e);
     }
@@ -355,14 +390,17 @@ public class KeyReporterImpl implements KeyReporter {
     BbrRateLimiterImpl limiter
   ) {
     Map<String, Map<String, Long>> sharded = new HashMap<>();
+    // One predicate per batch — the per-key routeNode(key, Set) overload would
+    // allocate a capturing lambda for every key of every flush.
+    Predicate<String> isAlive = aliveNodes::contains;
     keyCounts.forEach((key, val) -> {
       if (val > 0) {
-        String target = ringManager.routeNode(key, aliveNodes);
+        String target = ringManager.routeNode(key, isAlive);
         if (target != null) {
           sharded.computeIfAbsent(target, t -> new HashMap<>()).put(key, val);
         } else {
           long dropped = unroutableDropCounter.incrementAndGet();
-          if (dropped <= 3 || dropped % 100 == 0) {
+          if (unroutableLogThrottle.tryAcquire()) {
             log.debug("routeNode returned null for key={}, cumulativeUnroutable={}", key, dropped);
           }
         }
@@ -371,7 +409,7 @@ public class KeyReporterImpl implements KeyReporter {
     sharded.forEach((target, counts) -> {
       if (!dispatcher.enqueue(new ShardBatch(target, now, counts))) {
         long dropped = dispatcher.dropped();
-        if (dropped % 100 == 0 || dropped == 1) {
+        if (dispatcherDropLogThrottle.tryAcquire()) {
           log.warn(
             "reportToWorker queue full, dropped target={} keys={}, depth={}/{}, cumulativeDrops={}",
             target,
@@ -410,15 +448,43 @@ public class KeyReporterImpl implements KeyReporter {
   }
 
   /**
-   * Return the total number of batches that were discarded because they
-   * waited longer than 5 seconds in the dispatcher queue (staleness expiry).
+   * Return the total number of batches discarded by the consumer — the sum
+   * of the two discard causes now tracked separately by
+   * {@link #dispatcherExpiredDeadTarget()} and {@link #dispatcherExpiredStale()};
+   * kept for metric continuity.
    *
-   * @return total expired batch count since startup, or {@code -1} if the
+   * @return total discarded batch count since startup, or {@code -1} if the
    *         dispatcher has not been started
    */
   @Override
   public long dispatcherExpired() {
     return dispatcher == null ? -1 : dispatcher.expired();
+  }
+
+  /**
+   * Return the total number of batches discarded because their target Worker
+   * was no longer alive at consumption time (dead-target discards; a batch
+   * that is both dead-target and stale is attributed here).
+   *
+   * @return total dead-target discard count since startup, or {@code -1} if the
+   *         dispatcher has not been started
+   */
+  @Override
+  public long dispatcherExpiredDeadTarget() {
+    return dispatcher == null ? -1 : dispatcher.deadTargetExpired();
+  }
+
+  /**
+   * Return the total number of batches discarded because they waited longer
+   * than 5 seconds in the dispatcher queue (staleness expiry under
+   * backpressure).
+   *
+   * @return total stale-discard count since startup, or {@code -1} if the
+   *         dispatcher has not been started
+   */
+  @Override
+  public long dispatcherExpiredStale() {
+    return dispatcher == null ? -1 : dispatcher.staleExpired();
   }
 
   /**
@@ -444,12 +510,13 @@ public class KeyReporterImpl implements KeyReporter {
    */
   @Override
   public long getPendingKeyCount() {
-    return reportBufferedCounter.estimatedSizeOfKeysCount();
+    return reportWaveCounter.estimatedSizeOfKeysCount();
   }
 
   /**
-   * Return the total number of flush cycles that were permitted by the BBR
-   * rate limiter since startup.
+   * Return the total number of batches that were permitted by the BBR rate
+   * limiter since startup (counted once per completed publish, i.e. per
+   * {@code onSuccess} — not once per flush cycle).
    *
    * @return total passed count, or {@code -1} if BBR rate limiting is disabled
    *         ({@link #bbrRateLimiter} is {@code null})
@@ -460,8 +527,9 @@ public class KeyReporterImpl implements KeyReporter {
   }
 
   /**
-   * Return the total number of flush cycles that were dropped by the BBR
-   * rate limiter since startup (both gate drops and consumer drops).
+   * Return the total number of batches that were dropped by the BBR rate
+   * limiter since startup (both gate drops and consumer drops — counted per
+   * batch, not per flush cycle).
    *
    * @return total dropped count, or {@code -1} if BBR rate limiting is disabled
    */
@@ -498,22 +566,6 @@ public class KeyReporterImpl implements KeyReporter {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxInFlight();
   }
 
-  /**
-   * Rate-limiter for the no-alive-worker WARN: at most one log per
-   * {@value #NO_WORKER_LOG_WINDOW_MS}ms window. Thread-safe via
-   * {@link #lastNoWorkerLoggedAtMs} being volatile (mirrors
-   * {@code BroadcastBuffer.tryAcquireFlushErrorLog}).
-   *
-   * @return {@code true} if the caller may log now
-   */
-  private boolean tryAcquireNoWorkerLog() {
-    long now = currentTimeMillis();
-    if (now - lastNoWorkerLoggedAtMs < NO_WORKER_LOG_WINDOW_MS) {
-      return false;
-    }
-    lastNoWorkerLoggedAtMs = now;
-    return true;
-  }
 
   /**
    * Manages a bounded work queue and a fixed pool of consumer threads that
@@ -527,8 +579,20 @@ public class KeyReporterImpl implements KeyReporter {
 
     /** Bounded work queue between the flush loop and the consumer threads. */
     private final BlockingQueue<ShardBatch> queue = new LinkedBlockingQueue<>(queueCapacity);
-    /** Count of batches discarded due to staleness (>5 s wait in queue). */
-    private final AtomicLong expiredCount = new AtomicLong();
+    /**
+     * Count of batches discarded by the consumer because their target Worker
+     * was no longer alive at consumption time (the dead-worker guard in
+     * {@link #consumeLoop()}) — the worker-partition stall signal. When a
+     * batch is both dead-target and stale, it is attributed here: the
+     * partition is the more actionable signal.
+     */
+    private final AtomicLong expiredDeadTargetCount = new AtomicLong();
+    /**
+     * Count of batches discarded because they waited longer than 5 s in the
+     * queue (staleness expiry under backpressure) — the report-backpressure
+     * stall signal.
+     */
+    private final AtomicLong expiredStaleCount = new AtomicLong();
     /** Count of batches rejected because the queue was full. */
     private final AtomicLong droppedCount = new AtomicLong();
     /** Timeout for a single publish call before we give up and treat it as dropped. */
@@ -638,9 +702,11 @@ public class KeyReporterImpl implements KeyReporter {
         }
       }
       log.info(
-        "ReportDispatcher stopped, remaining queue={}, expired={}, dropped={}",
+        "ReportDispatcher stopped, remaining queue={}, expired={} (deadTarget={}, stale={}), dropped={}",
         queue.size(),
-        expiredCount.get(),
+        expired(),
+        expiredDeadTargetCount.get(),
+        expiredStaleCount.get(),
         droppedCount.get()
       );
     }
@@ -673,13 +739,25 @@ public class KeyReporterImpl implements KeyReporter {
     }
 
     /**
-     * Return the total number of batches that were discarded due to
-     * staleness (waited longer than 5 seconds in the queue) since startup.
+     * Return the total number of batches discarded by the consumer since
+     * startup — the sum of the two discard causes tracked by
+     * {@link #expiredDeadTargetCount} and {@link #expiredStaleCount}
+     * (kept for metric continuity with the former conflation).
      *
-     * @return total expired batch count
+     * @return total discarded batch count
      */
     long expired() {
-      return expiredCount.get();
+      return expiredDeadTargetCount.get() + expiredStaleCount.get();
+    }
+
+    /** Total batches discarded because their target Worker was no longer alive. */
+    long deadTargetExpired() {
+      return expiredDeadTargetCount.get();
+    }
+
+    /** Total batches discarded because they waited past the 5 s staleness bound. */
+    long staleExpired() {
+      return expiredStaleCount.get();
     }
 
     /**
@@ -729,8 +807,10 @@ public class KeyReporterImpl implements KeyReporter {
         // HashSet, and a burst of shard batches would otherwise pay that
         // O(workers) cost per batch on the publish path.
         Set<String> aliveWorkers = healthView.getAliveWorkerIds();
-        if (!aliveWorkers.contains(batch.target()) || currentTimeMillis() - batch.timestamp() > 5_000) {
-          expiredCount.incrementAndGet();
+        boolean deadTarget = !aliveWorkers.contains(batch.target());
+        boolean stale = currentTimeMillis() - batch.timestamp() > 5_000;
+        if (deadTarget || stale) {
+          (deadTarget ? expiredDeadTargetCount : expiredStaleCount).incrementAndGet();
           if (limiter != null) {
             limiter.onConsumerDrop();
           }

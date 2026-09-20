@@ -41,10 +41,10 @@ public interface BbrRateLimiter {
   /** Record a gate drop (tryAcquire failed). */
   void onGateDrop();
 
-  /** Total number of flush cycles that passed the limiter. */
+  /** Total number of batches that passed the limiter (counted once per completed publish, not per flush cycle). */
   long getTotalPassed();
 
-  /** Total number of flush cycles dropped by the limiter. */
+  /** Total number of batches dropped by the limiter (gate drops + consumer drops, counted per batch). */
   long getTotalDropped();
 
   /** Current number of in-flight batches. */

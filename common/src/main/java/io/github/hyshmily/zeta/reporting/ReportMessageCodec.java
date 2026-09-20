@@ -454,7 +454,7 @@ public final class ReportMessageCodec {
 
     static class ENCODE {
 
-      /* check if bytes exceed */
+      /** Post-write invariant: the cursor must land exactly on the pre-computed size. */
       public static void checkLength(int p, int size) {
         if (p != size) {
           throw new IllegalStateException("Compact encode size mismatch: wrote " + p + " of " + size + " bytes");
