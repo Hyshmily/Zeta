@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Random;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -182,5 +183,87 @@ class Lz4CacheCompressorTest {
     assertThat(CacheCompressor.NONE.wrap("hello")).isEqualTo("hello");
     assertThat(CacheCompressor.NONE.unwrap("hello")).isEqualTo("hello");
     assertThat(CacheCompressor.NONE.wrap(null)).isNull();
+  }
+
+  /**
+   * Random (high-entropy) payloads cannot be shrunk by LZ4: storing the compressed form would
+   * be no smaller than the raw form while taxing every hit with a decompression. The wrap must
+   * fall back to the raw flag instead.
+   */
+  @Test
+  void wrap_incompressibleString_shouldFallBackToRawFlag() throws IOException {
+    String input = new String(incompressibleBytes(1000), StandardCharsets.ISO_8859_1);
+    byte[] result = (byte[]) compressor.wrap(input);
+    assertThat(result[0]).isEqualTo((byte) 0); // FLAG_RAW — compression bought nothing
+    assertThat(result).hasSize(1 + input.getBytes(StandardCharsets.UTF_8).length);
+    assertThat(compressor.unwrap(result)).isEqualTo(input);
+  }
+
+  @Test
+  void wrap_incompressibleBytes_shouldFallBackToRawBytesFlag() throws IOException {
+    byte[] input = incompressibleBytes(1000);
+    byte[] result = (byte[]) compressor.wrap(input);
+    assertThat(result[0]).isEqualTo((byte) 3); // FLAG_RAW_BYTES
+    assertThat(result).hasSize(1 + input.length);
+    assertThat(compressor.unwrap(result)).isEqualTo(input);
+  }
+
+  /**
+   * Values whose worst-case compressed form exceeds the scratch residency cap must still
+   * compress correctly (per-call buffer) and must not grow the thread's resident buffer.
+   */
+  @Test
+  void wrap_oversizedValue_shouldNotPinScratchBeyondCap() throws IOException {
+    byte[] small = incompressibleBytes(300);
+    assertThat(compressor.unwrap(compressor.wrap(small))).isEqualTo(small);
+    int residentBefore = Lz4CacheCompressor.SCRATCH.get().length;
+    assertThat(residentBefore).isPositive();
+
+    byte[] huge = incompressibleBytes(2 * 1024 * 1024);
+    assertThat(compressor.unwrap(compressor.wrap(huge))).isEqualTo(huge);
+
+    // the 2 MiB value must not pin its worst-case buffer in the thread-local
+    assertThat(Lz4CacheCompressor.SCRATCH.get().length).isEqualTo(residentBefore);
+    assertThat(residentBefore).isLessThanOrEqualTo(Lz4CacheCompressor.SCRATCH_MAX_BYTES);
+  }
+
+  @Test
+  void wrap_largeCompressibleValue_shouldCompressAndRoundTrip() throws IOException {
+    byte[] input = new byte[2 * 1024 * 1024];
+    for (int i = 0; i < input.length; i++) {
+      input[i] = (byte) (i % 64);
+    }
+    byte[] wrapped = (byte[]) compressor.wrap(input);
+    assertThat(wrapped[0]).isEqualTo((byte) 2); // FLAG_LZ4_BYTES — still worth compressing
+    assertThat(compressor.unwrap(wrapped)).isEqualTo(input);
+  }
+
+  /** An unrecognized flag byte means corruption: unwrap must fail loudly, not leak a byte[]. */
+  @Test
+  void wrap_unknownFlag_shouldThrow() {
+    byte[] foreign = new byte[10];
+    foreign[0] = 0x05;
+    assertThatThrownBy(() -> compressor.unwrap(foreign))
+      .isInstanceOf(IOException.class)
+      .hasMessageContaining("Unknown codec flag");
+  }
+
+  /** Pins the decompression bound: a header claiming more than MAX_DECOMPRESSED_BYTES is rejected before allocating. */
+  @Test
+  void unwrap_excessiveLengthHeader_shouldThrow() {
+    byte[] bogus = new byte[16];
+    bogus[0] = 2; // FLAG_LZ4_BYTES
+    int claimed = 200_000_000; // > MAX_DECOMPRESSED_BYTES (100_000_000)
+    bogus[1] = (byte) claimed;
+    bogus[2] = (byte) (claimed >>> 8);
+    bogus[3] = (byte) (claimed >>> 16);
+    bogus[4] = (byte) (claimed >>> 24);
+    assertThatThrownBy(() -> compressor.unwrap(bogus)).isInstanceOf(IOException.class);
+  }
+
+  private static byte[] incompressibleBytes(int length) {
+    byte[] data = new byte[length];
+    new Random(42).nextBytes(data);
+    return data;
   }
 }

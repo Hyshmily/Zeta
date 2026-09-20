@@ -37,8 +37,14 @@ import net.jpountz.lz4.LZ4FastDecompressor;
  *       {@code [0x02][4-byte original-length LE][LZ4 payload]}</li>
  *   <li>Flag {@code 0x03} = uncompressed byte[]: {@code [0x03][raw bytes]}</li>
  * </ul>
+ * Flags {@code 0x01}/{@code 0x02} are only written when the compressed form is strictly
+ * smaller than the flag-prefixed raw form; incompressible values fall back to
+ * {@code 0x00}/{@code 0x03} so hits never pay a decompression that bought nothing.
  * Original length is bounds-checked during decompression to prevent resource
- * exhaustion attacks.
+ * exhaustion attacks. An unknown flag throws {@link IOException} — the format
+ * exists only inside this JVM's L1 (ADR-0015), so an unrecognized flag means
+ * corruption, and the caller's invalidate-and-reload path must treat it as
+ * such rather than receive a wrongly-typed value.
  */
 @Internal
 public class Lz4CacheCompressor implements CacheCompressor {
@@ -49,13 +55,30 @@ public class Lz4CacheCompressor implements CacheCompressor {
   private static final byte FLAG_RAW_BYTES = 3;
 
   /**
+   * Upper bound on the decompressed size accepted from the 4-byte length header. The
+   * {@code originalLen} allocation happens before LZ4 validates a single byte, so this
+   * bound is the only guard against a corrupt header triggering a huge allocation. It is
+   * deliberately generous: a legit stored value larger than the bound would fail
+   * decompression on every read (invalidate → reload → fail again), so only a bound no
+   * real value can exceed is safe. The compressed form never leaves this JVM's L1
+   * (ADR-0015), so an over-large claim can only be corruption, never a foreign format.
+   */
+  private static final int MAX_DECOMPRESSED_BYTES = 100_000_000;
+
+  /**
    * Reusable compression scratch buffer, one per thread. Compress allocates a
    * {@code maxCompressedLength + 5} array plus a final {@code copyOf} result
    * per call; reusing the intermediate array removes one allocation per
-   * compression. The buffer grows to the largest value compressed on that
-   * thread and stays resident (bounded by the executor thread count).
+   * compression. The buffer grows with the largest value compressed on that
+   * thread and stays resident, capped at {@link #SCRATCH_MAX_BYTES}: beyond
+   * the cap the buffer is per-call, so one huge value cannot pin its
+   * worst-case buffer in every executor thread for the process lifetime.
+   * Package-private so tests can assert the cap.
    */
-  private static final ThreadLocal<byte[]> SCRATCH = ThreadLocal.withInitial(() -> new byte[0]);
+  static final ThreadLocal<byte[]> SCRATCH = ThreadLocal.withInitial(() -> new byte[0]);
+
+  /** Scratch-buffer residency cap (1 MiB); larger buffers are per-call. Package-private for tests. */
+  static final int SCRATCH_MAX_BYTES = 1 << 20;
 
   private final LZ4Compressor compressor;
   private final LZ4FastDecompressor decompressor;
@@ -103,27 +126,40 @@ public class Lz4CacheCompressor implements CacheCompressor {
     return process(raw, FLAG_RAW_BYTES, FLAG_LZ4_BYTES);
   }
 
-  public byte[] process(byte[] raw, byte flagRawBytes, byte flagLz4Bytes) {
+  private byte[] process(byte[] raw, byte flagRaw, byte flagLz4) {
     if (raw.length < MIN_COMPRESS_LENGTH) {
-      byte[] buf = new byte[raw.length + 1];
-      buf[0] = flagRawBytes;
-      System.arraycopy(raw, 0, buf, 1, raw.length);
-      return buf;
+      return prefixed(raw, flagRaw);
     }
-    return compress(raw, flagLz4Bytes);
+    return compress(raw, flagRaw, flagLz4);
   }
 
-  private byte[] compress(byte[] raw, byte flag) {
+  private byte[] compress(byte[] raw, byte flagRaw, byte flagLz4) {
     int maxLen = compressor.maxCompressedLength(raw.length);
+    int need = maxLen + 5;
     byte[] scratch = SCRATCH.get();
-    if (scratch.length < maxLen + 5) {
-      scratch = new byte[maxLen + 5];
-      SCRATCH.set(scratch);
+    if (scratch.length < need) {
+      scratch = new byte[need];
+      if (need <= SCRATCH_MAX_BYTES) {
+        SCRATCH.set(scratch);
+      }
     }
-    scratch[0] = flag;
+    scratch[0] = flagLz4;
     writeLen(scratch, raw.length);
     int len = compressor.compress(raw, 0, raw.length, scratch, 5, maxLen);
+    if (len + 5 >= raw.length + 1) {
+      // Incompressible payload: the compressed form would be no smaller than
+      // the flag-prefixed raw form, so store raw — the stored size is the same
+      // or better and every hit skips a decompression that buys nothing.
+      return prefixed(raw, flagRaw);
+    }
     return Arrays.copyOf(scratch, len + 5);
+  }
+
+  private static byte[] prefixed(byte[] raw, byte flag) {
+    byte[] buf = new byte[raw.length + 1];
+    buf[0] = flag;
+    System.arraycopy(raw, 0, buf, 1, raw.length);
+    return buf;
   }
 
   @Override
@@ -140,7 +176,7 @@ public class Lz4CacheCompressor implements CacheCompressor {
       case FLAG_LZ4 -> new String(decompress(b), UTF_8);
       case FLAG_RAW_BYTES -> Arrays.copyOfRange(b, 1, b.length);
       case FLAG_LZ4_BYTES -> decompress(b);
-      default -> stored;
+      default -> throw new IOException("Unknown codec flag: 0x" + Integer.toHexString(b[0] & 0xFF));
     };
   }
 
@@ -149,7 +185,7 @@ public class Lz4CacheCompressor implements CacheCompressor {
       throw new IOException("Truncated LZ4 data");
     }
     int originalLen = readLen(compressed);
-    if (originalLen <= 0 || originalLen > 100_000_000) {
+    if (originalLen <= 0 || originalLen > MAX_DECOMPRESSED_BYTES) {
       throw new IOException("Invalid decompressed length: " + originalLen);
     }
     byte[] restored = new byte[originalLen];
