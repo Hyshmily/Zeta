@@ -33,6 +33,8 @@ import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.cache.codec.DefaultWeigher;
 import io.github.hyshmily.zeta.cache.codec.Lz4CacheCompressor;
+import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
+import io.github.hyshmily.zeta.cache.loader.ZetaLoadingSpec;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
@@ -51,10 +53,7 @@ import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
 import java.util.Optional;
-import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.springframework.beans.factory.ObjectProvider;
@@ -129,6 +128,7 @@ public class ZetaAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyDetector hotKeyDetector(
     HeavyKeeper heavyKeeper,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler
@@ -198,6 +198,7 @@ public class ZetaAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public ExpireManager expireManager(
     Cache<String, Object> hotLocalCache,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
@@ -234,6 +235,21 @@ public class ZetaAutoConfiguration {
   @Bean(name = "hotKeyExecutor", destroyMethod = "shutdownNow")
   @ConditionalOnMissingBean(name = "hotKeyExecutor")
   public Executor hotKeyExecutor(ZetaProperties properties) {
+    // ABORT (default) throws on saturation — upstream read paths swallow the
+    // failure as a cache miss. CALLER_RUNS back-pressures the submitting thread
+    // instead of dropping the async work.
+    var rejectionHandler =
+      properties.getExecutorRejection() == ZetaProperties.ExecutorRejection.CALLER_RUNS
+        ? (RejectedExecutionHandler) new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy()
+        : (RejectedExecutionHandler) (r, exe) -> {
+            log.warn(
+              "Zeta executor task rejected: corePool={}, maxPool={}, queueCapacity={}",
+              properties.getExecutorCorePoolSize(),
+              properties.getExecutorMaxPoolSize(),
+              properties.getExecutorQueueCapacity()
+            );
+            throw new RejectedExecutionException("HotKey executor queue full");
+          };
     var executor = new StandardThreadExecutor(
       properties.getExecutorCorePoolSize(),
       properties.getExecutorMaxPoolSize(),
@@ -241,15 +257,7 @@ public class ZetaAutoConfiguration {
       TimeUnit.SECONDS,
       properties.getExecutorQueueCapacity(),
       new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_HOTKEY),
-      (r, exe) -> {
-        log.warn(
-          "Zeta executor task rejected: corePool={}, maxPool={}, queueCapacity={}",
-          properties.getExecutorCorePoolSize(),
-          properties.getExecutorMaxPoolSize(),
-          properties.getExecutorQueueCapacity()
-        );
-        throw new RejectedExecutionException("HotKey executor queue full");
-      }
+      rejectionHandler
     );
     executor.allowCoreThreadTimeOut(true);
     return executor;
@@ -278,6 +286,7 @@ public class ZetaAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public BroadcastBuffer broadcastBuffer(
     @Qualifier("hotKeyScheduler") ScheduledExecutorService hotKeyScheduler,
     Optional<CacheSyncPublisher> syncPublisher,
@@ -328,6 +337,7 @@ public class ZetaAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean(type = "org.springframework.data.redis.core.RedisTemplate")
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   public HotKeyCache hotKeyCache(
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
     Cache<String, Object> hotLocalCache,
@@ -373,6 +383,22 @@ public class ZetaAutoConfiguration {
   }
 
   /**
+   * Create the empty prefix→loader registry backing the no-reader
+   * {@code Zeta.get(cacheKey)} overloads and the composite sync-plane loader
+   * (ADR-0070). Applications register {@link ZetaLoadingSpec}s against key
+   * prefixes (e.g. {@code "user:"}) at startup or at runtime; an empty registry
+   * is a no-op — every consumer falls back to the Redis value channel, so this
+   * bean changes nothing for deployments that do not use the feature.
+   *
+   * @return a new empty {@link ZetaLoaderRegistry}
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public ZetaLoaderRegistry zetaLoaderRegistry() {
+    return new ZetaLoaderRegistry();
+  }
+
+  /**
    * Create the L1 Caffeine cache instance.
    *
    * <p>Time-based expiry operates at the <em>Caffeine</em> level via a custom
@@ -383,9 +409,9 @@ public class ZetaAutoConfiguration {
    * manual invalidation. Reads never extend the expiry duration (no read-based
    * refresh), ensuring predictable TTL behavior.
    *
-   * <p>Eviction strategy: {@code max-weight} (> 0) enables memory-weighted
-   * eviction with {@link DefaultWeigher}; otherwise {@code max-size} limits
-   * entry count. Time-based TTL for entries without an explicit hard-expire
+   * <p>Eviction strategy: {@code max-weight} (> 0) enables memory-weighted eviction with {@link
+   * DefaultWeigher} configured by {@code weigh-walk-nodes} / {@code weigh-over-budget}; otherwise
+   * {@code max-size} limits entry count. Time-based TTL for entries without an explicit hard-expire
    * timestamp defaults to {@code zeta.local.default-hard-ttl-ms}.
    *
    * <p>Stats recording is always enabled ({@code recordStats()}) so that
@@ -395,15 +421,29 @@ public class ZetaAutoConfiguration {
    * counters to be populated.
    *
    * @param properties the HotKey configuration properties (never {@code null})
+   * @param customizerProvider ordered provider of application {@link ZetaCacheCustomizer}
+   *                           beans, applied just before {@code build()} (ADR-0070)
    * @return a configured Caffeine {@link Cache} instance
    */
   @Bean
   @ConditionalOnMissingBean
-  public Cache<String, Object> hotLocalCache(ZetaProperties properties) {
+  public Cache<String, Object> hotLocalCache(
+    ZetaProperties properties,
+    ObjectProvider<ZetaCacheCustomizer> customizerProvider
+  ) {
     var cfg = properties.getCache();
     Caffeine<Object, Object> builder = Caffeine.newBuilder();
     if (cfg.getMaxWeight() > 0) {
-      builder.maximumWeight(cfg.getMaxWeight()).weigher(DefaultWeigher.INSTANCE);
+      // The weigher may run while holding a bin lock (Caffeine's computeIfAbsent path), so its
+      // node budget and over-budget policy come from configuration rather than a fixed singleton.
+      builder
+        .maximumWeight(cfg.getMaxWeight())
+        .weigher(
+          DefaultWeigher.of(
+            cfg.getWeighWalkNodes(),
+            cfg.getWeighOverBudget() == ZetaProperties.CacheConfig.WeighOverBudget.ABORT
+          )
+        );
     } else {
       builder.maximumSize(cfg.getMaxSize());
     }
@@ -487,6 +527,10 @@ public class ZetaAutoConfiguration {
         }
       }
     );
+    // Application customizers run last, in order, immediately before build() —
+    // they may add orthogonal listeners/executors/schedulers but cannot replace
+    // the capacity or expiry knobs set above (Caffeine setters are single-use).
+    customizerProvider.orderedStream().forEach(customizer -> customizer.customize(builder));
     return builder.build();
   }
 }
