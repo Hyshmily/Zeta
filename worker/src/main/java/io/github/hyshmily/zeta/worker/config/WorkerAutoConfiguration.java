@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.worker.config;
 
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import io.github.hyshmily.zeta.reporting.CompactAwareReportMessageConverter;
 import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.confidence.BayesianConfidenceEstimator;
@@ -171,14 +172,18 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Bayesian confidence estimator using Normal-Normal conjugate model.
+   * Bayesian confidence estimator using Normal-Normal conjugate model — the
+   * default {@link ConfidenceEvaluator} strategy consumed by the state
+   * machine. Register a different {@code ConfidenceEvaluator} Bean to swap
+   * the confidence model entirely, or override this Bean to retune the
+   * conjugate parameters.
    *
    * @param properties worker configuration providing Bayesian prior and likelihood parameters
-   * @return a new {@link BayesianConfidenceEstimator} instance
+   * @return the default {@link BayesianConfidenceEstimator} as a {@link ConfidenceEvaluator}
    */
   @Bean
-  @ConditionalOnMissingBean
-  public BayesianConfidenceEstimator bayesianConfidenceEstimator(WorkerProperties properties) {
+  @ConditionalOnMissingBean(ConfidenceEvaluator.class)
+  public ConfidenceEvaluator bayesianConfidenceEstimator(WorkerProperties properties) {
     WorkerProperties.Bayesian cfg = properties.getBayesian();
     return new BayesianConfidenceEstimator(
       cfg.getPriorMean(),
@@ -187,18 +192,6 @@ public class WorkerAutoConfiguration {
       cfg.getHighConfidenceThreshold(),
       cfg.getMediumConfidenceThreshold()
     );
-  }
-
-  /**
-   * Confidence evaluator facade that wraps the Bayesian estimator.
-   *
-   * @param estimator the Bayesian confidence estimator
-   * @return a new {@link ConfidenceEvaluator} instance
-   */
-  @Bean
-  @ConditionalOnMissingBean
-  public ConfidenceEvaluator confidenceEvaluator(BayesianConfidenceEstimator estimator) {
-    return new ConfidenceEvaluator(estimator);
   }
 
   /**
@@ -725,15 +718,22 @@ public class WorkerAutoConfiguration {
   }
 
   /**
-   * Fallback JSON message converter for reportToWorker messages. Active only when the
-   * common module's {@code reportMessageConverter} is absent (e.g. in tests).
+   * Fallback report message converter for reportToWorker messages. Active only when the
+   * common module's {@code zetaReportMessageConverter} is absent (e.g. in tests).
+   * <p>
+   * Decodes both wire formats (Jackson JSON and the compact binary body,
+   * ADR-0074) by first-byte sniffing; never encodes compact (a Worker does
+   * not emit report messages).
    *
-   * @return a {@link org.springframework.amqp.support.converter.Jackson2JsonMessageConverter} instance
+   * @return a dual-format {@code CompactAwareReportMessageConverter} over a Jackson delegate
    */
   @Bean("reportMessageConverter")
   @ConditionalOnMissingBean(name = "reportMessageConverter")
   public MessageConverter reportMessageConverter() {
-    return new org.springframework.amqp.support.converter.Jackson2JsonMessageConverter();
+    return new CompactAwareReportMessageConverter(
+      new org.springframework.amqp.support.converter.Jackson2JsonMessageConverter(),
+      false
+    );
   }
 
   /**

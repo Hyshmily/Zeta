@@ -80,6 +80,16 @@ public class DefaultEvaluator implements Evaluator {
   /** Sliding-window detector shared with the evaluation pipeline. */
   private final SlidingWindowDetector detector;
 
+  /**
+   * Momentum time constant in milliseconds — one full sliding-window span
+   * ({@code windowSize × timeMillisPerSlice}). The per-key moving average
+   * decays with this constant and is fed the window-sum increment attributable
+   * to the elapsed time, so a key with a constant window level {@code W} holds
+   * an average ≈ {@code W} and the momentum ratio is calibrated to ≈ 1 for
+   * sustained traffic.
+   */
+  private final long momentumWindowSpanMs;
+
   /** Per-key lifecycle state machine. */
   private final ZetaBayesianSM stateMachine;
 
@@ -95,7 +105,8 @@ public class DefaultEvaluator implements Evaluator {
   private final boolean fastLaneEnabled;
 
   /**
-   * Per-key evaluation state (CV history + EMA momentum) in ONE map entry.
+   * Per-key evaluation state (CV history + window moving average) in ONE map
+   * entry.
    *
    * <p>Merging the previous two parallel maps ({@code windowSumHistories} and
    * {@code cmsCounts}) halves the per-evaluation map lookups: both components
@@ -116,21 +127,6 @@ public class DefaultEvaluator implements Evaluator {
    */
   private volatile long cachedLogThresholdSource = Long.MIN_VALUE;
   private volatile double cachedLogThreshold = 0.0;
-
-  /** EMA decay factor: 0.98 ≈ 35-cycle half-life. */
-  private static final double CMS_ALPHA = 0.98;
-
-  /**
-   * Reference decay cycle in milliseconds for the lazy EMA decay. The lazy
-   * formula anchors decay to wall time rather than to tick count, so a
-   * different eviction cadence stays approximately equivalent to the old
-   * per-tick decay. Deliberately independent of the eviction scan cadence
-   * ({@code zeta.worker.state-machine.evict-scan-interval-ms}, default
-   * 20 min — ADR-0060) and of the staleness threshold
-   * ({@code evict-interval-ms}); 30 s is simply the fixed decay tick the
-   * momentum inertia is tuned against.
-   */
-  private static final double EVICT_CYCLE_MS = 30_000.0;
 
   /**
    * Size gate for the periodic sweep of {@link #evalStates}: the sweep runs
@@ -177,6 +173,10 @@ public class DefaultEvaluator implements Evaluator {
     this.stateMachine = stateMachine;
     this.fastLaneRuleManager = fastLaneRuleManager;
     this.fastLaneEnabled = fastLaneEnabled;
+    // Momentum time constant = one full sliding window. A mocked detector (or
+    // a degenerate configuration) yields 0 — clamp to 1ms to keep the
+    // time-constant divisions finite.
+    this.momentumWindowSpanMs = Math.max(1L, detector.getWindowSize() * detector.getTimeMillisPerSlice());
   }
 
   /**
@@ -217,7 +217,7 @@ public class DefaultEvaluator implements Evaluator {
     FastLaneRuleManager.FastLaneRule rule = fastLaneEnabled ? fastLaneRuleManager.match(key) : null;
     boolean isFastlane = rule != null && windowSum >= rule.threshold();
 
-    return isFastlane ? toFastlane(key) : toBayesianlane(key, count, windowSum, globalRatio);
+    return isFastlane ? toFastlane(key) : toBayesianlane(key, windowSum, globalRatio);
   }
 
   /**
@@ -236,8 +236,8 @@ public class DefaultEvaluator implements Evaluator {
   }
 
   /**
-   * Bayesian evaluation path: sliding-window sum, trend normalisation, EMA
-   * momentum, and confidence-gated state machine.
+   * Bayesian evaluation path: sliding-window sum, trend normalisation, window
+   * moving average, and confidence-gated state machine.
    *
    * <p>Assembles an {@link EvaluationContext} with all per-key metrics needed
    * for the Bayesian posterior computation:
@@ -250,18 +250,17 @@ public class DefaultEvaluator implements Evaluator {
    *   <li><b>trendStrength</b> — ratio of the current window sum (normalised
    *       by the batch-sampled {@code globalRatio}) to the mean of the three
    *       preceding windows (upward/downward momentum)</li>
-   *   <li><b>EMA cmsCount</b> — per-key exponential moving average
-   *       ({@code cms = prev × CMS_ALPHA + count}) for gradual-decay
+   *   <li><b>windowAverage</b> — per-key time-decayed moving average of the
+   *       window sums (one-window-span time constant) for gradual-decay
    *       inertia</li>
    *   <li><b>adjustedLogThreshold</b> — {@code log(threshold) - log(momentum)}
-   *       where {@code momentum = clamp(cms / windowSum, 0.1, 10.0)}.
+   *       where {@code momentum = clamp(windowAverage / windowSum, 0.1, 10.0)}.
    *       Momentum &gt; 1 lowers the bar (sustained key stays HOT more
    *       easily); momentum &lt; 1 raises it (burst spike requires stronger
    *       evidence)</li>
    * </ul>
    *
    * @param key         the cache key being evaluated
-   * @param count       the access count in this report batch
    * @param windowSum   the current sliding-window sum (pre-computed by caller)
    * @param globalRatio batch-sampled global traffic ratio; non-positive values
    *                    are treated as the neutral {@code 1.0}
@@ -269,7 +268,7 @@ public class DefaultEvaluator implements Evaluator {
    *         or {@code NONE}
    */
   @SuppressWarnings("all")
-  public ZetaDecision toBayesianlane(String key, long count, long windowSum, double globalRatio) {
+  public ZetaDecision toBayesianlane(String key, long windowSum, double globalRatio) {
     long threshold = detector.getThreshold();
     boolean isWindowHot = windowSum >= threshold;
 
@@ -284,31 +283,33 @@ public class DefaultEvaluator implements Evaluator {
     long now = TimeSource.monotonicMillis();
     double cv;
     double trendStrength;
-    double ema;
+    double windowAverage;
     synchronized (state) {
       state.lastEvalTime = now;
       cv = state.history.addAndGetCv(windowSum, ratio);
       trendStrength = state.history.getTrendStrength();
-      ema = state.updateEma(count, now);
+      windowAverage = state.updateWindowAverage(windowSum, now, momentumWindowSpanMs);
     }
 
-    // cmsCount = cmsCount * α^(elapsed/cycle) + count
-    // High cmsCount + low windowSum = key was hot but cooling (momentum < 1)
-    // Low cmsCount + high windowSum = sudden spike with no history
-    double cms = ema;
-
-    // Momentum = cmsCount / windowSum — how much "history" the key carries
-    // relative to its current burst size.
-    double momentum = (cms > 0 && windowSum > 0) ? Math.max(0.1, Math.min(cms / windowSum, 10.0)) : 1.0;
+    // Momentum = windowAverage / windowSum — how much sustained history the
+    // key carries relative to its current burst size. Both sides share the
+    // same unit (window sums), so a key holding a steady window level sits at
+    // momentum ≈ 1 (no adjustment); a burst spike leaves the average behind
+    // (momentum < 1) and a cooling key keeps the average above its shrinking
+    // window (momentum > 1).
+    double momentum = (windowAverage > 0 && windowSum > 0)
+      ? Math.max(0.1, Math.min(windowAverage / windowSum, 10.0))
+      : 1.0;
 
     // Adjusted logThreshold: momentum > 1 lowers the bar (sustained key),
     // momentum < 1 raises it (first-time spike needs more confidence).
     double rawLogThresh = logThreshold(threshold);
-    // momentum == 1.0 (no history yet: cms or windowSum is zero) makes the
-    // adjustment exactly zero — skip the native log call on that common path.
+    // momentum == 1.0 (no history yet: windowAverage or windowSum is zero)
+    // makes the adjustment exactly zero — skip the native log call on that
+    // common path.
     double adjustedLogThresh = momentum == 1.0 ? rawLogThresh : rawLogThresh - Math.log(momentum);
     EvaluationContext ctx = new EvaluationContext(
-      (long) cms,
+      (long) windowAverage,
       windowSum,
       threshold,
       cv,
@@ -361,30 +362,33 @@ public class DefaultEvaluator implements Evaluator {
       // an evaluation. (The pre-merge sweep mutated the double[] cell in
       // place outside any lock; torn reads could yield NaN and poison the
       // momentum/z-score classification.)
-      evalStates.values().removeIf(state -> state.decayAndCheckDead(now));
+      evalStates.values().removeIf(state -> state.decayAndCheckDead(now, momentumWindowSpanMs));
     }
   }
 
   /**
-   * Per-key evaluation state: CV history + EMA momentum + freshness, guarded
-   * by the entry's intrinsic monitor. Callers synchronize on the state for
-   * every mutation ({@link #updateEma}, {@link WindowSumHistory#addAndGetCv},
-   * {@link #decayAndCheckDead}), so concurrent evaluations of the same key
-   * serialize without a second lock.
+   * Per-key evaluation state: CV history + window moving average + freshness,
+   * guarded by the entry's intrinsic monitor. Callers synchronize on the state
+   * for every mutation ({@link #updateWindowAverage},
+   * {@link WindowSumHistory#addAndGetCv}, {@link #decayAndCheckDead}), so
+   * concurrent evaluations of the same key serialize without a second lock.
    */
   private static final class PerKeyEvalState {
 
     /** Sliding-window sum history for the CV estimate. */
     final WindowSumHistory history = new WindowSumHistory();
 
-    /** EMA of reported counts (momentum signal). Mutated under the state monitor. */
-    double ema;
+    /**
+     * Time-decayed moving average of the key's sliding-window sums (the
+     * momentum reference). Mutated under the state monitor.
+     */
+    double windowAverage;
 
     /**
-     * Monotonic timestamp of the last EMA update (the lazy-decay anchor);
+     * Monotonic timestamp of the last average update (the decay anchor);
      * {@code 0} until the first update. Mutated under the state monitor.
      */
-    long emaUpdateMillis;
+    long averageUpdateMillis;
 
     /**
      * Monotonic timestamp of the last evaluation (volatility: the eviction
@@ -393,49 +397,61 @@ public class DefaultEvaluator implements Evaluator {
     volatile long lastEvalTime;
 
     /**
-     * Lazy time-based EMA update: applies the decay accumulated since the
-     * last update, then adds {@code count}. Must be called under the state
-     * monitor so concurrent evaluations of the same key cannot lose an update.
+     * Time-decayed moving average of the window sums, with a one-window-span
+     * time constant — the reference the momentum ratio is calibrated against.
+     * Each update decays the previous value by the elapsed time and adds the
+     * window-sum increment attributable to that elapsed time
+     * ({@code windowSum × Δt/span}), so a key holding a constant window level
+     * {@code W} converges to an average ≈ {@code W}. Must be called under the
+     * state monitor so concurrent evaluations of the same key cannot lose an
+     * update.
      *
-     * @param count the access count in this report batch
-     * @param now   current monotonic millis
-     * @return the updated EMA value
+     * <p>The first update for a key seeds the average with one full window
+     * sum — no elapsed-time evidence exists yet, and momentum 1.0 (neutral)
+     * is exactly the right first impression.
+     *
+     * <p>The source term is capped at one window's worth: across a long
+     * reporting gap the only evidence is the end-of-gap window sum, and the
+     * decay ({@code exp(-Δ/span)}, uncapped) forgets the pre-gap history.
+     *
+     * @param windowSum the current sliding-window sum
+     * @param now       current monotonic millis
+     * @param spanMs    the momentum time constant (one sliding-window span)
+     * @return the updated average
      */
-    double updateEma(long count, long now) {
-      long last = emaUpdateMillis == 0 ? now : emaUpdateMillis;
-      // Fast path: keys are re-evaluated every report cycle (tens of ms) while
-      // EVICT_CYCLE_MS is minutes — the integer exponent is 0 and
-      // pow(α, 0) == 1.0, so the ~50-100ns native Math.pow call is pure waste
-      // on every evaluation of every key. Only cross a decay tick when a whole
-      // cycle has actually elapsed (the truncating cast is exact: EVICT_CYCLE_MS
-      // is a whole number, so (long)(elapsed / 30000.0) == elapsed / 30000).
-      long elapsedCycles = (long) ((now - last) / EVICT_CYCLE_MS);
-      double decayed = elapsedCycles <= 0 ? ema : ema * Math.pow(CMS_ALPHA, elapsedCycles);
-      ema = decayed + count;
-      emaUpdateMillis = now;
-      return ema;
+    double updateWindowAverage(long windowSum, long now, long spanMs) {
+      long last = averageUpdateMillis;
+      if (last == 0) {
+        windowAverage = windowSum;
+        averageUpdateMillis = now;
+        return windowAverage;
+      }
+      long elapsed = Math.max(0, now - last);
+      double decay = Math.exp(-elapsed / (double) spanMs);
+      double sourceFraction = Math.min(1.0, elapsed / (double) spanMs);
+      windowAverage = windowAverage * decay + windowSum * sourceFraction;
+      averageUpdateMillis = now;
+      return windowAverage;
     }
 
     /**
-     * Decay-sweep step for one entry: advances the EMA's lazy decay to
+     * Decay-sweep step for one entry: advances the moving average's decay to
      * {@code now} and reports whether the value has decayed below 1.0 (the
      * entry is dead and the caller may remove it). Must run under the state
      * monitor — {@code removeIf} invokes it, so the method itself takes the
-     * monitor to serialize against {@link #updateEma}.
+     * monitor to serialize against {@link #updateWindowAverage}.
      *
      * @param now current monotonic millis
-     * @return {@code true} if the decayed EMA is below 1.0 (entry removable)
+     * @return {@code true} if the decayed average is below 1.0 (entry removable)
      */
-    synchronized boolean decayAndCheckDead(long now) {
-      if (emaUpdateMillis == 0) {
+    synchronized boolean decayAndCheckDead(long now, long spanMs) {
+      if (averageUpdateMillis == 0) {
         return true;
       }
-      long elapsedCycles = (long) ((now - emaUpdateMillis) / EVICT_CYCLE_MS);
-      if (elapsedCycles > 0) {
-        ema *= Math.pow(CMS_ALPHA, elapsedCycles);
-        emaUpdateMillis = now;
-      }
-      return ema < 1.0;
+      long elapsed = Math.max(0, now - averageUpdateMillis);
+      windowAverage *= Math.exp(-elapsed / (double) spanMs);
+      averageUpdateMillis = now;
+      return windowAverage < 1.0;
     }
   }
 

@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.worker.rule.impl;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import java.util.ArrayList;
 import java.util.List;
@@ -41,10 +42,24 @@ import java.util.function.Function;
  * {@link #updateRule}, {@link #replaceAll}) so changes are visible immediately.
  *
  * <p><b>Versioning (ADR-0025):</b> the rule set carries a wall-clock version
- * ({@code System.currentTimeMillis()} of the last local mutation; {@code 0}
- * for YAML-loaded initial rules). Mutations stamp the version;
- * {@link #replaceAll} applies a gossiped snapshot only when its version is
- * newer-or-equal, giving last-writer-wins convergence across Workers.
+ * ({@link TimeSource#currentTimeMillis()} of the last local mutation, made
+ * <em>strictly increasing</em>; {@code 0} for YAML-loaded initial rules).
+ * Mutations stamp the version; {@link #replaceAll} applies a gossiped snapshot
+ * only when its version is newer-or-equal, giving last-writer-wins convergence
+ * across Workers.
+ *
+ * <p><b>Why strictly increasing, not a bare wall clock:</b> the version is the
+ * only convergence key for a replicated rule set, and a bare
+ * {@code currentTimeMillis()} breaks it in two ways. (1) Two mutations inside the
+ * same millisecond stamp the <em>same</em> version for <em>different</em> rule
+ * sets; since {@link #replaceAll} only rejects {@code version < rulesVersion},
+ * each Worker keeps whichever snapshot arrived last, so peers can settle on
+ * divergent rule sets. (2) A backward wall-clock step (NTP correction, container
+ * clock drift) makes a fresh local edit carry a version at or below one already
+ * published; every peer then rejects the broadcast as stale and the edit
+ * silently never propagates (re-sending it does not help — it carries the same
+ * low version). {@link #nextRulesVersion()} therefore derives each version from
+ * the previous one as well as the clock.
  *
  * <p>Glob matching ({@code *} / {@code ?}) is used to compare cache keys
  * against rule patterns. See {@link #matchGlob} for the exact semantics.
@@ -73,6 +88,30 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
    * read via {@link #getRulesVersion()} (volatile).
    */
   private volatile long rulesVersion = 0L;
+
+  /**
+   * Mint the next rule-set version: strictly greater than every version this
+   * instance has published so far, and never below the current wall clock.
+   *
+   * <p>Takes the clock through {@link TimeSource} rather than
+   * {@code System.currentTimeMillis()} so the version also inherits TimeSource's
+   * monotonic floor against a backward NTP step. The {@code +1} term is what makes
+   * it <em>strictly</em> increasing: two mutations in the same millisecond — or a
+   * clock that has gone backwards — still receive distinct versions, which is
+   * required because {@link #replaceAll} accepts equal versions and would
+   * otherwise leave peers converging on whichever snapshot arrived last.
+   *
+   * <p><b>Callers must hold the intrinsic lock</b> (every mutation method is
+   * {@code synchronized}), so the read-modify-write on the volatile field is not
+   * racing another writer.
+   *
+   * @return the new, strictly greater rule-set version
+   */
+  private long nextRulesVersion() {
+    long next = Math.max(rulesVersion + 1, TimeSource.currentTimeMillis());
+    rulesVersion = next;
+    return next;
+  }
 
   /**
    * Caffeine cache from evaluated cache key to the matched rule.
@@ -137,7 +176,7 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
     } else {
       orderedRules.replaceAll(r -> r.keyPattern().equals(keyPattern) ? rule : r);
     }
-    rulesVersion = System.currentTimeMillis();
+    nextRulesVersion();
     matchCache.invalidateAll();
   }
 
@@ -152,7 +191,7 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
     boolean removed = rules.remove(keyPattern) != null;
     if (removed) {
       orderedRules.removeIf(r -> r.keyPattern().equals(keyPattern));
-      rulesVersion = System.currentTimeMillis();
+      nextRulesVersion();
       matchCache.invalidateAll();
     }
     return removed;
@@ -174,7 +213,7 @@ public class FastLaneRuleManagerImpl implements FastLaneRuleManager {
     if (updated) {
       FastLaneRule rule = new FastLaneRule(keyPattern, threshold);
       orderedRules.replaceAll(r -> r.keyPattern().equals(keyPattern) ? rule : r);
-      rulesVersion = System.currentTimeMillis();
+      nextRulesVersion();
       matchCache.invalidateAll();
     }
     return updated;

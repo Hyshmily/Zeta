@@ -3,8 +3,11 @@ package io.github.hyshmily.zeta.worker.config;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
@@ -202,5 +205,51 @@ class WorkerConfigNegotiatorTest {
 
     verifyNoInteractions(stateMachine);
     assertThat(configTimestampCounter.get()).isZero();
+  }
+
+  /**
+   * Reproduces the repeated-apply symptom: a tie-win peer re-broadcasts the same
+   * config on every heartbeat, so once the values already match the local ones
+   * the negotiator must stop rewriting them instead of re-applying (and
+   * re-logging) once per second forever.
+   */
+  @Test
+  void shouldApplyTieWinOnlyOnceWhenValuesAlreadyMatch() {
+    when(stateMachine.getConfirmCount()).thenReturn(5);
+    when(stateMachine.getCoolCount()).thenReturn(10);
+    when(stateMachine.getPreCoolGraceCount()).thenReturn(3);
+    configTimestampCounter.set(10);
+    Message msg = createHeartbeatMessage("worker-2", 10);
+
+    negotiator.onHeartbeat(msg);
+    negotiator.onHeartbeat(msg);
+    negotiator.onHeartbeat(msg);
+
+    verify(stateMachine, never()).setConfirmCount(anyInt());
+    verify(stateMachine, never()).setCoolCount(anyInt());
+    verify(stateMachine, never()).setPreCoolGraceCount(anyInt());
+    assertThat(configTimestampCounter.get()).isEqualTo(10);
+    assertThat(negotiator.hasReceivedConfig()).isTrue();
+  }
+
+  /**
+   * A strictly newer timestamp must still advance the local watermark even when
+   * the gossiped values coincide with the local ones, otherwise this Worker
+   * would keep broadcasting a stale timestamp that peers ignore.
+   */
+  @Test
+  void shouldAdvanceWatermarkOnNewerTimestampWithIdenticalValues() {
+    when(stateMachine.getConfirmCount()).thenReturn(5);
+    when(stateMachine.getCoolCount()).thenReturn(10);
+    when(stateMachine.getPreCoolGraceCount()).thenReturn(3);
+    configTimestampCounter.set(10);
+    Message msg = createHeartbeatMessage("worker-2", 20);
+
+    negotiator.onHeartbeat(msg);
+
+    assertThat(configTimestampCounter.get()).isEqualTo(20);
+    verify(stateMachine, never()).setConfirmCount(anyInt());
+    verify(stateMachine, never()).setCoolCount(anyInt());
+    verify(stateMachine, never()).setPreCoolGraceCount(anyInt());
   }
 }

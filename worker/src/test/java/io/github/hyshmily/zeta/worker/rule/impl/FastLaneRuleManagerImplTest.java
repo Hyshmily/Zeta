@@ -175,4 +175,57 @@ class FastLaneRuleManagerImplTest {
       assertThat(manager.match("a")).isNull();
     }
   }
+
+  /**
+   * The rule-set version is the only convergence key for a replicated rule set
+   * (ADR-0025 last-writer-wins), so it must be strictly increasing. A bare
+   * wall-clock stamp collapses to a tie when two mutations land in the same
+   * millisecond, and {@code replaceAll} accepts equal versions — so peers could
+   * settle on whichever snapshot arrived last and diverge. A backward wall-clock
+   * step is the other failure: the edit's version is not newer than what peers
+   * already hold, so the broadcast is rejected as stale and never propagates.
+   */
+  @Nested
+  class VersionMonotonicity {
+
+    @Test
+    void rapidMutations_shouldProduceStrictlyIncreasingVersions() {
+      long previous = manager.getRulesVersion();
+      // 200 back-to-back mutations. Pre-fix this loop hits same-millisecond ties
+      // almost immediately, and a tie makes two consecutive versions equal.
+      for (int i = 0; i < 200; i++) {
+        manager.addRule("burst:" + i + ":*", i + 1);
+        long current = manager.getRulesVersion();
+        assertThat(current).as("version after mutation %d", i).isGreaterThan(previous);
+        previous = current;
+      }
+    }
+
+    @Test
+    void everyMutationKind_shouldAdvanceTheVersion() {
+      long v0 = manager.getRulesVersion();
+      manager.addRule("versioned:*", 10);
+      long v1 = manager.getRulesVersion();
+      manager.updateRule("versioned:*", 20);
+      long v2 = manager.getRulesVersion();
+      manager.removeRule("versioned:*");
+      long v3 = manager.getRulesVersion();
+
+      assertThat(v1).isGreaterThan(v0);
+      assertThat(v2).isGreaterThan(v1);
+      assertThat(v3).isGreaterThan(v2);
+    }
+
+    @Test
+    void replaceAll_withOlderVersion_shouldBeIgnoredAndNotLowerTheVersion() {
+      manager.addRule("versioned:*", 10);
+      long published = manager.getRulesVersion();
+
+      manager.replaceAll(List.of(new FastLaneRuleManager.FastLaneRule("other:*", 20)), published - 1);
+
+      assertThat(manager.getRulesVersion()).isEqualTo(published);
+      assertThat(manager.match("versioned:x")).isNotNull();
+      assertThat(manager.match("other:x")).isNull();
+    }
+  }
 }

@@ -127,6 +127,7 @@ public class WorkerConfigNegotiator {
     if (msg == null || msg.getMessageProperties() == null) {
       return;
     }
+
     if (FastLaneRulesMessage.TYPE.equals(msg.getMessageProperties().getHeader(HEADER_TYPE))) {
       doOnRulesMessage(msg);
       return;
@@ -146,6 +147,7 @@ public class WorkerConfigNegotiator {
     if (fastLaneRuleManager == null) {
       return;
     }
+
     FastLaneRulesMessage rulesMsg = FastLaneRulesMessage.from(msg);
     if (rulesMsg == null || rulesMsg.nodeId().equals(nodeId)) {
       return;
@@ -168,11 +170,7 @@ public class WorkerConfigNegotiator {
 
   private void doOnHeartbeat(Message msg) {
     WorkerHeartbeatMessage hb = WorkerHeartbeatMessage.from(msg);
-    if (hb == null) {
-      return;
-    }
-
-    if (hb.workerId().equals(nodeId)) {
+    if (hb == null || hb.workerId().equals(nodeId)) {
       return;
     }
 
@@ -192,7 +190,9 @@ public class WorkerConfigNegotiator {
     int cc = hb.configConfirmCount();
     int gc = hb.configCoolCount();
     int pgc = hb.configGraceCount();
-    if (cc <= 0 || pgc <= 0 || gc <= pgc) {
+    // Single-source predicate (ZetaBayesianSM.isValidConfig) shared with the
+    // actuator endpoint, so both gates accept exactly the same configs.
+    if (!ZetaBayesianSM.isValidConfig(cc, pgc, gc)) {
       log.warn(
         "Ignoring malformed config from {}: confirmCount={}, coolCount={}, preCoolGraceCount={}",
         hb.workerId(),
@@ -202,19 +202,34 @@ public class WorkerConfigNegotiator {
       );
       return;
     }
-    stateMachine.setConfirmCount(cc);
-    stateMachine.setCoolCount(gc);
-    stateMachine.setPreCoolGraceCount(pgc);
+    // Values already equal to the local ones carry no new configuration, so
+    // rewriting the state machine and logging the same three numbers is pure
+    // noise: the heartbeat repeats this message on every ping (1 s by default)
+    // and the counter was advanced to the received timestamp by the first
+    // apply, so a tie-win peer would otherwise re-apply forever. Mirrors the
+    // equal-content skip in doOnRulesMessage. The watermark below is
+    // still advanced, so this Worker never keeps broadcasting a timestamp that
+    // peers ignore.
+    boolean sameValues =
+      cc == stateMachine.getConfirmCount() &&
+      gc == stateMachine.getCoolCount() &&
+      pgc == stateMachine.getPreCoolGraceCount();
+    if (!sameValues) {
+      stateMachine.setConfirmCount(cc);
+      stateMachine.setCoolCount(gc);
+      stateMachine.setPreCoolGraceCount(pgc);
+
+      log.debug(
+        "Applied config gossip from {}: confirmCount={}, coolCount={}, preCoolGraceCount={}, configTimestamp={}",
+        hb.workerId(),
+        cc,
+        gc,
+        pgc,
+        remoteTs
+      );
+    }
 
     configTimestampCounter.set(remoteTs);
-
-    log.debug(
-      "Applied newer config from {}: confirmCount={}, coolCount={}, preCoolGraceCount={}",
-      hb.workerId(),
-      hb.configConfirmCount(),
-      hb.configCoolCount(),
-      hb.configGraceCount()
-    );
 
     if (startupLatch.getCount() > 0) {
       startupLatch.countDown();
