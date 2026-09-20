@@ -28,7 +28,9 @@ import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
+import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -87,11 +89,16 @@ public class ZetaActuatorAutoConfiguration {
    * @param cacheSyncPublisherProvider  provider for the cache sync publisher (may be absent)
    * @param stateMachineProvider        provider for the Worker state machine (may be absent)
    * @param healthViewProvider          provider for the cluster health view (may be absent)
+   * @param syncListenerProvider        provider for the sync-plane listener whose ordered
+   *                                    dispatcher gate is reported (may be absent)
+   * @param workerListenerProvider      provider for the decision-plane listener whose ordered
+   *                                    dispatcher gate is reported (may be absent)
    * @param properties                  the HotKey configuration properties (never {@code null})
    * @return a new {@link ZetaEndpoint} instance
    */
   @Bean
   @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
+  @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   @ConditionalOnMissingBean
   public ZetaEndpoint hotKeyEndpoint(
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
@@ -104,6 +111,8 @@ public class ZetaActuatorAutoConfiguration {
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
     ObjectProvider<ZetaBayesianSM> stateMachineProvider,
     ObjectProvider<HealthView> healthViewProvider,
+    ObjectProvider<CacheSyncListener> syncListenerProvider,
+    ObjectProvider<WorkerListener> workerListenerProvider,
     ZetaProperties properties
   ) {
     return ZetaEndpoint.builder()
@@ -118,6 +127,8 @@ public class ZetaActuatorAutoConfiguration {
       .cacheSyncPublisher(cacheSyncPublisherProvider.getIfAvailable())
       .zetaBayesianSM(stateMachineProvider.getIfAvailable())
       .healthView(healthViewProvider.getIfAvailable())
+      .syncListener(syncListenerProvider.getIfAvailable())
+      .workerListener(workerListenerProvider.getIfAvailable())
       .build();
   }
 

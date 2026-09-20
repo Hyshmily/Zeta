@@ -31,7 +31,9 @@ import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
+import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -83,6 +85,8 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheSyncListener> syncListenerProvider = mock(ObjectProvider.class);
+    ObjectProvider<WorkerListener> workerListenerProvider = mock(ObjectProvider.class);
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
     doReturn(localCache).when(cacheProvider).getIfAvailable();
@@ -106,6 +110,8 @@ class ZetaActuatorAutoConfigurationTest {
       cacheSyncPublisherProvider,
       stateMachineProvider,
       healthViewProvider,
+      syncListenerProvider,
+      workerListenerProvider,
       properties
     );
 
@@ -127,6 +133,8 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheSyncListener> syncListenerProvider = mock(ObjectProvider.class);
+    ObjectProvider<WorkerListener> workerListenerProvider = mock(ObjectProvider.class);
     ZetaProperties properties = new ZetaProperties();
 
     doReturn(null).when(detectorProvider).getIfAvailable();
@@ -151,6 +159,8 @@ class ZetaActuatorAutoConfigurationTest {
       cacheSyncPublisherProvider,
       stateMachineProvider,
       healthViewProvider,
+      syncListenerProvider,
+      workerListenerProvider,
       properties
     );
 
@@ -195,6 +205,8 @@ class ZetaActuatorAutoConfigurationTest {
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
+    ObjectProvider<CacheSyncListener> syncListenerProvider = mock(ObjectProvider.class);
+    ObjectProvider<WorkerListener> workerListenerProvider = mock(ObjectProvider.class);
     ZetaProperties properties = new ZetaProperties();
 
     doReturn(hotKeyDetector).when(detectorProvider).getIfAvailable();
@@ -219,6 +231,8 @@ class ZetaActuatorAutoConfigurationTest {
       cacheSyncPublisherProvider,
       stateMachineProvider,
       healthViewProvider,
+      syncListenerProvider,
+      workerListenerProvider,
       properties
     );
 

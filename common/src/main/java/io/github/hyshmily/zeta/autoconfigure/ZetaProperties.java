@@ -88,6 +88,26 @@ public class ZetaProperties {
   @Min(1)
   private int executorQueueCapacity = 2000;
 
+  /**
+   * Rejection policy for the HotKey async executor when both the queue and the
+   * max pool are saturated (ADR-0070). {@code ABORT} (default) throws
+   * {@link java.util.concurrent.RejectedExecutionException} — load failures are
+   * swallowed as cache misses upstream, the caller is never blocked.
+   * {@code CALLER_RUNS} runs the task on the submitting thread — protects the
+   * async work from being dropped at the cost of back-pressuring the caller.
+   */
+  private ExecutorRejection executorRejection = ExecutorRejection.ABORT;
+
+  /** Rejection policy options for the HotKey async executor. */
+  public enum ExecutorRejection {
+
+    /** Throw {@link java.util.concurrent.RejectedExecutionException} (default). */
+    ABORT,
+
+    /** Run the rejected task on the submitting thread (back-pressure). */
+    CALLER_RUNS
+  }
+
   /** Pool size for the shared HotKey scheduler (periodic tasks). */
   @Min(1)
   private int schedulerPoolSize = 8;
@@ -210,6 +230,29 @@ public class ZetaProperties {
   /** Exchange name for app-to-Worker reportToWorker routing. */
   private String reportExchange = ZetaConstants.Exchange.REPORT;
 
+  /**
+   * Wire encoding for app-to-Worker report messages (see {@link ReportEncoding}).
+   * The Worker decode path always accepts both formats by first-byte
+   * sniffing, so the upgrade order is: Workers first (binary decode in
+   * place), then flip Apps to {@code COMPACT}.
+   */
+  private ReportEncoding reportEncoding = ReportEncoding.JSON;
+
+  /** Wire encoding for app-to-Worker report messages. */
+  public enum ReportEncoding {
+
+    /** Jackson JSON body (default) — human-readable, cross-version safe. */
+    JSON,
+
+    /**
+     * Compact binary body (varint + length-prefix framing, adapted from
+     * RocksDB {@code util/coding.h}; ADR-0074) — roughly 50-70% smaller than
+     * JSON for typical key-count batches. Identified by a fixed magic byte,
+     * so receivers accept it alongside JSON regardless of this setting.
+     */
+    COMPACT
+  }
+
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
   private long reportIntervalMs = 50;
 
@@ -257,6 +300,34 @@ public class ZetaProperties {
     /** Single value size limit (bytes). 0 = unlimited. */
     @Min(0)
     private long maxValueSize;
+
+    /**
+     * Max object-graph nodes visited per {@code weigh()} call in max-weight mode. Bounds the
+     * per-write CPU cost of weight estimation (the weigher may run while holding Caffeine's bin
+     * lock); sampled containers do not consume this budget in bulk. Values whose graph exceeds the
+     * budget follow {@link #weighOverBudget}.
+     */
+    @Min(1)
+    private int weighWalkNodes = 128;
+
+    /**
+     * What happens when the weigh walk budget (see {@link #weighWalkNodes}) is exhausted:
+     * {@code EXTRAPOLATE} prices the unmeasured remainder conservatively from the walked prefix
+     * (default); {@code ABORT} prices the value above any budget so Caffeine evicts it immediately
+     * (Ehcache-style abort — for deployments that would rather not cache values they cannot
+     * measure).
+     */
+    private WeighOverBudget weighOverBudget = WeighOverBudget.EXTRAPOLATE;
+
+    /** Policy for values whose object graph exhausts the weigh walk budget. */
+    public enum WeighOverBudget {
+
+      /** Extrapolate the unmeasured remainder conservatively from the walked prefix (default). */
+      EXTRAPOLATE,
+
+      /** Treat the value as exceeding any budget: it is evicted immediately (Ehcache-style abort). */
+      ABORT
+    }
   }
 
   /** L1 cache configuration. */

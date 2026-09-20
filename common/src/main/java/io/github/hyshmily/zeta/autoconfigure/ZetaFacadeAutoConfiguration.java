@@ -18,6 +18,7 @@ package io.github.hyshmily.zeta.autoconfigure;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
+import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
@@ -148,6 +149,9 @@ public class ZetaFacadeAutoConfiguration {
    * @param hotKeyCacheProvider provider for the HotKeyCache (app-only or coexistence mode)
    * @param appTopKProvider     provider for the app-side TopK detector
    * @param lockProvider        provider for distributed locks (absent when no Redis)
+   * @param loaderRegistryProvider provider for the prefix→loader registry backing
+   *                               the no-reader {@code get(cacheKey)} overloads
+   *                               (ADR-0070; absent unless an application declares the bean)
    * @return a new {@link Zeta} facade instance
    */
   @Bean
@@ -155,12 +159,14 @@ public class ZetaFacadeAutoConfiguration {
   public Zeta hotKey(
     ObjectProvider<HotKeyCache> hotKeyCacheProvider,
     @Qualifier("hotKeyDetector") ObjectProvider<HotKeyDetector> appTopKProvider,
-    ObjectProvider<LockProvider> lockProvider
+    ObjectProvider<LockProvider> lockProvider,
+    ObjectProvider<ZetaLoaderRegistry> loaderRegistryProvider
   ) {
     return new Zeta(
       hotKeyCacheProvider.getIfAvailable(),
       appTopKProvider.getIfAvailable(),
-      lockProvider.getIfAvailable()
+      lockProvider.getIfAvailable(),
+      loaderRegistryProvider.getIfAvailable()
     );
   }
 }

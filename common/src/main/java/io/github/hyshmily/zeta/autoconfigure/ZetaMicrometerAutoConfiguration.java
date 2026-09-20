@@ -17,6 +17,7 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
@@ -24,13 +25,17 @@ import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
+import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
+import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
+import java.util.function.Supplier;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -110,9 +115,15 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.reporter.queue.expired.total}</td><td>Cumulative expired batches</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.pending.keys}</td><td>Keys buffered in reporter counter cache</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.bbr.*}</td><td>BBR rate limiter (passed/dropped/inflight/maxinflight)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.reporter.queue.expired.dead.total}</td><td>Expired batches: dead target Worker</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.reporter.queue.expired.stale.total}</td><td>Expired batches: 5s staleness</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.stall.*}</td><td>Stall-cause &times; state gauges &mdash; the "why is it slow"
+   *       attribution view (RocksDB {@code write_stall_stats} pattern; see
+   *       {@link #registerStallGauges})</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.expire.refresh.available}</td><td>Available refresh limiter permits</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.version.degraded.total}</td><td>Cumulative version fallback count</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.sync.dedup.size}</td><td>Broadcast dedup cache size</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.dispatch.*}</td><td>Per-key dispatcher gate: pending/remaining units, active keys, backlogged, dropped, rejected</td><td>plane=sync|worker</td></tr>
    *   <tr><td>{@code zeta.worker.alive}</td><td>Whether any worker shard is alive</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.worker.tracked.keys}</td><td>Keys tracked by state machine</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.cpu.load}</td><td>System CPU load EMA</td><td>&mdash;</td></tr>
@@ -121,11 +132,16 @@ public class ZetaMicrometerAutoConfiguration {
    * @param hotKeyDetectorProvider      provider for the app-side TopK (may be absent)
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param reporterProvider            provider for the HotKey reporter (may be absent)
+   * @param broadcastBufferProvider     provider for the broadcast refresh buffer (may be absent)
    * @param expireManagerProvider       provider for the cache expiry manager (may be absent)
    * @param versionControllerProvider   provider for the version controller (may be absent)
    * @param cacheSyncPublisherProvider  provider for the cache sync publisher (may be absent)
    * @param stateMachineProvider        provider for the Worker state machine (may be absent)
    * @param healthViewProvider          provider for the cluster health view (may be absent)
+   * @param syncListenerProvider        provider for the sync-plane listener exposing its ordered
+   *                                    dispatcher gate (may be absent)
+   * @param workerListenerProvider      provider for the decision-plane listener exposing its ordered
+   *                                    dispatcher gate (may be absent)
    * @param cpuMonitorProvider          provider for the system CPU load monitor (may be absent)
    * @return a {@link MeterBinder} that registers HotKey-specific business metrics
    */
@@ -135,12 +151,15 @@ public class ZetaMicrometerAutoConfiguration {
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<KeyReporter> reporterProvider,
+    ObjectProvider<BroadcastBuffer> broadcastBufferProvider,
     ObjectProvider<ExpireManager> expireManagerProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
     ObjectProvider<ZetaBayesianSM> stateMachineProvider,
     ObjectProvider<HealthView> healthViewProvider,
-    ObjectProvider<SystemLoadMonitor> cpuMonitorProvider
+    ObjectProvider<SystemLoadMonitor> cpuMonitorProvider,
+    ObjectProvider<CacheSyncListener> syncListenerProvider,
+    ObjectProvider<WorkerListener> workerListenerProvider
   ) {
     return registry -> {
       hotKeyDetectorProvider.ifAvailable(detector -> registerLocalTopKGauges(detector, registry));
@@ -148,6 +167,17 @@ public class ZetaMicrometerAutoConfiguration {
         Gauge.builder("zeta.singleflight.inflight", sf, s -> (double) s.estimatedInflightSize()).register(registry)
       );
       reporterProvider.ifAvailable(r -> registerReporterGauges(r, registry));
+      // Stall-cause gauges: each (cause, state ≠ normal) pair is its own
+      // meter — the healthy/normal state registers nothing (the RocksDB
+      // write_stall_stats pattern). A missing component silently skips its
+      // causes (that failure mode does not exist in this deployment).
+      registerStallGauges(
+        registry,
+        reporterProvider,
+        singleFlightProvider,
+        broadcastBufferProvider,
+        healthViewProvider
+      );
       expireManagerProvider.ifAvailable(em -> {
         if (em.getRefreshLimiter() != null) {
           Gauge.builder("zeta.expire.refresh.available", em, e ->
@@ -171,8 +201,77 @@ public class ZetaMicrometerAutoConfiguration {
       cpuMonitorProvider.ifAvailable(cpu ->
         Gauge.builder("zeta.cpu.load", cpu, SystemLoadMonitor::getCpuLoadEMA).register(registry)
       );
+      // Per-key dispatcher gates (ADR-0072 D-1): registered only when the plane's listener is
+      // present — a missing listener means that plane does not exist in this deployment mode.
+      syncListenerProvider.ifAvailable(listener -> {
+        if (listener.dispatcherStats() != null) {
+          registerDispatchGauges(registry, "sync", listener::dispatcherStats);
+        }
+      });
+      workerListenerProvider.ifAvailable(listener -> {
+        if (listener.dispatcherStats() != null) {
+          registerDispatchGauges(registry, "worker", listener::dispatcherStats);
+        }
+      });
     };
   }
+
+  /**
+   * Register the per-key dispatcher gate gauges for one plane (ADR-0072 D-1).
+   *
+   * <p>{@code zeta.dispatch.pending.units} is the weighted backlog currently charged to the gate and
+   * {@code zeta.dispatch.remaining.units} is the capacity left before submissions start being
+   * dropped — reading the two together is what tells "no traffic" (both zero/at capacity) apart
+   * from "gate saturated" (remaining near zero), a distinction that previously existed only as a
+   * throttled WARN emitted after the gate had already closed.
+   *
+   * <p>The supplier is re-read on every scrape, so a listener created before its {@code @PostConstruct}
+   * initializer ran (or one whose dispatcher is absent) contributes a zeroed snapshot instead of
+   * failing the scrape.
+   *
+   * @param registry the meter registry to register into
+   * @param plane    the {@code plane} tag value ({@code sync} or {@code worker})
+   * @param supplier re-reads the plane's gate snapshot on each scrape
+   */
+  private static void registerDispatchGauges(
+    MeterRegistry registry,
+    String plane,
+    Supplier<DispatcherStats> supplier
+  ) {
+    Gauge.builder("zeta.dispatch.pending.units", supplier, s -> (double) snapshot(s).pendingUnits())
+      .tag("plane", plane)
+      .register(registry);
+    Gauge.builder("zeta.dispatch.remaining.units", supplier, s -> (double) snapshot(s).remainingUnits())
+      .tag("plane", plane)
+      .register(registry);
+    Gauge.builder("zeta.dispatch.active.keys", supplier, s -> (double) snapshot(s).activeKeys())
+      .tag("plane", plane)
+      .register(registry);
+    Gauge.builder("zeta.dispatch.backlogged", supplier, s -> snapshot(s).backlogged() ? 1.0 : 0.0)
+      .tag("plane", plane)
+      .register(registry);
+    Gauge.builder("zeta.dispatch.dropped.total", supplier, s -> (double) snapshot(s).dropped())
+      .tag("plane", plane)
+      .register(registry);
+    Gauge.builder("zeta.dispatch.rejected.total", supplier, s -> (double) snapshot(s).rejected())
+      .tag("plane", plane)
+      .register(registry);
+  }
+
+  /**
+   * Read one gate snapshot, substituting a zeroed snapshot for an absent dispatcher so a gauge
+   * lambda can never throw during a scrape.
+   *
+   * @param supplier re-reads the plane's gate snapshot
+   * @return the snapshot, or a zeroed one when the plane has no initialized dispatcher
+   */
+  private static DispatcherStats snapshot(Supplier<DispatcherStats> supplier) {
+    DispatcherStats stats = supplier.get();
+    return stats == null ? ZERO_STATS : stats;
+  }
+
+  /** Zeroed gate snapshot used only while a plane's dispatcher does not exist yet. */
+  private static final DispatcherStats ZERO_STATS = new DispatcherStats(0L, 0L, 0, 0L, 0L);
 
   /**
    * Register Micrometer gauges for the local app-side TopK detector.
@@ -210,10 +309,74 @@ public class ZetaMicrometerAutoConfiguration {
     Gauge.builder("zeta.reporter.queue.expired.total", reporter, r -> (double) r.dispatcherExpired()).register(
       registry
     );
+    Gauge.builder("zeta.reporter.queue.expired.dead.total", reporter, r -> (double) r.dispatcherExpiredDeadTarget())
+      .register(registry);
+    Gauge.builder("zeta.reporter.queue.expired.stale.total", reporter, r -> (double) r.dispatcherExpiredStale())
+      .register(registry);
     Gauge.builder("zeta.reporter.pending.keys", reporter, r -> (double) r.getPendingKeyCount()).register(registry);
     Gauge.builder("zeta.reporter.bbr.passed", reporter, r -> (double) r.bbrPassed()).register(registry);
     Gauge.builder("zeta.reporter.bbr.dropped", reporter, r -> (double) r.bbrDropped()).register(registry);
     Gauge.builder("zeta.reporter.bbr.inflight", reporter, r -> (double) r.bbrInFlight()).register(registry);
     Gauge.builder("zeta.reporter.bbr.maxinflight", reporter, r -> (double) r.bbrMaxInFlight()).register(registry);
+  }
+
+  /**
+   * Register the stall-cause gauges — the "why is it slow" attribution view,
+   * modeled on RocksDB's {@code WriteStallCause × WriteStallCondition}
+   * ticker matrix ({@code db/write_stall_stats}). Each (cause, state) pair
+   * that can occur in this deployment gets one meter; the normal state
+   * registers nothing, so an absent series means "not stalling".
+   *
+   * <table>
+   *   <tr><th>Metric name</th><th>Meaning</th><th>Source</th></tr>
+   *   <tr><td>{@code zeta.stall.report_backpressure.delayed}</td><td>Dispatcher queue depth
+   *       (congestion building; clamped at 0 before the reporter starts)</td>
+   *       <td>KeyReporter</td></tr>
+   *   <tr><td>{@code zeta.stall.report_backpressure.stopped.total}</td><td>Batches lost to a full
+   *       queue or staleness expiry (drops are the stopped state of the report path)</td>
+   *       <td>KeyReporter</td></tr>
+   *   <tr><td>{@code zeta.stall.broadcast_storm.stopped.total}</td><td>Refresh broadcasts lost to
+   *       broker send failures or a saturated send executor</td><td>BroadcastBuffer</td></tr>
+   *   <tr><td>{@code zeta.stall.redis_degraded.stopped}</td><td>1 while the circuit breaker is
+   *       open (loads fast-fail; reads degrade to stale values)</td><td>SingleFlight</td></tr>
+   *   <tr><td>{@code zeta.stall.redis_degraded.timeouts.total}</td><td>Cumulative dedup loads
+   *       resolved empty by a reader timeout</td><td>SingleFlight</td></tr>
+   *   <tr><td>{@code zeta.stall.worker_partition.stopped}</td><td>1 while no Worker shard is
+   *       alive (report routing has no target)</td><td>HealthView</td></tr>
+   * </table>
+   */
+  private static void registerStallGauges(
+    MeterRegistry registry,
+    ObjectProvider<KeyReporter> reporterProvider,
+    ObjectProvider<SingleFlight> singleFlightProvider,
+    ObjectProvider<BroadcastBuffer> broadcastBufferProvider,
+    ObjectProvider<HealthView> healthViewProvider
+  ) {
+    reporterProvider.ifAvailable(r -> {
+      Gauge.builder("zeta.stall.report_backpressure.delayed", r, v -> (double) Math.max(0, v.dispatcherDepth()))
+        .register(registry);
+      Gauge.builder(
+        "zeta.stall.report_backpressure.stopped.total",
+        r,
+        v -> (double) Math.max(0, v.dispatcherDropped() + v.dispatcherExpired())
+      ).register(registry);
+    });
+    broadcastBufferProvider.ifAvailable(bb ->
+      Gauge.builder(
+        "zeta.stall.broadcast_storm.stopped.total",
+        bb,
+        b -> (double) (b.sendFailures() + b.saturationDrops())
+      ).register(registry)
+    );
+    singleFlightProvider.ifAvailable(sf -> {
+      Gauge.builder("zeta.stall.redis_degraded.stopped", sf, s -> s.isBreakerOpen() ? 1.0 : 0.0).register(registry);
+      Gauge.builder("zeta.stall.redis_degraded.timeouts.total", sf, s -> (double) s.getLoadTimeoutCount()).register(
+        registry
+      );
+    });
+    healthViewProvider.ifAvailable(hv ->
+      Gauge.builder("zeta.stall.worker_partition.stopped", hv, v -> v.getAliveWorkerIds().isEmpty() ? 1.0 : 0.0)
+        .register(registry)
+    );
   }
 }

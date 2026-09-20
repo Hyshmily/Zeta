@@ -25,6 +25,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
+import io.github.hyshmily.zeta.reporting.CompactAwareReportMessageConverter;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
 import io.github.hyshmily.zeta.reporting.impl.BbrRateLimiterImpl;
@@ -57,6 +58,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -188,6 +190,73 @@ class ZetaAmqpAutoConfigurationTest {
   }
 
   /**
+   * Verifies that the dedicated heartbeat {@code @Primary} connection factory is NOT
+   * created when no control-plane feature (worker listener / worker mode) is enabled —
+   * it must not hijack the application's unqualified {@code ConnectionFactory} injections.
+   */
+  @Test
+  void heartbeatConnectionFactoryIsAbsentWhenNoControlPlaneFeatureEnabled() {
+    reportRunner.run(ctx -> assertThat(ctx).doesNotHaveBean("zetaHeartbeatConnectionFactory"));
+  }
+
+  /**
+   * Verifies that the heartbeat connection factory is created when the worker
+   * listener (the feature that consumes it on the app side) is enabled.
+   */
+  @Test
+  void heartbeatConnectionFactoryIsCreatedWhenWorkerListenerEnabled() {
+    workerRunner.run(ctx -> assertThat(ctx).hasBean("zetaHeartbeatConnectionFactory"));
+  }
+
+  /**
+   * Verifies that the heartbeat connection factory is created in worker mode
+   * (the worker-side control-plane consumers: heartbeat producer, config
+   * gossip, PING/PONG verification).
+   */
+  @Test
+  void heartbeatConnectionFactoryIsCreatedWhenWorkerModeEnabled() {
+    new ApplicationContextRunner()
+      .withConfiguration(AutoConfigurations.of(ZetaAmqpAutoConfiguration.class))
+      .withPropertyValues("zeta.worker.enabled=true")
+      .run(ctx -> assertThat(ctx).hasBean("zetaHeartbeatConnectionFactory"));
+  }
+
+  /**
+   * Verifies that a data-plane {@link ConnectionFactory} resolution prefers
+   * Boot's {@code rabbitConnectionFactory} even when the control-plane factory
+   * is also present — the data/control plane isolation is preserved without
+   * hard-coded {@code @Qualifier} injection points.
+   */
+  @Test
+  void dataPlaneFactoryResolutionPrefersBootFactoryOverControlPlaneFactory() {
+    ConnectionFactory boot = mock(ConnectionFactory.class);
+    ConnectionFactory controlPlane = mock(ConnectionFactory.class);
+    org.springframework.context.support.StaticApplicationContext beanFactory =
+      new org.springframework.context.support.StaticApplicationContext();
+    beanFactory.getBeanFactory().registerSingleton("rabbitConnectionFactory", boot);
+    beanFactory.getBeanFactory().registerSingleton("zetaHeartbeatConnectionFactory", controlPlane);
+    beanFactory.refresh();
+
+    assertThat(ZetaAmqpAutoConfiguration.dataPlaneConnectionFactory(beanFactory)).isSameAs(boot);
+  }
+
+  /**
+   * Verifies that a user-defined {@code ConnectionFactory} under a non-default
+   * bean name is resolved (previously a hard-coded {@code rabbitConnectionFactory}
+   * qualifier threw {@code NoSuchBeanDefinitionException} at startup).
+   */
+  @Test
+  void dataPlaneFactoryResolutionFallsBackToUserNamedFactory() {
+    ConnectionFactory userFactory = mock(ConnectionFactory.class);
+    org.springframework.context.support.StaticApplicationContext beanFactory =
+      new org.springframework.context.support.StaticApplicationContext();
+    beanFactory.getBeanFactory().registerSingleton("myOwnConnectionFactory", userFactory);
+    beanFactory.refresh();
+
+    assertThat(ZetaAmqpAutoConfiguration.dataPlaneConnectionFactory(beanFactory)).isSameAs(userFactory);
+  }
+
+  /**
    * Verifies that the sync FanoutExchange is created with the configured name, durable, and non-auto-delete.
    */
   @Test
@@ -256,7 +325,12 @@ class ZetaAmqpAutoConfigurationTest {
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheSyncListener listener = config.cacheSyncListener(props, scheduler, mock(SyncDecisionHandler.class));
+    CacheSyncListener listener = config.cacheSyncListener(
+      props,
+      scheduler,
+      mock(SyncDecisionHandler.class),
+      new ZetaProperties()
+    );
 
     assertThat(listener).isNotNull();
   }
@@ -369,7 +443,12 @@ class ZetaAmqpAutoConfigurationTest {
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
-    WorkerListener listener = config.workerListener(props, scheduler, mock(WorkerDecisionHandler.class));
+    WorkerListener listener = config.workerListener(
+      props,
+      scheduler,
+      mock(WorkerDecisionHandler.class),
+      new io.github.hyshmily.zeta.autoconfigure.ZetaProperties()
+    );
 
     assertThat(listener).isNotNull();
   }
@@ -393,9 +472,19 @@ class ZetaAmqpAutoConfigurationTest {
   @Test
   void reportMessageConverterIsCreated() {
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    MessageConverter converter = config.reportMessageConverter();
+    MessageConverter converter = config.reportMessageConverter(new ZetaProperties());
 
     assertThat(converter).isNotNull();
+  }
+
+  @Test
+  void reportMessageConverter_compactEncodingFlag_followsConfiguration() {
+    ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
+    ZetaProperties compact = new ZetaProperties();
+    compact.setReportEncoding(ZetaProperties.ReportEncoding.COMPACT);
+
+    assertThat(config.reportMessageConverter(new ZetaProperties())).isInstanceOf(CompactAwareReportMessageConverter.class);
+    assertThat(config.reportMessageConverter(compact)).isInstanceOf(CompactAwareReportMessageConverter.class);
   }
 
   @Test
@@ -460,22 +549,63 @@ class ZetaAmqpAutoConfigurationTest {
     CacheSyncProperties props = new CacheSyncProperties();
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheSyncPublisher publisher = config.cacheSyncPublisher(rabbitTemplate, props, mock(SnowflakeIdGenerator.class));
+    CacheSyncPublisher publisher = config.cacheSyncPublisher(
+      rabbitTemplate,
+      props,
+      mock(SnowflakeIdGenerator.class),
+      new ZetaProperties()
+    );
 
     assertThat(publisher).isNotNull();
   }
 
   @Test
-  @SuppressWarnings("all")
+  @SuppressWarnings({"all", "unchecked"})
   void hotKeyRedisLoaderIsCreated() {
     org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
       org.springframework.data.redis.core.StringRedisTemplate.class
     );
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader loader = config.hotKeyRedisLoader(redisTemplate);
+    CacheLoader loader = config.hotKeyRedisLoader(
+      redisTemplate,
+      (org.springframework.beans.factory.ObjectProvider<io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry>) mock(
+        org.springframework.beans.factory.ObjectProvider.class
+      )
+    );
 
     assertThat(loader).isNotNull();
+  }
+
+  @Test
+  @SuppressWarnings({"all", "unchecked"})
+  void hotKeyRedisLoader_withRegistry_isComposite() {
+    org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
+      org.springframework.data.redis.core.StringRedisTemplate.class
+    );
+    org.springframework.beans.factory.ObjectProvider<io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry> provider =
+      mock(org.springframework.beans.factory.ObjectProvider.class);
+    when(provider.getIfAvailable()).thenReturn(new io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry());
+
+    ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
+    CacheLoader loader = config.hotKeyRedisLoader(redisTemplate, provider);
+
+    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RegistryAwareCacheLoader.class);
+  }
+
+  @Test
+  @SuppressWarnings({"all", "unchecked"})
+  void hotKeyRedisLoader_withoutRegistry_isPlainRedisLoader() {
+    org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
+      org.springframework.data.redis.core.StringRedisTemplate.class
+    );
+    org.springframework.beans.factory.ObjectProvider<io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry> provider =
+      mock(org.springframework.beans.factory.ObjectProvider.class);
+
+    ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
+    CacheLoader loader = config.hotKeyRedisLoader(redisTemplate, provider);
+
+    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RedisCacheLoader.class);
   }
 
   @Test
@@ -484,9 +614,12 @@ class ZetaAmqpAutoConfigurationTest {
     CacheSyncListener cacheSyncListener = mock(CacheSyncListener.class);
     CacheSyncProperties props = new CacheSyncProperties();
 
+    DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
+    beanFactory.registerSingleton("rabbitConnectionFactory", connectionFactory);
+
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
     SimpleMessageListenerContainer container = config.syncListenerContainer(
-      connectionFactory,
+      beanFactory,
       cacheSyncListener,
       props
     );
@@ -560,10 +693,13 @@ class ZetaAmqpAutoConfigurationTest {
     WorkerListener workerListener = mock(WorkerListener.class);
     WorkerListenerProperties props = new WorkerListenerProperties();
 
+    DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
+    beanFactory.registerSingleton("rabbitConnectionFactory", connectionFactory);
+
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
     SimpleMessageListenerContainer container = config.workerListenerContainer(
-      connectionFactory,
+      beanFactory,
       workerQueue,
       workerListener,
       props
@@ -709,11 +845,14 @@ class ZetaAmqpAutoConfigurationTest {
     props.setConcurrentConsumers(4);
     props.setPrefetchCount(10);
 
+    DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
+    beanFactory.registerSingleton("rabbitConnectionFactory", connectionFactory);
+
     ZetaAmqpAutoConfiguration.WorkerListenerConfiguration config =
       new ZetaAmqpAutoConfiguration.WorkerListenerConfiguration();
 
     // Container must be created without error when non-default properties are set
-    assertThat(config.workerListenerContainer(connectionFactory, workerQueue, workerListener, props)).isNotNull();
+    assertThat(config.workerListenerContainer(beanFactory, workerQueue, workerListener, props)).isNotNull();
   }
 
   @Test
