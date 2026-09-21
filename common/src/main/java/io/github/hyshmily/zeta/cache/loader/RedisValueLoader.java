@@ -20,15 +20,17 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
- * Default {@link CacheLoader} that reads values from Redis via
+ * Default value-channel {@link CacheLoader}: reads values from Redis via
  * {@link StringRedisTemplate#opsForValue()}.
  *
- * <p>Returns the raw string value from Redis, or {@code null} if the
- * key does not exist. The caller is responsible for deserialization.
+ * <p>Returns the raw string value from Redis, or {@code null} if the key does
+ * not exist. The caller is responsible for deserialization. Serves as the
+ * {@code fallback} of {@link PrefixRoutedLoader} for keys with no registered
+ * prefix, and as the standalone cluster loader when no registry bean exists.
  */
 @RequiredArgsConstructor
 @Internal
-public class RedisCacheLoader implements CacheLoader {
+public class RedisValueLoader implements CacheLoader<Object> {
 
   private final StringRedisTemplate redisTemplate;
 

@@ -49,6 +49,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.cache.Cache.ValueRetrievalException;
 
 @DisplayName("ZetaSpringCache tests")
@@ -209,7 +210,7 @@ class ZetaSpringCacheTest {
   @DisplayName("put stores value via hotKey.putThrough (default TTLs when no override)")
   void put_storesValue() {
     cache.put("myKey", "myValue");
-    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(0L), eq(0L));
+    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(CachePolicy.of(0L, 0L)));
   }
 
   @Test
@@ -217,7 +218,7 @@ class ZetaSpringCacheTest {
   void put_withSkipBroadcast_usesPutLocal() {
     ZetaCacheContext.get().push(CachePolicy.of(0, 0, false, true));
     cache.put("myKey", "myValue");
-    verify(zeta).putLocal("test::myKey", "myValue", 0L, 0L);
+    verify(zeta).putLocal("test::myKey", "myValue", CachePolicy.of(0L, 0L));
     verify(zeta, never()).putThrough(anyString(), any(), any());
   }
 
@@ -226,7 +227,10 @@ class ZetaSpringCacheTest {
   void put_withTtlOverride_passesTtlsToFacade() {
     ZetaCacheContext.get().push(CachePolicy.of(5000L, 1000L, false, false));
     cache.put("myKey", "myValue");
-    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(5000L), eq(1000L));
+    ArgumentCaptor<CachePolicy> policy = ArgumentCaptor.forClass(CachePolicy.class);
+    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), policy.capture());
+    assertThat(policy.getValue().hardTtlMs().getAsLong()).isEqualTo(5000L);
+    assertThat(policy.getValue().softTtlMs().getAsLong()).isEqualTo(1000L);
   }
 
   @Test
@@ -236,8 +240,8 @@ class ZetaSpringCacheTest {
 
     cache.put("myKey", null);
 
-    verify(zeta, never()).putThrough(anyString(), any(), any(), anyLong(), anyLong(), anyBoolean());
-    verify(zeta, never()).putLocal(anyString(), any(), anyLong(), anyLong());
+    verify(zeta, never()).putThrough(anyString(), any(), any(), any(CachePolicy.class));
+    verify(zeta, never()).putLocal(anyString(), any(), any(CachePolicy.class));
     verify(zeta, never()).putThrough(anyString(), any(), any());
     verify(zeta, never()).putLocal(anyString(), any());
   }
@@ -247,7 +251,7 @@ class ZetaSpringCacheTest {
   void evict_withSkipBroadcast_callsInvalidateLocal() {
     ZetaCacheContext.get().push(CachePolicy.of(0, 0, false, true));
     cache.evict("myKey");
-    verify(zeta).invalidate("test::myKey", false);
+    verify(zeta).invalidate(eq("test::myKey"), argThat(CachePolicy::skipBroadcast));
     verify(zeta, never()).invalidate(anyString());
   }
 
@@ -285,7 +289,7 @@ class ZetaSpringCacheTest {
     when(zeta.getLocalCache()).thenReturn(null);
     cache.clear();
     verify(zeta, never()).invalidateAllLocal();
-    verify(zeta, never()).invalidate(anyCollection(), anyBoolean());
+    verify(zeta, never()).invalidate(anyCollection(), any(CachePolicy.class));
   }
 
   @Test
@@ -303,8 +307,10 @@ class ZetaSpringCacheTest {
     verify(zeta, never()).invalidateAllLocal();
     org.mockito.ArgumentCaptor<java.util.Collection<String>> captor =
       org.mockito.ArgumentCaptor.forClass(java.util.Collection.class);
-    verify(zeta).invalidate(captor.capture(), anyBoolean());
+    ArgumentCaptor<CachePolicy> policyCaptor = ArgumentCaptor.forClass(CachePolicy.class);
+    verify(zeta).invalidate(captor.capture(), policyCaptor.capture());
     assertThat(captor.getValue()).containsExactlyInAnyOrder("test::a", "test::b");
+    assertThat(policyCaptor.getValue().skipBroadcast()).isFalse();
   }
 
   @Test
@@ -398,7 +404,7 @@ class ZetaSpringCacheTest {
   void put_withSkipBroadcastFalse_callsPutThrough() {
     ZetaCacheContext.get().push(CachePolicy.of(0, 0, false, false));
     cache.put("myKey", "myValue");
-    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(0L), eq(0L));
+    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(CachePolicy.of(0L, 0L)));
   }
 
   @Test
@@ -419,8 +425,12 @@ class ZetaSpringCacheTest {
 
     cache.put("myKey", null);
 
-    verify(zeta).putThrough(eq("test::myKey"), eq(NullValue.INSTANCE), any(), eq(10_000L), eq(10_000L), eq(true));
-    verify(zeta, never()).putLocal(anyString(), any(), anyLong(), anyLong());
+    ArgumentCaptor<CachePolicy> policy = ArgumentCaptor.forClass(CachePolicy.class);
+    verify(zeta).putThrough(eq("test::myKey"), eq(NullValue.INSTANCE), any(), policy.capture());
+    assertThat(policy.getValue().hardTtlMs().getAsLong()).isEqualTo(10_000L);
+    assertThat(policy.getValue().softTtlMs().getAsLong()).isEqualTo(10_000L);
+    assertThat(policy.getValue().skipBroadcast()).isFalse();
+    verify(zeta, never()).putLocal(anyString(), any(), any(CachePolicy.class));
   }
 
   @Test
@@ -431,8 +441,11 @@ class ZetaSpringCacheTest {
 
     cache.put("myKey", null);
 
-    verify(zeta).putLocal("test::myKey", NullValue.INSTANCE, 10_000L, 10_000L);
-    verify(zeta, never()).putThrough(anyString(), any(), any(), anyLong(), anyLong(), anyBoolean());
+    ArgumentCaptor<CachePolicy> policy = ArgumentCaptor.forClass(CachePolicy.class);
+    verify(zeta).putLocal(eq("test::myKey"), eq(NullValue.INSTANCE), policy.capture());
+    assertThat(policy.getValue().hardTtlMs().getAsLong()).isEqualTo(10_000L);
+    assertThat(policy.getValue().softTtlMs().getAsLong()).isEqualTo(10_000L);
+    verify(zeta, never()).putThrough(anyString(), any(), any(), any(CachePolicy.class));
   }
 
   @Test
@@ -442,7 +455,10 @@ class ZetaSpringCacheTest {
 
     cache.put("myKey", org.springframework.cache.support.NullValue.INSTANCE);
 
-    verify(zeta).putThrough(eq("test::myKey"), eq(NullValue.INSTANCE), any(), eq(10_000L), eq(10_000L), eq(true));
+    ArgumentCaptor<CachePolicy> policy = ArgumentCaptor.forClass(CachePolicy.class);
+    verify(zeta).putThrough(eq("test::myKey"), eq(NullValue.INSTANCE), any(), policy.capture());
+    assertThat(policy.getValue().hardTtlMs().getAsLong()).isEqualTo(10_000L);
+    assertThat(policy.getValue().softTtlMs().getAsLong()).isEqualTo(10_000L);
   }
 
   /**

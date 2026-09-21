@@ -8,17 +8,14 @@ Zeta 提供两种互补的监控机制。
 
 **前置条件：** classpath 中包含 `spring-boot-starter-actuator`。
 
-```yaml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,zeta
-```
+Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoint`——不受 `management.endpoints.web.exposure.include` 控制，无需在 include 列表中登记。只要 classpath 中存在 `spring-boot-starter-actuator`（注册条件）且 Spring MVC 可用，即自动注册：
 
-当 classpath 中存在 `spring-boot-starter-actuator` 时，Zeta 端点将自动注册到 `/actuator/hotkey`。
-
-通过 `management.endpoints.web.exposure.include=health,info,hotkey` 启用。
+| 端点                                      | 路径                            |
+| ----------------------------------------- | ------------------------------- |
+| 应用诊断（`ZetaEndpoint`）                | `/actuator/hotkey`              |
+| 哈希环查询（`RingEndpoint`，见第 3 节）   | `/actuator/hotkeyring`          |
+| 状态机运行时配置（Worker，见第 4 节）     | `/actuator/hotkey/worker/state` |
+| FastLane 规则管理（Worker）               | `/actuator/hotkey/fastlane`     |
 
 支持可选的 `?limit=N` 查询参数限制返回的应用端 TopK 条目数（默认 100）。
 
@@ -29,7 +26,7 @@ management:
   "local": {
     // ── 应用端 TopK 检测 ──
     "topK": [{ "key": "cache:shop:17", "count": 1523 }],  // 热 key 列表（按频率降序）
-    "topKCount": 1,                                        // 当前热 key 数
+    "topKCount": 1,                                        // 返回的 TopK 条目数（受 ?limit 限制）
     "totalRequests": 158392,                               // 追踪的总请求数
     "recentlyExpelled": ["cache:shop:5", "cache:shop:99"], // 最近被驱逐的 key
 
@@ -43,7 +40,8 @@ management:
 
     // ── L1 Caffeine 缓存 ──
     "cacheSize": 87,                // L1 预估大小
-    "cacheMaxSize": 1000,           // L1 最大容量
+    "cacheMaxSize": 1000,           // L1 最大条目数（max-weight 为 0 时使用）
+    "cacheMaxWeight": 0,            // L1 内存权重上限（字节，0 = 条目数模式）
 
     // ── SingleFlight 去重 ──
     "inflightSize": 3,              // 进行中的去重请求数
@@ -76,11 +74,10 @@ management:
     "versionDegradedCount": 0       // 使用降级节点本地版本的 key 数
   },
   "worker": {
-    "trackedKeys": 42,              // 状态机追踪的 key 数
-
     // ── Worker 健康状态 ──
-    "health": "healthy",            // 集群健康状态："healthy"、"unhealthy"、"unknown"
-    "trackedKeys": 7                // 状态机追踪的 key 数
+    "health": "healthy",                  // 集群健康状态："healthy" 或 "unhealthy"
+    "msSinceLastAnyHeartbeat": 1234,      // 距最近一次任意 Worker 心跳的毫秒数（-1 = 尚未收到）
+    "trackedKeys": 42                     // 状态机追踪的 key 数
   },
   "sync": {
     "dedupCacheSize": 20            // 广播去重缓存条目数
@@ -118,22 +115,38 @@ management:
 | `zeta.singleflight.inflight`        | Gauge | —                    | SingleFlight 进行中的去重数      |
 | `zeta.reporter.queue.depth`         | Gauge | —                    | Reporter 队列积压量              |
 | `zeta.reporter.queue.dropped.total` | Gauge | —                    | 累计丢弃批次（队列满）           |
-| `zeta.reporter.queue.expired.total` | Gauge | —                    | 累计过期批次                     |
+| `zeta.reporter.queue.expired.total` | Gauge | —                    | 累计过期批次（下列两种原因之和） |
+| `zeta.reporter.queue.expired.dead.total` | Gauge | —               | 目标 Worker 已死亡的过期批次     |
+| `zeta.reporter.queue.expired.stale.total` | Gauge | —              | 在队列中等待超过 5 秒而过期的批次 |
 | `zeta.reporter.pending.keys`        | Gauge | —                    | Reporter 计数缓存中缓冲的 key 数 |
 | `zeta.reporter.bbr.passed`          | Gauge | —                    | Reporter BBR 通过次数             |
 | `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR 丢弃次数             |
 | `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR 进行中请求数         |
 | `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR 最大进行中请求数     |
+| `zeta.stall.report_backpressure.delayed` | Gauge | —               | Reporter 队列深度（拥塞前兆，ADR-0076） |
+| `zeta.stall.report_backpressure.stopped.total` | Gauge | —      | 因队列满或过期而丢失的批次数      |
+| `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | 因 Broker 错误或发送线程池饱和而丢失的刷新广播数 |
+| `zeta.stall.redis_degraded.stopped` | Gauge | —                    | 熔断器打开时为 1（加载快速失败）  |
+| `zeta.stall.redis_degraded.timeouts.total` | Gauge | —             | 因读取超时而解析为空的去重加载数  |
+| `zeta.stall.worker_partition.stopped` | Gauge | —                  | 无存活 Worker 分片时为 1（报告路由无目标） |
 | `zeta.expire.refresh.available`     | Gauge | —                    | 刷新信号量可用许可数             |
 | `zeta.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
 | `zeta.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
 | `zeta.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
 | `zeta.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数              |
 | `zeta.cpu.load`                     | Gauge | —                    | 当前 CPU 负载（0-1000 范围）     |
+| `zeta.dispatch.pending.units`       | Gauge | `plane`              | 按 key 分发器闸门已计入的积压    |
+| `zeta.dispatch.remaining.units`     | Gauge | `plane`              | 距开始丢弃还剩的闸门容量         |
+| `zeta.dispatch.active.keys`         | Gauge | `plane`              | 当前持有任务的分发器 key 数      |
+| `zeta.dispatch.backlogged`          | Gauge | `plane`              | 存在未执行任务时为 1             |
+| `zeta.dispatch.dropped.total`       | Gauge | `plane`              | 被预算闸门累计丢弃数             |
+| `zeta.dispatch.rejected.total`      | Gauge | `plane`              | 被单 key 队列上限拒绝数          |
+
+`zeta.dispatch.*` 指标带 `plane=sync`（同步面）或 `plane=worker`（决策面）标签；当前部署模式下不存在的面不会注册任何指标。把 `pending.units` 与 `remaining.units` 一起看，才能区分"没有流量"与"闸门已饱和"——在这组指标出现之前，这两种情况在观测上无法区分，且只在提交已被丢弃之后才通过一条限流 WARN 体现。
 
 ## 3. 一致性哈希环管理
 
-当启用一致性哈希（`zeta.local.consistent-hashing.enabled=true`）且 classpath 中包含 `spring-boot-starter-web` 时，会在 `/actuator/hotkeyring` 注册一个 REST 控制器（`RingEndpoint.java`），用于环查询。
+当启用一致性哈希（`zeta.local.consistent-hashing.enabled=true`）且 classpath 中包含 `spring-boot-starter-actuator` 与 `spring-boot-starter-web` 时，会在 `/actuator/hotkeyring` 注册一个 REST 控制器（`RingEndpoint.java`），用于环查询。
 
 | 方法  | 路径                         | 说明                        |
 | ----- | ---------------------------- | --------------------------- |
@@ -142,7 +155,7 @@ management:
 
 ## 4. Worker 状态机运行时配置
 
-当启用 Worker 模式（`zeta.worker.enabled=true`）且 classpath 中包含 `spring-boot-starter-web` 时，会在 `/actuator/hotkey/worker/state` 注册一个 REST 控制器（`StateMachineEndpoint.java`），用于运行时读取和更新状态机配置。
+当启用 Worker 模式（`zeta.worker.enabled=true`）且 classpath 中包含 `spring-boot-starter-actuator` 与 `spring-boot-starter-web` 时，会在 `/actuator/hotkey/worker/state` 注册一个 REST 控制器（`StateMachineEndpoint.java`），用于运行时读取和更新状态机配置。
 
 | 方法   | 路径                            | 说明                                                                     |
 | ------ | ------------------------------- | ------------------------------------------------------------------------ |

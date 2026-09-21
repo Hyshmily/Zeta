@@ -22,8 +22,8 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
-import io.github.hyshmily.zeta.cache.loader.RedisCacheLoader;
-import io.github.hyshmily.zeta.cache.loader.RegistryAwareCacheLoader;
+import io.github.hyshmily.zeta.cache.loader.PrefixRoutedLoader;
+import io.github.hyshmily.zeta.cache.loader.RedisValueLoader;
 import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.reporting.*;
@@ -456,33 +456,40 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Default Redis loader used by the sync listener to refresh cache entries via {@code GET}.
+     * Cluster value loader used by the sync listener to refresh cache entries and
+     * by the Worker decision handler for HOT warm-up.
      *
      * <p>When a {@link ZetaLoaderRegistry} bean exists (ADR-0070), the returned
-     * loader is a composite that consults the registry first — keys matching a
-     * registered prefix load through the application's {@code ZetaCacheLoader},
-     * so Worker HOT warm-up and peer REFRESH work for data sources without a
-     * Redis value channel — and falls back to the Redis GET for unregistered
-     * keys. With no registry the plain {@link RedisCacheLoader} is returned,
+     * loader is a {@link PrefixRoutedLoader}: keys matching a registered prefix
+     * load through the application's {@code CacheLoader}, so Worker HOT warm-up
+     * and peer REFRESH work for data sources without a Redis value channel;
+     * unregistered keys fall back to the plain {@link RedisValueLoader} (Redis
+     * GET). With no registry the plain {@link RedisValueLoader} is returned,
      * preserving the historical behavior.
+     *
+     * <p><b>Call-chain contract:</b> {@link ZetaLoaderRegistry#match} is invoked
+     * in exactly two places — {@code Zeta#requireRegisteredSpec} (application
+     * read path, needs the full spec) and {@link PrefixRoutedLoader#load} (this
+     * path, needs the value only). New value-fetching paths must reuse one of the
+     * two.
      *
      * @param stringRedisTemplate the String-based Redis template for reading values
      * @param registryProvider    provider for the optional prefix→loader registry
-     * @return a {@link CacheLoader} that reads a key from the registered loader or Redis
+     * @return a {@code CacheLoader<Object>} that routes through the registry or reads Redis
      */
     @Bean
     @ConditionalOnMissingBean(CacheLoader.class)
-    public CacheLoader hotKeyRedisLoader(
+    public CacheLoader<Object> hotKeyClusterLoader(
       StringRedisTemplate stringRedisTemplate,
       ObjectProvider<ZetaLoaderRegistry> registryProvider
     ) {
-      CacheLoader redisLoader = new io.github.hyshmily.zeta.cache.loader.RedisCacheLoader(stringRedisTemplate);
+      CacheLoader<Object> redisFallback = new RedisValueLoader(stringRedisTemplate);
       ZetaLoaderRegistry registry = registryProvider.getIfAvailable();
-      return registry != null ? new RegistryAwareCacheLoader(registry, redisLoader) : redisLoader;
+      return registry != null ? new PrefixRoutedLoader(registry, redisFallback) : redisFallback;
     }
 
     /**
-     * Default {@link SyncDecisionHandler} that performs Redis-backed REFRESH,
+     * Default {@link SyncDecisionHandler} that performs loader-backed REFRESH,
      * version-guarded INVALIDATE, batch INVALIDATE_ALL, and RULES_SYNC. The
      * optional SingleFlight collaborator lets applied removals also drop the
      * key's dedup entry (ADR-0067); when absent, the historical
@@ -492,7 +499,7 @@ public class ZetaAmqpAutoConfiguration {
     @ConditionalOnMissingBean(SyncDecisionHandler.class)
     public SyncDecisionHandler defaultSyncDecisionHandler(
       Cache<String, Object> hotLocalCache,
-      CacheLoader hotKeyRedisLoader,
+      CacheLoader<Object> hotKeyClusterLoader,
       ExpireManager expireManager,
       RuleMatcher ruleMatcher,
       ObjectProvider<SingleFlight> singleFlightProvider,
@@ -500,7 +507,7 @@ public class ZetaAmqpAutoConfiguration {
     ) {
       return new DefaultSyncDecisionHandler(
         hotLocalCache,
-        hotKeyRedisLoader,
+        hotKeyClusterLoader,
         expireManager,
         ruleMatcher,
         syncHookProvider.stream().toList(),
@@ -758,14 +765,14 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Default {@link WorkerDecisionHandler} that performs Redis-backed HOT promotion
+     * Default {@link WorkerDecisionHandler} that performs loader-backed HOT promotion
      * and COOL downgrade with SRE rate limiting and version guarding.
      */
     @Bean
     @ConditionalOnMissingBean(WorkerDecisionHandler.class)
     public WorkerDecisionHandler defaultWorkerDecisionHandler(
       Cache<String, Object> hotLocalCache,
-      CacheLoader hotKeyRedisLoader,
+      CacheLoader<Object> hotKeyClusterLoader,
       ExpireManager expireManager,
       ObjectProvider<SreRateLimiterImpl> sreRateLimiterProvider,
       StringRedisTemplate stringRedisTemplate,
@@ -780,7 +787,7 @@ public class ZetaAmqpAutoConfiguration {
       );
       return new DefaultWorkerDecisionHandler(
         hotLocalCache,
-        hotKeyRedisLoader,
+        hotKeyClusterLoader,
         expireManager,
         sreRateLimiterProvider.getIfAvailable(),
         vc,

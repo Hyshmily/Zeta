@@ -37,6 +37,13 @@ import lombok.extern.slf4j.Slf4j;
  * spikes.
  * <p>Polling interval defaults to 500 ms. The monitor is started and stopped
  * explicitly via {@link #start()} / {@link #stop()}.
+ * <p>A failed or {@code NaN} MXBean read never poisons the EMA: the raw read
+ * falls back to the last good value (0.0 before the first success), so consumers
+ * such as the BBR/SRE rate limiters never observe {@code NaN} (which would flip
+ * them into strict enforcement permanently). The first failure logs one WARN
+ * with the stack trace; subsequent failures are logged at DEBUG only — the
+ * poller ticks every 500 ms and a recurring full-stacktrace WARN would flood
+ * the log forever.
  */
 @Internal
 @Slf4j
@@ -52,6 +59,10 @@ public class SystemLoadMonitorImpl implements SystemLoadMonitor {
 
   private final AtomicLong emaCpuLoadBits = new AtomicLong(Double.doubleToLongBits(0.0));
   private final AtomicBoolean running = new AtomicBoolean(false);
+  /** Whether the one-time WARN for a failed/NaN MXBean read has been emitted. */
+  private final AtomicBoolean readFailureWarned = new AtomicBoolean(false);
+  /** Last successful raw CPU load, returned on failed/NaN reads (0.0 before the first success). */
+  private volatile double lastGoodRawLoad = 0.0;
   private ScheduledFuture<?> flushTask;
 
   /**
@@ -137,17 +148,55 @@ public class SystemLoadMonitorImpl implements SystemLoadMonitor {
   /**
    * Returns the raw (non-smoothed) CPU load (0.0 – 1.0).
    * Reads directly from the MXBean each call.
+   *
+   * <p><b>Failure handling:</b> a failed or {@code NaN} MXBean read is treated the
+   * same — the last successful raw value is returned (0.0 before the first success),
+   * so the EMA can never be poisoned (see class Javadoc). The first failure logs one
+   * WARN with the stack trace; afterwards failures stay at DEBUG.
    */
   public double getCpuLoadRaw() {
     try {
-      OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
-      if (osBean instanceof com.sun.management.OperatingSystemMXBean sunOsBean) {
-        return Math.min(1.0, Math.max(0.0, sunOsBean.getCpuLoad()));
+      double raw = readCpuLoadFromOsBean();
+      if (!Double.isNaN(raw)) {
+        // Math.min/Math.max do not filter NaN — that is handled above as a failure.
+        double clamped = Math.min(1.0, Math.max(0.0, raw));
+        lastGoodRawLoad = clamped;
+        return clamped;
       }
+      return onCpuLoadReadFailed(null);
     } catch (Exception e) {
-      log.warn("Failed to read CPU load from MXBean; returning 0.0", e);
+      return onCpuLoadReadFailed(e);
+    }
+  }
+
+  /**
+   * Reads the process CPU load from the platform MXBean. Protected seam: tests
+   * subclass and override this to simulate MXBean failures and {@code NaN} reads.
+   *
+   * @return the raw CPU load, possibly {@code NaN} when the platform cannot report it
+   */
+  protected double readCpuLoadFromOsBean() {
+    OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
+    if (osBean instanceof com.sun.management.OperatingSystemMXBean sunOsBean) {
+      return sunOsBean.getCpuLoad();
     }
     return 0.0;
+  }
+
+  /**
+   * Fallback for a failed/NaN MXBean read: one WARN (first failure only, with the
+   * stack trace), then DEBUG, returning the last good raw value.
+   */
+  private double onCpuLoadReadFailed(Exception cause) {
+    if (readFailureWarned.compareAndSet(false, true)) {
+      log.warn("Failed to read CPU load from MXBean; returning the last good value. "
+        + "Further failures are logged at DEBUG.", cause);
+    } else if (cause == null) {
+      log.debug("CPU load MXBean returned NaN; returning the last good value.");
+    } else {
+      log.debug("Failed to read CPU load from MXBean; returning the last good value.", cause);
+    }
+    return lastGoodRawLoad;
   }
 
   private void sample() {

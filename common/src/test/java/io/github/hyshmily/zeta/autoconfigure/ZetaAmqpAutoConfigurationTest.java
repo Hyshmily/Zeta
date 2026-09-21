@@ -561,13 +561,13 @@ class ZetaAmqpAutoConfigurationTest {
 
   @Test
   @SuppressWarnings({"all", "unchecked"})
-  void hotKeyRedisLoaderIsCreated() {
+  void hotKeyClusterLoaderIsCreated() {
     org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
       org.springframework.data.redis.core.StringRedisTemplate.class
     );
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader loader = config.hotKeyRedisLoader(
+    CacheLoader<Object> loader = config.hotKeyClusterLoader(
       redisTemplate,
       (org.springframework.beans.factory.ObjectProvider<io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry>) mock(
         org.springframework.beans.factory.ObjectProvider.class
@@ -579,7 +579,7 @@ class ZetaAmqpAutoConfigurationTest {
 
   @Test
   @SuppressWarnings({"all", "unchecked"})
-  void hotKeyRedisLoader_withRegistry_isComposite() {
+  void hotKeyClusterLoader_withRegistry_isPrefixRouted() {
     org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
       org.springframework.data.redis.core.StringRedisTemplate.class
     );
@@ -588,14 +588,14 @@ class ZetaAmqpAutoConfigurationTest {
     when(provider.getIfAvailable()).thenReturn(new io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry());
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader loader = config.hotKeyRedisLoader(redisTemplate, provider);
+    CacheLoader<Object> loader = config.hotKeyClusterLoader(redisTemplate, provider);
 
-    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RegistryAwareCacheLoader.class);
+    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.PrefixRoutedLoader.class);
   }
 
   @Test
   @SuppressWarnings({"all", "unchecked"})
-  void hotKeyRedisLoader_withoutRegistry_isPlainRedisLoader() {
+  void hotKeyClusterLoader_withoutRegistry_isPlainRedisLoader() {
     org.springframework.data.redis.core.StringRedisTemplate redisTemplate = mock(
       org.springframework.data.redis.core.StringRedisTemplate.class
     );
@@ -603,9 +603,9 @@ class ZetaAmqpAutoConfigurationTest {
       mock(org.springframework.beans.factory.ObjectProvider.class);
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader loader = config.hotKeyRedisLoader(redisTemplate, provider);
+    CacheLoader<Object> loader = config.hotKeyClusterLoader(redisTemplate, provider);
 
-    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RedisCacheLoader.class);
+    assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RedisValueLoader.class);
   }
 
   @Test

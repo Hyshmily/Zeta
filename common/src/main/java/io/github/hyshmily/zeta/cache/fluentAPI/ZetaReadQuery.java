@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
+import org.springframework.util.Assert;
 
 /**
  * Fluent read query for the HotKey cache.
@@ -50,13 +51,17 @@ import java.util.function.Supplier;
  */
 public class ZetaReadQuery<T> {
 
+  /** No-op writer for fallback caching — a fallback resolves a value; it performs no data-source mutation. */
+  private static final Runnable NOOP_WRITER = () -> {};
+
   private final Zeta zeta;
   private final String cacheKey;
   private Supplier<T> primaryReader;
   private CacheMode cacheMode = CacheMode.GET;
   private long hardTtlMs = 0;
   private long softTtlMs = 0;
-  private boolean isAllowNullCaching = true;
+  private StalePolicy stalePolicy = StalePolicy.SOFT_REFRESH;
+  private boolean nullCaching = true;
   private boolean isAllowBroadcast = false;
   private List<Supplier<T>> fallbacks;
   private final AtomicBoolean executed = new AtomicBoolean(false);
@@ -103,7 +108,7 @@ public class ZetaReadQuery<T> {
    * @return this query instance
    */
   public ZetaReadQuery<T> withPrimary(Supplier<T> reader) {
-    return withPrimary(reader, cacheMode);
+    return withPrimary(reader, CacheMode.GET);
   }
 
   /**
@@ -114,6 +119,8 @@ public class ZetaReadQuery<T> {
    * @return this query instance
    */
   public ZetaReadQuery<T> withPrimary(Supplier<T> reader, CacheMode mode) {
+    Assert.notNull(reader, "reader must not be null");
+    Assert.notNull(mode, "mode must not be null");
     this.primaryReader = reader;
     this.cacheMode = mode;
     return this;
@@ -155,32 +162,42 @@ public class ZetaReadQuery<T> {
   }
 
   /**
-   * Disable null-value caching.
+   * Override the stale policy — what happens when the cached entry is
+   * soft-expired (stale) but not yet hard-expired.
    *
-   * <p>When the primary reader returns {@code null}, no cache entry is
-   * created, so the next query re-invokes the reader. Fallback readers are
-   * likewise not cached when they return {@code null}.
+   * <p>Default {@link StalePolicy#SOFT_REFRESH} (serve stale, refresh in the
+   * background). Use {@link StalePolicy#RETURN} to never trigger a background
+   * load, or {@link StalePolicy#REVALIDATE} to block the caller on a fresh
+   * load instead of serving stale data.
    *
+   * @param stalePolicy the stale policy for this query (never {@code null})
    * @return this query instance
    */
-  public ZetaReadQuery<T> notAllowNull() {
-    this.isAllowNullCaching = false;
+  public ZetaReadQuery<T> withStalePolicy(StalePolicy stalePolicy) {
+    Assert.notNull(stalePolicy, "stalePolicy must not be null");
+    this.stalePolicy = stalePolicy;
     return this;
   }
 
   /**
-   * Enable null-value caching (default).
+   * Set whether {@code null} reader results may be cached (default
+   * {@code true}, matching {@link CachePolicy#nullCaching()}).
    *
-   * <p>When the primary reader returns {@code null}, a sentinel value
-   * ({@link NullValue#INSTANCE}) is cached with a short TTL
-   * ({@code zeta.local.null-value-ttl-seconds}) so that subsequent reads for
-   * the same key return {@link Optional#empty()} without invoking the reader
-   * again — until the sentinel expires.
+   * <p>{@code true}: when the primary reader or a fallback reader returns
+   * {@code null}, a sentinel value ({@link NullValue#INSTANCE}) is cached with
+   * a short TTL ({@code zeta.local.null-value-ttl-seconds}) so that subsequent
+   * reads for the same key return {@link Optional#empty()} without invoking
+   * the reader again — until the sentinel expires.
    *
+   * <p>{@code false}: a {@code null} reader result creates no cache entry at
+   * all, so the next query re-invokes the reader. Fallback readers are
+   * likewise not cached when they return {@code null}.
+   *
+   * @param nullCaching whether to cache {@code null} reader results
    * @return this query instance
    */
-  public ZetaReadQuery<T> allowNull() {
-    this.isAllowNullCaching = true;
+  public ZetaReadQuery<T> nullCaching(boolean nullCaching) {
+    this.nullCaching = nullCaching;
     return this;
   }
 
@@ -196,6 +213,7 @@ public class ZetaReadQuery<T> {
    * @return this query instance
    */
   public ZetaReadQuery<T> thenExecute(Supplier<T> reader) {
+    Assert.notNull(reader, "reader must not be null");
     if (fallbacks == null) {
       fallbacks = new ArrayList<>();
     }
@@ -235,7 +253,22 @@ public class ZetaReadQuery<T> {
     return execute().orElse(defaultValue);
   }
 
-  @SuppressWarnings("all")
+  /**
+   * Execute the read query and return the resolved value as an {@link Optional}.
+   *
+   * <p>Resolution order: L1 hit, then the primary reader on a miss, then the
+   * fallback readers in registration order. The first non-null result is cached
+   * (broadcast to peers only when {@link #allowBroadcast()} is set) and returned.
+   * When every reader yields {@code null} and null caching is allowed, one
+   * short-TTL {@code NullValue} sentinel is cached so subsequent reads return
+   * {@link Optional#empty()} without invoking any reader again — until the
+   * sentinel expires.
+   *
+   * @return the resolved value, or an empty {@code Optional} if no reader produced a value
+   * @throws ZetaBlockedException if the key matches a block rule (propagated from the cache layer)
+   * @throws IllegalStateException if this query has already been executed
+   */
+  @SuppressWarnings("unchecked")
   public Optional<T> execute() {
     if (!executed.compareAndSet(false, true)) {
       throw new IllegalStateException("ZetaReadQuery can only be executed once");
@@ -247,10 +280,9 @@ public class ZetaReadQuery<T> {
     // The primary reader returns the raw value: a null result is handled
     // inside the cache layer, which stores a short-TTL NullValue sentinel
     // (when null caching is allowed) or leaves no entry at all (when
-    // disallowed via notAllowNull()).
-    Supplier<Object> wrappedPrimary = () -> primaryReader.get();
+    // disallowed via nullCaching(false)).
     CachePolicy policy = CachePolicy.of(
-      wrappedPrimary, hardTtlMs, softTtlMs, isAllowNullCaching, true, StalePolicy.SOFT_REFRESH
+      primaryReader, hardTtlMs, softTtlMs, nullCaching, true, stalePolicy
     );
 
     Optional<Object> result = switch (cacheMode) {
@@ -268,20 +300,27 @@ public class ZetaReadQuery<T> {
 
         if (val != null) {
           if (isAllowBroadcast) {
-            zeta.putThrough(cacheKey, val, () -> {}, hardTtlMs, softTtlMs, true);
+            zeta.putThrough(cacheKey, val, NOOP_WRITER, CachePolicy.of(hardTtlMs, softTtlMs));
           } else {
-            zeta.putLocal(cacheKey, val, hardTtlMs, softTtlMs);
+            zeta.putLocal(cacheKey, val, CachePolicy.of(hardTtlMs, softTtlMs));
           }
           return Optional.of(val);
         }
+      }
 
-        if (isAllowNullCaching) {
-          if (isAllowBroadcast) {
-            zeta.putThrough(cacheKey, NullValue.INSTANCE, () -> {}, hardTtlMs, softTtlMs, true);
-          } else {
-            zeta.putLocal(cacheKey, NullValue.INSTANCE, hardTtlMs, softTtlMs);
-          }
-        }
+      if (nullCaching) {
+        // The whole chain yielded null: cache ONE NullValue sentinel through the
+        // cache layer's read path (not a raw putLocal/putThrough) — it gets the
+        // short null-value TTL the nullCaching(true) contract promises (the same
+        // nullTtlSeconds path the loader uses), and no version INCR / REFRESH
+        // broadcast is emitted for a null. The read runs with the Worker report
+        // suppressed (the primary read already reported this access); the local
+        // TopK increment still applies, as it does on every cache-layer read.
+        // Cached once here, after the loop: the final L1 state is identical (a
+        // later successful fallback overwrites any sentinel), and the common
+        // case — the primary read already stored its sentinel — pays one hit
+        // instead of one full read path per null fallback.
+        zeta.get(cacheKey, CachePolicy.of(() -> null, 0L, 0L, true, false, StalePolicy.RETURN));
       }
     }
 

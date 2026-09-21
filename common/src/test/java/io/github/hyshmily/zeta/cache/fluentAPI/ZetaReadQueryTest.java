@@ -24,6 +24,7 @@ import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.StalePolicy;
 import java.util.Optional;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
@@ -49,6 +50,22 @@ class ZetaReadQueryTest {
     );
   }
 
+  /**
+   * Matcher for the fallback-null sentinel round trip: the null reader is
+   * routed through the cache layer's read path with the short null-value TTL
+   * (no TTL override), null caching enabled, reporting disabled (the primary
+   * read already counted the access), and no stale-policy machinery.
+   */
+  private static CachePolicy eqNullSentinelPolicy() {
+    return argThat(p ->
+      p.hardTtlMs().getAsLong() == 0L
+        && p.softTtlMs().getAsLong() == 0L
+        && p.nullCaching()
+        && p.stalePolicy() == StalePolicy.RETURN
+        && !p.reportEnabled()
+    );
+  }
+
   // ── Block rule ──
 
   /**
@@ -71,6 +88,21 @@ class ZetaReadQueryTest {
     Optional<String> result = query.withPrimary(() -> "db").execute();
     assertThat(result).contains("cached");
     verify(zeta).get(eq("test-key"), eqPolicy(0L, 0L, true, false));
+  }
+
+  // ── Stale policy override ──
+
+  @Test
+  void execute_shouldCarryStalePolicyOverrideIntoPolicy() {
+    when(zeta.get(anyString(), any(CachePolicy.class))).thenReturn(Optional.of("cached"));
+    Optional<String> result = query.withPrimary(() -> "db").withStalePolicy(StalePolicy.RETURN).execute();
+    assertThat(result).contains("cached");
+    verify(zeta).get(eq("test-key"), argThat((CachePolicy p) -> p.stalePolicy() == StalePolicy.RETURN));
+  }
+
+  @Test
+  void withStalePolicy_nullRejected() {
+    assertThatThrownBy(() -> query.withStalePolicy(null)).isInstanceOf(IllegalArgumentException.class);
   }
 
   // ── Cache hit (GET_WITH_SOFT_EXPIRE mode) ──
@@ -101,7 +133,7 @@ class ZetaReadQueryTest {
     when(zeta.get(anyString(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
-      .notAllowNull()
+      .nullCaching(false)
       .execute();
     assertThat(result).isEmpty();
   }
@@ -125,7 +157,7 @@ class ZetaReadQueryTest {
       .thenExecute(() -> "fallback")
       .execute();
     assertThat(result).contains("fallback");
-    verify(zeta).putLocal("test-key", "fallback", 0L, 0L);
+    verify(zeta).putLocal("test-key", "fallback", CachePolicy.of(0L, 0L));
   }
 
   // ── Cache miss, fallback with send ──
@@ -139,7 +171,7 @@ class ZetaReadQueryTest {
       .thenExecute(() -> "fb")
       .execute();
     assertThat(result).contains("fb");
-    verify(zeta).putThrough(eq("test-key"), eq("fb"), any(Runnable.class), eq(0L), eq(0L), anyBoolean());
+    verify(zeta).putThrough(eq("test-key"), eq("fb"), any(Runnable.class), eq(CachePolicy.of(0L, 0L)));
   }
 
   // ── Multiple fallbacks, first returns value ──
@@ -157,11 +189,17 @@ class ZetaReadQueryTest {
       .execute();
     assertThat(result).contains("fb2");
     verify(fb1).get();
-    verify(zeta).putLocal("test-key", "fb2", 0L, 0L);
+    verify(zeta).putLocal("test-key", "fb2", CachePolicy.of(0L, 0L));
   }
 
-  // ── Fallback null, null caching enabled → stores NullValue ──
+  // ── Fallback null, null caching enabled → short-TTL null sentinel via the cache layer ──
 
+  /**
+   * A fallback-null sentinel is no longer stored via {@code putLocal} with the
+   * caller's (possibly long) query TTL: it is routed through the cache layer's
+   * read path, which stores the sentinel with the short null-value TTL the
+   * {@code nullCaching(true)} contract promises.
+   */
   @Test
   void execute_shouldCacheNullValueWhenFallbackNull() {
     when(zeta.get(anyString(), any(CachePolicy.class))).thenReturn(Optional.empty());
@@ -170,13 +208,21 @@ class ZetaReadQueryTest {
       .thenExecute(() -> null)
       .execute();
     assertThat(result).isEmpty();
-    verify(zeta).putLocal("test-key", NullValue.INSTANCE, 0L, 0L);
+    // Primary read + one null-sentinel round trip; no putLocal for the null.
+    verify(zeta, times(2)).get(eq("test-key"), any(CachePolicy.class));
+    verify(zeta).get(eq("test-key"), eqNullSentinelPolicy());
+    verify(zeta, never()).putLocal(anyString(), any(), any(CachePolicy.class));
   }
 
-  // ── Fallback null, null caching + send → stores NullValue via putThrough ──
+  // ── Fallback null with broadcast enabled → still no version INCR / broadcast ──
 
+  /**
+   * A fallback null must never bump the data version nor broadcast a REFRESH:
+   * {@code allowBroadcast()} applies to real fallback values only, and the
+   * null sentinel takes the same non-broadcast cache-layer route.
+   */
   @Test
-  void execute_shouldCacheNullValueViaPutThroughWhenBroadcast() {
+  void execute_shouldNotVersionIncrOrBroadcastFallbackNull() {
     when(zeta.get(anyString(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
@@ -184,7 +230,8 @@ class ZetaReadQueryTest {
       .thenExecute(() -> null)
       .execute();
     assertThat(result).isEmpty();
-    verify(zeta).putThrough(eq("test-key"), eq(NullValue.INSTANCE), any(Runnable.class), eq(0L), eq(0L), anyBoolean());
+    verify(zeta).get(eq("test-key"), eqNullSentinelPolicy());
+    verify(zeta, never()).putThrough(anyString(), any(), any(Runnable.class), any(CachePolicy.class));
   }
 
   // ── Fallback null, null caching disabled → no cache call ──
@@ -194,12 +241,14 @@ class ZetaReadQueryTest {
     when(zeta.get(anyString(), any(CachePolicy.class))).thenReturn(Optional.empty());
     Optional<String> result = query
       .withPrimary(() -> null)
-      .notAllowNull()
+      .nullCaching(false)
       .thenExecute(() -> null)
       .execute();
     assertThat(result).isEmpty();
-    verify(zeta, never()).putLocal(anyString(), any(), anyLong(), anyLong());
-    verify(zeta, never()).putThrough(anyString(), any(), any(), anyLong(), anyLong(), anyBoolean());
+    // Only the primary read ran — no null-sentinel round trip, no cache write.
+    verify(zeta, times(1)).get(anyString(), any(CachePolicy.class));
+    verify(zeta, never()).putLocal(anyString(), any(), any(CachePolicy.class));
+    verify(zeta, never()).putThrough(anyString(), any(), any(), any(CachePolicy.class));
   }
 
   // ── Default value ──
@@ -263,7 +312,7 @@ class ZetaReadQueryTest {
   }
 
   @Test
-  void execute_shouldInvokeWrappedPrimaryReader_whenMockInvokesSupplier() {
+  void execute_shouldInvokePrimaryReader_whenMockInvokesSupplier() {
     when(zeta.get(anyString(), any(CachePolicy.class))).thenAnswer(invocation -> {
       CachePolicy policy = invocation.getArgument(1);
       @SuppressWarnings("all")
@@ -285,8 +334,8 @@ class ZetaReadQueryTest {
       .withPrimary(() -> "db")
       .notAllowBroadcast()
       .allowBroadcast()
-      .notAllowNull()
-      .allowNull()
+      .nullCaching(false)
+      .nullCaching(true)
       .thenExecute(fallback)
       .withHardTtl(1000L)
       .withSoftTtl(100L);

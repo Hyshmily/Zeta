@@ -192,9 +192,9 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
       // override does not apply: the sentinel TTL is its own knob.
       long nullTtlMs = properties.effectiveNullTtlMs();
       if (skipBroadcast) {
-        zeta.putLocal(prefixed, NullValue.INSTANCE, nullTtlMs, nullTtlMs);
+        zeta.putLocal(prefixed, NullValue.INSTANCE, CachePolicy.of(nullTtlMs, nullTtlMs));
       } else {
-        zeta.putThrough(prefixed, NullValue.INSTANCE, () -> {}, nullTtlMs, nullTtlMs, true);
+        zeta.putThrough(prefixed, NullValue.INSTANCE, () -> {}, CachePolicy.of(nullTtlMs, nullTtlMs));
       }
       return;
     }
@@ -204,9 +204,9 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
     long hardTtlMs = Math.max(0L, policy.hardTtlMs().getAsLong());
     long softTtlMs = Math.max(0L, policy.softTtlMs().getAsLong());
     if (skipBroadcast) {
-      zeta.putLocal(prefixed, storeValue, hardTtlMs, softTtlMs);
+      zeta.putLocal(prefixed, storeValue, CachePolicy.of(hardTtlMs, softTtlMs));
     } else {
-      zeta.putThrough(prefixed, storeValue, () -> {}, hardTtlMs, softTtlMs);
+      zeta.putThrough(prefixed, storeValue, () -> {}, CachePolicy.of(hardTtlMs, softTtlMs));
     }
   }
 
@@ -215,7 +215,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
     String prefixed = prefixedKey(key);
     boolean skip = ZetaCacheContext.get().current().skipBroadcast();
     if (skip) {
-      zeta.invalidate(prefixed, false);
+      zeta.invalidate(prefixed, CachePolicy.defaults().withSkipBroadcast(true));
     } else {
       zeta.invalidate(prefixed);
     }
@@ -229,7 +229,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
    * true)} on one cache never nukes the entries of other caches (the previous
    * behavior wiped the entire L1). Implementation is an O(n) scan of the local
    * L1 key set (acceptable: {@code clear()} is a rare, explicit operation)
-   * followed by one batched {@link Zeta#invalidate(Collection, boolean)},
+   * followed by one batched {@link Zeta#invalidate(Collection, CachePolicy)},
    * broadcast unless {@code @SkipBroadcast} applies so peers evict the same
    * namespace. Entries written after the snapshot are left for the next
    * eviction cycle.
@@ -252,6 +252,6 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
     }
 
     boolean skipBroadcast = ZetaCacheContext.get().current().skipBroadcast();
-    zeta.invalidate(keys, !skipBroadcast);
+    zeta.invalidate(keys, CachePolicy.defaults().withSkipBroadcast(skipBroadcast));
   }
 }

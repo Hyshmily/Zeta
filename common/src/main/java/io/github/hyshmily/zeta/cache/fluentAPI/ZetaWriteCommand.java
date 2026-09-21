@@ -16,7 +16,9 @@
 package io.github.hyshmily.zeta.cache.fluentAPI;
 
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.util.Assert;
 
 /**
  * Fluent write command for the HotKey cache.
@@ -87,10 +89,8 @@ public class ZetaWriteCommand<T> {
    * @param writer the data-source mutation to execute before caching
    */
   public void putThrough(T value, Runnable writer) {
-    if (!executed.compareAndSet(false, true)) {
-      throw new IllegalStateException("ZetaWriteCommand can only be executed once");
-    }
-    zeta.putThrough(cacheKey, value, writer, hardTtlMs, softTtlMs, true);
+    beginExecution();
+    zeta.putThrough(cacheKey, value, writer, CachePolicy.of(hardTtlMs, softTtlMs));
   }
 
   /**
@@ -100,9 +100,7 @@ public class ZetaWriteCommand<T> {
    * @param mutation the mutation to execute
    */
   public void invalidateAfterMutation(Runnable mutation) {
-    if (!executed.compareAndSet(false, true)) {
-      throw new IllegalStateException("ZetaWriteCommand can only be executed once");
-    }
+    beginExecution();
     zeta.invalidateAfterPut(cacheKey, mutation);
   }
 
@@ -111,9 +109,19 @@ public class ZetaWriteCommand<T> {
    * Next {@code get()} will re-fetch from the reader.
    */
   public void invalidate() {
-    if (!executed.compareAndSet(false, true)) {
-      throw new IllegalStateException("ZetaWriteCommand can only be executed once");
-    }
+    beginExecution();
     zeta.invalidate(cacheKey);
+  }
+
+  /**
+   * Marks this command as executed — single-use enforcement for the terminal methods.
+   *
+   * @throws IllegalStateException if this command has already been executed
+   */
+  private void beginExecution() {
+    Assert.state(
+      executed.compareAndSet(false, true),
+      "This ZetaWriteCommand has already been executed and cannot be reused."
+    );
   }
 }

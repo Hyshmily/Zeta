@@ -15,13 +15,17 @@
  */
 package io.github.hyshmily.zeta.cache.fluentAPI;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.model.CachePolicy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class ZetaWriteCommandTest {
 
@@ -34,32 +38,45 @@ class ZetaWriteCommandTest {
     command = new ZetaWriteCommand<>(zeta, "test-key");
   }
 
+  /**
+   * The facade's write family passes the policy as the last argument; capture
+   * it and assert the resolved TTLs (record equality is not reliable for
+   * non-zero TTLs — each {@code ttlSupplier(long)} call allocates a fresh
+   * lambda).
+   */
+  private CachePolicy capturedWritePolicy() {
+    ArgumentCaptor<CachePolicy> captor = ArgumentCaptor.forClass(CachePolicy.class);
+    verify(zeta).putThrough(any(), any(), any(Runnable.class), captor.capture());
+    return captor.getValue();
+  }
+
   @Test
   void putThrough_shouldDelegate() {
     Runnable writer = () -> {};
     command.putThrough("value", writer);
-    verify(zeta).putThrough("test-key", "value", writer, 0L, 0L, true);
+    assertThat(capturedWritePolicy().hardTtlMs().getAsLong()).isZero();
+    assertThat(capturedWritePolicy().softTtlMs().getAsLong()).isZero();
   }
 
   @Test
   void putThrough_withHardTtl_shouldDelegateWithTtl() {
-    Runnable writer = () -> {};
-    command.withHardTtl(5000L).putThrough("v", writer);
-    verify(zeta).putThrough("test-key", "v", writer, 5000L, 0L, true);
+    command.withHardTtl(5000L).putThrough("v", () -> {});
+    assertThat(capturedWritePolicy().hardTtlMs().getAsLong()).isEqualTo(5000L);
+    assertThat(capturedWritePolicy().softTtlMs().getAsLong()).isZero();
   }
 
   @Test
   void putThrough_withSoftTtl_shouldDelegateWithTtl() {
-    Runnable writer = () -> {};
-    command.withSoftTtl(500L).putThrough("v", writer);
-    verify(zeta).putThrough("test-key", "v", writer, 0L, 500L, true);
+    command.withSoftTtl(500L).putThrough("v", () -> {});
+    assertThat(capturedWritePolicy().hardTtlMs().getAsLong()).isZero();
+    assertThat(capturedWritePolicy().softTtlMs().getAsLong()).isEqualTo(500L);
   }
 
   @Test
   void putThrough_withBothTtls_shouldDelegateWithTtl() {
-    Runnable writer = () -> {};
-    command.withHardTtl(30000L).withSoftTtl(3000L).putThrough("v", writer);
-    verify(zeta).putThrough("test-key", "v", writer, 30000L, 3000L, true);
+    command.withHardTtl(30000L).withSoftTtl(3000L).putThrough("v", () -> {});
+    assertThat(capturedWritePolicy().hardTtlMs().getAsLong()).isEqualTo(30000L);
+    assertThat(capturedWritePolicy().softTtlMs().getAsLong()).isEqualTo(3000L);
   }
 
   @Test

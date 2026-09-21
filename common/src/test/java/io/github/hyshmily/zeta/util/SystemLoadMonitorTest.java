@@ -3,6 +3,10 @@ package io.github.hyshmily.zeta.util;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import io.github.hyshmily.zeta.util.impl.SystemLoadMonitorImpl;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -11,6 +15,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 class SystemLoadMonitorTest {
 
@@ -242,6 +247,124 @@ class SystemLoadMonitorTest {
         return rawValues[index++];
       }
       return 0.0;
+    }
+  }
+
+  // ── MXBean failure handling (protected readCpuLoadFromOsBean seam) ──
+
+  /** Seam subclass: the MXBean read always throws (e.g. NumberFormatException from a broken bean). */
+  static class ThrowingMonitor extends SystemLoadMonitorImpl {
+
+    ThrowingMonitor() {
+      super(100, 0.5);
+    }
+
+    @Override
+    protected double readCpuLoadFromOsBean() {
+      throw new NumberFormatException("simulated MXBean failure");
+    }
+  }
+
+  /** Seam subclass: the MXBean read returns NaN (platform cannot report the load). */
+  static class NaNTargetMonitor extends SystemLoadMonitorImpl {
+
+    NaNTargetMonitor() {
+      super(100, 0.5);
+    }
+
+    @Override
+    protected double readCpuLoadFromOsBean() {
+      return Double.NaN;
+    }
+  }
+
+  /** Seam subclass: one good read, then the MXBean read always throws. */
+  static class GoodThenThrowingMonitor extends SystemLoadMonitorImpl {
+
+    private final double goodValue;
+    private boolean first = true;
+
+    GoodThenThrowingMonitor(double goodValue) {
+      super(100, 0.5);
+      this.goodValue = goodValue;
+    }
+
+    @Override
+    protected double readCpuLoadFromOsBean() {
+      if (first) {
+        first = false;
+        return goodValue;
+      }
+      throw new NumberFormatException("simulated MXBean failure");
+    }
+  }
+
+  @Test
+  void getCpuLoadRaw_whenBeanThrows_shouldReturnLastGoodValue() {
+    GoodThenThrowingMonitor monitor = new GoodThenThrowingMonitor(0.7);
+    assertThat(monitor.getCpuLoadRaw()).isEqualTo(0.7); // good read → stored as last good
+    assertThat(monitor.getCpuLoadRaw()).isEqualTo(0.7); // failing read → last good
+    assertThat(monitor.getCpuLoadRaw()).isEqualTo(0.7); // still failing → still last good
+  }
+
+  @Test
+  void getCpuLoadRaw_whenBeanThrowsBeforeAnySuccess_shouldReturnZero() {
+    ThrowingMonitor monitor = new ThrowingMonitor();
+    assertThat(monitor.getCpuLoadRaw()).isEqualTo(0.0);
+  }
+
+  @Test
+  void sample_whenRawIsNaN_shouldNotPoisonEma() throws Exception {
+    // A NaN raw must be treated as a read failure: a NaN EMA would flip the BBR/SRE
+    // consumers (cpuLoad < cpuThreshold comparisons) into strict enforcement forever.
+    NaNTargetMonitor monitor = new NaNTargetMonitor();
+    Method sample = SystemLoadMonitorImpl.class.getDeclaredMethod("sample");
+    sample.setAccessible(true);
+    sample.invoke(monitor);
+    assertThat(monitor.getCpuLoadEMA()).isEqualTo(0.0);
+    assertThat(monitor.getCpuLoadEMA()).isFinite();
+  }
+
+  @Test
+  void getCpuLoadRaw_repeatedFailures_shouldWarnOnlyOnceThenDebug() {
+    ThrowingMonitor monitor = new ThrowingMonitor();
+    CollectingAppender appender = new CollectingAppender();
+    LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
+    ch.qos.logback.classic.Logger logbackLogger = context.getLogger(SystemLoadMonitorImpl.class);
+    // The DEBUG assertions below require DEBUG to actually be emitted — the
+    // effective level may be INFO depending on the logback config on the
+    // classpath, so pin it for the duration of the test.
+    Level originalLevel = logbackLogger.getLevel();
+    logbackLogger.setLevel(Level.DEBUG);
+    appender.start();
+    logbackLogger.addAppender(appender);
+    try {
+      for (int i = 0; i < 5; i++) {
+        assertThat(monitor.getCpuLoadRaw()).isEqualTo(0.0);
+      }
+      // One WARN (first failure, with the stack trace); the recurring 500ms-tick
+      // failures stay at DEBUG so the log is not flooded forever.
+      assertThat(appender.events).filteredOn(e -> e.getLevel() == Level.WARN).hasSize(1);
+      assertThat(appender.events)
+        .filteredOn(e -> e.getLevel() == Level.DEBUG)
+        .extracting(ILoggingEvent::getFormattedMessage)
+        .anySatisfy(msg -> assertThat(msg).contains("Failed to read CPU load"));
+    } finally {
+      logbackLogger.detachAppender(appender);
+      if (originalLevel != null) {
+        logbackLogger.setLevel(originalLevel);
+      }
+    }
+  }
+
+  /** Minimal logback capture appender (same pattern as {@code VersionControllerTest}). */
+  private static class CollectingAppender extends AppenderBase<ILoggingEvent> {
+
+    final java.util.List<ILoggingEvent> events = new java.util.ArrayList<>();
+
+    @Override
+    protected void append(ILoggingEvent event) {
+      events.add(event);
     }
   }
 }

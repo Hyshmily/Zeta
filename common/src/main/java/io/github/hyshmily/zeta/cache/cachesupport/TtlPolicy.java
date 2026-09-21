@@ -18,20 +18,29 @@ package io.github.hyshmily.zeta.cache.cachesupport;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.model.EntryDraft;
 import io.github.hyshmily.zeta.util.DelayUtil;
 import io.github.hyshmily.zeta.util.TimeSource;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Pure TTL and expiry policy for {@link CacheEntry} lifecycle arithmetic.
+ * Pure TTL and expiry policy for {@link io.github.hyshmily.zeta.model.CacheEntry}
+ * lifecycle arithmetic.
  *
  * <p>Deep module extracted from {@link ExpireManager}: every stateless
  * TTL computation — resolve (override vs default), compute (absolute
  * expire timestamps), getEffective (configured defaults), timestamp
- * conversion with jitter, expiry predicates, and entry-level TTL
- * transforms — lives here behind one small interface. {@link ExpireManager}
- * keeps only the stateful parts (refresh scheduling, TOCTOU guards,
- * entry factory) and exposes this policy via {@code ttlPolicy()}.
+ * conversion with jitter, and expiry predicates — lives here behind one
+ * small interface. {@link ExpireManager} keeps only the stateful parts
+ * (refresh scheduling, TOCTOU guards, entry factory) and exposes this
+ * policy via {@code ttlPolicy()}.
+ *
+ * <p>The class also implements {@link EntryDraft.ExpiryArithmetic}: the draft
+ * API ({@code ExpireManager.newEntry/editEntry}) delegates its computed
+ * expire timestamps to these {@code to*ExpireTimestamp} conversions — the
+ * single duration-to-timestamp rule for the whole entry pipeline. The former
+ * {@code applyXxx} entry transforms are folded into
+ * {@link EntryDraft#ttl}/{@link EntryDraft#rearmExpiry}.
  *
  * <p>Instances are cheap and hold no mutable state of their own: the
  * underlying {@link ZetaProperties} is read on every call (same as the
@@ -39,7 +48,7 @@ import org.jspecify.annotations.Nullable;
  * working. All methods are thread-safe and side-effect free.
  */
 @Internal
-public final class TtlPolicy {
+public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
 
   /** TTL configuration providing normal and hot-key TTL values. */
   private final ZetaProperties ttlConfig;
@@ -201,67 +210,6 @@ public final class TtlPolicy {
   }
 
   /**
-   * Create a copy of the entry with the normal (non-hot) TTL values set,
-   * leaving all other fields (hot TTLs, versions, state) untouched.
-   * <p>
-   * The normal TTLs ({@code normalHardTtlMs}, {@code normalSoftTtlMs})
-   * are the baseline TTL values that the entry reverts to when its key
-   * state transitions from HOT back to NORMAL. These are recorded at
-   * entry creation and preserved across state transitions.
-   *
-   * @param original   the source {@link CacheEntry} to copy
-   * @param hardTtlMs  normal hard TTL duration in milliseconds
-   * @param softTtlMs  normal soft TTL duration in milliseconds
-   * @return a new {@link CacheEntry} with the normal TTL fields updated
-   */
-  public CacheEntry applyNormalTtl(CacheEntry original, long hardTtlMs, long softTtlMs) {
-    return original.withNormalTtl(hardTtlMs, softTtlMs);
-  }
-
-  /**
-   * Create a new {@link CacheEntry} with updated TTL fields, preserving all
-   * other metadata from the supplied original entry.
-   *
-   * <p>Sets {@code hardTtlMs}, {@code softTtlMs},
-   * {@code hardExpireAtMs} (via {@link #computeHardExpireAt}),
-   * and {@code softExpireAtMs} (via {@link #computeSoftExpireAt}).
-   *
-   * @param original   an existing {@link CacheEntry} whose metadata should be preserved;
-   *                   must not be null
-   * @param hardTtlMs  hard TTL duration in milliseconds
-   * @param softTtlMs  soft TTL duration in milliseconds
-   * @return a new {@link CacheEntry} with the updated TTL timestamps,
-   *         while keeping all version, state, and normal TTL fields unchanged
-   */
-  public CacheEntry applyTtl(CacheEntry original, long hardTtlMs, long softTtlMs) {
-    return original.withTtl(hardTtlMs, softTtlMs, computeHardExpireAt(hardTtlMs), computeSoftExpireAt(softTtlMs));
-  }
-
-  /**
-   * Create a copy of the entry with only the hard TTL updated, leaving the
-   * existing soft TTL and all version/state fields untouched.
-   *
-   * @param original   the source {@link CacheEntry} to copy
-   * @param hardTtlMs  hard TTL duration in milliseconds
-   * @return a new {@link CacheEntry} with the updated hard TTL and expiration
-   */
-  public CacheEntry applyHardTtl(CacheEntry original, long hardTtlMs) {
-    return original.withHardTtl(hardTtlMs, computeHardExpireAt(hardTtlMs));
-  }
-
-  /**
-   * Create a copy of the entry with only the soft TTL updated, leaving the
-   * existing hard TTL and all version/state fields untouched.
-   *
-   * @param original   the source {@link CacheEntry} to copy
-   * @param softTtlMs  soft TTL duration in milliseconds
-   * @return a new {@link CacheEntry} with the updated soft TTL and expiration
-   */
-  public CacheEntry applySoftTtl(CacheEntry original, long softTtlMs) {
-    return original.withSoftTtl(softTtlMs, computeSoftExpireAt(softTtlMs));
-  }
-
-  /**
    * Convert a TTL duration (ms) to an absolute epoch-ms expiration timestamp
    * using the configured default jitter ratio.
    * Propagates {@link Long#MAX_VALUE} unchanged — used to signal permanent entries
@@ -344,5 +292,25 @@ public final class TtlPolicy {
       return expireAt > 0 && expireAt < TimeSource.currentTimeMillis();
     }
     return true;
+  }
+
+  /**
+   * {@link EntryDraft.ExpiryArithmetic} adaptation for the draft API: the
+   * {@code to*ExpireTimestamp} contract verbatim (hard {@code <= 0} =
+   * permanent, {@code Long.MAX_VALUE} propagates).
+   */
+  @Override
+  public long hardExpireAt(long hardTtlMs) {
+    return toHardExpireTimestamp(hardTtlMs);
+  }
+
+  /**
+   * {@link EntryDraft.ExpiryArithmetic} adaptation for the draft API: the
+   * {@code to*ExpireTimestamp} contract verbatim (soft {@code <= 0} =
+   * disabled / {@code 0}, {@code Long.MAX_VALUE} propagates).
+   */
+  @Override
+  public long softExpireAt(long softTtlMs) {
+    return toSoftExpireTimestamp(softTtlMs);
   }
 }

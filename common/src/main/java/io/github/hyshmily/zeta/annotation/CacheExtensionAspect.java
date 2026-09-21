@@ -453,7 +453,7 @@ public class CacheExtensionAspect {
       if (cacheCondition != null && !cacheCondition.unless().isEmpty()) {
         boolean shouldSkip = evaluateCacheCondition(cacheCondition.unless(), pjp, method, result);
         if (shouldSkip) {
-          zeta.invalidate(prefixedKey, !skipBroadcastFlag);
+          zeta.invalidate(prefixedKey, CachePolicy.defaults().withSkipBroadcast(skipBroadcastFlag));
         }
       }
 

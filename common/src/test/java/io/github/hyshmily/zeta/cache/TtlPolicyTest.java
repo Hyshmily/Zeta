@@ -22,6 +22,7 @@ import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.TimeSource;
+import io.github.hyshmily.zeta.model.EntryDraft;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -429,7 +430,7 @@ class TtlPolicyTest {
       .normalSoftTtlMs(30_000)
       .build();
 
-    CacheEntry updated = ttlPolicy.applyHardTtl(original, 120_000);
+    CacheEntry updated = EntryDraft.of(original, ttlPolicy).hardTtl(120_000).build();
 
     assertThat(updated.getHardTtlMs()).isEqualTo(120_000);
     assertThat(updated.getHardExpireAtMs()).isGreaterThan(original.getHardExpireAtMs());
@@ -462,7 +463,7 @@ class TtlPolicyTest {
       .normalSoftTtlMs(30_000)
       .build();
 
-    CacheEntry updated = ttlPolicy.applySoftTtl(original, 120_000);
+    CacheEntry updated = EntryDraft.of(original, ttlPolicy).softTtl(120_000).build();
 
     assertThat(updated.getSoftTtlMs()).isEqualTo(120_000);
     assertThat(updated.getSoftExpireAtMs()).isGreaterThan(original.getSoftExpireAtMs());
@@ -492,7 +493,7 @@ class TtlPolicyTest {
       .normalSoftTtlMs(30_000)
       .build();
 
-    CacheEntry updated = ttlPolicy.applyNormalTtl(original, 600_000, 60_000);
+    CacheEntry updated = EntryDraft.of(original).normalTtl(600_000, 60_000).build();
 
     assertThat(updated.getNormalHardTtlMs()).isEqualTo(600_000);
     assertThat(updated.getNormalSoftTtlMs()).isEqualTo(60_000);
