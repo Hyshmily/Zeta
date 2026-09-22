@@ -161,7 +161,7 @@ class DistributedSyncTest {
 
   private WorkerListener createWorkerListener(CacheLoader loader, SreRateLimiterImpl limiter) {
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setWarmupJitterMs(0);
+    props.setBroadcastJitterMs(0);
     props.getSre().setEnabled(limiter != null);
     WorkerListener l = new WorkerListener(props, scheduler, workerHandler(loader, limiter));
     l.init();

@@ -49,6 +49,15 @@ public interface CircuitBreaker extends AutoCloseable {
    */
   void onFailure(Throwable t);
 
+  /**
+   * Record that a reserved request slot is given up without a success/failure
+   * outcome — e.g. the executor rejected the task before any data-source call
+   * was attempted. Neither success nor failure statistics are affected; the
+   * only effect is releasing a half-open probe reservation so abandoned
+   * attempts cannot permanently drain the probe quota. No-op by default.
+   */
+  default void onAbandoned() {}
+
   /** Whether the breaker is currently open. */
   boolean isOpen();
 

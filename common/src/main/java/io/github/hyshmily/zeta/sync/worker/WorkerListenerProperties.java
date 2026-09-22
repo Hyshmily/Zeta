@@ -60,11 +60,6 @@ public class WorkerListenerProperties {
   /** Whether the RabbitMQ listener container starts automatically with the application context. */
   private boolean autoStartup = true;
 
-  /** Maximum random jitter (milliseconds) added before each Worker decision cache update.
-   * Spreads Redis reads across a small time window to avoid thundering herds
-   * when the Worker broadcasts a decision to many app instances simultaneously. */
-  private int warmupJitterMs = 50;
-
   /** Maximum random jitter (milliseconds) added before each Worker broadcast cache update.
    * When non-zero, spreads Redis reads across a small time window to avoid thundering herds
    * when the Worker broadcasts a decision to many app instances simultaneously.

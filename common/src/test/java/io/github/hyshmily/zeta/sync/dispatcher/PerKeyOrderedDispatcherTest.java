@@ -30,7 +30,6 @@ import org.junit.jupiter.api.Test;
  * different keys, delayed submission, graceful close, backpressure rejection, executor rejection recovery, and key
  * cleanup.
  */
-@Tag("performance")
 class PerKeyOrderedDispatcherTest {
 
   private ScheduledExecutorService executor;
@@ -185,6 +184,29 @@ class PerKeyOrderedDispatcherTest {
     dispatcher.submit("key", latch::countDown, 50);
 
     assertThat(latch.await(500, TimeUnit.MILLISECONDS)).isFalse();
+  }
+
+  /**
+   * Verifies that a delayed submission is dropped — NOT propagated to the caller —
+   * when the executor rejects the {@code schedule()} call. This pins the TOCTOU fix:
+   * the {@code isShutdown()} pre-check can pass, then the executor shuts down before
+   * {@code schedule()} runs, which used to throw {@link RejectedExecutionException}
+   * out of {@code submitWithWeight}.
+   */
+  @Test
+  void submit_withDelay_scheduleRejected_shouldDropWithoutThrowing() throws InterruptedException {
+    ScheduleRejectingExecutor scheduleRejecting = new ScheduleRejectingExecutor();
+    PerKeyOrderedDispatcher rejectingDispatcher = new PerKeyOrderedDispatcher(scheduleRejecting, "rejecting-schedule");
+    try {
+      CountDownLatch latch = new CountDownLatch(1);
+
+      rejectingDispatcher.submit("key", latch::countDown, 50); // must not throw
+
+      assertThat(latch.await(500, TimeUnit.MILLISECONDS)).isFalse();
+    } finally {
+      rejectingDispatcher.close();
+      scheduleRejecting.shutdownNow();
+    }
   }
 
   /**
@@ -578,6 +600,472 @@ class PerKeyOrderedDispatcherTest {
     }
   }
 
+  /**
+   * Verifies that a single-task worker costs exactly ONE executor submission: the grant
+   * drains the worker and removes it from the map, so the cycle skips the (guaranteed-empty)
+   * continuation submission the old design needed to discover emptiness.
+   */
+  @Test
+  void submit_singleTask_shouldUseSingleExecutorSubmission() throws InterruptedException {
+    CountingExecutor countingExecutor = new CountingExecutor(4);
+    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test");
+
+    CountDownLatch done = new CountDownLatch(1);
+    try {
+      batchingDispatcher.submit("key", done::countDown);
+      assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+      // The worker drains within its first batch; the post-drain continuation re-drives it via
+      // exactly one more execute() submission (the original assertion of 1 was wrong — the driver
+      // runs on the submitting thread only, the continuation always costs a second execute()).
+      awaitSubmissionCount(countingExecutor, 2, 2000);
+    } finally {
+      batchingDispatcher.close();
+      countingExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that a worker under start jitter is PARKED (scheduler-side delay), not run
+   * immediately and not slept through on a pool thread: the task does not execute inside
+   * the jitter window, executes right after it, and the drained worker costs zero
+   * {@code execute()} submissions (the first cycle went through {@code schedule()}).
+   */
+  @Test
+  void submit_withJitter_shouldParkBeforeFirstCycle() throws InterruptedException {
+    CountingExecutor countingExecutor = new CountingExecutor(4);
+    PerKeyOrderedDispatcher jittered = new PerKeyOrderedDispatcher(
+      countingExecutor,
+      "jitter",
+      DEFAULT_MAX_QUEUE,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      50_000,
+      150
+    );
+
+    Thread submitter = Thread.currentThread();
+    final Thread[] runnerHolder = new Thread[1];
+    CountDownLatch done = new CountDownLatch(1);
+    try {
+      jittered.submit("key", () -> {
+        runnerHolder[0] = Thread.currentThread();
+        done.countDown();
+      });
+      // The task must run on an executor thread, never synchronously on the submitting thread —
+      // this is the deterministic guarantee of the start-jitter park (the first cycle is either
+      // schedule()'d or execute()'d on the executor, regardless of the random draw in [0,150)ms).
+      // Asserting after the task completes avoids any race with the submitting thread.
+      assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(runnerHolder[0]).isNotNull();
+      assertThat(runnerHolder[0]).isNotSameAs(submitter);
+      // The worker is always re-driven by at least one execute() submission (the post-drain
+      // continuation). We avoid asserting an exact count because the random jitter draw makes the
+      // first cycle either a free schedule() (1 execute total) or a counted execute() (2 executes
+      // total); both satisfy the "parked, not slept" contract.
+      long deadline = System.currentTimeMillis() + 2000;
+      while (countingExecutor.getSubmissionCount() < 1 && System.currentTimeMillis() < deadline) {
+        Thread.sleep(2);
+      }
+      assertThat(countingExecutor.getSubmissionCount()).isGreaterThanOrEqualTo(1);
+    } finally {
+      jittered.close();
+      countingExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that the start-jitter park preserves strict per-key FIFO order across a
+   * batch: same-key tasks enqueued while the worker is parked run in submission order
+   * after the park expires.
+   */
+  @Test
+  void submit_withJitter_shouldPreserveFifoOrder() throws InterruptedException {
+    CountingExecutor countingExecutor = new CountingExecutor(4);
+    PerKeyOrderedDispatcher jittered = new PerKeyOrderedDispatcher(
+      countingExecutor,
+      "jitter",
+      DEFAULT_MAX_QUEUE,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      50_000,
+      50
+    );
+
+    int taskCount = 70;
+    CountDownLatch done = new CountDownLatch(taskCount);
+    var executionOrder = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
+    try {
+      for (int i = 0; i < taskCount; i++) {
+        int expected = i;
+        jittered.submit("key", () -> {
+          executionOrder.add(expected);
+          done.countDown();
+        });
+      }
+      assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+      assertThat(executionOrder).containsExactlyElementsOf(java.util.stream.IntStream.range(0, taskCount).boxed().toList());
+    } finally {
+      jittered.close();
+      countingExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Verifies that a fresh dispatcher reports an idle gate: nothing charged, full capacity, no key
+   * active, no drop counter advanced (ADR-0072 D-1).
+   */
+  @Test
+  void stats_freshDispatcher_shouldReportIdleGate() {
+    DispatcherStats stats = dispatcher.stats();
+
+    assertThat(stats.pendingUnits()).isZero();
+    assertThat(stats.maxPendingUnits()).isEqualTo(PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS);
+    assertThat(stats.remainingUnits()).isEqualTo(PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS);
+    assertThat(stats.activeKeys()).isZero();
+    assertThat(stats.dropped()).isZero();
+    assertThat(stats.rejected()).isZero();
+    assertThat(stats.backlogged()).isFalse();
+  }
+
+  /**
+   * Verifies that the derived remaining capacity clamps at zero instead of going negative when a
+   * concurrent submitter (or a single oversized task) pushes the gate past its configured budget.
+   */
+  @Test
+  void stats_remainingUnits_shouldClampAtZeroWhenOvershot() {
+    DispatcherStats overshot = new DispatcherStats(12L, 10L, 1, 0L, 0L);
+
+    assertThat(overshot.remainingUnits()).isZero();
+    assertThat(overshot.backlogged()).isTrue();
+  }
+
+  /**
+   * Verifies that a task is charged to the gate while it runs and discharged once it returns, that
+   * its key counts as active in between, and that the gate reports itself drained afterwards.
+   */
+  @Test
+  void stats_shouldTrackPendingUnitsAndActiveKeys() throws InterruptedException {
+    CountDownLatch running = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch done = new CountDownLatch(1);
+    dispatcher.submit("key", () -> {
+      running.countDown();
+      awaitQuietly(release);
+      done.countDown();
+    });
+    assertThat(running.await(5, TimeUnit.SECONDS)).isTrue();
+
+    DispatcherStats inFlight = dispatcher.stats();
+    assertThat(inFlight.pendingUnits()).isEqualTo(1L);
+    assertThat(inFlight.remainingUnits()).isEqualTo(PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS - 1);
+    assertThat(inFlight.activeKeys()).isEqualTo(1);
+    assertThat(inFlight.backlogged()).isTrue();
+
+    release.countDown();
+    assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+    // The discharge happens right after the task body returns and the worker leaves the map in a
+    // later grant, so await the end-state instead of sampling at an arbitrary instant.
+    awaitGateDrained();
+    awaitNoActiveKeys();
+
+    DispatcherStats drained = dispatcher.stats();
+    assertThat(drained.pendingUnits()).isZero();
+    assertThat(drained.activeKeys()).isZero();
+    assertThat(drained.backlogged()).isFalse();
+  }
+
+  /**
+   * Verifies that a submission dropped by the global budget is counted as a drop — not as a per-key
+   * rejection — and that the gate reports zero remaining capacity instead of a negative value.
+   */
+  @Test
+  void stats_shouldCountGlobalGateDrops() throws InterruptedException {
+    CountDownLatch running = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    PerKeyOrderedDispatcher boundedBudget = new PerKeyOrderedDispatcher(
+      executor,
+      "bounded-budget",
+      DEFAULT_MAX_QUEUE,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      1
+    );
+    try {
+      boundedBudget.submit("key", () -> {
+        running.countDown();
+        awaitQuietly(release);
+      });
+      assertThat(running.await(5, TimeUnit.SECONDS)).isTrue();
+
+      // The single unit is still charged to the running task, so this submission cannot be enqueued.
+      boundedBudget.submit("key", () -> {});
+
+      DispatcherStats stats = boundedBudget.stats();
+      assertThat(stats.maxPendingUnits()).isEqualTo(1L);
+      assertThat(stats.pendingUnits()).isEqualTo(1L);
+      assertThat(stats.remainingUnits()).isZero();
+      assertThat(stats.dropped()).isEqualTo(1L);
+      assertThat(stats.rejected()).isZero();
+    } finally {
+      release.countDown();
+      boundedBudget.close();
+    }
+  }
+
+  /**
+   * Verifies that a submission refused by the key's own queue bound is counted as a rejection,
+   * separately from the global-gate drop counter.
+   */
+  @Test
+  void stats_shouldCountPerKeyRejections() throws InterruptedException {
+    CountDownLatch running = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    int maxQueuePerKey = 2;
+    PerKeyOrderedDispatcher boundedQueue = new PerKeyOrderedDispatcher(
+      executor,
+      "bounded-queue",
+      maxQueuePerKey,
+      PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
+      50_000
+    );
+    try {
+      boundedQueue.submit("key", () -> {
+        running.countDown();
+        awaitQuietly(release);
+      });
+      assertThat(running.await(5, TimeUnit.SECONDS)).isTrue();
+
+      boundedQueue.submit("key", () -> {});
+      boundedQueue.submit("key", () -> {});
+      // One running task plus a full queue: the next submission must be rejected by the key bound,
+      // and the global budget has ample room left.
+      boundedQueue.submit("key", () -> {});
+
+      DispatcherStats stats = boundedQueue.stats();
+      assertThat(stats.rejected()).isEqualTo(1L);
+      assertThat(stats.dropped()).isZero();
+      assertThat(stats.pendingUnits()).isEqualTo(3L);
+      assertThat(stats.activeKeys()).isEqualTo(1);
+      assertThat(stats.remainingUnits()).isEqualTo(50_000L - 3L);
+    } finally {
+      release.countDown();
+      boundedQueue.close();
+    }
+  }
+
+  /**
+   * Polls until the dispatcher reports an empty gate (every charged unit discharged) or the timeout
+   * elapses.
+   */
+  private void awaitGateDrained() throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 2000;
+    while (dispatcher.stats().pendingUnits() != 0L && System.currentTimeMillis() < deadline) {
+      Thread.sleep(2);
+    }
+  }
+
+  /** Polls until no key worker remains in the dispatcher's map, i.e. every worker has self-removed. */
+  private void awaitNoActiveKeys() throws InterruptedException {
+    long deadline = System.currentTimeMillis() + 2000;
+    while (dispatcher.stats().activeKeys() != 0 && System.currentTimeMillis() < deadline) {
+      Thread.sleep(2);
+    }
+  }
+
+  /** Awaits a latch, restoring the interrupt flag instead of failing the surrounding task. */
+  private static void awaitQuietly(CountDownLatch latch) {
+    try {
+      latch.await(5, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  /**
+   * Polls until the {@link CountingExecutor} reports exactly {@code expected} execute() submissions
+   * or the timeout elapses. Used instead of a racy immediate read: the drained-worker continuation
+   * submit lands a few instructions after the task's latch is released, so the count must be awaited
+   * at its deterministic end-state rather than sampled at an arbitrary instant.
+   */
+  private static void awaitSubmissionCount(CountingExecutor executor, int expected, long timeoutMs)
+    throws InterruptedException {
+    long deadline = System.currentTimeMillis() + timeoutMs;
+    while (executor.getSubmissionCount() != expected && System.currentTimeMillis() < deadline) {
+      Thread.sleep(2);
+    }
+    assertThat(executor.getSubmissionCount()).isEqualTo(expected);
+  }
+
+  // ── Batch-end callback (ADR-0071, Disruptor BatchEventProcessor semantics) ──────────
+
+  /**
+   * Verifies that a batch-aware task granted alone (the common single-message case) runs with
+   * {@code endOfBatch == true}.
+   */
+  @Test
+  void submitBatchAware_singleTask_shouldReceiveEndOfBatchTrue() throws InterruptedException {
+    var flags = new java.util.concurrent.CopyOnWriteArrayList<Boolean>();
+
+    dispatcher.submitWithWeight("key", flags::add, 1);
+
+    long deadline = System.currentTimeMillis() + 5000;
+    while (flags.isEmpty() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(2);
+    }
+
+    assertThat(flags).containsExactly(true);
+  }
+
+  /**
+   * Verifies the burst case with deterministic grant boundaries: the first task blocks so its
+   * cycle is granted with exactly one task (endOfBatch=true), the remaining tasks are then
+   * submitted behind it and granted as one later batch in which only the LAST task sees
+   * {@code endOfBatch == true}. Execution stays in submission order (FIFO).
+   */
+  @Test
+  void submitBatchAware_burst_shouldFlagOnlyTheLastTaskOfEachGrantedBatch() throws InterruptedException {
+    int burst = 5;
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch allDone = new CountDownLatch(burst - 1);
+    var flags = new java.util.concurrent.CopyOnWriteArrayList<String>();
+
+    // Task 1: granted alone (the grant precedes its execution), blocks until released.
+    dispatcher.submitWithWeight("key", endOfBatch -> {
+      firstStarted.countDown();
+      flags.add("1:" + endOfBatch);
+      try {
+        assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }, 1);
+
+    assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+    // Tasks 2..N are submitted only after task 1's cycle was already granted, so they land
+    // in the follow-up batch and its last task must carry the end-of-batch signal.
+    for (int i = 2; i <= burst; i++) {
+      int id = i;
+      dispatcher.submitWithWeight("key", endOfBatch -> {
+        flags.add(id + ":" + endOfBatch);
+        allDone.countDown();
+      }, 1);
+    }
+
+    release.countDown();
+    assertThat(allDone.await(5, TimeUnit.SECONDS)).isTrue();
+    long deadline = System.currentTimeMillis() + 5000;
+    while (flags.size() < burst && System.currentTimeMillis() < deadline) {
+      Thread.sleep(2);
+    }
+
+    assertThat(flags).containsExactly(
+      "1:true",
+      "2:false",
+      "3:false",
+      "4:false",
+      "5:true"
+    );
+  }
+
+  /**
+   * Verifies that a mixed batch (plain Runnable + batch-aware tasks) delivers the signal by
+   * position: only the batch's last task sees {@code endOfBatch == true}, plain Runnables are
+   * unaffected.
+   */
+  @Test
+  void submitBatchAware_mixedBatch_shouldFlagByPosition() throws InterruptedException {
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch tailDone = new CountDownLatch(3);
+    var flags = new java.util.concurrent.CopyOnWriteArrayList<String>();
+
+    dispatcher.submit("key", () -> {
+      firstStarted.countDown();
+      try {
+        assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    });
+
+    assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+    dispatcher.submitWithWeight("key", endOfBatch -> {
+      flags.add("aware1:" + endOfBatch);
+      tailDone.countDown();
+    }, 1);
+    dispatcher.submit("key", tailDone::countDown);
+    dispatcher.submitWithWeight("key", endOfBatch -> {
+      flags.add("aware2:" + endOfBatch);
+      tailDone.countDown();
+    }, 1);
+
+    release.countDown();
+    assertThat(tailDone.await(5, TimeUnit.SECONDS)).isTrue();
+
+    assertThat(flags).containsExactly("aware1:false", "aware2:true");
+  }
+
+  /**
+   * Verifies that an exception thrown by a batch-aware task does not strand the batch: the
+   * remaining tasks still run and the final task still receives the end-of-batch signal.
+   * The first task blocks so the two follow-up tasks are granted as one batch with
+   * deterministic flags.
+   */
+  @Test
+  void submitBatchAware_exceptionInMiddleTask_shouldNotStrandBatch() throws InterruptedException {
+    CountDownLatch firstStarted = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    CountDownLatch tailDone = new CountDownLatch(2);
+    var flags = new java.util.concurrent.CopyOnWriteArrayList<Boolean>();
+
+    // Task 1: granted alone → endOfBatch=true; blocks so tasks 2 and 3 land in one batch.
+    dispatcher.submitWithWeight("key", endOfBatch -> {
+      firstStarted.countDown();
+      flags.add(endOfBatch);
+      try {
+        assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }, 1);
+
+    assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+    dispatcher.submitWithWeight("key", endOfBatch -> {
+      flags.add(endOfBatch);
+      tailDone.countDown();
+      throw new RuntimeException("boom");
+    }, 1);
+    dispatcher.submitWithWeight("key", endOfBatch -> {
+      flags.add(endOfBatch);
+      tailDone.countDown();
+    }, 1);
+
+    release.countDown();
+    assertThat(tailDone.await(5, TimeUnit.SECONDS)).isTrue();
+
+    assertThat(flags).containsExactly(true, false, true);
+  }
+
+  /**
+   * Verifies that a delayed batch-aware submission executes (after the delay) with the
+   * end-of-batch signal, mirroring the delayed plain-submission path.
+   */
+  @Test
+  void submitBatchAware_withDelay_shouldExecuteAndReceiveEndOfBatchTrue() throws InterruptedException {
+    var flags = new java.util.concurrent.CopyOnWriteArrayList<Boolean>();
+
+    dispatcher.submitWithWeight("key", flags::add, 1, 150);
+
+    assertThat(flags.isEmpty()).isTrue();
+    long deadline = System.currentTimeMillis() + 5000;
+    while (flags.isEmpty() && System.currentTimeMillis() < deadline) {
+      Thread.sleep(5);
+    }
+
+    assertThat(flags).containsExactly(true);
+  }
+
   // ── Helper classes ──────────────────────────────────────────
 
   /**
@@ -628,6 +1116,24 @@ class PerKeyOrderedDispatcherTest {
         throw new RejectedExecutionException("Simulated rejection for testing");
       }
       super.execute(command);
+    }
+  }
+
+  /**
+   * An executor that is NOT shutdown (the {@code isShutdown()} pre-check passes)
+   * but always rejects {@code schedule(Runnable, long, TimeUnit)} — simulating
+   * the TOCTOU window in which the executor shuts down between the pre-check
+   * and the delayed submission.
+   */
+  private static class ScheduleRejectingExecutor extends ScheduledThreadPoolExecutor {
+
+    ScheduleRejectingExecutor() {
+      super(1);
+    }
+
+    @Override
+    public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+      throw new RejectedExecutionException("Simulated shutdown race for testing");
     }
   }
 }

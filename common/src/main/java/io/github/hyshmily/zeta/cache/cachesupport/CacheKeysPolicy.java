@@ -17,6 +17,8 @@ package io.github.hyshmily.zeta.cache.cachesupport;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
+import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.model.KeyState;
 import jakarta.annotation.Nullable;
 import java.util.Collection;
 
@@ -55,6 +57,21 @@ public final class CacheKeysPolicy {
     if (rawKey == null) return null;
     int idx = rawKey.indexOf('?');
     return idx >= 0 ? rawKey.substring(0, idx) : rawKey;
+  }
+
+  /**
+   * Check whether an existing cache entry is managed by the Worker (HOT or COOL).
+   * Worker-managed entries preserve their original normal TTLs through writes.
+   *
+   * @param existing the existing cache entry (maybe {@code null} or a raw value)
+   * @return {@code true} if the entry is a {@link CacheEntry} with state HOT or
+   *         COOL
+   */
+  public static boolean isWorkerManaged(Object existing) {
+    return (
+      existing instanceof CacheEntry entry &&
+      (entry.getKeyState() == KeyState.HOT || entry.getKeyState() == KeyState.COOL)
+    );
   }
 
   /**

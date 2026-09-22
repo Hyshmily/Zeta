@@ -35,6 +35,7 @@ import io.github.hyshmily.zeta.sync.local.CacheSyncProperties;
 import io.github.hyshmily.zeta.sync.local.DefaultSyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncDecisionHandler;
 import io.github.hyshmily.zeta.sync.local.SyncMessage;
+import io.github.hyshmily.zeta.util.InstanceIdGenerator;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
@@ -42,6 +43,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
@@ -107,6 +109,64 @@ class CacheSyncListenerTest {
     cache.put("key1", entry(1, false, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
+  }
+
+  /**
+   * Verifies the batch-end amortization end to end (ADR-0071): a burst of same-key REFRESH
+   * messages costs strictly fewer Redis loads than messages, and the final L1 state carries
+   * the newest version regardless of how the dispatcher sliced the grant boundaries.
+   *
+   * <p>The blocking loader pins the first load until the whole burst has been submitted, so
+   * the drain can never complete between submissions — every slicing leaves at least one
+   * non-final REFRESH to amortize. The final task of the last batch is always the newest
+   * message, so the end state is deterministic even though the slicing is not.
+   */
+  @Test
+  void handleSyncMessage_sameKeyRefreshBurst_shouldAmortizeLoadsToBatchTail() throws Exception {
+    cache.put("key1", entry(1, false, 0));
+    AtomicInteger loads = new AtomicInteger();
+    CountDownLatch release = new CountDownLatch(1);
+    CacheLoader blockingLoader = k -> {
+      try {
+        release.await(10, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      loads.incrementAndGet();
+      return "refreshed";
+    };
+    CacheSyncProperties props = new CacheSyncProperties();
+    props.setWarmupJitterMs(0);
+    CacheSyncListener burstListener = new CacheSyncListener(props, scheduler, handler(blockingLoader));
+    burstListener.init();
+
+    try {
+      burstListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
+      burstListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 3L, false));
+      burstListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 4L, false));
+      release.countDown();
+
+      long deadline = System.currentTimeMillis() + 5000;
+      boolean applied = false;
+      while (System.currentTimeMillis() < deadline) {
+        if (loads.get() > 0
+          && cache.getIfPresent("key1") instanceof CacheEntry ce
+          && ce.getDataVersion() == 4L) {
+          applied = true;
+          break;
+        }
+        Thread.sleep(5);
+      }
+      assertThat(applied).as("final refresh (v4) must be applied").isTrue();
+    } finally {
+      burstListener.destroy();
+    }
+
+    // At least one load happened (the batch tail) but strictly fewer than messages —
+    // the non-final REFRESHes of the granted batch(es) were amortized away.
+    assertThat(loads.get()).isBetween(1, 2);
+    assertThat(cache.getIfPresent("key1")).isInstanceOf(CacheEntry.class);
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDataVersion()).isEqualTo(4L);
   }
 
   /**
@@ -360,6 +420,81 @@ class CacheSyncListenerTest {
     assertThat(cache.getIfPresent("key1")).isNotNull();
   }
 
+  /**
+   * ADR-0067: the sender's own REFRESH broadcast is dropped before parsing —
+   * the L1 entry the sender just wrote at the broadcast version must survive
+   * the fanout self-delivery (previously the equal-version no-value fallback
+   * removed it, defeating putThrough's local cache update on every write).
+   */
+  @Test
+  void handleSyncMessage_ownRefresh_shouldDropAndKeepOwnEntry() throws IOException, InterruptedException {
+    InstanceIdGenerator.setOverride("self-instance");
+    try {
+      cache.put("key1", entry(4, false, 0));
+      listener.handleSyncMessage(channel, syncMessageWithOrigin("key1", SyncMessage.TYPE_REFRESH, 4L, false, "self-instance"));
+      verify(channel).basicAck(anyLong(), eq(false));
+      awaitWorkerTasks();
+      // Untouched: the value is still the sender's own putThrough payload, not
+      // the loader's — the message never reached the decision handler.
+      assertThat(((CacheEntry) cache.getIfPresent("key1")).getValue()).isEqualTo("v");
+    } finally {
+      InstanceIdGenerator.setOverride(null);
+    }
+  }
+
+  /**
+   * A peer's REFRESH (different origin instance) is processed normally — the
+   * self-drop must not leak onto cross-instance traffic.
+   */
+  @Test
+  void handleSyncMessage_peerRefresh_shouldProcess() throws IOException, InterruptedException {
+    cache.put("key1", entry(4, false, 0));
+    listener.handleSyncMessage(channel, syncMessageWithOrigin("key1", SyncMessage.TYPE_REFRESH, 6L, false, "peer-instance"));
+    verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getValue()).isEqualTo("refreshed");
+  }
+
+  /**
+   * A self-addressed INVALIDATE is still processed (only REFRESH is dropped):
+   * it heals invalidate-vs-reload repopulations stamped with older versions.
+   */
+  @Test
+  void handleSyncMessage_ownInvalidate_shouldStillProcess() throws IOException, InterruptedException {
+    InstanceIdGenerator.setOverride("self-instance");
+    try {
+      cache.put("key1", entry(2, false, 0));
+      listener.handleSyncMessage(channel, syncMessageWithOrigin("key1", SyncMessage.TYPE_INVALIDATE, 5L, false, "self-instance"));
+      verify(channel).basicAck(anyLong(), eq(false));
+      awaitWorkerTasks();
+      assertThat(cache.getIfPresent("key1")).isNull();
+    } finally {
+      InstanceIdGenerator.setOverride(null);
+    }
+  }
+
+  /**
+   * A REFRESH without an origin header (pre-0067 sender, rolling upgrade) is
+   * processed — absent origin never drops.
+   */
+  @Test
+  void handleSyncMessage_refreshWithoutOriginHeader_shouldProcess() throws IOException, InterruptedException {
+    cache.put("key1", entry(4, false, 0));
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 6L, false));
+    verify(channel).basicAck(anyLong(), eq(false));
+    awaitWorkerTasks();
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getValue()).isEqualTo("refreshed");
+  }
+
+  private static Message syncMessageWithOrigin(String key, String type, long version, boolean degraded, String origin) {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, type);
+    props.setHeader(HEADER_VERSION, version);
+    props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
+    props.setHeader(HEADER_ORIGIN_INSTANCE, origin);
+    return new Message(key.getBytes(StandardCharsets.UTF_8), props);
+  }
+
   private static CacheEntry entry(long dataVersion, boolean degraded, long decisionVersion) {
     return CacheEntry.builder()
       .value("v")
@@ -374,5 +509,76 @@ class CacheSyncListenerTest {
       .normalHardTtlMs(300_000)
       .normalSoftTtlMs(30_000)
       .build();
+  }
+
+  // ── Application isolation (ADR-0068 pattern on the sync plane) ──
+
+  /**
+   * Builds a sync message that declares the sender's application name, the way
+   * {@code CacheSyncPublisher} now stamps every sync message. The sync exchange is a
+   * fanout with a global name, so on a shared broker these headers are the only thing
+   * telling one application's traffic apart from another's.
+   */
+  private static Message syncMessageFromApp(String key, String type, long version, boolean degraded, String appName) {
+    Message msg = syncMessage(key, type, version, degraded);
+    msg.getMessageProperties().setHeader(HEADER_APP_NAME, appName);
+    return msg;
+  }
+
+  private CacheSyncListener isolatedListener(String appName) {
+    // Zero start-jitter, matching setUp: with the default 50 ms park the dispatcher
+    // would still be sleeping when awaitWorkerTasks() returns, so the assertion would
+    // race the task rather than observe its outcome.
+    CacheSyncProperties props = new CacheSyncProperties();
+    props.setWarmupJitterMs(0);
+    CacheSyncListener isolated = new CacheSyncListener(props, scheduler, handler(k -> "v"), appName);
+    isolated.init();
+    return isolated;
+  }
+
+  @Test
+  void handleSyncMessage_fromForeignApp_shouldAckAndLeaveCacheUntouched() throws IOException {
+    cache.put("key1", entry(5, false, 0));
+    CacheSyncListener isolated = isolatedListener("appA");
+
+    isolated.handleSyncMessage(channel, syncMessageFromApp("key1", SyncMessage.TYPE_INVALIDATE, 1L, false, "appB"));
+
+    // A valid message that simply is not ours: ack it, do not apply it.
+    verify(channel).basicAck(anyLong(), eq(false));
+    assertThat(cache.getIfPresent("key1")).isNotNull();
+  }
+
+  @Test
+  void handleSyncMessage_fromSameApp_shouldApply() throws IOException, InterruptedException {
+    cache.put("key1", entry(5, false, 0));
+    CacheSyncListener isolated = isolatedListener("appA");
+
+    isolated.handleSyncMessage(channel, syncMessageFromApp("key1", SyncMessage.TYPE_INVALIDATE, 0L, false, "appA"));
+
+    awaitWorkerTasks();
+    assertThat(cache.getIfPresent("key1")).isNull();
+  }
+
+  @Test
+  void handleSyncMessage_withoutAppNameHeader_shouldBeProcessedForRollingUpgrade() throws IOException, InterruptedException {
+    cache.put("key1", entry(5, false, 0));
+    CacheSyncListener isolated = isolatedListener("appA");
+
+    // A pre-0068 sender declares no appName; dropping it would break rolling upgrades.
+    isolated.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
+
+    awaitWorkerTasks();
+    assertThat(cache.getIfPresent("key1")).isNull();
+  }
+
+  @Test
+  void handleSyncMessage_whenLocalAppNameIsBlank_shouldProcessEveryApp() throws IOException, InterruptedException {
+    cache.put("key1", entry(5, false, 0));
+    CacheSyncListener legacy = isolatedListener(null);
+
+    legacy.handleSyncMessage(channel, syncMessageFromApp("key1", SyncMessage.TYPE_INVALIDATE, 0L, false, "appB"));
+
+    awaitWorkerTasks();
+    assertThat(cache.getIfPresent("key1")).isNull();
   }
 }

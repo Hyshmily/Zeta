@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.sync;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.HEADER_APP_NAME;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -26,6 +27,8 @@ import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
 /**
@@ -109,6 +112,30 @@ class CacheSyncPublisherTest {
   void broadcastLocalInvalidateAll_withKeys_shouldSendMessage() {
     publisher.broadcastLocalInvalidateAll(List.of("k1", "k2"));
     verify(rabbitTemplate).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that an identical invalidate-all payload is deduplicated within
+   * the 1s window (the dedup key is the exact JSON payload string).
+   */
+  @Test
+  void broadcastLocalInvalidateAll_identicalPayload_shouldDeduplicate() {
+    publisher.broadcastLocalInvalidateAll(List.of("k1", "k2"));
+    publisher.broadcastLocalInvalidateAll(List.of("k1", "k2"));
+    verify(rabbitTemplate, times(1)).send(anyString(), anyString(), any());
+  }
+
+  /**
+   * Verifies that two DISTINCT payloads of the same length are both sent: the
+   * dedup key is the full payload string, so equal-length batches can never
+   * collide and silently skip a batch invalidation (the old length+32-bit-hash
+   * key could).
+   */
+  @Test
+  void broadcastLocalInvalidateAll_distinctSameLengthPayloads_shouldBothSend() {
+    publisher.broadcastLocalInvalidateAll(List.of("k1", "k2")); // ["k1","k2"]
+    publisher.broadcastLocalInvalidateAll(List.of("k3", "k4")); // ["k3","k4"] — same length, different batch
+    verify(rabbitTemplate, times(2)).send(anyString(), anyString(), any());
   }
 
   /**
@@ -206,5 +233,70 @@ class CacheSyncPublisherTest {
   void getDedupCacheSize_afterBroadcast_shouldReturnPositive() {
     publisher.broadcastRefresh("key1", 1L, false);
     assertThat(publisher.getDedupCacheSize()).isPositive();
+  }
+
+  // ── Application stamping (ADR-0068 pattern on the sync plane) ──
+
+  @Test
+  void broadcastRefresh_withAppName_shouldStampAppNameHeader() {
+    CacheSyncPublisher stamped = stampedPublisher("appA");
+
+    stamped.broadcastRefresh("key1", 1L, false);
+
+    assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("appA");
+  }
+
+  @Test
+  void broadcastLocalInvalidate_withAppName_shouldStampAppNameHeader() {
+    CacheSyncPublisher stamped = stampedPublisher("appA");
+
+    stamped.broadcastLocalInvalidate("key1", 1L, false);
+
+    assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("appA");
+  }
+
+  @Test
+  void broadcastLocalInvalidateAll_withAppName_shouldStampAppNameHeader() {
+    CacheSyncPublisher stamped = stampedPublisher("appA");
+
+    stamped.broadcastLocalInvalidateAll(List.of("k1", "k2"));
+
+    // A foreign INVALIDATE_ALL is the most damaging message to receive: it flushes
+    // the receiver's whole L1, so this path must carry the application stamp.
+    assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("appA");
+  }
+
+  @Test
+  void broadcastAllLocalRules_withAppName_shouldStampAppNameHeader() {
+    CacheSyncPublisher stamped = stampedPublisher("appA");
+
+    stamped.broadcastAllLocalRules("[{\"keyPattern\":\"a*\",\"threshold\":10}]", 7L);
+
+    assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isEqualTo("appA");
+  }
+
+  @Test
+  void withoutAppName_shouldOmitTheHeaderForBackwardCompatibility() {
+    // The setUp publisher is built with the 3-arg constructor, i.e. no application name.
+    publisher.broadcastRefresh("key1", 1L, false);
+
+    assertThat((String) captureSentMessage().getMessageProperties().getHeader(HEADER_APP_NAME)).isNull();
+  }
+
+  private CacheSyncPublisher stampedPublisher(String appName) {
+    CacheSyncPublisher stamped = new CacheSyncPublisher(
+      rabbitTemplate,
+      properties,
+      mock(SnowflakeIdGenerator.class),
+      appName
+    );
+    stamped.init();
+    return stamped;
+  }
+
+  private Message captureSentMessage() {
+    ArgumentCaptor<Message> captor = ArgumentCaptor.forClass(Message.class);
+    verify(rabbitTemplate).send(anyString(), anyString(), captor.capture());
+    return captor.getValue();
   }
 }

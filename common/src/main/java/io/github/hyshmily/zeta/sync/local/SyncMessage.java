@@ -22,12 +22,12 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DE
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.util.AmqpMessageReader;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 
 /**
@@ -82,7 +82,6 @@ import org.springframework.amqp.core.Message;
  *                          {@link ZetaConstants.Version#VERSION_DEFAULT} (0) for all other types;
  *                          receivers call {@code RuleMatcher.syncRules(cacheKey, rulesVersion)}
  */
-@Slf4j
 @Internal
 public record SyncMessage(
   long id,
@@ -148,44 +147,12 @@ public record SyncMessage(
       return null;
     }
 
-    long version = toLong(msg, HEADER_VERSION, VERSION_DEFAULT, WARNED_VERSION_TYPE);
+    long version = AmqpMessageReader.readLongHeader(msg, HEADER_VERSION, VERSION_DEFAULT, WARNED_VERSION_TYPE);
     boolean isVersionDegraded =
       msg.getMessageProperties().getHeader(HEADER_IS_VERSION_DEGRADED) instanceof Boolean b && b;
-    long rulesVersion = toLong(msg, HEADER_RULES_VERSION, VERSION_DEFAULT, WARNED_RULES_VERSION_TYPE);
-    long id = toLong(msg, HEADER_MESSAGE_ID, 0L, WARNED_ID_TYPE);
+    long rulesVersion = AmqpMessageReader.readLongHeader(msg, HEADER_RULES_VERSION, VERSION_DEFAULT, WARNED_RULES_VERSION_TYPE);
+    long id = AmqpMessageReader.readLongHeader(msg, HEADER_MESSAGE_ID, 0L, WARNED_ID_TYPE);
 
     return new SyncMessage(id, cacheKey, type, version, isVersionDegraded, rulesVersion);
-  }
-
-  /**
-   * Reads a numeric AMQP message header, returning its {@code long} value.
-   *
-   * <p>Shares the same contract as {@link io.github.hyshmily.zeta.sync.worker.WorkerMessage#toLong}:
-   * non-numeric headers trigger a one-time warning via the {@code warnFlag},
-   * then fall back to {@code defaultValue}. When {@code warnFlag} is null,
-   * warnings are suppressed entirely.
-   *
-   * @param msg          the AMQP message containing the header
-   * @param header       the header name to read
-   * @param defaultValue the fallback value when the header is missing or non-numeric
-   * @param warnFlag     one-shot warning gate; null to suppress warnings
-   * @return the header's numeric value, or {@code defaultValue}
-   */
-  @SuppressWarnings("all")
-  private static long toLong(Message msg, String header, long defaultValue, AtomicBoolean warnFlag) {
-    Object value = msg.getMessageProperties().getHeader(header);
-    if (value instanceof Number n) {
-      return n.longValue();
-    }
-    if (value != null && warnFlag != null && warnFlag.compareAndSet(false, true)) {
-      log.warn(
-        "Non-numeric header '{}' (type {}), defaulting to {}. Value: {}",
-        header,
-        value.getClass().getName(),
-        defaultValue,
-        value
-      );
-    }
-    return defaultValue;
   }
 }

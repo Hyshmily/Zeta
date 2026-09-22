@@ -10,6 +10,7 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$/../.." vcs="Git" />
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/sandbox/linux" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../thefuck-upgrade" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../../project/CloudDine" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../../project/Heima Dianping" vcs="Git" />

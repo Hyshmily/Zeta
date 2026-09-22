@@ -27,6 +27,7 @@ import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.sharding.HealthView;
+import io.github.hyshmily.zeta.model.EntryDraft;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -165,7 +166,7 @@ class DecisionValidityDemotionTest {
   @Test
   void coolEntry_neverDemoted() {
     mockWorker("w1", false, 5L);
-    CacheEntry cool = hotEntry("w1", 5L, 60_000, 15_000).withKeyState(KeyState.COOL);
+    CacheEntry cool = EntryDraft.of(hotEntry("w1", 5L, 60_000, 15_000)).keyState(KeyState.COOL).build();
     caffeineCache.put("k", cool);
 
     ExpireManagerImpl em = expireManager();

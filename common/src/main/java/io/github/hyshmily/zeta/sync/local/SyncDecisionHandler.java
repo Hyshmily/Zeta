@@ -23,7 +23,7 @@ import io.github.hyshmily.zeta.Internal;
  *
  * <p>Implement this interface and expose it as a Spring {@code @Bean} to fully
  * replace the default cache-sync processing logic. The default implementation
- * ({@link DefaultSyncDecisionHandler}) performs Redis-backed value loading,
+ * ({@link DefaultSyncDecisionHandler}) performs loader-backed value loading,
  * version-guarded invalidation, batch processing, and rule syncing.
  *
  * <p>Use {@code @ConditionalOnMissingBean(SyncDecisionHandler.class)} on your
@@ -39,6 +39,28 @@ public interface SyncDecisionHandler {
    *           must not be null
    */
   void handleRefresh(SyncMessage sm);
+
+  /**
+   * Process a REFRESH sync message with the ordered dispatcher's batch-end signal
+   * (ADR-0071, borrowed from LMAX Disruptor's {@code BatchEventProcessor}). The default
+   * implementation ignores the signal and delegates to {@link #handleRefresh(SyncMessage)},
+   * so existing custom implementations keep their exact behaviour.
+   *
+   * <p>The default {@link DefaultSyncDecisionHandler} uses it for I/O amortization: when
+   * further tasks for the same key follow in the current dispatch batch, a later REFRESH
+   * will reload the authoritative value anyway, so the non-final message is skipped without
+   * a Redis load.
+   *
+   * @param sm         the sync message containing the key and version to refresh;
+   *                   must not be null
+   * @param endOfBatch {@code true} if this message is the last task of its key's currently
+   *                   granted dispatch batch ({@code false} while further tasks of the same
+   *                   batch follow); best-effort — a message may be granted alone and always
+   *                   see {@code true} in that case
+   */
+  default void handleRefresh(SyncMessage sm, boolean endOfBatch) {
+    handleRefresh(sm);
+  }
 
   /**
    * Process an INVALIDATE sync message from a peer instance.

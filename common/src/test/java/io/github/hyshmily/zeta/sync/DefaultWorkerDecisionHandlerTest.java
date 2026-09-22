@@ -26,6 +26,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.codec.Lz4CacheCompressor;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
@@ -35,6 +36,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHook;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
+import io.github.hyshmily.zeta.model.EntryDraft;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -42,6 +44,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 
@@ -169,6 +172,94 @@ class DefaultWorkerDecisionHandlerTest {
   }
 
   /**
+   * Verifies that a clean Redis GET miss (loader returns null, no exception)
+   * is NOT recorded as an SRE failure: onFailed() would deflate the success
+   * ratio and make the limiter probabilistically drop legitimate HOT
+   * promotions while Redis is perfectly healthy.
+   */
+  @Test
+  void handleHot_cleanRedisMiss_shouldNotRecordSreFailure() {
+    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    when(limiter.tryAcquire()).thenReturn(true);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, limiter, null, List.of(hook));
+
+    handler.handleHot(workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
+
+    verify(hook).onHotSkipped(eq("missing"), any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(limiter, never()).onFailed();
+    verify(limiter, never()).onSuccess();
+  }
+
+  /**
+   * Verifies that a REAL Redis error (the loader throws) IS recorded as an SRE
+   * failure when the promotion is aborted (no L1 fallback value exists) — only
+   * genuine outages may drive the adaptive throttle.
+   */
+  @Test
+  void handleHot_redisErrorAbortsPromotion_shouldRecordSreFailure() {
+    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    when(limiter.tryAcquire()).thenReturn(true);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    CacheLoader failingLoader = k -> {
+      throw new RuntimeException("Redis down");
+    };
+    handler = new DefaultWorkerDecisionHandler(cache, failingLoader, expireManager, limiter, null, List.of(hook));
+
+    handler.handleHot(workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
+
+    verify(hook).onHotSkipped(eq("missing"), any(), eq(HotSkipReason.VALUE_NOT_FOUND));
+    verify(limiter).onFailed();
+    verify(limiter, never()).onSuccess();
+  }
+
+  /**
+   * Verifies the afterHotPromotion gate (F4): when the inner DCL guard rejects
+   * the promotion as stale (a newer decision landed during the Redis fetch),
+   * neither the hook nor the SRE success may fire. The loader bumps the
+   * entry's decisionVersion between the outer pre-check and the atomic
+   * compute, deterministically reproducing the stale-rejection interleaving.
+   */
+  @Test
+  void handleHot_innerGuardRejectsPromotion_shouldNotFireAfterHotPromotionHook() {
+    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    when(limiter.tryAcquire()).thenReturn(true);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    cache.put("key1", entry(1, KeyState.NORMAL));
+    CacheLoader bumpingLoader = k -> {
+      // Simulates a concurrent newer decision landing during the Redis fetch.
+      cache.put("key1", entry(10, KeyState.NORMAL));
+      return "fresh";
+    };
+    handler = new DefaultWorkerDecisionHandler(cache, bumpingLoader, expireManager, limiter, null, List.of(hook));
+
+    handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+
+    verify(hook, never()).afterHotPromotion(any(), any(), any());
+    verify(limiter, never()).onSuccess();
+    // The newer decision is preserved — nothing was overwritten.
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getDecisionVersion()).isEqualTo(10L);
+  }
+
+  /**
+   * Verifies that the afterHotPromotion hook receives the compute's own return
+   * value — the promoted entry carrying the new decision — rather than a racy
+   * getIfPresent re-read that could observe a foreign entry.
+   */
+  @Test
+  void handleHot_shouldPassPromotedEntryFromComputeToHook() {
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+
+    handler.handleHot(workerMessage("newkey", WorkerMessage.TYPE_HOT, 2L));
+
+    ArgumentCaptor<CacheEntry> entryCaptor = ArgumentCaptor.forClass(CacheEntry.class);
+    verify(hook).afterHotPromotion(eq("newkey"), any(), entryCaptor.capture());
+    assertThat(entryCaptor.getValue().getDecisionVersion()).isEqualTo(2L);
+    assertThat(entryCaptor.getValue().getKeyState()).isEqualTo(KeyState.HOT);
+  }
+
+  /**
    * Verifies the Redis-outage fallback (ADR-0008): when the loader fails and the
    * L1 entry is a normal (non-degraded) entry, its value is used for promotion.
    */
@@ -185,6 +276,39 @@ class DefaultWorkerDecisionHandlerTest {
     assertThat(promoted).isNotNull();
     assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
     assertThat(promoted.getValue()).isEqualTo("v");
+  }
+
+  /**
+   * Regression guard against double compression: the L1 fallback value arrives
+   * in its ALREADY-wrapped stored form (the zeta envelope — flag byte + LZ4
+   * payload), so the promotion must store it as-is. Re-wrapping it would
+   * double-compress the entry: the next read unwraps exactly one layer and
+   * serves the inner zeta {@code byte[]} to the application instead of the
+   * original value.
+   */
+  @Test
+  void handleHot_redisDown_shouldNotReWrapStoredFallbackValue() {
+    // The setUp ExpireManagerImpl uses CacheCompressor.NONE; the envelope form
+    // only exists under the real LZ4 codec (ADR-0015).
+    ExpireManagerImpl lz4Manager =
+        new ExpireManagerImpl(cache, Runnable::run, new ZetaProperties(), 10, new Lz4CacheCompressor());
+    String original = "zeta-fallback-value-".repeat(60); // ≥256 bytes — wrapped, not stored verbatim
+    Object wrapped = lz4Manager.wrapValue(original);
+    assertThat(wrapped).isInstanceOf(byte[].class);
+    CacheEntry l1Entry = EntryDraft.of(entry(1, KeyState.NORMAL)).value(wrapped).build();
+    cache.put("key1", l1Entry);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, lz4Manager, null, null, List.of(hook));
+
+    handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+
+    verify(hook).afterHotPromotion(eq("key1"), any(), any());
+    CacheEntry promoted = (CacheEntry) cache.getIfPresent("key1");
+    assertThat(promoted).isNotNull();
+    assertThat(promoted.getKeyState()).isEqualTo(KeyState.HOT);
+    // The stored value must be the exact wrapped instance the L1 held —
+    // byte-for-byte, no second envelope.
+    assertThat(promoted.getValue()).isSameAs(wrapped);
   }
 
   /**
@@ -208,7 +332,7 @@ class DefaultWorkerDecisionHandlerTest {
    */
   @Test
   void handleHot_redisDown_shouldSkipNullValueSentinel() {
-    CacheEntry nullEntry = entry(1, KeyState.NORMAL).toBuilder().value(NullValue.INSTANCE).build();
+    CacheEntry nullEntry = EntryDraft.of(entry(1, KeyState.NORMAL)).value(NullValue.INSTANCE).build();
     cache.put("key1", nullEntry);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
     handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));
@@ -270,6 +394,60 @@ class DefaultWorkerDecisionHandlerTest {
     handler.handleCool(workerMessage("missing", WorkerMessage.TYPE_COOL, 1L));
 
     verify(hook).onCoolSkipped(eq("missing"), any());
+  }
+
+  /**
+   * ADR-0066: a hard-expired entry is dead — the next read invalidates and reloads
+   * it (ADR-0034, the hard TTL is the absolute bound). Cooling it must NOT rewrite
+   * the stale value with fresh normal TTLs (which would resurrect the data for a
+   * full normal-TTL lifetime); the entry stays untouched and expires on schedule.
+   */
+  @Test
+  void handleCool_logicallyExpiredEntry_shouldNotResurrect() {
+    CacheEntry expired = CacheEntry.builder()
+      .value("stale")
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(5)
+      .decisionNodeId("node")
+      .decisionEpoch(1L)
+      .hardTtlMs(300_000)
+      // Epoch start (ms wall clock) — long past, so isLogicallyExpired is true.
+      .hardExpireAtMs(1L)
+      .softTtlMs(30_000)
+      .softExpireAtMs(1L)
+      .keyState(KeyState.HOT)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(30_000)
+      .build();
+    cache.put("key1", expired);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+
+    handler.handleCool(workerMessage("key1", WorkerMessage.TYPE_COOL, 6L));
+
+    CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
+    assertThat(after).isSameAs(expired);
+    assertThat(after.getKeyState()).isEqualTo(KeyState.HOT);
+    verify(hook).onCoolSkipped(eq("key1"), any());
+    verify(hook, never()).afterCoolDowngrade(eq("key1"), any(), any());
+  }
+
+  /**
+   * The expiry guard must not block a live entry: a valid HOT entry still cools
+   * normally (regression guard for the ADR-0066 guard placement).
+   */
+  @Test
+  void handleCool_liveEntry_shouldStillCool() {
+    cache.put("key1", entry(5, KeyState.HOT));
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+
+    handler.handleCool(workerMessage("key1", WorkerMessage.TYPE_COOL, 6L));
+
+    CacheEntry ce = (CacheEntry) cache.getIfPresent("key1");
+    assertThat(ce.getKeyState()).isEqualTo(KeyState.COOL);
+    verify(hook).afterCoolDowngrade(eq("key1"), any(), any());
   }
 
   @Test

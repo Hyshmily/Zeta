@@ -34,6 +34,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
+import io.github.hyshmily.zeta.util.TimeSource;
 import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -42,6 +43,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Message;
@@ -63,7 +65,7 @@ class WorkerListenerTest {
   void setUp() throws IOException {
     cache = Caffeine.newBuilder().maximumSize(100).build();
     WorkerListenerProperties properties = new WorkerListenerProperties();
-    properties.setWarmupJitterMs(0);
+    properties.setBroadcastJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
     expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
@@ -73,16 +75,34 @@ class WorkerListenerTest {
     channel = mock(Channel.class);
   }
 
+  @AfterEach
+  void resetClock() {
+    // Defensive: clear any leaked TimeSource offset so a prior test class cannot skew this
+    // listener's absolute-expiry arithmetic. The real failure here was the wrong-executor wait
+    // in awaitWorkerTasks, but resetting the static clock hook is cheap insurance.
+    TimeSource.setTimeOffsetForTest(0, 0);
+  }
+
   private WorkerDecisionHandler handler(CacheLoader loader, SreRateLimiterImpl limiter) {
     return new DefaultWorkerDecisionHandler(cache, loader, expireManager, limiter, null, Collections.emptyList());
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
+    awaitWorkerTasks(scheduler);
+  }
+
+  /**
+   * Waits for two tasks to drain on the given scheduler. The appName-isolated tests build their
+   * listener on a dedicated {@code sched} executor, so they must wait on {@code sched} — not the
+   * shared {@code scheduler} field — otherwise the wait returns before the listener's dispatcher
+   * task (running on {@code sched}) has actually mutated the cache (race → NPE on a null entry).
+   */
+  private void awaitWorkerTasks(ScheduledExecutorService sched) throws InterruptedException {
     CountDownLatch phase1 = new CountDownLatch(1);
     CountDownLatch phase2 = new CountDownLatch(1);
-    scheduler.execute(() -> phase1.countDown());
+    sched.execute(() -> phase1.countDown());
     assertThat(phase1.await(5, TimeUnit.SECONDS)).isTrue();
-    scheduler.execute(() -> phase2.countDown());
+    sched.execute(() -> phase2.countDown());
     assertThat(phase2.await(5, TimeUnit.SECONDS)).isTrue();
   }
 
@@ -148,7 +168,7 @@ class WorkerListenerTest {
     SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
     when(limiter.tryAcquire()).thenReturn(false);
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setWarmupJitterMs(0);
+    props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     WorkerDecisionHandler h = handler(k -> "v", limiter);
     WorkerListener throttled = new WorkerListener(props, sched, h);
@@ -176,7 +196,7 @@ class WorkerListenerTest {
   @Test
   void handleWorkerMessage_hot_withNullRedisValueNoDegradedEntry_shouldReturn() throws IOException {
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setWarmupJitterMs(0);
+    props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     WorkerDecisionHandler h = handler(k -> null, null);
     WorkerListener nullLoader = new WorkerListener(props, sched, h);
@@ -211,7 +231,7 @@ class WorkerListenerTest {
     );
 
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setWarmupJitterMs(0);
+    props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     WorkerDecisionHandler h = handler(
       k -> {
@@ -282,13 +302,18 @@ class WorkerListenerTest {
   void handleWorkerMessage_cool_onDegradedEntry_shouldDowngrade() throws IOException, InterruptedException {
     cache.put(
       "key1",
-      entry(-1, true, 0)
-        .toBuilder()
-        .keyState(KeyState.NORMAL)
+      CacheEntry.builder()
+        .value("v")
+        .dataVersion(-1)
+        .isVersionDegraded(true)
+        .decisionVersion(0)
         .hardTtlMs(300_000)
         .hardExpireAtMs(Long.MAX_VALUE)
         .softTtlMs(30_000)
         .softExpireAtMs(System.currentTimeMillis() + 30_000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(300_000)
+        .normalSoftTtlMs(30_000)
         .build()
     );
     listener.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_COOL, 1L));
@@ -341,7 +366,7 @@ class WorkerListenerTest {
     SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
     when(limiter.tryAcquire()).thenReturn(true);
     WorkerListenerProperties props = new WorkerListenerProperties();
-    props.setWarmupJitterMs(0);
+    props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     WorkerDecisionHandler h = handler(k -> "fresh", limiter);
     WorkerListener throttled = new WorkerListener(props, sched, h);
@@ -405,6 +430,73 @@ class WorkerListenerTest {
       assertThat(ce.getDecisionNodeId()).isEqualTo("worker-B");
       assertThat(ce.getDecisionEpoch()).isEqualTo(5L);
     });
+  }
+
+  // ── ADR-0068: appName shared-broker isolation ──
+
+  /**
+   * Verifies that a decision carrying a foreign appName header is acknowledged but
+   * never dispatched (no cache mutation) when the listener has a configured appName.
+   */
+  @Test
+  void handleWorkerMessage_foreignAppName_shouldAckButNotApply() throws IOException, InterruptedException {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setBroadcastJitterMs(0);
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v", null), "appA");
+    isolated.init();
+
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("key1", WorkerMessage.TYPE_HOT, 2L, "appB"));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    awaitWorkerTasks(sched);
+    assertThat(cache.getIfPresent("key1")).isNull();
+    sched.shutdown();
+  }
+
+  /**
+   * Verifies that a decision whose appName header matches the listener's appName is
+   * applied normally.
+   */
+  @Test
+  void handleWorkerMessage_matchingAppName_shouldApply() throws IOException, InterruptedException {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setBroadcastJitterMs(0);
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v", null), "appA");
+    isolated.init();
+
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("key1", WorkerMessage.TYPE_HOT, 2L, "appA"));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    awaitWorkerTasks(sched);
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
+    sched.shutdown();
+  }
+
+  /**
+   * Verifies rolling-upgrade compatibility: a decision without the appName header
+   * (pre-0068 Worker) is processed even when the listener has a configured appName.
+   */
+  @Test
+  void handleWorkerMessage_absentAppNameHeader_shouldApply() throws IOException, InterruptedException {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setBroadcastJitterMs(0);
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v", null), "appA");
+    isolated.init();
+
+    isolated.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
+    verify(channel).basicAck(anyLong(), anyBoolean());
+    awaitWorkerTasks(sched);
+    assertThat(((CacheEntry) cache.getIfPresent("key1")).getKeyState()).isEqualTo(KeyState.HOT);
+    sched.shutdown();
+  }
+
+  private static Message workerMessageWithAppName(String key, String type, long version, String appName) {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_TYPE, type);
+    props.setHeader(HEADER_VERSION, version);
+    props.setHeader(HEADER_APP_NAME, appName);
+    return new Message(key.getBytes(StandardCharsets.UTF_8), props);
   }
 
   private static Message workerMessageWithNodeIdEpoch(
