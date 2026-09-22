@@ -18,9 +18,9 @@ package io.github.hyshmily.zeta.util.executor;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.exception.ZetaExceptionHandler;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
+import org.springframework.util.Assert;
 
 /**
  * A {@link ScheduledThreadPoolExecutor} whose periodic tasks are exception-safe and never overlap.
@@ -111,11 +111,9 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     long period,
     @NonNull TimeUnit unit
   ) {
-    if (period <= 0) {
-      // Matches JDK validation. A non-positive period would otherwise produce a busy
-      // self-rescheduling loop inside the chain.
-      throw new IllegalArgumentException("period must be greater than zero");
-    }
+    // Matches JDK validation. A non-positive period would otherwise produce a busy
+    // self-rescheduling loop inside the chain.
+    Assert.isTrue(period > 0, "period must be greater than zero");
     return new SafePeriodicTask(command, unit.toNanos(period), true).start(initialDelay, unit);
   }
 
@@ -127,11 +125,9 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     long delay,
     @NonNull TimeUnit unit
   ) {
-    if (delay <= 0) {
-      // Matches JDK validation. A non-positive delay would otherwise produce a busy
-      // self-rescheduling loop inside the chain.
-      throw new IllegalArgumentException("delay must be greater than zero");
-    }
+    // Matches JDK validation. A non-positive delay would otherwise produce a busy
+    // self-rescheduling loop inside the chain.
+    Assert.isTrue(delay > 0, "delay must be greater than zero");
     return new SafePeriodicTask(command, unit.toNanos(delay), false).start(initialDelay, unit);
   }
 
@@ -177,13 +173,13 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
   // (the ScheduledFuture object itself is thread-safe by JDK contract — we never mutate its
   // internals), and `nextRunTimeNanos` is read/written exclusively along the chain's serialized
   // execution path where the schedule() submission establishes the happens-before edge.
-  @SuppressWarnings({"java:S3077", "java:S3078"})
+  @SuppressWarnings({ "java:S3077", "java:S3078" })
   private final class SafePeriodicTask implements ScheduledFuture<Void>, Runnable {
 
     private final Runnable command;
     private final long gapNanos;
     private final boolean rateMode;
-    private final AtomicBoolean cancelled = new AtomicBoolean(false);
+    private volatile boolean cancelled;
     /**
      * Absolute slot of the next run, in {@link System#nanoTime()} scale. Only meaningful in rate
      * mode. It is read and written exclusively along the chain's own serialized execution path
@@ -221,7 +217,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
     // catching Throwable is deliberate: an Error must not kill the cadence of
     // heartbeats/window-slides/flushes, and the chain link must never leak an exception into the worker loop
     public void run() {
-      if (cancelled.get()) {
+      if (cancelled) {
         return;
       }
       try {
@@ -251,23 +247,27 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
      * The chain ends silently when the executor shuts down.
      */
     private void scheduleNext() {
-      if (cancelled.get() || isShutdown()) {
-        unregister();
-        return;
-      }
       long delayNanos;
       if (rateMode) {
+        long now = System.nanoTime();
         nextRunTimeNanos += gapNanos;
-        delayNanos = nextRunTimeNanos - System.nanoTime();
+        delayNanos = nextRunTimeNanos - now;
         if (delayNanos <= 0) {
           // The previous run overshot its slot. Skip the missed tick (no back-to-back catch-up
           // burst) and re-anchor the cadence to the next future slot.
-          nextRunTimeNanos = System.nanoTime() + gapNanos;
+          nextRunTimeNanos = now + gapNanos;
           delayNanos = gapNanos;
         }
       } else {
-        // Fixed delay: the gap between the end of one run and the start of the next.
         delayNanos = gapNanos;
+      }
+      scheduleLink(delayNanos);
+    }
+
+    private void scheduleLink(long delayNanos) {
+      if (cancelled || isShutdown()) {
+        unregister();
+        return;
       }
       try {
         current = schedule(this, delayNanos, TimeUnit.NANOSECONDS);
@@ -284,16 +284,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
      * @param explicitDelayNanos the delay for this link
      */
     private void scheduleNext(long explicitDelayNanos) {
-      if (cancelled.get() || isShutdown()) {
-        unregister();
-        return;
-      }
-      try {
-        current = schedule(this, explicitDelayNanos, TimeUnit.NANOSECONDS);
-      } catch (RejectedExecutionException e) {
-        // Executor is shutting down; the chain ends silently.
-        unregister();
-      }
+      scheduleLink(explicitDelayNanos);
     }
 
     /**
@@ -306,7 +297,7 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
 
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
-      cancelled.set(true);
+      cancelled = true;
       unregister();
       ScheduledFuture<?> f = current;
       if (f != null) {
@@ -321,12 +312,12 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
 
     @Override
     public boolean isCancelled() {
-      return cancelled.get();
+      return cancelled;
     }
 
     @Override
     public boolean isDone() {
-      return cancelled.get() || (current != null && current.isDone());
+      return cancelled || (current != null && current.isDone());
     }
 
     @Override

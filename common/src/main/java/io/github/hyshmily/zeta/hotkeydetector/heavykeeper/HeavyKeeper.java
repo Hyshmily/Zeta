@@ -19,6 +19,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.FastRangeUtil;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.util.Assert;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
@@ -53,7 +55,7 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <p><b>Concurrency model:</b> Thread-safe with three tiers:
  * <ol>
- *   <li>Fine-grained striped synchronization (up to 4096 stripes)
+ *   <li>Fine-grained striped synchronization (up to 2048 stripes)
  *       on individual sketch buckets for low-contention sketch updates.
  *       {@code synchronized(Object[])} was retained over {@link ReentrantLock}
  *       and {@link java.util.concurrent.locks.StampedLock} after a
@@ -63,7 +65,7 @@ import lombok.extern.slf4j.Slf4j;
  *       No lock-striping replacement yields a measurable win, so the simpler
  *       monitor was kept.</li>
  *   <li>Lock-free TopK membership updates: existing hot keys are refreshed
- *       via {@link AtomicLong#accumulateAndGet(long, java.util.function.LongBinaryOperator)}
+ *       via {@link AtomicInteger#accumulateAndGet(int, java.util.function.IntBinaryOperator)}
  *       with {@link Math#max} on {@link Node#count}. Under no contention (the
  *       common case for most keys) this is a single CAS. Under 16-thread
  *       same-key contention this is <b>not</b> as fast as the previous
@@ -71,7 +73,7 @@ import lombok.extern.slf4j.Slf4j;
  *       (which used {@code Striped64} cells), but it is the simplest
  *       primitive that supports both atomic max-raise <i>and</i> atomic
  *       halving during periodic decay — the {@code LongAccumulator} had no
- *       {@link java.util.concurrent.atomic.AtomicLong#compareAndSet compareAndSet}
+ *       {@link AtomicInteger#compareAndSet compareAndSet}
  *       equivalent, making the {@code reset()+accumulate()} pattern in
  *       {@link #decayMembership} vulnerable to concurrent-count loss.</li>
  *   <li>A short, non-fair {@link ReentrantLock} ({@link #admissionLock}) guards
@@ -95,22 +97,36 @@ import lombok.extern.slf4j.Slf4j;
  *   <li>Decay uses a constant per-unit survival probability with a Binomial
  *       batch of {@code cur} trials, replacing the previous {@code decay^cur}
  *       formula that made high-count slots effectively immortal.</li>
- *   <li>Per-key {@link SlotLoc} cache ({@link #locCache}) memoises the
- *       Murmur3 fingerprint and pre-computed bucket indices per key, eliminating
- *       the hash + UTF-8 encode + {@code floorMod} cost on the hot path for
- *       repeatedly-accessed keys.</li>
+ *   <li>Per-key fingerprint resolution: TopK members carry their Murmur3
+ *       fingerprint on the {@link Node} itself (captured once at admission), so
+ *       a member add resolves its fingerprint from the same {@code members}
+ *       lookup the admission decision needs; non-members go through the
+ *       size-bounded {@link #nonMemberLocCache}, eliminating the hash + UTF-8
+ *       encode cost on repeatedly-flushed keys.</li>
  *   <li>Per-slot {@link #slotSums} array maintains the running window sum in
  *       O(1), removing the {@code windowCount}-length loop from the locked
  *       sketch-update path.</li>
- *   <li>Lock stripes raised from 256 to up to 4096 to further
- *       reduceCollision contention on the sketch.</li>
+ *   <li>Lock stripes scaled with the sketch size and capped at 2048 (down
+ *       from the earlier 4096 cap — see the ADR-0020 amendment) to bound
+ *       monitor allocation while keeping collision contention low.</li>
  *   <li>Window ring buffer flattened from {@code long[][] windows} to a single
- *       1D {@code long[] windows} (indexed {@code slot * windowCount + w}).
+ *       1D {@code int[] windows} (indexed {@code slot * windowCount + w}).
  *       One allocation, contiguous cache lines, no per-slot array header
- *       pointer-chasing.</li>
- *   <li>{@link AtomicLong} for {@link Node#count} — see "Concurrency model"
- *       above. Supports both atomic max-raise on the hot path and atomic
- *       halving during decay via CAS.</li>
+ *       pointer-chasing. The element type has since been narrowed from
+ *       {@code long} to {@code int} (v1.1.56, with the width-matched counters) —
+ *       the sketch's saturation guard caps every slot at
+ *       {@code Integer.MAX_VALUE}, so the wider type protected nothing. Note the
+ *       consequence for the strip lock: a non-volatile {@code int} write is
+ *       already atomic under the JMM, so the lock guards the <em>compound</em>
+ *       update of this array with {@code slotSums} and {@code fingerprints},
+ *       not element tearing (see the ADR-0006/0020 correction).</li>
+ *   <li>{@link AtomicInteger} for {@link Node#count} — the final step of the
+ *       {@code LongAccumulator → AtomicLong → AtomicInteger} evolution (see
+ *       "Concurrency model" above and ADR-0020). Sketch counts are
+ *       {@code int}-capped (see the {@link #windows} saturation guard), so a
+ *       member count can never exceed the {@code int} range; the narrower
+ *       counter halves its memory. Supports both atomic max-raise on the hot
+ *       path and atomic halving during decay via CAS.</li>
  * </ul>
  *
  * @see <a href="../../../../../../../docs/adr/0014-heavykeeper-concurrency-choices.md">ADR-0014: HeavyKeeper concurrency data-structure choices</a>
@@ -152,7 +168,10 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    */
   private static final long DIRECT_DECAY_THRESHOLD = 1 << 20;
 
-  /** Log every Nth "Failed to offer expelled key" warning to avoid log flooding. */
+  /**
+   * Log every Nth "Failed to offer" warning (admission-evicted and
+   * decay-dropped keys share this counter) to avoid log flooding.
+   */
   private static final int EXPELLED_LOG_INTERVAL = 1000;
 
   /**
@@ -225,27 +244,18 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   private final int widthMask;
 
   /**
-   * Per-key fingerprint cache, sized to match the TopK membership set exactly.
-   * Entries are added on TopK admission and removed on eviction or decay drop,
-   * so the cache size never exceeds {@link #k} (default 100). Non-member keys
-   * compute their fingerprint on the fly in {@link #locate} and are never cached
-   * here.
-   */
-  private final ConcurrentHashMap<String, SlotLoc> locCache;
-
-  /**
    * Size-bounded cache of fingerprints for recently seen <em>non-member</em>
-   * keys. {@link #locate} recomputed the Murmur3 fingerprint on every flush
-   * for every non-member key (the TopK membership is only ≤ k, so the vast
-   * majority of the key space is never cached); a high-cardinality workload
-   * paid the hash + UTF-8 encode cost repeatedly per flush cycle. This cache
-   * memoises those fingerprints with LRU eviction and no TTL — the size bound
-   * is the only lifecycle, so no background expiry thread is needed.
+   * keys. Without it, the Murmur3 fingerprint would be recomputed on every
+   * flush for every non-member key (the TopK membership is only ≤ k, so the
+   * vast majority of the key space is never a member); a high-cardinality
+   * workload paid the hash + UTF-8 encode cost repeatedly per flush cycle.
+   * This cache memoises those fingerprints with LRU eviction and no TTL — the
+   * size bound is the only lifecycle, so no background expiry thread is needed.
    *
-   * <p>Cache invalidation semantics are deliberately disjoint from
-   * {@link #locCache}: a {@link SlotLoc} is a pure function of the key
-   * (deterministic fingerprint), so a stale non-member entry is always
-   * correct — member admission/eviction only ever touches {@link #locCache}.
+   * <p>TopK members never enter this cache — {@link #locateFingerprint}
+   * resolves their fingerprint from the {@link Node} first. A {@link SlotLoc}
+   * is a pure function of the key (deterministic fingerprint), so even a
+   * stale non-member entry is always correct and needs no invalidation.
    */
   private final Cache<String, SlotLoc> nonMemberLocCache = Caffeine.newBuilder()
     .maximumSize(NON_MEMBER_LOC_CACHE_SIZE)
@@ -253,7 +263,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
   /**
    * Authoritative TopK membership map. Key → {@link Node} with an
-   * {@link AtomicLong} count supporting atomic max-raise on the hot path
+   * {@link AtomicInteger} count supporting atomic max-raise on the hot path
    * and atomic halving during decay. Size is bounded by {@link #k} and
    * enforced by {@link #admissionLock}. Reads and writes of the count on
    * existing members are lock-free.
@@ -342,17 +352,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     int windowCount,
     boolean autoAlignWidth
   ) {
-    if (k <= 0) throw new IllegalArgumentException("k must be > 0, but got: " + k);
-    if (width <= 0) throw new IllegalArgumentException("width must be > 0, but got: " + width);
-    if (depth <= 0) throw new IllegalArgumentException("depth must be > 0, but got: " + depth);
-    if (decay < 0.0 || decay > 1.0) throw new IllegalArgumentException(
-      "decay must be in [0.0, 1.0], but got: " + decay
-    );
-    if (minCount < 0) throw new IllegalArgumentException("minCount must be >= 0, but got: " + minCount);
-    if (windowCount < 2) throw new IllegalArgumentException("windowCount must be >= 2, but got: " + windowCount);
-    if (expelledQueueCapacity <= 0) {
-      throw new IllegalArgumentException("expelledQueueCapacity must be > 0, but got: " + expelledQueueCapacity);
-    }
+    Assert.isTrue(k > 0, "k must be > 0, but got: " + k);
+    Assert.isTrue(width > 0, "width must be > 0, but got: " + width);
+    Assert.isTrue(depth > 0, "depth must be > 0, but got: " + depth);
+    Assert.isTrue(decay >= 0.0 && decay <= 1.0, "decay must be in [0.0, 1.0], but got: " + decay);
+    Assert.isTrue(minCount >= 0, "minCount must be >= 0, but got: " + minCount);
+    Assert.isTrue(windowCount >= 2, "windowCount must be >= 2, but got: " + windowCount);
+    Assert.isTrue(expelledQueueCapacity > 0, "expelledQueueCapacity must be > 0, but got: " + expelledQueueCapacity);
 
     if (autoAlignWidth && (width & (width - 1)) != 0) {
       int original = width;
@@ -392,14 +398,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     this.widthIsPow2 = width > 0 && (width & (width - 1)) == 0;
     if (!widthIsPow2) {
       log.warn(
-        "Width {} is not a power of two; bucket index will use slow modulo. " +
-          "Recommended: use a power of two for optimal performance.",
+        "Width {} is not a power of two; bucket index will use the FastRange mapping "
+          + "(RocksDB fastrange.h). Recommended: use a power of two for bitmask performance.",
         width
       );
     }
     this.widthMask = width - 1;
 
-    this.locCache = new ConcurrentHashMap<>();
     this.members = new ConcurrentHashMap<>(k);
     this.admissionLock = new ReentrantLock();
     this.expelledQueue = new ArrayBlockingQueue<>(expelledQueueCapacity);
@@ -408,11 +413,15 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   /**
    * Compute the bucket index for row {@code i} given the key fingerprint,
    * using a fast bit-mask when {@link #width} is a power of two and a
-   * sign-stripped modulo otherwise (cheaper than {@link Math#floorMod}).
+   * FastRange mapping otherwise (adapted from RocksDB
+   * {@code util/fastrange.h}): the high half of the {@code width × uint32}
+   * product consumes the full 32-bit fingerprint entropy, where the former
+   * sign-stripped modulo only saw 31 bits — and replaces the division with a
+   * single multiplication.
    */
-  private int bucketIndex(long itemFingerprint, int row) {
-    int hash = (int) (itemFingerprint ^ (row * 0x9e3779b97f4a7c15L));
-    return widthIsPow2 ? (hash & widthMask) : ((hash & 0x7FFFFFFF) % width);
+  private int bucketIndex(int itemFingerprint, int row) {
+    int hash = itemFingerprint ^ (int) (row * 0x9e3779b97f4a7c15L);
+    return widthIsPow2 ? (hash & widthMask) : FastRangeUtil.fastRange32(hash, width);
   }
 
   /** 64-bit Murmur3 fingerprint (lower half of 128-bit hash) for sketch slot indexing. */
@@ -420,28 +429,23 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     return Hashing.murmur3_128().hashString(key, StandardCharsets.UTF_8).asLong();
   }
 
-  /** Returns cached {@link SlotLoc} for TopK members; computes on the fly for non-members. */
-  private SlotLoc locate(String key) {
-    SlotLoc loc = locCache.get(key);
-    if (loc != null) {
-      return loc;
-    }
-    loc = nonMemberLocCache.getIfPresent(key);
-    if (loc != null) {
-      return loc;
-    }
-    loc = new SlotLoc((int) fingerprint(key));
-    nonMemberLocCache.put(key, loc);
-    return loc;
-  }
-
   /**
-   * Compute and cache the {@link SlotLoc} for a key that has just been
-   * admitted into the TopK membership set. Must be called under
-   * {@link #admissionLock} alongside {@link #members} mutations.
+   * Resolve the Murmur3 fingerprint for {@code key}: TopK members carry theirs
+   * on the {@link Node} (captured once at admission), so the {@code members}
+   * lookup doubles as the fingerprint source; non-members go through the
+   * bounded Caffeine cache. Caffeine's get(key, mappingFunction) is atomic per
+   * key, so concurrent first flushes of the same key run the Murmur3
+   * fingerprint computation at most once instead of once per racing thread
+   * (the getIfPresent+put pair let both threads miss and both compute).
+   * SlotLoc is a pure function of the key, so a re-computation under an
+   * internal Caffeine race is harmless.
    */
-  private void cacheLoc(String key) {
-    locCache.put(key, new SlotLoc((int) fingerprint(key)));
+  private int locateFingerprint(String key) {
+    Node member = members.get(key);
+    if (member != null) {
+      return member.fp;
+    }
+    return nonMemberLocCache.get(key, k -> new SlotLoc((int) fingerprint(k))).fp();
   }
 
   /**
@@ -452,11 +456,30 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * for the Count-Min Sketch update and to {@link #admit} for the TopK
    * membership decision (cold reject, lock-free refresh, or lock-guarded
    * admission/eviction).
+   *
+   * <p>Non-positive increments are malformed for a count-only sketch and are
+   * ignored ({@link AddResult#cold()}), matching the {@code WaveCounter.count}
+   * guard — the sketch has no decrement protocol, so a negative value would
+   * otherwise corrupt windows and slot sums.
    */
   @Override
   public AddResult addDirect(String key, long increment) {
-    long maxCount = addToSketch(key, saturateIncrement(increment));
-    return admit(key, maxCount);
+    if (increment <= 0) {
+      return AddResult.cold();
+    }
+    return addOne(key, increment);
+  }
+
+  /**
+   * Records one counted access for one key: sketch update followed by the
+   * membership decision. Shared body of the single-key and batch
+   * {@link #addDirect} entry points — the callers own the non-positive
+   * increment guard, which differs between them (cold result vs. skip).
+   */
+  private AddResult addOne(String key, long increment) {
+    int itemFingerprint = locateFingerprint(key);
+    long maxCount = addToSketch(itemFingerprint, saturateIncrement(increment));
+    return admit(key, maxCount, itemFingerprint);
   }
 
   /**
@@ -475,9 +498,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     List<AddResult> results = new ArrayList<>(keyCounts.size());
 
     for (Map.Entry<String, Long> entry : keyCounts.entrySet()) {
+      long increment = entry.getValue();
+      if (increment <= 0) {
+        continue; // same non-positive guard as the single-key path
+      }
       String key = entry.getKey();
-      long maxCount = addToSketch(key, saturateIncrement(entry.getValue()));
-      AddResult r = admit(key, maxCount);
+      AddResult r = addOne(key, increment);
       if (r.isHotKey()) {
         results.add(r);
       }
@@ -489,8 +515,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * Warm up the TopK set from a persisted snapshot, bypassing the sketch.
    * <p>
    * Respects the capacity limit ({@code k}) — evicts the weakest member
-   * when full. Pre-caches fingerprints and index positions for fast-path
-   * compatibility with subsequent {@link #addDirect} calls.
+   * when full. Captures each key's Murmur3 fingerprint on its {@link Node}
+   * for fast-path compatibility with subsequent {@link #addDirect} calls.
+   * Evictions report the displaced key to {@link #expelledQueue} exactly like
+   * write-path evictions ({@link #evictMinAndPut}), so an observer never
+   * loses a member silently.
    *
    * @param keyCounts map of keys to their estimated counts
    */
@@ -505,18 +534,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         if (count < minCount) continue;
 
         if (members.size() >= k) {
-          if (count <= minPqCount) continue;
-          MemberCandidate min = findMinMember();
-          Node removed = members.remove(min.key());
-          if (removed != null) {
-            locCache.remove(min.key());
-          }
+          if (count <= minMemberCount) continue;
         }
 
-        members.put(key, new Node(key, count));
-        locCache.computeIfAbsent(key, k -> new SlotLoc((int) fingerprint(k)));
+        evictMinAndPut(key, count, (int) fingerprint(key));
       }
-      this.minPqCount = members.isEmpty() ? 0L : findMinMember().count();
+      this.minMemberCount = members.isEmpty() ? 0L : findMinMember().count();
     } finally {
       admissionLock.unlock();
     }
@@ -540,7 +563,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * with ties broken by key name (ascending).
    *
    * <p>Takes a lock-free snapshot of the current membership, sorts it, and
-   * returns at most {@code n} entries. A negative {@code n} is rejected.
+   * returns at most {@code n} entries. Each {@link Item} carries the count
+   * captured when its snapshot pair was taken (see
+   * {@link #snapshotMembersSorted}), so the ordering and the reported counts
+   * are mutually consistent even under concurrent membership mutation. A
+   * negative {@code n} is rejected.
    *
    * @param n maximum number of keys to return
    * @return list of at most {@code n} {@link Item} entries
@@ -548,18 +575,16 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    */
   @Override
   public List<Item> listTopN(int n) {
-    if (n < 0) {
-      throw new IllegalArgumentException("n must be non-negative, but got: " + n);
-    }
+    Assert.isTrue(n >= 0, "n must be non-negative, but got: " + n);
     if (n == 0 || members.isEmpty()) {
       return Collections.emptyList();
     }
 
-    List<Node> sorted = snapshotMembersSorted(n);
+    List<MemberSnapshot> sorted = snapshotMembersSorted(n);
     List<Item> result = new ArrayList<>(sorted.size());
 
-    for (Node node : sorted) {
-      result.add(new Item(node.key, node.count.get()));
+    for (MemberSnapshot member : sorted) {
+      result.add(new Item(member.key(), member.count()));
     }
     return result;
   }
@@ -621,6 +646,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * critical section is short (one sketch sweep + one membership sweep) and
    * runs at most once per decay interval, so the lock has no hot-path cost.
    *
+   * <p><b>Total accounting note:</b> {@code total.sumThenReset()} can drop an
+   * increment landing on a cell between its sum and reset, and the restore
+   * below intentionally re-adds only half of the observed sum. Both are
+   * bounded transient drifts of the same class as ADR-0013's acceptable race
+   * fading — self-correcting by the next cycle, never part of any TopK
+   * decision.
+   *
    * <p>The next-epoch window is zeroed <em>before</em> incrementing the epoch,
    * so concurrent {@link #addToSketch} callers still see the old epoch and
    * write to a different window — eliminating the race where a concurrent
@@ -662,34 +694,35 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     return node != null ? node.count.get() : 0L;
   }
 
-  @SuppressWarnings("null")
   /**
    * Clamp an external increment to the sketch's {@code int} counter range.
    *
    * <p>Real increments are per-flush batch counts (thousands at most); a
    * value at or above 2³¹ is a malformed input and saturates like any other
    * counter — same stop-condition semantics as {@link #applyIncrement}'s
-   * guard.
+   * guard. Both {@code addDirect} overloads reject non-positive increments
+   * before reaching this point, so only the upper bound needs clamping.
    */
   private static long saturateIncrement(long increment) {
     return Math.min(increment, Integer.MAX_VALUE);
   }
 
   /**
-   * Apply {@code increment} to the sketch for {@code key} and return the
-   * maximum cross-row slot sum observed. The top-level loop dispatches to
-   * {@link #updateEmptySlot}, {@link #updateMatchingSlot}, or
+   * Apply {@code increment} to the sketch for the key whose fingerprint is
+   * {@code itemFingerprint} and return the maximum cross-row slot sum
+   * observed. The top-level loop dispatches to {@link #updateEmptySlot},
+   * the matching-fingerprint fast path ({@link #applyIncrement}), or
    * {@link #decayCollisionSlot} depending on the slot's populated state and
    * fingerprint match. Per-row lock acquisition is delegated to those
-   * sub-routines via the {@code synchronized(lockStripes[...])} enclosing block.
+   * sub-routines via the {@code synchronized(lockStripes[...])} enclosing
+   * block. Callers must pass a positive increment — both {@code addDirect}
+   * overloads reject non-positive values before reaching here.
    */
-  private long addToSketch(String key, long increment) {
-    SlotLoc loc = locate(key);
-    long itemFingerprint = loc.fp;
+  private long addToSketch(int itemFingerprint, long increment) {
     long maxCount = 0;
 
     for (int i = 0; i < depth; i++) {
-      int index = i * width + bucketIndex(loc.fp, i);
+      int index = i * width + bucketIndex(itemFingerprint, i);
       Object lock = lockStripes[index & lockMask];
 
       //noinspection SynchronizationOnLocalVariableOrMethodParameter
@@ -704,8 +737,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         long cur = slotSums[index];
         if (cur == 0) {
           maxCount = updateEmptySlot(index, active, itemFingerprint, increment, maxCount);
-        } else if (fingerprints[index] == (int) itemFingerprint) {
-          maxCount = updateMatchingSlot(index, active, increment, maxCount);
+        } else if (fingerprints[index] == itemFingerprint) {
+          maxCount = applyIncrement(index, active, increment, maxCount);
         } else {
           maxCount = decayCollisionSlot(index, active, itemFingerprint, increment, cur, maxCount);
         }
@@ -721,22 +754,15 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * {@link #slotSums}. Returns the running {@code maxCount} (largest slot
    * sum seen so far across all rows for this add call).
    */
-  private long updateEmptySlot(int index, int active, long itemFingerprint, long increment, long maxCount) {
-    fingerprints[index] = (int) itemFingerprint;
+  private long updateEmptySlot(int index, int active, int itemFingerprint, long increment, long maxCount) {
+    fingerprints[index] = itemFingerprint;
     return applyIncrement(index, active, increment, maxCount);
   }
 
   /**
-   * Matching-fingerprint fast path: increment the active window and
-   * {@link #slotSums} by {@code increment}.
-   */
-  private long updateMatchingSlot(int index, int active, long increment, long maxCount) {
-    return applyIncrement(index, active, increment, maxCount);
-  }
-
-  /**
-   * Shared fast-path tail of {@link #updateEmptySlot} and
-   * {@link #updateMatchingSlot}: add {@code increment} to the active window
+   * Shared fast-path tail of {@link #updateEmptySlot} and the
+   * matching-fingerprint branch of {@link #addToSketch}: add
+   * {@code increment} to the active window
    * and mirror it into {@link #slotSums}, returning the running
    * {@code maxCount}.
    *
@@ -766,11 +792,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * either hand the slot over to the incoming fingerprint (full reset) or
    * proportionally decay every window. Returns the running {@code maxCount}.
    */
-  @SuppressWarnings({ "null", "squid:S2245", "java:S1117" })
+  @SuppressWarnings({ "null", "squid:S2245" })
   private long decayCollisionSlot(
     int index,
     int active,
-    long itemFingerprint,
+    int itemFingerprint,
     long increment,
     long cur,
     long maxCount
@@ -781,19 +807,19 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     // number of surviving units is Binomial(cur, decay).  This replaces the
     // previous decay^cur formula which was only valid for a single sequential
     // decrement and made high-cur slots effectively immortal.
-    double survivalProb = this.survivalProb;
+    double prob = survivalProb;
 
     long survivals;
     if (cur > DIRECT_DECAY_THRESHOLD) {
-      survivals = Math.round(cur * survivalProb);
+      survivals = Math.round(cur * prob);
     } else if (cur > BATCH_DECAY_THRESHOLD) {
-      double expected = cur * survivalProb;
-      double variance = expected * (1.0 - survivalProb);
+      double expected = cur * prob;
+      double variance = expected * (1.0 - prob);
       double noise = Math.sqrt(variance) * rng.nextGaussian();
       survivals = Math.round(expected + noise);
       survivals = Math.max(0, Math.min(survivals, cur));
     } else {
-      survivals = sampleBinomial(cur, survivalProb, rng);
+      survivals = sampleBinomial(cur, prob, rng);
     }
     long decays = cur - survivals;
 
@@ -804,7 +830,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
     if (decays >= cur) {
       // Replace the slot: fingerprint swap, wipe all windows, replay increment.
-      fingerprints[index] = (int) itemFingerprint;
+      fingerprints[index] = itemFingerprint;
       Arrays.fill(windows, index * windowStride, index * windowStride + windowCount, 0);
       windows[index * windowStride + active] = (int) increment;
       slotSums[index] = (int) increment;
@@ -855,8 +881,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   /**
    * Halve every TopK membership count under {@link #admissionLock} and drop
    * members whose halved count falls to zero. Each {@link Node#count} is an
-   * {@link AtomicLong}, so halving uses a CAS retry loop that preserves any
-   * concurrent {@link AtomicLong#accumulateAndGet} from the lock-free fast
+   * {@link AtomicInteger}, so halving uses a CAS retry loop that preserves any
+   * concurrent {@link AtomicInteger#accumulateAndGet} from the lock-free fast
    * path in {@link #admit}. Unlike the previous {@code reset()+accumulate()}
    * pattern on {@link java.util.concurrent.atomic.LongAccumulator}, this
    * approach never loses concurrent writes — if a concurrent accumulate
@@ -907,12 +933,24 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
           // critical section. A count raised to > 0 keeps the member — the
           // revive is never lost to a stale decision.
           if (members.compute(key, (k, node) -> node != null && node.count.get() > 0 ? node : null) == null) {
-            locCache.remove(key); // decay-dropped — evict fingerprint cache
-            expelledQueue.offer(new Item(key, 0L));
+            // Same loss accounting as the admission path in admitOrEvict:
+            // a full expelledQueue silently drops the decay-drop, and the
+            // shared expelledLogCounter rate-limits the WARN (one per
+            // EXPELLED_LOG_INTERVAL failures across both offer sites).
+            if (
+              !expelledQueue.offer(new Item(key, 0L)) &&
+              expelledLogCounter.getAndIncrement() % EXPELLED_LOG_INTERVAL == 0
+            ) {
+              log.warn(
+                "Failed to offer decay-dropped key: {} ({} suppressed since last log)",
+                key,
+                EXPELLED_LOG_INTERVAL
+              );
+            }
           }
         }
       }
-      minPqCount = members.isEmpty() ? 0L : findMinMember().count();
+      minMemberCount = members.isEmpty() ? 0L : findMinMember().count();
     } finally {
       admissionLock.unlock();
     }
@@ -923,9 +961,14 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * {@code maxCount}.
    *
    * <p>Hot path (key already a member): a lock-free
-   * {@link AtomicLong#accumulateAndGet(long, java.util.function.LongBinaryOperator)}
+   * {@link AtomicInteger#accumulateAndGet(int, java.util.function.IntBinaryOperator)}
    * raises the member's observed count to {@code maxCount} via {@link Math#max}
-   * — no monitor is taken. Cold path (key not a member and
+   * — no monitor is taken. The raise is preceded by a plain read: when the
+   * sketch estimate has not grown past the current count (the common case for
+   * an established hot key between decay cycles), the locked CAS is skipped
+   * entirely; a raise skipped because a concurrent {@link #decayMembership}
+   * halving landed first is re-applied by the next flush.
+   * Cold path (key not a member and
    * {@code maxCount < minCount}): returns {@link AddResult#cold()} without
    * locking. Admission path (key not yet a member but {@code maxCount >= minCount}):
    * takes {@link #admissionLock}, scans {@link #members} via {@link #findMinMember()}
@@ -934,14 +977,14 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * Eviction populates {@link #expelledQueue} on the write path to preserve
    * the {@link AddResult#expelledKey()} contract.
    */
-  private AddResult admit(String key, long maxCount) {
+  private AddResult admit(String key, long maxCount, int itemFingerprint) {
     if (maxCount < minCount) {
       return AddResult.cold();
     }
     // Fast path: existing member — atomic max-raise, no lock.
     Node member = members.get(key);
     if (member != null) {
-      member.count.accumulateAndGet((int) maxCount, Math::max);
+      raiseCount(member, (int) maxCount);
       return new AddResult(null, true, key);
     }
     // Admission path: brand-new candidate, may enter or evict.
@@ -950,33 +993,46 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       // Double-check under lock — another thread may have admitted this key.
       Node existing = members.get(key);
       if (existing != null) {
-        existing.count.accumulateAndGet((int) maxCount, Math::max);
+        raiseCount(existing, (int) maxCount);
         return new AddResult(null, true, key);
       }
       // O(1) fast reject: can't beat the current minimum member.
-      if (members.size() >= k && maxCount < minPqCount) {
+      if (members.size() >= k && maxCount < minMemberCount) {
         return new AddResult(null, false, key);
       }
-      return admitOrEvict(key, maxCount);
+      return admitOrEvict(key, maxCount, itemFingerprint);
     } finally {
       admissionLock.unlock();
     }
   }
 
   /**
+   * Raise a member's count to {@code maxCount} only when the estimate has
+   * actually grown past it. {@link AtomicInteger#accumulateAndGet} begins with
+   * its own volatile get, so this guard costs one extra load on the raise
+   * path and saves a locked CAS — which takes the cache line exclusive even
+   * for a {@code CAS(prev, prev)} no-op — whenever the count is already up to
+   * date. Concurrent-halving correctness is unchanged: a max-raise skipped
+   * because a {@link #decayMembership} halving landed first is a bounded
+   * transient re-applied by the next flush.
+   */
+  private static void raiseCount(Node node, int maxCount) {
+    if (maxCount > node.count.get()) {
+      node.count.accumulateAndGet(maxCount, Math::max);
+    }
+  }
+
+  /**
    * Admit or evict under {@link #admissionLock}. Only called when the key is
-   * not yet a member and the O(1) fast-reject ({@link #minPqCount}) has
+   * not yet a member and the O(1) fast-reject ({@link #minMemberCount}) has
    * passed. Expects caller to hold the lock. The O(k) scan of
    * {@link #findMinMember} only happens on actual eviction.
    */
-  private AddResult admitOrEvict(String key, long maxCount) {
-    String expelledKey = null;
-
+  private AddResult admitOrEvict(String key, long maxCount, int itemFingerprint) {
     if (members.size() < k) {
-      members.put(key, new Node(key, maxCount));
-      cacheLoc(key); // cache fingerprint for the new member
-      if (maxCount < minPqCount || members.size() == 1) {
-        minPqCount = maxCount;
+      members.put(key, new Node(key, maxCount, itemFingerprint));
+      if (maxCount < minMemberCount || members.size() == 1) {
+        minMemberCount = maxCount;
       }
       return new AddResult(null, true, key);
     }
@@ -984,25 +1040,47 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     // Full — must evict the minimum member (O(k) scan).
     MemberCandidate min = findMinMember();
     if (maxCount < min.count()) {
-      minPqCount = min.count();
+      minMemberCount = min.count();
       return new AddResult(null, false, key);
     }
 
-    Node removed = members.remove(min.key());
-    if (removed != null) {
-      expelledKey = removed.key;
-      locCache.remove(expelledKey); // evicted — no longer needs cached fingerprint
-      if (
-        !expelledQueue.offer(new Item(expelledKey, min.count())) &&
-        expelledLogCounter.getAndIncrement() % EXPELLED_LOG_INTERVAL == 0
-      ) {
-        log.warn("Failed to offer expelled key: {} ({} suppressed since last log)", expelledKey, EXPELLED_LOG_INTERVAL);
+    String expelledKey = evictMinAndPut(key, maxCount, itemFingerprint);
+    minMemberCount = findMinMember().count();
+    return new AddResult(expelledKey, true, key);
+  }
+
+  /**
+   * Evict the current minimum member (when the set is full) and insert
+   * {@code key} at {@code count}. Shared by the write path
+   * ({@link #admitOrEvict}) and warm-up ({@link #warm}) so that <b>every</b>
+   * membership departure is reported to {@link #expelledQueue}: the
+   * {@link AddResult#expelledKey()} contract requires all departures to be
+   * visible, and warm-up's old inline {@code members.remove(min.key())} used
+   * to silently drop the evicted snapshot key instead.
+   *
+   * <p>Expects caller to hold {@link #admissionLock} and to have already
+   * verified the candidate beats the current minimum. The O(k) scan of
+   * {@link #findMinMember} only runs on an actual eviction.
+   *
+   * @return the key evicted to make room, or {@code null} when the set was not full
+   */
+  private String evictMinAndPut(String key, long count, int itemFingerprint) {
+    String expelledKey = null;
+    if (members.size() >= k) {
+      MemberCandidate min = findMinMember();
+      Node removed = members.remove(min.key());
+      if (removed != null) {
+        expelledKey = removed.key;
+        if (
+          !expelledQueue.offer(new Item(expelledKey, min.count())) &&
+          expelledLogCounter.getAndIncrement() % EXPELLED_LOG_INTERVAL == 0
+        ) {
+          log.warn("Failed to offer expelled key: {} ({} suppressed since last log)", expelledKey, EXPELLED_LOG_INTERVAL);
+        }
       }
     }
-    members.put(key, new Node(key, maxCount));
-    cacheLoc(key); // cache fingerprint for the replacement member
-    minPqCount = findMinMember().count();
-    return new AddResult(expelledKey, true, key);
+    members.put(key, new Node(key, count, itemFingerprint));
+    return expelledKey;
   }
 
   /**
@@ -1030,15 +1108,35 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * on key ascending — same ordering used by the original
    * {@link java.util.concurrent.ConcurrentSkipListMap}). Limited to at most
    * {@code limit} entries. Used by both {@link #list()} and {@link #listTopN(int)}.
+   *
+   * <p><b>Snapshot-before-sort:</b> each member's count is read <b>once</b>
+   * into an immutable {@link MemberSnapshot} <em>before</em> the sort runs.
+   * Member counts are concurrently mutated (lock-free max-raise in
+   * {@link #admit}, CAS halving in {@link #decayMembership}), and a
+   * comparator that re-reads a mutable counter mid-sort can feed TimSort an
+   * inconsistent total order — it then aborts with
+   * {@code "Comparison method violates its general contract!"} (reachable
+   * once the membership exceeds TimSort's MIN_MERGE of 32 and the merge
+   * passes run, e.g. k=100 introspection from {@code ZetaEndpoint}).
+   * Sorting the immutable snapshot is total-order-consistent by
+   * construction, and the reported counts are the same values the ordering
+   * was computed from.
    */
-  private List<Node> snapshotMembersSorted(int limit) {
+  List<MemberSnapshot> snapshotMembersSorted(int limit) {
     if (members.isEmpty()) {
       return Collections.emptyList();
     }
 
-    List<Node> snapshot = new ArrayList<>(members.values());
+    // Snapshot phase: one count read per member — the comparator never
+    // touches a mutable counter, so concurrent mutations cannot destabilize
+    // the sort. Weakly consistent iteration, same as before: a member
+    // admitted mid-snapshot may or may not appear.
+    List<MemberSnapshot> snapshot = new ArrayList<>(members.size());
+    for (Node n : members.values()) {
+      snapshot.add(new MemberSnapshot(n.key, n.count.get()));
+    }
     snapshot.sort((a, b) -> {
-      int c = Long.compare(b.count.get(), a.count.get());
+      int c = Long.compare(b.count, a.count);
       return c != 0 ? c : a.key.compareTo(b.key);
     });
     if (snapshot.size() > limit) {
@@ -1049,6 +1147,16 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
   /** Cached Murmur3 fingerprint for a single key (lower 32 bits; see {@link #bucketIndex}). */
   private record SlotLoc(int fp) {}
+
+  /**
+   * Immutable (key, count) pair captured while snapshotting the membership
+   * (see {@link #snapshotMembersSorted}): the sort's comparator reads these
+   * final fields instead of the live {@link Node#count}, so concurrent
+   * admit/decay mutations can never present TimSort with an inconsistent
+   * total order. Package-private so the snapshot tests in this package can
+   * assert the ordering directly.
+   */
+  record MemberSnapshot(String key, long count) {}
 
   /**
    * A key-count pair used as an entry in the TopK membership set.
@@ -1069,14 +1177,17 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     final String key;
     /** Current estimated count — supports atomic read-modify-write for both raise and decay. */
     final AtomicInteger count;
+    /** Lower-32-bit Murmur3 fingerprint, captured once at admission — a pure function of {@link #key}. */
+    final int fp;
 
-    Node(String key, long count) {
+    Node(String key, long count, int fp) {
       this.key = key;
       this.count = new AtomicInteger((int) Math.min(count, Integer.MAX_VALUE));
+      this.fp = fp;
     }
   }
 
-  /** Immutable minimummember snapshot returned by {@link #findMinMember()}. */
+  /** Immutable minimum member snapshot returned by {@link #findMinMember()}. */
   private record MemberCandidate(String key, long count) {}
 
   /**
@@ -1142,7 +1253,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
  * Only two padding layers are used: one for the leading pad (120 bytes),
  * and one for the three hot fields with inter-field and trailing pads (56 bytes each).
  * Each hot field occupies its own cache line, preventing false sharing between
- * the heavily updated {@code minPqCount}, {@code epoch}, and {@code total}.
+ * the heavily updated {@code minMemberCount}, {@code epoch}, and {@code total}.
  */
 final class HKHeader {
 
@@ -1172,7 +1283,7 @@ final class HKHeader {
   /**
    * Holds the three heavily contended fields with inter-field padding.
    * <ul>
-   *   <li>{@code minPqCount} – volatile long, guarded by 56-byte trailing pad</li>
+   *   <li>{@code minMemberCount} – volatile long, guarded by 56-byte trailing pad</li>
    *   <li>{@code epoch} – AtomicLong, guarded by 56-byte trailing pad</li>
    *   <li>{@code total} – LongAdder, guarded by 56-byte trailing pad</li>
    * </ul>
@@ -1182,9 +1293,9 @@ final class HKHeader {
   @SuppressWarnings("all")
   abstract static class StateRef extends PadState {
 
-    volatile long minPqCount;
+    volatile long minMemberCount;
 
-    // 56-byte pad between minPqCount and epoch
+    // 56-byte pad between minMemberCount and epoch
     byte a0, a1, a2, a3, a4, a5, a6, a7;
     byte a8, a9, a10, a11, a12, a13, a14, a15;
     byte a16, a17, a18, a19, a20, a21, a22, a23;

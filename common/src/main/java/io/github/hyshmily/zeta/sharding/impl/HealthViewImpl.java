@@ -23,6 +23,7 @@ import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -47,7 +48,7 @@ import lombok.extern.slf4j.Slf4j;
  * previous incarnation is discarded. This prevents stale health state from surviving
  * a Worker restart.
  *
- * <p><b>Thread safety:</b> All reportToWorker mutations use {@link ConcurrentHashMap#compute}
+ * <p><b>Thread safety:</b> All record mutations use {@link ConcurrentHashMap#compute}
  * and {@code computeIfPresent} for atomic per-Worker updates. The
  * {@code lastAnyHeartbeatTime} is a {@code volatile} field safe for
  * concurrent read/write.
@@ -119,6 +120,15 @@ public class HealthViewImpl implements HealthView {
   }
 
   /**
+   * Join/rejoin event captured from inside the atomic {@code compute} update and
+   * logged OUTSIDE the map bin lock — log formatting (and appender I/O) must
+   * never run while holding a {@link ConcurrentHashMap} lock. {@code joined} is
+   * {@code true} for a first-ever heartbeat, {@code false} for a restart
+   * (epoch bump), in which case {@code previousEpoch} carries the old epoch.
+   */
+  private record EpochTransition(boolean joined, long previousEpoch) {}
+
+  /**
    * Processes an incoming {@link WorkerHeartbeatMessage} from a Worker node and
    * updates the cluster health state accordingly.
    *
@@ -140,6 +150,7 @@ public class HealthViewImpl implements HealthView {
    */
   @Override
   public void onHeartbeat(WorkerHeartbeatMessage hb) {
+    AtomicReference<EpochTransition> transition = new AtomicReference<>();
     records.compute(hb.workerId(), (id, existing) -> {
       long now = TimeSource.monotonicMillis();
 
@@ -150,11 +161,9 @@ public class HealthViewImpl implements HealthView {
         r.epoch = hb.epoch();
         r.lastAliveEvidenceTime = now;
         r.readyToServe = hb.readyToServe();
-        if (existing == null) {
-          log.info("Worker joined cluster: {} (epoch={})", hb.workerId(), hb.epoch());
-        } else {
-          log.info("Worker re-joined with new epoch: {} (epoch {} -> {})", hb.workerId(), existing.epoch, hb.epoch());
-        }
+        transition.set(
+          new EpochTransition(existing == null, existing == null ? UNKNOWN_EPOCH : existing.epoch)
+        );
         return r;
       }
 
@@ -168,6 +177,20 @@ public class HealthViewImpl implements HealthView {
       existing.verifyFailures = 0;
       return existing;
     });
+
+    EpochTransition t = transition.get();
+    if (t != null) {
+      if (t.joined()) {
+        log.info("Worker joined cluster: {} (epoch={})", hb.workerId(), hb.epoch());
+      } else {
+        log.info(
+          "Worker re-joined with new epoch: {} (epoch {} -> {})",
+          hb.workerId(),
+          t.previousEpoch(),
+          hb.epoch()
+        );
+      }
+    }
 
     lastAnyHeartbeatTime = TimeSource.monotonicMillis();
     invalidateHealthCache();
@@ -238,7 +261,7 @@ public class HealthViewImpl implements HealthView {
   }
 
   /**
-   * Removes the health reportToWorker for a Worker that has been confirmed dead.
+   * Removes the health record for a Worker that has been confirmed dead.
    *
    * @param workerId the Worker to remove; must not be null
    */
@@ -371,7 +394,7 @@ public class HealthViewImpl implements HealthView {
   /**
    * Per-Worker health state tracked within the cluster health view.
    *
-   * <p>Each reportToWorker captures the Worker's current epoch, liveness timing,
+   * <p>Each record captures the Worker's current epoch, liveness timing,
    * readiness, load, and verification failure state. Records are created
    * on first heartbeat and updated (or replaced on epoch change) via
    * atomic {@code ConcurrentHashMap.compute} operations.
@@ -418,6 +441,6 @@ public class HealthViewImpl implements HealthView {
      */
     public boolean isAlive(long timeoutMs) {
       return readyToServe && !stale && TimeSource.monotonicMillis() - lastAliveEvidenceTime < timeoutMs;
-  }
+    }
   }
 }

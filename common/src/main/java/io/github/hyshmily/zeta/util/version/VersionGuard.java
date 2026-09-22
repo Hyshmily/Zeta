@@ -189,6 +189,69 @@ public final class VersionGuard {
   }
 
   /**
+   * CacheSyncListener guard for the <b>REFRESH receiver</b>: identical to
+   * {@link #shouldSkipForSync} except that an <b>equal</b> version applies instead of
+   * skipping — only a strictly newer existing version is skipped.
+   *
+   * <p>Rationale (ADR-0066): ADR-0033's read-path probe-after-read can stamp an entry
+   * one write ahead of its data — the reader loaded the pre-write value, the writer's
+   * INCR landed before the probe, and the entry now holds v4 data under a v5 stamp.
+   * The write's own {@code REFRESH(5)} must not be swallowed by the {@code >=}
+   * equality skip that the plain sync matrix uses: re-applying the equal-version
+   * refresh re-fetches the authoritative value (or falls back to a local
+   * invalidation when no value channel exists) and heals the over-stamped entry,
+   * while skipping would pin the stale value until the next write for the key or
+   * its whole TTL. The extra work for a genuine duplicate (same write, same
+   * version) is one Redis fetch plus an idempotent overwrite.
+   *
+   * @param existing            the existing cache entry; may be {@code null} (returns {@code false})
+   * @param incomingDataVersion the data version from the incoming REFRESH message
+   * @param incomingDegraded    {@code true} if the incoming REFRESH was sent in degraded mode
+   * @return {@code true} if the incoming refresh should be skipped (existing entry is
+   *         strictly newer, or the incoming refresh is degraded against a healthy entry);
+   *         {@code false} if it should be applied
+   */
+  public static boolean shouldSkipForRefresh(CacheEntry existing, long incomingDataVersion, boolean incomingDegraded) {
+    if (existing == null) {
+      return false;
+    }
+
+    boolean existingDegraded = existing.isVersionDegraded();
+
+    if (existingDegraded != incomingDegraded) {
+      return incomingDegraded;
+    }
+    return existing.getDataVersion() > incomingDataVersion;
+  }
+
+  /**
+   * REFRESH-receiver guard with a cache-level fast path: fetches the existing entry
+   * from the L1 cache and delegates to the entry-level overload.
+   *
+   * <p>Used <em>outside</em> atomic {@code compute} blocks as a cheap first-pass
+   * check (DCL pattern). A second guard inside the {@code compute} block is still
+   * needed for correctness.
+   *
+   * @param cache               the local Caffeine L1 cache; must not be null
+   * @param cacheKey            the cache key to look up; must not be null
+   * @param incomingDataVersion the data version from the incoming REFRESH message
+   * @param incomingDegraded    {@code true} if the incoming REFRESH was sent in degraded mode
+   * @return {@code true} if the incoming refresh should be skipped;
+   *         {@code false} if it should be applied
+   * @see #shouldSkipForRefresh(CacheEntry, long, boolean)
+   */
+  public static boolean shouldSkipForRefresh(
+    Cache<String, Object> cache,
+    String cacheKey,
+    long incomingDataVersion,
+    boolean incomingDegraded
+  ) {
+    return shouldSkip(cache, cacheKey, existing ->
+      shouldSkipForRefresh(existing, incomingDataVersion, incomingDegraded)
+    );
+  }
+
+  /**
    * CacheSyncListener guard with a cache-level fast path: fetches the existing entry
    * from the L1 cache and delegates to the entry-level overload.
    *

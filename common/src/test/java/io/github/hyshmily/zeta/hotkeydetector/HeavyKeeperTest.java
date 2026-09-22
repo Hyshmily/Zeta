@@ -254,6 +254,25 @@ class HeavyKeeperTest {
     assertThat(keeper.total()).isZero();
   }
 
+  /**
+   * A zero increment must be a full no-op even when the key is already a
+   * member — no membership change, no count change, no total change.
+   */
+  @Test
+  void addDirect_zeroIncrementIsNoOpEvenForExistingMember() {
+    keeper.addDirect("key1", 10);
+    assertThat(keeper.contains("key1")).isTrue();
+    long totalBefore = keeper.total();
+    long countBefore = keeper.estimatedCount("key1");
+
+    AddResult result = keeper.addDirect("key1", 0);
+
+    assertThat(result.isHotKey()).isFalse();
+    assertThat(keeper.contains("key1")).isTrue();
+    assertThat(keeper.total()).isEqualTo(totalBefore);
+    assertThat(keeper.estimatedCount("key1")).isEqualTo(countBefore);
+  }
+
   @Test
   void addDirect_shouldAccumulateSameKey() {
     for (int i = 0; i < 10; i++) {
@@ -366,8 +385,32 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_withNegativeIncrement_shouldNotThrow() {
+    keeper.addDirect("key1", 4); // below MIN_COUNT — stays cold
+    long totalBefore = keeper.total();
+
     assertThat(keeper.addDirect("key1", -5).isHotKey()).isFalse();
     assertThat(keeper.contains("key1")).isFalse();
+    assertThat(keeper.total()).isEqualTo(totalBefore);
+  }
+
+  /**
+   * The batch path must skip non-positive entries entirely — the sketch is
+   * count-only, so a negative entry must not corrupt windows or slot sums.
+   */
+  @Test
+  void addDirect_mapSkipsNonPositiveEntries() {
+    Map<String, Long> batch = new HashMap<>();
+    batch.put("hot", 20L);
+    batch.put("negative", -5L);
+    batch.put("zero", 0L);
+
+    List<AddResult> results = keeper.addDirect(batch);
+
+    assertThat(results).hasSize(1);
+    assertThat(results.get(0).currentKey()).isEqualTo("hot");
+    assertThat(keeper.total()).isEqualTo(20);
+    assertThat(keeper.contains("negative")).isFalse();
+    assertThat(keeper.contains("zero")).isFalse();
   }
 
   @Test

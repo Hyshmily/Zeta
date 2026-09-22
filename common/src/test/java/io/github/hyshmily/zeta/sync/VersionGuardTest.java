@@ -22,6 +22,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
+import io.github.hyshmily.zeta.model.DecisionStamp;
+import io.github.hyshmily.zeta.model.EntryDraft;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -217,7 +219,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_higherExistingDv_shouldSkip() {
-    CacheEntry degraded = entry(-5, true, 50).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry degraded = EntryDraft.of(entry(-5, true, 50)).decision(new DecisionStamp(50, "W1", 1)).build();
     assertThat(VersionGuard.shouldSkipForWorker(degraded, 1, "W1", 1)).isTrue();
   }
 
@@ -227,7 +229,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_lowerExistingDv_shouldNotSkip() {
-    CacheEntry degraded = entry(-5, true, 3).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry degraded = EntryDraft.of(entry(-5, true, 3)).decision(new DecisionStamp(3, "W1", 1)).build();
     assertThat(VersionGuard.shouldSkipForWorker(degraded, 5, "W1", 1)).isFalse();
   }
 
@@ -237,7 +239,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_higherEpoch_shouldNotSkip() {
-    CacheEntry existing = entry(-5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(-5, true, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 2)).isFalse();
   }
 
@@ -247,7 +249,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_lowerEpoch_shouldSkip() {
-    CacheEntry existing = entry(-5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(2).build();
+    CacheEntry existing = EntryDraft.of(entry(-5, true, 100)).decision(new DecisionStamp(100, "W1", 2)).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 1)).isTrue();
   }
 
@@ -257,7 +259,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_degradedEntry_differentNodeId_shouldNotSkip() {
-    CacheEntry existing = entry(-5, true, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(-5, true, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W2", 1)).isFalse();
   }
 
@@ -277,7 +279,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_higherEpoch_shouldNotSkip() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 10, "W1", 2)).isFalse();
   }
 
@@ -286,7 +288,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_existingDvHigher_shouldSkip() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 99, "W1", 1)).isTrue();
   }
 
@@ -295,7 +297,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_sameNodeId_existingDvEqual_shouldSkip() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 100, "W1", 1)).isTrue();
   }
 
@@ -304,7 +306,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_incomingDvHigher_shouldNotSkip() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 101, "W1", 1)).isFalse();
   }
 
@@ -314,7 +316,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_differentNodeId_lowerDv_shouldNotSkip() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     // Same epoch, different nodeId → accept unconditionally
     assertThat(VersionGuard.shouldSkipForWorker(existing, 50, "W2", 1)).isFalse();
   }
@@ -324,7 +326,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_differentNodeId_equalDv_shouldNotSkip() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     // Same epoch, different nodeId → accept unconditionally (last-writer-wins)
     assertThat(VersionGuard.shouldSkipForWorker(existing, 100, "W2", 1)).isFalse();
   }
@@ -335,7 +337,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_differentNodeId_higherDv_shouldNotSkip() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     // Same epoch, different nodeId → accept unconditionally
     assertThat(VersionGuard.shouldSkipForWorker(existing, 101, "W2", 1)).isFalse();
   }
@@ -347,7 +349,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_cacheLevel_withNodeIdEpoch_shouldDelegate() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(1).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 1)).build();
     cache.put("key", existing);
 
     // Same nodeId, existing dv >= incoming → skip
@@ -379,7 +381,7 @@ class VersionGuardTest {
    */
   @Test
   void shouldSkipForWorker_withEpoch_lowerEpoch_shouldSkip() {
-    CacheEntry existing = entry(5, false, 100).toBuilder().decisionNodeId("W1").decisionEpoch(2).build();
+    CacheEntry existing = EntryDraft.of(entry(5, false, 100)).decision(new DecisionStamp(100, "W1", 2)).build();
     assertThat(VersionGuard.shouldSkipForWorker(existing, 1, "W1", 1)).isTrue();
   }
 

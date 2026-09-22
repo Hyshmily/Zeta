@@ -21,6 +21,8 @@ import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
 import java.util.Set;
 import java.util.function.IntConsumer;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -54,23 +56,49 @@ public class RingManagerImpl implements RingManager {
     this.ring = new ConsistentHashRing(virtualNodeCount);
   }
 
+  /** Maximum Worker IDs shown in the ring-rebuilt INFO log before truncation. */
+  private static final int REBUILD_LOG_MAX_NODE_IDS = 20;
+
   /**
    * Rebuild the ring from the current cluster health view.
    *
+   * <p>The node-ID sample in the rebuild log is truncated per the repo logging
+   * rule (unbounded {@code joining} must be {@code limit()}-capped) — the Worker
+   * counts in the same line already carry the cardinality.
+   *
    * @param healthView the current cluster health view; must not be {@code null}
+   * @return the alive Worker set this reconciliation is based on — equal to the
+   *         ring's node set immediately after the call; callers may reuse it as
+   *         the routing liveness predicate without a second
+   *         {@link HealthView#getAliveWorkerIds()} materialisation
    * @throws NullPointerException if {@code healthView} is {@code null}
    */
   @Override
-  public synchronized void reconcileFromHealthView(HealthView healthView) {
+  public synchronized Set<String> reconcileFromHealthView(HealthView healthView) {
     Set<String> alive = healthView.getAliveWorkerIds();
     Set<String> prev = ring.getNodes();
     if (!alive.equals(prev)) {
       ring.rebuild(alive);
-      log.info("Ring rebuilt: {} -> {} workers [{}]", prev.size(), alive.size(), String.join(", ", alive));
+      log.info(
+        "Ring rebuilt: {} -> {} workers [{}]",
+        prev.size(),
+        alive.size(),
+        truncateNodeIds(alive)
+      );
       if (onRingReconciled != null) {
         onRingReconciled.accept(alive.size());
       }
     }
+    return alive;
+  }
+
+  /**
+   * First {@code REBUILD_LOG_MAX_NODE_IDS} Worker IDs (sorted, comma-joined),
+   * with an ellipsis marker when the set was truncated.
+   */
+  private static String truncateNodeIds(Set<String> nodes) {
+    String joined = nodes.stream().sorted().limit(REBUILD_LOG_MAX_NODE_IDS).collect(Collectors.joining(", "));
+    return nodes.size() > REBUILD_LOG_MAX_NODE_IDS ? joined + ", ..." : joined;
   }
 
   /**
@@ -112,6 +140,10 @@ public class RingManagerImpl implements RingManager {
    * supplied by the caller. This avoids re-fetching {@link
    * HealthView#getAliveWorkerIds()} per key inside hot loops.
    *
+   * <p>Convenience for {@code routeNode(key, aliveNodes::contains)} — hot loops
+   * routing many keys against one snapshot should prefer the {@link #routeNode(
+   * String, Predicate)} overload with a predicate built once per batch.
+   *
    * @param key        the cache key to route
    * @param aliveNodes the already-snapshotted set of alive Worker ids; must not
    *                   be {@code null} or modified concurrently
@@ -123,5 +155,20 @@ public class RingManagerImpl implements RingManager {
       return null;
     }
     return ring.locateNode(key, aliveNodes::contains);
+  }
+
+  /**
+   * Route a key to its target Worker node using a pre-built liveness predicate.
+   * Delegates directly to {@link ConsistentHashRing#locateNode}; hot loops build
+   * the predicate once per batch, so no per-key capturing lambda is allocated.
+   *
+   * @param key     the cache key to route; must not be {@code null}
+   * @param isAlive liveness predicate over Worker node IDs; must not be {@code null}
+   * @return the target Worker node id, or {@code null} if the ring is empty or no
+   *         ring node satisfies the predicate
+   */
+  @Override
+  public String routeNode(String key, Predicate<String> isAlive) {
+    return ring.locateNode(key, isAlive);
   }
 }
