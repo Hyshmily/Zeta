@@ -25,6 +25,8 @@ import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.model.VersionedValue;
+import io.github.hyshmily.zeta.model.EntryDraft;
+import io.github.hyshmily.zeta.model.DecisionStamp;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -34,7 +36,7 @@ import org.junit.jupiter.api.Test;
 /**
  * Tests for the stateful side of {@link ExpireManager}: background refresh
  * scheduling (dedup, limiter, timeout, fault modes, version-guarded merge),
- * the entry factory ({@code createBuilder} parameter combinations), and
+ * the entry factory ({@code newEntry()} draft parameter combinations), and
  * expiry extension.
  *
  * <p>The stateless TTL arithmetic tests live in {@link TtlPolicyTest}.
@@ -81,6 +83,68 @@ class CacheExpireManagerTest {
   }
 
   /**
+   * Entry-absent rebuild carries the evicted entry's OWN hard TTL: when the
+   * entry is evicted while the refresh is in flight, the rebuilt entry keeps
+   * the per-call hard TTL override instead of silently reverting to the
+   * configured default (300_000 in this suite).
+   */
+  @Test
+  void triggerBackgroundRefresh_entryEvictedDuringRefresh_shouldRebuildWithSnapshotHardTtl() {
+    caffeineCache.put(
+      "key",
+      CacheEntry.builder()
+        .value("old")
+        .dataVersion(1)
+        .isVersionDegraded(false)
+        .decisionVersion(0)
+        .hardTtlMs(123_456)
+        .hardExpireAtMs(System.currentTimeMillis() + 123_456)
+        .softTtlMs(30_000)
+        .softExpireAtMs(System.currentTimeMillis() - 1_000)
+        .keyState(KeyState.NORMAL)
+        .normalHardTtlMs(123_456)
+        .normalSoftTtlMs(30_000)
+        .build()
+    );
+
+    expireManager.triggerBackgroundRefresh(
+      "key",
+      () -> {
+        // The direct test executor runs the reader right after the snapshot
+        // was taken: evicting here reproduces "entry absent at apply time".
+        caffeineCache.invalidate("key");
+        return new VersionedValue("fresh", 7L, true);
+      },
+      30_000
+    );
+
+    CacheEntry rebuilt = (CacheEntry) caffeineCache.getIfPresent("key");
+    assertThat(rebuilt).isNotNull();
+    assertThat((Object) rebuilt.getValue()).isEqualTo("fresh");
+    assertThat(rebuilt.getDataVersion()).isEqualTo(7L);
+    assertThat(rebuilt.getHardTtlMs()).isEqualTo(123_456L);
+  }
+
+  /**
+   * A refresh task that completes before the {@code pendingRefreshes} compute
+   * stores it (fast reader, synchronous executor) must not leave a done marker
+   * behind: the map is unbounded, so a cold key would otherwise retain the
+   * completed marker until its next trigger.
+   */
+  @Test
+  void triggerBackgroundRefresh_fastCompletedTask_shouldNotLeaveDoneMarker() throws Exception {
+    expireManager.triggerBackgroundRefresh("key", () -> new VersionedValue("v", 0L, false), 30_000);
+
+    java.lang.reflect.Field pending = ExpireManagerImpl.class.getDeclaredField("pendingRefreshes");
+    pending.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<String, CompletableFuture<?>> map =
+      (java.util.concurrent.ConcurrentMap<String, CompletableFuture<?>>) pending.get(expireManager);
+
+    assertThat(map).isEmpty();
+  }
+
+  /**
    * Verifies that triggerBackgroundRefresh discards the result when the entry's data version has changed since the refresh started.
    */
   @Test
@@ -109,7 +173,7 @@ class CacheExpireManagerTest {
           .asMap()
           .computeIfPresent("key", (k, existing) -> {
             if (existing instanceof CacheEntry ce) {
-              return ce.toBuilder().dataVersion(10).build();
+              return EntryDraft.of(ce).version(10).build();
             }
             return existing;
           });
@@ -516,7 +580,7 @@ class CacheExpireManagerTest {
             .asMap()
             .computeIfPresent("key", (k, existing) -> {
               if (existing instanceof CacheEntry ce) {
-                return ce.toBuilder().dataVersion(10).build();
+                return EntryDraft.of(ce).version(10).build();
               }
               return existing;
             });
@@ -556,7 +620,7 @@ class CacheExpireManagerTest {
             .asMap()
             .computeIfPresent("key", (k, existing) -> {
               if (existing instanceof CacheEntry ce) {
-                return ce.withHardTtl(60_000, rewrittenExpire);
+                return asyncExpire.editEntry(ce).hardTtl(60_000).hardExpiryAt(rewrittenExpire).build();
               }
               return existing;
             });
@@ -639,23 +703,24 @@ class CacheExpireManagerTest {
     }
   }
 
-  // ── createBuilder parameter combinations ──────────────────────
+  // ── newEntry() draft parameter combinations ──────────────────────
 
   /**
-   * Verifies that createBuilder with decision metadata and pre-computed
+   * Verifies that newEntry() with decision metadata and pre-computed
    * expire timestamps sets all fields correctly.
    */
   @Test
-  void createBuilder_withDecisionMetadataAndExpireTimestamps_shouldSetAllFields() {
+  void newEntry_withDecisionMetadataAndExpireTimestamps_shouldSetAllFields() {
     long now = System.currentTimeMillis();
-    CacheEntry entry = expireManager.createBuilder(
-      "value",
-      new ExpireManager.VersionStamp(-42, true),
-      new ExpireManager.DecisionStamp(7, "worker-1", 3),
-      new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
-      new ExpireManager.ExpiryAt(now + 60_000, now + 30_000),
-      KeyState.HOT
-    );
+    CacheEntry entry = expireManager
+      .newEntry()
+      .value("value")
+      .version(-42)
+      .decision(new DecisionStamp(7, "worker-1", 3))
+      .ttl(60_000, 30_000, 300_000, 30_000)
+      .expiryAt(now + 60_000, now + 30_000)
+      .keyState(KeyState.HOT)
+      .build();
 
     assertThat(entry.getValue()).isEqualTo("value");
     assertThat(entry.getDataVersion()).isEqualTo(-42);
@@ -673,20 +738,20 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that createBuilder with decision metadata but no expire
+   * Verifies that newEntry() with decision metadata but no expire
    * timestamps computes expire-at via applyTtl.
    */
   @Test
-  void createBuilder_withDecisionMetadataAndNoExpireTimestamps_shouldComputeExpire() {
+  void newEntry_withDecisionMetadataAndNoExpireTimestamps_shouldComputeExpire() {
     long before = System.currentTimeMillis();
-    CacheEntry entry = expireManager.createBuilder(
-      "value",
-      new ExpireManager.VersionStamp(42, false),
-      new ExpireManager.DecisionStamp(7, "worker-1", 3),
-      new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
-      null,
-      KeyState.HOT
-    );
+    CacheEntry entry = expireManager
+      .newEntry()
+      .value("value")
+      .version(42)
+      .decision(new DecisionStamp(7, "worker-1", 3))
+      .ttl(60_000, 30_000, 300_000, 30_000)
+      .keyState(KeyState.HOT)
+      .build();
 
     assertThat(entry.getValue()).isEqualTo("value");
     assertThat(entry.getDataVersion()).isEqualTo(42);
@@ -703,21 +768,22 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that createBuilder without decision node/epoch metadata (local
+   * Verifies that newEntry() without decision node/epoch metadata (local
    * origin, no Worker) but with pre-computed expire timestamps sets all
    * fields correctly.
    */
   @Test
-  void createBuilder_withoutDecisionMetadataWithExpireTimestamps_shouldSetAllFields() {
+  void newEntry_withoutDecisionMetadataWithExpireTimestamps_shouldSetAllFields() {
     long now = System.currentTimeMillis();
-    CacheEntry entry = expireManager.createBuilder(
-      "value",
-      new ExpireManager.VersionStamp(42, false),
-      new ExpireManager.DecisionStamp(7, null, 0),
-      new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
-      new ExpireManager.ExpiryAt(now + 60_000, now + 30_000),
-      KeyState.NORMAL
-    );
+    CacheEntry entry = expireManager
+      .newEntry()
+      .value("value")
+      .version(42)
+      .decision(new DecisionStamp(7, null, 0))
+      .ttl(60_000, 30_000, 300_000, 30_000)
+      .expiryAt(now + 60_000, now + 30_000)
+      .keyState(KeyState.NORMAL)
+      .build();
 
     assertThat(entry.getValue()).isEqualTo("value");
     assertThat(entry.getDataVersion()).isEqualTo(42);
@@ -733,21 +799,21 @@ class CacheExpireManagerTest {
   }
 
   /**
-   * Verifies that createBuilder with no decision metadata and no expire
+   * Verifies that newEntry() with no decision metadata and no expire
    * timestamps produces a correctly built entry with timestamps computed
    * via applyTtl.
    */
   @Test
-  void createBuilder_rawFields_shouldComputeExpireAndSetFields() {
+  void newEntry_rawFields_shouldComputeExpireAndSetFields() {
     long before = System.currentTimeMillis();
-    CacheEntry entry = expireManager.createBuilder(
-      "value",
-      new ExpireManager.VersionStamp(42, false),
-      new ExpireManager.DecisionStamp(7, null, 0),
-      new ExpireManager.TtlSpec(60_000, 30_000, 300_000, 30_000),
-      null,
-      KeyState.NORMAL
-    );
+    CacheEntry entry = expireManager
+      .newEntry()
+      .value("value")
+      .version(42)
+      .decision(new DecisionStamp(7, null, 0))
+      .ttl(60_000, 30_000, 300_000, 30_000)
+      .keyState(KeyState.NORMAL)
+      .build();
 
     assertThat(entry.getValue()).isEqualTo("value");
     assertThat(entry.getDataVersion()).isEqualTo(42);

@@ -140,6 +140,24 @@ public record CachePolicy(
   }
 
   /**
+   * Builds a policy from static TTL overrides with all-default semantics:
+   * null caching enabled, broadcast enabled, {@link StalePolicy#SOFT_REFRESH},
+   * no reader, reporting enabled, failures swallowed. Intended for the
+   * write/local-write families of the {@code Zeta} facade
+   * ({@code putThrough}, {@code putLocal}, {@code putIfAbsent},
+   * {@code getAndSet}, {@code registerRefresh}, ...) where the two TTL
+   * overrides are the only knobs that apply.
+   *
+   * @param hardTtlMs hard TTL override (0 = use configured default;
+   *                  {@link Long#MAX_VALUE} for permanent entry)
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @return a new policy instance
+   */
+  public static CachePolicy of(long hardTtlMs, long softTtlMs) {
+    return of(hardTtlMs, softTtlMs, true, false);
+  }
+
+  /**
    * Returns a copy of this policy with {@link #failOnError()} set to
    * {@code true}: any {@link RuntimeException} on the read path (loader
    * exceptions, internal failures) propagates to the caller instead of being
@@ -151,6 +169,107 @@ public record CachePolicy(
    */
   public CachePolicy withFailOnError() {
     return new CachePolicy(hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, true);
+  }
+
+  /**
+   * Returns a copy of this policy with the value supplier replaced: all other
+   * components (lazy TTLs, null-caching, broadcast, stale-policy, reporting,
+   * failure semantics) are carried over unchanged. The annotation layer's sync
+   * read uses this to inject Spring's {@code valueLoader} into the
+   * thread-bound policy, which carries the storage-side decisions but no
+   * reader of its own.
+   *
+   * @param reader the value supplier for cache misses / refreshes ({@code null}
+   *               allowed, meaning no reader)
+   * @return a new policy instance with the given reader
+   */
+  public CachePolicy withReader(Supplier<?> reader) {
+    return new CachePolicy(
+      hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, failOnError
+    );
+  }
+
+  /**
+   * Returns a copy of this policy with a static hard TTL override. The value
+   * is wrapped into a constant supplier; the lazy-evaluation contract is
+   * unaffected for suppliers carried over from the source policy.
+   *
+   * @param hardTtlMs hard TTL override (0 = use configured default)
+   * @return a new policy instance
+   */
+  public CachePolicy withHardTtl(long hardTtlMs) {
+    return new CachePolicy(
+      ttlSupplier(hardTtlMs), softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, failOnError
+    );
+  }
+
+  /**
+   * Returns a copy of this policy with a static soft TTL override. The value
+   * is wrapped into a constant supplier; the lazy-evaluation contract is
+   * unaffected for suppliers carried over from the source policy.
+   *
+   * @param softTtlMs soft TTL override (0 = use configured default)
+   * @return a new policy instance
+   */
+  public CachePolicy withSoftTtl(long softTtlMs) {
+    return new CachePolicy(
+      hardTtlMs, ttlSupplier(softTtlMs), nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, failOnError
+    );
+  }
+
+  /**
+   * Returns a copy of this policy with the null-caching decision replaced.
+   *
+   * @param nullCaching whether {@code null} loader results may be cached as a
+   *                    sentinel entry
+   * @return a new policy instance
+   */
+  public CachePolicy withNullCaching(boolean nullCaching) {
+    return new CachePolicy(
+      hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, failOnError
+    );
+  }
+
+  /**
+   * Returns a copy of this policy with the broadcast suppression flag
+   * replaced. {@code skipBroadcast = true} suppresses cross-instance sync
+   * messages for write/evict operations (ignored on read paths).
+   *
+   * @param skipBroadcast whether to suppress cross-instance sync messages
+   * @return a new policy instance
+   */
+  public CachePolicy withSkipBroadcast(boolean skipBroadcast) {
+    return new CachePolicy(
+      hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, failOnError
+    );
+  }
+
+  /**
+   * Returns a copy of this policy with the Worker-report flag replaced.
+   *
+   * @param reportEnabled whether to allow reporting this access to the Worker
+   *                      for hot-key detection
+   * @return a new policy instance
+   */
+  public CachePolicy withReporting(boolean reportEnabled) {
+    return new CachePolicy(
+      hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, failOnError
+    );
+  }
+
+  /**
+   * Returns a copy of this policy with the stale policy replaced.
+   *
+   * @param stalePolicy what to do on soft-expire (stale) entries (never
+   *                    {@code null}; {@code null} is normalized to
+   *                    {@link StalePolicy#SOFT_REFRESH} by the compact
+   *                    constructor)
+   * @return a new policy instance
+   */
+  public CachePolicy withStalePolicy(StalePolicy stalePolicy) {
+    return new CachePolicy(
+      hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, failOnError
+    );
   }
 
   /**

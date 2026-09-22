@@ -20,10 +20,11 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.zeta.util.InterruptingAsync;
+import io.github.hyshmily.zeta.util.LogThrottle;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
@@ -57,16 +58,30 @@ public class SingleFlightImpl implements SingleFlight {
   private final CircuitBreaker circuitBreaker;
 
   /**
-   * Rate-limits the per-key join-failure WARN to one per window. A data-source
+   * Rate-limiter for the join-failure WARN: one per window — a data-source
    * outage with a high miss rate would otherwise flood the log with one
    * stack-trace WARN per read (the project's "never WARN on hot path" rule).
+   * Admission is strict — {@link LogThrottle}
+   * claims the window with a compare-and-set, so exactly one caller per window logs.
+   * The atomicity and the monotonic clock are provided by {@link LogThrottle}.
    */
-  private static final long FAILURE_LOG_WINDOW_MS = 10_000;
-  private volatile long lastFailureLoggedAtMs = 0L;
+  private final LogThrottle failureLogThrottle = LogThrottle.perDefaultWindow();
 
-  /** Rate-limits the high-inflight WARN (same window pattern). */
-  private static final long INFLIGHT_LOG_WINDOW_MS = 10_000;
-  private volatile long lastInflightLoggedAtMs = 0L;
+  /**
+   * Rate-limiter for the high-inflight WARN (same window pattern). Admission is strict — {@link LogThrottle}
+   * claims the window with a compare-and-set, so exactly one caller per window logs.
+   * The atomicity and the monotonic clock are provided by {@link LogThrottle}.
+   */
+  private final LogThrottle inflightLogThrottle = LogThrottle.perDefaultWindow();
+
+  /**
+   * Cumulative count of dedup loads resolved empty by a reader timeout —
+   * the Redis-degraded stall signal behind {@code getLoadTimeoutCount()} /
+   * {@code zeta.stall.redis_degraded.timeouts.total}. A timeout is the one
+   * failure shape the breaker already counts toward OPEN, so this counter
+   * exists for attribution, not protection.
+   */
+  private final AtomicLong timeoutCounter = new AtomicLong();
 
   /**
    * Creates a SingleFlightImpl deduplicator that prevents concurrent in-flight loads
@@ -114,6 +129,12 @@ public class SingleFlightImpl implements SingleFlight {
     return inflightLoads.estimatedSize();
   }
 
+  /** Cumulative reader-timeout count across the single-key and batch paths. */
+  @Override
+  public long getLoadTimeoutCount() {
+    return timeoutCounter.get();
+  }
+
   /**
    * Load a value via the supplier, deduplicating concurrent requests for the same key.
    * Thread-safe: concurrent calls for the same key share a single future.
@@ -126,12 +147,24 @@ public class SingleFlightImpl implements SingleFlight {
   @SuppressWarnings("all")
   @Override
   public <T> Optional<T> load(String cacheKey, Supplier<T> reader) {
-    if (intercept()) {
+    if (tryAdmitUnderBreaker()) {
       log.debug("CB open, skip load for key={}", cacheKey);
       return Optional.empty();
     }
 
-    CompletableFuture<Object> future = inflightLoads.asMap().computeIfAbsent(cacheKey, k -> submitReader(reader::get));
+    CompletableFuture<Object> future;
+    try {
+      future = inflightLoads.asMap().computeIfAbsent(cacheKey, k -> submitReader(reader::get));
+    } catch (RejectedExecutionException e) {
+      // The executor rejected the task before any data-source call: no reader
+      // outcome exists, so resolve empty (parity with the timeout path) and
+      // release the half-open probe reservation taken by tryAdmitUnderBreaker() — without
+      // this callback the reserved slot leaks and the breaker sticks in
+      // HALF_OPEN once the quota is drained by repeated rejections.
+      log.debug("SingleFlight executor rejected load, resolving empty: key={}", cacheKey);
+      circuitBreaker.onAbandoned();
+      return Optional.empty();
+    }
 
     try {
       T result = (T) future.join();
@@ -183,24 +216,42 @@ public class SingleFlightImpl implements SingleFlight {
       return Collections.emptyMap();
     }
 
-    if (intercept()) {
+    if (tryAdmitUnderBreaker()) {
       Map<String, Optional<T>> empty = new LinkedHashMap<>();
       for (String key : keys) empty.put(key, Optional.empty());
       return empty;
     }
 
-    for (String key : keys) {
-      inflightLoads.asMap().computeIfAbsent(key, ignored -> submitReader(() -> reader.apply(key)));
+    // Phase 1: submit every reader in one pass, capturing the dedup future per
+    // key. The captured reference (not a second map lookup) is joined in phase
+    // 2 — one hash round trip fewer, and the captured future always completes
+    // even if a concurrent failure removes it from the dedup cache, so the
+    // null-future branch of the former get()-based collect is gone.
+    List<CompletableFuture<Object>> futures = new ArrayList<>(keys.size());
+    try {
+      for (String key : keys) {
+        futures.add(inflightLoads.asMap().computeIfAbsent(key, ignored -> submitReader(() -> reader.apply(key))));
+      }
+    } catch (RejectedExecutionException e) {
+      // Executor saturation is not a reader failure: resolve empty for every
+      // key in both failure modes (mirrors the breaker-interception path,
+      // which resolves empty even under failOnError). Release the half-open
+      // probe reservation taken by tryAdmitUnderBreaker(); readers already submitted
+      // keep running and their results stay in the dedup cache for late
+      // callers (ADR-0002).
+      log.debug("SingleFlight executor rejected batch load, resolving empty: {} keys", keys.size());
+      circuitBreaker.onAbandoned();
+      Map<String, Optional<T>> empty = new LinkedHashMap<>();
+      for (String key : keys) {
+        empty.put(key, Optional.empty());
+      }
+      return empty;
     }
 
     Map<String, Optional<T>> results = new LinkedHashMap<>();
-    for (String key : keys) {
-      CompletableFuture<Object> future = inflightLoads.asMap().get(key);
-      // May be null if another thread invalidated the future due to a load failure
-      if (future == null) {
-        results.put(key, Optional.empty());
-        continue;
-      }
+    for (int i = 0; i < keys.size(); i++) {
+      String key = keys.get(i);
+      CompletableFuture<Object> future = futures.get(i);
       try {
         T result = (T) future.join();
         circuitBreaker.onSuccess();
@@ -210,21 +261,29 @@ public class SingleFlightImpl implements SingleFlight {
       } catch (CompletionException e) {
         // Every failure is recorded against the breaker (the filter inside
         // CircuitBreakerImpl decides ignorability) — see the single-key path.
+        // Joining the captured reference means a waiter observes the same
+        // failure as the caller that caused it, instead of silently
+        // resolving empty when the dedup entry was invalidated mid-flight.
         circuitBreaker.onFailure(e.getCause());
-        if (failOnError) {
-          // Fail-fast batch: mirror the single-key flow — handleFailure
-          // invalidates the dedup future and rethrows the cause
-          // (timeouts/interrupts still resolve to empty).
+        Throwable cause = e.getCause();
+        // The contract resolves timeouts to empty in both failure modes; the
+        // InterruptedException branch is defensive (CompletableFuture.join is
+        // uninterruptible, so a join cause is only ever a reader failure).
+        boolean resolveEmpty = cause instanceof TimeoutException || cause instanceof InterruptedException;
+        if (cause instanceof TimeoutException) {
+          timeoutCounter.incrementAndGet();
+        }
+        if (failOnError && !resolveEmpty) {
+          // Fail-fast batch: handleFailure invalidates the dedup future so a
+          // retry re-runs the reader, then rethrows the cause — the first real
+          // reader failure aborts the collection and propagates to the caller.
           handleFailure(key, e);
-          results.put(key, Optional.empty());
-          continue;
         }
         logFailure(key, e);
 
         inflightLoads.invalidate(key);
         results.put(key, Optional.empty());
 
-        Throwable cause = e.getCause();
         if (cause instanceof InterruptedException) {
           Thread.currentThread().interrupt();
         }
@@ -234,16 +293,61 @@ public class SingleFlightImpl implements SingleFlight {
   }
 
   /**
+   * {@inheritDoc}
+   * <p>
+   * Removes the dedup entry unconditionally (in-flight or completed). An
+   * in-flight future is left to finish for its waiters, but the next caller
+   * starts a fresh load instead of replaying its result — the write-path
+   * companion to the catch-only invalidation: a value invalidation (local or
+   * received, ADR-0067) must also invalidate the load result that produced it.
+   * <p>
+   * A call arriving from inside the same-key load's own compute (e.g. a reader
+   * that performs a synchronous putThrough) is a re-entrant map modification:
+   * the future is not yet inserted, so the eviction is impossible AND
+   * unnecessary — the load-path version guard refuses the stale store. The
+   * exception is therefore absorbed at DEBUG, never propagated to the write
+   * path.
+   */
+  @Override
+  public void invalidate(String cacheKey) {
+    try {
+      inflightLoads.invalidate(cacheKey);
+    } catch (RuntimeException e) {
+      log.debug(
+        "SingleFlight invalidate raced the same-key load compute for key={} (load guard covers the store): {}",
+        cacheKey,
+        e.toString()
+      );
+    }
+  }
+
+  /**
+   * {@inheritDoc}
+   * <p>
+   * Clears the whole dedup cache (in-flight futures included — waiters keep
+   * their future references and complete independently, but no new caller can
+   * join or replay them). The bulk companion to {@link #invalidate(String)},
+   * wired to {@code HotKeyCache.invalidateAllLocal} so an emergency L1 flush
+   * cannot be undone by a completed future replayed within the dedup TTL
+   * (ADR-0067).
+   */
+  @Override
+  public void invalidateAll() {
+    inflightLoads.invalidateAll();
+  }
+
+  /**
    * Check the circuit breaker and log a warning if the inflight queue is high.
    *
-   * @return {@code true} if the request can proceed, {@code false} if the breaker is open
+   * @return {@code true} if the request was <b>intercepted</b> (the breaker is open
+   *         and the caller must resolve to empty), {@code false} if it may proceed
    */
-  private boolean intercept() {
+  private boolean tryAdmitUnderBreaker() {
     if (!circuitBreaker.allowRequest()) {
       return true;
     }
     long inflight = estimatedInflightSize();
-    if (inflight > inflightMaxSize * 0.8 && tryAcquireInflightLog()) {
+    if (inflight > inflightMaxSize * 0.8 && inflightLogThrottle.tryAcquire()) {
       log.warn("SingleFlight inflight queue is high: {}/{}", inflight, inflightMaxSize);
     }
     return false;
@@ -273,41 +377,11 @@ public class SingleFlightImpl implements SingleFlight {
    * @return a {@link CompletableFuture} that will complete with the result
    *         or a {@link TimeoutException}
    */
-  @SuppressWarnings("")
   private CompletableFuture<Object> submitReader(Supplier<Object> reader) {
-    AtomicReference<Thread> runningThread = new AtomicReference<>();
-    AtomicBoolean stillRunning = new AtomicBoolean(true);
-    Executor wrapped = task ->
-      executor.execute(() -> {
-        runningThread.set(Thread.currentThread());
-        try {
-          task.run();
-        } finally {
-          // Task finished: forbid any late timeout interrupt (the captured
-          // thread reference may be reused for an unrelated task) and clear
-          // the interrupt flag so the next task on this pool thread starts
-          // clean. The flag can only have come from our own timeout
-          // machinery — threads are never exposed outside this class.
-          stillRunning.set(false);
-          runningThread.set(null);
-          Thread.interrupted();
-        }
-      });
-
-    CompletableFuture<Object> future = CompletableFuture.supplyAsync(reader, wrapped);
-    future.orTimeout(timeoutSeconds, TimeUnit.SECONDS);
-    future.whenComplete((r, ex) -> {
-      // The latch makes "interrupt" and "task finished" race exactly once:
-      // finished → no interrupt; timeout first → interrupt the thread while
-      // it is still executing this task (runningThread was cleared on exit).
-      if (ex instanceof TimeoutException && stillRunning.getAndSet(false)) {
-        Thread t = runningThread.get();
-        if (t != null) {
-          t.interrupt();
-        }
-      }
-    });
-    return future;
+    // Timeout machinery shared with the background-refresh path: the shared
+    // logic (thread capture, race-once latch, interrupt-flag cleanup) lives in
+    // {@link InterruptingAsync}.
+    return InterruptingAsync.supplyAsync(reader, executor, timeoutSeconds, TimeUnit.SECONDS);
   }
 
   /**
@@ -329,8 +403,23 @@ public class SingleFlightImpl implements SingleFlight {
       return;
     }
     if (cause instanceof TimeoutException) {
+      timeoutCounter.incrementAndGet();
       return;
     }
+    propagateCause(e);
+  }
+
+  /**
+   * Rethrow a {@link CompletionException}'s cause in its natural form: a
+   * {@code RuntimeException} as-is, an {@code Error} as-is, anything else wrapped
+   * back in a {@code CompletionException}. Used by the single-key failure path and
+   * the fail-fast batch path (where the interface contract requires every
+   * non-timeout reader failure to propagate).
+   *
+   * @param e the caught {@link CompletionException}
+   */
+  private static void propagateCause(CompletionException e) {
+    Throwable cause = e.getCause();
     if (cause instanceof RuntimeException re) {
       throw re;
     }
@@ -341,7 +430,7 @@ public class SingleFlightImpl implements SingleFlight {
   }
 
   /**
-   * Rate-limited join-failure WARN: at most one per {@value #FAILURE_LOG_WINDOW_MS}ms
+   * Rate-limited join-failure WARN: at most one per {@value LogThrottle#DEFAULT_WINDOW_MS}ms
    * window, keeping the first exception. A failing data source must not flood
    * the log with one stack-trace WARN per read.
    *
@@ -349,38 +438,8 @@ public class SingleFlightImpl implements SingleFlight {
    * @param e        the caught {@link CompletionException}
    */
   private void logFailure(String cacheKey, CompletionException e) {
-    if (tryAcquireFailureLog()) {
+    if (failureLogThrottle.tryAcquire()) {
       log.warn("singleflight join failed: key={}", cacheKey, e);
     }
-  }
-
-  /**
-   * Rate-limiter for the join-failure WARN (see {@link #logFailure}). Thread-safe
-   * via {@link #lastFailureLoggedAtMs} being volatile; a concurrent double-log in
-   * the same window is benign (approximate throttle, mirrors BroadcastBuffer).
-   *
-   * @return {@code true} if the caller may log now
-   */
-  private boolean tryAcquireFailureLog() {
-    long now = System.currentTimeMillis();
-    if (now - lastFailureLoggedAtMs < FAILURE_LOG_WINDOW_MS) {
-      return false;
-    }
-    lastFailureLoggedAtMs = now;
-    return true;
-  }
-
-  /**
-   * Rate-limiter for the high-inflight WARN (see {@link #intercept()}).
-   *
-   * @return {@code true} if the caller may log now
-   */
-  private boolean tryAcquireInflightLog() {
-    long now = System.currentTimeMillis();
-    if (now - lastInflightLoggedAtMs < INFLIGHT_LOG_WINDOW_MS) {
-      return false;
-    }
-    lastInflightLoggedAtMs = now;
-    return true;
   }
 }

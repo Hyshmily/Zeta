@@ -596,6 +596,57 @@ class SingleFlightTest {
   }
 
   /**
+   * ADR-0066 contract cleanup: in fail-on-error mode a reader TIMEOUT still
+   * resolves to empty (the interface contract) instead of propagating, while any
+   * other reader failure aborts the batch and propagates. The former
+   * implementation had unreachable post-throw code in this branch; this pins the
+   * timeout half of the contract with a short timeout.
+   */
+  @Test
+  void loadCollection_failOnError_timeout_resolvesToEmptyAndRetries() throws Exception {
+    CountDownLatch slowReader = new CountDownLatch(1);
+    CircuitBreaker breaker = new CircuitBreakerImpl(new ZetaProperties.CircuitBreaker());
+    SingleFlight shortTimeout = new SingleFlightImpl(1000, 10, 1, executor, breaker); // 1s timeout
+
+    Map<String, Optional<String>> result = shortTimeout.load(
+      List.of("slow", "fast"),
+      key -> {
+        if ("slow".equals(key)) {
+          awaitUninterruptibly(slowReader); // longer than the 1s timeout
+        }
+        return "val-" + key;
+      },
+      true
+    );
+
+    assertThat(result).containsEntry("slow", Optional.empty()).containsEntry("fast", Optional.of("val-fast"));
+
+    // The timed-out key's dedup future was invalidated: a retry re-runs the reader.
+    slowReader.countDown();
+    Map<String, Optional<String>> retry = shortTimeout.load(List.of("slow"), key -> "recovered", true);
+    assertThat(retry).containsEntry("slow", Optional.of("recovered"));
+  }
+
+  /** {@code CountDownLatch.await} that ignores the interrupt flag (used by blocking readers). */
+  private static void awaitUninterruptibly(CountDownLatch latch) {
+    boolean interrupted = false;
+    try {
+      while (true) {
+        try {
+          latch.await();
+          return;
+        } catch (InterruptedException e) {
+          interrupted = true;
+        }
+      }
+    } finally {
+      if (interrupted) {
+        Thread.currentThread().interrupt();
+      }
+    }
+  }
+
+  /**
    * Verifies that fail-on-error collection loading respects the circuit
    * breaker: an open breaker still resolves every key to empty without
    * invoking the reader or throwing.
