@@ -90,7 +90,7 @@ public interface RuleMatcher {
   /** Replace all rules with the given list. */
   void replaceRules(List<Rule> newRules);
 
-  /** Return an unmodifiable view of all current rules. */
+  /** Return an unmodifiable snapshot of all current rules. */
   List<Rule> getAllRules();
 
   /**

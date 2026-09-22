@@ -26,10 +26,15 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.RedisScript;
@@ -199,6 +204,77 @@ class RuleMatcherTest {
   }
 
   /**
+   * Verifies add/remove symmetry for PREFIX patterns: {@link RuleMatcher#of} strips the
+   * trailing {@code *} on the add path, so removal must canonicalize the same way or the
+   * rule could never be removed by the string that added it.
+   */
+  @Test
+  void removeRule_shouldRemovePrefixRuleByItsAddString() {
+    ruleMatcher.addRule(RuleMatcher.of("user:*", RuleAction.BLOCK));
+    assertThat(ruleMatcher.evaluateRule("user:42")).isEqualTo(RuleAction.BLOCK);
+
+    assertThat(ruleMatcher.removeRule("user:*", RuleAction.BLOCK)).isTrue();
+    assertThat(ruleMatcher.evaluateRule("user:42")).isEqualTo(RuleAction.ALLOW);
+    assertThat(ruleMatcher.getAllRules()).isEmpty();
+  }
+
+  /**
+   * Verifies that a PREFIX rule is also removable by its canonical (already stripped)
+   * pattern, so callers passing the stored form keep working.
+   */
+  @Test
+  void removeRule_shouldRemovePrefixRuleByCanonicalPattern() {
+    ruleMatcher.addRule(RuleMatcher.of("user:*", RuleAction.BLOCK));
+    assertThat(ruleMatcher.removeRule("user:", RuleAction.BLOCK)).isTrue();
+    assertThat(ruleMatcher.getAllRules()).isEmpty();
+  }
+
+  /**
+   * Verifies add/remove symmetry for WILDCARD patterns (stored verbatim).
+   */
+  @Test
+  void removeRule_shouldRemoveWildcardRuleByItsAddString() {
+    ruleMatcher.addRule(RuleMatcher.of("order:*-detail", RuleAction.ALLOW_NO_REPORT));
+    assertThat(ruleMatcher.evaluateRule("order:42-detail")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+
+    assertThat(ruleMatcher.removeRule("order:*-detail", RuleAction.ALLOW_NO_REPORT)).isTrue();
+    assertThat(ruleMatcher.getAllRules()).isEmpty();
+  }
+
+  /**
+   * Verifies add/remove symmetry for REGEX patterns: the {@code regex:} prefix is stripped
+   * on the add path, so removal must canonicalize identically.
+   */
+  @Test
+  void removeRule_shouldRemoveRegexRuleByItsAddString() {
+    ruleMatcher.addRule(RuleMatcher.of("regex:user:\\d+", RuleAction.BLOCK));
+    assertThat(ruleMatcher.evaluateRule("user:42")).isEqualTo(RuleAction.BLOCK);
+
+    assertThat(ruleMatcher.removeRule("regex:user:\\d+", RuleAction.BLOCK)).isTrue();
+    assertThat(ruleMatcher.getAllRules()).isEmpty();
+  }
+
+  /**
+   * Verifies the raw-pattern fallback: a REGEX rule whose canonical form would re-detect as
+   * PREFIX stays removable by the stored (unprefixed) string it was registered under.
+   */
+  @Test
+  void removeRule_shouldStillAcceptRawStoredPattern() {
+    ruleMatcher.addRule(RuleMatcher.of("regex:user:.*", RuleAction.BLOCK));
+    assertThat(ruleMatcher.removeRule("user:.*", RuleAction.BLOCK)).isTrue();
+    assertThat(ruleMatcher.getAllRules()).isEmpty();
+  }
+
+  /**
+   * Verifies that canonicalization never turns a removal into a throw: a malformed
+   * {@code regex:} pattern could not have been added either, so it simply matches nothing.
+   */
+  @Test
+  void removeRule_shouldNotThrowOnMalformedRegex() {
+    assertThat(ruleMatcher.removeRule("regex:[", RuleAction.BLOCK)).isFalse();
+  }
+
+  /**
    * Verifies that removeRulesByAction removes all rules with the given action and returns the count.
    */
   @Test
@@ -233,14 +309,15 @@ class RuleMatcherTest {
   }
 
   /**
-   * Verifies that getAllRules returns a defensive copy (snapshot) not affected by external mutation.
+   * Verifies that getAllRules returns an unmodifiable snapshot not affected by — or affecting —
+   * external mutation.
    */
   @Test
   void getAllRules_shouldReturnSnapshot() {
     ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
     List<Rule> snapshot = ruleMatcher.getAllRules();
     assertThat(snapshot).hasSize(1);
-    snapshot.clear();
+    assertThatThrownBy(snapshot::clear).isInstanceOf(UnsupportedOperationException.class);
     assertThat(ruleMatcher.getAllRules()).hasSize(1);
   }
 
@@ -403,6 +480,125 @@ class RuleMatcherTest {
     assertThatNullPointerException().isThrownBy(() -> ruleMatcher.replaceRules(Collections.singletonList(null)));
   }
 
+  @Nested
+  @DisplayName("Decision memo (ADR-0065)")
+  class DecisionMemo {
+
+    @Test
+    @DisplayName("a rule added after a memoized ALLOW is honored on the very next evaluation")
+    void memo_shouldReflectAddedRuleImmediately() {
+      assertThat(ruleMatcher.evaluateRule("blocked")).isEqualTo(RuleAction.ALLOW);
+      ruleMatcher.addRule(RuleMatcher.of("blocked", RuleAction.BLOCK));
+      assertThat(ruleMatcher.evaluateRule("blocked")).isEqualTo(RuleAction.BLOCK);
+    }
+
+    @Test
+    @DisplayName("a removed rule is honored on the very next evaluation")
+    void memo_shouldReflectRemovedRuleImmediately() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.BLOCK);
+      assertThat(ruleMatcher.removeRule("k", RuleAction.BLOCK)).isTrue();
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.ALLOW);
+    }
+
+    @Test
+    @DisplayName("a memoized BLOCK must not survive clearRules")
+    void memo_shouldReflectClearImmediately() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.BLOCK);
+      ruleMatcher.clearRules();
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.ALLOW);
+    }
+
+    @Test
+    @DisplayName("removeRulesByAction and removeRule(int) are honored on the very next evaluation")
+    void memo_shouldReflectPartialRemovalImmediately() {
+      ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
+      ruleMatcher.addRule(RuleMatcher.of("k2", RuleAction.BLOCK));
+      assertThat(ruleMatcher.evaluateRule("k1")).isEqualTo(RuleAction.BLOCK);
+      assertThat(ruleMatcher.evaluateRule("k2")).isEqualTo(RuleAction.BLOCK);
+
+      ruleMatcher.removeRulesByAction(RuleAction.BLOCK);
+      assertThat(ruleMatcher.evaluateRule("k1")).isEqualTo(RuleAction.ALLOW);
+
+      ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
+      ruleMatcher.addRule(RuleMatcher.of("k2", RuleAction.ALLOW_NO_REPORT));
+      ruleMatcher.removeRule(0);
+      assertThat(ruleMatcher.evaluateRule("k1")).isEqualTo(RuleAction.ALLOW);
+      assertThat(ruleMatcher.evaluateRule("k2")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+    }
+
+    @Test
+    @DisplayName("a direct replaceRules swap (which does not bump the version) is honored on the very next evaluation")
+    void memo_shouldReflectReplaceRulesImmediately() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.BLOCK);
+
+      ruleMatcher.replaceRules(List.of(RuleMatcher.of("k", RuleAction.ALLOW_NO_REPORT)));
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+    }
+
+    @Test
+    @DisplayName("a synced full-replace is honored on the very next evaluation")
+    void memo_shouldReflectSyncReplaceImmediately() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.ALLOW));
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.ALLOW);
+
+      ruleMatcher.syncRules("[{\"pattern\":\"k\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]", Long.MAX_VALUE);
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.BLOCK);
+    }
+
+    @Test
+    @DisplayName("repeat evaluations under one epoch return the memoized action, negative results included")
+    void memo_shouldServeRepeatEvaluations() {
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.ALLOW_NO_REPORT));
+      for (int i = 0; i < 3; i++) {
+        assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+      }
+      for (int i = 0; i < 3; i++) {
+        assertThat(ruleMatcher.evaluateRule("other")).isEqualTo(RuleAction.ALLOW);
+      }
+    }
+
+    @Test
+    @DisplayName("first-match-wins survives memoization")
+    void memo_shouldPreserveFirstMatch() {
+      ruleMatcher.addRule(RuleMatcher.of("foo", RuleAction.BLOCK));
+      ruleMatcher.addRule(RuleMatcher.of("regex:foo", RuleAction.ALLOW_NO_REPORT));
+      assertThat(ruleMatcher.evaluateRule("foo")).isEqualTo(RuleAction.BLOCK);
+      assertThat(ruleMatcher.evaluateRule("foo")).isEqualTo(RuleAction.BLOCK);
+    }
+
+    @Test
+    @DisplayName("concurrent evaluation and mutation converge: the final rule set wins, no stale action resurrects")
+    void memo_shouldStayConsistentUnderConcurrency() throws Exception {
+      int rounds = 100;
+      ExecutorService pool = Executors.newFixedThreadPool(4);
+      try {
+        Future<?> writer = pool.submit(() -> {
+          for (int i = 0; i < rounds; i++) {
+            ruleMatcher.addRule(RuleMatcher.of("hot", RuleAction.BLOCK));
+            ruleMatcher.removeRule("hot", RuleAction.BLOCK);
+          }
+        });
+        Future<?> reader = pool.submit(() -> {
+          for (int i = 0; i < rounds * 20; i++) {
+            // Only BLOCK (rule present) or ALLOW (no rule yet / already removed) are legal;
+            // any stale memo action outside this set would fail the test.
+            assertThat(ruleMatcher.evaluateRule("hot")).isIn(RuleAction.BLOCK, RuleAction.ALLOW);
+          }
+        });
+        writer.get(10, TimeUnit.SECONDS);
+        reader.get(10, TimeUnit.SECONDS);
+      } finally {
+        pool.shutdownNow();
+      }
+      // The writer's final removeRule emptied the set — a memo entry from any previous
+      // epoch must not resurrect BLOCK.
+      assertThat(ruleMatcher.evaluateRule("hot")).isEqualTo(RuleAction.ALLOW);
+    }
+  }
+
   private static void callInitRules(RuleMatcher ruleMatcher) {
     try {
       Method m = RuleMatcherImpl.class.getDeclaredMethod("initRules");
@@ -436,21 +632,24 @@ class RuleMatcherTest {
     @DisplayName("syncRules should skip when incoming version <= local version")
     void syncRules_shouldSkipStaleBroadcast() {
       ruleMatcher.addRule(RuleMatcher.of("k1", RuleAction.BLOCK));
-      ruleMatcher.syncRules("[]", Long.MAX_VALUE);
-      // After syncRules, local-only pattern should still exist
+      // addRule bumped the local version to 1; a broadcast at 1 or below is stale.
+      ruleMatcher.syncRules("[]", 1L);
+      // After the skipped syncRules, local-only pattern should still exist
       assertThat(ruleMatcher.evaluateRule("k1")).isEqualTo(RuleAction.BLOCK);
     }
 
     @Test
-    @DisplayName("syncRules should merge incoming rules with version > local version")
-    void syncRules_shouldMergeIncomingRules() {
+    @DisplayName("syncRules should full-replace the local set with a strictly fresher versioned broadcast (ADR-0062)")
+    void syncRules_shouldFullReplaceOnFresherVersion() {
       ruleMatcher.addRule(RuleMatcher.of("local", RuleAction.BLOCK));
       ruleMatcher.syncRules(
         "[{\"pattern\":\"incoming\",\"action\":\"ALLOW_NO_REPORT\",\"type\":\"EXACT\"}]",
         Long.MAX_VALUE
       );
       assertThat(ruleMatcher.evaluateRule("incoming")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
-      assertThat(ruleMatcher.evaluateRule("local")).isEqualTo(RuleAction.BLOCK);
+      // The local rule is absent from the fresher broadcast — its own broadcast was lost,
+      // and keeping it would also prevent deletions from ever converging.
+      assertThat(ruleMatcher.evaluateRule("local")).isEqualTo(RuleAction.ALLOW);
     }
 
     @Test
@@ -488,15 +687,67 @@ class RuleMatcherTest {
     }
 
     @Test
-    @DisplayName("syncRules should keep local-only patterns after merge")
+    @DisplayName("syncRules should union-merge legacy unversioned broadcasts (version 0, rolling upgrade)")
     void syncRules_shouldKeepLocalOnlyPatterns() {
       ruleMatcher.addRule(RuleMatcher.of("local-only", RuleAction.BLOCK));
       ruleMatcher.syncRules(
         "[{\"pattern\":\"incoming\",\"action\":\"ALLOW_NO_REPORT\",\"type\":\"EXACT\"}]",
-        Long.MAX_VALUE
+        0L
       );
       assertThat(ruleMatcher.evaluateRule("local-only")).isEqualTo(RuleAction.BLOCK);
       assertThat(ruleMatcher.evaluateRule("incoming")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+    }
+
+    @Test
+    @DisplayName("syncRules should propagate deletions and adopt the incoming version exactly (ADR-0062)")
+    void syncRules_shouldPropagateDeletionsViaFullReplace() {
+      ruleMatcher.addRule(RuleMatcher.of("doomed", RuleAction.BLOCK));
+      ruleMatcher.addRule(RuleMatcher.of("survivor", RuleAction.ALLOW_NO_REPORT));
+      ruleMatcher.syncRules(
+        "{\"rulesVersion\":10,\"rules\":[{\"pattern\":\"survivor\",\"action\":\"ALLOW_NO_REPORT\",\"type\":\"EXACT\"}]}",
+        10L
+      );
+      assertThat(ruleMatcher.evaluateRule("doomed")).isEqualTo(RuleAction.ALLOW);
+      assertThat(ruleMatcher.evaluateRule("survivor")).isEqualTo(RuleAction.ALLOW_NO_REPORT);
+      assertThat(ruleMatcher.getAllRules()).hasSize(1);
+
+      // The adopted version must be exact (10) so the next local change broadcasts at 11.
+      // The old off-by-one left the persisted version permanently one ahead of the local
+      // counter, silently rejecting every subsequent change.
+      ruleMatcher.addRule(RuleMatcher.of("post-sync", RuleAction.ALLOW));
+      ArgumentCaptor<Long> broadcastVersion = ArgumentCaptor.forClass(Long.class);
+      verify(publisher, atLeastOnce()).broadcastAllLocalRules(anyString(), broadcastVersion.capture());
+      assertThat(broadcastVersion.getAllValues()).endsWith(11L);
+    }
+
+    @Test
+    @DisplayName("loadRulesFromRedis should restore the persisted rulesVersion so post-restart changes are not dropped")
+    void initRules_shouldRestorePersistedVersion() {
+      when(valueOps.get(anyString())).thenReturn(
+        "{\"rulesVersion\":42,\"rules\":[{\"pattern\":\"persisted\",\"action\":\"BLOCK\",\"type\":\"EXACT\"}]}"
+      );
+      ruleMatcher = new RuleMatcherImpl(Optional.of(redisTemplate), Optional.of(publisher));
+      callInitRules(ruleMatcher);
+      assertThat(ruleMatcher.evaluateRule("persisted")).isEqualTo(RuleAction.BLOCK);
+
+      // The next local change must be broadcast at 43 (= 42 + 1), not 1 — restoring the
+      // persisted version is what keeps the Redis CAS gate and peer staleness gate working
+      // after a restart.
+      ruleMatcher.addRule(RuleMatcher.of("after-restart", RuleAction.ALLOW));
+
+      ArgumentCaptor<Long> broadcastVersion = ArgumentCaptor.forClass(Long.class);
+      verify(publisher, atLeastOnce()).broadcastAllLocalRules(anyString(), broadcastVersion.capture());
+      assertThat(broadcastVersion.getAllValues()).contains(43L);
+    }
+
+    @Test
+    @DisplayName("a CAS rejection (no-set result) must be observed but never fatal: rule stays local, broadcast still fires")
+    void persistToRedis_shouldTolerateCasRejection() {
+      // The mocked script call yields no set confirmation — the rejection branch of the persist path.
+      ruleMatcher.addRule(RuleMatcher.of("k", RuleAction.BLOCK));
+
+      assertThat(ruleMatcher.evaluateRule("k")).isEqualTo(RuleAction.BLOCK);
+      verify(publisher, atLeastOnce()).broadcastAllLocalRules(anyString(), anyLong());
     }
 
     @Test

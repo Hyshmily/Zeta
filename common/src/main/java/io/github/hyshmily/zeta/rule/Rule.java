@@ -35,9 +35,10 @@ import lombok.Data;
  * tracking and cross-instance synchronization. Rules are serialized to
  * JSON for Redis persistence and AMQP send.
  *
- * <p>Instances are mutable (for Jackson deserialization) but should be
- * treated as effectively immutable after construction and registration
- * with {@link RuleMatcher}.
+ * <p>Instances are mutable (for Jackson deserialization); the pattern-sensitive
+ * setters ({@link #setPattern}, {@link #setType}) invalidate the compiled regex
+ * state automatically. Post-registration mutation is still discouraged — mutate
+ * through {@link RuleMatcher} so the change propagates to the cluster.
  *
  * @see RuleMatcher
  * @see RuleAction
@@ -170,6 +171,32 @@ public class Rule {
   }
 
   /**
+   * Sets the pattern string and invalidates the compiled regex state, so the
+   * next {@link #match} or {@link #prepare} re-derives the compilation from
+   * the new pattern. Hand-written so the Lombok-generated setter cannot leave
+   * a compiled pattern that matches the old value.
+   *
+   * @param pattern the new pattern string
+   */
+  public void setPattern(String pattern) {
+    this.pattern = pattern;
+    compiledPattern = null;
+    patternVersion.incrementAndGet();
+  }
+
+  /**
+   * Sets the pattern type and invalidates the compiled regex state (a
+   * compilation of the old type is meaningless for the new one).
+   *
+   * @param type the new pattern type
+   */
+  public void setType(RuleType type) {
+    this.type = type;
+    compiledPattern = null;
+    patternVersion.incrementAndGet();
+  }
+
+  /**
    * Test whether the given cache key matches this rule's pattern.
    *
    * <p>Matching behavior depends on the rule type:
@@ -202,29 +229,38 @@ public class Rule {
       case PREFIX -> key.startsWith(pattern);
       case WILDCARD -> {
         MatcherCacheEntry entry = rebuiltIfNeeded();
-        yield entry.matcher.reset(key).matches();
+        yield entry != null && entry.matcher.reset(key).matches();
       }
       case REGEX -> {
         MatcherCacheEntry entry = rebuiltIfNeeded();
-        yield entry.matcher.reset(key).find();
+        yield entry != null && entry.matcher.reset(key).find();
       }
     };
   }
 
   private MatcherCacheEntry rebuiltIfNeeded() {
-    if (compiledPattern == null) prepare();
+    Pattern compiled = compiledPattern;
+    if (compiled == null) {
+      prepare();
+      compiled = compiledPattern;
+      if (compiled == null) {
+        // Type concurrently changed to a non-regex type; treat as non-matching this call.
+        return null;
+      }
+    }
     int curVersion = patternVersion.get();
     MatcherCacheEntry entry = matcherCache.get();
     if (entry == null || entry.version != curVersion) {
-      Matcher m = compiledPattern.matcher("");
-      entry = new MatcherCacheEntry(m, curVersion);
+      entry = new MatcherCacheEntry(compiled.matcher(""), curVersion);
       matcherCache.set(entry);
     }
     return entry;
   }
 
   /**
-   * Lazily compile the internal regex pattern if not already compiled.
+   * Lazily compile the internal regex pattern if not already compiled for
+   * the current pattern string; a repeated call on an up-to-date rule is a
+   * no-op (no recompilation, no matcher-cache invalidation).
    *
    * <p>For {@link RuleType#REGEX} rules, the pattern is used as-is.
    * For {@link RuleType#WILDCARD} rules, the glob metacharacters
@@ -233,9 +269,8 @@ public class Rule {
    * ({@code . + ^ $ [ ] \ ( ) { } |}) are escaped.
    *
    * <p>This method is safe for concurrent calls: {@link #compiledPattern}
-   * is {@code volatile}, and  is
-   * idempotent (compiling the same pattern twice produces identical,
-   * interchangeable objects).
+   * is {@code volatile}, and compilation is idempotent (compiling the same
+   * pattern twice produces identical, interchangeable objects).
    *
    * <p>Has no effect on {@link RuleType#EXACT} or {@link RuleType#PREFIX}
    * rules, which do not use regex matching.
@@ -246,12 +281,30 @@ public class Rule {
    */
   public void prepare() {
     if (type == null) return;
-    if (type == RuleType.REGEX) {
-      compiledPattern = Pattern.compile(pattern);
-    } else if (type == RuleType.WILDCARD) {
-      String regex = pattern.replaceAll("([.+^$\\[\\]\\\\(){}|])", "\\\\$1").replace("*", ".*").replace("?", ".");
-      compiledPattern = Pattern.compile(regex);
+    switch (type) {
+      case REGEX -> {
+        if (isCompiledFor(pattern)) return;
+        compiledPattern = Pattern.compile(pattern);
+      }
+      case WILDCARD -> {
+        String regex = toRegex(pattern);
+        if (isCompiledFor(regex)) return;
+        compiledPattern = Pattern.compile(regex);
+      }
+      default -> {
+        return;
+      }
     }
     patternVersion.incrementAndGet();
+  }
+
+  /** {@code true} if {@link #compiledPattern} is already compiled from {@code expectedRegex}. */
+  private boolean isCompiledFor(String expectedRegex) {
+    return compiledPattern != null && compiledPattern.pattern().equals(expectedRegex);
+  }
+
+  /** Convert a glob pattern ({@code *}, {@code ?}) to an equivalent full-match regex, escaping regex metacharacters. */
+  private static String toRegex(String glob) {
+    return glob.replaceAll("([.+^$\\[\\]\\\\(){}|])", "\\\\$1").replace("*", ".*").replace("?", ".");
   }
 }

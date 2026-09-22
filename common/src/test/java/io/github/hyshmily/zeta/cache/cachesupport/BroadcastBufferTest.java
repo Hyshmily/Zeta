@@ -26,20 +26,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link BroadcastBuffer} covering initialization, recording, flushing, scheduling, error
  * handling, and thread safety.
- *
- * <p>Tagged {@code flaky}: the forced-flush timing test
- * ({@code record_whenExceedingCap_shouldForceFlushAutomatically}) races against the shared CI
- * machine's scheduler and intermittently misses its timeout — excluded from CI runs via
- * {@code zeta.surefire.excludedGroups} (see root pom). Run locally with
- * {@code mvn test -Dzeta.surefire.excludedGroups=flaky -Dtest=BroadcastBufferTest} to re-enable.
  */
-@Tag("flaky")
 class BroadcastBufferTest {
 
   private ScheduledExecutorService scheduler;
@@ -252,6 +244,43 @@ class BroadcastBufferTest {
     boolean fired = latch.await(2000, TimeUnit.MILLISECONDS);
     org.junit.jupiter.api.Assertions.assertTrue(fired, "Scheduled flush should have fired within timeout");
     verify(spyPublisher).broadcastRefresh("auto-key", 1L, false);
+  }
+
+  /**
+   * Records do not cancel/re-arm the pending flush: a record arriving while a
+   * flush is already scheduled rides the ORIGINAL schedule — the flush swaps
+   * the whole pending map at fire time, so the later record is included in the
+   * same send cycle. The old per-record reschedule would have pushed the flush
+   * out by another full delay on every write.
+   */
+  @Test
+  void record_whileFlushPending_shouldRideOriginalSchedule() throws Exception {
+    CountDownLatch flushed = new CountDownLatch(1);
+    CacheSyncPublisher spyPublisher = mock(CacheSyncPublisher.class);
+    doAnswer(inv -> {
+      flushed.countDown();
+      return null;
+    })
+      .when(spyPublisher)
+      .broadcastRefresh("second", 2L, false);
+
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPublisher), 400L);
+    long firstRecordAt = System.nanoTime();
+    buf.record("first", 1L, false);
+    // Lands while the first record's flush is pending: the flush must NOT be
+    // pushed out to ~second + 400ms.
+    Thread.sleep(250);
+    buf.record("second", 2L, false);
+
+    boolean fired = flushed.await(2, TimeUnit.SECONDS);
+    org.junit.jupiter.api.Assertions.assertTrue(fired, "Scheduled flush should have fired within timeout");
+    long elapsedMs = (System.nanoTime() - firstRecordAt) / 1_000_000;
+    org.junit.jupiter.api.Assertions.assertTrue(
+      elapsedMs < 600,
+      "Flush should ride the original schedule, not be rescheduled per record (fired at ~" + elapsedMs + "ms)");
+    // The later record is delivered by the same flush (map swapped at fire time).
+    verify(spyPublisher).broadcastRefresh("first", 1L, false);
+    verify(spyPublisher).broadcastRefresh("second", 2L, false);
   }
 
   // ── Error handling ──

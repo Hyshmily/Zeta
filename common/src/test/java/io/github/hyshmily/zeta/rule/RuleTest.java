@@ -396,4 +396,40 @@ class RuleTest {
     assertThat(rule.match("")).isFalse();
     assertThat(rule.match("999")).isTrue();
   }
+
+  @Test
+  void setPatternInvalidatesCompiledState() {
+    var rule = new Rule(RuleType.WILDCARD, "foo*", RuleAction.BLOCK);
+    rule.prepare();
+    assertThat(rule.match("foobar")).isTrue();
+
+    rule.setPattern("bar*");
+    assertThat(rule.getCompiledPattern()).isNull();
+    assertThat(rule.match("barfoo")).isTrue();
+    assertThat(rule.match("foobar")).isFalse();
+  }
+
+  @Test
+  void setPatternInvalidatesRegexState() {
+    var rule = new Rule(RuleType.REGEX, "^foo", RuleAction.BLOCK);
+    assertThat(rule.match("foobar")).isTrue();
+
+    rule.setPattern("^bar");
+    assertThat(rule.match("barfoo")).isTrue();
+    assertThat(rule.match("foobar")).isFalse();
+  }
+
+  @Test
+  void setTypeInvalidatesCompiledState() {
+    var rule = new Rule(RuleType.WILDCARD, "foo.*", RuleAction.BLOCK);
+    rule.prepare();
+    // Glob semantics: the '.' is a literal dot, '*' matches any suffix.
+    assertThat(rule.match("foo.XYZ")).isTrue();
+    assertThat(rule.match("fooXYZ")).isFalse();
+
+    rule.setType(RuleType.EXACT);
+    // Now plain string equality against the raw pattern.
+    assertThat(rule.match("foo.*")).isTrue();
+    assertThat(rule.match("foo.XYZ")).isFalse();
+  }
 }
