@@ -17,10 +17,12 @@ package io.github.hyshmily.zeta.model;
 
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.Nullable;
+import lombok.AccessLevel;
 import lombok.Builder;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
+import org.springframework.util.Assert;
 
 /**
  * A value stored in the L1 cache together with its version metadata,
@@ -51,20 +53,22 @@ import lombok.ToString;
  * {@code int}s as a 2-bit unit plus a 30-bit mantissa (see {@link #encodeTtl}):
  * TTLs up to 2^30 − 1 ms (≈ 12.4 days) round-trip exactly in milliseconds;
  * longer TTLs are stored in seconds, minutes, or hours with sub-unit error
- * (< 0.001% relative). {@code Long.MAX_VALUE} (permanent) is a dedicated
+ * (&lt; 0.001% relative). {@code Long.MAX_VALUE} (permanent) is a dedicated
  * sentinel. Negative TTLs are rejected. The absolute expire-at timestamps
  * ({@code hardExpireAtMs}/{@code softExpireAtMs}) stay full {@code long}s and
  * are the actual expiry enforcement point — the stored TTLs are nominal values
  * used only when rebuilding an entry after a state transition.
  *
- * <p>Uses Lombok {@code @Builder} on the private constructor for initial
- * construction; the builder surface matches the logical fields
- * ({@code isVersionDegraded}, {@code decisionEpoch}, {@code keyState} are
- * accepted and packed). {@link #toBuilder()} is handwritten because the packed
- * fields no longer exist under their logical names. For modified copies, prefer
- * the {@code withXxx()} family of methods (e.g. {@link #withValue},
- * {@link #withTtl}) which allocate a single new instance directly — avoiding
- * the intermediate Builder object created by {@code toBuilder().field(v).build()}.
+ * <p><b>Construction and modification.</b> The entry is immutable. Every
+ * creation and every copy-on-write modification flows through the single
+ * {@link EntryDraft} API: production code obtains drafts from
+ * {@code ExpireManager.newEntry()} / {@code ExpireManager.editEntry(entry)}
+ * (wired to the TTL arithmetic), tests and explicit-timestamp callers use
+ * {@link EntryDraft#of(CacheEntry)}. The Lombok {@code @Builder} remains on the
+ * package-private constructor for direct low-level construction (the generated
+ * {@link #builder()} is the flat 13-field surface tests rely on); the former
+ * {@code withXxx()} copy family, {@code toBuilder()}, and the
+ * {@code TtlPolicy.applyXxx()} transforms are all replaced by the draft.
  */
 @Getter
 @ToString
@@ -149,7 +153,16 @@ public class CacheEntry {
    * Packed hard TTL duration (2-bit unit + 30-bit mantissa). Decoded via
    * {@link #getHardTtlMs()}; the actual eviction timestamp is
    * {@link #hardExpireAtMs}.
+   *
+   * <p>{@code @Getter(AccessLevel.NONE)} is deliberate: the packed {@code int}
+   * must never be observable. Without it Lombok would fall back to generating
+   * {@code int getHardTtlMs()} the moment the hand-written {@code long} getter
+   * is renamed or removed — and because an {@code int} widens silently into a
+   * {@code long}, callers would receive the packed encoding instead of a
+   * duration with nothing failing to compile. The same guard is applied to the
+   * other three packed TTL fields.
    */
+  @Getter(AccessLevel.NONE)
   @ToString.Exclude
   private final int hardTtlMs;
 
@@ -162,8 +175,10 @@ public class CacheEntry {
 
   /**
    * Packed soft TTL duration (2-bit unit + 30-bit mantissa). Decoded via
-   * {@link #getSoftTtlMs()}; {@code 0} means no soft expire.
+   * {@link #getSoftTtlMs()}; {@code 0} means no soft expire. See
+   * {@link #hardTtlMs} for why the packed field is not exposed as a getter.
    */
+  @Getter(AccessLevel.NONE)
   @ToString.Exclude
   private final int softTtlMs;
 
@@ -175,21 +190,30 @@ public class CacheEntry {
 
   /**
    * Packed normal-state hard TTL baseline (2-bit unit + 30-bit mantissa).
-   * Decoded via {@link #getNormalHardTtlMs()}.
+   * Decoded via {@link #getNormalHardTtlMs()}. See {@link #hardTtlMs} for why
+   * the packed field is not exposed as a getter.
    */
+  @Getter(AccessLevel.NONE)
   @ToString.Exclude
   private final int normalHardTtlMs;
 
   /**
    * Packed normal-state soft TTL baseline (2-bit unit + 30-bit mantissa).
-   * Decoded via {@link #getNormalSoftTtlMs()}.
+   * Decoded via {@link #getNormalSoftTtlMs()}. See {@link #hardTtlMs} for why
+   * the packed field is not exposed as a getter.
    */
+  @Getter(AccessLevel.NONE)
   @ToString.Exclude
   private final int normalSoftTtlMs;
 
   /**
    * Creates a new entry, packing {@code decisionEpoch} + {@code keyState}
    * into {@link #packedState} and the four TTLs into compact encodings.
+   *
+   * <p>Package-private: {@link EntryDraft} (same package) is the single
+   * high-level construction and modification API and calls this constructor
+   * directly — zero extra allocation. The Lombok {@code @Builder} keeps the
+   * flat 13-field surface available to tests and low-level callers.
    *
    * <p>The degraded flag is <b>not stored</b> — it is derived from the sign
    * bit of {@code dataVersion} (see ADR-0019). The constructor enforces the
@@ -217,7 +241,7 @@ public class CacheEntry {
    *         {@code Long.MAX_VALUE})
    */
   @Builder
-  private CacheEntry(
+  CacheEntry(
     @Nullable Object value,
     long dataVersion,
     boolean isVersionDegraded,
@@ -232,16 +256,14 @@ public class CacheEntry {
     long normalHardTtlMs,
     long normalSoftTtlMs
   ) {
-    if (isVersionDegraded != (dataVersion < 0)) {
-      throw new IllegalArgumentException(
-        "isVersionDegraded(" + isVersionDegraded + ") must equal (dataVersion < 0) for dataVersion=" + dataVersion
-      );
-    }
-    if (decisionEpoch < 0 || decisionEpoch > MAX_DECISION_EPOCH) {
-      throw new IllegalArgumentException(
-        "decisionEpoch out of range [0, " + MAX_DECISION_EPOCH + "]: " + decisionEpoch
-      );
-    }
+    Assert.isTrue(
+      isVersionDegraded == (dataVersion < 0),
+      () -> "isVersionDegraded(" + isVersionDegraded + ") must equal (dataVersion < 0) for dataVersion=" + dataVersion
+    );
+    Assert.isTrue(
+      decisionEpoch >= 0 && decisionEpoch <= MAX_DECISION_EPOCH,
+      () -> "decisionEpoch out of range [0, " + MAX_DECISION_EPOCH + "]: " + decisionEpoch
+    );
     this.value = value;
     this.dataVersion = dataVersion;
     this.decisionVersion = decisionVersion;
@@ -363,6 +385,20 @@ public class CacheEntry {
   }
 
   /**
+   * The Worker decision stamp carried by this entry, or {@code null} for a
+   * local origin (no {@code decisionNodeId} — local promotion, cleared
+   * demotion). The single extraction shape for decision metadata:
+   * {@code ExpireManager.decisionOf} delegates here, and callers that pass
+   * the result to {@link EntryDraft#decision} round-trip the fields exactly.
+   *
+   * @return the decision stamp, or {@code null} when the entry has no Worker origin
+   */
+  @Nullable
+  public DecisionStamp decisionStamp() {
+    return decisionNodeId == null ? null : new DecisionStamp(decisionVersion, decisionNodeId, getDecisionEpoch());
+  }
+
+  /**
    * Current hot-key state of this entry. Determines which TTL values
    * are active: {@link KeyState#HOT} uses extended TTLs,
    * {@link KeyState#COOL} reverts to normal TTLs.
@@ -425,439 +461,5 @@ public class CacheEntry {
   @ToString.Include(name = "normalSoftTtlMs")
   public long getNormalSoftTtlMs() {
     return decodeTtl(normalSoftTtlMs);
-  }
-
-  /** Return a copy with a different {@link #value}. */
-  public CacheEntry withValue(@Nullable Object value) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #dataVersion}. The degraded flag follows the new sign. */
-  public CacheEntry withDataVersion(long dataVersion) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      dataVersion < 0,
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #decisionVersion}. */
-  public CacheEntry withDecisionVersion(long decisionVersion) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #decisionNodeId}. */
-  public CacheEntry withDecisionNodeId(@Nullable String decisionNodeId) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #getDecisionEpoch decision epoch}. */
-  public CacheEntry withDecisionEpoch(long decisionEpoch) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      decisionEpoch,
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #getHardTtlMs() hard TTL}. */
-  public CacheEntry withHardTtlMs(long hardTtlMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      hardTtlMs,
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #hardExpireAtMs}. */
-  public CacheEntry withHardExpireAtMs(long hardExpireAtMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #getSoftTtlMs() soft TTL}. */
-  public CacheEntry withSoftTtlMs(long softTtlMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      softTtlMs,
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #softExpireAtMs}. */
-  public CacheEntry withSoftExpireAtMs(long softExpireAtMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #getKeyState() key state}. */
-  public CacheEntry withKeyState(KeyState keyState) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      keyState,
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #getNormalHardTtlMs() normal hard TTL}. */
-  public CacheEntry withNormalHardTtlMs(long normalHardTtlMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      normalHardTtlMs,
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with a different {@link #getNormalSoftTtlMs() normal soft TTL}. */
-  public CacheEntry withNormalSoftTtlMs(long normalSoftTtlMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      normalSoftTtlMs
-    );
-  }
-
-  /** Return a copy with all four TTL fields updated at once. */
-  public CacheEntry withTtl(long hardTtlMs, long softTtlMs, long hardExpireAtMs, long softExpireAtMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      hardTtlMs,
-      hardExpireAtMs,
-      softTtlMs,
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with hard TTL and hard expire-at updated together. */
-  public CacheEntry withHardTtl(long hardTtlMs, long hardExpireAtMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      hardTtlMs,
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with soft TTL and soft expire-at updated together. */
-  public CacheEntry withSoftTtl(long softTtlMs, long softExpireAtMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      softTtlMs,
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with both normal TTL fields updated together. */
-  public CacheEntry withNormalTtl(long normalHardTtlMs, long normalSoftTtlMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      normalHardTtlMs,
-      normalSoftTtlMs
-    );
-  }
-
-  /** Return a copy with all four TTL fields and keyState updated at once. */
-  public CacheEntry withTtlAndKeyState(
-    long hardTtlMs,
-    long softTtlMs,
-    long hardExpireAtMs,
-    long softExpireAtMs,
-    KeyState keyState
-  ) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      hardTtlMs,
-      hardExpireAtMs,
-      softTtlMs,
-      softExpireAtMs,
-      keyState,
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /**
-   * Return a copy with decision metadata, TTL fields, and keyState updated
-   * at once — the Worker COOL-decision pattern.
-   */
-  public CacheEntry withDecisionAndTtlAndState(
-    long decisionVersion,
-    String decisionNodeId,
-    long decisionEpoch,
-    long hardTtlMs,
-    long softTtlMs,
-    long hardExpireAtMs,
-    long softExpireAtMs,
-    KeyState keyState
-  ) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      decisionEpoch,
-      hardTtlMs,
-      hardExpireAtMs,
-      softTtlMs,
-      softExpireAtMs,
-      keyState,
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /**
-   * Return a copy with value, version metadata, and expire-at timestamps
-   * updated at once — the cache-sync refresh pattern.
-   */
-  public CacheEntry withValueAndRefreshMeta(
-    Object value,
-    long dataVersion,
-    boolean isVersionDegraded,
-    long hardExpireAtMs,
-    long softExpireAtMs
-  ) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded,
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      getSoftTtlMs(),
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /** Return a copy with value and soft TTL fields updated at once — the refresh-task pattern. */
-  public CacheEntry withValueAndSoftTtl(Object value, long softTtlMs, long softExpireAtMs) {
-    return new CacheEntry(
-      value,
-      dataVersion,
-      isVersionDegraded(),
-      decisionVersion,
-      decisionNodeId,
-      getDecisionEpoch(),
-      getHardTtlMs(),
-      hardExpireAtMs,
-      softTtlMs,
-      softExpireAtMs,
-      getKeyState(),
-      getNormalHardTtlMs(),
-      getNormalSoftTtlMs()
-    );
-  }
-
-  /**
-   * Copy builder seeded from this entry.
-   *
-   * <p>Written by hand because Lombok's generated {@code toBuilder()} reads
-   * constructor parameters by matching field names, but {@code decisionEpoch},
-   * {@code keyState}, and the four TTLs no longer exist as fields — the
-   * derived/decode getters feed the builder instead.
-   *
-   * @return a builder prefilled with this entry's logical fields
-   */
-  public CacheEntryBuilder toBuilder() {
-    return new CacheEntryBuilder()
-      .value(value)
-      .dataVersion(dataVersion)
-      .isVersionDegraded(isVersionDegraded())
-      .decisionVersion(decisionVersion)
-      .decisionNodeId(decisionNodeId)
-      .decisionEpoch(getDecisionEpoch())
-      .hardTtlMs(getHardTtlMs())
-      .hardExpireAtMs(hardExpireAtMs)
-      .softTtlMs(getSoftTtlMs())
-      .softExpireAtMs(softExpireAtMs)
-      .keyState(getKeyState())
-      .normalHardTtlMs(getNormalHardTtlMs())
-      .normalSoftTtlMs(getNormalSoftTtlMs());
   }
 }
