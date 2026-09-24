@@ -294,7 +294,8 @@ public class ZetaAmqpAutoConfiguration {
         cfg.getCpuThreshold(),
         cfg.getBbrWindowMs(),
         cfg.getBbrWindowBuckets(),
-        cfg.getBbrCooldownMs()
+        cfg.getBbrCooldownMs(),
+        cfg.getBbrMaxInFlightCeiling()
       );
     }
 

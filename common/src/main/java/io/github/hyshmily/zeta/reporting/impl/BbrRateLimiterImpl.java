@@ -25,16 +25,41 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.util.Assert;
 
 /**
- * BBR (Bottleneck Bandwidth and Round-trip) adaptive rate limiter.
+ * Damped adaptive rate limiter (BBR-flavored), modeled on the Linux writeback
+ * throttle in {@code mm/page-writeback.c}.
  *
- * <p>Inspired by the aegis /golang BBR implementation and Alibaba Sentinel.
- * Uses a sliding-window max-pass and min-RTT to compute the optimal concurrency
- * limit per Little's Law: {@code concurrency = throughput × latency}.
+ * <p>The limiter regulates the number of in-flight batches with three layers,
+ * mirroring the kernel's dirty-page throttling structure:
  *
- * <p>When the system CPU is below threshold the limiter is permissive,
- * only dropping when concurrency exceeds the limit <em>and</em> a cooldown
- * period is active.  When CPU is above threshold the limiter enforces the
- * concurrency budget strictly.
+ * <ol>
+ *   <li><b>Freerun band</b> (kernel {@code dirty_freerun_ceiling}): at or below
+ *       half the damped baseline the control loop does not restrict at all,
+ *       eliminating measurement noise in the common case. A recent consumer
+ *       drop (cooldown) bypasses the band and enforces the budget strictly.
+ *   <li><b>Position control</b> (kernel {@code pos_ratio_polynom}): the
+ *       admission budget is the damped baseline scaled by a cubic position
+ *       ratio around the setpoint — fast response far from the setpoint, flat
+ *       slope near it. CPU pressure no longer acts as a two-state hard switch:
+ *       it continuously derates the hard limit over a ±20 pp ramp around the
+ *       configured threshold, which pulls the setpoint down smoothly.
+ *   <li><b>Damped baseline</b> (kernel {@code wb_update_dirty_ratelimit},
+ *       adjusted every 200 ms): a slow-moving budget baseline that tracks a
+ *       Little's-Law estimate ({@code maxPass × minRt}) through a direction
+ *       gate (only moves toward the position-error side), a three-way clamp
+ *       against outlier estimates, and step-size decay. Measurement noise
+ *       cannot become budget action in a single step.
+ * </ol>
+ *
+ * <p><b>Convergence</b> (supersedes the old maxPassCache-only argument):
+ * continuous gate drops mean no new passes enter the sliding window, so
+ * {@code maxPASS()} reads all-zero buckets and {@code est} decays via the
+ * maxPassCache ×0.99 path. In-flight strictly drains while gate drops persist
+ * (denied cycles never enqueue), so once in-flight reaches the budget the
+ * freerun band / budget check admits again. When in-flight overshoots the
+ * baseline far enough to engage the downward direction gate, the baseline also
+ * follows the decaying estimate with a bounded step (≤ ~12.5% of the remaining
+ * gap per 200 ms update). The design converges without lock-up; the freerun
+ * band shrinks with the baseline.
  *
  * <p><b>Application:</b> Used by {@link KeyReporter} to skip flush cycles
  * when the reporting pipeline is saturated, providing back-pressure that is
@@ -43,9 +68,30 @@ import org.springframework.util.Assert;
 @Internal
 public class BbrRateLimiterImpl implements BbrRateLimiter {
 
+  /** Q10 fixed-point shift, mirrors kernel {@code RATELIMIT_CALC_SHIFT}. */
+  private static final int RATELIMIT_CALC_SHIFT = 10;
+  /** pos_ratio value representing 1.0 in Q10. */
+  private static final long POS_RATIO_ONE = 1L << RATELIMIT_CALC_SHIFT;
+  /** pos_ratio upper clamp (kernel {@code clamp(pos_ratio, 0, 2 << SHIFT)}). */
+  private static final long POS_RATIO_MAX = 2L << RATELIMIT_CALC_SHIFT;
+  /** Pre-cube clamp on the normalized error; beyond this pos_ratio saturates anyway. */
+  private static final long POS_RATIO_X_CLAMP = 4L << RATELIMIT_CALC_SHIFT;
+  /** CPU ratio floor: at full CPU load 1/4 of the ceiling is retained. */
+  private static final long CPU_RATIO_FLOOR = 256;
+  /** CPU derating is a continuous ramp of ±20 pp around the configured threshold. */
+  private static final long CPU_RAMP_BAND = 200;
+  /** Baseline adjustment cadence, mirrors the kernel's 200 ms damping period. */
+  private static final long BASELINE_INTERVAL_MS = 200;
+  /** Clock rollback / huge-jump guard: re-anchor instead of integrating a bogus delta. */
+  private static final long BASELINE_STALE_MS = 60_000;
+  /** Default absolute in-flight ceiling when not configured. */
+  private static final long DEFAULT_MAX_IN_FLIGHT_CEILING = 128;
+
   private final SystemLoadMonitor cpuMonitor;
   private final int cpuThreshold; // 0–1000
   private final long cooldownMs;
+  /** Quasi-static hard limit (kernel {@code thresh}); also caps the Little-Law estimate. */
+  private final long maxInFlightCeiling;
 
   private final long[] passBuckets;
   private final long[] rtBuckets;
@@ -57,6 +103,15 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   private final Object bucketLock = new Object();
   private int currentBucket;
   private long windowStart;
+
+  /** Damped baseline, analog of kernel {@code wb->dirty_ratelimit}. Guarded by bucketLock. */
+  private long balancedInFlight = 1;
+  /** Previous undamped estimate, analog of kernel {@code wb->balanced_dirty_ratelimit}. Guarded by bucketLock. */
+  private long lastBalanced = 1;
+  /** Whether the baseline has been seeded from a real window estimate. Guarded by bucketLock. */
+  private boolean baselineWarmed;
+  /** Last baseline adjustment timestamp, guarded by bucketLock. */
+  private long lastBaselineUpdateMs;
 
   private static final class InFlightField extends BbrPadding.InFlightRef {}
 
@@ -74,10 +129,12 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   private final AtomicLong totalDropped = new AtomicLong(0);
 
   /**
-   * Constructs a BBR rate limiter with explicit configuration.
+   * Constructs a BBR rate limiter with explicit configuration and the default
+   * absolute in-flight ceiling.
    *
    * @param cpuMonitor  the system CPU load monitor used to derive the load signal
-   * @param cpuThreshold CPU threshold on a 0-1000 scale; the limiter enforces strictly above this
+   * @param cpuThreshold CPU threshold on a 0-1000 scale; center of the continuous
+   *                     derating ramp (see class javadoc)
    * @param windowMs    duration of the sliding window in milliseconds
    * @param bucketCount number of buckets within the sliding window
    * @param cooldownMs  duration of the cooldown period after a drop in milliseconds
@@ -89,12 +146,41 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     int bucketCount,
     long cooldownMs
   ) {
+    this(cpuMonitor, cpuThreshold, windowMs, bucketCount, cooldownMs, DEFAULT_MAX_IN_FLIGHT_CEILING);
+  }
+
+  /**
+   * Constructs a BBR rate limiter with explicit configuration including the
+   * absolute in-flight ceiling.
+   *
+   * <p>The ceiling is the quasi-static position reference (kernel {@code thresh}):
+   * the Little-Law estimate and the damped baseline are both capped by it, and
+   * CPU pressure derates it continuously. It should exceed the expected worker
+   * count ({@code minInFlight}) so the floor never overrides it.
+   *
+   * @param cpuMonitor          the system CPU load monitor
+   * @param cpuThreshold        CPU threshold on a 0-1000 scale (ramp center)
+   * @param windowMs            duration of the sliding window in milliseconds
+   * @param bucketCount         number of buckets within the sliding window
+   * @param cooldownMs          duration of the cooldown period after a drop in milliseconds
+   * @param maxInFlightCeiling  absolute in-flight ceiling; must be positive
+   */
+  public BbrRateLimiterImpl(
+    SystemLoadMonitor cpuMonitor,
+    int cpuThreshold,
+    long windowMs,
+    int bucketCount,
+    long cooldownMs,
+    long maxInFlightCeiling
+  ) {
     Assert.isTrue(bucketCount > 0 && windowMs > 0, "windowMs and bucketCount must be positive");
+    Assert.isTrue(maxInFlightCeiling > 0, "maxInFlightCeiling must be positive");
     long duration = windowMs / bucketCount;
     Assert.isTrue(duration > 0, "windowMs(" + windowMs + ") must be >= bucketCount(" + bucketCount + ")");
     this.cpuMonitor = cpuMonitor;
     this.cpuThreshold = cpuThreshold;
     this.cooldownMs = cooldownMs;
+    this.maxInFlightCeiling = maxInFlightCeiling;
     this.bucketCount = bucketCount;
     this.bucketDurationMs = duration;
     this.bucketPerSecond = Math.max(1, (int) (1000L / duration));
@@ -108,8 +194,8 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
    * Check whether the current flush cycle is allowed.
    * <p>
    * If allowed, the caller <b>must</b> call {@link #onSuccess(long)} or
-   *  afterward.  {@link #onEnqueue()} must be called after
-   * a successful enqueue.
+   * {@link #onConsumerDrop()} afterward.  {@link #onEnqueue()} must be called
+   * after a successful enqueue.
    *
    * @return {@code true} if the flush is allowed
    */
@@ -122,15 +208,16 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     double cpuLoad = cpuMonitor.getCpuLoadEMA() * 1000.0; // convert 0-1 → 0-1000
     synchronized (bucketLock) {
       tick();
+      updateBaseline(cpuLoad);
 
       long currentInFlight = inFlightField.value.get();
-      long maxInFlight = maxInFlight();
-
-      if (cpuLoad < cpuThreshold) {
-        return currentInFlight <= maxInFlight || !isCooldown();
-      } else {
-        return currentInFlight <= maxInFlight;
+      // Freerun band (kernel dirty_freerun_ceiling): below half the damped
+      // baseline the control loop does not restrict at all. A recent consumer
+      // drop (cooldown) bypasses the band — the budget is then strict.
+      if (currentInFlight <= freerunCeiling() && !isCooldown()) {
+        return true;
       }
+      return currentInFlight <= effectiveBudget(cpuLoad, currentInFlight);
     }
   }
 
@@ -175,14 +262,11 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
    * This prevents a transient drop from blocking all subsequent flushes for {@code cooldownMs}.
    *
    * <p><b>Convergence proof:</b> continuous gate drops mean no new passes enter the sliding window,
-   * so maxPASS() eventually reads all-zero buckets and falls back to maxPassCache. The cache decays
-   * slowly (×0.99 per empty-window read), so maxInFlight shrinks gradually. Once inFlight falls
-   * back below the decaying budget, tryAcquire permits again. The design converges without lock-up.
-   *
-   * <p><b>Trade-off:</b> maxPassCache slow decay prevents the budget from anchoring permanently to
-   * a historical peak after a traffic step-down. Without decay, a once-hot key population would
-   * permanently inflate the concurrency budget even after the traffic pattern changes. The 0.99
-   * factor means the budget halves every ~69 empty-window reads (~3.5 s at 50 ms flush intervals).
+   * so maxPASS() eventually reads all-zero buckets and the Little-Law estimate decays via the
+   * maxPassCache ×0.99 path. Once in-flight exceeds the damped baseline, the direction gate allows
+   * downward moves and the baseline follows the decaying estimate (bounded step per 200 ms update).
+   * The budget therefore shrinks until in-flight drains below it and tryAcquire permits again.
+   * The design converges without lock-up.
    */
   @Override
   public void onGateDrop() {
@@ -214,58 +298,55 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     dropTimeMinFlightField.minInFlight = Math.max(1, count);
   }
 
-  /** Current computed max concurrency limit. */
+  /**
+   * Current effective admission budget: the damped baseline scaled by the CPU-derated
+   * position ratio for the current in-flight level. This is exactly what
+   * {@link #tryAcquire} enforces above the freerun band.
+   */
   @Override
   public long getCurrentMaxInFlight() {
+    double cpuLoad = cpuMonitor.getCpuLoadEMA() * 1000.0;
     synchronized (bucketLock) {
       tick();
-      return maxInFlight();
+      updateBaseline(cpuLoad);
+      return effectiveBudget(cpuLoad, inFlightField.value.get());
     }
   }
 
-  /** Advance the sliding window forward, zeroing any buckets that have elapsed. */
-  private void tick() {
-    long now = currentTimeMillis();
-    long elapsed = now - windowStart;
-    if (elapsed < bucketDurationMs) {
-      return;
+  /** Current damped baseline (kernel {@code wb->dirty_ratelimit} analog). Observability curve. */
+  @Override
+  public long getBalancedInFlight() {
+    synchronized (bucketLock) {
+      return balancedInFlight;
     }
-    int steps = (int) Math.min(elapsed / bucketDurationMs, bucketCount);
-    for (int i = 0; i < steps; i++) {
-      currentBucket = (currentBucket + 1) % bucketCount;
-      passBuckets[currentBucket] = 0;
-      rtBuckets[currentBucket] = 0;
-      rtCounts[currentBucket] = 0;
+  }
+
+  /** Current sliding-window max pass per bucket (the maxPass half of the Little-Law estimate). */
+  @Override
+  public long getCurrentMaxPass() {
+    synchronized (bucketLock) {
+      tick();
+      return maxPASS();
     }
-    windowStart += steps * bucketDurationMs;
+  }
+
+  /** Current sliding-window min average RT in ms (the minRt half of the Little-Law estimate). */
+  @Override
+  public long getCurrentMinRt() {
+    synchronized (bucketLock) {
+      tick();
+      return minRT();
+    }
   }
 
   /**
-   * Compute the concurrency budget: floor(maxPASS × minRT × bucketPerSecond / 1000 + 0.5).
-   * Caller must hold bucketLock.
+   * Peak pass rate per bucket in the sliding window. Caller must hold bucketLock.
    *
-   * <p>When no usable samples exist (a degenerate zero-RT reading is the only
-   * way to get here — {@link #maxPASS} and {@link #minRT} both fall back to
-   * caches seeded at 1), the budget falls back to the configured
-   * {@code minInFlight} floor rather than unbounded admission: the previous
-   * {@code Long.MAX_VALUE} let a cold or degenerate window bypass CPU
-   * throttling entirely, contradicting the "CPU above threshold ⇒ strict"
-   * contract of {@link #tryAcquire}.
+   * <p>When no usable samples exist (all buckets empty) the maxPassCache slowly
+   * decays (×0.99 per empty-window read) so the Little-Law estimate — and with
+   * it the damped baseline — loosens under persistent gate drops instead of
+   * anchoring permanently to a historical peak.
    */
-  private long maxInFlight() {
-    long mp = maxPASS();
-    long mr = minRT();
-
-    if (mp == 0 || mr == 0) {
-      return dropTimeMinFlightField.minInFlight;
-    }
-    return Math.max(
-      dropTimeMinFlightField.minInFlight,
-      (long) Math.floor(((double) mp * mr * bucketPerSecond) / 1000.0 + 0.5)
-    );
-  }
-
-  /** Peak pass rate per bucket in the sliding window. Caller must hold bucketLock. */
   private long maxPASS() {
     long max = 0;
     for (long v : passBuckets) {
@@ -274,9 +355,6 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
       }
     }
     if (max == 0) {
-      // All buckets empty — slowly decay cache so budget loosens under persistent gate drops.
-      // Without decay, maxInFlight would anchor permanently to the last observed peak even
-      // after a traffic step-down, preventing the limiter from adapting to lower load.
       return maxPassMinRtField.maxPassCache.updateAndGet(c -> Math.max(1, (long) (c * 0.99)));
     }
     final long observed = max;
@@ -301,6 +379,207 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     final long observed = min;
     maxPassMinRtField.minRtCache.updateAndGet(c -> (c + observed) >> 1);
     return min;
+  }
+
+  /** Advance the sliding window forward, zeroing any buckets that have elapsed. */
+  private void tick() {
+    long now = currentTimeMillis();
+    long elapsed = now - windowStart;
+    if (elapsed < bucketDurationMs) {
+      return;
+    }
+    int steps = (int) Math.min(elapsed / bucketDurationMs, bucketCount);
+    for (int i = 0; i < steps; i++) {
+      currentBucket = (currentBucket + 1) % bucketCount;
+      passBuckets[currentBucket] = 0;
+      rtBuckets[currentBucket] = 0;
+      rtCounts[currentBucket] = 0;
+    }
+    windowStart += steps * bucketDurationMs;
+  }
+
+  /**
+   * Slow path: adjust the damped baseline at most once per {@link #BASELINE_INTERVAL_MS}.
+   * Caller must hold bucketLock.
+   *
+   * <p>Port of kernel {@code wb_update_dirty_ratelimit} (mm/page-writeback.c:1319-1468):
+   * a linear Little-Law estimate ({@code est}) is filtered through a direction gate
+   * (move only toward the position-error side, :1436-1446), clamped against
+   * {@code lastBalanced}/{@code est}/{@code task} outliers, and applied with
+   * step-size decay (:1453-1457) so the baseline moves smoothly even when the
+   * estimate jumps.
+   */
+  private void updateBaseline(double cpuLoad) {
+    long now = currentTimeMillis();
+    long elapsed = now - lastBaselineUpdateMs;
+    if (elapsed >= 0 && elapsed < BASELINE_INTERVAL_MS) {
+      return;
+    }
+    lastBaselineUpdateMs = now;
+    // Time-rollback / huge-jump guard (PELT-style, kernel pelt.c:184-194):
+    // a negative or absurd delta must never enter the damping loop — re-anchor
+    // and let the next cycle use fresh window data.
+    if (elapsed < 0 || elapsed > BASELINE_STALE_MS) {
+      return;
+    }
+
+    long est = estimateBalanced();
+    long inFlight = inFlightField.value.get();
+
+    if (!baselineWarmed) {
+      // Seed the baseline directly from the first real estimate instead of
+      // ramping one rounded step at a time — the decayed step would otherwise
+      // take seconds to reach a sane operating point from the seed of 1.
+      baselineWarmed = true;
+      balancedInFlight = Math.max(dropTimeMinFlightField.minInFlight, Math.max(1, est));
+      lastBalanced = balancedInFlight;
+      return;
+    }
+
+    long limit = effectiveLimit(cpuLoad);
+    long setpoint = Math.min(balancedInFlight, limit);
+    // task_ratelimit analog (kernel :1346-1348): currently effective budget
+    // scaled by the position ratio; the +1 helps ramp from tiny values.
+    long task =
+      ((balancedInFlight * posRatioPolynom(inFlight, setpoint, positionCeiling(setpoint)))
+        >> RATELIMIT_CALC_SHIFT) + 1;
+
+    // Direction gate (kernel :1436-1446): the position error direction decides
+    // whether only upward or only downward moves are allowed — not the CPU signal.
+    long x;
+    long step = 0;
+    if (inFlight < setpoint) {
+      x = Math.min(lastBalanced, Math.min(est, task));
+      if (balancedInFlight < x) {
+        step = x - balancedInFlight;
+      }
+    } else {
+      x = Math.max(lastBalanced, Math.max(est, task));
+      if (balancedInFlight > x) {
+        step = balancedInFlight - x;
+      }
+    }
+
+    // Step-size decay (kernel :1453-1457): the closer the baseline is to the
+    // step target, the smaller the relative move — eliminates pointless tremors.
+    if (step > 0) {
+      long shift = balancedInFlight / (2 * step + 1);
+      step = shift < 63 ? (((step >> shift) + 7) >> 3) : 0;
+    }
+
+    balancedInFlight = Math.max(1, balancedInFlight + ((balancedInFlight < est) ? step : -step));
+    lastBalanced = est;
+  }
+
+  /**
+   * Little-Law estimate of the sustainable in-flight level from the sliding window
+   * (the {@code balanced} rate analog), capped at the quasi-static ceiling — the
+   * analog of kernel {@code balanced_dirty_ratelimit > write_bw → write_bw} (:1385-1386).
+   * Caller must hold bucketLock.
+   */
+  private long estimateBalanced() {
+    long mp = maxPASS();
+    long mr = minRT();
+    if (mp == 0 || mr == 0) {
+      return 0;
+    }
+    long est = (long) Math.floor(((double) mp * mr * bucketPerSecond) / 1000.0 + 0.5);
+    return Math.min(est, maxInFlightCeiling);
+  }
+
+  /**
+   * Effective admission budget for the current in-flight level. Caller must hold bucketLock.
+   *
+   * <p>{@code baseline × posRatio} with the baseline as the position setpoint: when
+   * in-flight sits at the baseline the ratio is 1.0, far below it up to 2.0, above it
+   * smoothly below 1.0. The position control runs on a narrow band (saturation at
+   * twice the setpoint, kernel-like {@code limit - setpoint} span) — a wide band out
+   * to the config ceiling would dilute the position error and stall the loop for
+   * small baselines. The result is capped by the (CPU-derated) hard limit and floored
+   * by {@code minInFlight} so the degenerate-window case can never unlock unbounded
+   * admission.
+   */
+  private long effectiveBudget(double cpuLoad, long inFlight) {
+    long limit = effectiveLimit(cpuLoad);
+    long setpoint = Math.min(balancedInFlight, limit);
+    long posRatio = posRatioPolynom(inFlight, setpoint, positionCeiling(setpoint));
+    long budget = Math.min(limit, (balancedInFlight * posRatio) >> RATELIMIT_CALC_SHIFT);
+    return Math.max(dropTimeMinFlightField.minInFlight, budget);
+  }
+
+  /**
+   * Upper end of the position-control band: setpoint plus a span of
+   * {@code max(4, setpoint)} — the position ratio saturates at twice the
+   * setpoint. The +4 floor keeps the band meaningful for tiny baselines
+   * where a purely proportional span would collapse to a single unit.
+   */
+  private static long positionCeiling(long setpoint) {
+    return setpoint + Math.max(4, setpoint);
+  }
+
+  /** Freerun band: half the damped baseline. Caller must hold bucketLock. */
+  private long freerunCeiling() {
+    return balancedInFlight >> 1;
+  }
+
+  /**
+   * CPU-derated hard limit: the configured ceiling scaled by a continuous ratio.
+   * Caller must hold bucketLock.
+   */
+  private long effectiveLimit(double cpuLoad) {
+    return Math.max(1, (maxInFlightCeiling * cpuRatio(cpuLoad)) >> RATELIMIT_CALC_SHIFT);
+  }
+
+  /**
+   * Continuous CPU derating ratio in Q10: 1.0 below {@code threshold − band},
+   * {@link #CPU_RATIO_FLOOR} above {@code threshold + band}, linear in between.
+   * This replaces the old two-state permissive/strict switch — the CPU signal
+   * now lowers the hard limit smoothly instead of flipping a mode bit.
+   *
+   * @param cpuLoad CPU load on a 0-1000 scale
+   * @return Q10 ratio in {@code [CPU_RATIO_FLOOR, POS_RATIO_ONE]}
+   */
+  private long cpuRatio(double cpuLoad) {
+    long start = Math.max(0, cpuThreshold - CPU_RAMP_BAND);
+    long end = Math.min(1000, cpuThreshold + CPU_RAMP_BAND);
+    if (cpuLoad <= start) {
+      return POS_RATIO_ONE;
+    }
+    if (cpuLoad >= end) {
+      return CPU_RATIO_FLOOR;
+    }
+    long span = Math.max(1, end - start);
+    long over = (long) cpuLoad - start;
+    return POS_RATIO_ONE - (over * (POS_RATIO_ONE - CPU_RATIO_FLOOR)) / span;
+  }
+
+  /**
+   * Port of kernel {@code pos_ratio_polynom} (mm/page-writeback.c:960-975):
+   * {@code f(setpoint) = 1.0}, negative feedback with a cubic curve — fast
+   * response on large errors, small oscillation near the setpoint, and the
+   * kernel's explicit {@code clamp(pos_ratio, 0, 2 << SHIFT)} bounds. The
+   * normalized error is pre-clamped before cubing so the Q10 arithmetic
+   * cannot overflow, and the divisor carries the kernel's {@code | 1}
+   * divide-by-zero guard.
+   *
+   * @param inFlight current position
+   * @param setpoint target position (must be ≤ limit)
+   * @param limit    hard limit
+   * @return Q10 position ratio in {@code [0, POS_RATIO_MAX]}
+   */
+  private static long posRatioPolynom(long inFlight, long setpoint, long limit) {
+    long denom = (limit - setpoint) | 1;
+    long x = ((setpoint - inFlight) << RATELIMIT_CALC_SHIFT) / denom;
+    if (x > POS_RATIO_X_CLAMP) {
+      x = POS_RATIO_X_CLAMP;
+    } else if (x < -POS_RATIO_X_CLAMP) {
+      x = -POS_RATIO_X_CLAMP;
+    }
+    long posRatio = x;
+    posRatio = (posRatio * x) >> RATELIMIT_CALC_SHIFT;
+    posRatio = (posRatio * x) >> RATELIMIT_CALC_SHIFT;
+    posRatio += POS_RATIO_ONE;
+    return Math.max(0, Math.min(POS_RATIO_MAX, posRatio));
   }
 
   private boolean isCooldown() {

@@ -133,4 +133,18 @@ public interface KeyReporter {
    * @return computed max in-flight, or {@code -1} if BBR is disabled
    */
   long bbrMaxInFlight();
+
+  /**
+   * Return the current damped budget baseline of the BBR rate limiter — the
+   * slow-moving budget that tracks the Little-Law estimate through a direction
+   * gate and step-size decay (kernel {@code wb->dirty_ratelimit} analog).
+   *
+   * <p>Compare with {@link #bbrMaxInFlight()}: the budget is the baseline scaled
+   * by the CPU-derated position ratio, so the two curves together show how much
+   * of the current budget comes from measured throughput versus position/CPU
+   * pressure.
+   *
+   * @return current damped baseline, or {@code -1} if BBR is disabled
+   */
+  long bbrBalancedInFlight();
 }

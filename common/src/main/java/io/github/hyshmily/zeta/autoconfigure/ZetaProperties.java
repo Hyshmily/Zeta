@@ -396,6 +396,16 @@ public class ZetaProperties {
     /** Cooldown period in ms after a drop before allowing again. */
     @Min(0)
     private long bbrCooldownMs = 1_000;
+
+    /**
+     * Absolute in-flight ceiling (hard limit) for the damped adaptive limiter.
+     * Quasi-static position reference: the Little-Law estimate and the damped
+     * baseline are both capped by it, and CPU pressure derates it continuously
+     * over a ±20 pp ramp around {@link #cpuThreshold}. Should exceed the
+     * expected Worker count so the {@code minInFlight} floor never overrides it.
+     */
+    @Min(1)
+    private long bbrMaxInFlightCeiling = 128;
   }
 
   /**

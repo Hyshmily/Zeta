@@ -16,14 +16,14 @@
 package io.github.hyshmily.zeta.reporting;
 
 /**
- * CPU‑driven BBR (Bottleneck Bandwidth and Round-trip) adaptive rate limiter.
+ * Damped adaptive rate limiter (BBR-flavored), modeled on the Linux writeback
+ * throttle in {@code mm/page-writeback.c}.
  *
- * <p>BBR computes a dynamic concurrency budget (max in-flight batches) from
- * a sliding-window measurement of peak throughput and minimum request
- * round-trip time.  CPU utilisation is used as an additional pressure signal
- * — when CPU crosses the configured threshold, the limiter stops granting
- * capacity above the current in-flight floor (the number of active Worker
- * nodes), preventing overload from driving latency higher.
+ * <p>The concurrency budget is a slow-moving damped baseline (adjusted every
+ * 200 ms through a direction gate with step-size decay) scaled by a cubic
+ * position ratio around the setpoint. CPU utilisation is a continuous derating
+ * signal over a ±20 pp ramp around the configured threshold — not a two-state
+ * hard switch.
  */
 public interface BbrRateLimiter {
   /** Check whether the current flush cycle is allowed to proceed. */
@@ -53,6 +53,18 @@ public interface BbrRateLimiter {
   /** Dynamically set the minimum concurrency floor. */
   void setMinInFlight(int count);
 
-  /** Current computed max concurrency budget. */
+  /**
+   * Current effective admission budget (damped baseline × position ratio,
+   * CPU-derated). This is what {@link #tryAcquire} enforces above the freerun band.
+   */
   long getCurrentMaxInFlight();
+
+  /** Current damped budget baseline (kernel {@code wb->dirty_ratelimit} analog), for observability. */
+  long getBalancedInFlight();
+
+  /** Current sliding-window max pass per bucket, for observability. */
+  long getCurrentMaxPass();
+
+  /** Current sliding-window min average RT in ms, for observability. */
+  long getCurrentMinRt();
 }

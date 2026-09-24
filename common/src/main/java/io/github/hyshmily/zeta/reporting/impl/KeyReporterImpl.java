@@ -553,10 +553,11 @@ public class KeyReporterImpl implements KeyReporter {
   /**
    * Return the current BBR-computed maximum concurrency budget (max in-flight).
    *
-   * <p>This value is derived from the sliding-window maxPASS and minRT
-   * metrics via Little's Law. It represents the limiter's estimate of the
-   * optimal number of concurrent in-flight batches before the pipeline
-   * becomes congested.
+   * <p>This value is the damped baseline scaled by the CPU-derated position
+   * ratio, where the baseline tracks a sliding-window maxPASS × minRT
+   * Little's-Law estimate through a direction gate with step-size decay. It
+   * represents the limiter's estimate of the optimal number of concurrent
+   * in-flight batches before the pipeline becomes congested.
    *
    * @return the computed max in-flight budget, or {@code -1} if BBR rate
    *         limiting is disabled
@@ -564,6 +565,16 @@ public class KeyReporterImpl implements KeyReporter {
   @Override
   public long bbrMaxInFlight() {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxInFlight();
+  }
+
+  /**
+   * Return the current damped budget baseline of the BBR rate limiter.
+   *
+   * @return current damped baseline, or {@code -1} if BBR rate limiting is disabled
+   */
+  @Override
+  public long bbrBalancedInFlight() {
+    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getBalancedInFlight();
   }
 
 

@@ -190,12 +190,13 @@
 | 属性                                       | 默认值  | 说明                                                                                                                                     |
 | ------------------------------------------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `zeta.local.reporter.enabled`              | `true`  | 启用 BBR 自适应速率限制，作用于 Reporter 刷盘路径                                                                                        |
-| `zeta.local.reporter.cpu-threshold`        | `800`   | CPU 阈值（0–1000 刻度，800 = 80%）。低于此值时限制器宽松（并发≤预算 **或** 不在冷却期即准入）；达到或超过此值时严格（仅并发≤预算才准入） |
+| `zeta.local.reporter.cpu-threshold`        | `800`   | CPU 折减斜坡中心（0–1000 刻度，800 = 80%）。限制器在该值 ±20 个百分点的连续斜坡上折减硬上限（低于下沿不折减，1000 时保留上限的 ¼）——不是两态宽松/严格开关 |
 | `zeta.local.reporter.cpu-poll-interval-ms` | `500`   | CPU 轮询间隔（ms）。守护线程以此频率调用 `com.sun.management.OperatingSystemMXBean.getCpuLoad()`                                         |
 | `zeta.local.reporter.cpu-decay`            | `0.95`  | CPU 负载 EMA 平滑衰减因子（0.0–1.0）。值越高越平滑，但响应越慢                                                                           |
 | `zeta.local.reporter.bbr-window-ms`        | `10000` | BBR 滑动窗口时长（ms），用于追踪最大通过率和最小往返时间                                                                                 |
 | `zeta.local.reporter.bbr-window-buckets`   | `100`   | BBR 滑动窗口的桶数                                                                                                                       |
-| `zeta.local.reporter.bbr-cooldown-ms`      | `1000`  | 批次丢弃后的冷却时间（ms）。冷却期内无论 CPU 状态如何，限制器拒绝所有准入                                                                |
+| `zeta.local.reporter.bbr-cooldown-ms`      | `1000`  | 消费侧丢弃后的冷却时间（ms）。冷却期内跳过 freerun 带、严格按并发预算准入                                                                |
+| `zeta.local.reporter.bbr-max-in-flight-ceiling` | `128` | 阻尼式自适应限速的绝对在途上限（硬限制）。准静态位置参考：Little 直算估计与阻尼基线均被它封顶，CPU 压力在其上连续折减。应大于预期 Worker 数，避免 `minInFlight` 地板覆盖它 |
 
 ### Worker 监听器（`zeta.worker-listener.*`）
 
