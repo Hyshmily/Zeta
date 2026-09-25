@@ -29,6 +29,7 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.reporting.*;
 import io.github.hyshmily.zeta.reporting.impl.BbrRateLimiterImpl;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
+import io.github.hyshmily.zeta.reporting.impl.ReportFeedLoop;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
@@ -54,6 +55,7 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.util.Assert;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
@@ -340,6 +342,24 @@ public class ZetaAmqpAutoConfiguration {
         snowflakeIdGenerator
       );
       bbrRateLimiterProvider.ifAvailable(reporter::setBbrRateLimiter);
+      // ADR-0078: feed-loop flush-cadence tuner (default shadow — the
+      // trajectory is exposed via gauges, nothing is applied until an
+      // operator flips report-interval-tuning to on).
+      if (properties.getReportIntervalTuning() != ZetaProperties.ReportIntervalTuning.OFF) {
+        Assert.isTrue(
+          properties.getReportIntervalMaxMs() >= properties.getReportIntervalMinMs(),
+          "zeta.local.report-interval-max-ms must be >= zeta.local.report-interval-min-ms"
+        );
+        reporter.setIntervalFeedLoop(
+          new ReportFeedLoop(
+            ReportFeedLoop.Mode.valueOf(properties.getReportIntervalTuning().name()),
+            properties.getReportIntervalTargetBatch(),
+            properties.getReportIntervalMinMs(),
+            properties.getReportIntervalMaxMs(),
+            properties.getReportIntervalMs()
+          )
+        );
+      }
       return reporter;
     }
   }

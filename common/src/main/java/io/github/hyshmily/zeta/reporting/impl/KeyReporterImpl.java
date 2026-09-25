@@ -108,6 +108,17 @@ public class KeyReporterImpl implements KeyReporter {
   @SuppressWarnings("java:S3077") // BBR is thread-safe
   private volatile BbrRateLimiterImpl bbrRateLimiter;
 
+  /**
+   * Optional ADR-0078 feed-loop tuner for the flush cadence
+   * ({@code zeta.local.report-interval-tuning}); null disables adaptation and
+   * the WaveCounter tide base stays at the configured
+   * {@code report-interval-ms}. In shadow mode the tuner computes and exposes
+   * the trajectory without applying it; in apply mode each completed flush
+   * moves the tide base via {@link WaveCounter#adjustDeliverIntervalMs(long)}.
+   */
+  @Setter
+  private volatile ReportFeedLoop intervalFeedLoop;
+
   /** Cumulative counter of report batches silently dropped because no Workers were alive. */
   private final AtomicLong workerDeadDropCounter = new AtomicLong();
   /** Cumulative counter of keys dropped because routeNode returned null (ring inconsistency window). */
@@ -350,6 +361,22 @@ public class KeyReporterImpl implements KeyReporter {
         }
       }
 
+      // ADR-0078: sample the completed flush into the feed-loop interval
+      // tuner. The censored cycles above return earlier — empty snapshot, no
+      // alive Worker, BBR gate drop — so the loop learns only from flushes
+      // that actually reached the routing stage (the kernel sampler has no
+      // such censoring; this is the Zeta-specific addition). Shadow mode
+      // computes and exposes only; apply mode moves the WaveCounter tide
+      // base, which takes effect at the NEXT scheduled tide (one fire of lag
+      // — the batch just flushed accumulated under the previous base).
+      ReportFeedLoop feedLoop = intervalFeedLoop;
+      if (feedLoop != null) {
+        long next = feedLoop.onFlushCompleted(keyCounts.size());
+        if (feedLoop.mode() == ReportFeedLoop.Mode.ON) {
+          reportWaveCounter.adjustDeliverIntervalMs(next);
+        }
+      }
+
       // Defer O(keys × log vnodes) routing computation to dedicated executor
       // so the shared scheduler thread is not starved (SystemLoadMonitor, decay, etc.)
       long now = currentTimeMillis();
@@ -577,6 +604,28 @@ public class KeyReporterImpl implements KeyReporter {
     return bbrRateLimiter == null ? -1 : bbrRateLimiter.getBalancedInFlight();
   }
 
+  @Override
+  public boolean feedLoopEnabled() {
+    return intervalFeedLoop != null;
+  }
+
+  @Override
+  public long feedLoopIntervalMs() {
+    ReportFeedLoop feedLoop = intervalFeedLoop;
+    return feedLoop == null ? -1 : feedLoop.intervalMs();
+  }
+
+  @Override
+  public long feedLoopScoreBp() {
+    ReportFeedLoop feedLoop = intervalFeedLoop;
+    return feedLoop == null ? -1 : feedLoop.lastScoreBp();
+  }
+
+  @Override
+  public long feedLoopBatchSize() {
+    ReportFeedLoop feedLoop = intervalFeedLoop;
+    return feedLoop == null ? -1 : feedLoop.lastAvgBatchSize();
+  }
 
   /**
    * Manages a bounded work queue and a fixed pool of consumer threads that

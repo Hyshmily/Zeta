@@ -141,6 +141,9 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR dropped count             |
 | `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR in-flight count           |
 | `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR max in-flight count       |
+| `zeta.reporter.feedloop.interval`   | Gauge | —                    | Feed-loop base flush interval (ms); shadow mode shows the trajectory that *would* be applied (ADR-0078; registered only when `report-interval-tuning` != off) |
+| `zeta.reporter.feedloop.score`      | Gauge | —                    | Feed-loop score in bp — two-window-averaged batch size vs target (10000 == on target) |
+| `zeta.reporter.feedloop.batch`      | Gauge | —                    | Feed-loop averaged batch size (keys per completed flush) |
 | `zeta.stall.report_backpressure.delayed` | Gauge | —               | Reporter dispatcher queue depth (congestion building; ADR-0076) |
 | `zeta.stall.report_backpressure.stopped.total` | Gauge | —      | Batches lost to a full queue or staleness expiry |
 | `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | Refresh broadcasts lost to broker errors or a saturated send executor |

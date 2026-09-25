@@ -115,6 +115,12 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.reporter.queue.expired.total}</td><td>Cumulative expired batches</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.pending.keys}</td><td>Keys buffered in reporter counter cache</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.bbr.*}</td><td>BBR rate limiter (passed/dropped/inflight/maxinflight)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.reporter.feedloop.interval}</td><td>Feed-loop base flush interval in ms
+   *       (shadow: the trajectory that <em>would</em> be applied; ADR-0078)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.reporter.feedloop.score}</td><td>Feed-loop score in bp — averaged batch
+   *       size vs target (10000 == on target)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.reporter.feedloop.batch}</td><td>Feed-loop averaged batch size (keys per
+   *       completed flush)</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.queue.expired.dead.total}</td><td>Expired batches: dead target Worker</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.queue.expired.stale.total}</td><td>Expired batches: 5s staleness</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.stall.*}</td><td>Stall-cause &times; state gauges &mdash; the "why is it slow"
@@ -318,6 +324,17 @@ public class ZetaMicrometerAutoConfiguration {
     Gauge.builder("zeta.reporter.bbr.dropped", reporter, r -> (double) r.bbrDropped()).register(registry);
     Gauge.builder("zeta.reporter.bbr.inflight", reporter, r -> (double) r.bbrInFlight()).register(registry);
     Gauge.builder("zeta.reporter.bbr.maxinflight", reporter, r -> (double) r.bbrMaxInFlight()).register(registry);
+    // ADR-0078 feed-loop interval tuner: registered only when the tuner is
+    // configured (report-interval-tuning != off). In shadow mode the interval
+    // gauge shows the trajectory the tuner WOULD apply — the deploy-first
+    // observation window.
+    if (reporter.feedLoopEnabled()) {
+      Gauge.builder("zeta.reporter.feedloop.interval", reporter, r -> (double) r.feedLoopIntervalMs()).register(
+        registry
+      );
+      Gauge.builder("zeta.reporter.feedloop.score", reporter, r -> (double) r.feedLoopScoreBp()).register(registry);
+      Gauge.builder("zeta.reporter.feedloop.batch", reporter, r -> (double) r.feedLoopBatchSize()).register(registry);
+    }
   }
 
   /**

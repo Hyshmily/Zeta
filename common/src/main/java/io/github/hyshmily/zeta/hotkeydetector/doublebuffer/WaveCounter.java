@@ -738,8 +738,17 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * signature's rate gate. The config layer
    * ({@code zeta.local.report-interval-ms})
    * does not validate the value, so the clamp lives at the consumption point.
+   *
+   * <p>
+   * Mutable since ADR-0078 ({@link #adjustDeliverIntervalMs}): the value is the
+   * BASE the three cadence adaptations act around — backlog pressure compresses
+   * a non-empty tide's delay from this base down to the floor, the empty-tide
+   * ladder stretches an idle cycle up to 2x this base, and the feed-loop
+   * interval tuner (report path only) moves the base itself. Volatile: the tide
+   * loop re-reads it on every fire, so an adjustment takes effect at the next
+   * scheduled tide without re-arming anything.
    */
-  private final long deliverIntervalMs;
+  private volatile long deliverIntervalMs;
 
   /**
    * Maximum number of promoted hot keys (capped; further promotions are skipped).
@@ -3546,6 +3555,41 @@ public class WaveCounter implements InitializingBean, Destroyable {
    */
   public void nudgeTide() {
     scheduleTide(EARLY_TIDE_MIN_INTERVAL_MS);
+  }
+
+  /**
+   * Adjust the base delivery cadence used by the tide loop from the next fire
+   * onward (ADR-0078 feed-loop interval tuner; report path only).
+   *
+   * <p>
+   * The value is the <b>base</b> the existing cadence adaptations act around —
+   * it does not displace them: backlog pressure still compresses a non-empty
+   * tide's delay from this base down to {@link #EARLY_TIDE_MIN_INTERVAL_MS},
+   * and the empty-tide ladder still stretches an idle cycle up to
+   * {@link #EMPTY_TIDE_STRETCH_CAP_MULTIPLE}x this base. Callers own the
+   * [floor, ceiling] policy; this method only clamps up to the floor so the
+   * construction-time invariant (see the {@code deliverIntervalMs} Javadoc —
+   * the governor's flood-rate normalization divides by the cadence) is never
+   * broken by a later adjustment.
+   *
+   * <p>
+   * Visibility: the field is volatile and the tide loop re-reads it on every
+   * fire, so the adjustment takes effect at the next scheduled tide. The
+   * currently armed delay is intentionally left alone — one fire of lag keeps
+   * the lastInput → score → nextInput control sequence well-defined (the batch
+   * being flushed accumulated under the PREVIOUS base).
+   *
+   * <p>
+   * Safe to call from any thread after {@link #afterPropertiesSet()};
+   * no-op after {@link #destroy()}.
+   *
+   * @param newIntervalMs requested base cadence (clamped up to the floor)
+   */
+  public void adjustDeliverIntervalMs(long newIntervalMs) {
+    if ((boolean) SHUTDOWN.getVolatile(this)) {
+      return;
+    }
+    this.deliverIntervalMs = Math.max(EARLY_TIDE_MIN_INTERVAL_MS, newIntervalMs);
   }
 
   @Override

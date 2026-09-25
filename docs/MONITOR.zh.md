@@ -123,6 +123,9 @@ Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoin
 | `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR 丢弃次数             |
 | `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR 进行中请求数         |
 | `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR 最大进行中请求数     |
+| `zeta.reporter.feedloop.interval`   | Gauge | —                    | FeedLoop 基准上报间隔（毫秒）；shadow 模式下显示"将要应用"的轨迹（ADR-0078；仅 `report-interval-tuning` ≠ off 时注册） |
+| `zeta.reporter.feedloop.score`      | Gauge | —                    | FeedLoop 得分（bp）——两窗口平均批大小相对目标（10000 == 正中目标） |
+| `zeta.reporter.feedloop.batch`      | Gauge | —                    | FeedLoop 平均批大小（每次完成 flush 的键数） |
 | `zeta.stall.report_backpressure.delayed` | Gauge | —               | Reporter 队列深度（拥塞前兆，ADR-0076） |
 | `zeta.stall.report_backpressure.stopped.total` | Gauge | —      | 因队列满或过期而丢失的批次数      |
 | `zeta.stall.broadcast_storm.stopped.total` | Gauge | —           | 因 Broker 错误或发送线程池饱和而丢失的刷新广播数 |

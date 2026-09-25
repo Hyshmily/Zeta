@@ -147,4 +147,50 @@ public interface KeyReporter {
    * @return current damped baseline, or {@code -1} if BBR is disabled
    */
   long bbrBalancedInFlight();
+
+  /**
+   * Whether the ADR-0078 feed-loop interval tuner is configured for the flush
+   * cadence ({@code zeta.local.report-interval-tuning} != off).
+   *
+   * @return {@code true} when the tuner exists (shadow or apply mode)
+   */
+  default boolean feedLoopEnabled() {
+    return false;
+  }
+
+  /**
+   * Return the feed-loop's current base flush interval in ms — in shadow mode
+   * this is the trajectory the tuner <em>would</em> apply (kernel
+   * {@code damon_feed_loop_next_input} output), in apply mode the live
+   * WaveCounter tide base.
+   *
+   * @return current base interval, or {@code -1} if the tuner is disabled
+   */
+  default long feedLoopIntervalMs() {
+    return -1;
+  }
+
+  /**
+   * Return the last feed-loop score in basis points of the goal — the
+   * two-window-averaged batch size against
+   * {@code zeta.local.report-interval-target-batch} ({@code 10000} == on
+   * target).
+   *
+   * @return last score in bp, or {@code -1} if the tuner is disabled or no
+   *         flush has been sampled yet
+   */
+  default long feedLoopScoreBp() {
+    return -1;
+  }
+
+  /**
+   * Return the last two-window-averaged batch size (distinct keys per
+   * completed flush) the tuner scored.
+   *
+   * @return last averaged batch size, or {@code -1} if the tuner is disabled
+   *         or no flush has been sampled yet
+   */
+  default long feedLoopBatchSize() {
+    return -1;
+  }
 }

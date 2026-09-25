@@ -19,6 +19,7 @@ import io.github.hyshmily.zeta.constants.ZetaConstants;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import java.util.ArrayList;
@@ -255,6 +256,58 @@ public class ZetaProperties {
 
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
   private long reportIntervalMs = 50;
+
+  /**
+   * ADR-0078 feed-loop tuning of the reporter flush cadence (kernel
+   * {@code damon_feed_loop_next_input} port). {@code off} disables the tuner;
+   * {@code shadow} (default) computes and exposes the interval trajectory via
+   * the {@code zeta.reporter.feedloop.*} gauges without applying it;
+   * {@code on} applies each computed interval to the WaveCounter tide base —
+   * sparse batches lengthen the interval (fewer, fuller AMQP messages), dense
+   * batches shorten it (message size and detection lag stay bounded).
+   */
+  @NotNull
+  private ReportIntervalTuning reportIntervalTuning = ReportIntervalTuning.SHADOW;
+
+  /**
+   * Goal keys per flush for the feed-loop tuner ({@code N}); the loop settles
+   * the flush interval where the two-window-averaged batch size matches this
+   * target. Only meaningful when {@code report-interval-tuning} != off.
+   */
+  @Min(1)
+  private long reportIntervalTargetBatch = 512;
+
+  /**
+   * Flush-interval floor for the feed-loop tuner (the scheduler cadence
+   * bound; the WaveCounter tide floor is 50ms, so values below 50 are
+   * effectively 50). Only meaningful when {@code report-interval-tuning} !=
+   * off.
+   */
+  @Min(1)
+  private long reportIntervalMinMs = 50;
+
+  /**
+   * Flush-interval ceiling for the feed-loop tuner — the detection-lag bound:
+   * a new hot key waits at most this long before its first report reaches the
+   * Worker. The empty-tide ladder stretches to 2x the (tuned) base, so the
+   * effective idle worst case is 2x this value. Only meaningful when
+   * {@code report-interval-tuning} != off.
+   */
+  @Min(1)
+  private long reportIntervalMaxMs = 1000;
+
+  /** Tuning modes for the ADR-0078 reporter flush-cadence feed loop. */
+  public enum ReportIntervalTuning {
+
+    /** No tuner: the flush cadence stays at {@code report-interval-ms}. */
+    OFF,
+
+    /** Compute and expose the trajectory via gauges; never apply (default). */
+    SHADOW,
+
+    /** Apply each computed interval to the WaveCounter tide base. */
+    ON
+  }
 
   /** Number of shards for reportToWorker partitioning (only used when consistent-hashing is disabled). */
   private int shardCount = 1;
