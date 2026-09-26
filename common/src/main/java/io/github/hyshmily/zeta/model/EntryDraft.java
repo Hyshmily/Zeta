@@ -108,6 +108,8 @@ public final class EntryDraft {
   private long softExpireAtMs;
   private long normalHardTtlMs;
   private long normalSoftTtlMs;
+  /** Refault-gate solo-flight flag (ADR-0079) — carried over from the source entry on a seeded draft. */
+  private boolean soloFlight;
   /**
    * Provisional computed expiry on an arithmetic-free draft: {@code ttl}/
    * {@code hardTtl}/{@code softTtl}/{@code rearmExpiry} set the flag for the
@@ -171,6 +173,7 @@ public final class EntryDraft {
     draft.softExpireAtMs = source.getSoftExpireAtMs();
     draft.normalHardTtlMs = source.getNormalHardTtlMs();
     draft.normalSoftTtlMs = source.getNormalSoftTtlMs();
+    draft.soloFlight = source.isSoloFlight();
     return draft;
   }
 
@@ -316,6 +319,21 @@ public final class EntryDraft {
   }
 
   /**
+   * Set the refault-gate solo-flight flag (ADR-0079): the entry is a
+   * short-TTL residency stored after a distance rejection, and its SIZE
+   * eviction must not advance the refault clock. Seeded drafts carry the
+   * source entry's flag over; only the solo-flight construction site in the
+   * load path sets it to {@code true}.
+   *
+   * @param soloFlight whether the built entry is a solo-flight residency
+   * @return this draft
+   */
+  public EntryDraft soloFlight(boolean soloFlight) {
+    this.soloFlight = soloFlight;
+    return this;
+  }
+
+  /**
    * Override the hard expire timestamp explicitly (custom jitter ratio, lease,
    * or bound-capped scenarios). Call after {@link #ttl} to replace its computed
    * value; the hard TTL duration is unaffected. On an arithmetic-free draft
@@ -402,7 +420,8 @@ public final class EntryDraft {
       softExpireAtMs,
       keyState,
       normalHardTtlMs,
-      normalSoftTtlMs
+      normalSoftTtlMs,
+      soloFlight
     );
   }
 

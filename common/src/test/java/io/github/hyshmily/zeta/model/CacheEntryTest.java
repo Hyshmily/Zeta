@@ -678,5 +678,27 @@ class CacheEntryTest {
     assertThat(entry.getKeyState()).isNull();
     assertThat(entry.getNormalHardTtlMs()).isZero();
     assertThat(entry.getNormalSoftTtlMs()).isZero();
+    assertThat(entry.isSoloFlight()).isFalse();
+  }
+
+  @Test
+  void soloFlight_shouldRoundTripAndSurviveDraftCopy() {
+    // The load path's solo-flight construction (ADR-0079): short hard TTL, no
+    // soft cadence, NORMAL state, flag set. The flag must round-trip the packed
+    // state and survive every later draft copy of the entry.
+    CacheEntry solo = EntryDraft.blank(ARITH)
+      .value("v")
+      .ttl(200, 0, 200, 0)
+      .keyState(KeyState.NORMAL)
+      .soloFlight(true)
+      .build();
+    assertThat(solo.isSoloFlight()).isTrue();
+
+    CacheEntry edited = EntryDraft.of(solo).softTtl(0).build();
+    assertThat(edited.isSoloFlight()).isTrue();
+
+    // Default construction stays unflagged.
+    CacheEntry normal = CacheEntry.builder().value("v").build();
+    assertThat(normal.isSoloFlight()).isFalse();
   }
 }

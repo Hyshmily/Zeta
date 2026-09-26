@@ -142,7 +142,8 @@ class VersionStampedLoadTest {
       versionController,
       ttlConfig,
       mock(HealthView.class),
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      null
     );
   }
 

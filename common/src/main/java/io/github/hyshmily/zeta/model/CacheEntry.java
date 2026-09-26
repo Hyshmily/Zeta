@@ -66,7 +66,7 @@ import org.springframework.util.Assert;
  * (wired to the TTL arithmetic), tests and explicit-timestamp callers use
  * {@link EntryDraft#of(CacheEntry)}. The Lombok {@code @Builder} remains on the
  * package-private constructor for direct low-level construction (the generated
- * {@link #builder()} is the flat 13-field surface tests rely on); the former
+ * {@link #builder()} is the flat 14-field surface tests rely on); the former
  * {@code withXxx()} copy family, {@code toBuilder()}, and the
  * {@code TtlPolicy.applyXxx()} transforms are all replaced by the draft.
  */
@@ -90,6 +90,14 @@ public class CacheEntry {
   private static final int STATE_CODE_NORMAL = 1;
   private static final int STATE_CODE_COOL = 2;
   private static final int STATE_CODE_HOT = 3;
+  /**
+   * Solo-flight flag bit within {@link #packedState} (ADR-0079) — bit 58 of the
+   * reserved range. Set on entries stored after a refault-distance rejection:
+   * the refault gate's clock/shadow keeper reads it on a {@code SIZE} removal
+   * to know the eviction is the gate's own short-TTL churn (which must not
+   * advance the eviction clock) rather than a true residency turnover.
+   */
+  private static final long SOLO_FLIGHT_FLAG = 1L << 58;
 
   /** TTL encoding units (2-bit selector in the packed {@code int}). */
   private static final int TTL_UNIT_MS = 0;
@@ -143,10 +151,19 @@ public class CacheEntry {
   /**
    * Packed decision metadata: bits [0, 2) hold the 2-bit key-state code
    * (low bits for zero-shift hot-path reads and at-a-glance debugging), bits
-   * [2, 58) hold the decision epoch, bits [58, 64) are reserved.
+   * [2, 58) hold the decision epoch, bit 58 is the solo-flight flag
+   * ({@link #isSoloFlight()}, ADR-0079), bits [59, 64) are reserved.
    * Decoded via {@link #getDecisionEpoch()} and {@link #getKeyState()}.
+   *
+   * <p>
+   * No public getter: the packed representation is an internal encoding detail
+   * (the other packed fields use {@code @Getter(NONE)}; this one was missed in
+   * 674d565). The decoded accessors ({@link #getKeyState()},
+   * {@link #getDecisionEpoch()}, {@link #isSoloFlight()}) are the supported
+   * surface.
    */
   @ToString.Exclude
+  @Getter(AccessLevel.NONE)
   private final long packedState;
 
   /**
@@ -235,6 +252,10 @@ public class CacheEntry {
    * @param keyState          the hot-key state, may be null
    * @param normalHardTtlMs   the normal-state hard TTL baseline
    * @param normalSoftTtlMs   the normal-state soft TTL baseline
+   * @param soloFlight        whether this entry is a refault-gate solo-flight
+   *                          entry (ADR-0079): a short-TTL residency stored
+   *                          after a distance rejection, whose SIZE eviction
+   *                          must not advance the refault clock
    * @throws IllegalArgumentException if the degraded flag contradicts the sign
    *         of {@code dataVersion}, {@code decisionEpoch} exceeds 56 bits, or a
    *         TTL is negative or larger than the hour-tier maximum (except
@@ -254,7 +275,8 @@ public class CacheEntry {
     long softExpireAtMs,
     @Nullable KeyState keyState,
     long normalHardTtlMs,
-    long normalSoftTtlMs
+    long normalSoftTtlMs,
+    boolean soloFlight
   ) {
     Assert.isTrue(
       isVersionDegraded == (dataVersion < 0),
@@ -268,7 +290,7 @@ public class CacheEntry {
     this.dataVersion = dataVersion;
     this.decisionVersion = decisionVersion;
     this.decisionNodeId = decisionNodeId;
-    this.packedState = (decisionEpoch << EPOCH_SHIFT) | stateCode(keyState);
+    this.packedState = (decisionEpoch << EPOCH_SHIFT) | stateCode(keyState) | (soloFlight ? SOLO_FLIGHT_FLAG : 0L);
     this.hardTtlMs = encodeTtl(hardTtlMs, "hardTtlMs");
     this.hardExpireAtMs = hardExpireAtMs;
     this.softTtlMs = encodeTtl(softTtlMs, "softTtlMs");
@@ -408,6 +430,21 @@ public class CacheEntry {
   @ToString.Include(name = "keyState")
   public KeyState getKeyState() {
     return stateFromCode((int) (packedState & STATE_CODE_MASK));
+  }
+
+  /**
+   * Whether this entry is a refault-gate solo-flight entry (ADR-0079): a
+   * short-TTL residency stored after a distance rejection. The refault gate's
+   * clock/shadow keeper reads this on a {@code SIZE} removal — the eviction of
+   * the gate's own churn must not advance the eviction clock, only re-stamp
+   * the key's shadow anchor. The flag survives draft copies ({@code editEntry})
+   * so any later modification of the entry keeps the residency non-counting.
+   *
+   * @return {@code true} for a solo-flight entry
+   */
+  @ToString.Include(name = "soloFlight")
+  public boolean isSoloFlight() {
+    return (packedState & SOLO_FLIGHT_FLAG) != 0;
   }
 
   /**

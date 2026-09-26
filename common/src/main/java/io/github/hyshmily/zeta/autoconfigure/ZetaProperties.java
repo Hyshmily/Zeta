@@ -381,6 +381,63 @@ public class ZetaProperties {
       /** Treat the value as exceeding any budget: it is evicted immediately (Ehcache-style abort). */
       ABORT
     }
+
+    /**
+     * ADR-0079 refault distance admission for the L1 load path (kernel
+     * {@code mm/workingset.c} port). The gate answers "would this key have
+     * survived until its next access" — measured as the number of capacity
+     * evictions since the key last left residency — before inserting a
+     * freshly loaded value. {@code off} disables the gate entirely (no
+     * removal listener, no shadow table); {@code shadow} (default) runs the
+     * full machinery and exposes the {@code zeta.l1.refault.*} gauges but
+     * admits everything; {@code on} enforces — a rejected key is stored only
+     * as a short-TTL solo-flight entry ({@link #refaultRejectTtlMs}) instead
+     * of a full-TTL residency.
+     */
+    @NotNull
+    private RefaultAdmissionMode refaultAdmission = RefaultAdmissionMode.SHADOW;
+
+    /**
+     * Hard TTL for entries stored after a refault rejection (the solo-flight
+     * coalescing window). Short by design: rejected keys must not accumulate
+     * residency, but a brief window merges concurrent/rapid re-reads so the
+     * backend load is coalesced rather than amplified. Only meaningful when
+     * {@link #refaultAdmission} = {@code on}.
+     */
+    @Min(1)
+    private long refaultRejectTtlMs = 200;
+
+    /**
+     * Capacity (in entries) the gate compares refault distances against.
+     * {@code 0} (default) derives the estimate from {@link #maxSize} — exact
+     * in size mode. In weight mode {@code maxSize} is not the entry bound, so
+     * deployments should set this to the expected steady-state entry count.
+     */
+    @Min(0)
+    private long refaultCapacityEntries;
+
+    /**
+     * Shadow table size as a power-of-two exponent (slots = 2^bits, 8 bytes
+     * per slot). {@code 0} (default) auto-derives the smallest table that
+     * covers 8x the capacity estimate, clamped to [2^8, 2^18]; larger
+     * deployments may pin the exponent explicitly (8..24).
+     */
+    @Min(0)
+    @Max(24)
+    private int refaultShadowBits;
+  }
+
+  /** Modes for the ADR-0079 refault distance admission gate. */
+  public enum RefaultAdmissionMode {
+
+    /** No gate: no listener, no shadow table, byte-identical to pre-ADR-0079 behavior. */
+    OFF,
+
+    /** Run the full machinery and expose gauges; never refuse residency (default). */
+    SHADOW,
+
+    /** Enforce: refault-rejected keys are stored only as short-TTL solo-flight entries. */
+    ON
   }
 
   /** L1 cache configuration. */

@@ -115,7 +115,8 @@ class ZetaCacheTest {
       new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
       ttlConfig,
       healthView,
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      null
     );
   }
 
@@ -1144,7 +1145,8 @@ class ZetaCacheTest {
       new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
       props,
       mock(HealthView.class),
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      null
     );
 
     assertThat(
@@ -1326,7 +1328,8 @@ class ZetaCacheTest {
       new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
       new ZetaProperties(),
       mock(HealthView.class),
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      null
     );
 
     assertThatCode(() -> cache.putThrough("key1", "newValue", () -> {}, 0L, 0L, true)).doesNotThrowAnyException();
@@ -1359,7 +1362,8 @@ class ZetaCacheTest {
       failing,
       ttlConfig,
       mock(HealthView.class),
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      null
     );
 
     cache.putThrough("key1", "degradedValue", () -> {}, 0L, 0L, false);
@@ -1390,7 +1394,8 @@ class ZetaCacheTest {
       failing,
       ttlConfig,
       mock(HealthView.class),
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      null
     );
 
     cache.putThrough("key1", "degradedValue", () -> {}, 0L, 0L, true);
@@ -2116,7 +2121,8 @@ class ZetaCacheTest {
       new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
       ttlConfig,
       healthView,
-      CacheCompressor.NONE
+      CacheCompressor.NONE,
+      null
     );
   }
 
@@ -2553,7 +2559,8 @@ class ZetaCacheTest {
         new VersionControllerImpl(Optional.empty(), 60, snowflakeIdGenerator),
         ttlConfig,
         healthView,
-        CacheCompressor.NONE
+        CacheCompressor.NONE,
+        null
       );
     }
 
@@ -3708,7 +3715,8 @@ class ZetaCacheTest {
         versionController,
         ttlConfig,
         healthView,
-        CacheCompressor.NONE
+        CacheCompressor.NONE,
+        null
       );
     }
 

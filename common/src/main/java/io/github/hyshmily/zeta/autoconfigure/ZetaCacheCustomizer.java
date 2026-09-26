@@ -40,7 +40,12 @@ import com.github.benmanes.caffeine.cache.Caffeine;
  *       {@link IllegalStateException} (those knobs belong to Zeta's
  *       {@code zeta.local.cache.*} configuration). Intended additions are
  *       orthogonal ones: {@code scheduler}, {@code executor}, {@code ticker},
- *       {@code removalListener}, {@code evictionListener}.</li>
+ *       {@code removalListener}, {@code evictionListener}. Note: when refault
+ *       admission is enabled (ADR-0079, {@code refault-admission != off}) Zeta
+ *       itself owns the {@code removalListener} slot — its clock/shadow keeper
+ *       must see every capacity eviction. Use {@code evictionListener} for
+ *       application notifications; a second {@code removalListener} fails
+ *       Caffeine's single-use setter check at startup.</li>
  *   <li>{@code recordStats()} is always on; do not disable it — {@code Zeta#stats()}
  *       and the {@code cache.*} Micrometer metrics depend on it.</li>
  * </ul>

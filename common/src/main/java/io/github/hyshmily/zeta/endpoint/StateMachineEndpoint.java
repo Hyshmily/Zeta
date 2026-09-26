@@ -51,6 +51,14 @@ public class StateMachineEndpoint {
   private final ObjectProvider<AtomicLong> configTimestampCounter;
 
   /**
+   * Serializes config POSTs: the validate step reads a snapshot and the apply
+   * step writes three fields, so two unsynchronized requests can interleave
+   * and mint an invalid combined config. Holds the fresh-snapshot read,
+   * validation, and the setters together (see {@link #set}).
+   */
+  private final Object configWriteLock = new Object();
+
+  /**
    * Creates a new endpoint for the given state machine instance.
    *
    * @param stateMachine           the hot-key state machine whose config is exposed
@@ -130,40 +138,55 @@ public class StateMachineEndpoint {
       return Map.of("status", "ok");
     }
 
-    // Mirror of the WorkerConfigNegotiator gossip predicate — validate the
-    // POST-APPLIED combination (provided fields override, others keep their
-    // current values) before mutating anything, so the endpoint can never
-    // mint a config the cluster would refuse to adopt. The predicate itself
-    // is defined once on {@link ZetaBayesianSM#isValidConfig} so the two
-    // call sites cannot drift.
-    if (!ZetaBayesianSM.isValidConfig(confirmCount, preCoolGraceCount, coolCount)) {
-      return Map.of(
-        "status",
-        "error",
-        "message",
-        "Config rejected: confirmCount >= 1, preCoolGraceCount >= 1 and " +
-          "coolCount > preCoolGraceCount are required (confirmCount=" +
-          confirmCount +
-          ", coolCount=" +
-          coolCount +
-          ", preCoolGraceCount=" +
-          preCoolGraceCount +
-          ")"
-      );
-    }
+    // Serialize snapshot-validate-apply: two concurrent POSTs that each
+    // validate against their own starting snapshot can interleave their
+    // setters and land a combination that is individually-invalid (e.g.
+    // coolCount <= preCoolGraceCount) — the divergent-config state this
+    // validation exists to prevent. The lock holds from the FRESH snapshot
+    // (taken inside) through the last setter, so the validated combination
+    // and the applied combination are always the same.
+    synchronized (configWriteLock) {
+      int effConfirm = body.containsKey("confirmCount") ? confirmCount : stateMachine.getConfirmCount();
+      int effCool = body.containsKey("coolCount") ? coolCount : stateMachine.getCoolCount();
+      int effGrace = body.containsKey("preCoolGraceCount")
+        ? preCoolGraceCount
+        : stateMachine.getPreCoolGraceCount();
 
-    if (body.containsKey("confirmCount")) {
-      stateMachine.setConfirmCount(confirmCount);
-    }
-    if (body.containsKey("coolCount")) {
-      stateMachine.setCoolCount(coolCount);
-    }
-    if (body.containsKey("preCoolGraceCount")) {
-      stateMachine.setPreCoolGraceCount(preCoolGraceCount);
-    }
-    var counter = configTimestampCounter.getIfAvailable();
-    if (counter != null) {
-      counter.incrementAndGet();
+      // Mirror of the WorkerConfigNegotiator gossip predicate — validate the
+      // POST-APPLIED combination (provided fields override, others keep their
+      // current values) before mutating anything, so the endpoint can never
+      // mint a config the cluster would refuse to adopt. The predicate itself
+      // is defined once on {@link ZetaBayesianSM#isValidConfig} so the two
+      // call sites cannot drift.
+      if (!ZetaBayesianSM.isValidConfig(effConfirm, effGrace, effCool)) {
+        return Map.of(
+          "status",
+          "error",
+          "message",
+          "Config rejected: confirmCount >= 1, preCoolGraceCount >= 1 and " +
+            "coolCount > preCoolGraceCount are required (confirmCount=" +
+            effConfirm +
+            ", coolCount=" +
+            effCool +
+            ", preCoolGraceCount=" +
+            effGrace +
+            ")"
+        );
+      }
+
+      if (body.containsKey("confirmCount")) {
+        stateMachine.setConfirmCount(effConfirm);
+      }
+      if (body.containsKey("coolCount")) {
+        stateMachine.setCoolCount(effCool);
+      }
+      if (body.containsKey("preCoolGraceCount")) {
+        stateMachine.setPreCoolGraceCount(effGrace);
+      }
+      var counter = configTimestampCounter.getIfAvailable();
+      if (counter != null) {
+        counter.incrementAndGet();
+      }
     }
     return Map.of("status", "ok");
   }

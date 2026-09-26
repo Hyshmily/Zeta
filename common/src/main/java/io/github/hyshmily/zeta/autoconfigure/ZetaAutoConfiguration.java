@@ -23,10 +23,7 @@ import com.github.benmanes.caffeine.cache.Expiry;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
-import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.zeta.cache.cachesupport.*;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.CircuitBreakerImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
@@ -333,6 +330,7 @@ public class ZetaAutoConfiguration {
    * @param ruleMatcher               the rule matcher instance (never {@code null})
    * @param healthViewProvider        provider for the cluster health view (creates default if absent)
    * @param compressor                the cache compressor for value serialization
+   * @param refaultAdmission          the shared refault admission gate (ADR-0079)
    * @return a new HotKeyCache instance with node-local version tracking
    */
   @Bean
@@ -349,7 +347,8 @@ public class ZetaAutoConfiguration {
     RuleMatcher ruleMatcher,
     ObjectProvider<HealthView> healthViewProvider,
     CacheCompressor compressor,
-    SnowflakeIdGenerator snowflakeIdGenerator
+    SnowflakeIdGenerator snowflakeIdGenerator,
+    RefaultAdmission refaultAdmission
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -367,7 +366,8 @@ public class ZetaAutoConfiguration {
           properties.getHeartbeat().getDegradeAfterFailures()
         )
       ),
-      compressor
+      compressor,
+      refaultAdmission
     );
   }
 
@@ -399,6 +399,22 @@ public class ZetaAutoConfiguration {
   }
 
   /**
+   * Create the refault distance admission gate (ADR-0079, the {@code mm/workingset.c}
+   * port). The gate and the L1 cache share this one instance: the cache's removal
+   * listener feeds it (clock + shadow table) and {@link HotKeyCache#loadCacheEntry}
+   * consults it before a load-path insert. Mode {@code off} yields an inert gate —
+   * no listener is attached and the cache behaves exactly as before.
+   *
+   * @param properties the HotKey configuration properties (never {@code null})
+   * @return the shared refault admission gate
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public RefaultAdmission refaultAdmission(ZetaProperties properties) {
+    return RefaultAdmission.from(properties.getCache());
+  }
+
+  /**
    * Create the L1 Caffeine cache instance.
    *
    * <p>Time-based expiry operates at the <em>Caffeine</em> level via a custom
@@ -414,6 +430,14 @@ public class ZetaAutoConfiguration {
    * {@code max-size} limits entry count. Time-based TTL for entries without an explicit hard-expire
    * timestamp defaults to {@code zeta.local.default-hard-ttl-ms}.
    *
+   * <p>When refault admission is enabled (ADR-0079, mode != off) the removal listener
+   * slot is consumed by the gate's clock/shadow keeper — capacity evictions advance
+   * the eviction clock and stamp the key's shadow entry, except the gate's own
+   * solo-flight churn (entries flagged {@code soloFlight} re-stamp without advancing,
+   * so the reject rate never feeds back into the clock). Application customizers
+   * that need their own notifications must use {@code evictionListener} (a second
+   * removalListener would fail Caffeine's single-use setter check).
+   *
    * <p>Stats recording is always enabled ({@code recordStats()}) so that
    * {@code Zeta#stats()} and the {@code cache.*} Micrometer metrics report
    * hit/miss/eviction counters. A custom {@code Cache<String, Object>} bean
@@ -421,6 +445,8 @@ public class ZetaAutoConfiguration {
    * counters to be populated.
    *
    * @param properties the HotKey configuration properties (never {@code null})
+   * @param refaultAdmissionProvider provider for the shared refault gate (always present
+   *                                 unless the application replaced the bean)
    * @param customizerProvider ordered provider of application {@link ZetaCacheCustomizer}
    *                           beans, applied just before {@code build()} (ADR-0070)
    * @return a configured Caffeine {@link Cache} instance
@@ -429,6 +455,7 @@ public class ZetaAutoConfiguration {
   @ConditionalOnMissingBean
   public Cache<String, Object> hotLocalCache(
     ZetaProperties properties,
+    ObjectProvider<RefaultAdmission> refaultAdmissionProvider,
     ObjectProvider<ZetaCacheCustomizer> customizerProvider
   ) {
     var cfg = properties.getCache();
@@ -527,6 +554,15 @@ public class ZetaAutoConfiguration {
         }
       }
     );
+    // Refault admission (ADR-0079): the gate's clock/shadow keeper owns the
+    // removalListener slot when the gate is active. Attached before application
+    // customizers so a conflicting customizer listener fails fast at startup
+    // (Caffeine setters are single-use) rather than silently dropping evidence.
+    refaultAdmissionProvider.ifAvailable(gate -> {
+      if (gate.gating()) {
+        builder.removalListener((key, value, cause) -> gate.onRemoval(key, value, cause));
+      }
+    });
     // Application customizers run last, in order, immediately before build() —
     // they may add orthogonal listeners/executors/schedulers but cannot replace
     // the capacity or expiry knobs set above (Caffeine setters are single-use).

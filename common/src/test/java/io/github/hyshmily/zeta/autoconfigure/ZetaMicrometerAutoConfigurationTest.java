@@ -23,6 +23,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
@@ -146,7 +147,8 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(healthView),
       providerThatReturns(cpuMonitor),
       providerThatReturns(null),
-      providerThatReturns(null)
+      providerThatReturns(null),
+      providerThatReturns(RefaultAdmission.from(new ZetaProperties().getCache()))
     );
     binder.bindTo(registry);
 
@@ -174,6 +176,13 @@ class ZetaMicrometerAutoConfigurationTest {
     assertGaugeValue("zeta.stall.redis_degraded.stopped", 0.0);
     assertGaugeValue("zeta.stall.redis_degraded.timeouts.total", 0.0);
     assertGaugeValue("zeta.stall.worker_partition.stopped", 0.0);
+    // Refault admission gauges (ADR-0079): the default SHADOW gate exposes the
+    // full trajectory — zero counters, no evidence yet, capacity from config.
+    assertGaugeValue("zeta.l1.refault.admit.total", 0.0);
+    assertGaugeValue("zeta.l1.refault.reject.total", 0.0);
+    assertGaugeValue("zeta.l1.refault.distance", -1.0);
+    assertGaugeValue("zeta.l1.refault.capacity", 100_000.0);
+    assertGaugeValue("zeta.l1.refault.clock.rate", 0.0);
   }
 
   /**
@@ -182,6 +191,7 @@ class ZetaMicrometerAutoConfigurationTest {
   @Test
   void customMeterBinder_handlesNoDeps() {
     MeterBinder binder = config.hotKeyCustomMetrics(
+      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -220,6 +230,7 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
+      providerThatReturns(null),
       providerThatReturns(null)
     );
     binder.bindTo(registry);
@@ -240,6 +251,7 @@ class ZetaMicrometerAutoConfigurationTest {
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(detector),
       providerThatReturns(sf),
+      providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
@@ -290,7 +302,8 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(syncListener),
-      providerThatReturns(workerListener)
+      providerThatReturns(workerListener),
+      providerThatReturns(null)
     );
     binder.bindTo(registry);
 
@@ -331,7 +344,8 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(syncListener),
-      providerThatReturns(workerListener)
+      providerThatReturns(workerListener),
+      providerThatReturns(null)
     );
     binder.bindTo(registry);
 

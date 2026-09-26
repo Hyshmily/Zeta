@@ -79,18 +79,34 @@ public interface KeyReporter {
    * longer alive at consumption time (the worker-partition stall signal
    * behind {@code zeta.stall.worker_partition.stopped}).
    *
-   * @return total dead-target discard count since startup, or {@code -1} if the dispatcher has not been started
+   * <p>
+   * Default {@code -1} (not tracked) so third-party implementations compiled
+   * against earlier releases stay source- and binary-compatible; the built-in
+   * dispatcher-backed reporter overrides this with the real counter.
+   *
+   * @return total dead-target discard count since startup, or {@code -1} if
+   *         not tracked or the dispatcher has not been started
    */
-  long dispatcherExpiredDeadTarget();
+  default long dispatcherExpiredDeadTarget() {
+    return -1;
+  }
 
   /**
    * Return the total number of batches discarded because they waited longer
    * than 5 seconds in the dispatcher queue (staleness expiry under
    * backpressure — the report-backpressure stall signal).
    *
-   * @return total stale-discard count since startup, or {@code -1} if the dispatcher has not been started
+   * <p>
+   * Default {@code -1} (not tracked) so third-party implementations compiled
+   * against earlier releases stay source- and binary-compatible; the built-in
+   * dispatcher-backed reporter overrides this with the real counter.
+   *
+   * @return total stale-discard count since startup, or {@code -1} if not
+   *         tracked or the dispatcher has not been started
    */
-  long dispatcherExpiredStale();
+  default long dispatcherExpiredStale() {
+    return -1;
+  }
 
   /**
    * Return the total number of batches rejected because the dispatcher queue was full.
@@ -144,9 +160,15 @@ public interface KeyReporter {
    * of the current budget comes from measured throughput versus position/CPU
    * pressure.
    *
-   * @return current damped baseline, or {@code -1} if BBR is disabled
+   * <p>
+   * Default {@code -1} (not tracked) so third-party implementations compiled
+   * against earlier releases stay source- and binary-compatible.
+   *
+   * @return current damped baseline, or {@code -1} if not tracked or BBR is disabled
    */
-  long bbrBalancedInFlight();
+  default long bbrBalancedInFlight() {
+    return -1;
+  }
 
   /**
    * Whether the ADR-0078 feed-loop interval tuner is configured for the flush

@@ -500,7 +500,8 @@ class ZetaSpringCacheTest {
         new VersionControllerImpl(Optional.empty(), 60, new SnowflakeIdGenerator(0, 1)),
         props,
         mock(HealthView.class),
-        CacheCompressor.NONE
+        CacheCompressor.NONE,
+        null
       );
       realZeta = new Zeta(hotKeyCache, hotKeyDetector);
       alpha = new ZetaSpringCache("alpha", realZeta, props, true);

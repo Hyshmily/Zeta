@@ -120,9 +120,19 @@ public class Rule {
   /** Action to take when a key matches this rule. */
   private RuleAction action;
 
-  /** Compiled regex for WILDCARD and REGEX types; lazily initialised. */
+  /**
+   * Atomic publication unit for compiled-pattern state: the compiled regex and
+   * the generation version it was built from are always read as ONE volatile
+   * reference, so a reader can never pair a stale {@link Pattern} with a newer
+   * version (the dual-field scheme this replaces allowed exactly that — an old
+   * matcher stamped with the new version, permanently disabling invalidation
+   * until the next pattern change).
+   */
+  private record CompiledState(Pattern compiled, int version) {}
+
+  /** Compiled-pattern state for WILDCARD and REGEX types; lazily initialised. {@code null} = needs (re)compilation. */
   @JsonIgnore
-  private transient volatile Pattern compiledPattern;
+  private transient volatile CompiledState compiledState;
 
   /** Reusable matcher per thread, avoiding allocation on every match call. */
   @JsonIgnore
@@ -134,6 +144,22 @@ public class Rule {
   @JsonIgnore
   private final transient java.util.concurrent.atomic.AtomicInteger patternVersion =
     new java.util.concurrent.atomic.AtomicInteger(0);
+
+  /**
+   * Compatibility accessor (formerly Lombok-generated over the removed
+   * {@code compiledPattern} field): the currently published compiled regex, or
+   * {@code null} when the pattern needs (re)compilation.
+   */
+  @JsonIgnore
+  public Pattern getCompiledPattern() {
+    CompiledState cs = compiledState;
+    return cs == null ? null : cs.compiled();
+  }
+
+  /** Atomically publish a freshly compiled pattern together with its generation version. */
+  private void publish(Pattern compiled) {
+    compiledState = new CompiledState(compiled, patternVersion.incrementAndGet());
+  }
 
   /**
    * No-arg constructor for frameworks (e.g. Jackson deserialisation).
@@ -166,7 +192,7 @@ public class Rule {
     this.pattern = pattern;
     this.action = action;
     if (type == RuleType.REGEX) {
-      this.compiledPattern = Pattern.compile(pattern);
+      publish(Pattern.compile(pattern));
     }
   }
 
@@ -180,7 +206,7 @@ public class Rule {
    */
   public void setPattern(String pattern) {
     this.pattern = pattern;
-    compiledPattern = null;
+    compiledState = null;
     patternVersion.incrementAndGet();
   }
 
@@ -192,7 +218,7 @@ public class Rule {
    */
   public void setType(RuleType type) {
     this.type = type;
-    compiledPattern = null;
+    compiledState = null;
     patternVersion.incrementAndGet();
   }
 
@@ -239,19 +265,20 @@ public class Rule {
   }
 
   private MatcherCacheEntry rebuiltIfNeeded() {
-    Pattern compiled = compiledPattern;
-    if (compiled == null) {
+    // One volatile read publishes (compiled, version) atomically — a cached
+    // matcher can only carry the version of the generation it was built from.
+    CompiledState cs = compiledState;
+    if (cs == null) {
       prepare();
-      compiled = compiledPattern;
-      if (compiled == null) {
+      cs = compiledState;
+      if (cs == null) {
         // Type concurrently changed to a non-regex type; treat as non-matching this call.
         return null;
       }
     }
-    int curVersion = patternVersion.get();
     MatcherCacheEntry entry = matcherCache.get();
-    if (entry == null || entry.version != curVersion) {
-      entry = new MatcherCacheEntry(compiled.matcher(""), curVersion);
+    if (entry == null || entry.version != cs.version()) {
+      entry = new MatcherCacheEntry(cs.compiled().matcher(""), cs.version());
       matcherCache.set(entry);
     }
     return entry;
@@ -268,9 +295,12 @@ public class Rule {
    * regex equivalents, and all other regex special characters
    * ({@code . + ^ $ [ ] \ ( ) { } |}) are escaped.
    *
-   * <p>This method is safe for concurrent calls: {@link #compiledPattern}
-   * is {@code volatile}, and compilation is idempotent (compiling the same
-   * pattern twice produces identical, interchangeable objects).
+   * <p>This method is safe for concurrent calls: the compiled pattern and its
+   * generation version are published as one atomic volatile reference
+   * ({@link CompiledState}), and compilation is idempotent (compiling the same
+   * pattern twice produces identical, interchangeable objects). Concurrent
+   * prepares last-write-win; readers rebuild their thread-local matcher at
+   * most one extra time.
    *
    * <p>Has no effect on {@link RuleType#EXACT} or {@link RuleType#PREFIX}
    * rules, which do not use regex matching.
@@ -284,23 +314,23 @@ public class Rule {
     switch (type) {
       case REGEX -> {
         if (isCompiledFor(pattern)) return;
-        compiledPattern = Pattern.compile(pattern);
+        publish(Pattern.compile(pattern));
       }
       case WILDCARD -> {
         String regex = toRegex(pattern);
         if (isCompiledFor(regex)) return;
-        compiledPattern = Pattern.compile(regex);
+        publish(Pattern.compile(regex));
       }
       default -> {
         return;
       }
     }
-    patternVersion.incrementAndGet();
   }
 
-  /** {@code true} if {@link #compiledPattern} is already compiled from {@code expectedRegex}. */
+  /** {@code true} if the published state is already compiled from {@code expectedRegex}. */
   private boolean isCompiledFor(String expectedRegex) {
-    return compiledPattern != null && compiledPattern.pattern().equals(expectedRegex);
+    CompiledState cs = compiledState;
+    return cs != null && cs.compiled().pattern().equals(expectedRegex);
   }
 
   /** Convert a glob pattern ({@code *}, {@code ?}) to an equivalent full-match regex, escaping regex metacharacters. */

@@ -25,6 +25,7 @@ import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
@@ -116,7 +117,8 @@ class ZetaRedisAutoConfigurationTest {
       ruleMatcher,
       healthViewProvider,
       CacheCompressor.NONE,
-      snowflakeIdGenerator
+      snowflakeIdGenerator,
+      RefaultAdmission.from(properties.getCache())
     );
 
     assertThat(cache).isNotNull();
@@ -159,7 +161,8 @@ class ZetaRedisAutoConfigurationTest {
       ruleMatcher,
       healthViewProvider,
       CacheCompressor.NONE,
-      snowflakeIdGenerator
+      snowflakeIdGenerator,
+      RefaultAdmission.from(properties.getCache())
     );
 
     assertThat(cache).isNotNull();

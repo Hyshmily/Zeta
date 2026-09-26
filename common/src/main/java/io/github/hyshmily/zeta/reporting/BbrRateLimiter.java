@@ -56,15 +56,38 @@ public interface BbrRateLimiter {
   /**
    * Current effective admission budget (damped baseline × position ratio,
    * CPU-derated). This is what {@link #tryAcquire} enforces above the freerun band.
+   *
+   * <p>
+   * <b>Not side-effect-free:</b> the read may consume the rate-limited
+   * baseline-update slot (one per {@code BASELINE_INTERVAL_MS}) exactly as
+   * {@link #tryAcquire} does — the port folds its lazy {@code dirty_ratelimit}
+   * update into the shared read path. Under active traffic the control loop
+   * wins the slot and scraping is a no-op; scraping an idle limiter lets the
+   * estimate decay as designed. For a guaranteed-passive curve use
+   * {@link #getBalancedInFlight()}.
    */
   long getCurrentMaxInFlight();
 
   /** Current damped budget baseline (kernel {@code wb->dirty_ratelimit} analog), for observability. */
   long getBalancedInFlight();
 
-  /** Current sliding-window max pass per bucket, for observability. */
+  /**
+   * Current sliding-window max pass per bucket, for observability.
+   *
+   * <p>
+   * <b>Not side-effect-free:</b> reads lazily smooth/decay the cached
+   * maxPass estimate (kernel-style decay-on-read — the mechanism that loosens
+   * the estimate under sustained gate drops), so scrape frequency is a minor
+   * input to the estimate trajectory.
+   */
   long getCurrentMaxPass();
 
-  /** Current sliding-window min average RT in ms, for observability. */
+  /**
+   * Current sliding-window min average RT in ms, for observability.
+   *
+   * <p>
+   * Reads lazily smooth the cached minRt estimate (decay-on-read, see
+   * {@link #getCurrentMaxPass()}).
+   */
   long getCurrentMinRt();
 }

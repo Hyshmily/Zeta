@@ -20,6 +20,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
@@ -118,6 +119,7 @@ public class ZetaRedisAutoConfiguration {
    *                              may be absent
    * @param properties         the HotKey configuration properties
    * @param ruleMatcher        the rule matcher for blacklist/whitelist evaluation
+   * @param refaultAdmission   the shared refault admission gate (ADR-0079)
    * @return a new Redis-backed HotKeyCache instance
    */
   @Bean
@@ -135,7 +137,8 @@ public class ZetaRedisAutoConfiguration {
     RuleMatcher ruleMatcher,
     ObjectProvider<HealthView> healthViewProvider,
     CacheCompressor compressor,
-    SnowflakeIdGenerator snowflakeIdGenerator
+    SnowflakeIdGenerator snowflakeIdGenerator,
+    RefaultAdmission refaultAdmission
   ) {
     return new HotKeyCache(
       hotKeyDetector,
@@ -157,7 +160,8 @@ public class ZetaRedisAutoConfiguration {
           properties.getHeartbeat().getDegradeAfterFailures()
         )
       ),
-      compressor
+      compressor,
+      refaultAdmission
     );
   }
 }

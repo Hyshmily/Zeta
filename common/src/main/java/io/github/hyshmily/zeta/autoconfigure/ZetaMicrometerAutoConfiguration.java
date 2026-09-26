@@ -19,6 +19,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
@@ -126,6 +127,9 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.stall.*}</td><td>Stall-cause &times; state gauges &mdash; the "why is it slow"
    *       attribution view (RocksDB {@code write_stall_stats} pattern; see
    *       {@link #registerStallGauges})</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.l1.refault.*}</td><td>Refault distance admission gate (ADR-0079):
+   *       admit/reject verdicts, last distance, capacity estimate, eviction-clock rate;
+   *       registered only when the gate is active (mode != off)</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.expire.refresh.available}</td><td>Available refresh limiter permits</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.version.degraded.total}</td><td>Cumulative version fallback count</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.sync.dedup.size}</td><td>Broadcast dedup cache size</td><td>&mdash;</td></tr>
@@ -149,6 +153,8 @@ public class ZetaMicrometerAutoConfiguration {
    * @param workerListenerProvider      provider for the decision-plane listener exposing its ordered
    *                                    dispatcher gate (may be absent)
    * @param cpuMonitorProvider          provider for the system CPU load monitor (may be absent)
+   * @param refaultAdmissionProvider    provider for the refault admission gate (ADR-0079; its
+   *                                    gauges register only when the gate is active, mode != off)
    * @return a {@link MeterBinder} that registers HotKey-specific business metrics
    */
   @Bean
@@ -165,7 +171,8 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<HealthView> healthViewProvider,
     ObjectProvider<SystemLoadMonitor> cpuMonitorProvider,
     ObjectProvider<CacheSyncListener> syncListenerProvider,
-    ObjectProvider<WorkerListener> workerListenerProvider
+    ObjectProvider<WorkerListener> workerListenerProvider,
+    ObjectProvider<RefaultAdmission> refaultAdmissionProvider
   ) {
     return registry -> {
       hotKeyDetectorProvider.ifAvailable(detector -> registerLocalTopKGauges(detector, registry));
@@ -217,6 +224,13 @@ public class ZetaMicrometerAutoConfiguration {
       workerListenerProvider.ifAvailable(listener -> {
         if (listener.dispatcherStats() != null) {
           registerDispatchGauges(registry, "worker", listener::dispatcherStats);
+        }
+      });
+      // Refault admission gauges (ADR-0079): registered only when the gate is
+      // active — mode off has no machinery and no trajectory to expose.
+      refaultAdmissionProvider.ifAvailable(gate -> {
+        if (gate.gating()) {
+          registerRefaultGauges(gate, registry);
         }
       });
     };
@@ -335,6 +349,39 @@ public class ZetaMicrometerAutoConfiguration {
       Gauge.builder("zeta.reporter.feedloop.score", reporter, r -> (double) r.feedLoopScoreBp()).register(registry);
       Gauge.builder("zeta.reporter.feedloop.batch", reporter, r -> (double) r.feedLoopBatchSize()).register(registry);
     }
+  }
+
+  /**
+   * Register the refault distance admission gauges (ADR-0079, the
+   * {@code mm/workingset.c} port).
+   *
+   * <table>
+   *   <tr><th>Metric name</th><th>Meaning</th></tr>
+   *   <tr><td>{@code zeta.l1.refault.admit.total}</td><td>Cumulative admit verdicts
+   *       (shadow mode: would-admit — every verdict admits)</td></tr>
+   *   <tr><td>{@code zeta.l1.refault.reject.total}</td><td>Cumulative reject verdicts
+   *       (shadow mode: the <em>would-reject</em> rate — the deploy-first
+   *       observation signal)</td></tr>
+   *   <tr><td>{@code zeta.l1.refault.distance}</td><td>Distance of the latest
+   *       evidence-backed decision (capacity evictions since the key last left
+   *       residency); -1 = decided without evidence (cold-key rule)</td></tr>
+   *   <tr><td>{@code zeta.l1.refault.capacity}</td><td>The static capacity estimate
+   *       (entries) distances are compared against</td></tr>
+   *   <tr><td>{@code zeta.l1.refault.clock.rate}</td><td>Capacity-eviction rate
+   *       (evictions/sec, EWMA over scrapes) — independently valuable as the
+   *       scan-pressure alarm: sustained non-zero means capacity thrashing,
+   *       whatever the gate decides</td></tr>
+   * </table>
+   *
+   * @param gate     the shared refault admission gate (active, mode != off)
+   * @param registry the meter registry to register into
+   */
+  private static void registerRefaultGauges(RefaultAdmission gate, MeterRegistry registry) {
+    Gauge.builder("zeta.l1.refault.admit.total", gate, g -> (double) g.admitCount()).register(registry);
+    Gauge.builder("zeta.l1.refault.reject.total", gate, g -> (double) g.rejectCount()).register(registry);
+    Gauge.builder("zeta.l1.refault.distance", gate, g -> (double) g.lastDistance()).register(registry);
+    Gauge.builder("zeta.l1.refault.capacity", gate, g -> (double) g.capacityEntries()).register(registry);
+    Gauge.builder("zeta.l1.refault.clock.rate", gate, RefaultAdmission::clockRatePerSec).register(registry);
   }
 
   /**
