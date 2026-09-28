@@ -115,7 +115,8 @@ public class ZetaMicrometerAutoConfiguration {
    *   <tr><td>{@code zeta.reporter.queue.dropped.total}</td><td>Cumulative dropped batches</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.queue.expired.total}</td><td>Cumulative expired batches</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.pending.keys}</td><td>Keys buffered in reporter counter cache</td><td>&mdash;</td></tr>
-   *   <tr><td>{@code zeta.reporter.bbr.*}</td><td>BBR rate limiter (passed/dropped/inflight/maxinflight)</td><td>&mdash;</td></tr>
+   *   <tr><td>{@code zeta.reporter.bbr.*}</td><td>BBR rate limiter (passed/dropped/inflight/maxinflight/
+   *       balanced/maxpass/minrt/yielded)</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.feedloop.interval}</td><td>Feed-loop base flush interval in ms
    *       (shadow: the trajectory that <em>would</em> be applied; ADR-0078)</td><td>&mdash;</td></tr>
    *   <tr><td>{@code zeta.reporter.feedloop.score}</td><td>Feed-loop score in bp — averaged batch
@@ -338,6 +339,14 @@ public class ZetaMicrometerAutoConfiguration {
     Gauge.builder("zeta.reporter.bbr.dropped", reporter, r -> (double) r.bbrDropped()).register(registry);
     Gauge.builder("zeta.reporter.bbr.inflight", reporter, r -> (double) r.bbrInFlight()).register(registry);
     Gauge.builder("zeta.reporter.bbr.maxinflight", reporter, r -> (double) r.bbrMaxInFlight()).register(registry);
+    // Little-Law estimate decomposition (ADR-0011): plotting balanced / maxpass
+    // / minrt together shows how much of the budget comes from measured
+    // throughput versus position/CPU pressure — and whether minrt carries
+    // publisher-path queue pollution (the PROBE_RTT decision input).
+    Gauge.builder("zeta.reporter.bbr.balanced", reporter, r -> (double) r.bbrBalancedInFlight()).register(registry);
+    Gauge.builder("zeta.reporter.bbr.maxpass", reporter, r -> (double) r.bbrMaxPass()).register(registry);
+    Gauge.builder("zeta.reporter.bbr.minrt", reporter, r -> (double) r.bbrMinRt()).register(registry);
+    Gauge.builder("zeta.reporter.bbr.yielded", reporter, r -> (double) r.bbrYielded()).register(registry);
     // ADR-0078 feed-loop interval tuner: registered only when the tuner is
     // configured (report-interval-tuning != off). In shadow mode the interval
     // gauge shows the trajectory the tuner WOULD apply — the deploy-first

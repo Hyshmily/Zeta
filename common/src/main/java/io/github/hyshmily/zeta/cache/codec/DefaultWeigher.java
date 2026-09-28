@@ -145,6 +145,9 @@ public final class DefaultWeigher implements Weigher<String, Object> {
    */
   static final int CONTAINER_SAMPLE_SIZE = 8;
 
+  /** {@code log2(CONTAINER_SAMPLE_SIZE)} — the constant is a power of two, so sample indexing shifts. */
+  static final int CONTAINER_SAMPLE_SIZE_SHIFT = 3;
+
   /**
    * Safety factor on extrapolated container tails. The sample cannot cover every ordering — a
    * container ordered by size could hide larger elements behind it — so the unmeasured part is
@@ -418,7 +421,7 @@ public final class DefaultWeigher implements Weigher<String, Object> {
       int measured = 0;
       for (int i = 0; i < CONTAINER_SAMPLE_SIZE; i++) {
         long before = walk.total;
-        measureValue(walk, list.get((int) (((long) i * size) / CONTAINER_SAMPLE_SIZE)));
+        measureValue(walk, list.get((int) (((long) i * size) >> CONTAINER_SAMPLE_SIZE_SHIFT)));
         sampled += walk.total - before;
         measured++;
         if (walk.exhausted) {

@@ -141,6 +141,10 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR dropped count             |
 | `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR in-flight count           |
 | `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR max in-flight count       |
+| `zeta.reporter.bbr.balanced`        | Gauge | —                    | Reporter BBR damped baseline (kernel `dirty_ratelimit` analog) |
+| `zeta.reporter.bbr.maxpass`         | Gauge | —                    | Sliding-window max pass per bucket (Little-Law estimate input; decay-on-read) |
+| `zeta.reporter.bbr.minrt`           | Gauge | —                    | Sliding-window min avg RT in ms (Little-Law estimate input; decay-on-read) — the curve to watch for publisher-path queue pollution |
+| `zeta.reporter.bbr.yielded`         | Gauge | —                    | Cumulative downstream-yield steps (two consecutive baseline intervals with publish-failure/staleness drops lower the baseline ×7/8 per step) |
 | `zeta.reporter.feedloop.interval`   | Gauge | —                    | Feed-loop base flush interval (ms); shadow mode shows the trajectory that *would* be applied (ADR-0078; registered only when `report-interval-tuning` != off) |
 | `zeta.reporter.feedloop.score`      | Gauge | —                    | Feed-loop score in bp — two-window-averaged batch size vs target (10000 == on target) |
 | `zeta.reporter.feedloop.batch`      | Gauge | —                    | Feed-loop averaged batch size (keys per completed flush) |

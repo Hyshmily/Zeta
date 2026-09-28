@@ -38,6 +38,55 @@ public interface BbrRateLimiter {
   /** Record a consumer drop (stale/failed batch). */
   void onConsumerDrop();
 
+  /**
+   * Cause of a consumer-side batch drop, used to attribute downstream-yield
+   * evidence (kernel {@code bbr_lt_bw} sampling, tcp_bbr.c:659-758).
+   *
+   * <p>Only {@link #PUBLISH_FAILED} and {@link #STALE} are evidence of
+   * downstream saturation: the batch actually reached the publish path and
+   * failed there, or waited past the staleness bound under backpressure.
+   * {@link #DEAD_TARGET} (the target Worker disappeared) and
+   * {@link #LOCAL_REJECTED} (local executor saturation / shutdown drain) are
+   * not downstream evidence — lowering the damped baseline for them would
+   * react to the wrong bottleneck.
+   */
+  enum ConsumerDropCause {
+    /** Publish threw or timed out — the downstream pipeline is the bottleneck. */
+    PUBLISH_FAILED,
+    /** Batch waited past the staleness bound in the dispatch queue — backpressure evidence. */
+    STALE,
+    /** Target Worker no longer alive at consumption time — routing event, not saturation. */
+    DEAD_TARGET,
+    /** Local rejection (publish executor saturated) or shutdown drain — local, not downstream. */
+    LOCAL_REJECTED,
+  }
+
+  /**
+   * Record a consumer drop with its cause. Causes classified as downstream
+   * saturation ({@link ConsumerDropCause#PUBLISH_FAILED},
+   * {@link ConsumerDropCause#STALE}) feed the downstream-yield confirmation in
+   * {@code BbrRateLimiterImpl}; other causes only record the drop and cooldown.
+   *
+   * <p>
+   * Default delegates to {@link #onConsumerDrop()} (cause ignored) so
+   * implementations compiled against earlier releases stay compatible.
+   *
+   * @param cause why the batch was dropped on the consumer side
+   */
+  default void onConsumerDrop(ConsumerDropCause cause) {
+    onConsumerDrop();
+  }
+
+  /**
+   * Total number of downstream-yield steps applied to the damped baseline
+   * (each step reduces it by 1/8, kernel {@code bbr_lt_bw_ratio}).
+   *
+   * @return cumulative yield step count, or {@code -1} if not tracked
+   */
+  default long getTotalDownstreamYields() {
+    return -1;
+  }
+
   /** Record a gate drop (tryAcquire failed). */
   void onGateDrop();
 

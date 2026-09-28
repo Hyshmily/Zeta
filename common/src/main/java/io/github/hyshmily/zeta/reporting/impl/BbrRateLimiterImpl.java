@@ -61,6 +61,13 @@ import org.springframework.util.Assert;
  * gap per 200 ms update). The design converges without lock-up; the freerun
  * band shrinks with the baseline.
  *
+ * <p><b>Downstream yield</b> (kernel {@code bbr_lt_bw} sampling): consumer
+ * drops classified as downstream saturation (publish failure / staleness)
+ * confirm across two consecutive baseline intervals lower the damped baseline
+ * by 1/8 per yield — a direct response to a downstream quota step, faster
+ * than waiting for the maxPass window to decay. Dead-target and local
+ * rejections are excluded from the evidence.
+ *
  * <p><b>Application:</b> Used by {@link KeyReporter} to skip flush cycles
  * when the reporting pipeline is saturated, providing back-pressure that is
  * proportional to system load.
@@ -84,6 +91,12 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   private static final long BASELINE_INTERVAL_MS = 200;
   /** Clock rollback / huge-jump guard: re-anchor instead of integrating a bogus delta. */
   private static final long BASELINE_STALE_MS = 60_000;
+  /**
+   * Downstream-yield step: the baseline is reduced by 1/8 per confirmed yield,
+   * mirrors kernel {@code bbr_lt_bw_ratio} (tcp_bbr.c:659-758).
+   */
+  private static final long YIELD_NUMERATOR = 7;
+  private static final long YIELD_DENOMINATOR = 8;
   /** Default absolute in-flight ceiling when not configured. */
   private static final long DEFAULT_MAX_IN_FLIGHT_CEILING = 128;
 
@@ -112,6 +125,20 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   private boolean baselineWarmed;
   /** Last baseline adjustment timestamp, guarded by bucketLock. */
   private long lastBaselineUpdateMs;
+
+  /**
+   * Consumer drops within the current baseline interval that indicate
+   * downstream saturation ({@code PUBLISH_FAILED} / {@code STALE} only).
+   * Atomic: drops arrive from consumer threads outside the bucket lock.
+   */
+  private final AtomicLong saturatedDropsInInterval = new AtomicLong();
+  /** Cumulative downstream-yield steps applied (observability counter). */
+  private final AtomicLong totalDownstreamYields = new AtomicLong();
+  /**
+   * Whether the previous baseline interval saw a saturation-caused drop —
+   * the two-interval confirmation state. Guarded by bucketLock.
+   */
+  private boolean prevIntervalSaturated;
 
   private static final class InFlightField extends BbrPadding.InFlightRef {}
 
@@ -247,12 +274,34 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     totalPassed.incrementAndGet();
   }
 
-  /** Record a dropped flush from the consumer (stale/failed batch — was enqueued, so decrement inFlight). */
+  /**
+   * Record a dropped flush from the consumer (stale/failed batch — was enqueued, so decrement inFlight).
+   * Legacy entry point: the cause is unknown, so the drop is classified as
+   * {@link ConsumerDropCause#LOCAL_REJECTED} and never feeds downstream-yield confirmation.
+   */
   @Override
   public void onConsumerDrop() {
+    onConsumerDrop(ConsumerDropCause.LOCAL_REJECTED);
+  }
+
+  /**
+   * Record a dropped flush from the consumer with its cause.
+   *
+   * <p>All causes update the cooldown timestamp and decrement in-flight.
+   * Causes classified as downstream saturation ({@code PUBLISH_FAILED} /
+   * {@code STALE}) additionally count toward the two-interval downstream-yield
+   * confirmation — dead-target and local rejections are excluded so the
+   * baseline only yields to genuine downstream quota steps (kernel
+   * {@code bbr_lt_bw} sampling).
+   */
+  @Override
+  public void onConsumerDrop(ConsumerDropCause cause) {
     dropTimeMinFlightField.lastDropTime = currentTimeMillis();
     totalDropped.incrementAndGet();
     inFlightField.value.decrementAndGet();
+    if (cause == ConsumerDropCause.PUBLISH_FAILED || cause == ConsumerDropCause.STALE) {
+      saturatedDropsInInterval.incrementAndGet();
+    }
   }
 
   /**
@@ -283,6 +332,12 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   @Override
   public long getTotalDropped() {
     return totalDropped.get();
+  }
+
+  /** Cumulative downstream-yield steps applied to the damped baseline (each step ×7/8). */
+  @Override
+  public long getTotalDownstreamYields() {
+    return totalDownstreamYields.get();
   }
 
   /** Current number of in-flight (enqueued but not yet published) batches. */
@@ -390,7 +445,9 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
     }
     int steps = (int) Math.min(elapsed / bucketDurationMs, bucketCount);
     for (int i = 0; i < steps; i++) {
-      currentBucket = (currentBucket + 1) % bucketCount;
+      if (++currentBucket == bucketCount) {
+        currentBucket = 0;
+      }
       passBuckets[currentBucket] = 0;
       rtBuckets[currentBucket] = 0;
       rtCounts[currentBucket] = 0;
@@ -469,6 +526,35 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
 
     balancedInFlight = Math.max(1, balancedInFlight + ((balancedInFlight < est) ? step : -step));
     lastBalanced = est;
+    applyDownstreamYield();
+  }
+
+  /**
+   * Downstream-yield overlay on the damped baseline, ported from kernel
+   * {@code bbr_lt_bw} sampling (tcp_bbr.c:659-758): when two consecutive
+   * baseline intervals each saw a saturation-caused consumer drop, treat the
+   * downstream quota as having stepped down and lower the baseline by 1/8
+   * (kernel {@code bbr_lt_bw_ratio}) instead of waiting for the maxPass
+   * window to slide out — under a real bottleneck, "produce fewer batches"
+   * is cheaper than "deny more batches".
+   *
+   * <p>A yield disarms the confirmation until an interval without downstream
+   * drops is observed, so sustained saturation yields every other interval
+   * (≤ ~23% descent per 400 ms) instead of collapsing multiplicatively. The
+   * step is floored at {@code minInFlight} (the budget floor), and recovery
+   * runs through the normal damping loop once the drops stop — bounded
+   * ascent, no lock-up. Caller must hold bucketLock.
+   */
+  private void applyDownstreamYield() {
+    long saturatedDrops = saturatedDropsInInterval.getAndSet(0);
+    boolean intervalSaturated = saturatedDrops > 0;
+    boolean confirmed = baselineWarmed && intervalSaturated && prevIntervalSaturated;
+    prevIntervalSaturated = intervalSaturated && !confirmed;
+    if (confirmed) {
+      long floor = Math.min(dropTimeMinFlightField.minInFlight, balancedInFlight);
+      balancedInFlight = Math.max(floor, balancedInFlight * YIELD_NUMERATOR / YIELD_DENOMINATOR);
+      totalDownstreamYields.incrementAndGet();
+    }
   }
 
   /**

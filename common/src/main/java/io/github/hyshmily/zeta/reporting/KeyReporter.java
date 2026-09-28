@@ -171,6 +171,50 @@ public interface KeyReporter {
   }
 
   /**
+   * Return the sliding-window max pass per bucket feeding the Little-Law
+   * estimate (the maxPass half of {@code maxPass × minRt}).
+   *
+   * <p>
+   * Reads lazily smooth/decay the cached maxPass estimate (kernel-style
+   * decay-on-read), so scrape frequency is a minor input to the estimate
+   * trajectory — same caveat as {@link #bbrMaxInFlight()}.
+   *
+   * @return current sliding-window max pass, or {@code -1} if not tracked or BBR is disabled
+   */
+  default long bbrMaxPass() {
+    return -1;
+  }
+
+  /**
+   * Return the sliding-window min average RT in ms feeding the Little-Law
+   * estimate (the minRt half of {@code maxPass × minRt}). Plotted next to
+   * {@link #bbrMaxInFlight()}, this is the curve that reveals publisher-path
+   * queue pollution before enabling PROBE_RTT-style probing.
+   *
+   * <p>
+   * Reads lazily smooth the cached minRt estimate (decay-on-read, see
+   * {@link #bbrMaxPass()}).
+   *
+   * @return current sliding-window min RT in ms, or {@code -1} if not tracked or BBR is disabled
+   */
+  default long bbrMinRt() {
+    return -1;
+  }
+
+  /**
+   * Return the cumulative number of downstream-yield steps applied to the
+   * damped baseline (kernel {@code bbr_lt_bw} sampling: two consecutive
+   * baseline intervals with saturation-caused consumer drops lower the
+   * baseline by 1/8 per step). A rising curve means the report pipeline's
+   * downstream (RabbitMQ / Worker) is persistently quota-limited.
+   *
+   * @return cumulative yield step count, or {@code -1} if not tracked or BBR is disabled
+   */
+  default long bbrYielded() {
+    return -1;
+  }
+
+  /**
    * Whether the ADR-0078 feed-loop interval tuner is configured for the flush
    * cadence ({@code zeta.local.report-interval-tuning} != off).
    *

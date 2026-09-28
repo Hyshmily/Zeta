@@ -21,6 +21,7 @@ import static io.github.hyshmily.zeta.util.TimeSource.currentTimeMillis;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
 import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
+import io.github.hyshmily.zeta.reporting.BbrRateLimiter.ConsumerDropCause;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
@@ -605,6 +606,21 @@ public class KeyReporterImpl implements KeyReporter {
   }
 
   @Override
+  public long bbrMaxPass() {
+    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMaxPass();
+  }
+
+  @Override
+  public long bbrMinRt() {
+    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getCurrentMinRt();
+  }
+
+  @Override
+  public long bbrYielded() {
+    return bbrRateLimiter == null ? -1 : bbrRateLimiter.getTotalDownstreamYields();
+  }
+
+  @Override
   public boolean feedLoopEnabled() {
     return intervalFeedLoop != null;
   }
@@ -749,14 +765,16 @@ public class KeyReporterImpl implements KeyReporter {
         log.warn("ReportDispatcher shutdown interrupted while waiting for consumers to terminate");
       }
       // Drain remaining queue entries — each was onEnqueue'd but never processed,
-      // so we must onConsumerDrop to keep BBR inFlight balanced.
+      // so we must onConsumerDrop to keep BBR inFlight balanced. A shutdown drain
+      // is a lifecycle event, not downstream saturation — LOCAL_REJECTED keeps it
+      // out of the downstream-yield confirmation.
       BbrRateLimiterImpl limiter = bbrRateLimiter;
       if (limiter != null) {
         List<ShardBatch> abandoned = new ArrayList<>();
         queue.drainTo(abandoned);
         if (!abandoned.isEmpty()) {
           for (int i = 0; i < abandoned.size(); i++) {
-            limiter.onConsumerDrop();
+            limiter.onConsumerDrop(ConsumerDropCause.LOCAL_REJECTED);
           }
           log.info("Drained {} abandoned batches from queue and decremented inFlight", abandoned.size());
         }
@@ -872,7 +890,9 @@ public class KeyReporterImpl implements KeyReporter {
         if (deadTarget || stale) {
           (deadTarget ? expiredDeadTargetCount : expiredStaleCount).incrementAndGet();
           if (limiter != null) {
-            limiter.onConsumerDrop();
+            // Only staleness is downstream-yield evidence; a dead target is a
+            // routing event, not saturation (kernel bbr_lt_bw attribution).
+            limiter.onConsumerDrop(deadTarget ? ConsumerDropCause.DEAD_TARGET : ConsumerDropCause.STALE);
           }
           continue;
         }
@@ -901,7 +921,7 @@ public class KeyReporterImpl implements KeyReporter {
                   );
                   scheduler.schedule(() -> lastPublishErrorLogged.set(false), 10, TimeUnit.SECONDS);
                 }
-                if (capturedLimiter != null) capturedLimiter.onConsumerDrop();
+                if (capturedLimiter != null) capturedLimiter.onConsumerDrop(ConsumerDropCause.PUBLISH_FAILED);
               } else if (capturedLimiter != null) {
                 // Use only publish time (dequeue → completion), not queue wait,
                 // so that backpressure-driven queue buildup does not inflate minRT.
@@ -910,7 +930,7 @@ public class KeyReporterImpl implements KeyReporter {
             });
         } catch (RejectedExecutionException ree) {
           droppedCount.incrementAndGet();
-          if (capturedLimiter != null) capturedLimiter.onConsumerDrop();
+          if (capturedLimiter != null) capturedLimiter.onConsumerDrop(ConsumerDropCause.LOCAL_REJECTED);
         }
       }
     }

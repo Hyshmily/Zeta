@@ -123,6 +123,10 @@ Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoin
 | `zeta.reporter.bbr.dropped`         | Gauge | —                    | Reporter BBR 丢弃次数             |
 | `zeta.reporter.bbr.inflight`        | Gauge | —                    | Reporter BBR 进行中请求数         |
 | `zeta.reporter.bbr.maxinflight`     | Gauge | —                    | Reporter BBR 最大进行中请求数     |
+| `zeta.reporter.bbr.balanced`        | Gauge | —                    | Reporter BBR 阻尼基线（内核 `dirty_ratelimit` 对应物） |
+| `zeta.reporter.bbr.maxpass`         | Gauge | —                    | 滑窗单桶最大通过数（Little 估算输入；读时衰减） |
+| `zeta.reporter.bbr.minrt`           | Gauge | —                    | 滑窗最小平均 RT（毫秒，Little 估算输入；读时衰减）——观察发布链路排队污染的关键曲线 |
+| `zeta.reporter.bbr.yielded`         | Gauge | —                    | 累计下游让路步数（连续两个基线区间出现发布失败/过期丢弃时，基线每步 ×7/8） |
 | `zeta.reporter.feedloop.interval`   | Gauge | —                    | FeedLoop 基准上报间隔（毫秒）；shadow 模式下显示"将要应用"的轨迹（ADR-0078；仅 `report-interval-tuning` ≠ off 时注册） |
 | `zeta.reporter.feedloop.score`      | Gauge | —                    | FeedLoop 得分（bp）——两窗口平均批大小相对目标（10000 == 正中目标） |
 | `zeta.reporter.feedloop.batch`      | Gauge | —                    | FeedLoop 平均批大小（每次完成 flush 的键数） |

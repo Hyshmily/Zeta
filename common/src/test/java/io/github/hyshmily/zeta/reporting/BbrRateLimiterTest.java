@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import io.github.hyshmily.zeta.reporting.BbrRateLimiter.ConsumerDropCause;
 import io.github.hyshmily.zeta.reporting.impl.BbrRateLimiterImpl;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.TimeSource;
@@ -619,6 +620,154 @@ class BbrRateLimiterTest {
     assertThat(limiter.tryAcquire()).isTrue();
   }
 
+  // ── downstream yield (kernel bbr_lt_bw overlay on the damped baseline) ──
+
+  @Test
+  void downstreamYield_firesAfterTwoConsecutiveSaturatedIntervals() {
+    populatePasses(50, 100); // est = 50 → baseline 50
+    warmBaseline();
+    fillInFlight(50); // pipeline-full steady state: in-flight == baseline
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(50);
+
+    // Interval 1: saturation drop sampled by the 200 ms baseline loop — arms only.
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(50);
+
+    // Interval 2: second consecutive saturated interval → yield ×7/8 (50 → 43).
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(43);
+    assertThat(limiter.getTotalDownstreamYields()).isEqualTo(1);
+  }
+
+  @Test
+  void downstreamYield_singleSaturatedInterval_doesNotFire() {
+    populatePasses(50, 100);
+    warmBaseline();
+    fillInFlight(50);
+    dropEnqueued(ConsumerDropCause.STALE);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(50);
+    assertThat(limiter.getTotalDownstreamYields()).isEqualTo(0);
+  }
+
+  @Test
+  void downstreamYield_deadTargetAndLocalDrops_areNotDownstreamEvidence() {
+    populatePasses(50, 100);
+    warmBaseline();
+    fillInFlight(50);
+    dropEnqueued(ConsumerDropCause.DEAD_TARGET);
+    sampleBaselineInterval();
+    dropEnqueued(ConsumerDropCause.LOCAL_REJECTED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(50);
+    assertThat(limiter.getTotalDownstreamYields()).isEqualTo(0);
+  }
+
+  @Test
+  void downstreamYield_legacyNoArgDrop_isClassifiedLocalAndDoesNotConfirm() {
+    populatePasses(50, 100);
+    warmBaseline();
+    fillInFlight(50);
+    limiter.onEnqueue();
+    limiter.onConsumerDrop();
+    sampleBaselineInterval();
+    limiter.onEnqueue();
+    limiter.onConsumerDrop();
+    sampleBaselineInterval();
+    // Legacy drops still record cooldown + drop accounting, but never yield.
+    assertThat(limiter.getTotalDropped()).isEqualTo(2);
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(50);
+    assertThat(limiter.getTotalDownstreamYields()).isEqualTo(0);
+  }
+
+  @Test
+  void downstreamYield_disarmsUntilACleanInterval_sustainedSaturationYieldsEveryOtherInterval() {
+    populatePasses(50, 100);
+    warmBaseline();
+    fillInFlight(50);
+    // Fire 1: 50 → 43.
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(43);
+    // The yield disarms confirmation; the very next saturated interval must not fire.
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(43);
+    // Second consecutive saturated interval → fire 2: 43 → 37.
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(37);
+    assertThat(limiter.getTotalDownstreamYields()).isEqualTo(2);
+  }
+
+  @Test
+  void downstreamYield_floorsAtMinInFlight() {
+    limiter.setMinInFlight(40);
+    populatePasses(50, 100); // est 50 → seed = max(minInFlight 40, 50) = 50
+    warmBaseline();
+    fillInFlight(50);
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(43);
+    // Next yield would compute 43 × 7/8 = 37, but the budget floor wins: 40.
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(40);
+    assertThat(limiter.getTotalDownstreamYields()).isEqualTo(2);
+  }
+
+  @Test
+  void downstreamYield_holdsThroughCleanIntervals_thenRearms() {
+    populatePasses(50, 100);
+    warmBaseline();
+    fillInFlight(50);
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(43);
+
+    // Clean intervals: the baseline holds (the three-way clamp + step decay keep
+    // the yield memory until a genuinely higher estimate justifies climbing) —
+    // no continued descent, no oscillation.
+    for (int i = 0; i < 3; i++) {
+      sampleBaselineInterval();
+    }
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(43);
+
+    // A clean interval re-arms the confirmation: two fresh saturated intervals
+    // fire again (43 → 37).
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(37);
+    assertThat(limiter.getTotalDownstreamYields()).isEqualTo(2);
+  }
+
+  @Test
+  void downstreamYield_dropsBeforeBaselineSeed_doNotFire() {
+    populatePasses(50, 100);
+    // Drop arrives before the baseline has ever been seeded — the seed update
+    // must not consume it as yield evidence.
+    dropEnqueued(ConsumerDropCause.PUBLISH_FAILED);
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(50);
+    assertThat(limiter.getTotalDownstreamYields()).isEqualTo(0);
+    // The pre-seed drop carries into the first sampled interval (armed only),
+    // so a single further interval still cannot confirm.
+    sampleBaselineInterval();
+    assertThat(limiter.getBalancedInFlight()).isEqualTo(50);
+  }
+
   // ── Integration: full cycle ──
 
   @Test
@@ -737,6 +886,29 @@ class BbrRateLimiterTest {
   }
 
   /**
+   * Park in-flight at the given level — the pipeline-full steady state the
+   * limiter regulates around. At in-flight == baseline the position ratio is
+   * 1.0 and the damping loop holds, so yield steps show cleanly; parking at 0
+   * instead would saturate the position ratio at 2.0 and make the damping
+   * loop climb every interval, masking the yield.
+   */
+  private void fillInFlight(int count) {
+    for (int i = 0; i < count; i++) {
+      limiter.onEnqueue();
+    }
+  }
+
+  /**
+   * Record one batch completing as a consumer drop: enqueued first (as every
+   * production consumer drop is), so in-flight stays balanced and the position
+   * controller sees the realistic post-drop level.
+   */
+  private void dropEnqueued(ConsumerDropCause cause) {
+    limiter.onEnqueue();
+    limiter.onConsumerDrop(cause);
+  }
+
+  /**
    * Force the next limiter call to run a baseline update: the 200 ms cadence
    * would otherwise skip it inside a fast-running test.
    */
@@ -747,6 +919,16 @@ class BbrRateLimiterTest {
 
   private void forceBaselineUpdate() {
     forceBaselineUpdate(limiter);
+  }
+
+  /**
+   * Sample one 200 ms baseline interval: force the cadence gate open and read
+   * the budget (the shared read path runs {@code updateBaseline}, which also
+   * samples the downstream-yield confirmation).
+   */
+  private void sampleBaselineInterval() {
+    forceBaselineUpdate();
+    limiter.getCurrentMaxInFlight();
   }
 
   private void forceBaselineUpdate(BbrRateLimiterImpl target) {

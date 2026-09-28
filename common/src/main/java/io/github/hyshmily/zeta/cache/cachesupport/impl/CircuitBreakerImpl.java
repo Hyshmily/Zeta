@@ -371,7 +371,10 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    * and re-evaluates the failure threshold.
    */
   private void slide() {
-    int next = (currentIndex + 1) % bucketSize;
+    int next = currentIndex + 1;
+    if (next == bucketSize) {
+      next = 0;
+    }
     int base = next * STRIDE;
     VH.setVolatile(counts, base + SUCCESS_OFFSET, 0L);
     VH.setVolatile(counts, base + FAIL_OFFSET, 0L);
