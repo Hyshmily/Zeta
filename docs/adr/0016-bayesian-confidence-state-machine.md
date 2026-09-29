@@ -296,3 +296,126 @@ This prevents the hot-phase accumulated posterior from delaying COOL broadcasts:
 2. **Memory**: each tracked key now carries two additional `double` fields (16 bytes per key). At 100k tracked keys, this adds ~1.6 MB to the Worker heap — negligible.
 
 3. **Thread safety**: posterior updates happen inside the existing `Striped` per-key lock. No additional synchronization required.
+
+## 2026-09-28 Addendum: Demotion Hysteresis (Schmitt Re-Promotion Gate), full_bw Stall Exit, and Idle-Epoch Shift
+
+Three mechanisms from the kernel-inspired optimizations doc §6 (all kernel claims
+verified verbatim against the local 7.3-rc4 sources of `tcp_cubic.c` and
+`tcp_bbr.c`). They sit entirely at or below the existing binary hot verdict —
+the Bayesian confidence gate remains the sole broadcast authority.
+
+### §6.1 Demotion hysteresis — Schmitt re-promotion gate
+
+**Motivation.** The doc's original proposal transplanted CUBIC's
+`fast_convergence` discount directly: re-promotion threshold =
+`max(threshold, 0.85 × observedCount)`. Review rejected it on two grounds:
+
+1. **It is a no-op for the exact case it targets.** A flapper oscillating at
+   the threshold has peak ≈ threshold, so `0.85 × peak < threshold` and the
+   `max()` always picks the plain threshold. Only keys with peak > 1.18 ×
+   threshold are affected — and for them the effect is delaying the return of
+   genuinely hot keys (a cost, not a benefit).
+2. **Semantic mismatch.** CUBIC's loss point is the peak (cwnd grows until
+   loss), while Zeta's demotion point is a trough (demotion fires only after
+   consecutive cold windows). The transplanted formula has no valid reading of
+   "observedCount at demotion".
+
+**Design (Schmitt trigger).** When a key is fully demoted —
+`PRE_COOLING → COLD` with a COOL broadcast — a per-key flag
+(`demoteHysteresisActive`) is armed. While armed, the binary hot verdict for
+that key requires `windowSum ≥ threshold × 5/4` (integer math in
+`raisedThreshold`), instead of the plain threshold. The factor 1.25 is BBR's
+`bbr_full_bw_thresh`; the fast_convergence discount's inverse (1/0.85 ≈
+1.176) rounds to the same constant, giving §6 a single hysteresis constant.
+Flappers hovering at the plain threshold stay cold (the band's purpose);
+strong keys rebuild past the raised band and re-promote through the normal
+Bayesian gate.
+
+**Lifecycle.** Armed on the COOL-broadcast demotion only (the CANDIDATE_HOT →
+COLD silent drop is not app-visible and does not arm the gate). Cleared on any
+re-promotion (COLD → CANDIDATE_HOT / CONFIRMED_HOT) and on fast-lane
+promotion (rule authority overrides). The flag rides the state snapshot as its
+9th field: a failed COOL broadcast rolls back to `PRE_COOLING` with the gate
+disarmed (the demotion did not happen), and a failed HOT re-promotion keeps it
+armed. It is lost on `evictStale` removal — accepted, because the gate targets
+window-scale flapping while the eviction horizon (default 20 min) is ~4 orders
+of magnitude longer than a flap cycle; a key silent that long has no flapping
+history worth remembering.
+
+**Orthogonality.** The gate is per-key; ADR-0042/0045's promotion floor and
+governor are global. The gate multiplies `ctx.threshold()` below the Bayesian
+layer; the momentum-adjusted `adjustedLogThreshold` (ADR-0053 family) is
+untouched.
+
+### §6.3 full_bw stall exit (COLD observation phase)
+
+Mirrors BBR's `bbr_check_full_bw_reached` (tcp_bbr.c:874-890): while a COLD
+key is still accumulating its hot streak (`hotStreak < confirmCount`), each
+hot window's sum is compared against the previous hot window's. After
+`FULL_BW_CNT = 3` consecutive windows with gain below `5/4`
+(`bbr_full_bw_thresh = BBR_UNIT*5/4`), the count has plateaued — the stable
+level is itself the evidence — so the remaining streak windows are skipped and
+the Bayesian gate is consulted immediately (`hotStreak` set to
+`confirmCount`). A gain at or above 1.25× resets the counter (BBR resets
+`full_bw_cnt` on fresh bandwidth growth). Baselines reset on cold windows and
+on evaluation gaps (see §6.4), mapping BBR's round-start / non-app-limited
+conditions to window contiguity.
+
+Direction-safe: the stall path only accelerates the existing Bayesian gate and
+can never bypass it. Inert unless `confirmCount > FULL_BW_CNT + 1` — the
+default configuration (`confirmCount = 1`) never enters the tracking phase, so
+default-config behavior is unchanged.
+
+### §6.4 Idle-epoch shift (streak counters)
+
+CUBIC shifts `epoch_start += idleDelta` on resume after idling
+(`cubictcp_cwnd_event_tx_start`, tcp_cubic.c:142-158): the curve's anchor
+moves, history is preserved — neither reset (lose history) nor frozen (count
+idle as active). Zeta's streak counters currently freeze during reporting
+silence. The freeze is harmless for the hot direction (silence is not hot
+evidence), but it undercounts cooling progress: a key silent for 10 minutes
+that resumes with sparse reports had to re-earn the full `coolCount` (default
+12000 windows × 50 ms = 600 s of *evaluated* cold windows — hours under
+sparse reporting) before the overdue COOL broadcast, and `evictStale` only
+covers silences longer than 20 minutes.
+
+**Design.** On evaluation, if the gap since the key's previous evaluation
+spans one or more full counter windows (`counterWindowMs = smDurationMs /
+smSlices`, default 50 ms), credit `floor(idleMs / counterWindowMs) − 1` windows
+into `coolStreak` for `CONFIRMED_HOT` / `PRE_COOLING` states. The minus-one
+excludes the current window (the evaluation itself counts it) and makes
+sub-window jitter credit zero, so normal back-to-back cadence is unaffected;
+the credit is capped at `coolCount + 1` (more cannot change any decision).
+The hot-observation stall baseline (`lastHotObs`/`stallCount`) resets on any
+gap. The credit runs after the pre-mutation snapshot, so broadcast-failure
+rollbacks undo it. Silence remains non-evidence for the hot direction —
+`hotStreak` is never credited.
+
+**Activation.** The legacy 6-arg constructor keeps `counterWindowMs = 0`
+(crediting disabled — existing embedders and tests keep exact legacy
+behavior). The production bean passes the real counter unit from
+`WorkerProperties`.
+
+### Implementation inventory
+
+| Class | Change |
+|-------|--------|
+| `StateSnapshot` | Added 9th component `demoteHysteresisActive` + 8-arg compatibility constructor |
+| `ZetaBayesianSM.KeyState` | Added `demoteHysteresisActive`, `lastHotObs`, `stallCount` |
+| `ZetaBayesianSM` | 7-arg constructor (`counterWindowMs`); idle credit in `evaluate`; Schmitt verdict in `evaluate`; stall tracking in `evaluateHot` (COLD); gate arm in `evaluatePreCooling`; gate clear on promotions and fastlane |
+| `WorkerAutoConfiguration` | Passes `smDurationMs/smSlices` as the counter window unit |
+| Tests | `ZetaBayesianSMKernelInspiredTest` (14 cases: gate arm/disarm/rollback/fastlane, stall early-promotion + growth control + reset + default-config neutrality, idle credit + jitter immunity + hot revive + legacy off) |
+
+### Consequences
+
+1. **Default-config neutrality.** With `confirmCount = 1` and the legacy
+   constructor, all three mechanisms are inert; existing test suites pass
+   unchanged.
+2. **Memory.** Three extra fields per tracked key (11 bytes plus padding ≈
+   16 bytes); negligible at 100k keys.
+3. **Thread safety.** All new state is touched exclusively under the existing
+   per-key `Striped` lock; the flag participates in the `mutationSeq` snapshot
+   protocol unchanged.
+4. **Hysteresis vs stale eviction.** Accepted memory loss on eviction (see
+   above); no cross-restart persistence — the gate is intentionally not
+   serialized into broadcasts.

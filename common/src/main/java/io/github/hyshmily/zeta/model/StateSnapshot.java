@@ -37,6 +37,13 @@ import lombok.experimental.Accessors;
  *
  * <p>Fluent accessors ({@code key()}, {@code currentState()}, etc.) preserve
  * the same API as the previous {@code record} representation.
+ *
+ * <p>{@code demoteHysteresisActive} carries the per-key demotion-hysteresis
+ * flag (Schmitt re-promotion gate, kernel-inspired doc §6.1): it is set when
+ * a key is fully demoted with a COOL broadcast and cleared on re-promotion.
+ * It rides the snapshot so a broadcast-failure rollback restores exactly the
+ * pre-decision gate state — a rolled-back COOL must not leave the gate armed
+ * (the demotion did not happen), and a rolled-back HOT must not disarm it.
  */
 @Accessors(fluent = true)
 @Builder
@@ -48,5 +55,24 @@ public record StateSnapshot(
   double posteriorMean,
   double accumulatedPrecision,
   int lowResetCount,
-  long mutationSeq
-) {}
+  long mutationSeq,
+  boolean demoteHysteresisActive
+) {
+
+  /**
+   * Compatibility constructor for the pre-hysteresis 8-field snapshot shape:
+   * the demotion-hysteresis gate defaults to inactive.
+   */
+  public StateSnapshot(
+    String key,
+    String currentState,
+    int hotStreak,
+    int coolStreak,
+    double posteriorMean,
+    double accumulatedPrecision,
+    int lowResetCount,
+    long mutationSeq
+  ) {
+    this(key, currentState, hotStreak, coolStreak, posteriorMean, accumulatedPrecision, lowResetCount, mutationSeq, false);
+  }
+}

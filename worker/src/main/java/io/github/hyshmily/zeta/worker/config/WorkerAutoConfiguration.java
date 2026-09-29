@@ -211,7 +211,10 @@ public class WorkerAutoConfiguration {
       properties.getPreCoolGraceWindows(),
       confidenceEvaluator,
       properties.getBayesian().getPriorMean(),
-      properties.getStateMachine().getRebroadcastIntervalMs()
+      properties.getStateMachine().getRebroadcastIntervalMs(),
+      // Counter time-unit for the idle-epoch shift (kernel-inspired doc
+      // §6.4): one evaluation window = smDurationMs / smSlices (default 50 ms).
+      Math.max(1L, properties.getStateMachine().getSmDurationMs() / properties.getStateMachine().getSmSlices())
     );
   }
 

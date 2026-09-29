@@ -171,8 +171,9 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   /**
    * Log every Nth "Failed to offer" warning (admission-evicted and
    * decay-dropped keys share this counter) to avoid log flooding.
+   * Kept a power of two so the rate check is a bitmask AND.
    */
-  private static final int EXPELLED_LOG_INTERVAL = 1000;
+  private static final int EXPELLED_LOG_INTERVAL = 1024;
 
   /**
    * Size bound of {@link #nonMemberLocCache}. ~16k entries × (String key +
@@ -224,8 +225,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * update and zero. Replaces the {@code windowCount}-length {@code slotSum} loop on the hot path.
    */
   private final int[] slotSums;
-  /** {@code totalSlots * windowCount} — precomputed stride used for window indexing. */
-  private final int windowStride;
+  /**
+   * {@code log2(windowCount)} — {@code windowCount} is auto-aligned to a power of two in the
+   * constructor, so slot-window indexing uses {@code slot << windowShift} instead of a multiply.
+   */
+  private final int windowShift;
 
   /** Bitmask for window index when windowCount is a power of two ({@code windowCount - 1}). */
   private final int windowMask;
@@ -377,7 +381,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     this.depth = depth;
     this.minCount = minCount;
     this.windowCount = windowCount;
-    this.windowStride = windowCount;
+    this.windowShift = Integer.numberOfTrailingZeros(windowCount);
     this.windowMask = windowCount - 1;
 
     this.survivalProb = decay;
@@ -398,8 +402,8 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     this.widthIsPow2 = width > 0 && (width & (width - 1)) == 0;
     if (!widthIsPow2) {
       log.warn(
-        "Width {} is not a power of two; bucket index will use the FastRange mapping "
-          + "(RocksDB fastrange.h). Recommended: use a power of two for bitmask performance.",
+        "Width {} is not a power of two; bucket index will use the FastRange mapping " +
+          "(RocksDB fastrange.h). Recommended: use a power of two for bitmask performance.",
         width
       );
     }
@@ -776,11 +780,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * a slot can only reach the cap under extreme continuous traffic.
    */
   private long applyIncrement(int index, int active, long increment, long maxCount) {
-    int window = windows[index * windowStride + active] + (int) increment;
+    int window = windows[(index << windowShift) + active] + (int) increment;
     if (increment > 0 && window < 0) {
       window = Integer.MAX_VALUE; // saturation guard: an overflowing window would decay-skip
     }
-    windows[index * windowStride + active] = window;
+    windows[(index << windowShift) + active] = window;
     slotSums[index] += (int) increment;
     if (increment > 0 && slotSums[index] < 0) slotSums[index] = Integer.MAX_VALUE;
     return Math.max(maxCount, slotSums[index]);
@@ -793,14 +797,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * proportionally decay every window. Returns the running {@code maxCount}.
    */
   @SuppressWarnings({ "null", "squid:S2245" })
-  private long decayCollisionSlot(
-    int index,
-    int active,
-    int itemFingerprint,
-    long increment,
-    long cur,
-    long maxCount
-  ) {
+  private long decayCollisionSlot(int index, int active, int itemFingerprint, long increment, long cur, long maxCount) {
     ThreadLocalRandom rng = ThreadLocalRandom.current();
     // Constant per-unit survival probability.  Each of the cur existing units
     // independently survives the collision with probability decay, so the
@@ -828,11 +825,12 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       decays = Math.min(decays, maxDecays);
     }
 
+    int base = index << windowShift;
     if (decays >= cur) {
       // Replace the slot: fingerprint swap, wipe all windows, replay increment.
       fingerprints[index] = itemFingerprint;
-      Arrays.fill(windows, index * windowStride, index * windowStride + windowCount, 0);
-      windows[index * windowStride + active] = (int) increment;
+      Arrays.fill(windows, base, base + windowCount, 0);
+      windows[base + active] = (int) increment;
       slotSums[index] = (int) increment;
       return Math.max(maxCount, increment);
     }
@@ -841,7 +839,6 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     // int counters: both factors can reach 2^31, so the product reaches 2^62.
     long sumBefore = slotSums[index];
     long totalSubtracted = 0;
-    int base = index * windowStride;
 
     for (int w = 0; w < windowCount; w++) {
       int off = base + w;
@@ -865,9 +862,9 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     for (int stripe = 0; stripe < lockStripes.length; stripe++) {
       synchronized (lockStripes[stripe]) {
         for (int i = stripe; i < slotSums.length; i += lockStripes.length) {
-          int oldWindow = windows[i * windowStride + aw];
+          int oldWindow = windows[(i << windowShift) + aw];
           if (oldWindow != 0) {
-            windows[i * windowStride + aw] = 0;
+            windows[(i << windowShift) + aw] = 0;
             slotSums[i] -= oldWindow;
             if (slotSums[i] < 0) {
               slotSums[i] = 0; // guard against int underflow races
@@ -939,7 +936,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
             // EXPELLED_LOG_INTERVAL failures across both offer sites).
             if (
               !expelledQueue.offer(new Item(key, 0L)) &&
-              expelledLogCounter.getAndIncrement() % EXPELLED_LOG_INTERVAL == 0
+              (expelledLogCounter.getAndIncrement() & (EXPELLED_LOG_INTERVAL - 1)) == 0
             ) {
               log.warn(
                 "Failed to offer decay-dropped key: {} ({} suppressed since last log)",
@@ -1073,9 +1070,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
         expelledKey = removed.key;
         if (
           !expelledQueue.offer(new Item(expelledKey, min.count())) &&
-          expelledLogCounter.getAndIncrement() % EXPELLED_LOG_INTERVAL == 0
+          (expelledLogCounter.getAndIncrement() & (EXPELLED_LOG_INTERVAL - 1)) == 0
         ) {
-          log.warn("Failed to offer expelled key: {} ({} suppressed since last log)", expelledKey, EXPELLED_LOG_INTERVAL);
+          log.warn(
+            "Failed to offer expelled key: {} ({} suppressed since last log)",
+            expelledKey,
+            EXPELLED_LOG_INTERVAL
+          );
         }
       }
     }

@@ -93,6 +93,15 @@ import lombok.extern.slf4j.Slf4j;
  *
  *   evictStale scan: CONFIRMED_HOT / PRE_COOLING idle > staleAfterMs ──► broadcast COOL, state removed
  *   evictStale scan: COLD idle > coldStaleAfterMs ──────────────────────► removed (no broadcast)
+ *
+ *   Idle-epoch shift (kernel-inspired §6.4): silence ≥ 1 window credits the missed
+ *     windows into coolStreak for CONFIRMED_HOT / PRE_COOLING — silence is cooling
+ *     evidence; CUBIC's epoch_start += idleDelta analog (no reset, no freeze).
+ *   Demotion hysteresis (§6.1): PRE_COOLING ──► COLD arms a per-key Schmitt gate;
+ *     re-promotion requires windowSum ≥ threshold × 1.25 until promoted.
+ *   full_bw stall (§6.3): COLD observation phase with FULL_BW_CNT=3 consecutive hot
+ *     windows at gain < 1.25× consults the Bayesian gate immediately (only effective
+ *     when confirmCount > 4).
  * </pre>
  *
  * <p><b>Fast-lane bypass:</b> When the window sum meets a configured fast-lane
@@ -260,12 +269,34 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     double priorMean,
     long rebroadcastIntervalMs
   ) {
+    this(confirmCount, coolCount, preCoolGraceCount, confidenceEvaluator, priorMean, rebroadcastIntervalMs, 0L);
+  }
+
+  /**
+   * Full constructor: also takes the counter time-unit for the idle-epoch
+   * shift (kernel-inspired doc §6.4, CUBIC {@code cubictcp_cwnd_event_tx_start},
+   * tcp_cubic.c:142-158, verified against the local 7.3-rc4 copy).
+   *
+   * @param counterWindowMs duration of one evaluation window in the streak
+   *                        counters' semantics ({@code smDurationMs/smSlices});
+   *                        {@code 0} disables idle crediting
+   */
+  public ZetaBayesianSM(
+    int confirmCount,
+    int coolCount,
+    int preCoolGraceCount,
+    ConfidenceEvaluator confidenceEvaluator,
+    double priorMean,
+    long rebroadcastIntervalMs,
+    long counterWindowMs
+  ) {
     this.confirmCount = confirmCount;
     this.coolCount = coolCount;
     this.preCoolGraceCount = preCoolGraceCount;
     this.confidenceEvaluator = confidenceEvaluator;
     this.priorMean = priorMean;
     this.rebroadcastIntervalMs = rebroadcastIntervalMs;
+    this.counterWindowMs = Math.max(0L, counterWindowMs);
   }
 
   /**
@@ -273,6 +304,32 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    * key (10 s). Used by the 5-arg compatibility constructor. See ADR-0024.
    */
   static final long DEFAULT_REBROADCAST_INTERVAL_MS = 10_000L;
+
+  /**
+   * Kernel-inspired doc §6.3 (BBR {@code full_bw}, tcp_bbr.c:874-890, verified
+   * against the local 7.3-rc4 copy): during the COLD streak observation phase,
+   * {@value #FULL_BW_CNT} consecutive hot windows whose count gain is below
+   * 1.25× ({@code GAIN_NUM/GAIN_DEN}) mean the key has plateaued — the stable
+   * level itself is the evidence, so the remaining streak windows are skipped
+   * and the Bayesian gate is consulted immediately. Mirrors BBR's
+   * {@code bbr_full_bw_thresh = BBR_UNIT*5/4} and {@code bbr_full_bw_cnt = 3}.
+   * Direction-safe: it only accelerates the existing Bayesian gate, never
+   * bypasses it. Inert when {@code confirmCount <= FULL_BW_CNT + 1} (the
+   * default config's confirmCount = 1 never enters the tracking phase).
+   */
+  static final int GAIN_NUM = 5;
+  static final int GAIN_DEN_BIT_SHIFT = 2;
+  static final int FULL_BW_CNT = 3;
+
+  /**
+   * Counter time-unit in millis — the duration of one evaluation "window" in
+   * the {@code hotStreak}/{@code coolStreak} counters' semantics (derived from
+   * {@code stateMachine.smDurationMs / smSlices}, default 50 ms). Drives the
+   * idle-epoch shift below; {@code 0} disables idle crediting (compatibility
+   * constructor default, also used by unit tests that evaluate in rapid
+   * succession where real-time gaps must never affect streaks).
+   */
+  private final long counterWindowMs;
 
   /**
    * Minimum interval between periodic HOT rebroadcasts of the same key.
@@ -417,13 +474,59 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         state.mutationSeq++;
         snapShot = snapshotOf(key, state);
       }
-      state.lastUpdateTime = TimeSource.monotonicMillis();
+      long now = TimeSource.monotonicMillis();
+
+      // Idle-epoch shift (kernel-inspired doc §6.4; CUBIC's
+      // cubictcp_cwnd_event_tx_start shifts epoch_start by the idle delta
+      // instead of resetting or freezing the curve — tcp_cubic.c:142-158).
+      // Silence between evaluations IS cooling evidence: credit the elapsed
+      // missed windows to coolStreak so a key that resumes after a long gap
+      // does not have to re-earn the full coolCount it already spent silent.
+      // Credit = full missed windows (jitter below one window credits 0, so
+      // normal back-to-back cadence is unaffected) minus the current window
+      // (the evaluation below counts it itself), capped at coolCount + 1 —
+      // more credit cannot change any decision. The hot-observation stall
+      // baseline is reset: the gap breaks window contiguity (§6.3 compares
+      // only contiguous windows). Runs after the snapshot so a
+      // broadcast-failure rollback also rolls the credit back.
+      if (counterWindowMs > 0) {
+        long idleWindows = (now - state.lastUpdateTime) / counterWindowMs - 1;
+        if (idleWindows > 0) {
+          state.lastHotObs = 0;
+          state.stallCount = 0;
+          if (state.currentState == PRE_COOLING || state.currentState == CONFIRMED_HOT) {
+            state.coolStreak = (int) Math.min(
+              (long) state.coolStreak + Math.min(idleWindows, coolCount + 1L),
+              (long) coolCount + 1
+            );
+          }
+        }
+      }
+      state.lastUpdateTime = now;
 
       // Re-read the current sliding-window sum inside the lock via the
       // LongSupplier provided by Evaluator.  This closes the TOCTOU race:
       // addCount(key, count) was called outside the lock, and another thread
       // could have updated the window between that call and this evaluation.
-      boolean hot = isHotThisWindow || (windowSumSupplier.getAsLong() >= ctx.threshold());
+      long windowSum = windowSumSupplier.getAsLong();
+
+      // Schmitt re-promotion gate (kernel-inspired doc §6.1, refactored from
+      // the original CUBIC fast_convergence mapping): a key that was fully
+      // demoted with a COOL broadcast must exceed threshold × 1.25 to be
+      // treated as hot again. The 1.25 factor is BBR's full_bw_thresh — the
+      // fast_convergence discount's 0.85 inverse (≈1.176) rounds to the same
+      // constant. The gate lives entirely below the Bayesian layer: it only
+      // raises the binary hot verdict for the demoted key, the confidence
+      // gate still decides the actual broadcast. Flappers hovering at the
+      // plain threshold stay cold (the original doc formula
+      // max(threshold, 0.85 × peak) is a no-op for exactly those keys —
+      // 0.85 × peak < threshold whenever peak < 1.176 × threshold); strong
+      // keys rebuild past the raised band and re-promote normally. The gate
+      // survives while the COLD KeyState persists (actively-reported flappers
+      // keep lastUpdateTime fresh) and is cleared on re-promotion / fast-lane.
+      boolean hot = state.demoteHysteresisActive
+        ? windowSum >= raisedThreshold(ctx.threshold())
+        : isHotThisWindow || windowSum >= ctx.threshold();
       return hot ? evaluateHot(key, state, ctx, snapShot) : evaluateCold(key, state, ctx, snapShot);
     } catch (Exception e) {
       log.warn("Unexpected StateMachine Exception for key {}", key, e);
@@ -525,7 +628,30 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     switch (state.currentState) {
       case COLD -> {
         if (state.hotStreak < confirmCount) {
-          return ZetaDecision.none(key, snapShot);
+          // full_bw stall tracking (kernel-inspired doc §6.3; BBR's
+          // bbr_check_full_bw_reached, tcp_bbr.c:874-890): while still in the
+          // observation phase, compare each hot window's count against the
+          // previous hot window's. FULL_BW_CNT consecutive windows with gain
+          // below 1.25× (GAIN_NUM/GAIN_DEN) mean the count has plateaued —
+          // the stable level is itself the evidence, so the remaining streak
+          // windows are skipped and the Bayesian gate is consulted now
+          // (BBR exits STARTUP the same way). Baseline/counter were reset by
+          // the idle-epoch shift on any gap, so only contiguous windows
+          // count (BBR's round_start / non-app-limited conditions map to
+          // contiguity; hot windows are by definition fully-observed).
+          // Inert unless confirmCount > FULL_BW_CNT + 1 (default config's
+          // confirmCount = 1 never enters this branch). Direction-safe:
+          // only accelerates the Bayesian gate, never bypasses it.
+          if (obs > 0) {
+            if (state.lastHotObs > 0) {
+              state.stallCount = obs << GAIN_DEN_BIT_SHIFT < state.lastHotObs * GAIN_NUM ? state.stallCount + 1 : 0;
+            }
+            state.lastHotObs = obs;
+          }
+          if (state.stallCount < FULL_BW_CNT) {
+            return ZetaDecision.none(key, snapShot);
+          }
+          state.hotStreak = confirmCount;
         }
 
         ProbabilityResult pr = bayesianUpdate(state, obs, ctx);
@@ -534,6 +660,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
           case HIGH -> {
             state.currentState = CONFIRMED_HOT;
             state.lowResetCount = 0;
+            state.demoteHysteresisActive = false;
+            state.lastHotObs = 0;
+            state.stallCount = 0;
             state.lastBroadcastAt = TimeSource.monotonicMillis();
             log.debug("State transition: COLD -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
             summarizeTransition("COLD -> CONFIRMED_HOT", key);
@@ -542,6 +671,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
           case MEDIUM -> {
             state.currentState = CANDIDATE_HOT;
             state.lowResetCount = 0;
+            state.demoteHysteresisActive = false;
+            state.lastHotObs = 0;
+            state.stallCount = 0;
             return ZetaDecision.none(key, snapShot);
           }
           default -> {
@@ -569,9 +701,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         if (pr.level() == ConfidenceLevel.HIGH) {
           state.currentState = CONFIRMED_HOT;
           state.lowResetCount = 0;
+          state.demoteHysteresisActive = false;
           state.lastBroadcastAt = TimeSource.monotonicMillis();
 
-          log.debug("State transition: CANDIDATE_HOT -> CONFIRMED_HOT key={} obs={} pct={}", key, obs, pr.probability());
+          log.debug(
+            "State transition: CANDIDATE_HOT -> CONFIRMED_HOT key={} obs={} pct={}",
+            key,
+            obs,
+            pr.probability()
+          );
           summarizeTransition("CANDIDATE_HOT -> CONFIRMED_HOT", key);
           return ZetaDecision.hot(key, snapShot);
         }
@@ -626,6 +764,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   private ZetaDecision evaluateCold(String key, KeyState state, EvaluationContext ctx, StateSnapshot snapShot) {
     state.coolStreak++;
     state.hotStreak = 0;
+    state.lastHotObs = 0;
+    state.stallCount = 0;
     state.lowResetCount = 0;
 
     switch (state.currentState) {
@@ -701,6 +841,15 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
 
       if (pr.level() != ConfidenceLevel.HIGH) {
         state.currentState = COLD;
+        // Arm the per-key Schmitt re-promotion gate (kernel-inspired doc
+        // §6.1): the COOL broadcast demotion raises this key's re-promotion
+        // bar to threshold × 1.25 until it actually re-promotes. Cleared on
+        // re-promotion / fast-lane; rides the state snapshot so a broadcast
+        // failure restores the pre-decision gate state. Lost on stale
+        // eviction — accepted: the gate targets window-scale flapping, while
+        // evictStale's horizon (evict-interval, default 20 min) is ~4 orders
+        // of magnitude longer than a flap cycle.
+        state.demoteHysteresisActive = true;
         log.debug("State transition: PRE_COOLING -> COLD key={} obs={} pct={}", key, obs, pr.probability());
         summarizeTransition("PRE_COOLING -> COLD", key);
         return ZetaDecision.cool(key, snapShot);
@@ -712,9 +861,20 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
   }
 
   /**
+   * Raised re-promotion threshold for the demotion-hysteresis gate (§6.1):
+   * {@code threshold × GAIN_NUM / GAIN_DEN} (= 1.25×) in pure integer math.
+   *
+   * @param threshold the current hot threshold ({@code ctx.threshold()})
+   * @return the raised bar a fully-demoted key must exceed to count as hot
+   */
+  private static long raisedThreshold(long threshold) {
+    return threshold > 0 ? threshold + (threshold >> 2) : threshold;
+  }
+
+  /**
    * Builds a {@link StateSnapshot} carrying the key state's current fields
    * and evaluation epoch. Sole construction point — the evaluate, fastlane
-   * and introspection paths all need the same 8-field capture.
+   * and introspection paths all need the same 9-field capture.
    *
    * @param key   the cache key
    * @param state the state to capture (read under the per-key lock)
@@ -729,7 +889,8 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       state.posteriorMean,
       state.accumulatedPrecision,
       state.lowResetCount,
-      state.mutationSeq
+      state.mutationSeq,
+      state.demoteHysteresisActive
     );
   }
 
@@ -790,6 +951,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
         .hotStreak(Math.max(state.hotStreak, confirmCount))
         .coolStreak(0)
         .lowResetCount(0)
+        .demoteHysteresisActive(false)
+        .lastHotObs(0)
+        .stallCount(0)
         .lastUpdateTime(now)
         .lastBroadcastAt(now)
         .build();
@@ -1088,12 +1252,17 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
       keyState.posteriorMean = previousState.posteriorMean();
       keyState.accumulatedPrecision = previousState.accumulatedPrecision();
       keyState.lowResetCount = previousState.lowResetCount();
+      keyState.demoteHysteresisActive = previousState.demoteHysteresisActive();
       // Clear the broadcast stamp so the next evaluation retries the (failed)
       // broadcast immediately instead of waiting out the rebroadcast interval.
       keyState.lastBroadcastAt = 0L;
       // Applied rollback only — skipped rollbacks (evicted / advanced seq) are
       // expected edge cases and stay at DEBUG.
-      log.warn("Rolled back state for key={} to snapshot seq={} after broadcast failure", key, previousState.mutationSeq());
+      log.warn(
+        "Rolled back state for key={} to snapshot seq={} after broadcast failure",
+        key,
+        previousState.mutationSeq()
+      );
     } finally {
       lock.unlock();
     }
@@ -1137,6 +1306,35 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     /** Number of consecutive windows below the hot threshold. */
     @Builder.Default
     int coolStreak = 0;
+
+    /**
+     * Per-key Schmitt re-promotion gate (kernel-inspired doc §6.1): armed
+     * when the key is fully demoted with a COOL broadcast, cleared on any
+     * re-promotion or fast-lane promotion. While armed, the binary hot
+     * verdict requires {@code windowSum ≥ threshold × 1.25} instead of
+     * {@code threshold}. Restored by snapshot rollback; lost on stale
+     * eviction (accepted — the gate targets window-scale flapping, see
+     * {@code evaluatePreCooling}).
+     */
+    @Builder.Default
+    boolean demoteHysteresisActive = false;
+
+    /**
+     * Window sum of the previous hot window during the COLD observation
+     * phase — the full_bw stall baseline (§6.3). {@code 0} = no baseline
+     * (first window of the current observation epoch; also reset by idle
+     * gaps and cold windows).
+     */
+    @Builder.Default
+    long lastHotObs = 0L;
+
+    /**
+     * Consecutive hot windows with gain below 1.25× in the current
+     * observation epoch (§6.3); reaching {@code FULL_BW_CNT} short-circuits
+     * the remaining streak windows into the Bayesian gate.
+     */
+    @Builder.Default
+    int stallCount = 0;
 
     /**
      * Consecutive LOW-confidence resets in COLD state.
