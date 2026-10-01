@@ -105,7 +105,7 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
 
 ## 2. Micrometer Metrics
 
-When `io.micrometer:micrometer-core` is on the classpath, `ZetaMicrometerAutoConfiguration` automatically registers MeterBinder beans exposing the following metrics.
+When `io.micrometer:micrometer-core` is on the classpath, `ZetaMicrometerAutoConfiguration` automatically registers MeterBinder beans exposing the following metrics (the `zeta.worker.*` detection-plane meters marked ADR-0080 below are the exception — the Worker module registers those itself, see the note after the custom-metrics table).
 
 ### Caffeine L1 Cache Metrics (`zeta.l1.*`)
 
@@ -158,7 +158,11 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.version.degraded.total`       | Gauge | —                    | Cumulative version fallback count       |
 | `zeta.sync.dedup.size`              | Gauge | —                    | Broadcast dedup cache size              |
 | `zeta.worker.alive`                 | Gauge | —                    | Whether any worker shard is alive (0/1) |
-| `zeta.worker.tracked.keys`          | Gauge | —                    | Keys tracked by state machine           |
+| `zeta.worker.tracked.keys`          | Gauge | —                    | Keys tracked by state machine (only keys that have ever been hot) |
+| `zeta.worker.detector.keys`         | Gauge | —                    | Keys holding a live sliding-window entry in the Worker detector (the per-key memory driver) |
+| `zeta.worker.decisions.hot`         | Counter | —                  | HOT decisions successfully emitted to the cluster |
+| `zeta.worker.decisions.cool`        | Counter | —                  | COOL decisions successfully emitted to the cluster |
+| `zeta.worker.report.eval`           | Timer | —                    | Per-report-batch evaluation latency of the Worker's per-key loop (monotonic clock, ns resolution) |
 | `zeta.cpu.load`                     | Gauge | —                    | Current CPU load (0-1000 scale)         |
 | `zeta.dispatch.pending.units`       | Gauge | `plane`              | Weighted backlog on the per-key gate    |
 | `zeta.dispatch.remaining.units`     | Gauge | `plane`              | Gate capacity left before drops         |
@@ -168,6 +172,14 @@ Standard Caffeine cache metrics via `CaffeineCacheMetrics.monitor()`:
 | `zeta.dispatch.rejected.total`      | Gauge | `plane`              | Cumulative rejections by key bound      |
 
 The `zeta.dispatch.*` gauges carry `plane=sync` for the sync plane and `plane=worker` for the decision plane; a plane absent from the current deployment mode registers no gauges. Reading `pending.units` together with `remaining.units` is what distinguishes "no traffic" from "gate saturated" — before these gauges existed, both looked identical and only surfaced as a rate-limited WARN after submissions had already been dropped.
+
+### Worker Detection-Plane Metrics (`zeta.worker.detector.keys`, `zeta.worker.decisions.*`, `zeta.worker.report.eval`)
+
+The ADR-0080 detection-plane meters — one gauge, two emission counters and one timer — are the measurement baseline a Worker detection-architecture change is judged against. They are registered by the **Worker module's `WorkerAutoConfiguration`** (not by `ZetaMicrometerAutoConfiguration`: every one of them reads a worker-module class — `SlidingWindowDetector`, `WorkerBroadcaster`, `ReportConsumer` — while the common auto-configuration can only see common-module types), and only when a `MeterRegistry` bean is present; without one the Worker runs meter-less instead of failing startup.
+
+- **`zeta.worker.detector.keys`** gauges the sliding-window detector's per-key window map — the structure that actually holds the Worker's memory (≈418.5 B of the ≈678 B retained per reported key, ADR-0080 §3). The pre-existing `zeta.worker.tracked.keys` gauge cannot see it: it reads the state machine, which returns early and materializes no state for a key that has never been hot, so it counts only ever-hot keys. The gap between the two gauges is the never-hot key mass the detector still pays for.
+- **`zeta.worker.decisions.hot` / `zeta.worker.decisions.cool`** count **successful emissions only**, incremented at the single send funnel (`WorkerBroadcaster.broadcastHot`/`broadcastCool` — the state-machine path and the idle-eviction COOL path both publish through it). A failed AMQP send returns `false`, the caller rolls the key's state machine back, and the decision is re-emitted by the next evaluation or by the periodic HOT rebroadcast (ADR-0024); counting attempts would therefore count one decision twice. The 100 ms per-key dedup elision is not counted either — it emits nothing, because the decision it suppresses was already counted when it was sent.
+- **`zeta.worker.report.eval`** is a `Timer` whose samples are **monotonic nanosecond deltas** (`Timer.record(elapsed, NANOSECONDS)`), taken around the per-key evaluation loop of `ReportConsumer.doOnReport` once per processed report batch (one sample per batch, not per key). Micrometer then stores and exports the value in the registry's base time unit — seconds by default for the standard registries, hence `_seconds` in a Prometheus export — but the measured quantity is a clock delta, not a timestamp. It uses the **monotonic clock only** and is deliberately *not* the report's cross-host wall-clock age (`now - message.timestamp()`), which is unusable under App clock skew — the same reason the optional staleness filter defaults to off. **AMQP queue wait is therefore excluded by construction**, as are the staleness filter and the global-ratio sampling that precede the loop; in the default buffered broadcast mode (ADR-0061) the decision sends run on the buffer's drain thread and are excluded too, while the legacy synchronous mode folds its in-line sends into the sample. Batches dropped as stale or empty never reach the loop and record no sample.
 
 ## 3. Consistent Hash Ring Management
 

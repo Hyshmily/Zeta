@@ -26,6 +26,7 @@ import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
+import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.util.ArrayDeque;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -143,6 +144,23 @@ public class ReportConsumer {
    */
   private final WorkerBroadcastBuffer broadcastBuffer;
 
+  /**
+   * Optional detection-plane meters (ADR-0080), used for the per-report-batch
+   * evaluation timer {@code zeta.worker.report.eval}. {@code null} — the legacy
+   * constructors — leaves batches untimed, matching the ADR-0037/0061
+   * "null keeps the legacy path" convention for optional collaborators.
+   */
+  private final WorkerDetectionMetrics metrics;
+
+  /**
+   * Constructs a consumer without a decision-send buffer or detection-plane meters.
+   *
+   * @param evaluator            the key evaluator
+   * @param broadcaster          the HOT/COOL decision broadcaster
+   * @param globalQpsEstimator   the global throughput estimator
+   * @param stateMachine         the per-key lifecycle state machine
+   * @param stalenessThresholdMs the optional report staleness threshold ({@code 0} disables it)
+   */
   public ReportConsumer(
     Evaluator evaluator,
     WorkerBroadcaster broadcaster,
@@ -150,9 +168,20 @@ public class ReportConsumer {
     ZetaBayesianSM stateMachine,
     long stalenessThresholdMs
   ) {
-    this(evaluator, broadcaster, globalQpsEstimator, stateMachine, stalenessThresholdMs, null);
+    this(evaluator, broadcaster, globalQpsEstimator, stateMachine, stalenessThresholdMs, null, null);
   }
 
+  /**
+   * Constructs a consumer with an optional decision-send buffer (ADR-0061) and
+   * without detection-plane meters.
+   *
+   * @param evaluator            the key evaluator
+   * @param broadcaster          the HOT/COOL decision broadcaster
+   * @param globalQpsEstimator   the global throughput estimator
+   * @param stateMachine         the per-key lifecycle state machine
+   * @param stalenessThresholdMs the optional report staleness threshold ({@code 0} disables it)
+   * @param broadcastBuffer      the decision-send buffer, or {@code null} for the synchronous drain
+   */
   public ReportConsumer(
     Evaluator evaluator,
     WorkerBroadcaster broadcaster,
@@ -161,12 +190,37 @@ public class ReportConsumer {
     long stalenessThresholdMs,
     WorkerBroadcastBuffer broadcastBuffer
   ) {
+    this(evaluator, broadcaster, globalQpsEstimator, stateMachine, stalenessThresholdMs, broadcastBuffer, null);
+  }
+
+  /**
+   * Constructs a consumer with the optional decision-send buffer and the
+   * detection-plane meters.
+   *
+   * @param evaluator            the key evaluator
+   * @param broadcaster          the HOT/COOL decision broadcaster
+   * @param globalQpsEstimator   the global throughput estimator
+   * @param stateMachine         the per-key lifecycle state machine
+   * @param stalenessThresholdMs the optional report staleness threshold ({@code 0} disables it)
+   * @param broadcastBuffer      the decision-send buffer, or {@code null} for the synchronous drain
+   * @param metrics              the detection-plane meters, or {@code null} to leave batches untimed
+   */
+  public ReportConsumer(
+    Evaluator evaluator,
+    WorkerBroadcaster broadcaster,
+    GlobalQpsEstimator globalQpsEstimator,
+    ZetaBayesianSM stateMachine,
+    long stalenessThresholdMs,
+    WorkerBroadcastBuffer broadcastBuffer,
+    WorkerDetectionMetrics metrics
+  ) {
     this.evaluator = evaluator;
     this.broadcaster = broadcaster;
     this.globalQpsEstimator = globalQpsEstimator;
     this.stateMachine = stateMachine;
     this.stalenessThresholdMs = stalenessThresholdMs;
     this.broadcastBuffer = broadcastBuffer;
+    this.metrics = metrics;
   }
 
   /**
@@ -233,6 +287,16 @@ public class ReportConsumer {
     ArrayDeque<Report> pendingBroadcasts = new ArrayDeque<>();
     int chunkKeyCount = 0;
 
+    // Per-batch evaluation timing (ADR-0080). Monotonic clock only: the stamp is
+    // taken here and read again after the drain below, never derived from
+    // `now - message.timestamp()` — that crosses hosts and is unusable under App
+    // clock skew (the staleness-filter note above), and it would fold AMQP queue
+    // wait into what is meant to be the evaluation cost. The staleness filter and
+    // the global-ratio sampling above are outside the sample; in the default
+    // buffered mode (ADR-0061) the decision sends run on the buffer's drain
+    // thread and are outside it too.
+    long evalStartNanos = metrics != null ? metrics.startReportEval() : 0L;
+
     // Process each key sequentially on the consumer thread. 8 concurrent
     // consumers already provide sufficient parallelism; intra-chunk
     // parallelisation would amplify stripe-lock contention for no gain.
@@ -298,6 +362,10 @@ public class ReportConsumer {
     if (!pendingBroadcasts.isEmpty()) {
       dispatchBroadcasts(pendingBroadcasts);
       pendingBroadcasts.clear();
+    }
+
+    if (metrics != null) {
+      metrics.recordReportEval(evalStartNanos);
     }
 
     globalQpsEstimator.addTotal(totalQps);

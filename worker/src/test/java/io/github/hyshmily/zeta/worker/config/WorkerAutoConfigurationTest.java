@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
+import io.github.hyshmily.zeta.reporting.ReportMessage;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.worker.detection.Evaluator;
 import io.github.hyshmily.zeta.worker.detection.GlobalQpsEstimator;
@@ -27,6 +28,8 @@ import io.github.hyshmily.zeta.worker.detection.ThresholdLearner;
 import io.github.hyshmily.zeta.worker.dispatch.VerifyConsumer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -75,6 +78,55 @@ class WorkerAutoConfigurationTest {
       assertThat(ctx).hasSingleBean(GlobalQpsEstimator.class);
       assertThat(ctx).hasSingleBean(ThresholdLearner.class);
       assertThat(ctx).hasSingleBean(WorkerAutoConfiguration.EvictStaleTask.class);
+    });
+  }
+
+  /**
+   * Verifies the ADR-0080 detection-plane meters are registered by the worker
+   * auto-configuration when a {@link SimpleMeterRegistry} bean is present, and that
+   * they are wired into the live pipeline: one report batch must produce exactly one
+   * {@code zeta.worker.report.eval} sample, and the detector gauge must read the
+   * window map of the very detector bean the evaluator writes into.
+   */
+  @Test
+  @DisplayName("worker context registers and wires the detection-plane meters when a MeterRegistry is present")
+  void workerContextRegistersDetectionMetersWhenMeterRegistryPresent() {
+    new ApplicationContextRunner()
+      .withPropertyValues("zeta.worker.enabled=true")
+      .withUserConfiguration(MinimalMockConfiguration.class, MeterRegistryConfiguration.class)
+      .withConfiguration(AutoConfigurations.of(WorkerAutoConfiguration.class))
+      .run(ctx -> {
+        SimpleMeterRegistry registry = ctx.getBean(SimpleMeterRegistry.class);
+
+        assertThat(registry.find("zeta.worker.detector.keys").gauge()).isNotNull();
+        assertThat(registry.find("zeta.worker.decisions.hot").counter()).isNotNull();
+        assertThat(registry.find("zeta.worker.decisions.cool").counter()).isNotNull();
+        assertThat(registry.find("zeta.worker.report.eval").timer()).isNotNull();
+
+        ctx
+          .getBean(ReportConsumer.class)
+          .onReport(new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("ctxKey", 1L)));
+
+        assertThat(registry.find("zeta.worker.report.eval").timer().count()).isEqualTo(1L);
+        assertThat(registry.find("zeta.worker.detector.keys").gauge().value()).isEqualTo(1.0);
+      });
+  }
+
+  /**
+   * Verifies the detection meters stay out of the context when no registry bean
+   * exists (micrometer absent or metrics auto-configuration off): the bean is created
+   * meter-less rather than failing startup, and a report batch still processes.
+   */
+  @Test
+  @DisplayName("worker context without a MeterRegistry keeps the pipeline meter-less")
+  void workerContextWithoutMeterRegistryStaysMeterless() {
+    runner.run(ctx -> {
+      assertThat(ctx).hasSingleBean(ReportConsumer.class);
+      assertThatCode(() ->
+        ctx
+          .getBean(ReportConsumer.class)
+          .onReport(new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("ctxKey", 1L)))
+      ).doesNotThrowAnyException();
     });
   }
 
@@ -534,6 +586,20 @@ class WorkerAutoConfigurationTest {
     @Bean("configTimestampCounter")
     AtomicLong customConfigTimestampCounter() {
       return new AtomicLong(42L);
+    }
+  }
+
+  /**
+   * Supplies a {@link SimpleMeterRegistry} so the ADR-0080 detection-plane meters
+   * have a registry to register into. A real Worker gets one from Boot's actuator
+   * metrics auto-configuration.
+   */
+  @Configuration
+  static class MeterRegistryConfiguration {
+
+    @Bean
+    SimpleMeterRegistry meterRegistry() {
+      return new SimpleMeterRegistry();
     }
   }
 

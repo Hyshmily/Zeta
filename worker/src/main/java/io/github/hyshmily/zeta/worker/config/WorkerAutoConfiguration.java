@@ -28,9 +28,11 @@ import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcaster;
 import io.github.hyshmily.zeta.worker.dispatch.WorkerHeartbeatProducer;
 import io.github.hyshmily.zeta.worker.ingest.ReportConsumer;
+import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRulesBroadcaster;
 import io.github.hyshmily.zeta.worker.rule.impl.FastLaneRuleManagerImpl;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
@@ -72,6 +74,8 @@ import org.springframework.util.Assert;
  *   <li>{@link ZetaBayesianSM} – per‑key lifecycle state machine.</li>
  *   <li>{@link ReportConsumer} – AMQP listener that drives the pipeline.</li>
  *   <li>{@link WorkerBroadcaster} – publishes HOT / COOL broadcasts.</li>
+ *   <li>{@link WorkerDetectionMetrics} – detection-plane meters (ADR-0080; needs a
+ *       {@code MeterRegistry} bean, silently meter-less without one).</li>
  *   <li>RabbitMQ topology ({@code reportExchange}, shard‑specific
  *       {@code reportQueue}, binding).</li>
  *   <li>Scheduled tasks for stale‑state eviction.</li>
@@ -251,6 +255,41 @@ public class WorkerAutoConfiguration {
   }
 
   /**
+   * Detection-plane meters for the Worker (ADR-0080): the sliding-window detector's
+   * live key count, the HOT/COOL decisions actually emitted to the cluster, and the
+   * per-report-batch evaluation latency.
+   *
+   * <p>Registered here rather than in the common module's
+   * {@code ZetaMicrometerAutoConfiguration} because every one of the three meters
+   * reads a worker-module type ({@link SlidingWindowDetector},
+   * {@link WorkerBroadcaster}, {@link ReportConsumer}) while the common
+   * auto-configuration can only see common-module types (it injects
+   * {@code ObjectProvider<ZetaBayesianSM>}, the common interface); reaching them from
+   * there would need a common→worker dependency or a new public interface exposing
+   * worker-private state.
+   *
+   * <p>Micrometer is resolved through an {@link ObjectProvider}, like the Redis
+   * connection factory of {@link #workerEpochCounter} above: a context without a
+   * {@link MeterRegistry} bean (micrometer absent, or metrics auto-configuration
+   * switched off) gets a meter-less instance whose recording methods no-op instead
+   * of failing startup.
+   *
+   * @param detector      the detector whose live per-key window map size is gauged
+   * @param meterRegistry provider for the meter registry; absent when the context
+   *                      holds no registry bean
+   * @return the Worker's detection-plane meters
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
+  public WorkerDetectionMetrics workerDetectionMetrics(
+    SlidingWindowDetector detector,
+    ObjectProvider<MeterRegistry> meterRegistry
+  ) {
+    return new WorkerDetectionMetrics(meterRegistry.getIfAvailable(), detector);
+  }
+
+  /**
    * Report consumer – the main AMQP entry point.
    *
    * @param evaluator         the Bayesian evaluator with integrated fast-lane support
@@ -258,6 +297,8 @@ public class WorkerAutoConfiguration {
    * @param globalQpsEstimator the global qps estimator tracking overall throughput
    * @param stateMachine      the per-key lifecycle state machine
    * @param properties        worker configuration providing the optional staleness filter
+   * @param broadcastBuffer   provider for the optional decision-send buffer (ADR-0061)
+   * @param metrics           provider for the optional detection-plane meters (ADR-0080)
    * @return a new {@link ReportConsumer} instance
    */
   @Bean
@@ -268,7 +309,8 @@ public class WorkerAutoConfiguration {
     GlobalQpsEstimator globalQpsEstimator,
     ZetaBayesianSM stateMachine,
     WorkerProperties properties,
-    ObjectProvider<WorkerBroadcastBuffer> broadcastBuffer
+    ObjectProvider<WorkerBroadcastBuffer> broadcastBuffer,
+    ObjectProvider<WorkerDetectionMetrics> metrics
   ) {
     return new ReportConsumer(
       evaluator,
@@ -276,7 +318,8 @@ public class WorkerAutoConfiguration {
       globalQpsEstimator,
       stateMachine,
       properties.getReportConsumer().getStalenessThresholdMs(),
-      broadcastBuffer.getIfAvailable()
+      broadcastBuffer.getIfAvailable(),
+      metrics.getIfAvailable()
     );
   }
 
@@ -309,6 +352,7 @@ public class WorkerAutoConfiguration {
    * @param properties             worker configuration providing exchange and routing settings
    * @param nodeId                 the Worker's node identity, injected via {@code @Qualifier("workerNodeId")}
    * @param epochCounter           the Worker's epoch counter, injected via {@code @Qualifier("workerEpochCounter")}
+   * @param metrics                provider for the optional detection-plane meters (ADR-0080)
    * @return a new {@link WorkerBroadcaster} instance
    */
   @Bean
@@ -318,7 +362,8 @@ public class WorkerAutoConfiguration {
     WorkerProperties properties,
     @Qualifier("workerNodeId") String nodeId,
     @Qualifier("workerEpochCounter") AtomicLong epochCounter,
-    SnowflakeIdGenerator snowflakeIdGenerator
+    SnowflakeIdGenerator snowflakeIdGenerator,
+    ObjectProvider<WorkerDetectionMetrics> metrics
   ) {
     return new WorkerBroadcaster(
       rabbitTemplate,
@@ -326,7 +371,8 @@ public class WorkerAutoConfiguration {
       properties.getRouting().getAppName(),
       nodeId,
       epochCounter,
-      snowflakeIdGenerator
+      snowflakeIdGenerator,
+      metrics.getIfAvailable()
     );
   }
 

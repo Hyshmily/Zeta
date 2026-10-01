@@ -23,10 +23,10 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
+import io.github.hyshmily.zeta.worker.metrics.WorkerDetectionMetrics;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -43,8 +43,16 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
  * <p>Messages are delivered to every instance's dedicated queue through a
  * fanout exchange ({@code zeta.send.exchange}) — the receiver
  * differentiates message type via the {@code HEADER_TYPE} header.
+ *
+ * <p>This class is the <b>single funnel</b> for decisions leaving the Worker: the
+ * state-machine path ({@code ReportConsumer}) and the idle-eviction path
+ * ({@code EvictStaleTask}) both publish through {@link #broadcastHot} /
+ * {@link #broadcastCool}, and nothing else writes to the broadcast exchange. The
+ * {@code zeta.worker.decisions.hot} / {@code .cool} counters are therefore
+ * incremented here — the only place that knows whether a decision actually reached
+ * the cluster — rather than at the call sites, which would count one decision twice
+ * (the retry after a failed send).
  */
-@RequiredArgsConstructor
 @Slf4j
 public class WorkerBroadcaster {
 
@@ -65,6 +73,67 @@ public class WorkerBroadcaster {
   private final AtomicLong epochCounter;
 
   private final SnowflakeIdGenerator snowflakeIdGenerator;
+
+  /**
+   * Optional detection-plane meters (ADR-0080). {@code null} — the legacy
+   * constructor — leaves the emission counters unregistered, matching the
+   * ADR-0037/0061 "null keeps the legacy path" convention for optional
+   * collaborators.
+   */
+  private final WorkerDetectionMetrics metrics;
+
+  /**
+   * Constructs a broadcaster without detection-plane meters.
+   *
+   * <p>Kept for callers and tests that do not need observability; delegates with a
+   * {@code null} metrics collaborator (counters off).
+   *
+   * @param rabbitTemplate     the template used to publish messages
+   * @param broadcastExchange  the fanout exchange name
+   * @param appName            the application name carried in the send header
+   * @param nodeId             this Worker's node identity
+   * @param epochCounter       this Worker's epoch counter
+   * @param snowflakeIdGenerator the trace-ID generator
+   */
+  public WorkerBroadcaster(
+    RabbitTemplate rabbitTemplate,
+    String broadcastExchange,
+    String appName,
+    String nodeId,
+    AtomicLong epochCounter,
+    SnowflakeIdGenerator snowflakeIdGenerator
+  ) {
+    this(rabbitTemplate, broadcastExchange, appName, nodeId, epochCounter, snowflakeIdGenerator, null);
+  }
+
+  /**
+   * Constructs a broadcaster with the optional detection-plane meters.
+   *
+   * @param rabbitTemplate     the template used to publish messages
+   * @param broadcastExchange  the fanout exchange name
+   * @param appName            the application name carried in the send header
+   * @param nodeId             this Worker's node identity
+   * @param epochCounter       this Worker's epoch counter
+   * @param snowflakeIdGenerator the trace-ID generator
+   * @param metrics            the emission counters, or {@code null} to leave them off
+   */
+  public WorkerBroadcaster(
+    RabbitTemplate rabbitTemplate,
+    String broadcastExchange,
+    String appName,
+    String nodeId,
+    AtomicLong epochCounter,
+    SnowflakeIdGenerator snowflakeIdGenerator,
+    WorkerDetectionMetrics metrics
+  ) {
+    this.rabbitTemplate = rabbitTemplate;
+    this.broadcastExchange = broadcastExchange;
+    this.appName = appName;
+    this.nodeId = nodeId;
+    this.epochCounter = epochCounter;
+    this.snowflakeIdGenerator = snowflakeIdGenerator;
+    this.metrics = metrics;
+  }
 
   /**
    * Worker‑local decision version counter.
@@ -133,16 +202,30 @@ public class WorkerBroadcaster {
   /**
    * Broadcasts a HOT decision for the given key.
    *
+   * <p>A successful send is counted into {@code zeta.worker.decisions.hot}
+   * (ADR-0080). The counter sits at this funnel rather than at the call sites
+   * because a failed send returns {@code false} and the caller rolls the state
+   * machine back — the decision is then re-emitted by the next evaluation or by the
+   * periodic HOT rebroadcast (ADR-0024), so counting at the call site would count
+   * one decision twice.
+   *
    * @param cacheKey the key that has been confirmed as hot
    */
   public boolean broadcastHot(String cacheKey) {
     String dedupKey = cacheKey + ":" + WorkerMessage.TYPE_HOT;
     if (broadcastDedupCache.getIfPresent(dedupKey) != null) {
+      // Duplicate elided inside the 100 ms debounce window: nothing is emitted, so
+      // nothing is counted — the decision being deduplicated was already counted
+      // when it was sent. The caller still sees success and must not roll back.
       return true;
     }
     long dv = nextDecisionVersion();
     try {
       sendBroadcast(cacheKey, WorkerMessage.TYPE_HOT, dv);
+      if (metrics != null) {
+        metrics.countHotDecision();
+      }
+
       broadcastDedupCache.put(dedupKey, Boolean.TRUE);
       log.debug("Broadcast HOT: key={}, dv={}", cacheKey, dv);
     } catch (Exception e) {
@@ -157,16 +240,23 @@ public class WorkerBroadcaster {
   /**
    * Broadcasts a COOL decision for the given key.
    *
+   * <p>A successful send is counted into {@code zeta.worker.decisions.cool}
+   * (ADR-0080), on the same emission-only rule as {@link #broadcastHot(String)}.
+   *
    * @param cacheKey the key that has been confirmed as fully cooled
    */
   public boolean broadcastCool(String cacheKey) {
     String dedupKey = cacheKey + ":" + WorkerMessage.TYPE_COOL;
     if (broadcastDedupCache.getIfPresent(dedupKey) != null) {
+      // Elided duplicate: see broadcastHot — nothing emitted, nothing counted.
       return true;
     }
     long dv = nextDecisionVersion();
     try {
       sendBroadcast(cacheKey, WorkerMessage.TYPE_COOL, dv);
+      if (metrics != null) {
+        metrics.countCoolDecision();
+      }
       broadcastDedupCache.put(dedupKey, Boolean.TRUE);
       log.info("Broadcast COOL: key={}, dv={}", cacheKey, dv);
     } catch (Exception e) {

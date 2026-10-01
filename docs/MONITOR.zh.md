@@ -87,7 +87,7 @@ Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoin
 
 ## 2. Micrometer 指标
 
-当 classpath 中存在 `io.micrometer:micrometer-core` 时，`ZetaMicrometerAutoConfiguration` 自动注册 MeterBinder Bean，暴露以下指标。
+当 classpath 中存在 `io.micrometer:micrometer-core` 时，`ZetaMicrometerAutoConfiguration` 自动注册 MeterBinder Bean，暴露以下指标（下表中标注 ADR-0080 的 `zeta.worker.*` 检测面指标是例外——它们由 Worker 模块自行注册，见自定义指标表之后的说明）。
 
 ### Caffeine L1 缓存指标（`zeta.l1.*`）
 
@@ -140,7 +140,11 @@ Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoin
 | `zeta.version.degraded.total`       | Gauge | —                    | 累计版本回退次数                 |
 | `zeta.sync.dedup.size`              | Gauge | —                    | 广播去重缓存大小                 |
 | `zeta.worker.alive`                 | Gauge | —                    | 任意 Worker 分片是否存活（0/1）  |
-| `zeta.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数              |
+| `zeta.worker.tracked.keys`          | Gauge | —                    | 状态机追踪的 key 数（仅统计曾经热过的 key） |
+| `zeta.worker.detector.keys`         | Gauge | —                    | Worker 检测器中持有活跃滑动窗口条目的 key 数（key 级内存的主要占用者） |
+| `zeta.worker.decisions.hot`         | Counter | —                  | 成功下发到集群的 HOT 决策数      |
+| `zeta.worker.decisions.cool`        | Counter | —                  | 成功下发到集群的 COOL 决策数     |
+| `zeta.worker.report.eval`           | Timer | —                    | Worker 逐 key 评估循环的单批耗时（仅用单调时钟，纳秒分辨率） |
 | `zeta.cpu.load`                     | Gauge | —                    | 当前 CPU 负载（0-1000 范围）     |
 | `zeta.dispatch.pending.units`       | Gauge | `plane`              | 按 key 分发器闸门已计入的积压    |
 | `zeta.dispatch.remaining.units`     | Gauge | `plane`              | 距开始丢弃还剩的闸门容量         |
@@ -150,6 +154,14 @@ Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoin
 | `zeta.dispatch.rejected.total`      | Gauge | `plane`              | 被单 key 队列上限拒绝数          |
 
 `zeta.dispatch.*` 指标带 `plane=sync`（同步面）或 `plane=worker`（决策面）标签；当前部署模式下不存在的面不会注册任何指标。把 `pending.units` 与 `remaining.units` 一起看，才能区分"没有流量"与"闸门已饱和"——在这组指标出现之前，这两种情况在观测上无法区分，且只在提交已被丢弃之后才通过一条限流 WARN 体现。
+
+### Worker 检测面指标（`zeta.worker.detector.keys`、`zeta.worker.decisions.*`、`zeta.worker.report.eval`）
+
+ADR-0080 引入的这四个检测面指标，是评判任何 Worker 检测架构改动的前置测量基线。它们由 **Worker 模块的 `WorkerAutoConfiguration`** 注册（而不是 `ZetaMicrometerAutoConfiguration`：这些指标读取的都是 worker 模块的类——`SlidingWindowDetector`、`WorkerBroadcaster`、`ReportConsumer`——而 common 的自动配置只能看到 common 模块的类型），且仅在存在 `MeterRegistry` Bean 时注册；没有注册表时 Worker 以无指标方式运行，而不是启动失败。
+
+- **`zeta.worker.detector.keys`** 采集滑动窗口检测器的 per-key 窗口 map——真正占用 Worker 内存的结构（每个上报 key 约 678 B 中有约 418.5 B 来自它，ADR-0080 §3）。既有的 `zeta.worker.tracked.keys` 看不到它：该指标读取状态机，而状态机对从未热过的 key 提前返回、不物化任何状态，因此只统计曾经热过的 key。两个 gauge 之间的差值，正是检测器仍然为之付费的"从未热过"的 key 规模。
+- **`zeta.worker.decisions.hot` / `zeta.worker.decisions.cool`** **只统计成功下发**，计数点位于唯一的发送汇聚处（`WorkerBroadcaster.broadcastHot`/`broadcastCool`——状态机路径与空闲驱逐的 COOL 路径都经由它发布）。AMQP 发送失败时返回 `false`，调用方会回滚该 key 的状态机状态，决策随后由下一次评估或 ADR-0024 的周期性 HOT 重播补齐；若按"尝试次数"计数，同一个决策会被计两次。100 ms 的 per-key 去重抑制同样不计——它没有真正下发任何消息，被抑制的那个决策在发送时就已计入。
+- **`zeta.worker.report.eval`** 是 `Timer`，其样本为**单调时钟的纳秒差值**（`Timer.record(elapsed, NANOSECONDS)`），包住 `ReportConsumer.doOnReport` 的逐 key 评估循环，每个被处理的批次采样一次（每批一个样本，而不是每 key 一个）。Micrometer 随后按注册表的 base time unit 存储与导出该值——标准注册表默认是秒，因此 Prometheus 导出为 `_seconds` 后缀——但被测量的量是时钟差值，而不是时间戳。它**只用单调时钟**，刻意不是上报消息的跨主机墙钟年龄（`now - message.timestamp()`）——App 时钟偏移使其不可用，这也正是可选陈旧过滤器默认关闭的原因。因此它**按构造排除了 AMQP 排队等待时间**；循环之前的陈旧过滤与全局比值采样也不计入；默认的缓冲广播模式（ADR-0061）下决策发送在缓冲区的 drain 线程上执行，同样不计入，而旧的同步模式下其内联发送会计入样本。被判定为陈旧或被丢弃的空批次不会进入循环，因此不产生样本。
 
 ## 3. 一致性哈希环管理
 
