@@ -186,7 +186,7 @@ class ZetaEndpointTest {
    */
   @Test
   void localSection_shouldExposeHeavyKeeperParams() {
-    HeavyKeeper hk = new HeavyKeeper(10, 500, 4, 0.9, 5);
+    HeavyKeeper hk = new HeavyKeeper(10, 500, 4, 0.9, 5, 10_000, 3, false);
     hk.addDirect("k1", 20);
     ZetaEndpoint ep = ZetaEndpoint.builder()
       .hotKeyDetector(hk)

@@ -515,7 +515,9 @@ public class CacheExtensionAspect {
       ttl == null ? () -> 0L : () -> resolveTtlValue(ttl.hardTtlMs(), ttl.hardTtlSpEl(), pjp, method);
     LongSupplier softSupplier =
       ttl == null ? () -> 0L : () -> resolveTtlValue(ttl.softTtlMs(), ttl.softTtlSpEl(), pjp, method);
-    return new CachePolicy(hardSupplier, softSupplier, nullCachingEnabled, skipBroadcastFlag, StalePolicy.SOFT_REFRESH);
+    return new CachePolicy(
+      hardSupplier, softSupplier, nullCachingEnabled, skipBroadcastFlag, StalePolicy.SOFT_REFRESH, null, true, false
+    );
   }
 
   /**
@@ -790,7 +792,7 @@ public class CacheExtensionAspect {
     validateWriteCombination(method);
     CachePolicy prev = ZetaCacheContext.get().snapshot();
     try {
-      ZetaCacheContext.get().push(new CachePolicy(null, null, true, skipBroadcastFlag, StalePolicy.SOFT_REFRESH));
+      ZetaCacheContext.get().push(new CachePolicy(null, null, true, skipBroadcastFlag, StalePolicy.SOFT_REFRESH, null, true, false));
       return pjp.proceed();
     } finally {
       ZetaCacheContext.get().restore(prev);

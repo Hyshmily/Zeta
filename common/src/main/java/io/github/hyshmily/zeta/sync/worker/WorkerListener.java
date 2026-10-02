@@ -85,14 +85,10 @@ public class WorkerListener {
   /** Per-key FIFO dispatcher for ordered cache mutation execution. */
   private PerKeyOrderedDispatcher dispatcher;
 
-  public WorkerListener(
-    WorkerListenerProperties properties,
-    ScheduledExecutorService scheduler,
-    WorkerDecisionHandler decisionHandler
-  ) {
-    this(properties, scheduler, decisionHandler, null);
-  }
-
+  /**
+   * Creates a listener. {@code appName} may be {@code null}/blank to disable
+   * the foreign-app filter (pre-0068 behavior).
+   */
   public WorkerListener(
     WorkerListenerProperties properties,
     ScheduledExecutorService scheduler,

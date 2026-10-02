@@ -55,7 +55,6 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.util.Assert;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
@@ -141,6 +140,51 @@ public class ZetaAmqpAutoConfiguration {
       }
     }
     throw new NoSuchBeanDefinitionException(ConnectionFactory.class);
+  }
+
+  /**
+   * Cluster value loader used by the sync listener to refresh cache entries and
+   * by the Worker decision handler for HOT warm-up.
+   *
+   * <p>When a {@link ZetaLoaderRegistry} bean exists (ADR-0070), the returned
+   * loader is a {@link PrefixRoutedLoader}: keys matching a registered prefix
+   * load through the application's {@code CacheLoader}, so Worker HOT warm-up
+   * and peer REFRESH work for data sources without a Redis value channel;
+   * unregistered keys fall back to the plain {@link RedisValueLoader} (Redis
+   * GET). With no registry the plain {@link RedisValueLoader} is returned,
+   * preserving the historical behavior.
+   *
+   * <p><b>Call-chain contract:</b> {@link ZetaLoaderRegistry#match} is invoked
+   * in exactly two places — {@code Zeta#requireRegisteredSpec} (application
+   * read path, needs the full spec) and {@link PrefixRoutedLoader#load} (this
+   * path, needs the value only). New value-fetching paths must reuse one of the
+   * two.
+   *
+   * <p><b>Why this bean lives at the top level (not inside
+   * {@code SyncConfiguration}):</b> it depends only on Redis — not on any sync
+   * infrastructure — and it is consumed by <em>both</em> the sync listener and
+   * the Worker decision handler. Keeping it behind
+   * {@code zeta.sync.enabled=true} made {@code zeta.worker-listener.enabled=true}
+   * alone fail at startup with {@code NoSuchBeanDefinitionException} (the
+   * handler's required {@code CacheLoader<Object>} had no producer). A static
+   * {@code @Bean} method needs no CGLIB proxying, so it is safe on this
+   * private-constructor configuration class and its condition is evaluated
+   * order-independently of the nested configuration classes.
+   *
+   * @param stringRedisTemplate the String-based Redis template for reading values
+   * @param registryProvider    provider for the optional prefix→loader registry
+   * @return a {@code CacheLoader<Object>} that routes through the registry or reads Redis
+   */
+  @Bean
+  @ConditionalOnBean(StringRedisTemplate.class)
+  @ConditionalOnMissingBean(CacheLoader.class)
+  public static CacheLoader<Object> hotKeyClusterLoader(
+    StringRedisTemplate stringRedisTemplate,
+    ObjectProvider<ZetaLoaderRegistry> registryProvider
+  ) {
+    CacheLoader<Object> redisFallback = new RedisValueLoader(stringRedisTemplate);
+    ZetaLoaderRegistry registry = registryProvider.getIfAvailable();
+    return registry != null ? new PrefixRoutedLoader(registry, redisFallback) : redisFallback;
   }
 
   /**
@@ -477,44 +521,13 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Cluster value loader used by the sync listener to refresh cache entries and
-     * by the Worker decision handler for HOT warm-up.
-     *
-     * <p>When a {@link ZetaLoaderRegistry} bean exists (ADR-0070), the returned
-     * loader is a {@link PrefixRoutedLoader}: keys matching a registered prefix
-     * load through the application's {@code CacheLoader}, so Worker HOT warm-up
-     * and peer REFRESH work for data sources without a Redis value channel;
-     * unregistered keys fall back to the plain {@link RedisValueLoader} (Redis
-     * GET). With no registry the plain {@link RedisValueLoader} is returned,
-     * preserving the historical behavior.
-     *
-     * <p><b>Call-chain contract:</b> {@link ZetaLoaderRegistry#match} is invoked
-     * in exactly two places — {@code Zeta#requireRegisteredSpec} (application
-     * read path, needs the full spec) and {@link PrefixRoutedLoader#load} (this
-     * path, needs the value only). New value-fetching paths must reuse one of the
-     * two.
-     *
-     * @param stringRedisTemplate the String-based Redis template for reading values
-     * @param registryProvider    provider for the optional prefix→loader registry
-     * @return a {@code CacheLoader<Object>} that routes through the registry or reads Redis
-     */
-    @Bean
-    @ConditionalOnMissingBean(CacheLoader.class)
-    public CacheLoader<Object> hotKeyClusterLoader(
-      StringRedisTemplate stringRedisTemplate,
-      ObjectProvider<ZetaLoaderRegistry> registryProvider
-    ) {
-      CacheLoader<Object> redisFallback = new RedisValueLoader(stringRedisTemplate);
-      ZetaLoaderRegistry registry = registryProvider.getIfAvailable();
-      return registry != null ? new PrefixRoutedLoader(registry, redisFallback) : redisFallback;
-    }
-
-    /**
      * Default {@link SyncDecisionHandler} that performs loader-backed REFRESH,
      * version-guarded INVALIDATE, batch INVALIDATE_ALL, and RULES_SYNC. The
      * optional SingleFlight collaborator lets applied removals also drop the
      * key's dedup entry (ADR-0067); when absent, the historical
-     * no-invalidation behavior is kept.
+     * no-invalidation behavior is kept. Resolves the top-level
+     * {@code hotKeyClusterLoader} by type (see that bean's Javadoc for why it
+     * lives outside this configuration class).
      */
     @Bean
     @ConditionalOnMissingBean(SyncDecisionHandler.class)

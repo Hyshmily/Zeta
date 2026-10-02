@@ -67,7 +67,7 @@ class ZetaTest {
     // mock default 0 would collapse every refresh interval to 1ms, turning destroy_shouldNotThrow
     // into a race between the scheduled refresh and the cancellation.
     when(hotKeyCache.resolveEffectiveSoftTtl(anyLong())).thenAnswer(invocation -> invocation.getArgument(0));
-    zeta = new Zeta(hotKeyCache, appDetector);
+    zeta = new Zeta(hotKeyCache, appDetector, null, null);
   }
 
   @Test
@@ -333,7 +333,7 @@ class ZetaTest {
 
   @Test
   void returnHotKeys_shouldReturnLocalEmptyWhenTopKNull() {
-    Zeta hk = new Zeta(hotKeyCache, null);
+    Zeta hk = new Zeta(hotKeyCache, null, null, null);
     assertThat(hk.returnLocalHotKeys()).isEmpty();
   }
 
@@ -345,7 +345,7 @@ class ZetaTest {
 
   @Test
   void returnTotalDataStreams_shouldReturnLocalZeroWhenTopKNull() {
-    assertThat(new Zeta(hotKeyCache, null).returnLocalTotalDataStreams()).isZero();
+    assertThat(new Zeta(hotKeyCache, null, null, null).returnLocalTotalDataStreams()).isZero();
   }
 
   @Test
@@ -358,7 +358,7 @@ class ZetaTest {
 
   @Test
   void cacheMethods_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.get("k", () -> "v")).isInstanceOf(ZetaModeException.class);
     assertThatThrownBy(() -> workerOnly.isLocalHotKey("k")).isInstanceOf(ZetaModeException.class);
     assertThatThrownBy(() -> workerOnly.peek("k")).isInstanceOf(ZetaModeException.class);
@@ -390,7 +390,7 @@ class ZetaTest {
 
   @Test
   void returnExpelledHotKeys_shouldReturnEmptyQueueWhenTopKNull() {
-    Zeta hk = new Zeta(hotKeyCache, null);
+    Zeta hk = new Zeta(hotKeyCache, null, null, null);
     assertThat(hk.returnLocalExpelledHotKeys()).isEmpty();
   }
 
@@ -398,7 +398,7 @@ class ZetaTest {
 
   @Test
   void returnTotalDataStreams_shouldReturnLocalZeroWhenTopKNullTwoArg() {
-    Zeta hk = new Zeta(hotKeyCache, null);
+    Zeta hk = new Zeta(hotKeyCache, null, null, null);
     assertThat(hk.returnLocalTotalDataStreams()).isZero();
   }
 
@@ -415,7 +415,7 @@ class ZetaTest {
 
   @Test
   void getLocalCache_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(workerOnly::getLocalCache).isInstanceOf(ZetaModeException.class);
   }
 
@@ -429,7 +429,7 @@ class ZetaTest {
 
   @Test
   void addBlacklist_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.addBlacklist("x")).isInstanceOf(ZetaModeException.class);
   }
 
@@ -441,7 +441,7 @@ class ZetaTest {
 
   @Test
   void removeBlacklist_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.removeBlacklist("x")).isInstanceOf(ZetaModeException.class);
   }
 
@@ -453,7 +453,7 @@ class ZetaTest {
 
   @Test
   void addWhitelist_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.addWhitelist("x")).isInstanceOf(ZetaModeException.class);
   }
 
@@ -465,7 +465,7 @@ class ZetaTest {
 
   @Test
   void removeWhitelist_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.removeWhitelist("x")).isInstanceOf(ZetaModeException.class);
   }
 
@@ -481,7 +481,7 @@ class ZetaTest {
 
   @Test
   void getAllRules_shouldReturnEmptyWhenCacheNull() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.getAllRules()).isEmpty();
   }
 
@@ -496,7 +496,7 @@ class ZetaTest {
 
   @Test
   void evaluateRule_shouldReturnAllowWhenCacheNull() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.evaluateRule("any")).isEqualTo(RuleAction.ALLOW);
   }
 
@@ -510,7 +510,7 @@ class ZetaTest {
 
   @Test
   void clearAllRules_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(workerOnly::clearAllRules).isInstanceOf(ZetaModeException.class);
   }
 
@@ -524,7 +524,7 @@ class ZetaTest {
 
   @Test
   void broadcastAllLocalRulesManually_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(workerOnly::broadcastAllLocalRulesManually).isInstanceOf(ZetaModeException.class);
   }
 
@@ -662,7 +662,7 @@ class ZetaTest {
 
   @Test
   void invalidateAllLocal_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(workerOnly::invalidateAllLocal).isInstanceOf(ZetaModeException.class);
   }
 
@@ -706,7 +706,7 @@ class ZetaTest {
 
   @Test
   void compareAndSet_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.compareAndSet("k", "old", "new")).isInstanceOf(ZetaModeException.class);
   }
 
@@ -726,7 +726,7 @@ class ZetaTest {
 
   @Test
   void compareAndInvalidate_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.compareAndInvalidate("k", "old")).isInstanceOf(ZetaModeException.class);
   }
 
@@ -743,7 +743,7 @@ class ZetaTest {
 
   @Test
   void getAndSet_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.getAndSet("k", "v", CachePolicy.defaults()))
       .isInstanceOf(ZetaModeException.class);
   }
@@ -764,7 +764,7 @@ class ZetaTest {
 
   @Test
   void putIfAbsent_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.putIfAbsent("k", "v", CachePolicy.defaults()))
       .isInstanceOf(ZetaModeException.class);
   }
@@ -780,7 +780,7 @@ class ZetaTest {
 
   @Test
   void estimatedSize_shouldReturnZeroInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.estimatedSize()).isZero();
   }
 
@@ -796,7 +796,7 @@ class ZetaTest {
 
   @Test
   void stats_shouldReturnNullInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.stats()).isNull();
   }
 
@@ -842,7 +842,7 @@ class ZetaTest {
 
   @Test
   void returnLocalTopNHotKeys_shouldReturnEmptyWhenDetectorNull() {
-    Zeta hk = new Zeta(hotKeyCache, null);
+    Zeta hk = new Zeta(hotKeyCache, null, null, null);
     assertThat(hk.returnLocalTopNHotKeys(5)).isEmpty();
   }
 
@@ -857,7 +857,7 @@ class ZetaTest {
 
   @Test
   void isBlacklisted_shouldReturnFalseWhenCacheNull() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.isBlacklisted("x")).isFalse();
   }
 
@@ -872,7 +872,7 @@ class ZetaTest {
 
   @Test
   void isWhitelisted_shouldReturnFalseWhenCacheNull() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.isWhitelisted("x")).isFalse();
   }
 
@@ -887,7 +887,7 @@ class ZetaTest {
 
   @Test
   void peek_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.peekAll(List.of("k"))).isInstanceOf(ZetaModeException.class);
   }
 
@@ -901,7 +901,7 @@ class ZetaTest {
 
   @Test
   void invalidateLocal_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.invalidate("k", CachePolicy.defaults().withSkipBroadcast(true)))
       .isInstanceOf(ZetaModeException.class);
   }
@@ -917,7 +917,7 @@ class ZetaTest {
 
   @Test
   void areLocalHotKeys_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.areLocalHotKeys(List.of("k"))).isInstanceOf(ZetaModeException.class);
   }
 
@@ -939,7 +939,7 @@ class ZetaTest {
 
   @Test
   void refresh_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.refresh("k", () -> "v")).isInstanceOf(ZetaModeException.class);
   }
 
@@ -962,7 +962,7 @@ class ZetaTest {
 
   @Test
   void invalidateAfterPut_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.invalidateAfterPut(Map.of("k", () -> {}))).isInstanceOf(
       ZetaModeException.class
     );
@@ -979,7 +979,7 @@ class ZetaTest {
 
   @Test
   void addBlacklist_collection_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.addBlacklist(List.of("x"))).isInstanceOf(ZetaModeException.class);
   }
 
@@ -992,7 +992,7 @@ class ZetaTest {
 
   @Test
   void removeBlacklist_collection_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.removeBlacklist(List.of("x"))).isInstanceOf(ZetaModeException.class);
   }
 
@@ -1007,7 +1007,7 @@ class ZetaTest {
 
   @Test
   void addWhitelist_collection_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.addWhitelist(List.of("x"))).isInstanceOf(ZetaModeException.class);
   }
 
@@ -1020,7 +1020,7 @@ class ZetaTest {
 
   @Test
   void removeWhitelist_collection_shouldThrowInWorkerMode() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.removeWhitelist(List.of("x"))).isInstanceOf(ZetaModeException.class);
   }
 
@@ -1037,7 +1037,7 @@ class ZetaTest {
 
   @Test
   void evaluateRules_whenCacheNull_shouldReturnAllAllow() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.evaluateRules(List.of("k1", "k2")))
       .containsEntry("k1", RuleAction.ALLOW)
       .containsEntry("k2", RuleAction.ALLOW);
@@ -1054,7 +1054,7 @@ class ZetaTest {
 
   @Test
   void isBlacklisted_collection_whenCacheNull_shouldReturnAllFalse() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.isBlacklisted(List.of("k1"))).containsEntry("k1", false);
   }
 
@@ -1067,7 +1067,7 @@ class ZetaTest {
 
   @Test
   void isWhitelisted_collection_whenCacheNull_shouldReturnAllFalse() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThat(workerOnly.isWhitelisted(List.of("k1"))).containsEntry("k1", false);
   }
 
@@ -1368,7 +1368,7 @@ class ZetaTest {
 
   @Test
   void workerMode_shouldStillRejectNullKey() {
-    Zeta workerOnly = new Zeta(null, null);
+    Zeta workerOnly = new Zeta(null, null, null, null);
     assertThatThrownBy(() -> workerOnly.get(null, () -> "v")).isInstanceOf(IllegalArgumentException.class);
   }
 

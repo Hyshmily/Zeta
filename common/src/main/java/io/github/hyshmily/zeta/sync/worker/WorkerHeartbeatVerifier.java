@@ -145,28 +145,6 @@ public class WorkerHeartbeatVerifier {
   }
 
   /**
-   * Creates a verifier with an internally owned single-thread scheduler.
-   * The internal daemon thread is named {@code hb-verifier}.
-   */
-  public WorkerHeartbeatVerifier(
-    RabbitTemplate rabbitTemplate,
-    HealthView healthView,
-    String appInstanceId,
-    VerifierConfig config
-  ) {
-    this(
-      rabbitTemplate,
-      healthView,
-      appInstanceId,
-      config.verifyIntervalMs,
-      config.pingTimeoutMs,
-      config.verifyMaxBackoffMs,
-      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier")),
-      true
-    );
-  }
-
-  /**
    * Creates a verifier with a caller-supplied external scheduler.
    * The caller manages the scheduler lifecycle — {@link #stop()} cancels
    * the task but does not shut down the scheduler.

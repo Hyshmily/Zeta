@@ -75,7 +75,7 @@ import org.junit.jupiter.api.Test;
  */
 class ZetaCacheTest {
 
-  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1);
+  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
 
   private HotKeyDetector hotKeyDetector;
   private Cache<String, Object> caffeineCache;
@@ -108,7 +108,7 @@ class ZetaCacheTest {
       new CentralDispatcher(
         Optional.empty(),
         Optional.empty(),
-        new BroadcastBuffer(scheduler, Optional.empty()),
+        new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
         hotKeyDetector
       ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
@@ -1125,7 +1125,7 @@ class ZetaCacheTest {
     ZetaProperties props = new ZetaProperties();
     props.setDefaultSoftTtlMs(0);
     props.setDefaultHotSoftTtlMs(0);
-    ExpireManager noSoft = new ExpireManagerImpl(caffeineCache, executor, props, 10);
+    ExpireManager noSoft = new ExpireManagerImpl(caffeineCache, executor, props, 10, CacheCompressor.NONE, null);
 
     when(singleFlight.load(anyString(), any())).thenReturn(vv("loaded"));
 
@@ -1138,7 +1138,7 @@ class ZetaCacheTest {
       new CentralDispatcher(
         Optional.empty(),
         Optional.empty(),
-        new BroadcastBuffer(scheduler, Optional.empty()),
+        new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
         hotKeyDetector
       ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
@@ -1321,7 +1321,7 @@ class ZetaCacheTest {
       new CentralDispatcher(
         Optional.empty(),
         Optional.of(publisher),
-        new BroadcastBuffer(rejecting, Optional.of(publisher)),
+        new BroadcastBuffer(rejecting, Optional.of(publisher), 500, 2_000, null),
         hotKeyDetector
       ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
@@ -1350,7 +1350,7 @@ class ZetaCacheTest {
     when(failing.fallbackVersion()).thenReturn(new VersionController.VersionResult(-100L, true));
 
     CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
-    BroadcastBuffer buffer = new BroadcastBuffer(scheduler, Optional.of(publisher));
+    BroadcastBuffer buffer = new BroadcastBuffer(scheduler, Optional.of(publisher), 500, 2_000, null);
     HotKeyCache cache = new HotKeyCache(
       hotKeyDetector,
       caffeineCache,
@@ -1382,7 +1382,7 @@ class ZetaCacheTest {
     when(failing.fallbackVersion()).thenReturn(new VersionController.VersionResult(-100L, true));
 
     CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
-    BroadcastBuffer buffer = new BroadcastBuffer(scheduler, Optional.of(publisher));
+    BroadcastBuffer buffer = new BroadcastBuffer(scheduler, Optional.of(publisher), 500, 2_000, null);
     HotKeyCache cache = new HotKeyCache(
       hotKeyDetector,
       caffeineCache,
@@ -2114,7 +2114,7 @@ class ZetaCacheTest {
       new CentralDispatcher(
         Optional.empty(),
         Optional.empty(),
-        new BroadcastBuffer(scheduler, Optional.empty()),
+        new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
         hotKeyDetector
       ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
@@ -2516,7 +2516,7 @@ class ZetaCacheTest {
   @DisplayName("Hot path detection and promotion")
   class HotPathTest {
 
-    private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1);
+    private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
 
     private HotKeyDetector hotKeyDetector;
     private Cache<String, Object> caffeineCache;
@@ -2536,7 +2536,7 @@ class ZetaCacheTest {
       singleFlight = mock(SingleFlight.class);
       executor = Runnable::run;
       ZetaProperties ttlConfig = new ZetaProperties();
-      expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
+      expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10, CacheCompressor.NONE, null);
       publisher = mock(CacheSyncPublisher.class);
       broadcastBuffer = new BroadcastBuffer(
         Executors.newSingleThreadScheduledExecutor(r -> {
@@ -2545,7 +2545,7 @@ class ZetaCacheTest {
           return t;
         }),
         Optional.of(publisher)
-      );
+      , 500, 2_000, null);
       healthView = mock(HealthView.class);
       reporter = mock(KeyReporter.class);
       hotKeyCache = new HotKeyCache(
@@ -3708,7 +3708,7 @@ class ZetaCacheTest {
         new CentralDispatcher(
           Optional.empty(),
           Optional.empty(),
-          new BroadcastBuffer(scheduler, Optional.empty()),
+          new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
           hotKeyDetector
         ),
         new RuleMatcherImpl(Optional.empty(), Optional.empty()),

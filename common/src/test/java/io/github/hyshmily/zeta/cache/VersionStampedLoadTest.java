@@ -83,7 +83,7 @@ import org.springframework.data.redis.core.ValueOperations;
 @Timeout(30)
 class VersionStampedLoadTest {
 
-  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1);
+  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
 
   private HotKeyDetector hotKeyDetector;
   private Cache<String, Object> cache;
@@ -119,7 +119,7 @@ class VersionStampedLoadTest {
     });
     executor = Runnable::run;
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, executor, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(cache, executor, ttlConfig, 10, CacheCompressor.NONE, null);
     versionController = mock(VersionController.class);
     when(versionController.currentVersion(anyString())).thenReturn(Optional.empty());
     when(versionController.currentVersions(anyIterable())).thenReturn(new LinkedHashMap<>());
@@ -135,7 +135,7 @@ class VersionStampedLoadTest {
       new CentralDispatcher(
         Optional.empty(),
         Optional.empty(),
-        new BroadcastBuffer(scheduler, Optional.empty()),
+        new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
         hotKeyDetector
       ),
       new RuleMatcherImpl(Optional.empty(), Optional.empty()),
@@ -178,8 +178,8 @@ class VersionStampedLoadTest {
       expireManager,
       mock(RuleMatcher.class),
       List.of()
-    );
-    CacheSyncListener l = new CacheSyncListener(props, scheduler, handler);
+    , null);
+    CacheSyncListener l = new CacheSyncListener(props, scheduler, handler, null);
     l.init();
     return l;
   }

@@ -153,47 +153,6 @@ public class ReportConsumer {
   private final WorkerDetectionMetrics metrics;
 
   /**
-   * Constructs a consumer without a decision-send buffer or detection-plane meters.
-   *
-   * @param evaluator            the key evaluator
-   * @param broadcaster          the HOT/COOL decision broadcaster
-   * @param globalQpsEstimator   the global throughput estimator
-   * @param stateMachine         the per-key lifecycle state machine
-   * @param stalenessThresholdMs the optional report staleness threshold ({@code 0} disables it)
-   */
-  public ReportConsumer(
-    Evaluator evaluator,
-    WorkerBroadcaster broadcaster,
-    GlobalQpsEstimator globalQpsEstimator,
-    ZetaBayesianSM stateMachine,
-    long stalenessThresholdMs
-  ) {
-    this(evaluator, broadcaster, globalQpsEstimator, stateMachine, stalenessThresholdMs, null, null);
-  }
-
-  /**
-   * Constructs a consumer with an optional decision-send buffer (ADR-0061) and
-   * without detection-plane meters.
-   *
-   * @param evaluator            the key evaluator
-   * @param broadcaster          the HOT/COOL decision broadcaster
-   * @param globalQpsEstimator   the global throughput estimator
-   * @param stateMachine         the per-key lifecycle state machine
-   * @param stalenessThresholdMs the optional report staleness threshold ({@code 0} disables it)
-   * @param broadcastBuffer      the decision-send buffer, or {@code null} for the synchronous drain
-   */
-  public ReportConsumer(
-    Evaluator evaluator,
-    WorkerBroadcaster broadcaster,
-    GlobalQpsEstimator globalQpsEstimator,
-    ZetaBayesianSM stateMachine,
-    long stalenessThresholdMs,
-    WorkerBroadcastBuffer broadcastBuffer
-  ) {
-    this(evaluator, broadcaster, globalQpsEstimator, stateMachine, stalenessThresholdMs, broadcastBuffer, null);
-  }
-
-  /**
    * Constructs a consumer with the optional decision-send buffer and the
    * detection-plane meters.
    *

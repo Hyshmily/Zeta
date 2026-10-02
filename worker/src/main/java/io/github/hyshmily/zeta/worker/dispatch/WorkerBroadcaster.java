@@ -83,31 +83,7 @@ public class WorkerBroadcaster {
   private final WorkerDetectionMetrics metrics;
 
   /**
-   * Constructs a broadcaster without detection-plane meters.
-   *
-   * <p>Kept for callers and tests that do not need observability; delegates with a
-   * {@code null} metrics collaborator (counters off).
-   *
-   * @param rabbitTemplate     the template used to publish messages
-   * @param broadcastExchange  the fanout exchange name
-   * @param appName            the application name carried in the send header
-   * @param nodeId             this Worker's node identity
-   * @param epochCounter       this Worker's epoch counter
-   * @param snowflakeIdGenerator the trace-ID generator
-   */
-  public WorkerBroadcaster(
-    RabbitTemplate rabbitTemplate,
-    String broadcastExchange,
-    String appName,
-    String nodeId,
-    AtomicLong epochCounter,
-    SnowflakeIdGenerator snowflakeIdGenerator
-  ) {
-    this(rabbitTemplate, broadcastExchange, appName, nodeId, epochCounter, snowflakeIdGenerator, null);
-  }
-
-  /**
-   * Constructs a broadcaster with the optional detection-plane meters.
+   * Constructs a broadcaster.
    *
    * @param rabbitTemplate     the template used to publish messages
    * @param broadcastExchange  the fanout exchange name

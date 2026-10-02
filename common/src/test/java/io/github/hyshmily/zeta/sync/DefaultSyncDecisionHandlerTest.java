@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.sync;
 
+import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
+
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -57,10 +59,10 @@ class DefaultSyncDecisionHandlerTest {
   void setUp() {
     cache = Caffeine.newBuilder().maximumSize(100).build();
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
     loader = k -> "refreshed";
     ruleMatcher = mock(RuleMatcher.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, Collections.emptyList());
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, Collections.emptyList(), null);
   }
 
   private static SyncMessage syncMessage(String key, String type, long version, boolean degraded) {
@@ -92,7 +94,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_shouldInvokeAfterRefreshHook() {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook));
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -110,7 +112,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_noValueInRedis_shouldFallBackToLocalInvalidation() {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList());
+    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -131,7 +133,7 @@ class DefaultSyncDecisionHandlerTest {
     handler = new DefaultSyncDecisionHandler(cache, k -> {
       loads.incrementAndGet();
       return "refreshed";
-    }, expireManager, ruleMatcher, List.of(hook));
+    }, expireManager, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false), false);
 
@@ -154,7 +156,7 @@ class DefaultSyncDecisionHandlerTest {
     handler = new DefaultSyncDecisionHandler(cache, k -> {
       loads.incrementAndGet();
       return "refreshed";
-    }, expireManager, ruleMatcher, List.of(hook));
+    }, expireManager, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false), true);
 
@@ -176,7 +178,7 @@ class DefaultSyncDecisionHandlerTest {
     handler = new DefaultSyncDecisionHandler(cache, k -> {
       loads.incrementAndGet();
       return "refreshed";
-    }, expireManager, ruleMatcher, Collections.emptyList());
+    }, expireManager, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -188,7 +190,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_staleVersion_shouldInvokeOnRefreshSkipped() {
     cache.put("key1", entry(5, false, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook));
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 3L, false));
 
@@ -205,7 +207,7 @@ class DefaultSyncDecisionHandlerTest {
   @Test
   void handleRefresh_blockedByInvalidationWatermark_shouldInvokeOnRefreshSkipped() {
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook));
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
 
     // INVALIDATE with version 5 records the watermark (the entry is removed).
     handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 5L, false));
@@ -227,7 +229,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_nullValue_shouldInvokeOnRefreshSkipped() {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> null, expireManager, ruleMatcher, List.of(hook));
+    handler = new DefaultSyncDecisionHandler(cache, k -> null, expireManager, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -238,7 +240,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleLocalInvalidate_shouldInvokeAfterInvalidateHook() {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook));
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
 
     handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 2L, false));
 
@@ -295,7 +297,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleLocalInvalidate_unconditional_onWorkerManaged_shouldNotFireHook() {
     cache.put("key1", entry(5, false, KeyState.HOT));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook));
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
 
     handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
 
@@ -338,7 +340,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_equalVersion_overstampedEntry_shouldApplyAndHeal() {
     cache.put("key1", entry(5, false, KeyState.NORMAL));
     CacheLoader freshLoader = k -> "fresh-v5";
-    handler = new DefaultSyncDecisionHandler(cache, freshLoader, expireManager, ruleMatcher, Collections.emptyList());
+    handler = new DefaultSyncDecisionHandler(cache, freshLoader, expireManager, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, false));
 
@@ -357,7 +359,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_fallback_strictlyNewerLocalWrite_shouldBePreserved() {
     cache.put("key1", entry(6, false, KeyState.NORMAL));
     CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList());
+    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, false));
 
@@ -375,7 +377,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_fallback_shouldPreserveWorkerManagedEntry() {
     cache.put("key1", entry(1, false, KeyState.HOT));
     CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList());
+    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -409,7 +411,7 @@ class DefaultSyncDecisionHandlerTest {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     SyncHook h1 = mock(SyncHook.class);
     SyncHook h2 = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(h1, h2));
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(h1, h2), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -427,7 +429,7 @@ class DefaultSyncDecisionHandlerTest {
     SyncHook countingHook = new SyncHook() {
       @Override public void afterRefresh(String k, SyncMessage sm, CacheEntry e) { count.incrementAndGet(); }
     };
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(failingHook, countingHook));
+    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(failingHook, countingHook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 

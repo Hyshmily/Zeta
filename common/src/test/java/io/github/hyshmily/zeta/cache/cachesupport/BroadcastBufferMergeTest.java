@@ -55,7 +55,7 @@ class BroadcastBufferMergeTest {
   }
 
   private BroadcastBuffer buffer() {
-    return new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+    return new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
   }
 
   /**

@@ -58,7 +58,7 @@ class BbrRateLimiterTest {
   void setUp() {
     cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
-    limiter = new BbrRateLimiterImpl(cpuMonitor, CPU_THRESHOLD, WINDOW_MS, BUCKETS, COOLDOWN_MS);
+    limiter = new BbrRateLimiterImpl(cpuMonitor, CPU_THRESHOLD, WINDOW_MS, BUCKETS, COOLDOWN_MS, 128L);
   }
 
   // ── tryAcquire – freerun band (below half the damped baseline) ──

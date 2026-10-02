@@ -50,7 +50,7 @@ class HeavyKeeperTest {
 
   @BeforeEach
   void setUp() {
-    keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, MIN_COUNT);
+    keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, MIN_COUNT, 10_000, 3, false);
   }
 
   /**
@@ -58,10 +58,10 @@ class HeavyKeeperTest {
    */
   @Test
   void constructor_shouldRejectInvalidK() {
-    assertThatThrownBy(() -> new HeavyKeeper(0, WIDTH, DEPTH, DECAY, MIN_COUNT)).isInstanceOf(
+    assertThatThrownBy(() -> new HeavyKeeper(0, WIDTH, DEPTH, DECAY, MIN_COUNT, 10_000, 3, false)).isInstanceOf(
       IllegalArgumentException.class
     );
-    assertThatThrownBy(() -> new HeavyKeeper(-1, WIDTH, DEPTH, DECAY, MIN_COUNT)).isInstanceOf(
+    assertThatThrownBy(() -> new HeavyKeeper(-1, WIDTH, DEPTH, DECAY, MIN_COUNT, 10_000, 3, false)).isInstanceOf(
       IllegalArgumentException.class
     );
   }
@@ -98,7 +98,7 @@ class HeavyKeeperTest {
    */
   @Test
   void add_Direct_keysBelowMinCountShouldNotBeHot() {
-    keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 100);
+    keeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 100, 10_000, 3, false);
     AddResult result = keeper.addDirect("lowFreqKey", 1);
     assertThat(result.isHotKey()).isFalse();
     assertThat(result.expelledKey()).isNull();
@@ -344,7 +344,7 @@ class HeavyKeeperTest {
 
   @Test
   void fading_shouldRemoveKeysWithCountOne() {
-    HeavyKeeper lowMinKeeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1);
+    HeavyKeeper lowMinKeeper = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1, 10_000, 3, false);
     lowMinKeeper.addDirect("key1", 1);
     assertThat(lowMinKeeper.contains("key1")).isTrue();
     lowMinKeeper.fading();
@@ -415,7 +415,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_mapBatch_whenAllBelowMinCount_shouldReturnEmpty() {
-    HeavyKeeper hk = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1000);
+    HeavyKeeper hk = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1000, 10_000, 3, false);
     Map<String, Long> map = new HashMap<>();
     map.put("low1", 1L);
     map.put("low2", 2L);
@@ -430,7 +430,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_withExpelledQueueFull_shouldNotThrow() {
-    HeavyKeeper smallQueue = new HeavyKeeper(3, 1000, 4, 0.9, 1, 1);
+    HeavyKeeper smallQueue = new HeavyKeeper(3, 1000, 4, 0.9, 1, 1, 3, false);
     for (int i = 0; i < 5; i++) {
       smallQueue.addDirect("key" + i, 50);
     }
@@ -481,7 +481,7 @@ class HeavyKeeperTest {
 
   @Test
   void fading_whenMultipleEntriesHaveCountOne_shouldClearAll() {
-    HeavyKeeper hk = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1);
+    HeavyKeeper hk = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1, 10_000, 3, false);
     hk.addDirect("k1", 1);
     hk.addDirect("k2", 1);
     hk.addDirect("k3", 1);
@@ -495,7 +495,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_withCollisionAndDecaySubtracts_shouldDecrement() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100, 3, false);
     hk.addDirect("key1", 10);
     hk.addDirect("key2", 5);
     assertThat(hk.contains("key2")).isTrue();
@@ -503,7 +503,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_withCollisionAndDecayReplaces_shouldReplaceFingerprint() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 1.0, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 1.0, 1, 100, 3, false);
     hk.addDirect("key1", 5);
     hk.addDirect("key2", 10);
     assertThat(hk.contains("key1")).isTrue();
@@ -512,7 +512,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_withCollisionAndCountAboveLookup_shouldUseMaxLookupEntry() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100, 3, false);
     for (int i = 0; i < 300; i++) {
       hk.addDirect("key1", 1);
     }
@@ -524,7 +524,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_withCollisionAndZeroIncrement_shouldHandle() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100, 3, false);
     hk.addDirect("key1", 10);
     AddResult result = hk.addDirect("key2", 0);
     assertThat(result).isNotNull();
@@ -533,7 +533,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_withCollisionAndLargeIncrement_shouldUseNormalApproximation() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100, 3, false);
     hk.addDirect("key1", 1);
     AddResult result = hk.addDirect("key2", 200);
     assertThat(result.isHotKey()).isTrue();
@@ -541,7 +541,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirect_withCollisionAndMediumIncrement_shouldUseFallbackLoop() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100, 3, false);
     hk.addDirect("key1", 1);
     AddResult result = hk.addDirect("key2", 20);
     assertThat(result.isHotKey()).isTrue();
@@ -551,7 +551,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirectMap_whenKeyBelowMinCount_shouldSkip() {
-    HeavyKeeper hk = new HeavyKeeper(3, 100, 4, 0.9, 50, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 100, 4, 0.9, 50, 100, 3, false);
     Map<String, Long> map = new HashMap<>();
     map.put("high", 100L);
     map.put("low", 10L);
@@ -564,7 +564,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirectMap_whenKeyNotHotEnough_shouldNotInsert() {
-    HeavyKeeper hk = new HeavyKeeper(3, 100000, 4, 0.9, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 100000, 4, 0.9, 1, 100, 3, false);
     hk.addDirect("a", 100);
     hk.addDirect("b", 100);
     hk.addDirect("c", 100);
@@ -577,7 +577,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirectMap_withCollisionInAddToSketch_shouldHandle() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.0, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.0, 1, 100, 3, false);
     Map<String, Long> map = new HashMap<>();
     map.put("key1", 10L);
     map.put("key2", 5L);
@@ -587,7 +587,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirectMap_withExistingKeyInHeap_shouldRemoveOldNode() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1000, 4, 0.9, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1000, 4, 0.9, 1, 100, 3, false);
     hk.addDirect("k", 50);
     Map<String, Long> map = new HashMap<>();
     map.put("k", 10L);
@@ -599,7 +599,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirectMap_withExpelledQueueFull_shouldLogWarning() {
-    HeavyKeeper hk = new HeavyKeeper(1, 1000, 4, 0.9, 1, 1);
+    HeavyKeeper hk = new HeavyKeeper(1, 1000, 4, 0.9, 1, 1, 3, false);
     hk.addDirect("first", 100);
     hk.addDirect("second", 200);
     Map<String, Long> map = new HashMap<>();
@@ -611,7 +611,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirectMap_withExistingKeyCollisionInAddToSketch_shouldHandle() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1000, 4, 0.9, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1000, 4, 0.9, 1, 100, 3, false);
     hk.addDirect("k", 10);
     Map<String, Long> map = new HashMap<>();
     map.put("k", 5L);
@@ -627,7 +627,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirectMap_withCollisionCountAboveLookup_shouldUseMaxLookup() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.5, 1, 100, 3, false);
     for (int i = 0; i < 300; i++) {
       hk.addDirect("key1", 1);
     }
@@ -639,7 +639,7 @@ class HeavyKeeperTest {
 
   @Test
   void addDirectMap_withCollisionAndDecayReplacesFingerprint_shouldReplace() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 1.0, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 1.0, 1, 100, 3, false);
     hk.addDirect("key1", 5);
     Map<String, Long> map = new HashMap<>();
     map.put("key2", 10L);
@@ -650,7 +650,7 @@ class HeavyKeeperTest {
 
   @Test
   void fading_withConcurrentAddDirect_shouldNotDeadlock() throws InterruptedException {
-    HeavyKeeper preloaded = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1);
+    HeavyKeeper preloaded = new HeavyKeeper(TOP_K, WIDTH, DEPTH, DECAY, 1, 10_000, 3, false);
     for (int i = 0; i < 10; i++) {
       preloaded.addDirect("key" + i, 100);
     }
@@ -688,7 +688,7 @@ class HeavyKeeperTest {
 
   @Test
   void decayCollision_withHotSlot_shouldLimitDecay() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100, 3, false);
     for (int i = 0; i < 100; i++) {
       hk.addDirect("hot", 1);
     }
@@ -702,7 +702,7 @@ class HeavyKeeperTest {
 
   @Test
   void decayCollision_withLargeIncrement_shouldUseFastPath() {
-    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100);
+    HeavyKeeper hk = new HeavyKeeper(3, 1, 1, 0.9, 1, 100, 3, false);
     hk.addDirect("key1", 1);
     AddResult result = hk.addDirect("key2", 200);
     assertThat(result).isNotNull();
@@ -714,7 +714,7 @@ class HeavyKeeperTest {
     // Regression test: decayMembership() previously used reset()+accumulate() on LongAccumulator,
     // which lost concurrent accumulate() writes that arrived between get() and reset().
     // The fix uses AtomicLong with a CAS retry loop that preserves concurrent accumulates.
-    HeavyKeeper hk = new HeavyKeeper(10, 1000, 4, 0.9, 1, 50000, 3);
+    HeavyKeeper hk = new HeavyKeeper(10, 1000, 4, 0.9, 1, 50000, 3, false);
     hk.addDirect("hotkey", 10000);
 
     CountDownLatch latch = new CountDownLatch(1);

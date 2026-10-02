@@ -120,19 +120,6 @@ public class BayesianConfidenceEstimator implements ConfidenceEvaluator {
   private final double maxAccumulatedPrecision;
 
   /**
-   * Constructs the estimator with the default confidence-classification
-   * thresholds documented on {@link ProbabilityResult}.
-   *
-   * @param priorMean     prior mean (log scale)
-   * @param priorStd      prior standard deviation (log scale)
-   * @param likelihoodStd base likelihood standard deviation (log scale);
-   *                      adjusted dynamically when a finite CV is provided
-   */
-  public BayesianConfidenceEstimator(double priorMean, double priorStd, double likelihoodStd) {
-    this(priorMean, priorStd, likelihoodStd, ProbabilityResult.HIGH_THRESHOLD, ProbabilityResult.MEDIUM_THRESHOLD);
-  }
-
-  /**
    * Constructs the estimator with the given Normal-Normal conjugate parameters
    * and confidence-classification thresholds.
    *

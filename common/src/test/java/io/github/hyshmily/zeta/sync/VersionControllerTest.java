@@ -57,7 +57,7 @@ class VersionControllerTest {
 
   @BeforeEach
   void setUp() {
-    snowflake = new SnowflakeIdGenerator(0, 1);
+    snowflake = new SnowflakeIdGenerator(0, 1, 5L, false);
     redisTemplate = mock(StringRedisTemplate.class);
     controller = new VersionControllerImpl(Optional.of(redisTemplate), 10, snowflake);
   }

@@ -62,9 +62,6 @@ import lombok.extern.slf4j.Slf4j;
 @Internal
 public class BroadcastBuffer {
 
-  private static final long DEFAULT_FLUSH_DELAY_MS = 500;
-  private static final long DEFAULT_MAX_DEFER_MS = 2_000;
-
   /**
    * Maximum number of pending entries before a forced flush is triggered (soft cap: the flush is
    * off-loaded to the scheduler thread, so the map may briefly overshoot under a write burst).
@@ -138,36 +135,6 @@ public class BroadcastBuffer {
    */
   private volatile ScheduledFuture<?> scheduledFlush;
   private final Object scheduleLock = new Object();
-
-  /**
-   * Creates a BroadcastBuffer with the default flush delay of 500ms.
-   *
-   * @param scheduler the shared scheduler ({@code hotKeyScheduler})
-   * @param publisher the optional sync publisher
-   */
-  public BroadcastBuffer(
-    ScheduledExecutorService scheduler,
-    @SuppressWarnings("OptionalUsedAsFieldOrParameterType") Optional<CacheSyncPublisher> publisher
-  ) {
-    this(scheduler, publisher, DEFAULT_FLUSH_DELAY_MS, DEFAULT_MAX_DEFER_MS);
-  }
-
-  public BroadcastBuffer(
-    ScheduledExecutorService scheduler,
-    @SuppressWarnings("OptionalUsedAsFieldOrParameterType") Optional<CacheSyncPublisher> publisher,
-    long flushDelayMs
-  ) {
-    this(scheduler, publisher, flushDelayMs, Math.max(flushDelayMs, DEFAULT_MAX_DEFER_MS));
-  }
-
-  public BroadcastBuffer(
-    ScheduledExecutorService scheduler,
-    @SuppressWarnings("OptionalUsedAsFieldOrParameterType") Optional<CacheSyncPublisher> publisher,
-    long flushDelayMs,
-    long maxDeferMs
-  ) {
-    this(scheduler, publisher, flushDelayMs, maxDeferMs, null);
-  }
 
   /**
    * Creates a BroadcastBuffer with explicit flush delay, max deferral and an optional dedicated

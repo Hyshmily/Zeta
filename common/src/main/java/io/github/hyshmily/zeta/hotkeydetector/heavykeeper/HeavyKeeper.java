@@ -20,6 +20,10 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.FastRangeUtil;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.util.Assert;
+
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -30,9 +34,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
-import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.util.Assert;
 
 /**
  * HeavyKeeper — a Count-Min Sketch variant for approximate Top‑K tracking
@@ -283,56 +284,6 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   private final BlockingQueue<Item> expelledQueue;
 
   /**
-   * Construct a HeavyKeeper instance.
-   *
-   * @param k        maximum number of hot keys to track
-   * @param width    width of the Count-Min Sketch (number of columns per row)
-   * @param depth    depth of the Count-Min Sketch (number of rows / hash functions)
-   * @param decay    probabilistic decay factor (0.0–1.0); higher values preserve counts longer
-   * @param minCount minimum count threshold before a key can enter the TopK set
-   */
-  public HeavyKeeper(int k, int width, int depth, double decay, int minCount) {
-    this(k, width, depth, decay, minCount, 10_000, 3);
-  }
-
-  /**
-   * Construct a HeavyKeeper instance with a custom expelled-queue capacity.
-   *
-   * @param k                     maximum number of hot keys to track
-   * @param width                 width of the Count-Min Sketch (number of columns per row)
-   * @param depth                 depth of the Count-Min Sketch (number of rows / hash functions)
-   * @param decay                 probabilistic decay factor (0.0–1.0); higher values preserve counts longer
-   * @param minCount              minimum count threshold before a key can enter the TopK set
-   * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled items
-   */
-  public HeavyKeeper(int k, int width, int depth, double decay, int minCount, int expelledQueueCapacity) {
-    this(k, width, depth, decay, minCount, expelledQueueCapacity, 3, false);
-  }
-
-  /**
-   * Construct a HeavyKeeper instance with sliding-window configuration.
-   *
-   * @param k                     maximum number of hot keys to track
-   * @param width                 width of the Count-Min Sketch (number of columns per row)
-   * @param depth                 depth of the Count-Min Sketch (number of rows / hash functions)
-   * @param decay                 probabilistic decay factor (0.0–1.0); higher values preserve counts longer
-   * @param minCount              minimum count threshold before a key can enter the TopK set
-   * @param expelledQueueCapacity capacity of the bounded blocking queue for expelled items
-   * @param windowCount           number of time windows per sketch slot (ring buffer depth, default 3)
-   */
-  public HeavyKeeper(
-    int k,
-    int width,
-    int depth,
-    double decay,
-    int minCount,
-    int expelledQueueCapacity,
-    int windowCount
-  ) {
-    this(k, width, depth, decay, minCount, expelledQueueCapacity, windowCount, false);
-  }
-
-  /**
    * Construct a HeavyKeeper instance with full configuration.
    *
    * @param k                     maximum number of hot keys to track
@@ -479,6 +430,10 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    * membership decision. Shared body of the single-key and batch
    * {@link #addDirect} entry points — the callers own the non-positive
    * increment guard, which differs between them (cold result vs. skip).
+   * <p><b>Key-validity contract (test-pinned):</b> a {@code null} key fails
+   * fast with {@link NullPointerException} — the sketch kernel is strict and
+   * the {@code HotKeyDetector} facade owns the lenient null/blank filtering
+   * ({@code AddResult.cold()}); the empty string is a legitimate key.
    */
   private AddResult addOne(String key, long increment) {
     int itemFingerprint = locateFingerprint(key);

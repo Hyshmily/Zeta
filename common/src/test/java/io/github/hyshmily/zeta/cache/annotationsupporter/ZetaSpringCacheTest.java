@@ -493,17 +493,17 @@ class ZetaSpringCacheTest {
         new CentralDispatcher(
           Optional.empty(),
           Optional.empty(),
-          new BroadcastBuffer(scheduler, Optional.empty()),
+          new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
           hotKeyDetector
         ),
         new RuleMatcherImpl(Optional.empty(), Optional.empty()),
-        new VersionControllerImpl(Optional.empty(), 60, new SnowflakeIdGenerator(0, 1)),
+        new VersionControllerImpl(Optional.empty(), 60, new SnowflakeIdGenerator(0, 1, 5L, false)),
         props,
         mock(HealthView.class),
         CacheCompressor.NONE,
         null
       );
-      realZeta = new Zeta(hotKeyCache, hotKeyDetector);
+      realZeta = new Zeta(hotKeyCache, hotKeyDetector, null, null);
       alpha = new ZetaSpringCache("alpha", realZeta, props, true);
       beta = new ZetaSpringCache("beta", realZeta, props, true);
     }

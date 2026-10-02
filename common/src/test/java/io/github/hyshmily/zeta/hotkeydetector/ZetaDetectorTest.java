@@ -54,11 +54,6 @@ class ZetaDetectorTest {
     assertThat(detector).isNotNull();
   }
 
-  @Test
-  void constructor_withoutScheduler_shouldNotFail() {
-    assertThat(new HotKeyDetector(heavyKeeper)).isNotNull();
-  }
-
   // ── Lifecycle ──
 
   @Test
@@ -136,7 +131,7 @@ class ZetaDetectorTest {
   @Test
   void add_shouldAcceptValidKey() {
     detector.add("valid-key");
-    // BufferedCounter doesn't flush synchronously; just verify no throw
+    // WaveCounter does not flush synchronously; just verify no throw
   }
 
   @Test
@@ -260,7 +255,7 @@ class ZetaDetectorTest {
 
   @Test
   void add_buffered_shouldEventuallyFlushToHeavyKeeper() throws Exception {
-    HeavyKeeper realKeeper = new HeavyKeeper(3, 1000, 4, 0.9, 1);
+    HeavyKeeper realKeeper = new HeavyKeeper(3, 1000, 4, 0.9, 1, 10_000, 3, false);
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     HotKeyDetector realDetector = new HotKeyDetector(realKeeper, scheduler);
     realDetector.afterPropertiesSet();

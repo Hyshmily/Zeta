@@ -97,13 +97,6 @@ public class SnowflakeIdGenerator {
   }
 
   /**
-   * Explicit datacenter + worker, default 5ms clock rewind tolerance.
-   */
-  public SnowflakeIdGenerator(long dataCenterId, long workerId) {
-    this(dataCenterId, workerId, 5L, false);
-  }
-
-  /**
    * Full constructor.
    *
    * @param dataCenterId   datacenter ID (0..3)

@@ -45,7 +45,7 @@ class CacheSyncPublisherTest {
   void setUp() {
     rabbitTemplate = mock(RabbitTemplate.class);
     properties = new CacheSyncProperties();
-    publisher = new CacheSyncPublisher(rabbitTemplate, properties, mock(SnowflakeIdGenerator.class));
+    publisher = new CacheSyncPublisher(rabbitTemplate, properties, mock(SnowflakeIdGenerator.class), null);
     publisher.init();
   }
 
@@ -222,7 +222,7 @@ class CacheSyncPublisherTest {
    */
   @Test
   void getDedupCacheSize_beforeInit_shouldReturnZero() {
-    CacheSyncPublisher p = new CacheSyncPublisher(rabbitTemplate, properties, mock(SnowflakeIdGenerator.class));
+    CacheSyncPublisher p = new CacheSyncPublisher(rabbitTemplate, properties, mock(SnowflakeIdGenerator.class), null);
     assertThat(p.getDedupCacheSize()).isZero();
   }
 

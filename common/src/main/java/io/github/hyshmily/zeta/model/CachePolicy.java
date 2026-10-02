@@ -108,22 +108,6 @@ public record CachePolicy(
   }
 
   /**
-   * Convenience constructor for the annotation layer and other callers that
-   * manage the reader and reporting separately. Delegates to the canonical
-   * constructor with {@code reader = null}, {@code reportEnabled = true} and
-   * {@code failOnError = false}.
-   */
-  public CachePolicy(
-    LongSupplier hardTtlMs,
-    LongSupplier softTtlMs,
-    boolean nullCaching,
-    boolean skipBroadcast,
-    StalePolicy stalePolicy
-  ) {
-    this(hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, null, true, false);
-  }
-
-  /**
    * Builds a policy from a reader and all-default semantics: no TTL override,
    * null caching enabled, reporting enabled, failures swallowed. Combine with
    * {@link #withFailOnError()} to make read-path loader failures propagate to

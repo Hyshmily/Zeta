@@ -113,43 +113,6 @@ public class ExpireManagerImpl implements ExpireManager {
   }
 
   /**
-   * Creates a ExpireManagerImpl with the given Caffeine cache, executor, and TTL config.
-   *
-   * @param caffeineCache   the underlying L1 Caffeine cache
-   * @param executor        async executor for background refresh
-   * @param ttlConfig       TTL configuration (normal and hot-key variants)
-   * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
-   */
-  public ExpireManagerImpl(
-    Cache<String, Object> caffeineCache,
-    Executor executor,
-    ZetaProperties ttlConfig,
-    int refreshMaxPools
-  ) {
-    this(caffeineCache, executor, ttlConfig, refreshMaxPools, CacheCompressor.NONE);
-  }
-
-  /**
-   * Creates a ExpireManagerImpl with the given Caffeine cache, executor, TTL config,
-   * and a {@link CacheCompressor} for L1 value compression.
-   *
-   * @param caffeineCache   the underlying L1 Caffeine cache
-   * @param executor        async executor for background refresh
-   * @param ttlConfig       TTL configuration (normal and hot-key variants)
-   * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
-   * @param compressor      compressor for L1 cache values
-   */
-  public ExpireManagerImpl(
-    Cache<String, Object> caffeineCache,
-    Executor executor,
-    ZetaProperties ttlConfig,
-    int refreshMaxPools,
-    CacheCompressor compressor
-  ) {
-    this(caffeineCache, executor, ttlConfig, refreshMaxPools, compressor, null);
-  }
-
-  /**
    * Creates a ExpireManagerImpl with the given Caffeine cache, executor, TTL config,
    * compressor, and cluster health view.
    *
@@ -177,23 +140,9 @@ public class ExpireManagerImpl implements ExpireManager {
   }
 
   /**
-   * Create a ExpireManagerImpl with explicit jitter ratio (for testing).
-   */
-  ExpireManagerImpl(
-    Cache<String, Object> caffeineCache,
-    Executor executor,
-    ZetaProperties ttlConfig,
-    int refreshMaxPools,
-    double defaultTtlJitterRatio,
-    CacheCompressor compressor
-  ) {
-    this(caffeineCache, executor, ttlConfig, refreshMaxPools, defaultTtlJitterRatio, compressor, null);
-  }
-
-  /**
    * Create a ExpireManagerImpl with explicit jitter ratio and health view (for testing).
    *
-   * <p>The single constructor body: every other constructor delegates here, so
+   * <p>The single constructor body: the public constructor delegates here, so
    * the field wiring exists exactly once.
    */
   ExpireManagerImpl(

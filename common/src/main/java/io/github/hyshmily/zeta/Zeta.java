@@ -139,21 +139,6 @@ public class Zeta implements DisposableBean {
   private final ConcurrentHashMap<String, ScheduledFuture<?>> refreshFutures;
 
   /**
-   * Create a HotKey facade with cache and detector only.
-   *
-   * <p>
-   * Either parameter may be {@code null} depending on the deployment mode.
-   *
-   * @param hotKeyCache       the cache orchestrator (maybe {@code null} in
-   *                          Worker-only mode)
-   * @param appHotKeyDetector the app-side local TopK detector (maybe {@code null}
-   *                          in Worker-only mode)
-   */
-  public Zeta(HotKeyCache hotKeyCache, HotKeyDetector appHotKeyDetector) {
-    this(hotKeyCache, appHotKeyDetector, null, null);
-  }
-
-  /**
    * Create a HotKey facade with an optional distributed lock provider and
    * loader registry (ADR-0070).
    *

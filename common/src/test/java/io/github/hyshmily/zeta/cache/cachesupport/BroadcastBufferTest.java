@@ -57,7 +57,7 @@ class BroadcastBufferTest {
    */
   @Test
   void constructor_shouldAcceptMinimalParameters() {
-    assertThatCode(() -> new BroadcastBuffer(scheduler, Optional.empty())).doesNotThrowAnyException();
+    assertThatCode(() -> new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null)).doesNotThrowAnyException();
   }
 
   /**
@@ -65,7 +65,7 @@ class BroadcastBufferTest {
    */
   @Test
   void constructor_shouldAcceptCustomFlushDelay() {
-    assertThatCode(() -> new BroadcastBuffer(scheduler, Optional.empty(), 100L)).doesNotThrowAnyException();
+    assertThatCode(() -> new BroadcastBuffer(scheduler, Optional.empty(), 100L, Math.max(100L, 2_000), null)).doesNotThrowAnyException();
   }
 
   // ── record() behavior ──
@@ -76,7 +76,7 @@ class BroadcastBufferTest {
    */
   @Test
   void record_shouldLazyInitPendingMap() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
     buf.record("key1", 1L, false);
     buf.flush();
     verify(publisher).broadcastRefresh("key1", 1L, false);
@@ -88,7 +88,7 @@ class BroadcastBufferTest {
    */
   @Test
   void record_shouldMergeSameKey_latestWins() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
     buf.record("key", 1L, false);
     buf.record("key", 5L, false);
     buf.flush();
@@ -101,7 +101,7 @@ class BroadcastBufferTest {
    */
   @Test
   void record_differentKeys_shouldBothBeFlushed() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
     buf.record("key1", 1L, false);
     buf.record("key2", 2L, true);
     buf.flush();
@@ -116,7 +116,7 @@ class BroadcastBufferTest {
    */
   @Test
   void flush_shouldSendPendingToPublisher() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
     buf.record("a", 1L, false);
     buf.record("b", 2L, true);
     buf.flush();
@@ -129,7 +129,7 @@ class BroadcastBufferTest {
    */
   @Test
   void flush_withNoPublisher_shouldNotThrow() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.empty());
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null);
     buf.record("key", 1L, false);
     assertThatCode(buf::flush).doesNotThrowAnyException();
   }
@@ -139,7 +139,7 @@ class BroadcastBufferTest {
    */
   @Test
   void flush_withNoRecords_shouldNotPublish() {
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
     buf.flush();
     verifyNoInteractions(publisher);
   }
@@ -177,7 +177,7 @@ class BroadcastBufferTest {
     CountDownLatch allSent = installCountingPublisher(sent, BroadcastBuffer.MAX_PENDING_ENTRIES + 1);
 
     // Long flush delay so the deferred flush cannot fire during this test
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
 
     for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES; i++) {
       buf.record("key-" + i, i, false);
@@ -206,7 +206,7 @@ class BroadcastBufferTest {
     AtomicInteger sent = new AtomicInteger(0);
     CountDownLatch allSent = installCountingPublisher(sent, BroadcastBuffer.MAX_PENDING_ENTRIES + 1);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
 
     for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES + 1; i++) {
       buf.record("key-" + i, i, false);
@@ -238,7 +238,7 @@ class BroadcastBufferTest {
       .when(spyPublisher)
       .broadcastRefresh("auto-key", 1L, false);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPublisher), 100L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPublisher), 100L, Math.max(100L, 2_000), null);
     buf.record("auto-key", 1L, false);
 
     boolean fired = latch.await(2000, TimeUnit.MILLISECONDS);
@@ -264,7 +264,7 @@ class BroadcastBufferTest {
       .when(spyPublisher)
       .broadcastRefresh("second", 2L, false);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPublisher), 400L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPublisher), 400L, Math.max(400L, 2_000), null);
     long firstRecordAt = System.nanoTime();
     buf.record("first", 1L, false);
     // Lands while the first record's flush is pending: the flush must NOT be
@@ -294,7 +294,7 @@ class BroadcastBufferTest {
     CacheSyncPublisher throwingPub = mock(CacheSyncPublisher.class);
     doThrow(new RuntimeException("publisher failure")).when(throwingPub).broadcastRefresh("bad-key", 1L, false);
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(throwingPub), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(throwingPub), 5000L, Math.max(5000L, 2_000), null);
     buf.record("bad-key", 1L, false);
     buf.record("good-key", 2L, true);
 
@@ -402,7 +402,7 @@ class BroadcastBufferTest {
     when(rejecting.schedule(any(Runnable.class), anyLong(), any(TimeUnit.class)))
       .thenThrow(new RejectedExecutionException("saturated"));
 
-    BroadcastBuffer buf = new BroadcastBuffer(rejecting, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(rejecting, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
     buf.record("key1", 1L, false);
 
     verify(publisher).broadcastRefresh("key1", 1L, false);
@@ -419,7 +419,7 @@ class BroadcastBufferTest {
       .thenReturn(mock(ScheduledFuture.class));
     doThrow(new RejectedExecutionException("saturated")).when(rejecting).execute(any(Runnable.class));
 
-    BroadcastBuffer buf = new BroadcastBuffer(rejecting, Optional.of(publisher), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(rejecting, Optional.of(publisher), 5000L, Math.max(5000L, 2_000), null);
 
     for (int i = 0; i < BroadcastBuffer.MAX_PENDING_ENTRIES; i++) {
       buf.record("key-" + i, i, false);
@@ -446,7 +446,7 @@ class BroadcastBufferTest {
       .when(spyPub)
       .broadcastRefresh(anyString(), anyLong(), anyBoolean());
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPub), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPub), 5000L, Math.max(5000L, 2_000), null);
     buf.record("pre-flush", 1L, false);
 
     // flush swaps pending so the old map is iterated; record after swap goes to new map
@@ -478,7 +478,7 @@ class BroadcastBufferTest {
       .when(spyPub)
       .broadcastRefresh(anyString(), anyLong(), anyBoolean());
 
-    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPub), 5000L);
+    BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(spyPub), 5000L, Math.max(5000L, 2_000), null);
     int threadCount = 4;
     int recordsPerThread = 100;
 

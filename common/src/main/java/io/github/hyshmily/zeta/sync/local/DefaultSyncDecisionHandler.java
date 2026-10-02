@@ -88,16 +88,10 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
     .expireAfterWrite(10, TimeUnit.MINUTES)
     .build();
 
-  public DefaultSyncDecisionHandler(
-    Cache<String, Object> caffeineCache,
-    CacheLoader<Object> clusterLoader,
-    ExpireManager expireManager,
-    RuleMatcher ruleMatcher,
-    List<SyncHook> syncHooks
-  ) {
-    this(caffeineCache, clusterLoader, expireManager, ruleMatcher, syncHooks, null);
-  }
-
+  /**
+   * Creates a handler. {@code singleFlight} may be {@code null} when no dedup
+   * collaborator is wired.
+   */
   public DefaultSyncDecisionHandler(
     Cache<String, Object> caffeineCache,
     CacheLoader<Object> clusterLoader,

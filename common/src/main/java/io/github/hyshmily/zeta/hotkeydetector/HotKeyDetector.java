@@ -61,21 +61,6 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
   private final WaveCounter cacheWaveCounter;
 
   /**
-   * Creates a detector that wraps the given HeavyKeeper instance.
-   * Creates its own scheduler for buffered counter flushing.
-   *
-   * @param heavyKeeper the underlying sketch-based TopK implementation
-   */
-  public HotKeyDetector(HeavyKeeper heavyKeeper) {
-    this.heavyKeeper = heavyKeeper;
-    // Route the buffered flush through the facade's own addDirect (not
-    // heavyKeeper::addDirect) so the flush path keeps the invalidCacheKey
-    // guard: any future validation/instrumentation added to the facade entry
-    // point must also cover the buffer's flush, not silently bypass it.
-    this.cacheWaveCounter = new WaveCounter(this::addDirect);
-  }
-
-  /**
    * Creates a detector with a shared external scheduler.
    *
    * @param heavyKeeper the underlying sketch-based TopK implementation
@@ -83,7 +68,10 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
    */
   public HotKeyDetector(HeavyKeeper heavyKeeper, ScheduledExecutorService scheduler) {
     this.heavyKeeper = heavyKeeper;
-    // Same facade-routing rationale as the single-arg constructor.
+    // Route the buffered flush through the facade's own addDirect (not
+    // heavyKeeper::addDirect) so the flush path keeps the invalidCacheKey
+    // guard: any future validation/instrumentation added to the facade entry
+    // point must also cover the buffer's flush, not silently bypass it.
     this.cacheWaveCounter = new WaveCounter(this::addDirect, scheduler);
   }
 

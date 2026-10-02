@@ -9,33 +9,33 @@ class ZetaContextExceptionTest {
 
   @Test
   void shouldContainSourceClass() {
-    var ex = new ZetaContextException("MySource", "something broke");
+    var ex = new ZetaContextException("MySource", "something broke", null);
     assertThat(ex.getSourceClass()).isEqualTo("MySource");
   }
 
   @Test
   void shouldRecordTimestamp() {
     var before = Instant.now();
-    var ex = new ZetaContextException("Src", "msg");
+    var ex = new ZetaContextException("Src", "msg", null);
     var after = Instant.now();
     assertThat(ex.getTimestamp()).isBetween(before, after);
   }
 
   @Test
   void logMessageShouldContainFormattedTimestamp() {
-    var ex = new ZetaContextException("Src", "hello");
+    var ex = new ZetaContextException("Src", "hello", null);
     assertThat(ex.getMessage()).matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3} \\[Src\\] hello");
   }
 
   @Test
   void getMessageShouldReturnLogMessage() {
-    var ex = new ZetaContextException("Src", "detail");
+    var ex = new ZetaContextException("Src", "detail", null);
     assertThat(ex.getMessage()).endsWith("[Src] detail");
   }
 
   @Test
   void defaultDetailMessageShouldBeNullWhenNotProvided() {
-    var ex = new ZetaContextException("Src", null);
+    var ex = new ZetaContextException("Src", null, null);
     assertThat(ex.getMessage()).contains("[Src] null");
   }
 
@@ -57,7 +57,7 @@ class ZetaContextExceptionTest {
 
   @Test
   void getMessageReturnsFormattedLogMessage() {
-    var ex = new ZetaContextException("MyClass", "my message");
+    var ex = new ZetaContextException("MyClass", "my message", null);
     assertThat(ex.getMessage()).isEqualTo(ex.getLogMessage());
   }
 
@@ -65,7 +65,7 @@ class ZetaContextExceptionTest {
   void logMessageShouldBeMemoized() {
     // The log message is formatted lazily on first access (ADR-0063); repeated
     // access must return the same memoized instance.
-    var ex = new ZetaContextException("Src", "hello");
+    var ex = new ZetaContextException("Src", "hello", null);
     var first = ex.getLogMessage();
     assertThat(ex.getLogMessage()).isSameAs(first);
     assertThat(ex.getMessage()).isSameAs(first);
@@ -75,7 +75,7 @@ class ZetaContextExceptionTest {
   void defaultConstructorShouldCarryStackTrace() {
     // Only control-flow subclasses (ZetaBlockedException) opt out of stack filling;
     // the base class keeps the standard Throwable behaviour.
-    var ex = new ZetaContextException("Src", "hello");
+    var ex = new ZetaContextException("Src", "hello", null);
     assertThat(ex.getStackTrace()).isNotEmpty();
   }
 }

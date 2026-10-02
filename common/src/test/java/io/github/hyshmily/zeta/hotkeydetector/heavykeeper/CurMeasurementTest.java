@@ -17,7 +17,7 @@ class CurMeasurementTest {
     Field slotSumsField = HeavyKeeper.class.getDeclaredField("slotSums");
     slotSumsField.setAccessible(true);
 
-    HeavyKeeper hk = new HeavyKeeper(100, 2048, 4, 0.9, 100, 5000, 3);
+    HeavyKeeper hk = new HeavyKeeper(100, 2048, 4, 0.9, 100, 5000, 3, false);
     String key = "hot-key";
 
     int[] qpsValues = { 100, 500, 1000 };

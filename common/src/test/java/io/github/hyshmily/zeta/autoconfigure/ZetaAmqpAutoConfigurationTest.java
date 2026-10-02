@@ -567,7 +567,7 @@ class ZetaAmqpAutoConfigurationTest {
     );
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader<Object> loader = config.hotKeyClusterLoader(
+    CacheLoader<Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(
       redisTemplate,
       (org.springframework.beans.factory.ObjectProvider<io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry>) mock(
         org.springframework.beans.factory.ObjectProvider.class
@@ -588,7 +588,7 @@ class ZetaAmqpAutoConfigurationTest {
     when(provider.getIfAvailable()).thenReturn(new io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry());
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader<Object> loader = config.hotKeyClusterLoader(redisTemplate, provider);
+    CacheLoader<Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(redisTemplate, provider);
 
     assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.PrefixRoutedLoader.class);
   }
@@ -603,7 +603,7 @@ class ZetaAmqpAutoConfigurationTest {
       mock(org.springframework.beans.factory.ObjectProvider.class);
 
     ZetaAmqpAutoConfiguration.SyncConfiguration config = new ZetaAmqpAutoConfiguration.SyncConfiguration();
-    CacheLoader<Object> loader = config.hotKeyClusterLoader(redisTemplate, provider);
+    CacheLoader<Object> loader = ZetaAmqpAutoConfiguration.hotKeyClusterLoader(redisTemplate, provider);
 
     assertThat(loader).isInstanceOf(io.github.hyshmily.zeta.cache.loader.RedisValueLoader.class);
   }

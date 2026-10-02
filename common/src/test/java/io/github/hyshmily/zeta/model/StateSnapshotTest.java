@@ -8,7 +8,7 @@ class StateSnapshotTest {
 
   @Test
   void shouldCreateSnapshotWithAllFields() {
-    StateSnapshot snap = new StateSnapshot("k1", "CONFIRMED_HOT", 3, 0, 2.5, 1.0, 1, 7);
+    StateSnapshot snap = new StateSnapshot("k1", "CONFIRMED_HOT", 3, 0, 2.5, 1.0, 1, 7, false);
     assertThat(snap.key()).isEqualTo("k1");
     assertThat(snap.currentState()).isEqualTo("CONFIRMED_HOT");
     assertThat(snap.hotStreak()).isEqualTo(3);
@@ -21,7 +21,7 @@ class StateSnapshotTest {
 
   @Test
   void shouldCreateSnapshotWithDefaultValues() {
-    StateSnapshot snap = new StateSnapshot("k2", "COLD", 0, 0, 2.3026, 0.0, 0, 0);
+    StateSnapshot snap = new StateSnapshot("k2", "COLD", 0, 0, 2.3026, 0.0, 0, 0, false);
     assertThat(snap.posteriorMean()).isEqualTo(2.3026);
     assertThat(snap.accumulatedPrecision()).isZero();
   }
@@ -46,7 +46,7 @@ class StateSnapshotTest {
 
   @Test
   void shouldSupportFluentAccessors() {
-    StateSnapshot snap = new StateSnapshot("k4", "CANDIDATE_HOT", 2, 1, 2.0, 0.5, 2, 4);
+    StateSnapshot snap = new StateSnapshot("k4", "CANDIDATE_HOT", 2, 1, 2.0, 0.5, 2, 4, false);
     assertThat(snap.key()).isEqualTo("k4");
     assertThat(snap.currentState()).isEqualTo("CANDIDATE_HOT");
     assertThat(snap.mutationSeq()).isEqualTo(4);

@@ -182,7 +182,7 @@ class WorkerDetectionMetricsTest {
       "test-node",
       new AtomicLong(0L),
       mock(SnowflakeIdGenerator.class)
-    );
+    , null);
 
     assertThat(legacy.broadcastHot("legacyKey")).isTrue();
     assertThat(legacy.broadcastCool("legacyCoolKey")).isTrue();

@@ -11,9 +11,9 @@ import org.junit.jupiter.api.Test;
  */
 class BayesianConfidenceEstimatorTest {
 
-  private static final BayesianConfidenceEstimator DEFAULT = new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.8);
+  private static final BayesianConfidenceEstimator DEFAULT = new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.8, 0.95, 0.76);
 
-  private static final BayesianConfidenceEstimator OPTIMISTIC = new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5);
+  private static final BayesianConfidenceEstimator OPTIMISTIC = new BayesianConfidenceEstimator(BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5, 0.95, 0.76);
 
   @Nested
   class ConfidenceLevels_defaultParams {

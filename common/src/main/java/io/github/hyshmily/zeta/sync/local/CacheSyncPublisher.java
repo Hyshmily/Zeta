@@ -107,22 +107,6 @@ public class CacheSyncPublisher {
   private final String appName;
 
   /**
-   * Convenience constructor for callers that do not declare an application name —
-   * the stamped header is omitted and every receiver processes the message.
-   *
-   * @param rabbitTemplate       template bound to the sync exchange
-   * @param properties           sync configuration
-   * @param snowflakeIdGenerator message-id source
-   */
-  public CacheSyncPublisher(
-    RabbitTemplate rabbitTemplate,
-    CacheSyncProperties properties,
-    SnowflakeIdGenerator snowflakeIdGenerator
-  ) {
-    this(rabbitTemplate, properties, snowflakeIdGenerator, null);
-  }
-
-  /**
    * Stamp this instance's application name on an outgoing sync message.
    *
    * <p>Why it matters: the sync exchange is a {@code FanoutExchange} whose name is a

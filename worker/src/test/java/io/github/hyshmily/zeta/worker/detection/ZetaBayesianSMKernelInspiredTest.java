@@ -58,8 +58,7 @@ import org.junit.jupiter.api.Test;
 class ZetaBayesianSMKernelInspiredTest {
 
   private static final ConfidenceEvaluator EVAL = new BayesianConfidenceEstimator(
-    BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5
-  );
+    BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5, 0.95, 0.76);
 
   /** Hot window: sum 100 vs threshold 10 → HIGH confidence. */
   private static final EvaluationContext HOT_CTX = new EvaluationContext(100L, 100L, 10L, Double.NaN, 0.0);
@@ -294,10 +293,10 @@ class ZetaBayesianSMKernelInspiredTest {
     assertThat(machine.getStateSnapshot("k").coolStreak()).isEqualTo(7);
   }
 
-  /** The legacy 6-arg constructor keeps idle crediting disabled (existing tests unaffected). */
+  /** {@code counterWindowMs = 0} keeps idle crediting disabled (existing tests unaffected). */
   @Test
-  void legacyConstructor_disablesIdleCredit() {
-    ZetaBayesianSM legacy = new ZetaBayesianSM(3, 10, 4, EVAL, BayesianConfidenceEstimator.PRIOR_MEAN);
+  void zeroCounterWindow_disablesIdleCredit() {
+    ZetaBayesianSM legacy = new ZetaBayesianSM(3, 10, 4, EVAL, BayesianConfidenceEstimator.PRIOR_MEAN, 10_000L, 0L);
     for (int i = 0; i < 3; i++) {
       legacy.evaluate("k", true, false, HOT_CTX);
     }

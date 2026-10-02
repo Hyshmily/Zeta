@@ -54,7 +54,7 @@ class HeavyKeeperSnapshotTest {
    */
   @Test
   void snapshotMembersSorted_shouldSortByCountDescThenKeyAsc() {
-    HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1);
+    HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1, 10_000, 3, false);
     Map<String, Long> seed = new HashMap<>();
     seed.put("alpha", 50L);
     seed.put("gamma", 50L);
@@ -74,7 +74,7 @@ class HeavyKeeperSnapshotTest {
    */
   @Test
   void snapshotMembersSorted_shouldLimitToRequestedN() {
-    HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1);
+    HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1, 10_000, 3, false);
     Map<String, Long> seed = new HashMap<>();
     seed.put("alpha", 50L);
     seed.put("gamma", 50L);
@@ -90,7 +90,7 @@ class HeavyKeeperSnapshotTest {
   /** An empty membership yields an empty snapshot (no sentinel entries). */
   @Test
   void snapshotMembersSorted_shouldReturnEmptyForNoMembers() {
-    HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1);
+    HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1, 10_000, 3, false);
 
     assertThat(hk.snapshotMembersSorted(8)).isEmpty();
   }
@@ -101,7 +101,7 @@ class HeavyKeeperSnapshotTest {
    */
   @Test
   void listTopN_shouldReportSnapshotCounts() {
-    HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1);
+    HeavyKeeper hk = new HeavyKeeper(8, 1024, 4, 0.9, 1, 10_000, 3, false);
     Map<String, Long> seed = new HashMap<>();
     seed.put("alpha", 50L);
     seed.put("gamma", 50L);
@@ -131,7 +131,7 @@ class HeavyKeeperSnapshotTest {
   @Test
   void list_shouldSurviveConcurrentCountMutation() throws Exception {
     final int k = 100; // > TimSort MIN_MERGE (32): the merge passes run
-    HeavyKeeper hk = new HeavyKeeper(k, 1024, 4, 0.9, 1, 8192, 3);
+    HeavyKeeper hk = new HeavyKeeper(k, 1024, 4, 0.9, 1, 8192, 3, false);
     Map<String, Long> seed = new HashMap<>();
     for (int i = 0; i < k; i++) {
       seed.put("key-" + i, 10L + i);

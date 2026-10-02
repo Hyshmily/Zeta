@@ -90,25 +90,14 @@ public class CacheSyncListener {
   /* weight 1~ for 1KB(1024bits) */
   private static final int BYTE_WEIGHT = 10;
 
-  /**
-   * Convenience constructor for callers that do not declare an application name —
-   * the receiver then processes sync messages from every application.
-   *
-   * @param properties      sync configuration
-   * @param scheduler       dedicated sync scheduler
-   * @param decisionHandler strategy for applying a decoded sync message
-   */
-  public CacheSyncListener(
-    CacheSyncProperties properties,
-    ScheduledExecutorService scheduler,
-    SyncDecisionHandler decisionHandler
-  ) {
-    this(properties, scheduler, decisionHandler, null);
-  }
-
   /** Per-key FIFO dispatcher for ordered cache mutation execution. */
   private PerKeyOrderedDispatcher dispatcher;
 
+  /**
+   * Creates a listener. {@code appName} may be {@code null}/blank to process
+   * sync messages from every application (the pre-0068 behaviour, which
+   * legacy wiring and rolling upgrades still need).
+   */
   public CacheSyncListener(
     CacheSyncProperties properties,
     ScheduledExecutorService scheduler,

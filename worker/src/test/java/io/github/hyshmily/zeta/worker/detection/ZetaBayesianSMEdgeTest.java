@@ -44,7 +44,7 @@ class ZetaBayesianSMEdgeTest {
 
   private static final ConfidenceEvaluator EVAL = new BayesianConfidenceEstimator(
     BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5
-  );
+  , 0.95, 0.76);
 
   private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, Double.NaN, 0.0);
 
@@ -73,7 +73,8 @@ class ZetaBayesianSMEdgeTest {
       grace,
       EVAL,
       BayesianConfidenceEstimator.PRIOR_MEAN,
-      Long.MAX_VALUE
+      Long.MAX_VALUE,
+      0L
     );
   }
 
@@ -361,7 +362,7 @@ class ZetaBayesianSMEdgeTest {
   @Test
   void rollbackToPreviousState_nonExistentKey_shouldNotThrow() {
     ZetaBayesianSM m = machineWith(3, 10, 4);
-    StateSnapshot snapshot = new StateSnapshot("never-added", "CONFIRMED_HOT", 3, 0, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0, 0, 0);
+    StateSnapshot snapshot = new StateSnapshot("never-added", "CONFIRMED_HOT", 3, 0, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0, 0, 0, false);
     assertThatCode(() -> m.rollbackToPreviousState("never-added", snapshot)).doesNotThrowAnyException();
   }
 
@@ -406,7 +407,7 @@ class ZetaBayesianSMEdgeTest {
     ZetaBayesianSM m = machineWith(3, 10, 4);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
     assertThat(m.evaluate("key", true, false, CTX).type()).isEqualTo(DecisionType.NONE);
-    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0, 0, 1);
+    StateSnapshot bad = new StateSnapshot("key", "NON_EXISTENT_STATE", 0, 0, BayesianConfidenceEstimator.PRIOR_MEAN, 0.0, 0, 1, false);
     assertThatThrownBy(() -> m.rollbackToPreviousState("key", bad)).isInstanceOf(IllegalArgumentException.class);
   }
 

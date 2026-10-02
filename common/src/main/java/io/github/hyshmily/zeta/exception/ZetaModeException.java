@@ -63,7 +63,7 @@ public class ZetaModeException extends ZetaContextException {
    *                      the operation (e.g. {@code "App-mode cache"})
    */
   public ZetaModeException(String operation, String currentMode, String requiredMode) {
-    super(SOURCE_CLASS, "HotKey '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode);
+    super(SOURCE_CLASS, "HotKey '" + operation + "' requires " + requiredMode + ", but instance is in " + currentMode, null);
     this.operation = operation;
     this.currentMode = currentMode;
     this.requiredMode = requiredMode;

@@ -285,7 +285,7 @@ class WaveCounterTest {
     List<Map<String, Long>> captured = new ArrayList<>();
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     try {
-      WaveCounter c = new WaveCounter(captured::add, 3, 50, 0.5, sched);
+      WaveCounter c = new WaveCounter(captured::add, 3, 50, 0.5, sched, WaveCounter.DEFAULT_DELIVER_INTERVAL_MS);
       for (int i = 0; i < 5; i++) {
         c.count("cold-" + i, 1);
       }

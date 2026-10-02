@@ -156,27 +156,6 @@ public class BbrRateLimiterImpl implements BbrRateLimiter {
   private final AtomicLong totalDropped = new AtomicLong(0);
 
   /**
-   * Constructs a BBR rate limiter with explicit configuration and the default
-   * absolute in-flight ceiling.
-   *
-   * @param cpuMonitor  the system CPU load monitor used to derive the load signal
-   * @param cpuThreshold CPU threshold on a 0-1000 scale; center of the continuous
-   *                     derating ramp (see class javadoc)
-   * @param windowMs    duration of the sliding window in milliseconds
-   * @param bucketCount number of buckets within the sliding window
-   * @param cooldownMs  duration of the cooldown period after a drop in milliseconds
-   */
-  public BbrRateLimiterImpl(
-    SystemLoadMonitor cpuMonitor,
-    int cpuThreshold,
-    long windowMs,
-    int bucketCount,
-    long cooldownMs
-  ) {
-    this(cpuMonitor, cpuThreshold, windowMs, bucketCount, cooldownMs, DEFAULT_MAX_IN_FLIGHT_CEILING);
-  }
-
-  /**
    * Constructs a BBR rate limiter with explicit configuration including the
    * absolute in-flight ceiling.
    *

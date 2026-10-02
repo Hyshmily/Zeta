@@ -79,3 +79,5 @@ CLAUDE.md
 *.history/
 .workbuddy
 /run-mvn.cmd
+/.tmp.driveupload/
+/.tmp.drivedownload/

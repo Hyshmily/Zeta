@@ -144,7 +144,7 @@ class WaveCounterQuiescenceGateTest {
   void capacityDrop_shouldLeaveFlagUntouched() {
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     try {
-      WaveCounter c = new WaveCounter(m -> {}, 1, 50, 0.5, sched);
+      WaveCounter c = new WaveCounter(m -> {}, 1, 50, 0.5, sched, WaveCounter.DEFAULT_DELIVER_INTERVAL_MS);
       c.count("a", 1);
       c.clear();
       assertThat(readFlag(c)).isFalse();

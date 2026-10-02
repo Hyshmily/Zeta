@@ -201,7 +201,7 @@ class ZetaReporterTest {
     reporter.start();
     reporter.reportToWorker("key-x");
     reporter.reportToWorker("key-y");
-    // Wait until both keys appear across all messages (BufferedCounter eager swap may
+    // Wait until both keys appear across all messages (eager swap may
     // split keys across multiple batches).
     long deadline = System.currentTimeMillis() + AWAIT_TIMEOUT_MS;
     boolean allSeen = false;
@@ -295,7 +295,7 @@ class ZetaReporterTest {
     for (int i = 0; i < 100; i++) {
       reporter.reportToWorker("bulk-key-" + i);
     }
-    // Wait until all 100 distinct keys appear across all messages (BufferedCounter
+    // Wait until all 100 distinct keys appear across all messages (periodic flush may
     // eager swap may split keys across multiple batches).
     long deadline = System.currentTimeMillis() + AWAIT_TIMEOUT_MS;
     boolean allSeen = false;
@@ -319,7 +319,7 @@ class ZetaReporterTest {
   void flush_withBbrRateLimiter_shouldWireCorrectly() {
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.9);
-    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000);
+    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000, 128L);
     reporter.setBbrRateLimiter(bbr);
     assertThat(reporter.bbrPassed()).isZero();
     assertThat(reporter.bbrDropped()).isZero();
@@ -331,7 +331,7 @@ class ZetaReporterTest {
   void flush_withBbrRateLimiterAndRecords_shouldTrackMetrics() throws Exception {
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(0.5);
-    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000);
+    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000, 128L);
     reporter.setBbrRateLimiter(bbr);
     registerWorker(healthView, "worker-1");
     reporter.start();
@@ -344,7 +344,7 @@ class ZetaReporterTest {
   void flush_withHighCpuBbr_shouldDropRecords() throws Exception {
     SystemLoadMonitor cpuMonitor = mock(SystemLoadMonitor.class);
     when(cpuMonitor.getCpuLoadEMA()).thenReturn(1.0);
-    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000);
+    BbrRateLimiterImpl bbr = new BbrRateLimiterImpl(cpuMonitor, 800, 500, 5, 1000, 128L);
     reporter.setBbrRateLimiter(bbr);
     registerWorker(healthView, "worker-1");
     reporter.start();

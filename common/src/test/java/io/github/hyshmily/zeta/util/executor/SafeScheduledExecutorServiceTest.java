@@ -240,14 +240,10 @@ class SafeScheduledExecutorServiceTest {
   }
 
   @Test
-  void constructorVariants_shouldBeUsable() {
-    var a = new SafeScheduledExecutorService(1);
+  void constructor_shouldBeUsable() {
     var b = new SafeScheduledExecutorService(1, r -> new Thread(r));
-    var c = new SafeScheduledExecutorService(1, r -> new Thread(r), (r, e) -> {});
-    assertThat(List.of(a, b, c)).allMatch(e -> e.getPoolSize() == 0);
-    a.shutdownNow();
+    assertThat(b.getPoolSize()).isEqualTo(0);
     b.shutdownNow();
-    c.shutdownNow();
   }
 
   @Test

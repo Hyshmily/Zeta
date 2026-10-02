@@ -73,15 +73,6 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
   private final ConcurrentHashMap<Runnable, SafePeriodicTask> chains = new ConcurrentHashMap<>();
 
   /**
-   * Creates a safe scheduled executor with the given core pool size.
-   *
-   * @param corePoolSize the number of threads to keep in the pool
-   */
-  public SafeScheduledExecutorService(int corePoolSize) {
-    super(corePoolSize);
-  }
-
-  /**
    * Creates a safe scheduled executor with the given core pool size and thread factory.
    *
    * @param corePoolSize  the number of threads to keep in the pool
@@ -89,18 +80,6 @@ public class SafeScheduledExecutorService extends ScheduledThreadPoolExecutor {
    */
   public SafeScheduledExecutorService(int corePoolSize, ThreadFactory threadFactory) {
     super(corePoolSize, threadFactory);
-  }
-
-  /**
-   * Creates a safe scheduled executor with the given core pool size, thread factory and
-   * rejected-execution handler.
-   *
-   * @param corePoolSize  the number of threads to keep in the pool
-   * @param threadFactory the factory used when creating new threads
-   * @param handler       the handler for tasks that cannot be executed
-   */
-  public SafeScheduledExecutorService(int corePoolSize, ThreadFactory threadFactory, RejectedExecutionHandler handler) {
-    super(corePoolSize, threadFactory, handler);
   }
 
   @Override

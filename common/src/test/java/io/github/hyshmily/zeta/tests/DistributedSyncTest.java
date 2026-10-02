@@ -1,5 +1,7 @@
 package io.github.hyshmily.zeta.tests;
 
+import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
+
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
@@ -40,6 +42,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.*;
+
+import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -141,21 +145,21 @@ class DistributedSyncTest {
 
   private SyncDecisionHandler syncHandler(CacheLoader loader) {
     ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
-    return new DefaultSyncDecisionHandler(cache, loader, expire, ruleMatcher, List.of());
+    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
+    return new DefaultSyncDecisionHandler(cache, loader, expire, ruleMatcher, List.of(), null);
   }
 
   private CacheSyncListener createListener(CacheLoader loader) {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
-    CacheSyncListener l = new CacheSyncListener(props, scheduler, syncHandler(loader));
+    CacheSyncListener l = new CacheSyncListener(props, scheduler, syncHandler(loader), null);
     l.init();
     return l;
   }
 
   private WorkerDecisionHandler workerHandler(CacheLoader loader, SreRateLimiterImpl limiter) {
     ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
     return new DefaultWorkerDecisionHandler(cache, loader, expire, limiter, null, List.of());
   }
 
@@ -163,7 +167,7 @@ class DistributedSyncTest {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
     props.getSre().setEnabled(limiter != null);
-    WorkerListener l = new WorkerListener(props, scheduler, workerHandler(loader, limiter));
+    WorkerListener l = new WorkerListener(props, scheduler, workerHandler(loader, limiter), null);
     l.init();
     return l;
   }
@@ -181,7 +185,7 @@ class DistributedSyncTest {
     void broadcastRefresh_setsCorrectHeaders() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       CacheSyncProperties props = new CacheSyncProperties();
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, mock(SnowflakeIdGenerator.class));
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, props, mock(SnowflakeIdGenerator.class), null);
       pub.init();
 
       pub.broadcastRefresh("myKey", 42L, false);
@@ -199,7 +203,7 @@ class DistributedSyncTest {
     @DisplayName("broadcastLocalInvalidate sets correct headers and body")
     void broadcastLocalInvalidate_setsCorrectHeaders() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
       pub.init();
 
       pub.broadcastLocalInvalidate("del-key", 7L, true);
@@ -216,7 +220,7 @@ class DistributedSyncTest {
     @DisplayName("broadcastLocalInvalidateAll sends JSON array body")
     void broadcastLocalInvalidateAll_sendsJsonBody() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
       pub.init();
 
       pub.broadcastLocalInvalidateAll(List.of("k1", "k2"));
@@ -234,7 +238,7 @@ class DistributedSyncTest {
     @DisplayName("broadcastAllLocalRules sends rules JSON and version header")
     void broadcastAllLocalRules_setsRulesVersionHeader() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
       pub.init();
 
       pub.broadcastAllLocalRules("{\"v\":2}", 99L);
@@ -251,7 +255,7 @@ class DistributedSyncTest {
     @DisplayName("dedup composite key differs between degraded and normal")
     void dedupSeparatesDegradedAndNormal() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
       pub.init();
 
       pub.broadcastRefresh("k", 1L, false);
@@ -264,7 +268,7 @@ class DistributedSyncTest {
     @DisplayName("dedup blocks same degraded version re-send")
     void dedupBlocksDegradedResend() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
       pub.init();
 
       pub.broadcastRefresh("k", 5L, true);
@@ -278,7 +282,7 @@ class DistributedSyncTest {
     void publisher_handlesAmqpException() {
       RabbitTemplate rt = mock(RabbitTemplate.class);
       doThrow(new AmqpException("Broker down")).when(rt).send(anyString(), anyString(), any());
-      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class));
+      CacheSyncPublisher pub = new CacheSyncPublisher(rt, new CacheSyncProperties(), mock(SnowflakeIdGenerator.class), null);
       pub.init();
 
       pub.broadcastRefresh("k", 1L, false);
@@ -724,7 +728,8 @@ class DistributedSyncTest {
         rt,
         healthView,
         "test-app",
-        new WorkerHeartbeatVerifier.VerifierConfig(100_000, 500, 60_000)
+        new WorkerHeartbeatVerifier.VerifierConfig(100_000, 500, 60_000),
+        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
       );
     }
 
@@ -783,7 +788,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("tasks for same key execute in FIFO order")
     void sameKey_fifoOrder() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test");
+      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
       try {
         AtomicInteger seq = new AtomicInteger(0);
         CountDownLatch latch = new CountDownLatch(3);
@@ -812,7 +817,7 @@ class DistributedSyncTest {
     void differentKeys_noBlocking() throws Exception {
       // Use a multi-threaded executor so that tasks for different keys can run concurrently
       ScheduledExecutorService multiScheduler = Executors.newScheduledThreadPool(4);
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(multiScheduler, "test");
+      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(multiScheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
       try {
         CountDownLatch task1Block = new CountDownLatch(1);
         CountDownLatch task1Running = new CountDownLatch(1);
@@ -842,7 +847,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("delayed submission preserves per-key FIFO ordering")
     void delayedSubmission_preservesOrder() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test");
+      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
       try {
         List<Integer> executionOrder = Collections.synchronizedList(new ArrayList<>());
         CountDownLatch latch = new CountDownLatch(3);
@@ -885,7 +890,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("closed dispatcher drops tasks")
     void closed_dropsTasks() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test");
+      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
       d.close();
 
       CountDownLatch latch = new CountDownLatch(1);
@@ -897,7 +902,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("full queue silently rejects overflow tasks")
     void fullQueue_rejectsOverflow() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", 1);
+      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", 1, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
       try {
         CountDownLatch block = new CountDownLatch(1);
         CountDownLatch started = new CountDownLatch(1);
@@ -1173,7 +1178,8 @@ class DistributedSyncTest {
         mock(RabbitTemplate.class),
         spy(new HealthViewImpl(5000, 99)),
         "app",
-        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000)
+        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000),
+        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
       );
       long result = invokeComputeBackoff(v, 1);
       assertThat(result).isEqualTo(1000L);
@@ -1186,7 +1192,8 @@ class DistributedSyncTest {
         mock(RabbitTemplate.class),
         spy(new HealthViewImpl(5000, 99)),
         "app",
-        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000)
+        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000),
+        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
       );
       long result = invokeComputeBackoff(v, 2);
       assertThat(result).isEqualTo(2000L);
@@ -1199,7 +1206,8 @@ class DistributedSyncTest {
         mock(RabbitTemplate.class),
         spy(new HealthViewImpl(5000, 99)),
         "app",
-        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000)
+        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000),
+        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
       );
       // attempt 4: shift = 4+1 = 5, so 1000 * (1 << 5) = 32000
       long result = invokeComputeBackoff(v, 4);
@@ -1213,7 +1221,8 @@ class DistributedSyncTest {
         mock(RabbitTemplate.class),
         spy(new HealthViewImpl(5000, 99)),
         "app",
-        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 5000)
+        new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 5000),
+        Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
       );
       // attempt 5: shift = 5+1 = 6, 1000 * (1 << 6) = 64000, capped to 5000
       long result = invokeComputeBackoff(v, 5);
@@ -1289,7 +1298,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("three sequential tasks for same key execute in order")
     void threeTasks_sameKey_inOrder() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test");
+      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
       try {
         List<Integer> results = new CopyOnWriteArrayList<>();
         CountDownLatch latch = new CountDownLatch(3);
@@ -1317,7 +1326,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("no interleaving: same key tasks don't overlap")
     void sameKey_tasksDontOverlap() throws Exception {
-      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test");
+      PerKeyOrderedDispatcher d = new PerKeyOrderedDispatcher(scheduler, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
       try {
         CountDownLatch task1Running = new CountDownLatch(1);
         CountDownLatch task1Done = new CountDownLatch(1);
@@ -1583,7 +1592,7 @@ class DistributedSyncTest {
     @DisplayName("record defers then flush sends all pending")
     void recordThenFlush_sendsAll() {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
 
       buf.record("k1", 1L, false);
       buf.record("k2", 2L, true);
@@ -1598,7 +1607,7 @@ class DistributedSyncTest {
     @DisplayName("last-writer-wins: recording same key twice sends only latest")
     void lastWriterWins() {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
 
       buf.record("k", 1L, false);
       buf.record("k", 5L, true);
@@ -1621,7 +1630,7 @@ class DistributedSyncTest {
         .when(pub)
         .broadcastRefresh("auto", 1L, false);
 
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 100);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 100, Math.max(100, 2_000), null);
       buf.record("auto", 1L, false);
 
       assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
@@ -1632,7 +1641,7 @@ class DistributedSyncTest {
     @DisplayName("flush with no records does nothing")
     void flush_noRecords_noop() {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
       buf.flush();
       verifyNoInteractions(pub);
     }
@@ -1643,7 +1652,7 @@ class DistributedSyncTest {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
       doThrow(new RuntimeException("pub fail")).when(pub).broadcastRefresh("bad", 1L, false);
 
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
       buf.record("bad", 1L, false);
       buf.record("good", 2L, false);
 
@@ -1657,7 +1666,7 @@ class DistributedSyncTest {
     @DisplayName("concurrent record and flush is safe")
     void concurrent_recordAndFlush_safe() throws Exception {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000);
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
 
       ExecutorService pool = Executors.newFixedThreadPool(4);
       CountDownLatch startGate = new CountDownLatch(1);
@@ -1687,7 +1696,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("record with no publisher is safe")
     void record_noPublisher_safe() {
-      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.empty());
+      BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null);
       buf.record("k", 1L, false);
       buf.flush();
       // No exception

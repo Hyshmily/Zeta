@@ -32,7 +32,7 @@ class CentralDispatcherTest {
     reporter = mock(KeyReporter.class);
     publisher = mock(CacheSyncPublisher.class);
     scheduler = Executors.newSingleThreadScheduledExecutor();
-    broadcastBuffer = new BroadcastBuffer(scheduler, Optional.empty());
+    broadcastBuffer = new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null);
   }
 
   @AfterEach

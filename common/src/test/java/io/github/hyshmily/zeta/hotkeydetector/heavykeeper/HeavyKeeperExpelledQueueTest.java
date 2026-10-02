@@ -48,7 +48,7 @@ class HeavyKeeperExpelledQueueTest {
    */
   @Test
   void decayDrop_withFullQueue_shouldBeAccountedAndMemberRemoved() throws Exception {
-    HeavyKeeper hk = new HeavyKeeper(2, 1024, 4, 0.9, 1, 1, 3);
+    HeavyKeeper hk = new HeavyKeeper(2, 1024, 4, 0.9, 1, 1, 3, false);
     hk.warm(Map.of("a", 1L, "b", 1L));
     // Fill the single-slot queue so both decay drops below fail to offer.
     assertThat(hk.expelled().offer(new Item("dummy", 1L))).isTrue();
@@ -66,7 +66,7 @@ class HeavyKeeperExpelledQueueTest {
    */
   @Test
   void admissionEvict_withFullQueue_shouldBeAccounted() throws Exception {
-    HeavyKeeper hk = new HeavyKeeper(1, 1024, 4, 0.9, 1, 1, 3);
+    HeavyKeeper hk = new HeavyKeeper(1, 1024, 4, 0.9, 1, 1, 3, false);
     assertThat(hk.addDirect("a", 10).isHotKey()).isTrue();
     assertThat(hk.expelled().offer(new Item("dummy", 1L))).isTrue();
 

@@ -54,7 +54,7 @@ class WorkerBroadcasterTest {
 
   @BeforeEach
   void setUp() {
-    broadcaster = new WorkerBroadcaster(rabbitTemplate, BROADCAST, "testApp", "test-node", epochCounter, mock(SnowflakeIdGenerator.class));
+    broadcaster = new WorkerBroadcaster(rabbitTemplate, BROADCAST, "testApp", "test-node", epochCounter, mock(SnowflakeIdGenerator.class), null);
   }
 
   /**

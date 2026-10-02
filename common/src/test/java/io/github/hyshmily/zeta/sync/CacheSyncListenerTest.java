@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.sync;
 
+import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
+
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -69,17 +71,17 @@ class CacheSyncListenerTest {
     properties.setWarmupJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
     ruleMatcher = mock(RuleMatcher.class);
 
     SyncDecisionHandler handler = handler(k -> "refreshed");
-    listener = new CacheSyncListener(properties, scheduler, handler);
+    listener = new CacheSyncListener(properties, scheduler, handler, null);
     listener.init();
     channel = mock(Channel.class);
   }
 
   private SyncDecisionHandler handler(CacheLoader loader) {
-    return new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, Collections.emptyList());
+    return new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, Collections.emptyList(), null);
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
@@ -137,7 +139,7 @@ class CacheSyncListenerTest {
     };
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
-    CacheSyncListener burstListener = new CacheSyncListener(props, scheduler, handler(blockingLoader));
+    CacheSyncListener burstListener = new CacheSyncListener(props, scheduler, handler(blockingLoader), null);
     burstListener.init();
 
     try {
@@ -224,7 +226,7 @@ class CacheSyncListenerTest {
     CacheSyncProperties properties = new CacheSyncProperties();
     properties.setWarmupJitterMs(0);
     SyncDecisionHandler h = handler(k -> null);
-    CacheSyncListener nullListener = new CacheSyncListener(properties, scheduler, h);
+    CacheSyncListener nullListener = new CacheSyncListener(properties, scheduler, h, null);
     nullListener.init();
 
     nullListener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
@@ -325,7 +327,7 @@ class CacheSyncListenerTest {
     SyncDecisionHandler h = handler(k -> {
       throw new RuntimeException("Redis down");
     });
-    CacheSyncListener failingListener = new CacheSyncListener(props, scheduler, h);
+    CacheSyncListener failingListener = new CacheSyncListener(props, scheduler, h, null);
     failingListener.init();
 
     cache.put("key1", entry(1, false, 0));
@@ -386,7 +388,7 @@ class CacheSyncListenerTest {
     CacheSyncProperties props = new CacheSyncProperties();
     props.setWarmupJitterMs(0);
     SyncDecisionHandler h = handler(k -> null);
-    CacheSyncListener nullListener = new CacheSyncListener(props, scheduler, h);
+    CacheSyncListener nullListener = new CacheSyncListener(props, scheduler, h, null);
     nullListener.init();
 
     cache.put("key1", entry(5, false, 0));

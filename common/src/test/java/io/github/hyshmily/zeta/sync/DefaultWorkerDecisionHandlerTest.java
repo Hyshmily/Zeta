@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.sync;
 
+import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
+
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -59,7 +61,7 @@ class DefaultWorkerDecisionHandlerTest {
   void setUp() {
     cache = Caffeine.newBuilder().maximumSize(100).build();
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
     loader = k -> "fresh";
     handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, Collections.emptyList());
   }
@@ -291,7 +293,7 @@ class DefaultWorkerDecisionHandlerTest {
     // The setUp ExpireManagerImpl uses CacheCompressor.NONE; the envelope form
     // only exists under the real LZ4 codec (ADR-0015).
     ExpireManagerImpl lz4Manager =
-        new ExpireManagerImpl(cache, Runnable::run, new ZetaProperties(), 10, new Lz4CacheCompressor());
+        new ExpireManagerImpl(cache, Runnable::run, new ZetaProperties(), 10, new Lz4CacheCompressor(), null);
     String original = "zeta-fallback-value-".repeat(60); // ≥256 bytes — wrapped, not stored verbatim
     Object wrapped = lz4Manager.wrapValue(original);
     assertThat(wrapped).isInstanceOf(byte[].class);

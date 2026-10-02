@@ -61,18 +61,6 @@ public class WorkerConfigNegotiator {
   private final CountDownLatch startupLatch = new CountDownLatch(1);
 
   /**
-   * Compatibility constructor without fast-lane rules gossip (rules messages
-   * are silently skipped). Prefer {@link #WorkerConfigNegotiator(ZetaBayesianSM, AtomicLong, String, FastLaneRuleManager)}.
-   *
-   * @param stateMachine           the worker's state machine
-   * @param configTimestampCounter the shared config-change timestamp counter
-   * @param nodeId                 unique identifier for this Worker node
-   */
-  public WorkerConfigNegotiator(ZetaBayesianSM stateMachine, AtomicLong configTimestampCounter, String nodeId) {
-    this(stateMachine, configTimestampCounter, nodeId, null);
-  }
-
-  /**
    * Full constructor with fast-lane rules gossip support.
    *
    * @param stateMachine           the worker's state machine

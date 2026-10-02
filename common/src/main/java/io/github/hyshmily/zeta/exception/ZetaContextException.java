@@ -52,16 +52,6 @@ public class ZetaContextException extends RuntimeException {
   private volatile String logMessage;
 
   /**
-   * Creates a new context exception.
-   *
-   * @param sourceClass the simple name of the throwing class
-   * @param message     the detail message
-   */
-  public ZetaContextException(String sourceClass, String message) {
-    this(sourceClass, message, null);
-  }
-
-  /**
    * Creates a new context exception with a cause.
    *
    * @param sourceClass the simple name of the throwing class

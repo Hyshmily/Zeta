@@ -98,7 +98,7 @@ class WaveCounterRecyclingTest {
   @Test
   void capacityGuard_approximateSize_shouldDropNewColdKeys() throws Exception {
     List<Map<String, Long>> captured = new ArrayList<>();
-    WaveCounter c = new WaveCounter(captured::add, 3, 50, 0.5, null);
+    WaveCounter c = new WaveCounter(captured::add, 3, 50, 0.5, null, WaveCounter.DEFAULT_DELIVER_INTERVAL_MS);
     c.count("a", 1);
     c.count("b", 1);
     c.count("c", 1);
@@ -640,7 +640,7 @@ class WaveCounterRecyclingTest {
   @Test
   void capacityGuard_overshoot_admitsNewKeysWithinHeadroom() throws Exception {
     List<Map<String, Long>> captured = new ArrayList<>();
-    WaveCounter c = new WaveCounter(captured::add, 100, 50, 0.5, null);
+    WaveCounter c = new WaveCounter(captured::add, 100, 50, 0.5, null, WaveCounter.DEFAULT_DELIVER_INTERVAL_MS);
     for (int i = 0; i < 110; i++) {
       c.count("k" + i, 1);
     }
@@ -648,7 +648,7 @@ class WaveCounterRecyclingTest {
     assertThat(captured.get(captured.size() - 1)).as("headroom (10) admits up to 110 keys").hasSize(110);
 
     captured.clear();
-    WaveCounter c2 = new WaveCounter(captured::add, 100, 50, 0.5, null);
+    WaveCounter c2 = new WaveCounter(captured::add, 100, 50, 0.5, null, WaveCounter.DEFAULT_DELIVER_INTERVAL_MS);
     for (int i = 0; i < 111; i++) {
       c2.count("k" + i, 1);
     }

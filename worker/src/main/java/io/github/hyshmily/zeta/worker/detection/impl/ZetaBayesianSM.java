@@ -225,30 +225,6 @@ import lombok.extern.slf4j.Slf4j;
 public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBayesianSM {
 
   /**
-   * Constructs the state machine with the given lifecycle thresholds and
-   * the Bayesian confidence evaluator that gates every state transition.
-   *
-   * <p>Compatibility constructor: uses {@link #DEFAULT_REBROADCAST_INTERVAL_MS}
-   * as the periodic HOT rebroadcast interval (ADR-0024).
-   *
-   * @param confirmCount        consecutive hot windows to promote COLD → CONFIRMED_HOT
-   * @param coolCount           total consecutive cold windows for full cool-down
-   * @param preCoolGraceCount   cold windows before entering PRE_COOLING
-   * @param confidenceEvaluator the Bayesian confidence evaluator (must not be {@code null})
-   * @param priorMean           the global prior mean (log scale); used as the initial
-   *                            posterior mean for new keys
-   */
-  public ZetaBayesianSM(
-    int confirmCount,
-    int coolCount,
-    int preCoolGraceCount,
-    ConfidenceEvaluator confidenceEvaluator,
-    double priorMean
-  ) {
-    this(confirmCount, coolCount, preCoolGraceCount, confidenceEvaluator, priorMean, DEFAULT_REBROADCAST_INTERVAL_MS);
-  }
-
-  /**
    * Constructs the state machine with the given lifecycle thresholds, the
    * Bayesian confidence evaluator, and the periodic HOT rebroadcast interval.
    *
@@ -260,26 +236,9 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
    *                               posterior mean for new keys
    * @param rebroadcastIntervalMs  minimum interval between periodic HOT rebroadcasts
    *                               for a key that stays in {@code CONFIRMED_HOT} (ADR-0024)
-   */
-  public ZetaBayesianSM(
-    int confirmCount,
-    int coolCount,
-    int preCoolGraceCount,
-    ConfidenceEvaluator confidenceEvaluator,
-    double priorMean,
-    long rebroadcastIntervalMs
-  ) {
-    this(confirmCount, coolCount, preCoolGraceCount, confidenceEvaluator, priorMean, rebroadcastIntervalMs, 0L);
-  }
-
-  /**
-   * Full constructor: also takes the counter time-unit for the idle-epoch
-   * shift (kernel-inspired doc §6.4, CUBIC {@code cubictcp_cwnd_event_tx_start},
-   * tcp_cubic.c:142-158, verified against the local 7.3-rc4 copy).
-   *
-   * @param counterWindowMs duration of one evaluation window in the streak
-   *                        counters' semantics ({@code smDurationMs/smSlices});
-   *                        {@code 0} disables idle crediting
+   * @param counterWindowMs        duration of one evaluation window in the streak
+   *                               counters' semantics ({@code smDurationMs/smSlices});
+   *                               {@code 0} disables idle crediting
    */
   public ZetaBayesianSM(
     int confirmCount,
@@ -298,12 +257,6 @@ public class ZetaBayesianSM implements io.github.hyshmily.zeta.detection.ZetaBay
     this.rebroadcastIntervalMs = rebroadcastIntervalMs;
     this.counterWindowMs = Math.max(0L, counterWindowMs);
   }
-
-  /**
-   * Default interval between periodic HOT rebroadcasts for a continuously hot
-   * key (10 s). Used by the 5-arg compatibility constructor. See ADR-0024.
-   */
-  static final long DEFAULT_REBROADCAST_INTERVAL_MS = 10_000L;
 
   /**
    * Kernel-inspired doc §6.3 (BBR {@code full_bw}, tcp_bbr.c:874-890, verified

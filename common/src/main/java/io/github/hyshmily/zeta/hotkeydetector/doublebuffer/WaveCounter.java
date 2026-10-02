@@ -1405,53 +1405,12 @@ public class WaveCounter implements InitializingBean, Destroyable {
   }
 
   /**
-   * Compatibility constructor mirroring the deprecated
-   * {@link BufferedCounter} 5-arg shape so existing call sites (e.g.
-   * {@code KeyReporterImpl}) compile unchanged. The eager-swap
-   * ratio is a concept of the double-buffer design and is ignored here;
-   * the capacity is wired as a <em>soft</em> cap on the cold-path
-   * reservoir: once the shared table reaches it (plus a 10% overshoot
-   * headroom, see {@link #capacityHeadroom}), <b>new</b> keys are dropped
-   * — their counts are lost for this cycle — while already-tracked keys
-   * keep counting. The cap is approximate (racy size check) — it bounds
-   * memory, not exactness.
-   *
-   * @param batchConsumer    downstream consumer of merged snapshots
-   * @param capacity         max distinct cold keys per delivery cycle;
-   *                         {@code <= 0} means unbounded
-   * @param flushIntervalMs  retained for API compatibility — ignored
-   *                         (the flush-clock discharge was removed; the
-   *                         tide loop is the low-traffic fallback)
-   * @param ignoredSwapRatio ignored (no eager-swap in this design)
-   * @param scheduler        scheduler for the periodic flusher (not shut down by
-   *                         this instance)
-   */
-  public WaveCounter(
-      Consumer<Map<String, Long>> batchConsumer,
-      int capacity,
-      long flushIntervalMs,
-      double ignoredSwapRatio,
-      ScheduledExecutorService scheduler) {
-    this(
-        batchConsumer,
-        DEFAULT_MAX_OPCOUNT,
-        flushIntervalMs,
-        DEFAULT_DELIVER_INTERVAL_MS,
-        DEFAULT_HOT_LIMIT,
-        false,
-        scheduler);
-    this.capacity = Math.max(0, capacity);
-    this.capacityHeadroom = this.capacity / 10;
-  }
-
-  /**
-   * Compatibility constructor that additionally wires the delivery cadence.
+   * Constructor that additionally wires the delivery cadence and a soft
+   * capacity cap on the cold-path reservoir.
    *
    * <p>
-   * Unlike the 5-arg variant (whose {@code flushIntervalMs} is retained for
-   * API compatibility and ignored), this constructor passes
-   * {@code deliverIntervalMs} through to the tide loop, so callers such as
-   * {@code KeyReporterImpl} can honor their configured report interval
+   * {@code deliverIntervalMs} is passed through to the tide loop, so callers
+   * such as {@code KeyReporterImpl} can honor their configured report interval
    * ({@code zeta.local.report-interval-ms}, default 50ms) instead of the
    * 500ms adaptive default. Idle cycles stay at {@code deliverIntervalMs};
    * backlog pressure still shortens the cycle down to
@@ -1459,6 +1418,14 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * up to it — the scheduler enforces the floor on every fire regardless, so
    * a smaller setting only desynchronized the interval the governor's rate
    * normalization sees from the cadence actually scheduled.
+   *
+   * <p>
+   * The capacity is wired as a <em>soft</em> cap on the cold-path
+   * reservoir: once the shared table reaches it (plus a 10% overshoot
+   * headroom, see {@link #capacityHeadroom}), <b>new</b> keys are dropped
+   * — their counts are lost for this cycle — while already-tracked keys
+   * keep counting. The cap is approximate (racy size check) — it bounds
+   * memory, not exactness.
    *
    * @param batchConsumer     downstream consumer of merged snapshots
    * @param capacity          max distinct cold keys per delivery cycle;
@@ -1543,6 +1510,10 @@ public class WaveCounter implements InitializingBean, Destroyable {
     // a larger allocation would only be swept for nothing by decayCounts().
     this.beacon = new long[Math.toIntExact(Math.max(1, beaconBitCount >>> 4))]; // 4 bits per room (2+2 roles)
     this.ownsScheduler = ownsScheduler;
+    // Note: a null external scheduler is allowed at construction (a counter
+    // that never starts delivery legitimately uses this shape) — the
+    // lifecycle contract is enforced in afterPropertiesSet(), which is the
+    // single delivery-arming entry point.
     this.scheduler = ownsScheduler
         ? new SafeScheduledExecutorService(1, new ZetaThreadFactory("zeta-hot-route-counter-flusher"))
         : scheduler;
@@ -3594,6 +3565,13 @@ public class WaveCounter implements InitializingBean, Destroyable {
 
   @Override
   public void afterPropertiesSet() {
+    // Fail fast before arming delivery: a null external scheduler would
+    // otherwise NPE inside scheduleTide, be caught by its guard, and log
+    // "buffered counts will be delayed" while delivery would in fact never
+    // start. A counter that never calls this method legitimately may still
+    // be constructed with a null scheduler (pure buffered counting).
+    Assert.notNull(scheduler, "scheduler must not be null when starting delivery "
+        + "(construct with ownsScheduler=true or inject a real executor)");
     deliveryStarted = true;
     scheduleTide(deliverIntervalMs);
   }

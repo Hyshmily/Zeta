@@ -38,7 +38,7 @@ class PerKeyOrderedDispatcherTest {
   @BeforeEach
   void setUp() {
     executor = Executors.newScheduledThreadPool(4);
-    dispatcher = new PerKeyOrderedDispatcher(executor, "test");
+    dispatcher = new PerKeyOrderedDispatcher(executor, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
   }
 
   @AfterEach
@@ -139,7 +139,7 @@ class PerKeyOrderedDispatcherTest {
    */
   @Test
   void submit_keyQueueFull_shouldRejectTask() throws InterruptedException {
-    dispatcher = new PerKeyOrderedDispatcher(executor, "test", 1);
+    dispatcher = new PerKeyOrderedDispatcher(executor, "test", 1, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     CountDownLatch blockLatch = new CountDownLatch(1);
     CountDownLatch task1Started = new CountDownLatch(1);
@@ -196,7 +196,7 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_withDelay_scheduleRejected_shouldDropWithoutThrowing() throws InterruptedException {
     ScheduleRejectingExecutor scheduleRejecting = new ScheduleRejectingExecutor();
-    PerKeyOrderedDispatcher rejectingDispatcher = new PerKeyOrderedDispatcher(scheduleRejecting, "rejecting-schedule");
+    PerKeyOrderedDispatcher rejectingDispatcher = new PerKeyOrderedDispatcher(scheduleRejecting, "rejecting-schedule", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
     try {
       CountDownLatch latch = new CountDownLatch(1);
 
@@ -252,7 +252,7 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void runTask_withRejectedExecution_shouldReturnToFront() throws InterruptedException {
     ScheduledExecutorService rejectingExec = new SingleShotRejectingExecutor();
-    PerKeyOrderedDispatcher rejectingDispatcher = new PerKeyOrderedDispatcher(rejectingExec, "rejecting");
+    PerKeyOrderedDispatcher rejectingDispatcher = new PerKeyOrderedDispatcher(rejectingExec, "rejecting", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     CountDownLatch task1Ran = new CountDownLatch(1);
     CountDownLatch task2Ran = new CountDownLatch(1);
@@ -299,7 +299,7 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_sameKeyBurst_shouldBatch() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
-    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test");
+    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     int taskCount = 32;
     CountDownLatch done = new CountDownLatch(taskCount);
@@ -325,7 +325,7 @@ class PerKeyOrderedDispatcherTest {
   void submit_maxTasksPerCycle_shouldSplitBatches() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
     PerKeyOrderedDispatcher batchingDispatcher =
-      new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcherTest.DEFAULT_MAX_QUEUE, 8);
+      new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcherTest.DEFAULT_MAX_QUEUE, 8, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     int taskCount = 20;
     CountDownLatch done = new CountDownLatch(taskCount);
@@ -348,7 +348,7 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_batch_shouldPreserveFifoOrder() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
-    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test");
+    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     int taskCount = 70;
     CountDownLatch done = new CountDownLatch(taskCount);
@@ -377,7 +377,7 @@ class PerKeyOrderedDispatcherTest {
   void taskThrowable_shouldNotKillBatch() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
     PerKeyOrderedDispatcher batchingDispatcher =
-      new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcherTest.DEFAULT_MAX_QUEUE, 8);
+      new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcherTest.DEFAULT_MAX_QUEUE, 8, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     int taskCount = 4;
     CountDownLatch survivors = new CountDownLatch(taskCount - 1);
@@ -402,7 +402,7 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void runTask_withRejectedExecution_shouldRetryAndPreserveFifo() throws InterruptedException {
     ScheduledExecutorService rejectingExec = new SingleShotRejectingExecutor();
-    PerKeyOrderedDispatcher rejectingDispatcher = new PerKeyOrderedDispatcher(rejectingExec, "rejecting");
+    PerKeyOrderedDispatcher rejectingDispatcher = new PerKeyOrderedDispatcher(rejectingExec, "rejecting", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     CountDownLatch done = new CountDownLatch(2);
     var executionOrder = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
@@ -436,7 +436,7 @@ class PerKeyOrderedDispatcherTest {
       PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
       PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       1
-    );
+    , 0);
 
     CountDownLatch blockLatch = new CountDownLatch(1);
     CountDownLatch task1Started = new CountDownLatch(1);
@@ -490,7 +490,7 @@ class PerKeyOrderedDispatcherTest {
       PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
       PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       10
-    );
+    , 0);
 
     CountDownLatch heavyRan = new CountDownLatch(1);
     CountDownLatch lightRan = new CountDownLatch(1);
@@ -526,7 +526,7 @@ class PerKeyOrderedDispatcherTest {
       PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
       PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       10
-    );
+    , 0);
 
     CountDownLatch blockLatch = new CountDownLatch(1);
     CountDownLatch heavyStarted = new CountDownLatch(1);
@@ -568,7 +568,7 @@ class PerKeyOrderedDispatcherTest {
       PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY,
       PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       10
-    );
+    , 0);
 
     CountDownLatch blockLatch = new CountDownLatch(1);
     CountDownLatch heavyStarted = new CountDownLatch(1);
@@ -608,7 +608,7 @@ class PerKeyOrderedDispatcherTest {
   @Test
   void submit_singleTask_shouldUseSingleExecutorSubmission() throws InterruptedException {
     CountingExecutor countingExecutor = new CountingExecutor(4);
-    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test");
+    PerKeyOrderedDispatcher batchingDispatcher = new PerKeyOrderedDispatcher(countingExecutor, "test", PerKeyOrderedDispatcher.DEFAULT_MAX_QUEUE_PER_KEY, PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE, PerKeyOrderedDispatcher.DEFAULT_MAX_GLOBAL_PENDING_UNITS, 0);
 
     CountDownLatch done = new CountDownLatch(1);
     try {
@@ -786,7 +786,7 @@ class PerKeyOrderedDispatcherTest {
       DEFAULT_MAX_QUEUE,
       PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       1
-    );
+    , 0);
     try {
       boundedBudget.submit("key", () -> {
         running.countDown();
@@ -824,7 +824,7 @@ class PerKeyOrderedDispatcherTest {
       maxQueuePerKey,
       PerKeyOrderedDispatcher.DEFAULT_MAX_TASKS_PER_CYCLE,
       50_000
-    );
+    , 0);
     try {
       boundedQueue.submit("key", () -> {
         running.countDown();

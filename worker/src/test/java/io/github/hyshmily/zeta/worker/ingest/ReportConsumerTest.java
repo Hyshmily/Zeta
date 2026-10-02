@@ -53,7 +53,7 @@ class ReportConsumerTest {
 
   @BeforeEach
   void setUp() {
-    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 0L);
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 0L, null, null);
   }
 
   @Test
@@ -85,7 +85,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldSkipStaleMessagesWhenFilterEnabled() {
-    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 5000L);
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 5000L, null, null);
     ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis() - 10_000, Map.of("key", 1L));
     consumer.onReport(message);
 
@@ -105,7 +105,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldProcessMessageWhenReporterClockAhead() {
-    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 5000L);
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 5000L, null, null);
     ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis() + 10_000, Map.of("key", 1L));
     when(keyEvaluator.evaluate(eq("key"), eq(1L), anyDouble())).thenReturn(ZetaDecision.none("key", null));
 
@@ -162,7 +162,7 @@ class ReportConsumerTest {
 
   @Test
   void shouldProcessMessageUnderStalenessBoundary() {
-    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 100_000L);
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 100_000L, null, null);
     long now = System.currentTimeMillis();
     ReportMessage message = new ReportMessage(0L, "testApp", now - 1, Map.of("key", 1L));
     when(keyEvaluator.evaluate(eq("key"), eq(1L), anyDouble())).thenReturn(ZetaDecision.none("key", null));
@@ -348,7 +348,7 @@ class ReportConsumerTest {
   void bufferedConsumer_shouldBroadcastHotThroughBuffer() throws Exception {
     io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer buffer =
       new io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer(100);
-    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 0L, buffer);
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 0L, buffer, null);
     try {
       ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("hotKey", 100L));
       when(keyEvaluator.evaluate(eq("hotKey"), eq(100L), anyDouble())).thenReturn(ZetaDecision.hot("hotKey", null));
@@ -374,7 +374,7 @@ class ReportConsumerTest {
   void bufferedConsumer_failedSend_shouldRollBackState() throws Exception {
     io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer buffer =
       new io.github.hyshmily.zeta.worker.dispatch.WorkerBroadcastBuffer(100);
-    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 0L, buffer);
+    consumer = new ReportConsumer(keyEvaluator, broadcaster, globalQpsEstimator, stateMachine, 0L, buffer, null);
     try {
       ReportMessage message = new ReportMessage(0L, "testApp", System.currentTimeMillis(), Map.of("newKey", 100L));
       when(keyEvaluator.evaluate(eq("newKey"), eq(100L), anyDouble())).thenReturn(ZetaDecision.hot("newKey", null));

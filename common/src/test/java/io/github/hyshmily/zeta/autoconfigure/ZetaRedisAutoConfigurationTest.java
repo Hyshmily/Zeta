@@ -65,7 +65,7 @@ class ZetaRedisAutoConfigurationTest {
 
   private final ScheduledExecutorService testScheduler = Executors.newSingleThreadScheduledExecutor();
 
-  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1);
+  private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
 
   private final ApplicationContextRunner runner = new ApplicationContextRunner().withConfiguration(
     AutoConfigurations.of(ZetaRedisAutoConfiguration.class)
@@ -101,7 +101,7 @@ class ZetaRedisAutoConfigurationTest {
     CentralDispatcher dispatcher = new CentralDispatcher(
       Optional.empty(),
       Optional.empty(),
-      new BroadcastBuffer(testScheduler, Optional.empty()),
+      new BroadcastBuffer(testScheduler, Optional.empty(), 500, 2_000, null),
       detector
     );
     ZetaRedisAutoConfiguration config = new ZetaRedisAutoConfiguration();
@@ -145,7 +145,7 @@ class ZetaRedisAutoConfigurationTest {
     CentralDispatcher dispatcher = new CentralDispatcher(
       Optional.of(reporter),
       Optional.of(publisher),
-      new BroadcastBuffer(testScheduler, Optional.empty()),
+      new BroadcastBuffer(testScheduler, Optional.empty(), 500, 2_000, null),
       detector
     );
     ZetaRedisAutoConfiguration config = new ZetaRedisAutoConfiguration();

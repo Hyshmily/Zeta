@@ -158,16 +158,7 @@ public final class LogThrottle {
 
     /** Creates a counting throttle with the standard {@link #DEFAULT_WINDOW_MS} window. */
     public Counting() {
-      this(DEFAULT_WINDOW_MS);
-    }
-
-    /**
-     * Creates a counting throttle with an explicit window.
-     *
-     * @param windowMs the admission window length in milliseconds; must be positive
-     */
-    public Counting(long windowMs) {
-      this.throttle = new LogThrottle(windowMs);
+      this.throttle = new LogThrottle(DEFAULT_WINDOW_MS);
     }
 
     /**

@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.cache;
 
+import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.github.benmanes.caffeine.cache.Cache;
@@ -52,7 +54,7 @@ class CacheExpireManagerTest {
     caffeineCache = Caffeine.newBuilder().maximumSize(100).build();
     ttlConfig = new ZetaProperties();
     Executor executor = Runnable::run;
-    expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(caffeineCache, executor, ttlConfig, 10, CacheCompressor.NONE, null);
   }
 
   /**
@@ -196,7 +198,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withNullResult_shouldNotUpdateCache() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
 
     caffeineCache.put(
       "key",
@@ -230,7 +232,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withExhaustedLimiter_shouldSkip() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    ExpireManager limited = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 1);
+    ExpireManager limited = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 1, CacheCompressor.NONE, null);
 
     caffeineCache.put(
       "key1",
@@ -307,7 +309,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withSameKey_shouldDeduplicate() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
 
     caffeineCache.put(
       "key",
@@ -372,7 +374,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldPreserveExistingEntry() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
 
     caffeineCache.put(
       "key",
@@ -414,7 +416,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withEvictedKeyDuringRefresh_shouldNotError() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
 
     caffeineCache.put(
       "key",
@@ -461,7 +463,7 @@ class CacheExpireManagerTest {
     Executor rejectingExecutor = task -> {
       throw new RejectedExecutionException("rejected");
     };
-    ExpireManager rejectingMgr = new ExpireManagerImpl(caffeineCache, rejectingExecutor, ttlConfig, 10);
+    ExpireManager rejectingMgr = new ExpireManagerImpl(caffeineCache, rejectingExecutor, ttlConfig, 10, CacheCompressor.NONE, null);
 
     caffeineCache.put(
       "key",
@@ -497,7 +499,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldLeaseExistingEntry() throws InterruptedException {
     ExecutorService asyncExec = Executors.newCachedThreadPool();
-    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
     try {
       long originalExpire = System.currentTimeMillis() + 300_000;
       caffeineCache.put("key", hotEntry("original", 1, originalExpire));
@@ -538,7 +540,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_repeatedFailures_shouldDecayLeaseToFloor() {
     caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 600_000));
-    ExpireManager syncExpire = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 10);
+    ExpireManager syncExpire = new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
 
     syncExpire.triggerBackgroundRefresh("key", failingReader(), 30_000);
     long now = System.currentTimeMillis();
@@ -568,7 +570,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldNotLeaseWhenVersionAdvanced() throws InterruptedException {
     ExecutorService asyncExec = Executors.newCachedThreadPool();
-    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
     try {
       long originalExpire = System.currentTimeMillis() + 300_000;
       caffeineCache.put("key", hotEntry("original", 5, originalExpire));
@@ -607,7 +609,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldNotLeaseWhenEntryRewritten() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
     try {
       long originalExpire = System.currentTimeMillis() + 300_000;
       caffeineCache.put("key", hotEntry("original", 5, originalExpire));
@@ -645,7 +647,7 @@ class CacheExpireManagerTest {
   @Test
   void triggerBackgroundRefresh_withSupplierError_shouldNotRecreateEvictedEntry() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
-    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+    ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
     try {
       caffeineCache.put("key", hotEntry("original", 1, System.currentTimeMillis() + 300_000));
 
@@ -673,7 +675,7 @@ class CacheExpireManagerTest {
   void triggerBackgroundRefresh_async_withRefreshTimeoutEnabled_shouldWorkNormally() throws InterruptedException {
     Executor asyncExec = Executors.newCachedThreadPool();
     try {
-      ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10);
+      ExpireManager asyncExpire = new ExpireManagerImpl(caffeineCache, asyncExec, ttlConfig, 10, CacheCompressor.NONE, null);
 
       caffeineCache.put(
         "key",

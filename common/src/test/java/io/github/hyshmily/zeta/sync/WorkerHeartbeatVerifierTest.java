@@ -26,6 +26,9 @@ import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatMessage;
 import io.github.hyshmily.zeta.sync.worker.WorkerHeartbeatVerifier;
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import io.github.hyshmily.zeta.util.ZetaThreadFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -52,7 +55,8 @@ class WorkerHeartbeatVerifierTest {
       rabbitTemplate,
       healthView,
       "test-app",
-      new WorkerHeartbeatVerifier.VerifierConfig(100_000, 500, 60_000)
+      new WorkerHeartbeatVerifier.VerifierConfig(100_000, 500, 60_000),
+      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
     );
   }
 
@@ -135,7 +139,8 @@ class WorkerHeartbeatVerifierTest {
       rabbitTemplate,
       emptyView,
       "test-app",
-      new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000)
+      new WorkerHeartbeatVerifier.VerifierConfig(1000, 500, 60_000),
+      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
     );
 
     v.verifySuspectedWorkers();
@@ -195,7 +200,8 @@ class WorkerHeartbeatVerifierTest {
       rabbitTemplate,
       healthView,
       "test-app",
-      new WorkerHeartbeatVerifier.VerifierConfig(10_000, 500, 60_000)
+      new WorkerHeartbeatVerifier.VerifierConfig(10_000, 500, 60_000),
+      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
     );
 
     v.verifySuspectedWorkers();
@@ -217,7 +223,8 @@ class WorkerHeartbeatVerifierTest {
       rabbitTemplate,
       healthView,
       "test-app",
-      new WorkerHeartbeatVerifier.VerifierConfig(1, 1, 5)
+      new WorkerHeartbeatVerifier.VerifierConfig(1, 1, 5),
+      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
     );
 
     for (int i = 0; i < 6; i++) {
@@ -240,7 +247,8 @@ class WorkerHeartbeatVerifierTest {
       rabbitTemplate,
       healthView,
       "test-app",
-      new WorkerHeartbeatVerifier.VerifierConfig(10_000, 500, 60_000)
+      new WorkerHeartbeatVerifier.VerifierConfig(10_000, 500, 60_000),
+      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
     );
 
     v.verifySuspectedWorkers();
@@ -259,7 +267,8 @@ class WorkerHeartbeatVerifierTest {
       rabbitTemplate,
       healthView,
       "test-app",
-      new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 60_000)
+      new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 60_000),
+      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
     );
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(
       new Message(new byte[0], new MessageProperties())
@@ -309,7 +318,8 @@ class WorkerHeartbeatVerifierTest {
       rabbitTemplate,
       healthView,
       "test-app",
-      new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 60_000)
+      new WorkerHeartbeatVerifier.VerifierConfig(50, 500, 60_000),
+      Executors.newSingleThreadScheduledExecutor(new ZetaThreadFactory("zeta-hb-verifier-test"))
     );
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenReturn(
       new Message(new byte[0], new MessageProperties())

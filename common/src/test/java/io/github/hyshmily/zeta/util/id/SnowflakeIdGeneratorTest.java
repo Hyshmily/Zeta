@@ -32,7 +32,7 @@ class SnowflakeIdGeneratorTest {
 
   @Test
   void shouldProducePositiveIds() {
-    var gen = new SnowflakeIdGenerator(0, 1);
+    var gen = new SnowflakeIdGenerator(0, 1, 5L, false);
     for (int i = 0; i < 100; i++) {
       assertThat(gen.nextId()).isPositive();
     }
@@ -40,7 +40,7 @@ class SnowflakeIdGeneratorTest {
 
   @Test
   void shouldBeMonotonicallyIncreasing() {
-    var gen = new SnowflakeIdGenerator(0, 1);
+    var gen = new SnowflakeIdGenerator(0, 1, 5L, false);
     long prev = gen.nextId();
     for (int i = 0; i < 10_000; i++) {
       long next = gen.nextId();
@@ -51,7 +51,7 @@ class SnowflakeIdGeneratorTest {
 
   @Test
   void shouldBeUnique() {
-    var gen = new SnowflakeIdGenerator(0, 1);
+    var gen = new SnowflakeIdGenerator(0, 1, 5L, false);
     var ids = new HashSet<Long>();
     for (int i = 0; i < 50_000; i++) {
       assertThat(ids.add(gen.nextId())).isTrue();
@@ -60,7 +60,7 @@ class SnowflakeIdGeneratorTest {
 
   @Test
   void shouldEncodeDataCenterAndWorkerId() {
-    var gen = new SnowflakeIdGenerator(2, 127);
+    var gen = new SnowflakeIdGenerator(2, 127, 5L, false);
     long id = gen.nextId();
     // datacenter at bits 20-21, worker at bits 12-19
     assertThat((id >> 20) & 0b11).isEqualTo(2);
@@ -69,12 +69,12 @@ class SnowflakeIdGeneratorTest {
 
   @Test
   void shouldRejectInvalidDataCenterId() {
-    assertThatThrownBy(() -> new SnowflakeIdGenerator(4, 1)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new SnowflakeIdGenerator(4, 1, 5L, false)).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void shouldRejectInvalidWorkerId() {
-    assertThatThrownBy(() -> new SnowflakeIdGenerator(0, 256)).isInstanceOf(IllegalArgumentException.class);
+    assertThatThrownBy(() -> new SnowflakeIdGenerator(0, 256, 5L, false)).isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
@@ -91,7 +91,7 @@ class SnowflakeIdGeneratorTest {
   void shouldBeThreadSafe() throws Exception {
     int threads = 8;
     int idsPerThread = 5_000;
-    var gen = new SnowflakeIdGenerator(0, 1);
+    var gen = new SnowflakeIdGenerator(0, 1, 5L, false);
     var ids = new ConcurrentSkipListSet<Long>();
     var latch = new CountDownLatch(threads);
     var exec = Executors.newFixedThreadPool(threads);
@@ -128,7 +128,7 @@ class SnowflakeIdGeneratorTest {
     long maxSnowflakeId = Long.MAX_VALUE;
     assertThat(Long.MIN_VALUE + maxSnowflakeId).isNegative();
 
-    var gen = new SnowflakeIdGenerator(3, 255);
+    var gen = new SnowflakeIdGenerator(3, 255, 5L, false);
     for (int i = 0; i < 100_000; i++) {
       assertThat(Long.MIN_VALUE + gen.nextId()).isNegative();
     }
@@ -166,8 +166,8 @@ class SnowflakeIdGeneratorTest {
 
   @Test
   void differentWorkersProduceDifferentIdRanges() {
-    var genA = new SnowflakeIdGenerator(0, 1);
-    var genB = new SnowflakeIdGenerator(0, 2);
+    var genA = new SnowflakeIdGenerator(0, 1, 5L, false);
+    var genB = new SnowflakeIdGenerator(0, 2, 5L, false);
     var idsA = new HashSet<Long>();
     var idsB = new HashSet<Long>();
     for (int i = 0; i < 1000; i++) {

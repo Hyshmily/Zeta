@@ -168,33 +168,12 @@ public class PerKeyOrderedDispatcher implements AutoCloseable {
 
   private volatile boolean closed = false;
 
-  public PerKeyOrderedDispatcher(ScheduledExecutorService executor, String name) {
-    this(executor, name, DEFAULT_MAX_QUEUE_PER_KEY, DEFAULT_MAX_TASKS_PER_CYCLE, DEFAULT_MAX_GLOBAL_PENDING_UNITS);
-  }
-
-  public PerKeyOrderedDispatcher(ScheduledExecutorService executor, String name, int maxQueuePerKey) {
-    this(executor, name, maxQueuePerKey, DEFAULT_MAX_TASKS_PER_CYCLE, DEFAULT_MAX_GLOBAL_PENDING_UNITS);
-  }
-
-  public PerKeyOrderedDispatcher(
-    ScheduledExecutorService executor,
-    String name,
-    int maxQueuePerKey,
-    int maxTasksPerCycle
-  ) {
-    this(executor, name, maxQueuePerKey, maxTasksPerCycle, DEFAULT_MAX_GLOBAL_PENDING_UNITS);
-  }
-
-  public PerKeyOrderedDispatcher(
-    ScheduledExecutorService executor,
-    String name,
-    int maxQueuePerKey,
-    int maxTasksPerCycle,
-    long maxGlobalPendingUnits
-  ) {
-    this(executor, name, maxQueuePerKey, maxTasksPerCycle, maxGlobalPendingUnits, 0);
-  }
-
+  /**
+   * Creates a dispatcher. See the full constructor for parameter semantics;
+   * the defaults are {@link #DEFAULT_MAX_QUEUE_PER_KEY},
+   * {@link #DEFAULT_MAX_TASKS_PER_CYCLE} and
+   * {@link #DEFAULT_MAX_GLOBAL_PENDING_UNITS}; {@code jitterMs = 0}.
+   */
   public PerKeyOrderedDispatcher(
     ScheduledExecutorService executor,
     String name,

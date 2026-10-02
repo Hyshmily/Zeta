@@ -41,7 +41,7 @@ class ZetaBayesianSMTest {
 
   private static final ConfidenceEvaluator EVAL = new BayesianConfidenceEstimator(
     BayesianConfidenceEstimator.PRIOR_MEAN, 2.0, 0.5
-  );
+  , 0.95, 0.76);
 
   private static final EvaluationContext CTX = new EvaluationContext(100L, 100L, 10L, Double.NaN, 0.0);
 
@@ -55,7 +55,7 @@ class ZetaBayesianSMTest {
 
   @BeforeEach
   void setUp() {
-    machine = new ZetaBayesianSM(3, 10, 4, EVAL, BayesianConfidenceEstimator.PRIOR_MEAN);
+    machine = new ZetaBayesianSM(3, 10, 4, EVAL, BayesianConfidenceEstimator.PRIOR_MEAN, 10_000L, 0L);
   }
 
   @AfterEach

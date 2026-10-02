@@ -15,6 +15,8 @@
  */
 package io.github.hyshmily.zeta.sync;
 
+import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
+
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Amqp.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -68,9 +70,9 @@ class WorkerListenerTest {
     properties.setBroadcastJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10);
+    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
     WorkerDecisionHandler handler = handler(k -> "refreshed", null);
-    listener = new WorkerListener(properties, scheduler, handler);
+    listener = new WorkerListener(properties, scheduler, handler, null);
     listener.init();
     channel = mock(Channel.class);
   }
@@ -171,7 +173,7 @@ class WorkerListenerTest {
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     WorkerDecisionHandler h = handler(k -> "v", limiter);
-    WorkerListener throttled = new WorkerListener(props, sched, h);
+    WorkerListener throttled = new WorkerListener(props, sched, h, null);
     throttled.init();
 
     cache.put("key1", hotEntry());
@@ -199,7 +201,7 @@ class WorkerListenerTest {
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     WorkerDecisionHandler h = handler(k -> null, null);
-    WorkerListener nullLoader = new WorkerListener(props, sched, h);
+    WorkerListener nullLoader = new WorkerListener(props, sched, h, null);
     nullLoader.init();
 
     nullLoader.handleWorkerMessage(channel, workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
@@ -239,7 +241,7 @@ class WorkerListenerTest {
       },
       null
     );
-    WorkerListener failingLoader = new WorkerListener(props, sched, h);
+    WorkerListener failingLoader = new WorkerListener(props, sched, h, null);
     failingLoader.init();
 
     failingLoader.handleWorkerMessage(channel, workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
@@ -369,7 +371,7 @@ class WorkerListenerTest {
     props.setBroadcastJitterMs(0);
     ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
     WorkerDecisionHandler h = handler(k -> "fresh", limiter);
-    WorkerListener throttled = new WorkerListener(props, sched, h);
+    WorkerListener throttled = new WorkerListener(props, sched, h, null);
     throttled.init();
 
     cache.put("key1", entry(1, false, 0));

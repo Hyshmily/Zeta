@@ -293,7 +293,8 @@ public class ZetaAutoConfiguration {
       hotKeyScheduler,
       syncPublisher,
       syncProperties.getFlushDelayMs(),
-      syncProperties.getMaxDeferMs()
+      syncProperties.getMaxDeferMs(),
+      null
     );
   }
 

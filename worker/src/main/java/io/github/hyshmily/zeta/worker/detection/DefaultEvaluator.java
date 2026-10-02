@@ -138,23 +138,6 @@ public class DefaultEvaluator implements Evaluator {
   private static final int MAX_TRACKED_CMS_KEYS = 100_000;
 
   /**
-   * Constructs the evaluator with the given dependencies, keeping the
-   * pre-gate behaviour (fast-lane rules always consulted). Prefer the
-   * 4-arg constructor wired from {@code zeta.worker.fast-lane.enabled}.
-   *
-   * @param detector             the sliding-window detector
-   * @param stateMachine         the per-key lifecycle state machine
-   * @param fastLaneRuleManager  runtime-managed fast-lane rules
-   */
-  public DefaultEvaluator(
-    SlidingWindowDetector detector,
-    ZetaBayesianSM stateMachine,
-    FastLaneRuleManager fastLaneRuleManager
-  ) {
-    this(detector, stateMachine, fastLaneRuleManager, true);
-  }
-
-  /**
    * Constructs the evaluator with the given dependencies and the fast-lane gate.
    *
    * @param detector             the sliding-window detector

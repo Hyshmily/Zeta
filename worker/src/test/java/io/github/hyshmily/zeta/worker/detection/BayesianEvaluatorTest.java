@@ -42,7 +42,7 @@ class BayesianEvaluatorTest {
     // moving-average math in the tests below is exercised at production scale.
     when(detector.getWindowSize()).thenReturn(16);
     when(detector.getTimeMillisPerSlice()).thenReturn(63L);
-    evaluator = new DefaultEvaluator(detector, stateMachine, new FastLaneRuleManagerImpl(List.of()));
+    evaluator = new DefaultEvaluator(detector, stateMachine, new FastLaneRuleManagerImpl(List.of()), true);
   }
 
   @Nested
@@ -199,7 +199,7 @@ class BayesianEvaluatorTest {
       FastLaneRuleManager ruleManager = new FastLaneRuleManagerImpl(
         List.of(new FastLaneRuleManager.FastLaneRule("hot:*", 500))
       );
-      fastLaneEvaluator = new DefaultEvaluator(detector, stateMachine, ruleManager);
+      fastLaneEvaluator = new DefaultEvaluator(detector, stateMachine, ruleManager, true);
     }
 
     @Test

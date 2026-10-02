@@ -33,7 +33,7 @@ class WorkerConfigNegotiatorTest {
   @BeforeEach
   void setUp() {
     configTimestampCounter.set(0);
-    negotiator = new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId);
+    negotiator = new WorkerConfigNegotiator(stateMachine, configTimestampCounter, nodeId, null);
   }
 
   private static Message createHeartbeatMessage(String workerId, long configTs) {

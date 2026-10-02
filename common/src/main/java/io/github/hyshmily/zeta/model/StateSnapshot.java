@@ -57,22 +57,4 @@ public record StateSnapshot(
   int lowResetCount,
   long mutationSeq,
   boolean demoteHysteresisActive
-) {
-
-  /**
-   * Compatibility constructor for the pre-hysteresis 8-field snapshot shape:
-   * the demotion-hysteresis gate defaults to inactive.
-   */
-  public StateSnapshot(
-    String key,
-    String currentState,
-    int hotStreak,
-    int coolStreak,
-    double posteriorMean,
-    double accumulatedPrecision,
-    int lowResetCount,
-    long mutationSeq
-  ) {
-    this(key, currentState, hotStreak, coolStreak, posteriorMean, accumulatedPrecision, lowResetCount, mutationSeq, false);
-  }
-}
+) {}
