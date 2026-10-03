@@ -19,6 +19,7 @@ import static io.github.hyshmily.zeta.cache.cachesupport.CacheKeysPolicy.invalid
 import static io.github.hyshmily.zeta.constants.ZetaConstants.TOPK_INCR;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.hotkeydetector.doublebuffer.WaveCounter;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.AddResult;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
@@ -127,15 +128,14 @@ public class HotKeyDetector implements TopK, InitializingBean, DisposableBean {
   }
 
   /**
-   * Record single access for the given key through the buffer.
+   * Record single access for the given key through the buffer. Delegates to
+   * {@link #add(String, long)} with the standard single-access increment
+   * ({@value ZetaConstants#TOPK_INCR}).
    *
    * @param key the accessed key
    */
   public void add(String key) {
-    if (invalidCacheKey(key)) {
-      return;
-    }
-    cacheWaveCounter.count(key, TOPK_INCR);
+    add(key, TOPK_INCR);
   }
 
   /**

@@ -33,3 +33,7 @@ Scope audit before implementation (the borrowing analysis originally proposed wi
 1. Non-pow2 sketch widths map buckets with full fingerprint entropy and one multiply instead of a division; distribution is at least as uniform as before on quality hashes.
 2. The change is exercised only when `autoAlignWidth=false` and `width` is not a power of two — a rare configuration (the constructor warns and ADR practice aligns widths), which is also why the risk is small.
 3. `FastRangeUtilTest` pins the known values, range membership, full coverage on a non-pow2 width, and a 4σ distribution bound on 1023 buckets; the HeavyKeeper suite guards the sketch behavior.
+
+## Amendment 2026-10-03: merged into `FastMath`
+
+A consolidation pass merged the small pure-math utility classes into a single `io.github.hyshmily.zeta.util.FastMath` (`ZetaDecayMath` + `FastRangeUtil` + the pow2 alignment helper). `fastRange32` is unchanged — same signature, same body, same Javadoc contract (the variant-mismatch warning now lives on `FastMath.fastRange32`); the `FastRangeUtilTest` cases now run as part of `FastMathTest`. `HeavyKeeper.bucketIndex` reads `FastMath.fastRange32(hash, width)`. The `fastRange64` YAGNI decision stands, documented on `FastMath`.

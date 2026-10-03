@@ -1049,7 +1049,8 @@ public class WaveCounter implements InitializingBean, Destroyable {
    * counted: dead-worker, unroutable, routing-queue, dispatcher, BBR). At high
    * key cardinality the Worker's view under-counts by exactly the dropped
    * tail, so the counter is the operator's signal that {@code capacity} is too
-   * small for the workload. Read via {@link #coldCapacityDropCount()}.
+   * small for the workload. Surfaced through the capacity-drop WARN's
+   * "drops cumulative" field.
    */
   private final LongAdder coldCapacityDrops = new LongAdder();
 
@@ -2392,19 +2393,6 @@ public class WaveCounter implements InitializingBean, Destroyable {
    */
   public long estimatedSizeOfKeysCount() {
     return (long) APPROXIMATE_SIZE.getOpaque(this);
-  }
-
-  /**
-   * Return the number of cold-key counts discarded by the soft capacity guard
-   * since construction — the reporting chain's "every loss is observable"
-   * invariant applied to the one drop path that had no counter. A rising
-   * value means {@code capacity} is too small for the workload's key
-   * cardinality and the Worker's view is under-counting the dropped tail.
-   *
-   * @return cumulative discarded cold-key count additions
-   */
-  public long coldCapacityDropCount() {
-    return coldCapacityDrops.sum();
   }
 
   /**

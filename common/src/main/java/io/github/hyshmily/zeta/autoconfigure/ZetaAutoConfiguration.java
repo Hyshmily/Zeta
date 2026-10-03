@@ -361,14 +361,26 @@ public class ZetaAutoConfiguration {
       ruleMatcher,
       new VersionControllerImpl(Optional.empty(), properties.getVersionKeyTtlMinutes(), snowflakeIdGenerator),
       properties,
-      healthViewProvider.getIfAvailable(() ->
-        new HealthViewImpl(
-          properties.getHeartbeat().getTimeoutMs(),
-          properties.getHeartbeat().getDegradeAfterFailures()
-        )
-      ),
+      healthViewOrDefault(healthViewProvider, properties),
       compressor,
       refaultAdmission
+    );
+  }
+
+  /**
+   * Shared default {@link HealthView} assembly for every auto-configuration that
+   * consumes a cluster health view without forcing one to exist: the application's
+   * own {@code HealthView} bean when present, otherwise a local default built from
+   * the heartbeat timeout / degrade-after-failures settings. One definition for the
+   * non-Redis cache, the Redis-enhanced cache, and the reporter beans.
+   *
+   * @param healthViewProvider provider for an application-supplied health view
+   * @param properties         the HotKey configuration properties (default source)
+   * @return the resolved {@link HealthView} (never {@code null})
+   */
+  static HealthView healthViewOrDefault(ObjectProvider<HealthView> healthViewProvider, ZetaProperties properties) {
+    return healthViewProvider.getIfAvailable(() ->
+      new HealthViewImpl(properties.getHeartbeat().getTimeoutMs(), properties.getHeartbeat().getDegradeAfterFailures())
     );
   }
 
@@ -561,7 +573,7 @@ public class ZetaAutoConfiguration {
     // (Caffeine setters are single-use) rather than silently dropping evidence.
     refaultAdmissionProvider.ifAvailable(gate -> {
       if (gate.gating()) {
-        builder.removalListener((key, value, cause) -> gate.onRemoval(key, value, cause));
+        builder.removalListener(gate::onRemoval);
       }
     });
     // Application customizers run last, in order, immediately before build() —

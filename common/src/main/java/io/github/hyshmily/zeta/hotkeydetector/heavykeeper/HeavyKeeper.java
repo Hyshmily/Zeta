@@ -19,7 +19,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.util.FastRangeUtil;
+import io.github.hyshmily.zeta.util.FastMath;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.Assert;
@@ -317,13 +317,13 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
     if (autoAlignWidth && (width & (width - 1)) != 0) {
       int original = width;
-      width = Integer.highestOneBit(width - 1) << 1;
+      width = FastMath.pow2Ceil(width);
       log.info("Auto-aligned width from {} to {} to enable bitmask optimization", original, width);
     }
 
     if ((windowCount & (windowCount - 1)) != 0) {
       int original = windowCount;
-      windowCount = Integer.highestOneBit(windowCount - 1) << 1;
+      windowCount = FastMath.pow2Ceil(windowCount);
       log.info("Auto-aligned windowCount from {} to {} to enable bitmask optimization", original, windowCount);
     }
 
@@ -340,7 +340,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
     int totalSlots = depth * width;
     int stripes = Math.min(2048, Math.max(64, totalSlots >> 4));
     if ((stripes & (stripes - 1)) != 0) {
-      stripes = Integer.highestOneBit(stripes) << 1;
+      stripes = FastMath.pow2Ceil(stripes);
     }
     this.fingerprints = new int[totalSlots];
     this.windows = new int[totalSlots * windowCount];
@@ -376,7 +376,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
    */
   private int bucketIndex(int itemFingerprint, int row) {
     int hash = itemFingerprint ^ (int) (row * 0x9e3779b97f4a7c15L);
-    return widthIsPow2 ? (hash & widthMask) : FastRangeUtil.fastRange32(hash, width);
+    return widthIsPow2 ? (hash & widthMask) : FastMath.fastRange32(hash, width);
   }
 
   /** 64-bit Murmur3 fingerprint (lower half of 128-bit hash) for sketch slot indexing. */
@@ -885,20 +885,11 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
           // critical section. A count raised to > 0 keeps the member — the
           // revive is never lost to a stale decision.
           if (members.compute(key, (k, node) -> node != null && node.count.get() > 0 ? node : null) == null) {
-            // Same loss accounting as the admission path in admitOrEvict:
+            // Same loss accounting as the admission path in evictMinAndPut:
             // a full expelledQueue silently drops the decay-drop, and the
             // shared expelledLogCounter rate-limits the WARN (one per
             // EXPELLED_LOG_INTERVAL failures across both offer sites).
-            if (
-              !expelledQueue.offer(new Item(key, 0L)) &&
-              (expelledLogCounter.getAndIncrement() & (EXPELLED_LOG_INTERVAL - 1)) == 0
-            ) {
-              log.warn(
-                "Failed to offer decay-dropped key: {} ({} suppressed since last log)",
-                key,
-                EXPELLED_LOG_INTERVAL
-              );
-            }
+            offerExpelled(key, 0L, "decay-dropped key");
           }
         }
       }
@@ -975,6 +966,35 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
   }
 
   /**
+   * Offer a departing key to {@link #expelledQueue}, shared by both offer
+   * sites (write-path eviction in {@link #evictMinAndPut} and the
+   * {@link #decayMembership} drop). A full queue silently drops the
+   * departure (tolerated by design), and the shared {@link #expelledLogCounter}
+   * rate-limits the WARN to one log per {@link #EXPELLED_LOG_INTERVAL}
+   * failures across both sites.
+   *
+   * @param key          the departing key
+   * @param count        the key's count at departure time
+   * @param siteLabel    WARN text fragment identifying the offer site
+   *                     ({@code "expelled key"} / {@code "decay-dropped key"})
+   * @return {@code true} if the key was offered, {@code false} when dropped
+   */
+  private boolean offerExpelled(String key, long count, String siteLabel) {
+    if (expelledQueue.offer(new Item(key, count))) {
+      return true;
+    }
+    if ((expelledLogCounter.getAndIncrement() & (EXPELLED_LOG_INTERVAL - 1)) == 0) {
+      log.warn(
+        "Failed to offer {}: {} ({} suppressed since last log)",
+        siteLabel,
+        key,
+        EXPELLED_LOG_INTERVAL
+      );
+    }
+    return false;
+  }
+
+  /**
    * Admit or evict under {@link #admissionLock}. Only called when the key is
    * not yet a member and the O(1) fast-reject ({@link #minMemberCount}) has
    * passed. Expects caller to hold the lock. The O(k) scan of
@@ -1023,16 +1043,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
       Node removed = members.remove(min.key());
       if (removed != null) {
         expelledKey = removed.key;
-        if (
-          !expelledQueue.offer(new Item(expelledKey, min.count())) &&
-          (expelledLogCounter.getAndIncrement() & (EXPELLED_LOG_INTERVAL - 1)) == 0
-        ) {
-          log.warn(
-            "Failed to offer expelled key: {} ({} suppressed since last log)",
-            expelledKey,
-            EXPELLED_LOG_INTERVAL
-          );
-        }
+        offerExpelled(expelledKey, min.count(), "expelled key");
       }
     }
     members.put(key, new Node(key, count, itemFingerprint));

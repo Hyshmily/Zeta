@@ -91,7 +91,7 @@ zeta:
   # worker-listener:
   #   enabled: true
   # sync:
-  #   enabled: true     # worker-listener 依赖 hotKeyRedisLoader (CacheLoader) Bean
+  #   enabled: true     # worker-listener 依赖 hotKeyClusterLoader (CacheLoader) Bean
   #                     # 自定义: 实现 CacheLoader -> @Bean（见下方"自定义数据源"说明）
 
   # 一致性哈希默认开启（通过心跳实现动态 Worker 路由）
@@ -275,21 +275,51 @@ User user = zeta
   .executeOrNull();
 ```
 
-**CachePolicy API**（显式策略对象，per-invocation 控制）
+**注册式 Loader**（LoadingCache 风格 —— 注册一次，处处读取）
+
+按 key 前缀注册一次 loader，之后直接 `get(key)` 读取——调用点不再传 reader。`hardTtl` 对应 `expireAfterWrite`，`softTtl` 对应 `refreshAfterWrite`；miss 与后台刷新都走标准读管线（SingleFlight 去重、熔断、Worker 上报）。
+
+```java
+
+registry.register("user:",
+    ZetaLoadingSpec.<User>builder()
+        .loader(key -> createExpensiveUser(key))
+        .hardTtl(TimeUnit.MINUTES.toMillis(5))
+        .softTtl(TimeUnit.MINUTES.toMillis(1))
+        .build());
+
+// 之后直接读取 —— 调用点无 reader：
+Optional<User> user = zeta.get("user:42");
+Optional<User> fresh = zeta.getWithSoftExpire("user:42"); // 强制"回陈旧值 + 异步刷新"
+```
+
+> [!NOTE]
+>
+> - miss 与软失效刷新经标准读路径回调注册的 loader——SingleFlight 去重、熔断、Worker 上报全部生效；纯 L1 命中不会调用 loader。
+> - **显式 reader 永远优先：** `get(key, reader)` / `read(key).withPrimary(...)` 完全不查注册表；注册式 loader 只对无 reader 的重载生效。
+> - 集群加成：Worker HOT 预热与 peer REFRESH 同样经注册 loader 取值，热 key 可以直接从真实数据源（如数据库）预热，无需 Redis 值通道。
+> - 未注册前缀的 key 会快速失败（`IllegalStateException`），而不是静默返回空。容量（`maximumSize`）仍是全局 L1 配置（`zeta.local.cache.max-size` / `max-weight`），不按前缀划分。详见 [ADR-0070](docs/adr/0070-prefix-loader-registry-and-cache-customizers.md)。
+
+**CachePolicy API**（命名选项对象，per-invocation 控制）
+
+每个操作族只暴露两个位置形态：常用形态 + 以 `CachePolicy` 收尾的全控制形态。中间的逐参数重载（TTL、布尔旗标）不复存在——通过 `with*` 链定制。
 
 ```java
 // P. get 带 CachePolicy — 延迟 TTL 求值、空值缓存、陈旧策略
-CachePolicy policy = CachePolicy.of(30_000L, 10_000L, true, true, StalePolicy.SOFT_REFRESH);
+CachePolicy policy = CachePolicy.of(userRepo::findById)
+    .withHardTtl(30_000L)
+    .withSoftTtl(10_000L);
 
-Optional<User> user = zeta.get("user:123", userRepo::findById, policy);
+Optional<User> user = zeta.get("user:123", policy);
 
 // Q. computeIfAbsentWithSoftExpire 带 CachePolicy
-User user = zeta.computeIfAbsentWithSoftExpire(
+Optional<User> user = zeta.computeIfAbsentWithSoftExpire(
   "user:123",
-  () -> loadUser(123),
-  CachePolicy.of(60_000L, 30_000L, false, false),
-  true
-); // allowReport
+  CachePolicy.of(() -> loadUser(123))
+    .withHardTtl(60_000L)
+    .withSoftTtl(30_000L)
+    .withNullCaching(false)
+);
 ```
 
 **写操作**
@@ -298,24 +328,26 @@ User user = zeta.computeIfAbsentWithSoftExpire(
 // R. putThrough — 写穿透 + 广播
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
-// S. putThrough 带广播控制
-zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue), false); // 跳过广播
+// S. putThrough 带显式广播控制
+zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue),
+    CachePolicy.defaults().withSkipBroadcast(true)); // 仅本地
 
 // T. putThrough 带显式硬 TTL
-zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue), 60_000L);
+zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue),
+    CachePolicy.of(60_000L, 0));
 
 // U. invalidateAfterPut — 变异后失效（集合类型）
 zeta.invalidateAfterPut(key, () -> redisTemplate.opsForSet().add(key, members));
 
 // V. putLocal — 仅本地写，不广播、不 bump 版本
-zeta.putLocal("user:123", cachedValue, hardTtlMs, softTtlMs); // 指定 TTL
+zeta.putLocal("user:123", cachedValue, CachePolicy.of(hardTtlMs, softTtlMs)); // 指定 TTL
 
 // W. refresh — 本地驱逐后加载并缓存
-zeta.refresh("user:123", () -> loadUser(123), hardTtlMs, softTtlMs); // 带 TTL 覆盖
+zeta.refresh("user:123", () -> loadUser(123), CachePolicy.of(hardTtlMs, softTtlMs)); // 带 TTL 覆盖
 
 // X. 流式写 API
 zeta.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
-zeta.write("user:42").putBeforeInvalidate(dbMutation);
+zeta.write("user:42").invalidateAfterMutation(dbMutation);
 ```
 
 **自定义 per-entry TTL**
@@ -330,21 +362,31 @@ Zeta 使用**差异化 TTL**：热点 key 和普通 key 分别有独立默认值
 ```java
 // 5 分钟硬 TTL + 30 秒软 TTL
 Optional<String> shopJson = zeta.get("shop:" + shopId,
-    () -> redisTemplate.opsForValue().get("shop:" + shopId),
-    TimeUnit.MINUTES.toMillis(5), TimeUnit.SECONDS.toMillis(30));
+    CachePolicy.of(() -> redisTemplate.opsForValue().get("shop:" + shopId))
+        .withHardTtl(TimeUnit.MINUTES.toMillis(5))
+        .withSoftTtl(TimeUnit.SECONDS.toMillis(30)));
 
 // 30 秒硬 TTL，软 TTL 用默认值
 zeta.putThrough("weather:" + city, weatherData,
     () -> redisTemplate.opsForValue().set("weather:" + city, weatherData),
-    TimeUnit.SECONDS.toMillis(30), 0);
-
+    CachePolicy.of(TimeUnit.SECONDS.toMillis(30), 0));
 ```
 
 > [!NOTE]
 > **缓存雪崩防护：** `ExpireManager` 通过 `DelayUtil.computeTtlJitter()` 对每个过期时间戳施加均匀随机偏移（默认 ±5%）。5 分钟硬 TTL 在默认偏移下实际到期 4.75 ~ 5.25 分钟。通过 `zeta.local.ttl-jitter-ratio`（比例，默认 `0.05` = ±5%,`0`为禁用）控制。
 
 > [!TIP]
-> per-call TTL 语义：传入 `0` 表示使用该 key 状态的配置默认值。彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：向 `getWithSoftExpire(key, reader, Long.MAX_VALUE, softTtlMs)` 传入 `hardTtlMs = Long.MAX_VALUE`，entry 永久驻留 Caffeine。此用法受 Caffeine `Expiry` JavaDoc 明确支持：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
+> per-call TTL 语义：传入 `0` 表示使用该 key 状态的配置默认值。彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：通过 `getWithSoftExpire(key, CachePolicy.of(reader).withHardTtl(Long.MAX_VALUE).withSoftTtl(softTtlMs))` 传入 `hardTtlMs = Long.MAX_VALUE`，entry 永久驻留 Caffeine。此用法受 Caffeine `Expiry` JavaDoc 明确支持：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
+
+**CAS 风格操作**（`compareAndSet` / `compareAndInvalidate`）——基于当前 L1 值的条件替换 / 条件失效：
+
+```java
+// 仅当当前缓存值等于 expected 时原子替换
+boolean swapped = zeta.compareAndSet("stock:42", oldValue, newValue);
+
+// 仅当当前缓存值等于 expected 时失效
+boolean removed = zeta.compareAndInvalidate("stock:42", staleValue);
+```
 
 两个操作均为委托模式：调用方负责在 CAS 成功后重新读取或写入。无 L2 锁——守卫条件是调用时刻 L1 缓存 entry 的当前值。条件匹配且操作应用时返回 `true`，否则返回 `false`。
 
@@ -359,7 +401,7 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 
 **Worker 集群健康：** 观测到至少三分之一的 Worker 存活（向上取整，下限 1）即健康——如观测 3 台→1 台存活即健康；观测 9 台→3 台。单幸存 Worker 有意视为健康集群：Worker 侧上报流量已压缩，幸存者可承担集群服务；仅当观测 Worker 存活数不足三分之一时才触发降级（本地 COOL→HOT 接管）。可通过 `zeta.local.heartbeat.min-alive-workers: N` 设置绝对最小值（见 ADR-0028）。
 
-**快车道（FastLane，立即提升旁路）：** FastLane 是一条绕过贝叶斯置信度门控的评估路径。匹配用户配置的 glob 规则的 key（如 `product:*`），只要滑动窗口计数达到规则阈值，立即提升为 `CONFIRMED_HOT`——无需确认窗口、无需置信度评分、无需连续计数累积。全链路端到端延迟：**~60ms（P99）**。
+**快车道（FastLane，立即提升旁路）：** FastLane 是一条绕过贝叶斯置信度门控的评估路径。匹配用户配置的 glob 规则的 key（如 `product:*`），只要滑动窗口计数达到规则阈值，立即提升为 `CONFIRMED_HOT`——无需确认窗口、无需置信度评分、无需连续计数累积。全链路端到端延迟：**~60ms（P99）**。FastLane 仅在 `zeta.worker.fast-lane.enabled=true`（默认 `false`）时生效——只配置规则不会激活该路径。
 
 启动时通过配置文件设置 FastLane 规则：
 
@@ -367,6 +409,7 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 zeta:
   worker:
     fast-lane:
+      enabled: true # 必须显式开启——门控真实生效（默认 false）
       rules:
         - key-pattern: "product:*" # glob 模式
           threshold: 500 # 滑动窗口计数阈值
@@ -414,13 +457,23 @@ zeta:
 
 Worker 模块（`zeta-worker`）已将广播 exchange（默认 `zeta.send.exchange`）声明为 Spring `FanoutExchange` bean。如果通过非 `WorkerAutoConfiguration` 的方式独立部署 Worker，需要确保该 exchange 在 RabbitMQ 中存在——否则 Worker 的 HOT/COOL 广播会因 channel 级 `not_found` 异常而失败。
 
+**心跳 Exchange 的声明顺序**
+
+在全新的 broker 上，Worker 会在**控制面连接被用于发布之前**声明 `zeta.heartbeat.exchange`，因此冷启动集群的第一个 Worker 不再打印 `NOT_FOUND - no exchange 'zeta.heartbeat.exchange'`。（以前会：仅第一个 Worker 打印两条 `ERROR`——心跳交换机原先由 Spring Boot 的 `RabbitAdmin` 惰性声明，而心跳生产者自己开连接，发布可能抢在声明之前，导致该拍心跳与 fast-lane 规则 gossip 丢失，一个周期后自愈。）该声明挂在 Zeta 为心跳与规则 gossip 构建的控制面 `RabbitTemplate` 上，幂等且 durable，因此独立部署的 App 也能受益。
+
+其余对象（`zeta.send.exchange`、`zeta.reportToWorker.exchange`、sync exchange）仍由 Boot 的 `RabbitAdmin` 惰性声明，因此冷启动时仍可能出现一次性 `NOT_FOUND`，且同样无害——判据是 App 侧健康环是否变为非空，详见 [CONFIG.zh.md](docs/CONFIG.zh.md)。**不要**为了提前声明而新增第二个 `AmqpAdmin`/`RabbitAdmin` bean：Boot 的 admin 由 `@ConditionalOnMissingBean` 按返回类型把关，多一个 admin 会静默顶掉它，导致所有交换机、队列、绑定都不再被声明。
+
+**共享 broker 的 appName 隔离（ADR-0068）**
+
+每条 HOT/COOL 决策广播都携带 `appName` 头（取自 Worker 的 `zeta.worker.routing.app-name`），App 侧监听器会丢弃与自身 `zeta.local.app-name` 不同的决策——fanout 交换机忽略 routing key，多应用共用一个 RabbitMQ 时，否则 A 应用的决策会触发 B 应用的无效预热。两条兼容规则：**不带** `appName` 头的消息（旧版 Worker，滚动升级窗口）一律照常处理；未配置 `app-name` 的应用保持原有全收行为。两端 `app-name` 不一致时决策会被静默丢弃（DEBUG 日志可见），务必保持一致。详见 [ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md)。
+
 **PING/PONG 验证是辅助手段**
 
 `WorkerHeartbeatVerifier` 定期向**非存活**状态（心跳超时超过 `heartbeat.timeout-ms`，默认 10s）的 Worker 发送 PING。启动时的瞬态失败是预期的且安全的——首次 PING 可能在 Worker 的 verify 队列就绪前发出。主心跳路径（Worker → `zeta.heartbeat.exchange` → App 心跳队列）是 HealthView 更新和 RingManager 路由的权威机制。
 
 **自定义 HOT 提升的数据源**
 
-当 Worker 广播某个 key 的 HOT 决策时，App 侧的 `WorkerListener` 会通过 `CacheLoader.load(key)` 加载权威值，然后将该 entry 以扩展 TTL 提升到 L1。默认实现从 Redis 读取（`RedisCacheLoader`）。
+当 Worker 广播某个 key 的 HOT 决策时，App 侧的 `WorkerListener` 会通过 `CacheLoader.load(key)` 加载权威值，然后将该 entry 以扩展 TTL 提升到 L1。默认实现从 Redis 读取（`RedisValueLoader`）。
 
 要使用其他数据源（数据库、远程服务等），实现 `CacheLoader` 接口即可：
 
@@ -438,7 +491,7 @@ public CacheLoader dbCacheLoader(YourRepository repo) {
 }
 ```
 
-`@ConditionalOnMissingBean` 确保你的 Bean 替换默认的 `RedisCacheLoader`。`WorkerListener.handleHot()` 和 `CacheSyncListener.handleRefresh()` 都通过此接口获取值——无需其他配置变更。
+`@ConditionalOnMissingBean` 确保你的 Bean 替换默认的 `RedisValueLoader`。`WorkerListener.handleHot()` 和 `CacheSyncListener.handleRefresh()` 都通过此接口获取值——无需其他配置变更。
 
 **通过 Hook 观察广播决策**
 
@@ -647,7 +700,7 @@ public String updateLocal(String id, String val) { ... }
 
 ### 持久化与广播
 
-- **有 Redis：** 每次 `addRule()`/`removeRule()`/`clearRules()` 将规则列表序列化到 `ZetaConstants.Redis.KEY_RULES`（`"zeta:rules"`）。启动时 `RuleMatcher.initRules()` 从 Redis 加载。变更也通过 `TYPE_RULES_SYNC` 广播——对端通过 `RuleMatcher.syncRules()` 原子替换，不触发二次广播（避免风暴）。
+- **有 Redis：** 每次 `addRule()`/`removeRule()`/`clearRules()` 将规则列表序列化到 `ZetaConstants.Redis.KEY_RULES`（`"zeta:rules"`）。启动时 `RuleMatcher.initRules()` 从 Redis 加载并恢复持久化的 `rulesVersion`（ADR-0062）。变更也通过 `TYPE_RULES_SYNC` 广播——对端将版本严格更新的广播作为权威全量替换应用（删除与清空因此可以收敛），旧版无版本广播（`incomingVersion == 0`，滚动升级）退回并集合并；接收端不触发二次广播（避免风暴）。
 - **无 Redis：** 相同操作通过 `CacheSyncPublisher` fanout 交换机广播到所有对端。每个对端在内存中持有完整规则集。
 - **手动广播：** `zeta.broadcastAllLocalRulesManually()` 从 Redis（如可用）加载并重新广播当前规则集到所有对端。
 

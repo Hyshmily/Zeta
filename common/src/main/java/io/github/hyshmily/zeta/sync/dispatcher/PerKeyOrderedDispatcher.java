@@ -34,14 +34,14 @@ import lombok.extern.slf4j.Slf4j;
  * and never concurrently, while tasks for different keys can execute in parallel.
  *
  * <p>Designed to be used as the inner layer of a two-layer dispatch pattern where
- * an outer jitter (e.g. {@link io.github.hyshmily.zeta.util.DelayUtil#floatTimeDelay})
- * handles cross-instance staggering and this dispatcher handles same-instance ordering:
+ * an outer delay handles cross-instance staggering and this dispatcher handles
+ * same-instance ordering:
  *
  * <pre>{@code
- * DelayUtil.floatTimeDelay(
+ * scheduler.schedule(
  *     () -> dispatcher.submit(key, task),
  *     jitterMs,
- *     scheduler
+ *     TimeUnit.MILLISECONDS
  * );
  * }</pre>
  *

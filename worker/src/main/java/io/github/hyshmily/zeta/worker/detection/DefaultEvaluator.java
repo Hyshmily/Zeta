@@ -19,7 +19,7 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.model.EvaluationContext;
 import io.github.hyshmily.zeta.model.ZetaDecision;
 import io.github.hyshmily.zeta.util.TimeSource;
-import io.github.hyshmily.zeta.util.ZetaDecayMath;
+import io.github.hyshmily.zeta.util.FastMath;
 import io.github.hyshmily.zeta.worker.rule.FastLaneRuleManager;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -397,7 +397,7 @@ public class DefaultEvaluator implements Evaluator {
      * <p>The source term is capped at one window's worth: across a long
      * reporting gap the only evidence is the end-of-gap window sum, and the
      * decay (uncapped in practice — the PELT table factor reaches exact zero
-     * past {@code ZetaDecayMath.MAX_PERIODS}) forgets the pre-gap history.
+     * past {@code FastMath.MAX_PERIODS}) forgets the pre-gap history.
      *
      * @param windowSum the current sliding-window sum
      * @param now       current monotonic millis
@@ -413,10 +413,10 @@ public class DefaultEvaluator implements Evaluator {
       }
       long elapsed = Math.max(0, now - last);
       // O(1) PELT-table port of exp(-elapsed/spanMs): same one-window-span time
-      // constant, factor quantization ≤ 1.07% relative (ZetaDecayMathTest pins
+      // constant, factor quantization ≤ 1.07% relative (FastMathTest pins
       // the bound against Math.exp). Time-rollback (elapsed ≤ 0) is a no-op
       // decay with the anchor reset below — the kernel's pelt.c guard semantics.
-      double decay = ZetaDecayMath.expDecayFactor(elapsed, spanMs);
+      double decay = FastMath.expDecayFactor(elapsed, spanMs);
       double sourceFraction = Math.min(1.0, elapsed / (double) spanMs);
       windowAverage = windowAverage * decay + windowSum * sourceFraction;
       averageUpdateMillis = now;
@@ -438,7 +438,7 @@ public class DefaultEvaluator implements Evaluator {
         return true;
       }
       long elapsed = Math.max(0, now - averageUpdateMillis);
-      windowAverage *= ZetaDecayMath.expDecayFactor(elapsed, spanMs);
+      windowAverage *= FastMath.expDecayFactor(elapsed, spanMs);
       averageUpdateMillis = now;
       return windowAverage < 1.0;
     }

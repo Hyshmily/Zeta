@@ -57,7 +57,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /**
@@ -159,48 +158,15 @@ public class CacheExtensionAspect {
 
 
   /**
-   * Rate-limiter for per-invocation WARN sites: at most one WARN per
-   * {@link LogThrottle#DEFAULT_WINDOW_MS} window, with suppressed occurrences counted and
-   * reported alongside the next WARN. Admission is strict — {@link LogThrottle}
-   * claims the window with a compare-and-set, so exactly one caller per window
-   * logs; the atomicity and the monotonic clock are provided by
-   * {@link LogThrottle}. Within a window the caller logs at DEBUG instead.
-   */
-  private static final class RateLimitedWarn {
-
-    private final LogThrottle throttle = LogThrottle.perDefaultWindow();
-    private final AtomicLong suppressed = new AtomicLong();
-
-    /**
-     * Try to acquire the right to emit this window's WARN.
-     *
-     * @return {@code true} if the caller may WARN now
-     */
-    boolean tryAcquire() {
-      if (!throttle.tryAcquire()) {
-        suppressed.incrementAndGet();
-        return false;
-      }
-      return true;
-    }
-
-    /**
-     * Drain the count of WARNs suppressed since the last emitted one.
-     *
-     * @return the suppressed occurrence count (counter resets to 0)
-     */
-    long drainSuppressed() {
-      return suppressed.getAndSet(0);
-    }
-  }
-
-  /**
    * Per-site rate limiters (fallback, cache condition, TTL SpEL, preload SpEL).
+   * Each is the shared {@link LogThrottle.Counting} idiom — one full WARN per
+   * {@link LogThrottle#DEFAULT_WINDOW_MS} window, suppressed occurrences tallied
+   * and reported alongside the next WARN.
    */
-  private final RateLimitedWarn fallbackWarn = new RateLimitedWarn();
-  private final RateLimitedWarn cacheConditionWarn = new RateLimitedWarn();
-  private final RateLimitedWarn ttlSpelWarn = new RateLimitedWarn();
-  private final RateLimitedWarn preloadSpelWarn = new RateLimitedWarn();
+  private final LogThrottle.Counting fallbackWarn = new LogThrottle.Counting();
+  private final LogThrottle.Counting cacheConditionWarn = new LogThrottle.Counting();
+  private final LogThrottle.Counting ttlSpelWarn = new LogThrottle.Counting();
+  private final LogThrottle.Counting preloadSpelWarn = new LogThrottle.Counting();
 
   /**
    * Emit a per-invocation WARN at most once per {@link LogThrottle#DEFAULT_WINDOW_MS}
@@ -212,18 +178,19 @@ public class CacheExtensionAspect {
    * @param args    the message arguments
    */
   @SuppressWarnings("all")
-  private void warnRateLimited(RateLimitedWarn limiter, String message, Object... args) {
-    if (limiter.tryAcquire()) {
-      long suppressedCount = limiter.drainSuppressed();
-      if (suppressedCount > 0) {
-        Object[] extended = Arrays.copyOf(args, args.length + 1);
-        extended[args.length] = suppressedCount;
-        log.warn("{} ({} further occurrence(s) suppressed in the last 10s)", message, extended);
-      } else {
-        log.warn(message, args);
-      }
-    } else {
+  private void warnRateLimited(LogThrottle.Counting limiter, String message, Object... args) {
+    LogThrottle.Counting.Attempt attempt = limiter.record();
+    if (!attempt.admitted()) {
       log.debug(message + " (rate-limited)", args);
+      return;
+    }
+    long suppressedCount = attempt.count();
+    if (suppressedCount > 0) {
+      Object[] extended = Arrays.copyOf(args, args.length + 1);
+      extended[args.length] = suppressedCount;
+      log.warn("{} ({} further occurrence(s) suppressed in the last 10s)", message, extended);
+    } else {
+      log.warn(message, args);
     }
   }
 

@@ -27,7 +27,6 @@ import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
 import io.github.hyshmily.zeta.sharding.HealthView;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sync.local.CacheSyncPublisher;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
@@ -154,12 +153,7 @@ public class ZetaRedisAutoConfiguration {
         snowflakeIdGenerator
       ),
       properties,
-      healthViewProvider.getIfAvailable(() ->
-        new HealthViewImpl(
-          properties.getHeartbeat().getTimeoutMs(),
-          properties.getHeartbeat().getDegradeAfterFailures()
-        )
-      ),
+      ZetaAutoConfiguration.healthViewOrDefault(healthViewProvider, properties),
       compressor,
       refaultAdmission
     );

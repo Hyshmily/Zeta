@@ -229,19 +229,6 @@ public record CachePolicy(
   }
 
   /**
-   * Returns a copy of this policy with the Worker-report flag replaced.
-   *
-   * @param reportEnabled whether to allow reporting this access to the Worker
-   *                      for hot-key detection
-   * @return a new policy instance
-   */
-  public CachePolicy withReporting(boolean reportEnabled) {
-    return new CachePolicy(
-      hardTtlMs, softTtlMs, nullCaching, skipBroadcast, stalePolicy, reader, reportEnabled, failOnError
-    );
-  }
-
-  /**
    * Returns a copy of this policy with the stale policy replaced.
    *
    * @param stalePolicy what to do on soft-expire (stale) entries (never

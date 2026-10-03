@@ -32,27 +32,6 @@ class RollingWindowTest {
   }
 
   @Test
-  void max_empty() {
-    RollingWindow w = new RollingWindow(5, 500);
-    assertEquals(0, w.max());
-  }
-
-  @Test
-  void max_nonZero() {
-    RollingWindow w = new RollingWindow(5, 500);
-    w.add(3);
-    w.add(7);
-    w.add(2);
-    assertEquals(12, w.max());
-  }
-
-  @Test
-  void minNonZero_allZero() {
-    RollingWindow w = new RollingWindow(5, 500);
-    assertEquals(Long.MAX_VALUE, w.minNonZero());
-  }
-
-  @Test
   void reset() {
     RollingWindow w = new RollingWindow(3, 300);
     w.add(100);
@@ -67,7 +46,6 @@ class RollingWindowTest {
     RollingWindow w = new RollingWindow(1, 100);
     w.add(42);
     assertEquals(42, w.sum());
-    assertEquals(42, w.max());
   }
 
   @Test
@@ -113,17 +91,6 @@ class RollingWindowTest {
     w.add(10);
     w.add(-3);
     assertEquals(7, w.sum());
-  }
-
-  @Test
-  void minNonZero_withMixedValues() {
-    RollingWindow w = new RollingWindow(5, 500);
-    w.add(0);
-    w.add(5);
-    w.add(3);
-    w.add(0);
-    // All adds land in the same bucket (within same millisecond), so minNonZero returns 8
-    assertEquals(8, w.minNonZero());
   }
 
   @Test

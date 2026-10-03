@@ -33,7 +33,6 @@ import io.github.hyshmily.zeta.reporting.impl.ReportFeedLoop;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.sharding.RingManager;
-import io.github.hyshmily.zeta.sharding.impl.HealthViewImpl;
 import io.github.hyshmily.zeta.sharding.impl.RingManagerImpl;
 import io.github.hyshmily.zeta.sync.local.*;
 import io.github.hyshmily.zeta.sync.worker.*;
@@ -103,6 +102,7 @@ import org.springframework.util.Assert;
 )
 @ConditionalOnClass(name = "org.springframework.amqp.rabbit.core.RabbitTemplate")
 @EnableConfigurationProperties({ ZetaProperties.class, CacheSyncProperties.class, WorkerListenerProperties.class })
+@lombok.extern.slf4j.Slf4j
 public class ZetaAmqpAutoConfiguration {
 
   private ZetaAmqpAutoConfiguration() {}
@@ -112,6 +112,77 @@ public class ZetaAmqpAutoConfiguration {
 
   /** Bean name of Zeta's dedicated control-plane (heartbeat) connection factory. */
   private static final String CONTROL_PLANE_CONNECTION_FACTORY_BEAN = "zetaHeartbeatConnectionFactory";
+
+  /**
+   * Shared shape of the durable per-instance queues (the sync plane and the
+   * Worker-listener plane): 60-second message TTL (bounded queue backlog after a
+   * node outage) and 24-hour idle expiry (self-cleanup for decommissioned
+   * instances).
+   *
+   * @param queueName the per-instance queue name
+   * @return a durable {@link Queue} with {@code x-message-ttl} of 60 seconds
+   *         and {@code x-expires} of 24 hours
+   */
+  private static Queue durableTtlQueue(String queueName) {
+    return QueueBuilder.durable(queueName)
+      .withArgument("x-message-ttl", 60_000)
+      .withArgument("x-expires", 86_400_000)
+      .build();
+  }
+
+  /**
+   * Shared shape of the dedicated sync-plane / Worker-listener schedulers: the
+   * pool is at least {@code concurrentConsumers × 2} so every consumer thread
+   * can run a delayed follow-up task without starving the others.
+   *
+   * @param configuredPoolSize the configured minimum pool size
+   * @param concurrentConsumers the AMQP consumer count the scheduler must back
+   * @param threadNameSuffix thread-name suffix for the factory ({@code "-sync"}, {@code "-worker"})
+   * @return a daemon-thread scheduled executor named {@code zeta-scheduler<suffix>-N}
+   */
+  private static ScheduledExecutorService newJitterScheduler(int configuredPoolSize, int concurrentConsumers, String threadNameSuffix) {
+    int poolSize = Math.max(configuredPoolSize, concurrentConsumers * 2);
+    return Executors.newScheduledThreadPool(
+      poolSize,
+      new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER + threadNameSuffix)
+    );
+  }
+
+  /**
+   * Shared shape of the MANUAL-ack per-instance listener containers (the sync
+   * plane and the Worker-listener plane): bound to one queue, manual
+   * acknowledgment (the handler performs its own ack/nack), configured
+   * concurrency/prefetch/autostartup, an uncaught-exception WARN handler, and
+   * the channel-aware message listener.
+   *
+   * @param connectionFactory the (data-plane) connection factory
+   * @param queueName the queue to consume
+   * @param concurrentConsumers configured consumer count
+   * @param prefetchCount configured prefetch count
+   * @param autoStartup whether the container starts automatically
+   * @param listener the channel-aware message handler performing its own ack/nack
+   * @param uncaughtWarnMessage the WARN text for an uncaught listener exception
+   * @return a configured {@link SimpleMessageListenerContainer}
+   */
+  private static SimpleMessageListenerContainer newManualAckContainer(
+    ConnectionFactory connectionFactory,
+    String queueName,
+    int concurrentConsumers,
+    int prefetchCount,
+    boolean autoStartup,
+    ChannelAwareMessageListener listener,
+    String uncaughtWarnMessage
+  ) {
+    SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
+    container.setQueueNames(queueName);
+    container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+    container.setConcurrentConsumers(concurrentConsumers);
+    container.setPrefetchCount(prefetchCount);
+    container.setErrorHandler(t -> log.warn(uncaughtWarnMessage, t));
+    container.setAutoStartup(autoStartup);
+    container.setMessageListener(listener);
+    return container;
+  }
 
   /**
    * Resolve the data-plane {@link ConnectionFactory}: Spring Boot's default
@@ -377,12 +448,7 @@ public class ZetaAmqpAutoConfiguration {
         properties.getQueueOfferTimeoutMs(),
         properties.effectiveConsumerCount(),
         ringManager,
-        healthViewProvider.getIfAvailable(() ->
-          new HealthViewImpl(
-            properties.getHeartbeat().getTimeoutMs(),
-            properties.getHeartbeat().getDegradeAfterFailures()
-          )
-        ),
+        ZetaAutoConfiguration.healthViewOrDefault(healthViewProvider, properties),
         snowflakeIdGenerator
       );
       bbrRateLimiterProvider.ifAvailable(reporter::setBbrRateLimiter);
@@ -444,10 +510,7 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnClass(name = "org.springframework.amqp.core.Queue")
     public Queue hotkeySyncQueue(CacheSyncProperties properties) {
-      return QueueBuilder.durable(properties.getQueueName())
-        .withArgument("x-message-ttl", 60_000)
-        .withArgument("x-expires", 86_400_000)
-        .build();
+      return durableTtlQueue(properties.getQueueName());
     }
 
     /**
@@ -513,11 +576,7 @@ public class ZetaAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotKeySyncScheduler")
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public ScheduledExecutorService hotKeySyncScheduler(CacheSyncProperties properties) {
-      int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
-      return Executors.newScheduledThreadPool(
-        poolSize,
-        new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER + "-sync")
-      );
+      return newJitterScheduler(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers(), "-sync");
     }
 
     /**
@@ -612,21 +671,15 @@ public class ZetaAmqpAutoConfiguration {
       CacheSyncListener cacheSyncListener,
       CacheSyncProperties properties
     ) {
-      SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(
-        dataPlaneConnectionFactory(beanFactory)
+      return newManualAckContainer(
+        dataPlaneConnectionFactory(beanFactory),
+        properties.getQueueName(),
+        properties.getConcurrentConsumers(),
+        properties.getPrefetchCount(),
+        properties.isAutoStartup(),
+        (msg, channel) -> cacheSyncListener.handleSyncMessage(channel, msg),
+        "Sync listener uncaught exception (message will be requeued by container)"
       );
-      container.setQueueNames(properties.getQueueName());
-      container.setAutoStartup(properties.isAutoStartup());
-      container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
-      container.setConcurrentConsumers(properties.getConcurrentConsumers());
-      container.setPrefetchCount(properties.getPrefetchCount());
-      container.setErrorHandler(t ->
-        log.warn("Sync listener uncaught exception (message will be requeued by container)", t)
-      );
-      container.setMessageListener(
-        (ChannelAwareMessageListener) (msg, channel) -> cacheSyncListener.handleSyncMessage(channel, msg)
-      );
-      return container;
     }
   }
 
@@ -700,10 +753,7 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(name = "hotkeyWorkerQueue")
     public Queue hotkeyWorkerQueue(WorkerListenerProperties properties) {
-      return QueueBuilder.durable(properties.getQueueName())
-        .withArgument("x-message-ttl", 60_000)
-        .withArgument("x-expires", 86_400_000)
-        .build();
+      return durableTtlQueue(properties.getQueueName());
     }
 
     /**
@@ -791,11 +841,7 @@ public class ZetaAmqpAutoConfiguration {
     @ConditionalOnMissingBean(name = "hotKeyWorkerSchedScheduler")
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public ScheduledExecutorService hotKeyWorkerSchedScheduler(WorkerListenerProperties properties) {
-      int poolSize = Math.max(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers() * 2);
-      return Executors.newScheduledThreadPool(
-        poolSize,
-        new ZetaThreadFactory(ZetaConstants.Thread.PREFIX_SCHEDULER + "-worker")
-      );
+      return newJitterScheduler(properties.getSchedulerPoolSize(), properties.getConcurrentConsumers(), "-worker");
     }
 
     /**
@@ -904,21 +950,15 @@ public class ZetaAmqpAutoConfiguration {
       WorkerListener workerListener,
       WorkerListenerProperties properties
     ) {
-      SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(
-        dataPlaneConnectionFactory(beanFactory)
+      return newManualAckContainer(
+        dataPlaneConnectionFactory(beanFactory),
+        hotkeyWorkerQueue.getName(),
+        properties.getConcurrentConsumers(),
+        properties.getPrefetchCount(),
+        properties.isAutoStartup(),
+        (msg, channel) -> workerListener.handleWorkerMessage(channel, msg),
+        "Worker listener uncaught exception (message will be requeued by container)"
       );
-      container.setQueueNames(hotkeyWorkerQueue.getName());
-      container.setAcknowledgeMode(AcknowledgeMode.MANUAL);
-      container.setMessageListener(
-        (ChannelAwareMessageListener) (msg, channel) -> workerListener.handleWorkerMessage(channel, msg)
-      );
-      container.setConcurrentConsumers(properties.getConcurrentConsumers());
-      container.setPrefetchCount(properties.getPrefetchCount());
-      container.setErrorHandler(t ->
-        log.warn("Worker listener uncaught exception (message will be requeued by container)", t)
-      );
-      container.setAutoStartup(properties.isAutoStartup());
-      return container;
     }
 
     /**

@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.util.window;
 
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.FastMath;
 import io.github.hyshmily.zeta.util.TimeSource;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
@@ -103,12 +104,9 @@ public final class RollingWindow {
   @SuppressWarnings("all")
   public RollingWindow(int windowSize, long windowDurationMs) {
     // Zero previously crashed with an ArithmeticException (division by the aligned
-    // size below); negative sizes corrupted the highestOneBit alignment math.
+    // size below); negative sizes corrupted the pow2 alignment math.
     Assert.isTrue(windowSize > 0, "windowSize must be positive, got " + windowSize);
-    int aligned = windowSize;
-    if ((aligned & (aligned - 1)) != 0) {
-      aligned = Integer.highestOneBit(aligned - 1) << 1;
-    }
+    int aligned = FastMath.pow2Ceil(windowSize);
     this.windowSize = aligned;
     this.windowMask = aligned - 1;
     long bucketDuration = windowDurationMs / aligned;
@@ -159,48 +157,6 @@ public final class RollingWindow {
   public long sum() {
     tick();
     return sumField.value.get();
-  }
-
-  /**
-   * Maximum value across all buckets in the window.
-   *
-   * <p>Expired buckets are zeroed via {@link #tick()} before computing.
-   * O(windowSize) operation.
-   *
-   * @return the maximum value across all buckets, or 0 if all buckets are zero
-   */
-  public long max() {
-    tick();
-    long m = 0;
-    for (int i = 0; i < windowSize; i++) {
-      long v = buckets.get(i);
-      if (v > m) {
-        m = v;
-      }
-    }
-    return m;
-  }
-
-  /**
-   * Minimum non-zero value across all buckets in the window.
-   *
-   * <p>Expired buckets are zeroed via {@link #tick()} before computing.
-   * Useful for detecting the minimum "background" rate when most buckets
-   * have positive values. O(windowSize) operation.
-   *
-   * @return the minimum positive value across all buckets, or {@link Long#MAX_VALUE}
-   *         if every bucket is zero
-   */
-  public long minNonZero() {
-    tick();
-    long m = Long.MAX_VALUE;
-    for (int i = 0; i < windowSize; i++) {
-      long v = buckets.get(i);
-      if (v > 0 && v < m) {
-        m = v;
-      }
-    }
-    return m;
   }
 
   /**

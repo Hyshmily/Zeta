@@ -34,6 +34,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
@@ -300,10 +301,12 @@ public class CacheSyncPublisher {
 
         // ADR-0068 pattern on the sync plane: a peer application's INVALIDATE_ALL
         // would otherwise flush this application's whole L1.
-        MessageProperties props = newSyncMessageProperties(SyncMessage.TYPE_INVALIDATE_ALL);
-        Message message = new Message(json.getBytes(StandardCharsets.UTF_8), props);
-
-        rabbitTemplate.send(properties.getExchangeName(), "", message);
+        publishSync(
+          SyncMessage.TYPE_INVALIDATE_ALL,
+          json.getBytes(StandardCharsets.UTF_8),
+          null,
+          "Failed to serialize batch invalidate keys"
+        );
         invalidateAllDedup.put(json, Boolean.TRUE);
       } catch (RuntimeException | JsonProcessingException e) {
         // RuntimeException covers AmqpException and any unchecked failure from
@@ -338,17 +341,44 @@ public class CacheSyncPublisher {
     if (rulesJson == null || rulesJson.isBlank()) {
       return;
     }
-    try {
-      MessageProperties props = newSyncMessageProperties(SyncMessage.TYPE_RULES_SYNC);
-      props.setHeader(HEADER_RULES_VERSION, rulesVersion);
-      Message message = new Message(rulesJson.getBytes(StandardCharsets.UTF_8), props);
+    publishSync(
+      SyncMessage.TYPE_RULES_SYNC,
+      rulesJson.getBytes(StandardCharsets.UTF_8),
+      props -> props.setHeader(HEADER_RULES_VERSION, rulesVersion),
+      "Failed to send rules sync message"
+    );
+  }
 
-      rabbitTemplate.send(properties.getExchangeName(), "", message);
+  /**
+   * Unified sync-plane publish contract shared by all three send sites (the deduped
+   * single-key send, the rules sync, and the batch invalidate-all): build the common
+   * {@link #newSyncMessageProperties(String) sync properties}, let the caller stamp its
+   * type-specific headers, publish on the fanout exchange, and swallow any publish
+   * failure into one ERROR log — the documented contract is "failures are logged and
+   * do not propagate to the caller".
+   *
+   * <p>{@code RuntimeException} covers {@code AmqpException} and any unchecked failure
+   * from a closed/initializing template.
+   *
+   * @param type              the sync message type header value
+   * @param body              the pre-serialized message body (UTF-8 bytes)
+   * @param extraHeaders      optional type-specific headers, applied after the common
+   *                          properties are built; {@code null} for none
+   * @param failureLogMessage the exact ERROR log text used on a publish failure
+   *                          (callers keep their historical wording)
+   * @return {@code true} if the message was published, {@code false} on failure
+   */
+  private boolean publishSync(String type, byte[] body, Consumer<MessageProperties> extraHeaders, String failureLogMessage) {
+    try {
+      MessageProperties props = newSyncMessageProperties(type);
+      if (extraHeaders != null) {
+        extraHeaders.accept(props);
+      }
+      rabbitTemplate.send(properties.getExchangeName(), "", new Message(body, props));
+      return true;
     } catch (RuntimeException e) {
-      // RuntimeException covers AmqpException and any unchecked failure from
-      // a closed/initializing template — the documented contract is "failures
-      // are logged and do not propagate to the caller" (same as the batch path).
-      log.error("Failed to send rules sync message", e);
+      log.error(failureLogMessage, e);
+      return false;
     }
   }
 
@@ -454,25 +484,18 @@ public class CacheSyncPublisher {
    *         {@code false} on any send failure
    */
   private boolean doSend(String cacheKey, String type, long version, boolean degraded) {
-    try {
-      // INVALIDATE / REFRESH share this path (see the callers of doSend): the
-      // origin stamp (ADR-0067) lets receivers drop the sender's own REFRESH
-      // instead of replaying it against the entry the sender just wrote.
-      MessageProperties props = newSyncMessageProperties(type);
-      props.setHeader(HEADER_VERSION, version);
-      props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
-
-      Message message = new Message(cacheKey.getBytes(StandardCharsets.UTF_8), props);
-
-      rabbitTemplate.send(properties.getExchangeName(), "", message);
-      return true;
-    } catch (RuntimeException e) {
-      // RuntimeException covers AmqpException and any unchecked failure from
-      // a closed/initializing template — sendDeduped runs on the application
-      // write path, so a send failure must never propagate to the caller (it
-      // is logged here and the dedup claim is rolled back by the caller).
-      log.error("Failed to send sync message", e);
-      return false;
-    }
+    // The origin stamp (ADR-0067) set by the shared publish contract lets receivers
+    // drop the sender's own REFRESH instead of replaying it against the entry the
+    // sender just wrote. A publish failure returns false so sendDeduped rolls back
+    // its dedup claim and a retry within the same window stays possible.
+    return publishSync(
+      type,
+      cacheKey.getBytes(StandardCharsets.UTF_8),
+      props -> {
+        props.setHeader(HEADER_VERSION, version);
+        props.setHeader(HEADER_IS_VERSION_DEGRADED, degraded);
+      },
+      "Failed to send sync message"
+    );
   }
 }

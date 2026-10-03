@@ -176,16 +176,7 @@ public final class VersionGuard {
    *         {@code false} if it should be applied
    */
   public static boolean shouldSkipForSync(CacheEntry existing, long incomingDataVersion, boolean incomingDegraded) {
-    if (existing == null) {
-      return false;
-    }
-
-    boolean existingDegraded = existing.isVersionDegraded();
-
-    if (existingDegraded == incomingDegraded) {
-      return existing.getDataVersion() >= incomingDataVersion;
-    }
-    return incomingDegraded;
+    return compareDegraded(existing, incomingDataVersion, incomingDegraded, false);
   }
 
   /**
@@ -212,6 +203,32 @@ public final class VersionGuard {
    *         {@code false} if it should be applied
    */
   public static boolean shouldSkipForRefresh(CacheEntry existing, long incomingDataVersion, boolean incomingDegraded) {
+    return compareDegraded(existing, incomingDataVersion, incomingDegraded, true);
+  }
+
+  /**
+   * Shared 4-case degraded comparison matrix behind {@link #shouldSkipForSync} and
+   * {@link #shouldSkipForRefresh}: the two receivers differ in exactly one cell —
+   * how an <b>equal</b> version is treated.
+   *
+   * <ol>
+   *   <li>Both normal: skip if existing {@code >=} incoming (or {@code >} when
+   *       {@code equalApplies})</li>
+   *   <li>Existing normal, incoming degraded: always skip (normal wins)</li>
+   *   <li>Both degraded: skip if existing {@code >=} incoming (or {@code >} when
+   *       {@code equalApplies})</li>
+   *   <li>Existing degraded, incoming normal: never skip (normal overwrites degraded)</li>
+   * </ol>
+   *
+   * @param existing          the existing cache entry; may be {@code null} (returns {@code false})
+   * @param incomingVersion   the data version from the incoming sync message
+   * @param incomingDegraded  {@code true} if the incoming sync message was sent in degraded mode
+   * @param equalApplies      {@code true} → an <b>equal</b> version applies (strictly-newer skip,
+   *                          the REFRESH receiver, ADR-0066); {@code false} → an equal version
+   *                          skips (the plain {@code >=} matrix)
+   * @return {@code true} if the incoming message should be skipped; {@code false} if it should be applied
+   */
+  private static boolean compareDegraded(CacheEntry existing, long incomingVersion, boolean incomingDegraded, boolean equalApplies) {
     if (existing == null) {
       return false;
     }
@@ -221,7 +238,9 @@ public final class VersionGuard {
     if (existingDegraded != incomingDegraded) {
       return incomingDegraded;
     }
-    return existing.getDataVersion() > incomingDataVersion;
+    return equalApplies
+      ? existing.getDataVersion() > incomingVersion
+      : existing.getDataVersion() >= incomingVersion;
   }
 
   /**
