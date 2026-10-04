@@ -15,10 +15,9 @@
  */
 package io.github.hyshmily.zeta.sharding;
 
-import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.util.FastMath;
 import io.github.hyshmily.zeta.util.LogThrottle;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -272,7 +271,7 @@ public class ConsistentHashRing {
    * @return the hash value (may be negative)
    */
   private static int hash(String key) {
-    return Hashing.murmur3_32_fixed().hashString(key, StandardCharsets.UTF_8).asInt();
+    return FastMath.murmur3_32FixedUtf8(key);
   }
 
   /**

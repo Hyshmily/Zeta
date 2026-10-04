@@ -15,11 +15,13 @@
  */
 package io.github.hyshmily.zeta.util;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import io.github.hyshmily.zeta.Internal;
 
 /**
  * Fixed-point and bit-manipulation math primitives shared across the
- * detection and cache paths. One home for the three pure-function math
+ * detection and cache paths. One home for the four pure-function math
  * families the codebase ports from systems sources:
  *
  * <ul>
@@ -34,6 +36,12 @@ import io.github.hyshmily.zeta.Internal;
  * <li><b>Power-of-two alignment</b> — the JDK {@code highestOneBit} idiom
  * shared by the bit-masked structures (HeavyKeeper sketch/table/stripes,
  * RollingWindow buckets).</li>
+ * <li><b>MurmurHash3 hashing</b> — the canonical x86_32 (guava
+ * {@code murmur3_32_fixed}) and x64_128 lower-half variants, vendored
+ * bit-identically to replace the guava compile dependency (ADR-0081).
+ * Bit-identity is a hard requirement: the consistent-hash ring must agree
+ * across mixed-version rolling upgrades (ADR-0005), and the equivalence is
+ * permanently guarded by the guava differential corpus test.</li>
  * </ul>
  *
  * <p>All methods are pure functions and stateless; the class is
@@ -217,7 +225,6 @@ public final class FastMath {
     return (int) (((hash & 0xFFFFFFFFL) * range) >>> 32);
   }
 
-
   /**
    * Round {@code v} up to the smallest power of two ≥ {@code v}; a value that
    * is already a power of two (including 1) is returned unchanged.
@@ -227,6 +234,196 @@ public final class FastMath {
    */
   public static int pow2Ceil(int v) {
     return (v & (v - 1)) == 0 ? v : Integer.highestOneBit(v - 1) << 1;
+  }
+
+  /** x86_32 body constant. */
+  private static final int M32_C1 = 0xcc9e2d51;
+  /** x86_32 body constant. */
+  private static final int M32_C2 = 0x1b873593;
+  /** x86_32 body constant. */
+  private static final int M32_E = 0xe6546b64;
+  /** x64_128 body constant. */
+  private static final long M64_C1 = 0x87c37b91114253d5L;
+  /** x64_128 body constant. */
+  private static final long M64_C2 = 0x4cf5ad432745937fL;
+
+  /**
+   * MurmurHash3 x86_32 over UTF-8 bytes of {@code key} (seed 0) — bit-identical
+   * to guava {@code Hashing.murmur3_32_fixed().hashString(key, UTF_8).asInt()}.
+   * The consistent-hash ring's pinned hash (ADR-0005).
+   *
+   * @param key the input string; may be empty, never {@code null}
+   * @return the 32-bit hash (may be negative)
+   */
+  public static int murmur3_32FixedUtf8(String key) {
+    return murmur3_32Fixed(key.getBytes(UTF_8));
+  }
+
+  /**
+   * MurmurHash3 x86_32 (seed 0) — the canonical algorithm, which is exactly
+   * guava's {@code murmur3_32_fixed} byte semantics: a partial trailing word is
+   * zero-padded into the low bytes before the length mix (the pre-fix guava
+   * variant packed it differently, which is why {@code _fixed} exists).
+   *
+   * @param data the input bytes; may be empty, never {@code null}
+   * @return the 32-bit hash (may be negative)
+   */
+  public static int murmur3_32Fixed(byte[] data) {
+    int h = 0;
+    int len = data.length;
+    int nblocks = len >> 2;
+    for (int i = 0; i < nblocks; i++) {
+      int base = i << 2;
+      int k =
+        (data[base] & 0xff) |
+        ((data[base + 1] & 0xff) << 8) |
+        ((data[base + 2] & 0xff) << 16) |
+        ((data[base + 3] & 0xff) << 24);
+      k *= M32_C1;
+      k = Integer.rotateLeft(k, 15) * M32_C2;
+      h ^= k;
+      h = Integer.rotateLeft(h, 13) * 5 + M32_E;
+    }
+    int k1 = 0;
+    int tail = nblocks << 2;
+    switch (len - tail) {
+      case 3:
+        k1 ^= (data[tail + 2] & 0xff) << 16; // falls through
+      case 2:
+        k1 ^= (data[tail + 1] & 0xff) << 8; // falls through
+      case 1:
+        k1 ^= data[tail] & 0xff;
+        k1 *= M32_C1;
+        k1 = Integer.rotateLeft(k1, 15) * M32_C2;
+        h ^= k1;
+        break;
+      default:
+        break;
+    }
+    h ^= len;
+    h ^= h >>> 16;
+    h *= 0x85ebca6b;
+    h ^= h >>> 13;
+    h *= 0xc2b2ae35;
+    h ^= h >>> 16;
+    return h;
+  }
+
+  /**
+   * MurmurHash3 x64_128 (seed 0) over UTF-8 bytes of {@code key}, lower
+   * 64-bit half — bit-identical to guava
+   * {@code Hashing.murmur3_128().hashString(key, UTF_8).asLong()}.
+   * The HeavyKeeper sketch fingerprint (process-local; never on the wire).
+   *
+   * @param key the input string; may be empty, never {@code null}
+   * @return the lower 64 bits of the 128-bit hash (may be negative)
+   */
+  public static long murmur3_128Lower64Utf8(String key) {
+    return murmur3_128Lower64(key.getBytes(UTF_8));
+  }
+
+  /**
+   * MurmurHash3 x64_128 (seed 0), lower 64-bit half — the canonical
+   * two-lane algorithm with both finalization add passes.
+   *
+   * @param data the input bytes; may be empty, never {@code null}
+   * @return the lower 64 bits of the 128-bit hash (may be negative)
+   */
+  public static long murmur3_128Lower64(byte[] data) {
+    long h1 = 0;
+    long h2 = 0;
+    int len = data.length;
+    int nblocks = len >> 4;
+    for (int i = 0; i < nblocks; i++) {
+      int base = i << 4;
+      long k1 = longLe(data, base);
+      long k2 = longLe(data, base + 8);
+      k1 *= M64_C1;
+      k1 = Long.rotateLeft(k1, 31) * M64_C2;
+      h1 ^= k1;
+      h1 = Long.rotateLeft(h1, 27) * 5 + 0x52dce729L + h2;
+      k2 *= M64_C2;
+      k2 = Long.rotateLeft(k2, 33) * M64_C1;
+      h2 ^= k2;
+      h2 = Long.rotateLeft(h2, 31) * 5 + 0x38495ab5L + h1;
+    }
+    long k1 = 0;
+    long k2 = 0;
+    int tail = nblocks << 4;
+    switch (len - tail) {
+      case 15:
+        k2 ^= (long) (data[tail + 14] & 0xff) << 48; // falls through
+      case 14:
+        k2 ^= (long) (data[tail + 13] & 0xff) << 40; // falls through
+      case 13:
+        k2 ^= (long) (data[tail + 12] & 0xff) << 32; // falls through
+      case 12:
+        k2 ^= (long) (data[tail + 11] & 0xff) << 24; // falls through
+      case 11:
+        k2 ^= (long) (data[tail + 10] & 0xff) << 16; // falls through
+      case 10:
+        k2 ^= (long) (data[tail + 9] & 0xff) << 8; // falls through
+      case 9:
+        k2 ^= data[tail + 8] & 0xff;
+        k2 *= M64_C2;
+        k2 = Long.rotateLeft(k2, 33) * M64_C1;
+        h2 ^= k2; // falls through
+      case 8:
+        k1 ^= (long) (data[tail + 7] & 0xff) << 56; // falls through
+      case 7:
+        k1 ^= (long) (data[tail + 6] & 0xff) << 48; // falls through
+      case 6:
+        k1 ^= (long) (data[tail + 5] & 0xff) << 40; // falls through
+      case 5:
+        k1 ^= (long) (data[tail + 4] & 0xff) << 32; // falls through
+      case 4:
+        k1 ^= (long) (data[tail + 3] & 0xff) << 24; // falls through
+      case 3:
+        k1 ^= (long) (data[tail + 2] & 0xff) << 16; // falls through
+      case 2:
+        k1 ^= (long) (data[tail + 1] & 0xff) << 8; // falls through
+      case 1:
+        k1 ^= data[tail] & 0xff;
+        k1 *= M64_C1;
+        k1 = Long.rotateLeft(k1, 31) * M64_C2;
+        h1 ^= k1;
+        break;
+      default:
+        break;
+    }
+    h1 ^= len;
+    h2 ^= len;
+    h1 += h2;
+    h2 += h1;
+    h1 = fmix64(h1);
+    h2 = fmix64(h2);
+    h1 += h2;
+    return h1;
+  }
+
+  /** x64_128 finalizer. */
+  private static long fmix64(long k) {
+    long r = k;
+    r ^= r >>> 33;
+    r *= 0xff51afd7ed558ccdL;
+    r ^= r >>> 33;
+    r *= 0xc4ceb9fe1a85ec53L;
+    r ^= r >>> 33;
+    return r;
+  }
+
+  /** Little-endian 8-byte read. */
+  private static long longLe(byte[] data, int base) {
+    return (
+      (data[base] & 0xffL) |
+      ((data[base + 1] & 0xffL) << 8) |
+      ((data[base + 2] & 0xffL) << 16) |
+      ((data[base + 3] & 0xffL) << 24) |
+      ((data[base + 4] & 0xffL) << 32) |
+      ((data[base + 5] & 0xffL) << 40) |
+      ((data[base + 6] & 0xffL) << 48) |
+      ((data[base + 7] & 0xffL) << 56)
+    );
   }
 
   /** Non-instantiable. */

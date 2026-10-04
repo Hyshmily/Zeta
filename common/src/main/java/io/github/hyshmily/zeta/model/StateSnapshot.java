@@ -15,7 +15,6 @@
  */
 package io.github.hyshmily.zeta.model;
 
-import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import lombok.Builder;
 import lombok.experimental.Accessors;
 
@@ -26,7 +25,7 @@ import lombok.experimental.Accessors;
  * {@code evaluate} method and carried by {@link ZetaDecision} for
  * failure rollback.  The
  * {@code key} field enables the single-argument overload of
- * {@link ZetaBayesianSM#rollbackToPreviousState(ZetaBayesianSM.StateSnapshot)}.
+ * {@link io.github.hyshmily.zeta.detection.ZetaBayesianSM#rollbackToPreviousState(io.github.hyshmily.zeta.detection.ZetaBayesianSM.StateSnapshot)}.
  *
  * <p>{@code mutationSeq} is the per-key evaluation epoch carried by the
  * snapshot: it is bumped at the start of every evaluation that mutates the

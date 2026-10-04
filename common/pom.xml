@@ -28,9 +28,13 @@
       <groupId>com.github.ben-manes.caffeine</groupId>
       <artifactId>caffeine</artifactId>
     </dependency>
+    <!-- Test scope only (ADR-0081): the murmur3 hashes moved to vendored
+         bit-identical implementations in util/FastMath; guava stays here as
+         the permanent differential-equivalence guard for the hash functions. -->
     <dependency>
       <groupId>com.google.guava</groupId>
       <artifactId>guava</artifactId>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.springframework.amqp</groupId>

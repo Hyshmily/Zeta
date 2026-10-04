@@ -17,14 +17,12 @@ package io.github.hyshmily.zeta.hotkeydetector.heavykeeper;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.google.common.hash.Hashing;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.FastMath;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.Assert;
 
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -381,7 +379,7 @@ public class HeavyKeeper extends HKHeader.StateRef implements TopK {
 
   /** 64-bit Murmur3 fingerprint (lower half of 128-bit hash) for sketch slot indexing. */
   private static long fingerprint(String key) {
-    return Hashing.murmur3_128().hashString(key, StandardCharsets.UTF_8).asLong();
+    return FastMath.murmur3_128Lower64Utf8(key);
   }
 
   /**

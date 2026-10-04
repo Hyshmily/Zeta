@@ -15,8 +15,6 @@
  */
 package io.github.hyshmily.zeta.model;
 
-import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-
 /**
  * Aggregated observation data fed into Bayesian confidence evaluation.
  *
@@ -34,7 +32,7 @@ import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
  * high relative to the current window sum, the adjusted threshold is lowered —
  * a key with sustained history needs less evidence to stay HOT. Created by the
  * {@code Evaluator} before each call to
- * {@link ZetaBayesianSM#evaluate(String, boolean, boolean, EvaluationContext)}.
+ * {@link io.github.hyshmily.zeta.detection.ZetaBayesianSM#evaluate(String, boolean, boolean, EvaluationContext)}.
  *
  * @param cmsCount              per-key time-decayed moving average of the
  *                              sliding-window sums — the sustained window level

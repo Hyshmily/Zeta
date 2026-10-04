@@ -29,7 +29,7 @@ import java.util.logging.Logger;
  * <p>
  * Resolution order:
  * <ol>
- *   <li>Explicit override from {@link #setOverride} (typically from {@code zeta.instance-id})</li>
+ *   <li>Explicit override from {@link #setOverride} (typically from {@code zeta.local.instance-id})</li>
  *   <li>{@code HOSTNAME} environment variable + {@code server.port} system property</li>
  *   <li>Random {@link UUID} + {@code server.port} system property</li>
  * </ol>

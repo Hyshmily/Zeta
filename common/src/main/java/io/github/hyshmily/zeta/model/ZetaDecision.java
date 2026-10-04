@@ -15,13 +15,11 @@
  */
 package io.github.hyshmily.zeta.model;
 
-import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
-
 /**
  * A decision emitted by the Worker's sliding-window / state-machine pipeline,
  * instructing application instances how to treat a specific cache key.
  *
- * <p>Each evaluation cycle of {@link ZetaBayesianSM}
+ * <p>Each evaluation cycle of {@link io.github.hyshmily.zeta.detection.ZetaBayesianSM}
  * produces at most one {@code ZetaDecision} per key. The decision is then
  * serialized into a {@link io.github.hyshmily.zeta.sync.worker.WorkerMessage} and
  * sent to all application instances via RabbitMQ.

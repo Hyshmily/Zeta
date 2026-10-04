@@ -35,6 +35,22 @@
       <version>${project.version}</version>
     </dependency>
 
+    <!-- Declared explicitly: WorkerBroadcaster uses Caffeine for decision dedup.
+         Previously inherited transitively (and non-optionally) through zeta. -->
+    <dependency>
+      <groupId>com.github.ben-manes.caffeine</groupId>
+      <artifactId>caffeine</artifactId>
+    </dependency>
+
+    <!-- Declared explicitly (ADR-0081): zeta no longer carries guava at compile
+         scope; ZetaBayesianSM's Striped per-key locks are the only guava consumer.
+         Version pinned to match the zeta-parent dependencyManagement pin. -->
+    <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>32.1.3-jre</version>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-amqp</artifactId>

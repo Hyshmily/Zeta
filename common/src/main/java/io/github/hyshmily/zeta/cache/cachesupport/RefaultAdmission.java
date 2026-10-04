@@ -17,7 +17,6 @@ package io.github.hyshmily.zeta.cache.cachesupport;
 
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import jakarta.annotation.Nullable;
 import org.springframework.util.Assert;
@@ -102,7 +101,10 @@ import java.util.concurrent.atomic.LongAdder;
 @Internal
 public final class RefaultAdmission {
 
-  /** Gate mode (mirrors {@link ZetaProperties.RefaultAdmissionMode} for the autoconfigure-free core). */
+  /**
+   * Gate mode (the autoconfigure-free core of the config enum, mapped by name
+   * at the assembly layer — ADR-0082).
+   */
   public enum Mode {
     /** Inert: no listener, no table, no decisions. */
     OFF,
@@ -187,6 +189,31 @@ public final class RefaultAdmission {
   }
 
   /**
+   * Read-only view of the {@code zeta.local.cache.*} refault configuration
+   * block consumed by {@link #from}. Implemented at the assembly layer by the
+   * nested cache block of {@code ZetaProperties}; the cache packages never
+   * import the autoconfigure package (ADR-0082). All reads are
+   * construction-time: the gate extracts its final state once.
+   */
+  public interface Settings {
+
+    /** The gate mode (already mapped to {@link Mode} by the implementation). */
+    Mode mode();
+
+    /** Hard TTL (ms) for solo-flight entries stored after a reject verdict. */
+    long getRefaultRejectTtlMs();
+
+    /** Explicit capacity estimate (entries); {@code 0} derives from {@link #getMaxSize()}. */
+    long getRefaultCapacityEntries();
+
+    /** Explicit shadow-table exponent; {@code 0} auto-derives (clamped to [2^8, 2^18]). */
+    int getRefaultShadowBits();
+
+    /** Configured entry bound (used as the capacity fallback in size mode). */
+    int getMaxSize();
+  }
+
+  /**
    * Build the gate from the {@code zeta.local.cache.*} configuration.
    *
    * <p>Table sizing: an explicit {@code refault-shadow-bits} in [8, 24] wins;
@@ -195,7 +222,7 @@ public final class RefaultAdmission {
    * collision rate, which degrades decisions optimistically (more admits) —
    * never pessimistically.
    *
-   * @param cfg the L1 cache configuration block
+   * @param cfg the L1 cache configuration block view
    * @return the gate (inert singleton-state when mode is {@link Mode#OFF})
    * @throws IllegalArgumentException when an explicit shadow-bits value is out of range,
    *         or when the capacity estimate resolves to zero or negative — in weight
@@ -204,8 +231,8 @@ public final class RefaultAdmission {
    *         entry count. A non-positive term would push every evidenced distance
    *         past it and mass-reject (pessimistic), so the gate refuses to arm.
    */
-  public static RefaultAdmission from(ZetaProperties.CacheConfig cfg) {
-    Mode mode = Mode.valueOf(cfg.getRefaultAdmission().name());
+  public static RefaultAdmission from(Settings cfg) {
+    Mode mode = cfg.mode();
     if (mode == Mode.OFF) {
       return new RefaultAdmission(mode, cfg.getRefaultRejectTtlMs(), 0, 0);
     }

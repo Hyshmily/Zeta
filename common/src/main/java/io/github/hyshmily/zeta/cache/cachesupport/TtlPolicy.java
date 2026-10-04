@@ -16,7 +16,6 @@
 package io.github.hyshmily.zeta.cache.cachesupport;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.EntryDraft;
 import io.github.hyshmily.zeta.util.DelayUtil;
@@ -43,15 +42,15 @@ import org.jspecify.annotations.Nullable;
  * {@link EntryDraft#ttl}/{@link EntryDraft#rearmExpiry}.
  *
  * <p>Instances are cheap and hold no mutable state of their own: the
- * underlying {@link ZetaProperties} is read on every call (same as the
+ * underlying {@link CacheCoreSettings} view is read on every call (same as the
  * pre-extraction behaviour), so runtime configuration updates keep
  * working. All methods are thread-safe and side-effect free.
  */
 @Internal
 public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
 
-  /** TTL configuration providing normal and hot-key TTL values. */
-  private final ZetaProperties ttlConfig;
+  /** TTL configuration view providing normal and hot-key TTL values. */
+  private final CacheCoreSettings ttlConfig;
 
   /** Jitter ratio applied to TTLs to prevent cache stampedes (from config, default 0.05 = ±5%). */
   private final double defaultTtlJitterRatio;
@@ -59,10 +58,10 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
   /**
    * Create a TTL policy backed by the given configuration.
    *
-   * @param ttlConfig            TTL configuration (normal and hot-key variants)
+   * @param ttlConfig            TTL configuration view (normal and hot-key variants)
    * @param defaultTtlJitterRatio default jitter ratio for TTL stampede prevention
    */
-  public TtlPolicy(ZetaProperties ttlConfig, double defaultTtlJitterRatio) {
+  public TtlPolicy(CacheCoreSettings ttlConfig, double defaultTtlJitterRatio) {
     this.ttlConfig = ttlConfig;
     this.defaultTtlJitterRatio = defaultTtlJitterRatio;
   }

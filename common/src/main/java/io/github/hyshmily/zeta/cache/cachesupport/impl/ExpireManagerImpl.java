@@ -20,7 +20,7 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DE
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.cache.cachesupport.CacheCoreSettings;
 import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
@@ -51,7 +51,7 @@ public class ExpireManagerImpl implements ExpireManager {
   /** Async executor for background refresh tasks. */
   private final Executor executor;
   /** TTL configuration providing normal and hot-key TTL values. */
-  private final ZetaProperties ttlConfig;
+  private final CacheCoreSettings ttlConfig;
   /** Pure TTL/expiry policy — all stateless lifecycle arithmetic lives here. */
   private final TtlPolicy ttlPolicy;
   /** Semaphore limiting concurrent background refresh operations. */
@@ -131,7 +131,7 @@ public class ExpireManagerImpl implements ExpireManager {
   public ExpireManagerImpl(
     Cache<String, Object> caffeineCache,
     Executor executor,
-    ZetaProperties ttlConfig,
+    CacheCoreSettings ttlConfig,
     int refreshMaxPools,
     CacheCompressor compressor,
     HealthView healthView
@@ -148,7 +148,7 @@ public class ExpireManagerImpl implements ExpireManager {
   ExpireManagerImpl(
     Cache<String, Object> caffeineCache,
     Executor executor,
-    ZetaProperties ttlConfig,
+    CacheCoreSettings ttlConfig,
     int refreshMaxPools,
     double defaultTtlJitterRatio,
     CacheCompressor compressor,

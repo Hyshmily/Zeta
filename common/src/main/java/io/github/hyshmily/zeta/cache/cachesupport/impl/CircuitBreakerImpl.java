@@ -18,8 +18,8 @@ package io.github.hyshmily.zeta.cache.cachesupport.impl;
 import static io.github.hyshmily.zeta.util.TimeSource.monotonicMillis;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
+import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerSettings;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerState;
 import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import java.lang.invoke.MethodHandles;
@@ -88,7 +88,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   private static final int SUCCESS_OFFSET = 0;
   private static final int FAIL_OFFSET = 8;
 
-  private final ZetaProperties.CircuitBreaker config;
+  private final CircuitBreakerSettings config;
   private final int bucketSize;
   private final long[] counts;
   private final ScheduledExecutorService scheduler;
@@ -137,9 +137,10 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   private final ScheduledFuture<?> slideFuture;
 
   /**
-   * @param config Circuit breaker configuration (buckets, thresholds, exception lists).
+   * @param config Circuit breaker configuration view (buckets, thresholds, exception lists);
+   *               read live on every decision so runtime toggles keep working (ADR-0082).
    */
-  public CircuitBreakerImpl(ZetaProperties.CircuitBreaker config) {
+  public CircuitBreakerImpl(CircuitBreakerSettings config) {
     this.config = config;
     this.bucketSize = config.getWindowBuckets();
     this.counts = new long[bucketSize * STRIDE];

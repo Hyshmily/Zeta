@@ -1,12 +1,6 @@
 {
   "properties": [
     {
-      "name": "zeta.instance-id",
-      "type": "java.lang.String",
-      "description": "Explicit instance ID for queue naming. Falls back to <server.port>-<HOSTNAME> (or <server.port>-<UUID> if HOSTNAME is unset) if empty.",
-      "defaultValue": ""
-    },
-    {
       "name": "zeta.scheduling.enabled",
       "type": "java.lang.Boolean",
       "description": "Enable periodic TopK decay and expelled-key drain scheduling.",

@@ -15,6 +15,9 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
+import io.github.hyshmily.zeta.cache.cachesupport.CacheCoreSettings;
+import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerSettings;
+import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -37,11 +40,19 @@ import org.springframework.validation.annotation.Validated;
  * decay, minimum count), L1 Caffeine cache limits, SingleFlight
  * deduplication settings, executor thread pool, TTL overrides (hard
  * and soft, for normal and hot keys), and reporting shard topology.
+ *
+ * <p>Implements the cache-core configuration views ({@link CacheCoreSettings},
+ * plus the nested {@link CircuitBreakerSettings} and
+ * {@link RefaultAdmission.Settings} blocks) so the cache packages never import
+ * this assembly package — the dependency points one way
+ * (autoconfigure → cache, ADR-0082). The bridges delegate to the live bound
+ * bean, so runtime configuration updates keep working exactly as before the
+ * views existed.
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "zeta.local")
-public class ZetaProperties {
+public class ZetaProperties implements CacheCoreSettings {
 
   /** Number of top hot keys to track. */
   @Min(1)
@@ -339,10 +350,12 @@ public class ZetaProperties {
   private static final int CACHED_PROCESSORS = Runtime.getRuntime().availableProcessors();
 
   /**
-   * L1 cache sizing configuration.
+   * L1 cache sizing and refault configuration. Implements the
+   * {@link RefaultAdmission.Settings} view consumed by
+   * {@code RefaultAdmission.from} at the assembly boundary.
    */
   @Data
-  public static class CacheConfig {
+  public static class CacheConfig implements RefaultAdmission.Settings {
 
     /** Maximum number of entries (ignored when {@link #maxWeight} > 0). */
     private int maxSize = 100_000;
@@ -425,6 +438,12 @@ public class ZetaProperties {
     @Min(0)
     @Max(24)
     private int refaultShadowBits;
+
+    /** {@link RefaultAdmission.Settings} bridge: the gate mode, mapped by name (same values). */
+    @Override
+    public RefaultAdmission.Mode mode() {
+      return RefaultAdmission.Mode.valueOf(refaultAdmission.name());
+    }
   }
 
   /** Modes for the ADR-0079 refault distance admission gate. */
@@ -568,9 +587,12 @@ public class ZetaProperties {
    * <p>When enabled, protects remote calls (reader suppliers) from cascading failures.
    * Default is disabled — users should only enable when their cache-load suppliers
    * (e.g. database queries, remote API calls) are prone to timeout or error cascades.
+   *
+   * <p>Implements the {@link CircuitBreakerSettings} view: the breaker
+   * implementation reads every decision through this live view (ADR-0082).
    */
   @Data
-  public static class CircuitBreaker {
+  public static class CircuitBreaker implements CircuitBreakerSettings {
 
     /** Whether circuit breaker is enabled. Default {@code false}. */
     private boolean enabled = false;
@@ -649,6 +671,12 @@ public class ZetaProperties {
   /** Cache key normalization configuration. */
   @Valid
   private CacheKey cacheKey = new CacheKey();
+
+  /** {@link CacheCoreSettings} bridge: the live nested cache-key block. */
+  @Override
+  public boolean isStripQuery() {
+    return cacheKey.isStripQuery();
+  }
 
   /** Spring Cache integration configuration. */
   @Valid
