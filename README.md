@@ -17,9 +17,33 @@
 
 Zeta is a configurable, high-performance, low-cost lightweight distributed cache and preheating framework, designed to solve cluster-wide distributed consistent caching problems for arbitrary sudden hotspot data at minimal cost, fully decoupling business code from distributed coordination infrastructure via Redis and RabbitMQ.
 
-### Detection
+### Positioning
 
-Zeta provides two-tier hot-key detection — a local in-process HeavyKeeper probabilistic sketch and a remote Worker cluster's sliding-window + Bayesian state machine pipeline.
+**Good fit:**
+
+- **Flash sales & time-boxed promotions** — FastLane rules promote on threshold (~60ms P99), `@Intercept` rate-limits per key with fallback, `@Preload` warms known hot keys
+- **Unpredictable viral traffic** — HeavyKeeper counts any key on the fly, no pre-registration; the Worker's learning period auto-calibrates thresholds
+- **Read-heavy clusters hammering single keys** — hot keys get automatic L1 TTL extension (1h vs 5min defaults), SingleFlight merges reloads to prevent breakdown
+- **Caches that must stay consistent across instances (eventually)** — write-through broadcast + per-key version guard; incremental cost is one Redis INCR + one MQ message
+
+**Not a fit:**
+
+- **Steady low-traffic services** — the detection layer idles with ~5MB of sketch arrays and a dozen background threads; plain Caffeine is enough
+- **Workloads needing strong per-write consensus** — sync is at-most-once (ack-before-update), version probes fail open, and brief cross-instance inconsistency during outages is by design; Zeta is eventual-consistency
+
+### Features
+
+| Capability           | Description                                                                                                                                                            |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local hot-key detection | In-process HeavyKeeper TopK sketch — hot keys get their L1 Caffeine TTL extended automatically, no Worker required                                                 |
+| Cluster detection & warm | Sliding window + Bayesian confidence state machine on a Worker cluster; HOT keys pre-warmed from your real data source (DB, remote service)                       |
+| FastLane             | Glob rules for latency-critical keys (flash sales, breaking news): threshold hit → `CONFIRMED_HOT` immediately, ~60ms (P99) end-to-end                                 |
+| Two-level cache      | Caffeine L1 + any backend via registered loaders; SingleFlight anti-breakdown, stale-while-revalidate, TTL jitter anti-avalanche                                       |
+| Cross-instance coherency | Write-through broadcast with per-key version guard — eventual consistency without Paxos/Raft overhead                                                              |
+| Spring Cache fusion  | `@Cacheable` / `@CachePut` / `@CacheEvict` fused with hot-key detection, plus `@CacheTTL`, `@Intercept`, `@Fallback`, `@Preload` and friends ([docs/ANNOTATION.md](docs/ANNOTATION.md)) |
+| Runtime ops          | Actuator endpoints, FastLane rule REST API, decision hooks & handler SPIs ([docs/MONITOR.md](docs/MONITOR.md))                                                         |
+
+### Local/Cluster Detection
 
 ```java
 private final Zeta zeta;
@@ -31,16 +55,24 @@ zeta.tag("product:123");
 zeta.peek("product:123");
 ```
 
+- **Local tier (always on):** every instance runs a HeavyKeeper TopK sketch. A key entering the TopK set gets its L1 Caffeine TTL extended automatically — no Worker feedback needed. L1 misses are merged by SingleFlight to prevent cache breakdown; soft-expired entries serve stale while a background refresh runs, and if the data source is down the entry stays alive on a decaying lease (`max(remaining/2, 120s)`) instead of hitting the data source on every read ([ADR-0036](docs/adr/0036-lease-on-failure.md)).
+- **Cluster tier (optional):** instances report counts through a CPU-BBR back-pressured reporter to RabbitMQ; the Worker cluster runs a two-path evaluation pipeline — **FastLane** (glob rules, threshold → immediate `CONFIRMED_HOT`, ~60ms P99 end-to-end) and the **Bayesian path** (Normal-Normal conjugate posterior with per-key evidence accumulation: strongly hot keys confirm in ~50–150ms, borderline keys accumulate evidence across evaluation windows).
+
+<details>
+<summary><b>Implementation details</b></summary>
+
 - The `WaveCounter` routes keys by heat into two paths: hot keys merge into a per-writer local map (zero shared contention, bulk-merged to the shared table every 128 increments) and cold keys write directly to a lock-free shared table. One snapshot is delivered per 500ms cycle.
-- The tide is self-adaptive: the `TidePacer` shortens the delivery cycle to 50ms under bursts and stretches it when idle, while the `MoonsTidalForce` promotion-floor governor drops the floor to the boundary to admit blocked renewing keys (never ratcheting) — with volume-gated regime switches (quiet traffic → floor 1; flood → one-tide stale-floor collapse), bounded, backoff-priced probe walks (ADR-0045/0051/0052/0053), and a direction-verified veto that probes the live signal before retreating past a confirmed rung (ADR-0058) — whose descent itself now probes the live renewal each stride: it parks at the first healthy rung it reaches and pivots when the descent keeps under-earning its own start (ADR-0059). The promotion boundary is exact (ADR-0054): the cycle's k-th largest count, selected by quickselect within a log2-located bucket, with renewing members re-promoted before newcomers on ties — the hot set stays stable under flat distributions; on stable workloads the selection reuses the previous tide's exact boundary as a sweep filter, so the selection runs over ~`hotLimit` keys instead of the whole bucket (ADR-0057).
+- The tide is self-adaptive: the `TidePacer` shortens the delivery cycle to 50ms under bursts and stretches it when idle, while the `MoonsTidalForce` promotion-floor governor drops the floor to the boundary to admit blocked renewing keys (never ratcheting) — with volume-gated regime switches (quiet traffic → floor 1; flood → one-tide stale-floor collapse), bounded, backoff-priced probe walks ([ADR-0045](docs/adr/0045-promotion-floor-governor.md)/[ADR-0051](docs/adr/0051-governor-probe-machine-bounds.md)/[ADR-0052](docs/adr/0052-governor-caffeine-refinements.md)/[ADR-0053](docs/adr/0053-density-priced-raise-stride.md)), and a direction-verified veto that probes the live signal before retreating past a confirmed rung ([ADR-0058](docs/adr/0058-direction-verified-veto-retreat.md)) — whose descent itself now probes the live renewal each stride: it parks at the first healthy rung it reaches and pivots when the descent keeps under-earning its own start ([ADR-0059](docs/adr/0059-descent-slope-verified-retreat.md)). The promotion boundary is exact ([ADR-0054](docs/adr/0054-exact-selection-promotion-boundary.md)): the cycle's k-th largest count, selected by quickselect within a log2-located bucket, with renewing members re-promoted before newcomers on ties — the hot set stays stable under flat distributions; on stable workloads the selection reuses the previous tide's exact boundary as a sweep filter, so the selection runs over ~`hotLimit` keys instead of the whole bucket ([ADR-0057](docs/adr/0057-kth-shortcut-exact-selection.md)).
 
-- Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency. If that background refresh fails, the stale entry is kept alive with a decaying lease (`max(remaining/2, 120s)`, ADR-0036) — a down source becomes background retry instead of a per-read stampede, and the entry self-heals on the first successful refresh.
+- Each application instance runs a local TopK sketch that tracks frequently accessed keys. When a key enters the local TopK set, its L1 Caffeine cache TTL is automatically extended — no Worker feedback required. On L1 miss, the SingleFlight mechanism merges concurrent requests for the same key to prevent cache breakdown. Soft expiration is also supported — when the soft TTL expires but the hard TTL has not, stale entries are served immediately while a background async refresh is triggered, ensuring response latency. If that background refresh fails, the stale entry is kept alive with a decaying lease (`max(remaining/2, 120s)`, [ADR-0036](docs/adr/0036-lease-on-failure.md)) — a down source becomes background retry instead of a per-read stampede, and the entry self-heals on the first successful refresh.
 
-- `KeyReporter` aggregates local counts through a second `WaveCounter` (50ms flush cadence), then passes them through a CPU-BBR rate limiter (CPU threshold 80%, sliding window 10s/100 buckets) before batch-reporting to RabbitMQ via `DirectExchange` with routing key `report.{appName}.{nodeId}`.
+- `KeyReporter` aggregates local counts through a second `WaveCounter` (50ms flush cadence), then passes them through a CPU-BBR rate limiter (CPU threshold 80%, sliding window 10s/100 buckets) before batch-reporting to RabbitMQ via `DirectExchange` with routing key `reportToWorker.{appName}.{target}`.
 
 - The Worker cluster aggregates access reports from all application instances and runs a **two-path evaluation pipeline**:
   - **FastLane**: For keys matching user-configured glob rules (e.g. `product:*`), the sliding-window sum is compared directly against the rule's threshold. When the threshold is met, the key is promoted to `CONFIRMED_HOT` immediately — no Bayesian confidence gating, no confirm windows. Under default configuration, end-to-end latency: **~60ms (P99)**.
   - **Bayesian path**: For all other keys, sliding-window frequency analysis combined with a Bayesian confidence state machine (Normal-Normal conjugate posterior with per-key evidence accumulation) produces decisions: `HIGH (≥0.95)` → `CONFIRMED_HOT` broadcasts HOT; `MEDIUM ([0.76, 0.95))` → `CANDIDATE_HOT` accumulates evidence; `LOW (<0.76)` → retention strategy (first 2 occurrences with `hotStreak=confirmCount-1` fast re-evaluation, 3rd occurrence full reset). Promotion latency depends on traffic intensity: a strongly hot key (well above threshold) reaches CONFIRMED_HOT in **~50–150ms**, while a borderline key (near-threshold) may require multiple evaluation windows.
+
+</details>
 
 ### Multi-Node Cache Coherency
 
@@ -58,13 +90,10 @@ Benchmarks:
 - get (L1 hit) ~15M ops/s (full path including TopK + Reporter)
 
 Inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project; algorithm support from [Aegis](https://github.com/go-kratos/aegis)、[neural](https://github.com/yu120/neural/tree/master)
-.
 
 ## Quick Start
 
 ### 1. Add Dependency
-
-Configuration reference:
 
 <details>
 <summary><b>Quick Deploy YAML Templates</b></summary>
@@ -117,7 +146,7 @@ zeta:
 # Recommended: deploy local App first, then start Workers
 ```
 
-**Cluster health threshold** — by default (`min-alive-workers: 0`), the cluster is healthy when at least **one third of observed Workers** are alive (rounded up, minimum 1): e.g. 3 observed Workers → 1 alive is healthy; 5 observed → 2 alive; 9 observed → 3 alive. A single surviving Worker is intentionally treated as healthy (see ADR-0028). Set `min-alive-workers: N` to require an absolute number of alive Workers. See `docs/CONFIG.md` for details.
+**Cluster health threshold** — by default (`min-alive-workers: 0`), the cluster is healthy when at least **one third of observed Workers** are alive (rounded up, minimum 1): e.g. 3 observed Workers → 1 alive is healthy; 5 observed → 2 alive; 9 observed → 3 alive. A single surviving Worker is intentionally treated as healthy (see [ADR-0028](docs/adr/0028-records-based-one-third-cluster-health-threshold.md)). Set `min-alive-workers: N` to require an absolute number of alive Workers. See [CONFIG.md](docs/CONFIG.md) for details.
 
 **All parameters:**
 See [CONFIG.md](docs/CONFIG.md)
@@ -147,9 +176,9 @@ See [CONFIG.md](docs/CONFIG.md)
 </repositories>
 
 <dependency>
-    <groupId>io.github.hyshmily</groupId>
-    <artifactId>zeta</artifactId>
- <version>1.1.57</version>
+  <groupId>io.github.hyshmily</groupId>
+  <artifactId>zeta</artifactId>
+  <version>1.1.57</version>
 </dependency>
 ```
 
@@ -401,7 +430,7 @@ Worker mode provides cluster-wide hotspot detection via dedicated nodes. App ins
 | App-only    | `false` (default) | `HotKeyCache`, TopK, reporter, actuator, sync                             |
 | Worker-only | `true`            | Worker only (no cache — `get()`/`putThrough()` throw `ZetaModeException`) |
 
-**Worker Cluster Health:** The cluster is healthy when at least one third of the Workers observed via heartbeats are alive (rounded up, minimum 1) — e.g. 3 Workers observed → 1 alive is healthy; 9 observed → 3 alive. A single surviving Worker is intentionally treated as a healthy cluster: Worker-side report traffic is compressed and the survivor can serve the cluster; degradation (local COOL→HOT takeover) triggers only when fewer than one third of observed Workers remain. Set `zeta.local.heartbeat.min-alive-workers: N` for an absolute minimum (see ADR-0028).
+**Worker Cluster Health:** The cluster is healthy when at least one third of the Workers observed via heartbeats are alive (rounded up, minimum 1) — e.g. 3 Workers observed → 1 alive is healthy; 9 observed → 3 alive. A single surviving Worker is intentionally treated as a healthy cluster: Worker-side report traffic is compressed and the survivor can serve the cluster; degradation (local COOL→HOT takeover) triggers only when fewer than one third of observed Workers remain. Set `zeta.local.heartbeat.min-alive-workers: N` for an absolute minimum (see [ADR-0028](docs/adr/0028-records-based-one-third-cluster-health-threshold.md)).
 
 **FastLane (Immediate Promotion Bypass):** FastLane is an evaluation path that bypasses the Bayesian confidence gating entirely. Keys matching user-configured glob rules (e.g. `product:*`) are promoted to `CONFIRMED_HOT` as soon as the sliding-window sum reaches the rule's threshold — no confirm windows, no confidence scoring, no streak counting. End-to-end latency: **~60ms** (P99). FastLane only engages when `zeta.worker.fast-lane.enabled=true` (default `false`) — configuring rules alone does not activate the path.
 
@@ -465,7 +494,7 @@ On a fresh broker the Worker declares `zeta.heartbeat.exchange` **before** the c
 
 For the remaining entities (`zeta.send.exchange`, `zeta.reportToWorker.exchange`, the sync exchange) declarations are still issued lazily by Boot's `RabbitAdmin`, so a one-off cold-start `NOT_FOUND` remains possible and remains benign — judge recovery by whether the App-side health ring becomes non-empty, as described in [CONFIG.md](docs/CONFIG.md). Do **not** add a second `AmqpAdmin`/`RabbitAdmin` bean to force earlier declaration: Boot's admin is guarded by `@ConditionalOnMissingBean` on its return type, so an extra admin silently switches it off and leaves every exchange, queue and binding undeclared.
 
-**Shared-broker appName isolation (ADR-0068)**
+**Shared-broker appName isolation ([ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md))**
 
 Every HOT/COOL decision broadcast carries an `appName` header (from the Worker's `zeta.worker.routing.app-name`), and the App-side listener drops decisions whose `appName` differs from its own `zeta.local.app-name` — the fanout exchange ignores the routing key, so on a shared RabbitMQ broker app A's decisions would otherwise trigger useless prewarming on app B. Two compatibility rules: messages **without** the `appName` header (older Workers, rolling-upgrade window) are always processed, and apps with no `app-name` configured keep the old receive-everything behavior. A mismatch between the two `app-name` values silently discards decisions (visible at DEBUG) — keep them identical. See [ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md).
 
@@ -678,7 +707,7 @@ Requires `spring-boot-starter-cache` and `spring-boot-starter-aop` on the classp
 
 Enable `zeta.sync.enabled=true`.
 
-Read-path entries (L1 misses, soft-expire refreshes, null sentinels) are stamped with the `dataVersion` probed from Redis after the value read (pipelined for batch loads), so late stale broadcasts are rejected by the shared version comparison instead of overwriting fresher values. Probe failures leave entries unstamped (fail-open); see ADR-0033.
+Read-path entries (L1 misses, soft-expire refreshes, null sentinels) are stamped with the `dataVersion` probed from Redis after the value read (pipelined for batch loads), so late stale broadcasts are rejected by the shared version comparison instead of overwriting fresher values. Probe failures leave entries unstamped (fail-open); see [ADR-0033](docs/adr/0033-read-path-version-stamping.md).
 
 ## Rule System
 
@@ -702,7 +731,7 @@ Enable `zeta.sync.enabled=true` to enable cross-instance rule synchronization. T
 
 ### Persistence & Broadcast
 
-- **With Redis:** Each `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `ZetaConstants.Redis.KEY_RULES` (`"zeta:rules"`). On startup, `RuleMatcher.initRules()` loads from Redis and restores the persisted `rulesVersion` (ADR-0062). Changes are also broadcast via `TYPE_RULES_SYNC` — a peer applies a strictly fresher versioned broadcast as an authoritative full replacement (so deletions and clears converge), while legacy unversioned broadcasts (`incomingVersion == 0`, rolling upgrades) fall back to union merge; the receiver never re-broadcasts (loop-free).
+- **With Redis:** Each `addRule()`/`removeRule()`/`clearRules()` serializes the rule list to `ZetaConstants.Redis.KEY_RULES` (`"zeta:rules"`). On startup, `RuleMatcher.initRules()` loads from Redis and restores the persisted `rulesVersion` ([ADR-0062](docs/adr/0062-rule-sync-version-authoritative-replace.md)). Changes are also broadcast via `TYPE_RULES_SYNC` — a peer applies a strictly fresher versioned broadcast as an authoritative full replacement (so deletions and clears converge), while legacy unversioned broadcasts (`incomingVersion == 0`, rolling upgrades) fall back to union merge; the receiver never re-broadcasts (loop-free).
 - **Without Redis:** Same operations are broadcast to all peers via the `CacheSyncPublisher` fanout exchange. Each peer holds the full rule set in memory.
 - **Manual broadcast:** `zeta.broadcastAllLocalRulesManually()` loads from Redis (if available) and re-broadcasts the current rule set to all peers.
 

@@ -17,9 +17,33 @@
 
 Zeta 是一款可配置、高性能、低成本的轻量级分布式缓存与预热框架, 致力于以极低的成本解决集群维度对任意突发性的、无法预先感知的热点数据分布式一致性缓存问题,通过 Redis 和 RabbitMQ 将业务代码与整个分布式协调基础设施完全解耦。
 
-### 检测
+### 定位
 
-Zeta 提供双级热键检测——本地进程内 HeavyKeeper 概率草图和远程 Worker 集群的滑动窗口 + 贝叶斯状态机管线。
+**适合：**
+
+- **秒杀与限时活动** —— FastLane 规则达标即热（~60ms P99）、`@Intercept` 按 key 限流 + fallback 兜底、`@Preload` 预热已知热点
+- **不可预知的突发流量** —— HeavyKeeper 对任意 key 即时计数，无需预注册；Worker 学习期自动校准阈值
+- **读多写少、单 key 被集中轰炸的集群** —— 热 key 自动延长 L1 TTL（默认 1h vs 5min），SingleFlight 合并回源防击穿
+- **需要跨实例保持一致（最终一致）的缓存** —— 写穿透广播 + 每 key 版本守卫，增量成本仅为 Redis INCR + 一条 MQ 消息
+
+**不适合：**
+
+- **低流量稳态服务** —— 检测层常驻约 5MB 草图数组与十几个后台线程却永远空转，纯 Caffeine 足够
+- **需要强一致逐写共识的场景** —— 同步语义为至多一次（ack-before-update）、版本探测失败 fail-open、宕机窗口内实例间短暂不一致是设计内行为；Zeta 按最终一致性设计
+
+### 特点
+
+| 能力              | 说明                                                                                                                                                                          |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 本地热点检测      | 进程内 HeavyKeeper TopK 草图——热 key 自动延长 L1 Caffeine TTL，无需 Worker                                                                                                    |
+| 集群检测与预热    | Worker 集群滑动窗口 + 贝叶斯置信度状态机；HOT key 直接从真实数据源（DB、远程服务）预热                                                                                        |
+| 快车道 FastLane   | 延迟敏感 key（秒杀、突发新闻）的 glob 规则：达标即 `CONFIRMED_HOT`，全链路 ~60ms（P99）                                                                                       |
+| 两级缓存          | Caffeine L1 + 注册式 loader 接任意后端；SingleFlight 防击穿、stale-while-revalidate、TTL 抖动防雪崩                                                                           |
+| 跨实例一致性      | 写穿透广播 + 每 key 版本守卫——无需 Paxos/Raft 开销的最终一致                                                                                                                  |
+| Spring Cache 融合 | `@Cacheable` / `@CachePut` / `@CacheEvict` 融合热点检测，外加 `@CacheTTL`、`@Intercept`、`@Fallback`、`@Preload` 等扩展注解（[docs/ANNOTATION.zh.md](docs/ANNOTATION.zh.md)） |
+| 运行时运维        | Actuator 端点、FastLane 规则 REST API、决策 Hook 与 Handler SPI（[docs/MONITOR.zh.md](docs/MONITOR.zh.md)）                                                                   |
+
+### 本地/集群检测
 
 ```java
 private final Zeta zeta;
@@ -31,16 +55,24 @@ zeta.tag("product:123");
 zeta.peek("product:123");
 ```
 
+- **本地层（常开）：** 每个实例运行 HeavyKeeper TopK 草图。key 进入 TopK 集合即自动延长其 L1 Caffeine TTL——无需 Worker 反馈。L1 未命中由 SingleFlight 合并并发请求防击穿；软过期条目回陈旧值同时后台刷新，数据源故障时条目以衰减续租（`max(剩余/2, 120s)`）继续存活，而不是每次读都请求数据源（[ADR-0036](docs/adr/0036-lease-on-failure.md)）。
+- **集群层（可选）：** 实例计数经 CPU-BBR 背压上报至 RabbitMQ；Worker 集群运行双路径评估管线——**快车道**（glob 规则，达标即提升 `CONFIRMED_HOT`，全链路 ~60ms P99）与**贝叶斯路径**（Normal-Normal 共轭后验 + 逐 key 证据累积：强热点 ~50–150ms 确认，边界 key 跨评估窗口累积证据）。
+
+<details>
+<summary><b>具体实现</b></summary>
+
 - `WaveCounter` 按键热度路由到两条路径：热键合并进写线程本地 map（零共享争用，每 128 次自增批量合并到共享表），冷键直接写入无锁共享表。每 500ms 周期交付一次快照
-- 潮汐节奏是自适应的：`TidePacer` 在突发时把交付周期缩短至 50ms、空闲时加倍拉长；`MoonsTidalForce` 提升门槛调节器在续热键受阻时把门槛降到边界直接接纳（绝不棘轮上调），并带两个按流量分档的 regime 开关（低流量归 1、洪水时旧门槛一个 tide 塌缩归位）、有界带退避定价的探针 walk（ADR-0045/0051/0052/0053），以及方向可验证的否决回退——先实测实时信号再决定是否越过已确认的梯级（ADR-0058），且回退下降段本身也逐级实测实时续热率：路过首个健康梯级即就地停车，持续劣于自身起点即转向（ADR-0059）。提升边界本身是精确的（ADR-0054）：边界值是该周期第 k 大计数的精确值，由 quickselect 在 log2 定位的桶内选出，并列时续热成员先于新来者重新提升——平坦分布下热集保持稳定；稳定负载下选择复用上一周期边界作为扫描过滤器，选择规模从整个桶降为约 `hotLimit` 个键（ADR-0057）
+- 潮汐节奏是自适应的：`TidePacer` 在突发时把交付周期缩短至 50ms、空闲时加倍拉长；`MoonsTidalForce` 提升门槛调节器在续热键受阻时把门槛降到边界直接接纳（绝不棘轮上调），并带两个按流量分档的 regime 开关（低流量归 1、洪水时旧门槛一个 tide 塌缩归位）、有界带退避定价的探针 walk（[ADR-0045](docs/adr/0045-promotion-floor-governor.md)/[ADR-0051](docs/adr/0051-governor-probe-machine-bounds.md)/[ADR-0052](docs/adr/0052-governor-caffeine-refinements.md)/[ADR-0053](docs/adr/0053-density-priced-raise-stride.md)），以及方向可验证的否决回退——先实测实时信号再决定是否越过已确认的梯级（[ADR-0058](docs/adr/0058-direction-verified-veto-retreat.md)），且回退下降段本身也逐级实测实时续热率：路过首个健康梯级即就地停车，持续劣于自身起点即转向（[ADR-0059](docs/adr/0059-descent-slope-verified-retreat.md)）。提升边界本身是精确的（[ADR-0054](docs/adr/0054-exact-selection-promotion-boundary.md)）：边界值是该周期第 k 大计数的精确值，由 quickselect 在 log2 定位的桶内选出，并列时续热成员先于新来者重新提升——平坦分布下热集保持稳定；稳定负载下选择复用上一周期边界作为扫描过滤器，选择规模从整个桶降为约 `hotLimit` 个键（[ADR-0057](docs/adr/0057-kth-shortcut-exact-selection.md)）
 
-- 每个应用实例运行一个本地 TopK 草图，跟踪高频访问的键。当键进入本地 TopK 集合时，其 L1 Caffeine 缓存的 TTL 会自动延长——无需等待 Worker 响应。L1 未命中时由 SingleFlight 机制合并同 key 并发请求，避免缓存击穿。同时支持软过期——在硬 TTL 到达之前，软 TTL 过期的条目可返回陈值并触发后台异步刷新，保障响应速度。若后台刷新失败，条目会以衰减续租（`max(剩余/2, 120s)`，ADR-0036）继续存活——源故障从"每次读同步打源"变成后台重试，首次成功刷新后自动自愈。
+- 每个应用实例运行一个本地 TopK 草图，跟踪高频访问的键。当键进入本地 TopK 集合时，其 L1 Caffeine 缓存的 TTL 会自动延长——无需等待 Worker 响应。L1 未命中时由 SingleFlight 机制合并同 key 并发请求，避免缓存击穿。同时支持软过期——在硬 TTL 到达之前，软 TTL 过期的条目可返回陈值并触发后台异步刷新，保障响应速度。若后台刷新失败，条目会以衰减续租（`max(剩余/2, 120s)`，[ADR-0036](docs/adr/0036-lease-on-failure.md)）继续存活——源故障从"每次读同步打源"变成后台重试，首次成功刷新后自动自愈。
 
-- `KeyReporter` 将本地计数经第二套 WaveCounter（50ms 刷新节奏）聚合后，经 CPU-BBR 速率限制器（CPU 阈值 80%，滑动窗口 10s/100 桶）判定是否放行，通过 `DirectExchange` 批量上报至 RabbitMQ，路由键 `report.{appName}.{nodeId}`
+- `KeyReporter` 将本地计数经第二套 WaveCounter（50ms 刷新节奏）聚合后，经 CPU-BBR 速率限制器（CPU 阈值 80%，滑动窗口 10s/100 桶）判定是否放行，通过 `DirectExchange` 批量上报至 RabbitMQ，路由键 `reportToWorker.{appName}.{target}`
 
 - Worker 集群聚合所有应用实例的访问报告，运行**双路径评估管线**：
   - **快车道（FastLane）**：对匹配用户配置的 glob 规则的 key（如 `product:*`），滑动窗口求和直接与规则阈值比较。达标即提升为 `CONFIRMED_HOT`——无贝叶斯置信度门控、无确认窗口。默认参数设定下,全链路端到端延迟：**~60ms（P99）**。
   - **贝叶斯路径**：对所有其他 key，滑动窗口频率分析结合贝叶斯置信度状态机（Normal-Normal 共轭后验 + 逐 key 证据累积）产生决策:`HIGH（≥0.95）` → `CONFIRMED_HOT` 广播 HOT；`MEDIUM（[0.76, 0.95)）` → `CANDIDATE_HOT` 积累证据；`LOW（<0.76）` → 保留策略（前 2 次 `hotStreak=confirmCount-1` 快速重评，第 3 次完全重置）。提升延迟取决于流量强度：强热点 key（远超阈值）在 **~50–150ms** 内达到 CONFIRMED_HOT；边界 key（接近阈值）可能需要多轮评估窗口。
+
+</details>
 
 ### 多节点缓存一致性
 
@@ -62,8 +94,6 @@ HotKey受京东[hotkey](https://gitee.com/jd-platform-opensource/hotkey)项目�
 ## 快速开始
 
 ### 1. 添加依赖
-
-配置参考:
 
 <details>
 <summary><b>快速部署 YAML 模板</b></summary>
@@ -115,9 +145,9 @@ zeta:
 # 无需静态分片配置——只需增加机器即可,建议本地App优先部署再启动worker
 ```
 
-**集群健康阈值** — 默认（`min-alive-workers: 0`）时，观测到至少 **三分之一的 Worker 存活**（向上取整，下限 1）即健康：如观测 3 台→1 台存活即健康；观测 5 台→2 台；观测 9 台→3 台。单幸存 Worker 有意视为健康（见 ADR-0028）。设置 `min-alive-workers: N` 可要求绝对存活数。详见 `docs/CONFIG.md`。
+**集群健康阈值** — 默认（`min-alive-workers: 0`）时，观测到至少 **三分之一的 Worker 存活**（向上取整，下限 1）即健康：如观测 3 台→1 台存活即健康；观测 5 台→2 台；观测 9 台→3 台。单幸存 Worker 有意视为健康（见 [ADR-0028](docs/adr/0028-records-based-one-third-cluster-health-threshold.md)）。设置 `min-alive-workers: N` 可要求绝对存活数。详见 [CONFIG.zh.md](docs/CONFIG.zh.md)。
 
-**全部参数）**
+**全部参数**
 参考[CONFIG.zh.md](docs/CONFIG.zh.md)
 
 </details>
@@ -306,9 +336,7 @@ Optional<User> fresh = zeta.getWithSoftExpire("user:42"); // 强制"回陈旧值
 
 ```java
 // P. get 带 CachePolicy — 延迟 TTL 求值、空值缓存、陈旧策略
-CachePolicy policy = CachePolicy.of(userRepo::findById)
-    .withHardTtl(30_000L)
-    .withSoftTtl(10_000L);
+CachePolicy policy = CachePolicy.of(userRepo::findById).withHardTtl(30_000L).withSoftTtl(10_000L);
 
 Optional<User> user = zeta.get("user:123", policy);
 
@@ -399,7 +427,7 @@ Worker 模式通过专用节点提供集群维度热点检测。App 实例定期
 | App-only    | `false`（默认）  | `HotKeyCache`、TopK、reporter、actuator、sync                        |
 | Worker-only | `true`           | 仅 Worker（无缓存——`get()`/`putThrough()` 抛出 `ZetaModeException`） |
 
-**Worker 集群健康：** 观测到至少三分之一的 Worker 存活（向上取整，下限 1）即健康——如观测 3 台→1 台存活即健康；观测 9 台→3 台。单幸存 Worker 有意视为健康集群：Worker 侧上报流量已压缩，幸存者可承担集群服务；仅当观测 Worker 存活数不足三分之一时才触发降级（本地 COOL→HOT 接管）。可通过 `zeta.local.heartbeat.min-alive-workers: N` 设置绝对最小值（见 ADR-0028）。
+**Worker 集群健康：** 观测到至少三分之一的 Worker 存活（向上取整，下限 1）即健康——如观测 3 台→1 台存活即健康；观测 9 台→3 台。单幸存 Worker 有意视为健康集群：Worker 侧上报流量已压缩，幸存者可承担集群服务；仅当观测 Worker 存活数不足三分之一时才触发降级（本地 COOL→HOT 接管）。可通过 `zeta.local.heartbeat.min-alive-workers: N` 设置绝对最小值（见 [ADR-0028](docs/adr/0028-records-based-one-third-cluster-health-threshold.md)）。
 
 **快车道（FastLane，立即提升旁路）：** FastLane 是一条绕过贝叶斯置信度门控的评估路径。匹配用户配置的 glob 规则的 key（如 `product:*`），只要滑动窗口计数达到规则阈值，立即提升为 `CONFIRMED_HOT`——无需确认窗口、无需置信度评分、无需连续计数累积。全链路端到端延迟：**~60ms（P99）**。FastLane 仅在 `zeta.worker.fast-lane.enabled=true`（默认 `false`）时生效——只配置规则不会激活该路径。
 
@@ -463,7 +491,7 @@ Worker 模块（`zeta-worker`）已将广播 exchange（默认 `zeta.send.exchan
 
 其余对象（`zeta.send.exchange`、`zeta.reportToWorker.exchange`、sync exchange）仍由 Boot 的 `RabbitAdmin` 惰性声明，因此冷启动时仍可能出现一次性 `NOT_FOUND`，且同样无害——判据是 App 侧健康环是否变为非空，详见 [CONFIG.zh.md](docs/CONFIG.zh.md)。**不要**为了提前声明而新增第二个 `AmqpAdmin`/`RabbitAdmin` bean：Boot 的 admin 由 `@ConditionalOnMissingBean` 按返回类型把关，多一个 admin 会静默顶掉它，导致所有交换机、队列、绑定都不再被声明。
 
-**共享 broker 的 appName 隔离（ADR-0068）**
+**共享 broker 的 appName 隔离（[ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md)）**
 
 每条 HOT/COOL 决策广播都携带 `appName` 头（取自 Worker 的 `zeta.worker.routing.app-name`），App 侧监听器会丢弃与自身 `zeta.local.app-name` 不同的决策——fanout 交换机忽略 routing key，多应用共用一个 RabbitMQ 时，否则 A 应用的决策会触发 B 应用的无效预热。两条兼容规则：**不带** `appName` 头的消息（旧版 Worker，滚动升级窗口）一律照常处理；未配置 `app-name` 的应用保持原有全收行为。两端 `app-name` 不一致时决策会被静默丢弃（DEBUG 日志可见），务必保持一致。详见 [ADR-0068](docs/adr/0068-broadcast-app-name-isolation.md)。
 
@@ -676,7 +704,7 @@ public String updateLocal(String id, String val) { ... }
 
 启用 `zeta.sync.enabled=true`。
 
-读路径条目(L1 miss、软过期刷新、null 哨兵)会以值读取后探测到的 Redis `dataVersion` 盖章(批量装载走 pipeline),迟到的过期广播会被共享的版本比较拒绝,而不会覆盖更新的值。探测失败时条目不盖章(fail-open);详见 ADR-0033。
+读路径条目(L1 miss、软过期刷新、null 哨兵)会以值读取后探测到的 Redis `dataVersion` 盖章(批量装载走 pipeline),迟到的过期广播会被共享的版本比较拒绝,而不会覆盖更新的值。探测失败时条目不盖章(fail-open);详见 [ADR-0033](docs/adr/0033-read-path-version-stamping.md)。
 
 ## 规则系统
 
@@ -700,7 +728,7 @@ public String updateLocal(String id, String val) { ... }
 
 ### 持久化与广播
 
-- **有 Redis：** 每次 `addRule()`/`removeRule()`/`clearRules()` 将规则列表序列化到 `ZetaConstants.Redis.KEY_RULES`（`"zeta:rules"`）。启动时 `RuleMatcher.initRules()` 从 Redis 加载并恢复持久化的 `rulesVersion`（ADR-0062）。变更也通过 `TYPE_RULES_SYNC` 广播——对端将版本严格更新的广播作为权威全量替换应用（删除与清空因此可以收敛），旧版无版本广播（`incomingVersion == 0`，滚动升级）退回并集合并；接收端不触发二次广播（避免风暴）。
+- **有 Redis：** 每次 `addRule()`/`removeRule()`/`clearRules()` 将规则列表序列化到 `ZetaConstants.Redis.KEY_RULES`（`"zeta:rules"`）。启动时 `RuleMatcher.initRules()` 从 Redis 加载并恢复持久化的 `rulesVersion`（[ADR-0062](docs/adr/0062-rule-sync-version-authoritative-replace.md)）。变更也通过 `TYPE_RULES_SYNC` 广播——对端将版本严格更新的广播作为权威全量替换应用（删除与清空因此可以收敛），旧版无版本广播（`incomingVersion == 0`，滚动升级）退回并集合并；接收端不触发二次广播（避免风暴）。
 - **无 Redis：** 相同操作通过 `CacheSyncPublisher` fanout 交换机广播到所有对端。每个对端在内存中持有完整规则集。
 - **手动广播：** `zeta.broadcastAllLocalRulesManually()` 从 Redis（如可用）加载并重新广播当前规则集到所有对端。
 
