@@ -19,9 +19,10 @@ import static io.github.hyshmily.zeta.constants.ZetaConstants.Routing.KEY_HEARTB
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.cache.loader.PrefixRoutedLoader;
 import io.github.hyshmily.zeta.cache.loader.RedisValueLoader;
 import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
@@ -140,7 +141,11 @@ public class ZetaAmqpAutoConfiguration {
    * @param threadNameSuffix thread-name suffix for the factory ({@code "-sync"}, {@code "-worker"})
    * @return a daemon-thread scheduled executor named {@code zeta-scheduler<suffix>-N}
    */
-  private static ScheduledExecutorService newJitterScheduler(int configuredPoolSize, int concurrentConsumers, String threadNameSuffix) {
+  private static ScheduledExecutorService newJitterScheduler(
+    int configuredPoolSize,
+    int concurrentConsumers,
+    String threadNameSuffix
+  ) {
     int poolSize = Math.max(configuredPoolSize, concurrentConsumers * 2);
     return Executors.newScheduledThreadPool(
       poolSize,
@@ -396,7 +401,7 @@ public class ZetaAmqpAutoConfiguration {
      * @return a new {@link BbrRateLimiter} instance
      */
     @Bean
-    @ConditionalOnMissingBean
+    @ConditionalOnMissingBean(BbrRateLimiter.class)
     @ConditionalOnProperty(
       prefix = "zeta.local.reporter",
       name = "enabled",
@@ -404,7 +409,7 @@ public class ZetaAmqpAutoConfiguration {
       matchIfMissing = true
     )
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
-    public BbrRateLimiterImpl hotKeyBbrRateLimiter(SystemLoadMonitor cpuMonitor, ZetaProperties properties) {
+    public BbrRateLimiter hotKeyBbrRateLimiter(SystemLoadMonitor cpuMonitor, ZetaProperties properties) {
       ZetaProperties.ReporterLimiter cfg = properties.getReporter();
       return new BbrRateLimiterImpl(
         cpuMonitor,
@@ -436,7 +441,7 @@ public class ZetaAmqpAutoConfiguration {
       ZetaProperties properties,
       RingManager ringManager,
       ObjectProvider<HealthView> healthViewProvider,
-      ObjectProvider<BbrRateLimiterImpl> bbrRateLimiterProvider,
+      ObjectProvider<BbrRateLimiter> bbrRateLimiterProvider,
       SnowflakeIdGenerator snowflakeIdGenerator
     ) {
       KeyReporterImpl reporter = new KeyReporterImpl(
@@ -591,9 +596,9 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(SyncDecisionHandler.class)
     public SyncDecisionHandler defaultSyncDecisionHandler(
-      Cache<String, Object> hotLocalCache,
+      Cache<String, CacheEntry> hotLocalCache,
       CacheLoader<Object> hotKeyClusterLoader,
-      ExpireManager expireManager,
+      EntryLifecycle entryLifecycle,
       RuleMatcher ruleMatcher,
       ObjectProvider<SingleFlight> singleFlightProvider,
       ObjectProvider<SyncHook> syncHookProvider
@@ -601,7 +606,7 @@ public class ZetaAmqpAutoConfiguration {
       return new DefaultSyncDecisionHandler(
         hotLocalCache,
         hotKeyClusterLoader,
-        expireManager,
+        entryLifecycle,
         ruleMatcher,
         syncHookProvider.stream().toList(),
         singleFlightProvider.getIfAvailable()
@@ -811,14 +816,14 @@ public class ZetaAmqpAutoConfiguration {
      * @return a new {@link SreRateLimiter} instance
      */
     @Bean
-    @ConditionalOnMissingBean
+    @ConditionalOnMissingBean(SreRateLimiter.class)
     @ConditionalOnProperty(
       prefix = "zeta.worker-listener.sre",
       name = "enabled",
       havingValue = "true",
       matchIfMissing = true
     )
-    public SreRateLimiterImpl hotKeySreRateLimiter(WorkerListenerProperties properties) {
+    public SreRateLimiter hotKeySreRateLimiter(WorkerListenerProperties properties) {
       WorkerListenerProperties.Sre sreConfig = properties.getSre();
       return new SreRateLimiterImpl(
         sreConfig.getWindowMs(),
@@ -851,10 +856,10 @@ public class ZetaAmqpAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(WorkerDecisionHandler.class)
     public WorkerDecisionHandler defaultWorkerDecisionHandler(
-      Cache<String, Object> hotLocalCache,
+      Cache<String, CacheEntry> hotLocalCache,
       CacheLoader<Object> hotKeyClusterLoader,
-      ExpireManager expireManager,
-      ObjectProvider<SreRateLimiterImpl> sreRateLimiterProvider,
+      EntryLifecycle entryLifecycle,
+      ObjectProvider<SreRateLimiter> sreRateLimiterProvider,
       StringRedisTemplate stringRedisTemplate,
       ZetaProperties zetaProperties,
       SnowflakeIdGenerator snowflakeIdGenerator,
@@ -868,7 +873,7 @@ public class ZetaAmqpAutoConfiguration {
       return new DefaultWorkerDecisionHandler(
         hotLocalCache,
         hotKeyClusterLoader,
-        expireManager,
+        entryLifecycle,
         sreRateLimiterProvider.getIfAvailable(),
         vc,
         workerDecisionHookProvider.stream().toList()

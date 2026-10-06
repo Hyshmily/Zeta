@@ -21,7 +21,8 @@ import static org.mockito.Mockito.mock;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.CacheEntry;
@@ -44,7 +45,7 @@ class ZetaAutoConfigurationTest {
     .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class));
 
   /**
-   * Verifies that all default beans (TopK, Cache, SingleFlight, ExpireManagerImpl, Executor, HotKeyCache, HotKey) are created.
+   * Verifies that all default beans (TopK, Cache, SingleFlight, EntryLifecycleImpl, Executor, HotKeyCache, HotKey) are created.
    */
   @Test
   void allBeansAreCreatedByDefault() {
@@ -53,7 +54,8 @@ class ZetaAutoConfigurationTest {
       assertThat(ctx.getBean("hotKeyDetector")).isInstanceOf(HotKeyDetector.class);
       assertThat(ctx).hasSingleBean(Cache.class);
       assertThat(ctx).hasSingleBean(SingleFlight.class);
-      assertThat(ctx).hasSingleBean(ExpireManager.class);
+      assertThat(ctx).hasSingleBean(EntryLifecycle.class);
+      assertThat(ctx).hasSingleBean(BackgroundRefresher.class);
       assertThat(ctx).hasBean("hotKeyExecutor");
       assertThat(ctx.getBean("hotKeyExecutor")).isInstanceOf(Executor.class);
       assertThat(ctx).hasSingleBean(HotKeyCache.class);
@@ -117,15 +119,15 @@ class ZetaAutoConfigurationTest {
   }
 
   /**
-   * Verifies that a custom ExpireManagerImpl bean overrides the default one.
+   * Verifies that a custom EntryLifecycle bean overrides the default one.
    */
   @Test
-  void expireManagerCanBeOverridden() {
+  void entryLifecycleCanBeOverridden() {
     new ApplicationContextRunner()
-      .withBean(ExpireManager.class, () -> mock(ExpireManager.class))
+      .withBean(EntryLifecycle.class, () -> mock(EntryLifecycle.class))
       .withPropertyValues("zeta.local.topK=200")
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
-      .run(ctx -> assertThat(ctx).hasSingleBean(ExpireManager.class));
+      .run(ctx -> assertThat(ctx).hasSingleBean(EntryLifecycle.class));
   }
 
   /**
@@ -187,10 +189,10 @@ class ZetaAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).hasSingleBean(Cache.class);
-        Cache<String, Object> cache = ctx.getBean(Cache.class);
+        Cache<String, CacheEntry> cache = ctx.getBean(Cache.class);
         // Put more than 500 entries, then cleanUp to force eviction
         for (int i = 0; i < 600; i++) {
-          cache.put("k" + i, "v" + i);
+          cache.put("k" + i, plainEntry("v" + i));
         }
         cache.cleanUp();
         assertThat(cache.estimatedSize()).isLessThanOrEqualTo(500);
@@ -206,8 +208,8 @@ class ZetaAutoConfigurationTest {
   void hotLocalCache_shouldEnableStatsRecording() {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(Cache.class);
-      Cache<String, Object> cache = ctx.getBean(Cache.class);
-      cache.put("k", "v");
+      Cache<String, CacheEntry> cache = ctx.getBean(Cache.class);
+      cache.put("k", plainEntry("v"));
       cache.getIfPresent("k");
       assertThat(cache.stats().hitCount()).isPositive();
     });
@@ -233,9 +235,9 @@ class ZetaAutoConfigurationTest {
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
       .run(ctx -> {
         assertThat(ctx).hasSingleBean(Cache.class);
-        Cache<String, Object> cache = ctx.getBean(Cache.class);
-        // Put a string value; weight should be computed by DefaultWeigher
-        cache.put("test", "value");
+        Cache<String, CacheEntry> cache = ctx.getBean(Cache.class);
+        // Put an entry; weight should be computed by DefaultWeigher
+        cache.put("test", plainEntry("value"));
         cache.cleanUp();
         assertThat(cache.estimatedSize()).isOne();
       });
@@ -251,7 +253,7 @@ class ZetaAutoConfigurationTest {
       .withPropertyValues("zeta.local.topK=200")
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
       .run(ctx -> {
-        Cache<String, Object> cache = ctx.getBean(Cache.class);
+        Cache<String, CacheEntry> cache = ctx.getBean(Cache.class);
         CacheEntry entry = CacheEntry.builder()
           .value("logical-expiry-value")
           .hardExpireAtMs(Long.MAX_VALUE)
@@ -264,18 +266,25 @@ class ZetaAutoConfigurationTest {
   }
 
   /**
-   * Verifies that a non-CacheEntry value is accepted (falls through to default TTL).
+   * Verifies that a plain NORMAL entry is accepted with logical expiry
+   * (F1 L1 type closure: slots hold {@link CacheEntry} only — the former
+   * non-entry fallback is gone).
    */
   @Test
-  void localCache_shouldAcceptNonCacheEntryValue() {
+  void localCache_shouldAcceptNormalEntry() {
     new ApplicationContextRunner()
       .withPropertyValues("zeta.local.topK=200")
       .withConfiguration(AutoConfigurations.of(ZetaFacadeAutoConfiguration.class, ZetaAutoConfiguration.class))
       .run(ctx -> {
-        Cache<String, Object> cache = ctx.getBean(Cache.class);
-        cache.put("plain", "plain-string-value");
+        Cache<String, CacheEntry> cache = ctx.getBean(Cache.class);
+        cache.put("plain", plainEntry("plain-string-value"));
         cache.cleanUp();
-        assertThat(cache.getIfPresent("plain")).isEqualTo("plain-string-value");
+        assertThat(cache.getIfPresent("plain").getValue()).isEqualTo("plain-string-value");
       });
+  }
+
+  /** Minimal NORMAL entry with pure logical expiry (never time-evicted). */
+  private static CacheEntry plainEntry(String value) {
+    return CacheEntry.builder().value(value).dataVersion(0).hardExpireAtMs(Long.MAX_VALUE).build();
   }
 }

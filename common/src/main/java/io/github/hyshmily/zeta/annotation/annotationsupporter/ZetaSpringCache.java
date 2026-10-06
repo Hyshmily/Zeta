@@ -17,9 +17,11 @@ package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.InvalidatePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import jakarta.annotation.Nullable;
+import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.NonNull;
 import org.springframework.cache.Cache;
 import org.springframework.cache.support.AbstractValueAdaptingCache;
@@ -36,7 +38,7 @@ import java.util.function.Supplier;
  *
  * <p>This class is the <b>storage-policy enforcement point</b> (the <em>how</em>
  * layer) of the annotation integration: it reads the per-invocation
- * {@link CachePolicy} from {@link ZetaCacheContext} and translates it into the
+ * {@link ZetaCacheContext.Snapshot} from {@link ZetaCacheContext} and translates it into the
  * appropriate {@link Zeta} facade calls. It deliberately does <b>not</b> decide
  * whether the intercepted method runs — that is the aspect's job.
  *
@@ -51,25 +53,26 @@ import java.util.function.Supplier;
  * configuration, never by the presence of a TTL override.
  */
 @Internal
+@Slf4j
 public class ZetaSpringCache extends AbstractValueAdaptingCache {
 
   private final String name;
   /**
    * Precomputed {@code name + keySeparator} for {@link #prefixedKey} — the
-   * separator is bound from {@code ZetaProperties} once at startup, so the
+   * separator is bound from {@link SpringCacheSettings} once at startup, so the
    * per-op getter chain and re-concatenation are wasted work on the hottest
    * annotation-path operation.
    */
   private final String keyPrefix;
   private final Zeta zeta;
-  private final ZetaProperties properties;
+  private final SpringCacheSettings settings;
 
-  public ZetaSpringCache(String name, Zeta zeta, ZetaProperties properties, boolean allowNullValues) {
+  public ZetaSpringCache(String name, Zeta zeta, SpringCacheSettings settings, boolean allowNullValues) {
     super(allowNullValues);
     this.name = name;
     this.zeta = zeta;
-    this.properties = properties;
-    this.keyPrefix = name + properties.getSpringCache().getKeySeparator();
+    this.settings = settings;
+    this.keyPrefix = name + settings.keySeparator();
   }
 
   private String prefixedKey(Object key) {
@@ -122,7 +125,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
    * {@inheritDoc}
    *
    * <p>The sync read entry for {@code @Cacheable(sync = true)}: the resolved
-   * {@link CachePolicy} (TTL overrides, null-caching decision) flows into the
+   * {@link ReadPolicy} (TTL overrides, null-caching decision) flows into the
    * atomic soft-expire compute path. TTL suppliers are evaluated lazily, so
    * SpEL expressions cost nothing on a plain cache hit. A cached
    * {@code null} (sentinel) surfaces as {@code null} without re-invoking the
@@ -134,7 +137,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
   @SuppressWarnings("unchecked")
   public <T> T get(@NonNull Object key, @NonNull Callable<T> valueLoader) {
     String prefixed = prefixedKey(key);
-    CachePolicy policy = ZetaCacheContext.get().current();
+    ReadPolicy policy = ZetaCacheContext.get().current();
 
     Supplier<Object> loader = () -> {
       try {
@@ -145,7 +148,7 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
     };
 
     return zeta
-      .computeIfAbsentWithSoftExpire(prefixed, policy.withReader(loader))
+      .computeIfAbsentWithSoftExpireOptional(prefixed, policy.withReader(loader))
       .map(v -> (T) fromStoreValue(v))
       .orElse(null);
   }
@@ -175,9 +178,9 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
   public void put(@NonNull Object key, @Nullable Object value) {
     String prefixed = prefixedKey(key);
     Object storeValue = toStoreValue(value);
-    CachePolicy policy = ZetaCacheContext.get().current();
+    ReadPolicy policy = ZetaCacheContext.get().current();
 
-    boolean skipBroadcast = policy.skipBroadcast();
+    boolean skipBroadcast = ZetaCacheContext.get().skipBroadcast();
     boolean isNullValue = storeValue instanceof org.springframework.cache.support.NullValue;
 
     if (isNullValue) {
@@ -190,11 +193,11 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
       // null TTL (Long.MAX_VALUE when null-value TTL is disabled, matching
       // TtlPolicy.computeNullExpireAt's disabled semantics). The @CacheTTL
       // override does not apply: the sentinel TTL is its own knob.
-      long nullTtlMs = properties.effectiveNullTtlMs();
+      long nullTtlMs = settings.effectiveNullTtlMs();
       if (skipBroadcast) {
-        zeta.putLocal(prefixed, NullValue.INSTANCE, CachePolicy.of(nullTtlMs, nullTtlMs));
+        zeta.putLocal(prefixed, NullValue.INSTANCE, WritePolicy.of(nullTtlMs, nullTtlMs));
       } else {
-        zeta.putThrough(prefixed, NullValue.INSTANCE, () -> {}, CachePolicy.of(nullTtlMs, nullTtlMs));
+        zeta.putThrough(prefixed, NullValue.INSTANCE, () -> {}, WritePolicy.of(nullTtlMs, nullTtlMs));
       }
       return;
     }
@@ -204,18 +207,18 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
     long hardTtlMs = Math.max(0L, policy.hardTtlMs().getAsLong());
     long softTtlMs = Math.max(0L, policy.softTtlMs().getAsLong());
     if (skipBroadcast) {
-      zeta.putLocal(prefixed, storeValue, CachePolicy.of(hardTtlMs, softTtlMs));
+      zeta.putLocal(prefixed, storeValue, WritePolicy.of(hardTtlMs, softTtlMs));
     } else {
-      zeta.putThrough(prefixed, storeValue, () -> {}, CachePolicy.of(hardTtlMs, softTtlMs));
+      zeta.putThrough(prefixed, storeValue, () -> {}, WritePolicy.of(hardTtlMs, softTtlMs));
     }
   }
 
   @Override
   public void evict(@NonNull Object key) {
     String prefixed = prefixedKey(key);
-    boolean skip = ZetaCacheContext.get().current().skipBroadcast();
+    boolean skip = ZetaCacheContext.get().skipBroadcast();
     if (skip) {
-      zeta.invalidate(prefixed, CachePolicy.defaults().withSkipBroadcast(true));
+      zeta.invalidate(prefixed, InvalidatePolicy.of(true));
     } else {
       zeta.invalidate(prefixed);
     }
@@ -229,29 +232,30 @@ public class ZetaSpringCache extends AbstractValueAdaptingCache {
    * true)} on one cache never nukes the entries of other caches (the previous
    * behavior wiped the entire L1). Implementation is an O(n) scan of the local
    * L1 key set (acceptable: {@code clear()} is a rare, explicit operation)
-   * followed by one batched {@link Zeta#invalidate(Collection, CachePolicy)},
+    * followed by one batched {@link Zeta#invalidate(Collection, InvalidatePolicy)},
    * broadcast unless {@code @SkipBroadcast} applies so peers evict the same
    * namespace. Entries written after the snapshot are left for the next
    * eviction cycle.
    */
   @Override
   public void clear() {
-    com.github.benmanes.caffeine.cache.Cache<String, Object> localCache = zeta.getLocalCache();
-    if (localCache == null) {
+    if (!zeta.isApp()) {
+      // Non-app mode (no L1 cache) — @CacheEvict(allEntries = true) has
+      // nothing to evict. Silent until now, which read as a working eviction
+      // that evicted nothing; say so once.
+      log.warn(
+        "clear() called but no local L1 cache is available (non-app mode); "
+          + "@CacheEvict(allEntries = true) is a no-op"
+      );
       return;
     }
 
-    List<String> keys = localCache
-      .asMap()
-      .keySet()
-      .stream()
-      .filter(k -> k.startsWith(keyPrefix))
-      .toList();
+    List<String> keys = zeta.stats().localKeysWithPrefix(keyPrefix);
     if (keys.isEmpty()) {
       return;
     }
 
-    boolean skipBroadcast = ZetaCacheContext.get().current().skipBroadcast();
-    zeta.invalidate(keys, CachePolicy.defaults().withSkipBroadcast(skipBroadcast));
+    boolean skipBroadcast = ZetaCacheContext.get().skipBroadcast();
+    zeta.invalidate(keys, InvalidatePolicy.of(skipBroadcast));
   }
 }

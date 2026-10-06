@@ -15,14 +15,11 @@
  */
 package io.github.hyshmily.zeta.util;
 
-import static java.util.logging.Level.FINE;
-import static java.util.logging.Level.INFO;
-
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Generates a unique instance identifier used for per-instance RabbitMQ queue names.
@@ -35,6 +32,7 @@ import java.util.logging.Logger;
  * </ol>
  */
 @Internal
+@Slf4j
 public final class InstanceIdGenerator {
 
   /** Private constructor to prevent instantiation of this utility class. */
@@ -53,8 +51,6 @@ public final class InstanceIdGenerator {
   private static final long NODE_ID;
 
   private static final String NODE_UUID_STRING;
-
-  private static final Logger LOG = Logger.getLogger(InstanceIdGenerator.class.getName());
 
   static {
     NODE_ID = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
@@ -84,9 +80,9 @@ public final class InstanceIdGenerator {
     String normalized = (id != null && !id.isBlank()) ? id : null;
     if (!Objects.equals(normalized, override)) {
       if (normalized != null) {
-        LOG.log(INFO, "Instance ID override set: {0}", normalized);
+        log.info("Instance ID override set: {}", normalized);
       } else {
-        LOG.log(INFO, "Instance ID override cleared");
+        log.info("Instance ID override cleared");
       }
     }
     override = normalized;
@@ -115,7 +111,7 @@ public final class InstanceIdGenerator {
           String hostname = System.getenv("HOSTNAME");
           String uniquePart = (hostname != null && !hostname.isBlank()) ? hostname : NODE_UUID_STRING;
           cached = port + "-" + uniquePart;
-          LOG.log(FINE, "Instance ID resolved (auto): {0}", cached);
+          log.debug("Instance ID resolved (auto): {}", cached);
         }
       }
     }

@@ -20,11 +20,13 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
@@ -89,9 +91,10 @@ class ZetaRedisAutoConfigurationTest {
   void hotKeyCacheBeanIsCreatedWithRequiredDependencies() {
     ZetaProperties properties = new ZetaProperties();
     HotKeyDetector detector = mock(HotKeyDetector.class);
-    Cache<String, Object> localCache = mock(Cache.class);
+    Cache<String, CacheEntry> localCache = mock(Cache.class);
     SingleFlight singleFlight = mock(SingleFlight.class);
-    ExpireManager expireManager = mock(ExpireManager.class);
+    EntryLifecycle entryLifecycle = mock(EntryLifecycle.class);
+    BackgroundRefresher backgroundRefresher = mock(BackgroundRefresher.class);
     Executor executor = mock(Executor.class);
 
     RuleMatcher ruleMatcher = new RuleMatcherImpl(
@@ -109,7 +112,8 @@ class ZetaRedisAutoConfigurationTest {
       detector,
       localCache,
       singleFlight,
-      expireManager,
+      entryLifecycle,
+      backgroundRefresher,
       executor,
       dispatcher,
       redisTemplateProvider,
@@ -131,9 +135,10 @@ class ZetaRedisAutoConfigurationTest {
   void hotKeyCacheBeanAcceptsOptionalDependencies() {
     ZetaProperties properties = new ZetaProperties();
     HotKeyDetector detector = mock(HotKeyDetector.class);
-    Cache<String, Object> localCache = mock(Cache.class);
+    Cache<String, CacheEntry> localCache = mock(Cache.class);
     SingleFlight singleFlight = mock(SingleFlight.class);
-    ExpireManager expireManager = mock(ExpireManager.class);
+    EntryLifecycle entryLifecycle = mock(EntryLifecycle.class);
+    BackgroundRefresher backgroundRefresher = mock(BackgroundRefresher.class);
     Executor executor = mock(Executor.class);
     CacheSyncPublisher publisher = mock(CacheSyncPublisher.class);
     KeyReporter reporter = mock(KeyReporter.class);
@@ -153,7 +158,8 @@ class ZetaRedisAutoConfigurationTest {
       detector,
       localCache,
       singleFlight,
-      expireManager,
+      entryLifecycle,
+      backgroundRefresher,
       executor,
       dispatcher,
       redisTemplateProvider,
@@ -202,7 +208,7 @@ class ZetaRedisAutoConfigurationTest {
       .withBean(HotKeyDetector.class, () -> mock(HotKeyDetector.class))
       .withBean(Cache.class, () -> mock(Cache.class))
       .withBean(SingleFlight.class, () -> mock(SingleFlight.class))
-      .withBean(ExpireManager.class, () -> mock(ExpireManager.class))
+      .withBean(EntryLifecycle.class, () -> mock(EntryLifecycle.class))
       .withBean("hotKeyExecutor", Executor.class, () -> mock(Executor.class))
       .withBean(ZetaProperties.class, ZetaProperties::new)
       .withConfiguration(AutoConfigurations.of(ZetaRedisAutoConfiguration.class))

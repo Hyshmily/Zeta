@@ -26,7 +26,7 @@ import java.lang.annotation.Target;
  * naturally accumulate enough accesses in the HeavyKeeper TopK sketch.
  *
  * <p>Pre-loaded keys have their detection counts inflated via
- * {@link Zeta#notifyLocalDetectorDirect(String, long)}
+ * {@link Zeta.DetectorAdmin#notifyLocalDetectorDirect(String, long)}
  * so they immediately benefit from long TTLs, hot-key interception
  * ({@link Intercept @Intercept}), and priority treatment — without waiting
  * for the detection engine to recognise them organically.

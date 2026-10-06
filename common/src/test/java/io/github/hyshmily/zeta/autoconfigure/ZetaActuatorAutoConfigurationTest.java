@@ -20,7 +20,9 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.RingEndpoint;
@@ -39,6 +41,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
+import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
+import org.springframework.boot.actuate.endpoint.annotation.Selector;
+import org.springframework.boot.actuate.endpoint.annotation.WriteOperation;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -70,17 +76,18 @@ class ZetaActuatorAutoConfigurationTest {
   @Test
   void hotKeyEndpointIsCreatedWithAllDependencies() {
     TopK hotKeyDetector = mock(TopK.class);
-    Cache<String, Object> localCache = mock(Cache.class);
+    Cache<String, CacheEntry> localCache = mock(Cache.class);
     SingleFlight singleFlight = mock(SingleFlight.class);
     KeyReporter reporter = mock(KeyReporter.class);
     ZetaProperties properties = new ZetaProperties();
 
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
-    ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
+    ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<ExpireManager> expireManagerProvider = mock(ObjectProvider.class);
+    ObjectProvider<EntryLifecycle> entryLifecycleProvider = mock(ObjectProvider.class);
+    ObjectProvider<BackgroundRefresher> backgroundRefresherProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
@@ -93,7 +100,8 @@ class ZetaActuatorAutoConfigurationTest {
     doReturn(singleFlight).when(sfProvider).getIfAvailable();
     doReturn(reporter).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
-    doReturn(null).when(expireManagerProvider).getIfAvailable();
+    doReturn(null).when(entryLifecycleProvider).getIfAvailable();
+    doReturn(null).when(backgroundRefresherProvider).getIfAvailable();
     doReturn(null).when(versionControllerProvider).getIfAvailable();
     doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
     doReturn(null).when(stateMachineProvider).getIfAvailable();
@@ -105,7 +113,8 @@ class ZetaActuatorAutoConfigurationTest {
       sfProvider,
       reporterProvider,
       ruleMatcherProvider,
-      expireManagerProvider,
+      entryLifecycleProvider,
+      backgroundRefresherProvider,
       versionControllerProvider,
       cacheSyncPublisherProvider,
       stateMachineProvider,
@@ -124,11 +133,12 @@ class ZetaActuatorAutoConfigurationTest {
   @Test
   void hotKeyEndpointHandlesMissingDependenciesAsNull() {
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
-    ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
+    ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<ExpireManager> expireManagerProvider = mock(ObjectProvider.class);
+    ObjectProvider<EntryLifecycle> entryLifecycleProvider = mock(ObjectProvider.class);
+    ObjectProvider<BackgroundRefresher> backgroundRefresherProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
@@ -142,7 +152,8 @@ class ZetaActuatorAutoConfigurationTest {
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
-    doReturn(null).when(expireManagerProvider).getIfAvailable();
+    doReturn(null).when(entryLifecycleProvider).getIfAvailable();
+    doReturn(null).when(backgroundRefresherProvider).getIfAvailable();
     doReturn(null).when(versionControllerProvider).getIfAvailable();
     doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
     doReturn(null).when(stateMachineProvider).getIfAvailable();
@@ -154,7 +165,8 @@ class ZetaActuatorAutoConfigurationTest {
       sfProvider,
       reporterProvider,
       ruleMatcherProvider,
-      expireManagerProvider,
+      entryLifecycleProvider,
+      backgroundRefresherProvider,
       versionControllerProvider,
       cacheSyncPublisherProvider,
       stateMachineProvider,
@@ -196,11 +208,12 @@ class ZetaActuatorAutoConfigurationTest {
   void hotKeyEndpointAcceptsOnlyAppTopK() {
     TopK hotKeyDetector = mock(TopK.class);
     ObjectProvider<TopK> detectorProvider = mock(ObjectProvider.class);
-    ObjectProvider<Cache<String, Object>> cacheProvider = mock(ObjectProvider.class);
+    ObjectProvider<Cache<String, CacheEntry>> cacheProvider = mock(ObjectProvider.class);
     ObjectProvider<SingleFlight> sfProvider = mock(ObjectProvider.class);
     ObjectProvider<KeyReporter> reporterProvider = mock(ObjectProvider.class);
     ObjectProvider<RuleMatcher> ruleMatcherProvider = mock(ObjectProvider.class);
-    ObjectProvider<ExpireManager> expireManagerProvider = mock(ObjectProvider.class);
+    ObjectProvider<EntryLifecycle> entryLifecycleProvider = mock(ObjectProvider.class);
+    ObjectProvider<BackgroundRefresher> backgroundRefresherProvider = mock(ObjectProvider.class);
     ObjectProvider<VersionController> versionControllerProvider = mock(ObjectProvider.class);
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider = mock(ObjectProvider.class);
     ObjectProvider<ZetaBayesianSM> stateMachineProvider = mock(ObjectProvider.class);
@@ -214,7 +227,8 @@ class ZetaActuatorAutoConfigurationTest {
     doReturn(null).when(sfProvider).getIfAvailable();
     doReturn(null).when(reporterProvider).getIfAvailable();
     doReturn(null).when(ruleMatcherProvider).getIfAvailable();
-    doReturn(null).when(expireManagerProvider).getIfAvailable();
+    doReturn(null).when(entryLifecycleProvider).getIfAvailable();
+    doReturn(null).when(backgroundRefresherProvider).getIfAvailable();
     doReturn(null).when(versionControllerProvider).getIfAvailable();
     doReturn(null).when(cacheSyncPublisherProvider).getIfAvailable();
     doReturn(null).when(stateMachineProvider).getIfAvailable();
@@ -226,7 +240,8 @@ class ZetaActuatorAutoConfigurationTest {
       sfProvider,
       reporterProvider,
       ruleMatcherProvider,
-      expireManagerProvider,
+      entryLifecycleProvider,
+      backgroundRefresherProvider,
       versionControllerProvider,
       cacheSyncPublisherProvider,
       stateMachineProvider,
@@ -237,5 +252,29 @@ class ZetaActuatorAutoConfigurationTest {
     );
 
     assertThat(endpoint).isNotNull();
+  }
+
+  /**
+   * Pins the management-plane migration: all three diagnostics endpoints must
+   * be standard Actuator {@link Endpoint}s (port, exposure, and roles honored
+   * via {@code management.*}) — never plain MVC controllers on the
+   * application port — with stable ids and operation shapes.
+   */
+  @Test
+  void endpointsAreActuatorEndpointsWithStableIdsAndOperations() throws Exception {
+    assertThat(ZetaEndpoint.class.getAnnotation(Endpoint.class).id()).isEqualTo("hotkey");
+    assertThat(RingEndpoint.class.getAnnotation(Endpoint.class).id()).isEqualTo("hotkeyring");
+    assertThat(StateMachineEndpoint.class.getAnnotation(Endpoint.class).id()).isEqualTo("hotkey-worker-state");
+
+    assertThat(ZetaEndpoint.class.getMethod("hotKeyInfo", Integer.class))
+      .satisfies(m -> assertThat(m.getAnnotation(ReadOperation.class)).isNotNull());
+    assertThat(RingEndpoint.class.getMethod("ringInfo"))
+      .satisfies(m -> assertThat(m.getAnnotation(ReadOperation.class)).isNotNull());
+    assertThat(RingEndpoint.class.getMethod("keyMapping", String.class).getParameters()[0].getAnnotation(Selector.class))
+      .isNotNull();
+    assertThat(StateMachineEndpoint.class.getMethod("get"))
+      .satisfies(m -> assertThat(m.getAnnotation(ReadOperation.class)).isNotNull());
+    assertThat(StateMachineEndpoint.class.getMethod("set", Integer.class, Integer.class, Integer.class))
+      .satisfies(m -> assertThat(m.getAnnotation(WriteOperation.class)).isNotNull());
   }
 }

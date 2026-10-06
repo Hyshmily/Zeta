@@ -17,17 +17,25 @@ package io.github.hyshmily.zeta.annotation;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import io.github.bucket4j.Bandwidth;
-import io.github.bucket4j.Bucket;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.InvalidatePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
 import io.github.hyshmily.zeta.model.StalePolicy;
 import io.github.hyshmily.zeta.util.LogThrottle;
-import io.github.hyshmily.zeta.util.TimeSource;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
@@ -45,19 +53,6 @@ import org.springframework.core.annotation.Order;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
-
-import java.lang.annotation.Annotation;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.time.Duration;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.LongSupplier;
 
 /**
  * Companion AOP aspect for Spring {@link Cacheable @Cacheable},
@@ -86,7 +81,7 @@ public class CacheExtensionAspect {
 
   /**
    * Separator inserted between a cache name and its key, read once from
-   * {@link ZetaProperties#getSpringCache()} at construction time. Every key
+   * {@link SpringCacheSettings} at construction time. Every key
    * assembly site in this aspect ({@code @Cacheable}, {@code @Preload},
    * {@code @Tag}) derives its prefix from this single value, so the three
    * cannot drift apart and the per-invocation getter chain disappears.
@@ -122,7 +117,7 @@ public class CacheExtensionAspect {
    */
   private final Map<Method, Method> fallbackMethodCache = new ConcurrentHashMap<>();
 
-  /** Upper bound for the aspect's bookkeeping caches (preload dedup, QPS buckets, QPS block table). */
+  /** Upper bound for the aspect's bookkeeping caches (preload dedup). */
   private static final int BOOKKEEPING_CACHE_MAX_SIZE = 100_000;
 
   /**
@@ -151,11 +146,6 @@ public class CacheExtensionAspect {
    * the second preload).
    */
   private static final long PRELOAD_UNLIMITED_COUNT = Integer.MAX_VALUE;
-
-  /** Expiry for the QPS bookkeeping caches — a quiet key's buckets/block entry age out. */
-  private static final Duration QPS_BOOKKEEPING_EXPIRY = Duration.ofMinutes(5);
-
-
 
   /**
    * Per-site rate limiters (fallback, cache condition, TTL SpEL, preload SpEL).
@@ -226,51 +216,27 @@ public class CacheExtensionAspect {
   private final Set<Method> validatedWriteMethods = ConcurrentHashMap.newKeySet();
 
   /**
-   * Token-bucket based QPS rate limiters, one per cache key. Entries idle for
-   * 5 minutes expire (mirroring {@link #qpsBlockTable}'s TTL): the cardinality
-   * is user-key-driven, and without a TTL a one-time burst of distinct keys
-   * would pin up to {@code maximumSize} bucket instances for the process
-   * lifetime — the size cap alone only trims on the boundary crossing. An
-   * active key refreshes its access on every intercepted request, so the TTL
-   * never disturbs live limiting; an idle key simply starts from a fresh
-   * bucket, which is the correct state for a quiet key.
+   * The {@link Intercept} admission gate (QPS token buckets, QPS block table,
+   * concurrent-thread counters). The gate owns all interception state — see
+   * {@link InterceptGate} for the semantics; the aspect only consults it and
+   * releases owed concurrent-thread slots in the advice's {@code finally}.
    */
-  private final Cache<String, Bucket> qpsBuckets = Caffeine.newBuilder()
-    .expireAfterAccess(QPS_BOOKKEEPING_EXPIRY)
-    .maximumSize(100_000)
-    .build();
-
-  /**
-   * QPS block table: cache key → absolute unblock timestamp (millis).
-   * Used together with {@link Intercept#blockDurationMs()} to enforce a
-   * mandatory cooling-off period after a QPS breach. The Caffeine TTL
-   * (5 minutes) is a safety net — the actual block duration is driven by
-   * the stored timestamp comparison.
-   */
-  private final Cache<String, Long> qpsBlockTable = Caffeine.newBuilder()
-    .expireAfterWrite(QPS_BOOKKEEPING_EXPIRY)
-    .maximumSize(100_000)
-    .build();
-
-  /**
-   * Atomic counters for tracking concurrent thread usage per cache key.
-   */
-  private final ConcurrentHashMap<String, AtomicInteger> concurrentCounters = new ConcurrentHashMap<>();
+  private final InterceptGate interceptGate = new InterceptGate();
 
   /**
    * Constructs the aspect with the required dependencies.
    *
    * <p>The configuration is consumed here, once: only the derived
    * {@link #keySeparator} is retained, so a later mutation of the mutable
-   * {@link ZetaProperties} bean cannot make this aspect disagree with
+   * settings bean cannot make this aspect disagree with
    * {@code ZetaSpringCache} about the key layout.
    *
-   * @param zeta       the core cache engine
-   * @param properties the configuration properties
+   * @param zeta     the core cache engine
+   * @param settings the Spring-Cache configuration view
    */
-  public CacheExtensionAspect(Zeta zeta, ZetaProperties properties) {
+  public CacheExtensionAspect(Zeta zeta, SpringCacheSettings settings) {
     this.zeta = zeta;
-    this.keySeparator = properties.getSpringCache().getKeySeparator();
+    this.keySeparator = settings.keySeparator();
   }
 
   /**
@@ -287,8 +253,9 @@ public class CacheExtensionAspect {
    * fallback value before the actual method is called. Every
    * interception feeds the local TopK detector (without reporting to
    * the Worker) so intercepted hot keys cannot flap.</li>
-   * <li>Build the immutable {@link CachePolicy} (lazy TTLs, null-caching,
-   * broadcast flag) and push it into {@link ZetaCacheContext}.</li>
+   * <li>Build the immutable {@link ReadPolicy} (lazy TTLs, null-caching)
+   * and push it alongside the broadcast flag into
+   * {@link ZetaCacheContext}.</li>
    * <li>Proceed with the original method invocation.</li>
    * <li>Optionally invalidate the cache entry if a {@link CacheCondition}
    * is not met after the invocation (purge semantics; the invalidation
@@ -329,74 +296,16 @@ public class CacheExtensionAspect {
       handlePreload(preload, pjp, cacheName, method);
     }
 
-    boolean needsDecrement = false;
+    // Admission gate: the stateful interception rules (FORCE / IS_LOCAL_HOT /
+    // QPS / CONCURRENT_THREADS) live in InterceptGate; a blocked call feeds
+    // the local TopK (keeps the intercepted key hot so it cannot flap) and
+    // resolves the fallback chain without invoking the method.
+    InterceptGate.GateResult gateResult = InterceptGate.GateResult.PROCEED;
     if (intercept != null) {
-      String interceptFallback = intercept.fallback();
-      switch (intercept.type()) {
-        case FORCE -> {
-          // Force a fallback without even calling the original method.
-          notifyDetectorOnIntercept(prefixedKey);
-          return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
-        }
-        case IS_LOCAL_HOT -> {
-          // If the local detector has identified the key as a hot key, fall back.
-          if (zeta.isLocalHotKey(prefixedKey)) {
-            notifyDetectorOnIntercept(prefixedKey);
-            return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
-          }
-        }
-        case QPS -> {
-          int qpsThreshold = intercept.qps().threshold();
-          long blockMs = intercept.qps().blockDurationMs();
-          if (qpsThreshold > 0) {
-            // Layer 1: block table — fast reject without consuming tokens
-            if (blockMs > 0) {
-              Long unblockTime = qpsBlockTable.getIfPresent(prefixedKey);
-              if (unblockTime != null) {
-                if (TimeSource.monotonicMillis() < unblockTime) {
-                  notifyDetectorOnIntercept(prefixedKey);
-                  return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
-                }
-                // Block expired — evict and fall through to tryConsume
-                qpsBlockTable.invalidate(prefixedKey);
-              }
-            }
-            // Layer 2: token bucket — normal rate limiting
-            Bucket bucket = qpsBuckets.get(prefixedKey, k ->
-              Bucket.builder()
-                .addLimit(
-                  Bandwidth.builder().capacity(qpsThreshold).refillGreedy(qpsThreshold, Duration.ofSeconds(1)).build()
-                )
-                .build()
-            );
-            if (!bucket.tryConsume(1)) {
-              // First breach → enter block table if configured
-              if (blockMs > 0) {
-                qpsBlockTable.put(prefixedKey, TimeSource.monotonicMillis() + blockMs);
-              }
-              notifyDetectorOnIntercept(prefixedKey);
-              return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
-            }
-          }
-        }
-        case CONCURRENT_THREADS -> {
-          // Limit the number of concurrent threads executing the original method for this
-          // key.
-          int maxThreads = intercept.concurrent().threshold();
-          if (maxThreads > 0) {
-            AtomicInteger counter = concurrentCounters.computeIfAbsent(prefixedKey, k -> new AtomicInteger(0));
-            if (counter.incrementAndGet() > maxThreads) {
-              // Exceeded the limit; decrement immediately and fall back.
-              concurrentCounters.computeIfPresent(prefixedKey, (k, v) -> {
-                int after = v.decrementAndGet();
-                return after == 0 ? null : v;
-              });
-              notifyDetectorOnIntercept(prefixedKey);
-              return resolveInterceptFallback(pjp, fallback, interceptFallback, prefixedKey, method);
-            }
-            needsDecrement = true; // must decrement in finally block
-          }
-        }
+      gateResult = interceptGate.check(prefixedKey, intercept, zeta.detector()::isLocalHotKey);
+      if (gateResult == InterceptGate.GateResult.BLOCKED) {
+        notifyDetectorOnIntercept(prefixedKey);
+        return resolveInterceptFallback(pjp, fallback, intercept.fallback(), prefixedKey, method);
       }
     }
 
@@ -404,13 +313,13 @@ public class CacheExtensionAspect {
     boolean skipBroadcastFlag = skipBroadcast != null;
 
     // Save the current context so we can restore it after the invocation.
-    CachePolicy prev = ZetaCacheContext.get().snapshot();
+    ZetaCacheContext.Snapshot prev = ZetaCacheContext.get().snapshot();
     try {
       // Push the resolved policy. TTL suppliers stay lazy: SpEL expressions
       // are evaluated at most once, and only on miss / promotion / refresh —
-      // never on a plain cache hit. The policy is pushed unconditionally so
+      // never on a plain cache hit. The snapshot is pushed unconditionally so
       // nested @Cacheable invocations never observe an outer method's policy.
-      ZetaCacheContext.get().push(buildPolicy(ttl, nullCachingEnabled, skipBroadcastFlag, pjp, method));
+      ZetaCacheContext.get().push(buildPolicy(ttl, nullCachingEnabled, pjp, method), skipBroadcastFlag);
 
       Object result = pjp.proceed();
 
@@ -420,7 +329,7 @@ public class CacheExtensionAspect {
       if (cacheCondition != null && !cacheCondition.unless().isEmpty()) {
         boolean shouldSkip = evaluateCacheCondition(cacheCondition.unless(), pjp, method, result);
         if (shouldSkip) {
-          zeta.invalidate(prefixedKey, CachePolicy.defaults().withSkipBroadcast(skipBroadcastFlag));
+          zeta.invalidate(prefixedKey, InvalidatePolicy.of(skipBroadcastFlag));
         }
       }
 
@@ -447,34 +356,31 @@ public class CacheExtensionAspect {
       }
       throw e;
     } finally {
-      // Cleanup: decrement concurrent counter if it was incremented,
+      // Cleanup: return the concurrent-thread slot if the gate took one,
       // and restore the previous thread-local context.
-      if (needsDecrement) {
-        concurrentCounters.computeIfPresent(prefixedKey, (k, v) -> {
-          int after = v.decrementAndGet();
-          return after == 0 ? null : v;
-        });
+      if (gateResult == InterceptGate.GateResult.PROCEED_WITH_RELEASE) {
+        interceptGate.release(prefixedKey);
       }
       ZetaCacheContext.get().restore(prev);
     }
   }
 
   /**
-   * Build the immutable {@link CachePolicy} for this invocation. Static TTL
+   * Build the immutable {@link ReadPolicy} for this invocation. Static TTL
    * values and SpEL expressions are both wrapped as lazy suppliers; the
    * underlying cache resolves them at most once and never on a plain hit.
+   * Broadcast control travels separately (pushed alongside, not inside the
+   * read policy).
    *
    * @param ttl                the resolved {@link CacheTTL} (may be {@code null})
    * @param nullCachingEnabled whether {@code null} results may be cached
-   * @param skipBroadcastFlag  whether cross-instance sync is suppressed
    * @param pjp                the join point (SpEL evaluation context)
    * @param method             the intercepted method
-   * @return the policy for this invocation
+   * @return the read policy for this invocation
    */
-  private CachePolicy buildPolicy(
+  private ReadPolicy buildPolicy(
     CacheTTL ttl,
     boolean nullCachingEnabled,
-    boolean skipBroadcastFlag,
     ProceedingJoinPoint pjp,
     Method method
   ) {
@@ -482,8 +388,14 @@ public class CacheExtensionAspect {
       ttl == null ? () -> 0L : () -> resolveTtlValue(ttl.hardTtlMs(), ttl.hardTtlSpEl(), pjp, method);
     LongSupplier softSupplier =
       ttl == null ? () -> 0L : () -> resolveTtlValue(ttl.softTtlMs(), ttl.softTtlSpEl(), pjp, method);
-    return new CachePolicy(
-      hardSupplier, softSupplier, nullCachingEnabled, skipBroadcastFlag, StalePolicy.SOFT_REFRESH, null, true, false
+    return new ReadPolicy(
+      hardSupplier,
+      softSupplier,
+      nullCachingEnabled,
+      StalePolicy.SOFT_REFRESH,
+      null,
+      true,
+      false
     );
   }
 
@@ -498,7 +410,7 @@ public class CacheExtensionAspect {
    */
   private void notifyDetectorOnIntercept(String prefixedKey) {
     try {
-      zeta.notifyLocalDetector(prefixedKey);
+      zeta.detector().notifyLocalDetector(prefixedKey);
     } catch (RuntimeException e) {
       log.debug("notifyLocalDetector failed for key={}: {}", prefixedKey, e.toString());
     }
@@ -669,7 +581,7 @@ public class CacheExtensionAspect {
       }
     }
     registeredPreloadKeys.putAll(registeredKeys);
-    zeta.notifyLocalDetectorDirect(notifiedKeys);
+    zeta.detector().notifyLocalDetectorDirect(notifiedKeys);
 
     // Dynamic key resolved via SpEL expression.
     String keyExpr = preload.keyExpr();
@@ -682,7 +594,7 @@ public class CacheExtensionAspect {
         if (value != null) {
           String fullKey = cacheName + keySeparator + value;
           if (registeredPreloadKeys.getIfPresent(fullKey) == null) {
-            zeta.notifyLocalDetectorDirect(fullKey, preloadCount);
+            zeta.detector().notifyLocalDetectorDirect(fullKey, preloadCount);
             registeredPreloadKeys.put(fullKey, Boolean.TRUE);
           }
         }
@@ -720,7 +632,7 @@ public class CacheExtensionAspect {
       key = tag.cacheName() + keySeparator + key;
     }
 
-    zeta.tag(key, tag.skipDetection(), tag.skipReport());
+    zeta.tag(key, Zeta.TagMode.of(tag.skipDetection(), tag.skipReport()));
 
     return pjp.proceed();
   }
@@ -757,9 +669,9 @@ public class CacheExtensionAspect {
     SkipBroadcast skipBroadcast = method.getAnnotation(SkipBroadcast.class);
     boolean skipBroadcastFlag = skipBroadcast != null;
     validateWriteCombination(method);
-    CachePolicy prev = ZetaCacheContext.get().snapshot();
+    ZetaCacheContext.Snapshot prev = ZetaCacheContext.get().snapshot();
     try {
-      ZetaCacheContext.get().push(new CachePolicy(null, null, true, skipBroadcastFlag, StalePolicy.SOFT_REFRESH, null, true, false));
+      ZetaCacheContext.get().push(ReadPolicy.defaults(), skipBroadcastFlag);
       return pjp.proceed();
     } finally {
       ZetaCacheContext.get().restore(prev);

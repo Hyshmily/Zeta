@@ -20,22 +20,30 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+import io.github.hyshmily.zeta.DefaultZeta;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.InvalidatePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaSpringCache;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
+import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.rule.impl.RuleMatcherImpl;
+import io.github.hyshmily.zeta.rule.RuleMatcher;
+import io.github.hyshmily.zeta.rule.RuleService;
 import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.version.impl.VersionControllerImpl;
@@ -56,19 +64,16 @@ import org.springframework.cache.Cache.ValueRetrievalException;
 class ZetaSpringCacheTest {
 
   private Zeta zeta;
-  private ZetaProperties properties;
-  private ZetaProperties.SpringCache springCache;
+  private SpringCacheSettings settings;
   private ZetaSpringCache cache;
 
   @BeforeEach
   @SuppressWarnings("all")
   void setUp() {
     zeta = mock(Zeta.class);
-    properties = mock(ZetaProperties.class);
-    springCache = new ZetaProperties.SpringCache();
-    springCache.setKeySeparator("::");
-    when(properties.getSpringCache()).thenReturn(springCache);
-    cache = new ZetaSpringCache("test", zeta, properties, true);
+    settings = mock(SpringCacheSettings.class);
+    when(settings.keySeparator()).thenReturn("::");
+    cache = new ZetaSpringCache("test", zeta, settings, true);
   }
 
   @AfterEach
@@ -107,8 +112,8 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("lookup returns null when key is null-cached")
   void lookup_returnsNullWhenNullCached() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, false));
-    when(zeta.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(null);
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
     cache.get("myKey", (Callable<String>) () -> null);
     ZetaCacheContext.get().restore(null);
 
@@ -118,45 +123,45 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("get without TTL override calls computeIfAbsentWithSoftExpire with default policy")
   void get_withoutTtl_callsHotKeyComputeIfAbsent() {
-    when(zeta.computeIfAbsentWithSoftExpire(
-        eq("test::myKey"), any(CachePolicy.class)
+    when(zeta.computeIfAbsentWithSoftExpireOptional(
+        eq("test::myKey"), any(ReadPolicy.class)
     )).thenReturn(Optional.of("value"));
     String result = cache.get("myKey", (Callable<String>) () -> "loaded");
     assertThat(result).isEqualTo("value");
-    verify(zeta).computeIfAbsentWithSoftExpire(
-        eq("test::myKey"), any(CachePolicy.class));
+    verify(zeta).computeIfAbsentWithSoftExpireOptional(
+        eq("test::myKey"), any(ReadPolicy.class));
   }
 
   @Test
   @DisplayName("get with TTL override calls computeIfAbsentWithSoftExpire with policy")
   void get_withTtlOverride_callsComputeIfAbsentSoft() {
-    ZetaCacheContext.get().push(CachePolicy.of(5000L, 1000L, false, false));
-    when(zeta.computeIfAbsentWithSoftExpire(
-        eq("test::myKey"), any(CachePolicy.class)
+    ZetaCacheContext.get().push(ReadPolicy.of(5000L, 1000L).withNullCaching(false));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(
+        eq("test::myKey"), any(ReadPolicy.class)
     )).thenReturn(Optional.of("value"));
     String result = cache.get("myKey", (Callable<String>) () -> "loaded");
     assertThat(result).isEqualTo("value");
-    verify(zeta).computeIfAbsentWithSoftExpire(
-        eq("test::myKey"), argThat((CachePolicy p) -> p.hardTtlMs().getAsLong() == 5000L));
+    verify(zeta).computeIfAbsentWithSoftExpireOptional(
+        eq("test::myKey"), argThat((ReadPolicy p) -> p.hardTtlMs().getAsLong() == 5000L));
   }
 
   @Test
   @DisplayName("get with only softTtl override calls computeIfAbsentWithSoftExpire")
   void get_withSoftTtlOverride_only() {
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 500L, false, false));
-    when(zeta.computeIfAbsentWithSoftExpire(
-        eq("test::myKey"), any(CachePolicy.class)
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 500L).withNullCaching(false));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(
+        eq("test::myKey"), any(ReadPolicy.class)
     )).thenReturn(Optional.of("value"));
     cache.get("myKey", (Callable<String>) () -> "loaded");
-    verify(zeta).computeIfAbsentWithSoftExpire(
-        eq("test::myKey"), argThat((CachePolicy p) -> p.softTtlMs().getAsLong() == 500L));
+    verify(zeta).computeIfAbsentWithSoftExpireOptional(
+        eq("test::myKey"), argThat((ReadPolicy p) -> p.softTtlMs().getAsLong() == 500L));
   }
 
   @Test
   @DisplayName("get returns fromStoreValue of the result")
   void get_whenResultPresent_returnsFromStoreValue() {
-    when(zeta.computeIfAbsentWithSoftExpire(
-        anyString(), any(CachePolicy.class)
+    when(zeta.computeIfAbsentWithSoftExpireOptional(
+        anyString(), any(ReadPolicy.class)
     )).thenReturn(Optional.of("computed-value"));
     String result = cache.get("myKey", (Callable<String>) () -> "loaded");
     assertThat(result).isEqualTo("computed-value");
@@ -165,8 +170,8 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("get returns null when result is null and allowNull is false")
   void get_whenNullAndNotAllowNull_returnsNull() {
-    when(zeta.computeIfAbsentWithSoftExpire(
-        anyString(), any(CachePolicy.class)
+    when(zeta.computeIfAbsentWithSoftExpireOptional(
+        anyString(), any(ReadPolicy.class)
     )).thenReturn(Optional.empty());
     String result = cache.get("myKey", (Callable<String>) () -> null);
     assertThat(result).isNull();
@@ -176,9 +181,9 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("get returns null when result is null and allowNull is true")
   void get_whenNullAndAllowNull_returnsNull() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, false));
-    when(zeta.computeIfAbsentWithSoftExpire(
-        anyString(), any(CachePolicy.class)
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(
+        anyString(), any(ReadPolicy.class)
     )).thenReturn(Optional.empty());
     String result = cache.get("myKey", (Callable<String>) () -> null);
     assertThat(result).isNull();
@@ -189,8 +194,8 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("get with allowNull and skipBroadcast does not call putLocal")
   void get_whenNullAllowNullAndSkipBroadcast_doesNotCallPutLocal() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, true));
-    when(zeta.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(null);
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0), true);
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
     String result = cache.get("myKey", (Callable<String>) () -> null);
     assertThat(result).isNull();
     verify(zeta, never()).putLocal(anyString(), any());
@@ -200,8 +205,8 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("get with allowNull=true adds key to nullCachedKeys")
   void get_whenAllowNull_addsToNullCachedKeys() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, false));
-    when(zeta.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(null);
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
     cache.get("myKey", (Callable<String>) () -> null);
     assertThat(cache.lookup("myKey")).isNull();
   }
@@ -210,24 +215,24 @@ class ZetaSpringCacheTest {
   @DisplayName("put stores value via hotKey.putThrough (default TTLs when no override)")
   void put_storesValue() {
     cache.put("myKey", "myValue");
-    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(CachePolicy.of(0L, 0L)));
+    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(WritePolicy.of(0L, 0L)));
   }
 
   @Test
   @DisplayName("put with skipBroadcast uses putLocal")
   void put_withSkipBroadcast_usesPutLocal() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, false, true));
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0).withNullCaching(false), true);
     cache.put("myKey", "myValue");
-    verify(zeta).putLocal("test::myKey", "myValue", CachePolicy.of(0L, 0L));
+    verify(zeta).putLocal("test::myKey", "myValue", WritePolicy.of(0L, 0L));
     verify(zeta, never()).putThrough(anyString(), any(), any());
   }
 
   @Test
   @DisplayName("put resolves the @CacheTTL override into the TTL-carrying putThrough")
   void put_withTtlOverride_passesTtlsToFacade() {
-    ZetaCacheContext.get().push(CachePolicy.of(5000L, 1000L, false, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(5000L, 1000L).withNullCaching(false));
     cache.put("myKey", "myValue");
-    ArgumentCaptor<CachePolicy> policy = ArgumentCaptor.forClass(CachePolicy.class);
+    ArgumentCaptor<WritePolicy> policy = ArgumentCaptor.forClass(WritePolicy.class);
     verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), policy.capture());
     assertThat(policy.getValue().hardTtlMs().getAsLong()).isEqualTo(5000L);
     assertThat(policy.getValue().softTtlMs().getAsLong()).isEqualTo(1000L);
@@ -236,12 +241,12 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("put(null) with @NullCaching(false) writes nothing (next call re-invokes the method)")
   void put_null_withNullCachingDisabled_writesNothing() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, false, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0).withNullCaching(false));
 
     cache.put("myKey", null);
 
-    verify(zeta, never()).putThrough(anyString(), any(), any(), any(CachePolicy.class));
-    verify(zeta, never()).putLocal(anyString(), any(), any(CachePolicy.class));
+    verify(zeta, never()).putThrough(anyString(), any(), any(), any(WritePolicy.class));
+    verify(zeta, never()).putLocal(anyString(), any(), any(WritePolicy.class));
     verify(zeta, never()).putThrough(anyString(), any(), any());
     verify(zeta, never()).putLocal(anyString(), any());
   }
@@ -249,17 +254,17 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("evict with skipBroadcast calls invalidateLocal")
   void evict_withSkipBroadcast_callsInvalidateLocal() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, false, true));
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0).withNullCaching(false), true);
     cache.evict("myKey");
-    verify(zeta).invalidate(eq("test::myKey"), argThat(CachePolicy::skipBroadcast));
+    verify(zeta).invalidate(eq("test::myKey"), argThat(InvalidatePolicy::skipBroadcast));
     verify(zeta, never()).invalidate(anyString());
   }
 
   @Test
   @DisplayName("put removes key from nullCachedKeys")
   void put_removesFromNullCachedKeys() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, false));
-    when(zeta.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(null);
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
     cache.get("myKey", (Callable<String>) () -> null);
     assertThat(cache.lookup("myKey")).isNull();
     ZetaCacheContext.get().restore(null);
@@ -272,8 +277,8 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("evict removes from nullCachedKeys and calls invalidate")
   void evict_removesFromNullCachedKeysAndInvalidates() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, false));
-    when(zeta.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(null);
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
     cache.get("myKey", (Callable<String>) () -> null);
     ZetaCacheContext.get().restore(null);
 
@@ -284,30 +289,30 @@ class ZetaSpringCacheTest {
   }
 
   @Test
-  @DisplayName("clear without a local cache is a no-op")
+  @DisplayName("clear without app mode is a no-op")
   void clear_withoutLocalCache_isNoOp() {
-    when(zeta.getLocalCache()).thenReturn(null);
+    Zeta.StatsAdmin statsView = mock(Zeta.StatsAdmin.class);
+    when(zeta.stats()).thenReturn(statsView);
+    when(zeta.isApp()).thenReturn(false);
     cache.clear();
     verify(zeta, never()).invalidateAllLocal();
-    verify(zeta, never()).invalidate(anyCollection(), any(CachePolicy.class));
+    verify(zeta, never()).invalidate(anyCollection(), any(InvalidatePolicy.class));
   }
 
   @Test
   @DisplayName("clear invalidates only this cache's keys, never the whole L1")
   void clear_invalidatesOnlyThisCachesKeys() {
-    com.github.benmanes.caffeine.cache.Cache<String, Object> localCache =
-      com.github.benmanes.caffeine.cache.Caffeine.newBuilder().maximumSize(10).build();
-    localCache.put("test::a", "1");
-    localCache.put("test::b", "2");
-    localCache.put("other::c", "3");
-    when(zeta.getLocalCache()).thenReturn(localCache);
+    Zeta.StatsAdmin statsView = mock(Zeta.StatsAdmin.class);
+    when(zeta.stats()).thenReturn(statsView);
+    when(zeta.isApp()).thenReturn(true);
+    when(statsView.localKeysWithPrefix("test::")).thenReturn(java.util.List.of("test::a", "test::b"));
 
     cache.clear();
 
     verify(zeta, never()).invalidateAllLocal();
     org.mockito.ArgumentCaptor<java.util.Collection<String>> captor =
       org.mockito.ArgumentCaptor.forClass(java.util.Collection.class);
-    ArgumentCaptor<CachePolicy> policyCaptor = ArgumentCaptor.forClass(CachePolicy.class);
+    ArgumentCaptor<InvalidatePolicy> policyCaptor = ArgumentCaptor.forClass(InvalidatePolicy.class);
     verify(zeta).invalidate(captor.capture(), policyCaptor.capture());
     assertThat(captor.getValue()).containsExactlyInAnyOrder("test::a", "test::b");
     assertThat(policyCaptor.getValue().skipBroadcast()).isFalse();
@@ -316,14 +321,16 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("lookup hit delegates to a single peekAndTag (one rule evaluation, one lookup behind the facade)")
   void lookup_hit_delegatesToPeekAndTag() {
+    Zeta.RuleAdmin ruleAdmin = mock(Zeta.RuleAdmin.class);
+    when(zeta.rules()).thenReturn(ruleAdmin);
     when(zeta.peekAndTag("test::myKey")).thenReturn("stored-value");
 
     assertThat(cache.lookup("myKey")).isEqualTo("stored-value");
 
     verify(zeta).peekAndTag("test::myKey");
     verify(zeta, never()).peek(anyString());
-    verify(zeta, never()).evaluateRule(anyString());
-    verify(zeta, never()).tag(anyString(), anyBoolean(), anyBoolean());
+    verify(ruleAdmin, never()).evaluateRule(anyString());
+    verify(zeta, never()).tag(anyString(), any(Zeta.TagMode.class));
   }
 
   @Test
@@ -337,8 +344,8 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("lookup with nullCachedKeys removed returns peek value")
   void lookup_afterNullCachedKeysRemoved_returnsPeekValue() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, false));
-    when(zeta.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(null);
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
     cache.get("myKey", (Callable<String>) () -> null);
     ZetaCacheContext.get().restore(null);
 
@@ -358,10 +365,11 @@ class ZetaSpringCacheTest {
   @DisplayName("prefixedKey uses custom separator when configured")
   void prefixedKey_usesCustomSeparator() {
     // The separator is bound at startup and captured in the per-cache key
-    // prefix — configure it BEFORE the cache is constructed (the real
-    // ZetaProperties lifecycle), then verify the prefix shape.
-    springCache.setKeySeparator("-->");
-    ZetaSpringCache custom = new ZetaSpringCache("test", zeta, properties, true);
+    // prefix — configure it BEFORE the cache is constructed, then verify the
+    // prefix shape.
+    SpringCacheSettings customSettings = mock(SpringCacheSettings.class);
+    when(customSettings.keySeparator()).thenReturn("-->");
+    ZetaSpringCache custom = new ZetaSpringCache("test", zeta, customSettings, true);
     when(zeta.peekAndTag("test-->otherKey")).thenReturn("v2");
     assertThat(custom.lookup("otherKey")).isEqualTo("v2");
   }
@@ -369,8 +377,8 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("get wraps loader exception in ValueRetrievalException")
   void get_whenLoaderThrows_wrapsInValueRetrievalException() {
-    when(zeta.computeIfAbsentWithSoftExpire(anyString(), any(CachePolicy.class))).thenAnswer(invocation -> {
-      CachePolicy p = invocation.getArgument(1);
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenAnswer(invocation -> {
+      ReadPolicy p = invocation.getArgument(1);
       @SuppressWarnings("all")
       Supplier<Object> supplier = (Supplier<Object>) p.reader();
       supplier.get();
@@ -389,8 +397,8 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("get invokes valueLoader successfully")
   void get_whenLoaderSucceeds_invokesLoader() {
-    when(zeta.computeIfAbsentWithSoftExpire(anyString(), any(CachePolicy.class))).thenAnswer(invocation -> {
-      CachePolicy p = invocation.getArgument(1);
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenAnswer(invocation -> {
+      ReadPolicy p = invocation.getArgument(1);
       @SuppressWarnings("all")
       Supplier<Object> supplier = (Supplier<Object>) p.reader();
       return Optional.ofNullable(supplier.get());
@@ -402,16 +410,16 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("put with skipBroadcast=false calls putThrough")
   void put_withSkipBroadcastFalse_callsPutThrough() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, false, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0).withNullCaching(false));
     cache.put("myKey", "myValue");
-    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(CachePolicy.of(0L, 0L)));
+    verify(zeta).putThrough(eq("test::myKey"), eq("myValue"), any(), eq(WritePolicy.of(0L, 0L)));
   }
 
   @Test
   @DisplayName("get with allowNull and skipBroadcast=false does not call putThrough")
   void get_whenNullAllowNullAndNoSkipBroadcast_doesNotCallPutThrough() {
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, false));
-    when(zeta.computeIfAbsent(anyString(), any(CachePolicy.class))).thenReturn(null);
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0));
+    when(zeta.computeIfAbsentWithSoftExpireOptional(anyString(), any(ReadPolicy.class))).thenReturn(Optional.empty());
     String result = cache.get("myKey", (Callable<String>) () -> null);
     assertThat(result).isNull();
     verify(zeta, never()).putThrough(anyString(), any(), any());
@@ -421,41 +429,41 @@ class ZetaSpringCacheTest {
   @Test
   @DisplayName("put(null) stores Zeta's sentinel with the short null TTL via putThrough")
   void put_null_storesZetaSentinelWithShortTtl() {
-    when(properties.effectiveNullTtlMs()).thenReturn(10_000L);
+    when(settings.effectiveNullTtlMs()).thenReturn(10_000L);
 
     cache.put("myKey", null);
 
-    ArgumentCaptor<CachePolicy> policy = ArgumentCaptor.forClass(CachePolicy.class);
+    ArgumentCaptor<WritePolicy> policy = ArgumentCaptor.forClass(WritePolicy.class);
     verify(zeta).putThrough(eq("test::myKey"), eq(NullValue.INSTANCE), any(), policy.capture());
     assertThat(policy.getValue().hardTtlMs().getAsLong()).isEqualTo(10_000L);
     assertThat(policy.getValue().softTtlMs().getAsLong()).isEqualTo(10_000L);
     assertThat(policy.getValue().skipBroadcast()).isFalse();
-    verify(zeta, never()).putLocal(anyString(), any(), any(CachePolicy.class));
+    verify(zeta, never()).putLocal(anyString(), any(), any(WritePolicy.class));
   }
 
   @Test
   @DisplayName("put(null) with skipBroadcast stores the sentinel locally with the short null TTL")
   void put_null_skipBroadcast_storesSentinelLocally() {
-    when(properties.effectiveNullTtlMs()).thenReturn(10_000L);
-    ZetaCacheContext.get().push(CachePolicy.of(0, 0, true, true));
+    when(settings.effectiveNullTtlMs()).thenReturn(10_000L);
+    ZetaCacheContext.get().push(ReadPolicy.of(0, 0), true);
 
     cache.put("myKey", null);
 
-    ArgumentCaptor<CachePolicy> policy = ArgumentCaptor.forClass(CachePolicy.class);
+    ArgumentCaptor<WritePolicy> policy = ArgumentCaptor.forClass(WritePolicy.class);
     verify(zeta).putLocal(eq("test::myKey"), eq(NullValue.INSTANCE), policy.capture());
     assertThat(policy.getValue().hardTtlMs().getAsLong()).isEqualTo(10_000L);
     assertThat(policy.getValue().softTtlMs().getAsLong()).isEqualTo(10_000L);
-    verify(zeta, never()).putThrough(anyString(), any(), any(), any(CachePolicy.class));
+    verify(zeta, never()).putThrough(anyString(), any(), any(), any(WritePolicy.class));
   }
 
   @Test
   @DisplayName("put of an explicit Spring NullValue is translated to Zeta's sentinel")
   void put_springNullValue_translatedToZetaSentinel() {
-    when(properties.effectiveNullTtlMs()).thenReturn(10_000L);
+    when(settings.effectiveNullTtlMs()).thenReturn(10_000L);
 
     cache.put("myKey", org.springframework.cache.support.NullValue.INSTANCE);
 
-    ArgumentCaptor<CachePolicy> policy = ArgumentCaptor.forClass(CachePolicy.class);
+    ArgumentCaptor<WritePolicy> policy = ArgumentCaptor.forClass(WritePolicy.class);
     verify(zeta).putThrough(eq("test::myKey"), eq(NullValue.INSTANCE), any(), policy.capture());
     assertThat(policy.getValue().hardTtlMs().getAsLong()).isEqualTo(10_000L);
     assertThat(policy.getValue().softTtlMs().getAsLong()).isEqualTo(10_000L);
@@ -472,6 +480,7 @@ class ZetaSpringCacheTest {
 
     private Zeta realZeta;
     private HotKeyDetector hotKeyDetector;
+    private com.github.benmanes.caffeine.cache.Cache<String, CacheEntry> caffeineCache;
     private ZetaSpringCache alpha;
     private ZetaSpringCache beta;
 
@@ -480,15 +489,21 @@ class ZetaSpringCacheTest {
     void setUp() {
       hotKeyDetector = mock(HotKeyDetector.class);
       when(hotKeyDetector.contains(anyString())).thenReturn(false);
-      com.github.benmanes.caffeine.cache.Cache<String, Object> caffeine =
+      caffeineCache =
         com.github.benmanes.caffeine.cache.Caffeine.newBuilder().maximumSize(100).build();
+      com.github.benmanes.caffeine.cache.Cache<String, CacheEntry> caffeine = caffeineCache;
       ZetaProperties props = new ZetaProperties();
       ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+      EntryLifecycleImpl entryLifecycle = new EntryLifecycleImpl(caffeine, props, CacheCompressor.NONE, mock(HealthView.class));
+      BackgroundRefresher backgroundRefresher =
+        new DefaultBackgroundRefresher(caffeine, Runnable::run, entryLifecycle.ttlPolicy(), CacheCompressor.NONE, 10);
+      RuleMatcher ruleMatcher = new RuleMatcherImpl(Optional.empty(), Optional.empty());
       HotKeyCache hotKeyCache = new HotKeyCache(
         hotKeyDetector,
         caffeine,
         mock(SingleFlight.class),
-        new ExpireManagerImpl(caffeine, Runnable::run, props, 10, CacheCompressor.NONE, mock(HealthView.class)),
+        entryLifecycle,
+        backgroundRefresher,
         Runnable::run,
         new CentralDispatcher(
           Optional.empty(),
@@ -496,14 +511,15 @@ class ZetaSpringCacheTest {
           new BroadcastBuffer(scheduler, Optional.empty(), 500, 2_000, null),
           hotKeyDetector
         ),
-        new RuleMatcherImpl(Optional.empty(), Optional.empty()),
+        ruleMatcher,
         new VersionControllerImpl(Optional.empty(), 60, new SnowflakeIdGenerator(0, 1, 5L, false)),
         props,
         mock(HealthView.class),
         CacheCompressor.NONE,
         null
       );
-      realZeta = new Zeta(hotKeyCache, hotKeyDetector, null, null);
+      RuleService ruleService = new RuleService(ruleMatcher, props);
+      realZeta = new DefaultZeta(hotKeyCache, hotKeyDetector, null, null, ruleService);
       alpha = new ZetaSpringCache("alpha", realZeta, props, true);
       beta = new ZetaSpringCache("beta", realZeta, props, true);
     }
@@ -543,7 +559,7 @@ class ZetaSpringCacheTest {
     void put_null_storesShortTtlSentinel() {
       alpha.put("nk", null);
 
-      Object raw = realZeta.getLocalCache().getIfPresent("alpha::nk");
+      Object raw = caffeineCache.getIfPresent("alpha::nk");
       assertThat(raw).isInstanceOf(CacheEntry.class);
       CacheEntry entry = (CacheEntry) raw;
       assertThat(entry.getValue()).isEqualTo(NullValue.INSTANCE);
@@ -561,10 +577,10 @@ class ZetaSpringCacheTest {
     @Test
     @DisplayName("put resolves the @CacheTTL override into the stored entry (not the global default)")
     void put_withTtlOverride_storesOverriddenTtl() {
-      ZetaCacheContext.get().push(CachePolicy.of(5_000L, 0L, false, false));
+      ZetaCacheContext.get().push(ReadPolicy.of(5_000L, 0L).withNullCaching(false));
       alpha.put("tlock", "v");
 
-      CacheEntry entry = (CacheEntry) realZeta.getLocalCache().getIfPresent("alpha::tlock");
+      CacheEntry entry = (CacheEntry) caffeineCache.getIfPresent("alpha::tlock");
       assertThat(entry).isNotNull();
       // 5s override (±5% jitter) — NOT the 300s default.
       long now = System.currentTimeMillis();
@@ -574,17 +590,17 @@ class ZetaSpringCacheTest {
     @Test
     @DisplayName("put(null) with @NullCaching(false) leaves no entry; the next lookup re-invokes")
     void put_null_withNullCachingDisabled_leavesNoEntry() {
-      ZetaCacheContext.get().push(CachePolicy.of(0, 0, false, false));
+      ZetaCacheContext.get().push(ReadPolicy.of(0, 0).withNullCaching(false));
       alpha.put("nk2", null);
 
-      assertThat(realZeta.getLocalCache().getIfPresent("alpha::nk2")).isNull();
+      assertThat(caffeineCache.getIfPresent("alpha::nk2")).isNull();
       assertThat(alpha.lookup("nk2")).isNull();
     }
 
     @Test
     @DisplayName("lookup hit on a whitelisted key still detects (annotation path)")
     void lookup_whitelistedKey_stillDetects() {
-      realZeta.addWhitelist("alpha::wlk");
+      realZeta.rules().addWhitelist("alpha::wlk");
       alpha.put("wlk", "wl-value");
 
       assertThat(alpha.lookup("wlk")).isEqualTo("wl-value");
@@ -594,8 +610,11 @@ class ZetaSpringCacheTest {
     @Test
     @DisplayName("lookup of a blocked key throws ZetaBlockedException")
     void lookup_blockedKey_throws() {
-      realZeta.addBlacklist("alpha::blk");
-      realZeta.getLocalCache().put("alpha::blk", "cached-value");
+      realZeta.rules().addBlacklist("alpha::blk");
+      caffeineCache.put(
+        "alpha::blk",
+        CacheEntry.builder().value("cached-value").dataVersion(0).hardExpireAtMs(Long.MAX_VALUE).build()
+      );
 
       assertThatThrownBy(() -> alpha.lookup("blk")).isInstanceOf(ZetaBlockedException.class);
       verify(hotKeyDetector, never()).add("alpha::blk");

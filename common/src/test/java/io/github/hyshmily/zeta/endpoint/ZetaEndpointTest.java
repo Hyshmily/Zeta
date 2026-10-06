@@ -20,8 +20,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
@@ -57,13 +59,14 @@ import org.junit.jupiter.api.Test;
 class ZetaEndpointTest {
 
   private TopK hotKeyDetector;
-  private Cache<String, Object> caffeineCache;
+  private Cache<String, CacheEntry> caffeineCache;
   private SingleFlight singleFlight;
   private ZetaProperties properties;
   private KeyReporter KeyReporter;
   private RuleMatcher ruleMatcher;
   private RingManager workerHealthMonitor;
-  private ExpireManager expireManager;
+  private EntryLifecycle entryLifecycle;
+  private BackgroundRefresher backgroundRefresher;
   private VersionController versionController;
   private CacheSyncPublisher cacheSyncPublisher;
   private ZetaBayesianSM zetaBayesianSM;
@@ -79,8 +82,9 @@ class ZetaEndpointTest {
     KeyReporter = mock(KeyReporter.class);
     ruleMatcher = new RuleMatcherImpl(Optional.empty(), Optional.empty());
     workerHealthMonitor = mock(RingManager.class);
-    expireManager = mock(ExpireManager.class);
-    when(expireManager.ttlPolicy()).thenReturn(mock(TtlPolicy.class));
+    entryLifecycle = mock(EntryLifecycle.class);
+    backgroundRefresher = mock(BackgroundRefresher.class);
+    when(entryLifecycle.ttlPolicy()).thenReturn(mock(TtlPolicy.class));
     versionController = mock(VersionController.class);
     cacheSyncPublisher = mock(CacheSyncPublisher.class);
     zetaBayesianSM = mock(ZetaBayesianSM.class);
@@ -98,7 +102,8 @@ class ZetaEndpointTest {
       .properties(properties)
       .hotKeyReporter(KeyReporter)
       .ruleMatcher(ruleMatcher)
-      .expireManager(expireManager)
+      .entryLifecycle(entryLifecycle)
+      .backgroundRefresher(backgroundRefresher)
       .versionController(versionController)
       .cacheSyncPublisher(cacheSyncPublisher)
       .zetaBayesianSM(zetaBayesianSM)
@@ -127,11 +132,11 @@ class ZetaEndpointTest {
     when(KeyReporter.dispatcherExpired()).thenReturn(2L);
     when(KeyReporter.dispatcherDropped()).thenReturn(1L);
     when(KeyReporter.getPendingKeyCount()).thenReturn(5L);
-    when(expireManager.ttlPolicy().getEffectiveHardTtlMs()).thenReturn(300000L);
-    when(expireManager.ttlPolicy().getEffectiveSoftTtlMs()).thenReturn(30000L);
-    when(expireManager.ttlPolicy().getEffectiveHotHardTtlMs()).thenReturn(3600000L);
-    when(expireManager.ttlPolicy().getEffectiveHotSoftTtlMs()).thenReturn(300000L);
-    when(expireManager.getRefreshLimiter()).thenReturn(new Semaphore(50));
+    when(entryLifecycle.ttlPolicy().getEffectiveHardTtlMs()).thenReturn(300000L);
+    when(entryLifecycle.ttlPolicy().getEffectiveSoftTtlMs()).thenReturn(30000L);
+    when(entryLifecycle.ttlPolicy().getEffectiveHotHardTtlMs()).thenReturn(3600000L);
+    when(entryLifecycle.ttlPolicy().getEffectiveHotSoftTtlMs()).thenReturn(300000L);
+    when(backgroundRefresher.getRefreshLimiter()).thenReturn(new Semaphore(50));
     when(versionController.isRedisConfigured()).thenReturn(true);
     when(versionController.getDegradedVersionCount()).thenReturn(0L);
     when(cacheSyncPublisher.getDedupCacheSize()).thenReturn(15L);
@@ -392,11 +397,11 @@ class ZetaEndpointTest {
   void localSection_shouldSkipRefreshPoolWhenLimiterNull() {
     mockTopK(hotKeyDetector, List.of(), 0L);
     when(caffeineCache.estimatedSize()).thenReturn(0L);
-    when(expireManager.ttlPolicy().getEffectiveHardTtlMs()).thenReturn(300000L);
-    when(expireManager.ttlPolicy().getEffectiveSoftTtlMs()).thenReturn(30000L);
-    when(expireManager.ttlPolicy().getEffectiveHotHardTtlMs()).thenReturn(3600000L);
-    when(expireManager.ttlPolicy().getEffectiveHotSoftTtlMs()).thenReturn(300000L);
-    when(expireManager.getRefreshLimiter()).thenReturn(null);
+    when(entryLifecycle.ttlPolicy().getEffectiveHardTtlMs()).thenReturn(300000L);
+    when(entryLifecycle.ttlPolicy().getEffectiveSoftTtlMs()).thenReturn(30000L);
+    when(entryLifecycle.ttlPolicy().getEffectiveHotHardTtlMs()).thenReturn(3600000L);
+    when(entryLifecycle.ttlPolicy().getEffectiveHotSoftTtlMs()).thenReturn(300000L);
+    when(backgroundRefresher.getRefreshLimiter()).thenReturn(null);
     ZetaEndpoint ep = endpointWithAll();
     Map<String, Object> info = ep.hotKeyInfo(100);
     Map<String, Object> local = (Map<String, Object>) info.get("local");

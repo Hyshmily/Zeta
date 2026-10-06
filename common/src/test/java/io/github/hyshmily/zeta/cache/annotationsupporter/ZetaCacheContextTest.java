@@ -18,7 +18,7 @@ package io.github.hyshmily.zeta.cache.annotationsupporter;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
@@ -42,7 +42,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with non-default hardTtlMs sets context")
   void apply_withHardTtlMs_setsContext() {
-    ZetaCacheContext.get().push(CachePolicy.of(1000L, 0L, false, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(1000L, 0L).withNullCaching(false));
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isEqualTo(1000L);
     assertThat(ZetaCacheContext.get().current().softTtlMs().getAsLong()).isZero();
     assertThat(ZetaCacheContext.get().current().nullCaching()).isFalse();
@@ -51,7 +51,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with non-default softTtlMs sets context")
   void apply_withSoftTtlMs_setsContext() {
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 500L, false, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 500L).withNullCaching(false));
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isZero();
     assertThat(ZetaCacheContext.get().current().softTtlMs().getAsLong()).isEqualTo(500L);
     assertThat(ZetaCacheContext.get().current().nullCaching()).isFalse();
@@ -60,7 +60,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with allowNull true sets context")
   void apply_withAllowNull_setsContext() {
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 0L, true, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 0L));
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isZero();
     assertThat(ZetaCacheContext.get().current().softTtlMs().getAsLong()).isZero();
     assertThat(ZetaCacheContext.get().current().nullCaching()).isTrue();
@@ -69,10 +69,10 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("apply with all defaults clears context")
   void apply_withAllDefaults_clearsContext() {
-    ZetaCacheContext.get().push(CachePolicy.of(1000L, 500L, true, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(1000L, 500L));
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isEqualTo(1000L);
 
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 0L, false, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 0L).withNullCaching(false));
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isZero();
     assertThat(ZetaCacheContext.get().current().softTtlMs().getAsLong()).isZero();
     assertThat(ZetaCacheContext.get().current().nullCaching()).isFalse();
@@ -91,7 +91,7 @@ class ZetaCacheContextTest {
   }
 
   @Test
-  @DisplayName("nullCaching returns true by default (CachePolicy defaults)")
+  @DisplayName("nullCaching returns true by default (ReadPolicy defaults)")
   void nullCaching_whenNoContext_returnsTrue() {
     assertThat(ZetaCacheContext.get().current().nullCaching()).isTrue();
   }
@@ -99,12 +99,12 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("snapshot returns current context values")
   void snapshot_returnsCurrentValues() {
-    ZetaCacheContext.get().push(CachePolicy.of(2000L, 1000L, true, false));
-    CachePolicy snapshot = ZetaCacheContext.get().snapshot();
+    ZetaCacheContext.get().push(ReadPolicy.of(2000L, 1000L));
+    ZetaCacheContext.Snapshot snapshot = ZetaCacheContext.get().snapshot();
     assertThat(snapshot).isNotNull();
-    assertThat(snapshot.hardTtlMs().getAsLong()).isEqualTo(2000L);
-    assertThat(snapshot.softTtlMs().getAsLong()).isEqualTo(1000L);
-    assertThat(snapshot.nullCaching()).isTrue();
+    assertThat(snapshot.readPolicy().hardTtlMs().getAsLong()).isEqualTo(2000L);
+    assertThat(snapshot.readPolicy().softTtlMs().getAsLong()).isEqualTo(1000L);
+    assertThat(snapshot.readPolicy().nullCaching()).isTrue();
   }
 
   @Test
@@ -116,10 +116,10 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("restore restores previously captured values")
   void restore_restoresValues() {
-    ZetaCacheContext.get().push(CachePolicy.of(2000L, 1000L, true, false));
-    CachePolicy snapshot = ZetaCacheContext.get().snapshot();
+    ZetaCacheContext.get().push(ReadPolicy.of(2000L, 1000L));
+    ZetaCacheContext.Snapshot snapshot = ZetaCacheContext.get().snapshot();
 
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 0L, false, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 0L).withNullCaching(false));
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isZero();
 
     ZetaCacheContext.get().restore(snapshot);
@@ -131,7 +131,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("restore null clears context")
   void restore_null_clearsContext() {
-    ZetaCacheContext.get().push(CachePolicy.of(2000L, 1000L, true, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(2000L, 1000L));
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isPositive();
 
     ZetaCacheContext.get().restore(null);
@@ -143,7 +143,7 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("different threads have isolated contexts")
   void threadIsolation() throws Exception {
-    ZetaCacheContext.get().push(CachePolicy.of(100L, 200L, true, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(100L, 200L));
     assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isEqualTo(100L);
 
     AtomicReference<Long> otherThreadHardTtl = new AtomicReference<>();
@@ -151,7 +151,7 @@ class ZetaCacheContextTest {
 
     Thread other = new Thread(() -> {
       assertThat(ZetaCacheContext.get().current().hardTtlMs().getAsLong()).isZero();
-      ZetaCacheContext.get().push(CachePolicy.of(300L, 400L, false, false));
+      ZetaCacheContext.get().push(ReadPolicy.of(300L, 400L).withNullCaching(false));
       otherThreadHardTtl.set(ZetaCacheContext.get().current().hardTtlMs().getAsLong());
       latch.countDown();
     });
@@ -170,13 +170,13 @@ class ZetaCacheContextTest {
   }
 
   @Test
-  @DisplayName("CachePolicy record accessors work correctly")
+  @DisplayName("ReadPolicy record accessors work correctly")
   void contextValuesRecordAccessors() {
-    var values = CachePolicy.of(5000L, 1000L, true, false);
+    var values = ReadPolicy.of(5000L, 1000L);
     assertThat(values.hardTtlMs().getAsLong()).isEqualTo(5000L);
     assertThat(values.softTtlMs().getAsLong()).isEqualTo(1000L);
     assertThat(values.nullCaching()).isTrue();
-    assertThat(values.skipBroadcast()).isFalse();
+    assertThat(values.reportEnabled()).isTrue();
   }
 
   // ── @Broadcast / skipBroadcast tests ──
@@ -184,47 +184,46 @@ class ZetaCacheContextTest {
   @Test
   @DisplayName("push with skipBroadcast true sets skipBroadcast")
   void apply_withSkipBroadcast_setsContext() {
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 0L, false, true));
-    assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 0L).withNullCaching(false), true);
+    assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
     assertThat(ZetaCacheContext.get().current().nullCaching()).isFalse();
   }
 
   @Test
   @DisplayName("skipBroadcast returns false when no context set")
   void isSkipBroadcast_whenNoContext_returnsFalse() {
-    assertThat(ZetaCacheContext.get().current().skipBroadcast()).isFalse();
+    assertThat(ZetaCacheContext.get().skipBroadcast()).isFalse();
   }
 
   @Test
   @DisplayName("skipBroadcast returns false when context set without skipBroadcast")
   void isSkipBroadcast_whenContextWithoutFlag_returnsFalse() {
-    ZetaCacheContext.get().push(CachePolicy.of(100L, 0L, false, false));
-    assertThat(ZetaCacheContext.get().current().skipBroadcast()).isFalse();
+    ZetaCacheContext.get().push(ReadPolicy.of(100L, 0L).withNullCaching(false));
+    assertThat(ZetaCacheContext.get().skipBroadcast()).isFalse();
   }
 
   @Test
   @DisplayName("snapshot preserves skipBroadcast flag")
   void snapshot_preservesSkipBroadcast() {
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 0L, false, true));
-    CachePolicy snapshot = ZetaCacheContext.get().snapshot();
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 0L).withNullCaching(false), true);
+    ZetaCacheContext.Snapshot snapshot = ZetaCacheContext.get().snapshot();
     assertThat(snapshot).isNotNull();
     assertThat(snapshot.skipBroadcast()).isTrue();
 
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 0L, false, false));
-    assertThat(ZetaCacheContext.get().current().skipBroadcast()).isFalse();
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 0L).withNullCaching(false));
+    assertThat(ZetaCacheContext.get().skipBroadcast()).isFalse();
 
     ZetaCacheContext.get().restore(snapshot);
-    assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
+    assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
   }
 
   @Test
   @DisplayName("push with skipBroadcast alone does not clear context")
   void apply_withSkipBroadcastOnly_keepsContext() {
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 0L, false, true));
-    assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 0L).withNullCaching(false), true);
+    assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
 
-    ZetaCacheContext.get().push(CachePolicy.of(0L, 0L, false, false));
-    assertThat(ZetaCacheContext.get().current().skipBroadcast()).isFalse();
+    ZetaCacheContext.get().push(ReadPolicy.of(0L, 0L).withNullCaching(false));
+    assertThat(ZetaCacheContext.get().skipBroadcast()).isFalse();
   }
-
 }

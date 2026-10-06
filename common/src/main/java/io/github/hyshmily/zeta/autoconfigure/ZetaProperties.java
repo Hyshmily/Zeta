@@ -15,16 +15,14 @@
  */
 package io.github.hyshmily.zeta.autoconfigure;
 
+import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
 import io.github.hyshmily.zeta.cache.cachesupport.CacheCoreSettings;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerSettings;
 import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
+import io.github.hyshmily.zeta.endpoint.EndpointSettings;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Pattern;
-import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.*;
 import java.util.ArrayList;
 import java.util.List;
 import lombok.AccessLevel;
@@ -45,14 +43,15 @@ import org.springframework.validation.annotation.Validated;
  * plus the nested {@link CircuitBreakerSettings} and
  * {@link RefaultAdmission.Settings} blocks) so the cache packages never import
  * this assembly package — the dependency points one way
- * (autoconfigure → cache, ADR-0082). The bridges delegate to the live bound
- * bean, so runtime configuration updates keep working exactly as before the
- * views existed.
+ * (autoconfigure → cache, ADR-0082). The same holds for the annotation and
+ * endpoint views ({@link SpringCacheSettings}, {@link EndpointSettings}).
+ * The bridges delegate to the live bound bean, so runtime configuration
+ * updates keep working exactly as before the views existed.
  */
 @Data
 @Validated
 @ConfigurationProperties(prefix = "zeta.local")
-public class ZetaProperties implements CacheCoreSettings {
+public class ZetaProperties implements CacheCoreSettings, SpringCacheSettings, EndpointSettings {
 
   /** Number of top hot keys to track. */
   @Min(1)
@@ -112,12 +111,11 @@ public class ZetaProperties implements CacheCoreSettings {
 
   /** Rejection policy options for the HotKey async executor. */
   public enum ExecutorRejection {
-
     /** Throw {@link java.util.concurrent.RejectedExecutionException} (default). */
     ABORT,
 
     /** Run the rejected task on the submitting thread (back-pressure). */
-    CALLER_RUNS
+    CALLER_RUNS,
   }
 
   /** Pool size for the shared HotKey scheduler (periodic tasks). */
@@ -160,8 +158,44 @@ public class ZetaProperties implements CacheCoreSettings {
   /** TTL (seconds) for null/cache-miss entries. Kept short to avoid caching negative results. */
   private int nullValueTtlSeconds = 10;
 
+  @Override
   public long effectiveNullTtlMs() {
     return nullValueTtlSeconds > 0 ? nullValueTtlSeconds * 1000L : Long.MAX_VALUE;
+  }
+
+  @Override
+  public String keySeparator() {
+    return getSpringCache().getKeySeparator();
+  }
+
+  @Override
+  public int cacheMaxSize() {
+    return getCache().getMaxSize();
+  }
+
+  @Override
+  public long cacheMaxWeight() {
+    return getCache().getMaxWeight();
+  }
+
+  @Override
+  public int inflightMaxSize() {
+    return getInflightMaxSize();
+  }
+
+  @Override
+  public int inflightTtlSeconds() {
+    return getInflightTtlSeconds();
+  }
+
+  @Override
+  public int inflightTimeoutSeconds() {
+    return getInflightTimeoutSeconds();
+  }
+
+  @Override
+  public int nullValueTtlSeconds() {
+    return getNullValueTtlSeconds();
   }
 
   /**
@@ -252,7 +286,6 @@ public class ZetaProperties implements CacheCoreSettings {
 
   /** Wire encoding for app-to-Worker report messages. */
   public enum ReportEncoding {
-
     /** Jackson JSON body (default) — human-readable, cross-version safe. */
     JSON,
 
@@ -262,7 +295,7 @@ public class ZetaProperties implements CacheCoreSettings {
      * JSON for typical key-count batches. Identified by a fixed magic byte,
      * so receivers accept it alongside JSON regardless of this setting.
      */
-    COMPACT
+    COMPACT,
   }
 
   /** Interval in ms at which the reporter flushes batches to RabbitMQ. */
@@ -309,7 +342,6 @@ public class ZetaProperties implements CacheCoreSettings {
 
   /** Tuning modes for the ADR-0078 reporter flush-cadence feed loop. */
   public enum ReportIntervalTuning {
-
     /** No tuner: the flush cadence stays at {@code report-interval-ms}. */
     OFF,
 
@@ -317,7 +349,7 @@ public class ZetaProperties implements CacheCoreSettings {
     SHADOW,
 
     /** Apply each computed interval to the WaveCounter tide base. */
-    ON
+    ON,
   }
 
   /** Number of shards for reportToWorker partitioning (only used when consistent-hashing is disabled). */
@@ -387,12 +419,11 @@ public class ZetaProperties implements CacheCoreSettings {
 
     /** Policy for values whose object graph exhausts the weigh walk budget. */
     public enum WeighOverBudget {
-
       /** Extrapolate the unmeasured remainder conservatively from the walked prefix (default). */
       EXTRAPOLATE,
 
       /** Treat the value as exceeding any budget: it is evicted immediately (Ehcache-style abort). */
-      ABORT
+      ABORT,
     }
 
     /**
@@ -448,7 +479,6 @@ public class ZetaProperties implements CacheCoreSettings {
 
   /** Modes for the ADR-0079 refault distance admission gate. */
   public enum RefaultAdmissionMode {
-
     /** No gate: no listener, no shadow table, byte-identical to pre-ADR-0079 behavior. */
     OFF,
 
@@ -456,7 +486,7 @@ public class ZetaProperties implements CacheCoreSettings {
     SHADOW,
 
     /** Enforce: refault-rejected keys are stored only as short-TTL solo-flight entries. */
-    ON
+    ON,
   }
 
   /** L1 cache configuration. */

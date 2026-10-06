@@ -18,9 +18,10 @@ package io.github.hyshmily.zeta.autoconfigure;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
@@ -54,7 +55,7 @@ import org.springframework.context.annotation.Bean;
  *       estimated size, max size) under the {@code zeta.l1} metric prefix via
  *       {@link CaffeineCacheMetrics}.</li>
  *   <li>{@code hotKeyCustomMetrics} — HotKey-specific business metrics covering TopK detection
- *       (local and worker), SingleFlight, Reporter (queue depth, drops, BBR stats), ExpireManager
+ *       (local and worker), SingleFlight, Reporter (queue depth, drops, BBR stats), BackgroundRefresher
  *       (refresh permits), VersionController (degraded count), SyncPublisher (dedup cache size),
  *       Worker health (alive/dead), StateMachine (tracked keys), and CPU load (EMA).</li>
  * </ul>
@@ -90,7 +91,7 @@ public class ZetaMicrometerAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public MeterBinder hotKeyCaffeineMetrics(
-    @Qualifier("hotLocalCache") ObjectProvider<Cache<String, Object>> hotLocalCacheProvider
+    @Qualifier("hotLocalCache") ObjectProvider<Cache<String, CacheEntry>> hotLocalCacheProvider
   ) {
     return registry ->
       hotLocalCacheProvider.ifAvailable(cache -> CaffeineCacheMetrics.monitor(registry, cache, "zeta.l1"));
@@ -144,7 +145,7 @@ public class ZetaMicrometerAutoConfiguration {
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param reporterProvider            provider for the HotKey reporter (may be absent)
    * @param broadcastBufferProvider     provider for the broadcast refresh buffer (may be absent)
-   * @param expireManagerProvider       provider for the cache expiry manager (may be absent)
+   * @param backgroundRefresherProvider provider for the background refresh executor (may be absent)
    * @param versionControllerProvider   provider for the version controller (may be absent)
    * @param cacheSyncPublisherProvider  provider for the cache sync publisher (may be absent)
    * @param stateMachineProvider        provider for the Worker state machine (may be absent)
@@ -165,7 +166,7 @@ public class ZetaMicrometerAutoConfiguration {
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<KeyReporter> reporterProvider,
     ObjectProvider<BroadcastBuffer> broadcastBufferProvider,
-    ObjectProvider<ExpireManager> expireManagerProvider,
+    ObjectProvider<BackgroundRefresher> backgroundRefresherProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
     ObjectProvider<ZetaBayesianSM> stateMachineProvider,
@@ -192,7 +193,7 @@ public class ZetaMicrometerAutoConfiguration {
         broadcastBufferProvider,
         healthViewProvider
       );
-      expireManagerProvider.ifAvailable(em -> {
+      backgroundRefresherProvider.ifAvailable(em -> {
         if (em.getRefreshLimiter() != null) {
           Gauge.builder("zeta.expire.refresh.available", em, e ->
             (double) e.getRefreshLimiter().availablePermits()

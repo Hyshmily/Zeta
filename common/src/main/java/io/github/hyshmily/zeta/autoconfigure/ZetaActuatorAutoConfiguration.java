@@ -17,13 +17,15 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.endpoint.RingEndpoint;
 import io.github.hyshmily.zeta.endpoint.StateMachineEndpoint;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
@@ -84,7 +86,8 @@ public class ZetaActuatorAutoConfiguration {
    * @param singleFlightProvider        provider for the SingleFlight dedup layer (may be absent)
    * @param hotKeyReporterProvider      provider for the HotKey reporter (may be absent)
    * @param ruleMatcherProvider         provider for the rule matcher (may be absent)
-   * @param expireManagerProvider       provider for the cache expiry manager (may be absent)
+   * @param entryLifecycleProvider      provider for the entry lifecycle manager (may be absent)
+   * @param backgroundRefresherProvider provider for the background refresh executor (may be absent)
    * @param versionControllerProvider   provider for the version controller (may be absent)
    * @param cacheSyncPublisherProvider  provider for the cache sync publisher (may be absent)
    * @param stateMachineProvider        provider for the Worker state machine (may be absent)
@@ -97,16 +100,17 @@ public class ZetaActuatorAutoConfiguration {
    * @return a new {@link ZetaEndpoint} instance
    */
   @Bean
-  @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
+  @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
   @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
   @ConditionalOnMissingBean
   public ZetaEndpoint hotKeyEndpoint(
     @Qualifier("hotKeyDetector") ObjectProvider<TopK> hotKeyDetectorProvider,
-    ObjectProvider<Cache<String, Object>> hotLocalCacheProvider,
+    ObjectProvider<Cache<String, CacheEntry>> hotLocalCacheProvider,
     ObjectProvider<SingleFlight> singleFlightProvider,
     ObjectProvider<KeyReporter> hotKeyReporterProvider,
     ObjectProvider<RuleMatcher> ruleMatcherProvider,
-    ObjectProvider<ExpireManager> expireManagerProvider,
+    ObjectProvider<EntryLifecycle> entryLifecycleProvider,
+    ObjectProvider<BackgroundRefresher> backgroundRefresherProvider,
     ObjectProvider<VersionController> versionControllerProvider,
     ObjectProvider<CacheSyncPublisher> cacheSyncPublisherProvider,
     ObjectProvider<ZetaBayesianSM> stateMachineProvider,
@@ -122,7 +126,8 @@ public class ZetaActuatorAutoConfiguration {
       .properties(properties)
       .hotKeyReporter(hotKeyReporterProvider.getIfAvailable())
       .ruleMatcher(ruleMatcherProvider.getIfAvailable())
-      .expireManager(expireManagerProvider.getIfAvailable())
+      .entryLifecycle(entryLifecycleProvider.getIfAvailable())
+      .backgroundRefresher(backgroundRefresherProvider.getIfAvailable())
       .versionController(versionControllerProvider.getIfAvailable())
       .cacheSyncPublisher(cacheSyncPublisherProvider.getIfAvailable())
       .zetaBayesianSM(stateMachineProvider.getIfAvailable())
@@ -136,8 +141,8 @@ public class ZetaActuatorAutoConfiguration {
    * Create the {@link RingEndpoint} for consistent-hash ring CRUD operations.
    *
    * <p>Only active when {@code zeta.local.consistent-hashing.enabled=true}
-   * and Spring MVC ({@code RestController}) is on the classpath.
-   * Provides REST endpoints at {@code /actuator/hotkeyring} for viewing and
+   * and the Actuator endpoint infrastructure is on the classpath.
+   * Provides operations at {@code /actuator/hotkeyring} for viewing and
    * modifying the consistent-hash ring topology.
    *
    * @param ringManagerProvider        the ring manager for consistent-hash topology (never {@code null})
@@ -145,7 +150,7 @@ public class ZetaActuatorAutoConfiguration {
    * @return a new {@link RingEndpoint} instance
    */
   @Bean
-  @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
+  @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
   @ConditionalOnProperty(prefix = "zeta.local.consistent-hashing", name = "enabled", havingValue = "true")
   @ConditionalOnMissingBean
   public RingEndpoint ringEndpoint(
@@ -160,9 +165,10 @@ public class ZetaActuatorAutoConfiguration {
    * state-machine configuration at runtime.
    *
    * <p>Only active when a {@link ZetaBayesianSM} bean is present
-   * (i.e. in Worker mode) and Spring MVC is on the classpath.
-   * Exposes REST endpoints at {@code /actuator/hotkey/worker/state}
-   * for GET (read config) and POST (update config) operations.
+   * (i.e. in Worker mode) and the Actuator endpoint infrastructure is on the
+   * classpath.
+   * Exposes operations at {@code /actuator/hotkey-worker-state}
+   * for read (config snapshot) and write (typed config update) operations.
    * Configuration changes propagate to peer Workers via heartbeat send.
    *
    * @param stateMachine                    the Worker state machine (never {@code null})
@@ -172,7 +178,7 @@ public class ZetaActuatorAutoConfiguration {
    * @return a new {@link StateMachineEndpoint} instance
    */
   @Bean
-  @ConditionalOnClass(name = "org.springframework.web.bind.annotation.RestController")
+  @ConditionalOnClass(name = "org.springframework.boot.actuate.endpoint.annotation.Endpoint")
   @ConditionalOnBean(ZetaBayesianSM.class)
   @ConditionalOnMissingBean
   public StateMachineEndpoint stateMachineEndpoint(

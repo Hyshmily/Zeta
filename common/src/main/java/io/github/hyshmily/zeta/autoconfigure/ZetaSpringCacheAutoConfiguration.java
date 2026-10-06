@@ -70,6 +70,12 @@ public class ZetaSpringCacheAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
+  // Symmetric with hotKeyCacheManager above: when the user supplies their own
+  // CacheManager, Zeta's manager is skipped — and an aspect that pushes
+  // CacheExtension policies without that manager is dead weight whose
+  // annotations silently do nothing. Declared after the manager bean, so the
+  // ConditionalOnBean evaluation sees the skip decision (ADR-0086).
+  @ConditionalOnBean(ZetaCacheManager.class)
   @ConditionalOnClass(name = "org.aspectj.lang.ProceedingJoinPoint")
   public CacheExtensionAspect hotKeyCacheExtensionAspect(Zeta zeta, ZetaProperties properties) {
     return new CacheExtensionAspect(zeta, properties);

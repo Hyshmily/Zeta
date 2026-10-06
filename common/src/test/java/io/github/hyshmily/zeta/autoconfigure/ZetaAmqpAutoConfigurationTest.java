@@ -21,14 +21,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.model.CacheEntry;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.reporting.BbrRateLimiter;
 import io.github.hyshmily.zeta.reporting.CompactAwareReportMessageConverter;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.reporting.ReportPublisher;
-import io.github.hyshmily.zeta.reporting.impl.BbrRateLimiterImpl;
 import io.github.hyshmily.zeta.reporting.impl.KeyReporterImpl;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
@@ -46,7 +46,6 @@ import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.util.SystemLoadMonitor;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
 import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
-import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import java.util.concurrent.ScheduledExecutorService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -144,7 +143,7 @@ class ZetaAmqpAutoConfigurationTest {
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
-    ObjectProvider<BbrRateLimiterImpl> bbrProvider = mock(ObjectProvider.class);
+    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
     KeyReporter reporter = config.hotKeyReporter(
       reportPublisher,
       scheduler,
@@ -437,7 +436,7 @@ class ZetaAmqpAutoConfigurationTest {
    */
   @Test
   void workerListenerIsCreatedWithRequiredDependencies() {
-    Cache<String, Object> localCache = mock(Cache.class);
+    Cache<String, CacheEntry> localCache = mock(Cache.class);
     CacheLoader redisLoader = mock(CacheLoader.class);
     WorkerListenerProperties props = new WorkerListenerProperties();
     ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
@@ -527,7 +526,7 @@ class ZetaAmqpAutoConfigurationTest {
     ZetaProperties properties = new ZetaProperties();
     RingManager ringManager = new RingManagerImpl(150);
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
-    ObjectProvider<BbrRateLimiterImpl> bbrProvider = mock(ObjectProvider.class);
+    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
     KeyReporter reporter = config.hotKeyReporter(
@@ -867,7 +866,7 @@ class ZetaAmqpAutoConfigurationTest {
     ObjectProvider<HealthView> healthViewProvider = mock(ObjectProvider.class);
     when(healthViewProvider.getIfAvailable(any())).thenReturn(customHealthView);
 
-    ObjectProvider<BbrRateLimiterImpl> bbrProvider = mock(ObjectProvider.class);
+    ObjectProvider<BbrRateLimiter> bbrProvider = mock(ObjectProvider.class);
 
     ZetaAmqpAutoConfiguration.ReportConfiguration config = new ZetaAmqpAutoConfiguration.ReportConfiguration();
     KeyReporter reporter = config.hotKeyReporter(

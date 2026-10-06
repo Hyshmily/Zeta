@@ -20,9 +20,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
@@ -81,15 +82,15 @@ class ZetaMicrometerAutoConfigurationTest {
    */
   @Test
   void caffeineMeterBinder_registersMetrics() {
-    Cache<String, Object> cache = Caffeine.newBuilder().recordStats().build();
-    cache.put("a", 1);
+    Cache<String, CacheEntry> cache = Caffeine.newBuilder().recordStats().build();
+    cache.put("a", CacheEntry.builder().value(1).dataVersion(0).hardExpireAtMs(Long.MAX_VALUE).build());
     cache.getIfPresent("a");
     cache.getIfPresent("missing");
 
     @SuppressWarnings("all")
-    ObjectProvider<Cache<String, Object>> provider = mock(ObjectProvider.class);
+    ObjectProvider<Cache<String, CacheEntry>> provider = mock(ObjectProvider.class);
     doAnswer(inv -> {
-      ((Consumer<Cache<String, Object>>) inv.getArgument(0)).accept(cache);
+      ((Consumer<Cache<String, CacheEntry>>) inv.getArgument(0)).accept(cache);
       return null;
     })
       .when(provider)
@@ -117,8 +118,8 @@ class ZetaMicrometerAutoConfigurationTest {
     when(reporter.dispatcherDropped()).thenReturn(5L);
     when(reporter.dispatcherExpired()).thenReturn(3L);
     when(reporter.getPendingKeyCount()).thenReturn(200L);
-    ExpireManager expireManager = mock(ExpireManager.class);
-    when(expireManager.getRefreshLimiter()).thenReturn(new Semaphore(8));
+    BackgroundRefresher backgroundRefresher = mock(BackgroundRefresher.class);
+    when(backgroundRefresher.getRefreshLimiter()).thenReturn(new Semaphore(8));
     VersionController vc = mock(VersionController.class);
     when(vc.getDegradedVersionCount()).thenReturn(7L);
     CacheSyncPublisher csp = mock(CacheSyncPublisher.class);
@@ -140,7 +141,7 @@ class ZetaMicrometerAutoConfigurationTest {
       providerThatReturns(sf),
       providerThatReturns(reporter),
       providerThatReturns(broadcastBuffer),
-      providerThatReturns(expireManager),
+      providerThatReturns(backgroundRefresher),
       providerThatReturns(vc),
       providerThatReturns(csp),
       providerThatReturns(sm),
@@ -211,19 +212,19 @@ class ZetaMicrometerAutoConfigurationTest {
   }
 
   /**
-   * Verifies that the custom MeterBinder gracefully handles a null refresh limiter from ExpireManagerImpl.
+   * Verifies that the custom MeterBinder gracefully handles a null refresh limiter from BackgroundRefresherImpl.
    */
   @Test
   void customMeterBinder_handlesNullRefreshLimiter() {
-    ExpireManager expireManager = mock(ExpireManager.class);
-    when(expireManager.getRefreshLimiter()).thenReturn(null);
+    BackgroundRefresher backgroundRefresher = mock(BackgroundRefresher.class);
+    when(backgroundRefresher.getRefreshLimiter()).thenReturn(null);
 
     MeterBinder binder = config.hotKeyCustomMetrics(
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),
-      providerThatReturns(expireManager),
+      providerThatReturns(backgroundRefresher),
       providerThatReturns(null),
       providerThatReturns(null),
       providerThatReturns(null),

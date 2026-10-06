@@ -23,11 +23,10 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
+import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
+import org.springframework.boot.actuate.endpoint.annotation.Selector;
 import org.springframework.util.Assert;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
 
 /**
  * Actuator {@code /actuator/hotkeyring} endpoint for consistent-hash ring inspection.
@@ -38,14 +37,16 @@ import org.springframework.web.bind.annotation.RestController;
  *   <li>{@code GET /actuator/hotkeyring/{key}} — query which node handles a key
  * </ul>
  *
+ * <p>Runs on the management plane (port, exposure, and roles honored via the
+ * standard {@code management.*} configuration), unlike a plain MVC controller.
+ *
  * <p><b>Security:</b> This endpoint exposes cluster topology (live node addresses)
  * and per-key routing information. Protect it via Spring Security
  * (e.g. {@code management.endpoint.hotkeyring.roles=ADMIN}) to prevent
  * internal infrastructure discovery in production environments.
  */
 @Internal
-@RestController
-@RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkeyring")
+@Endpoint(id = "hotkeyring")
 public class RingEndpoint {
 
   @Nullable
@@ -65,7 +66,7 @@ public class RingEndpoint {
    * @return a map containing {@code nodeCount}, {@code virtualNodes},
    *         and {@code nodes} entries
    */
-  @GetMapping
+  @ReadOperation
   public Map<String, Object> ringInfo() {
     if (ringManager == null) {
       return Map.of("error", "RingManager not available (RabbitMQ absent)");
@@ -87,8 +88,8 @@ public class RingEndpoint {
    * @return a map containing the key and its assigned node ID
    * @throws IllegalArgumentException if {@code key} is empty
    */
-  @GetMapping("/{key}")
-  public Map<String, Object> keyMapping(@PathVariable String key) {
+  @ReadOperation
+  public Map<String, Object> keyMapping(@Selector String key) {
     Assert.hasText(key, "key must not be empty");
     if (ringManager == null) {
       return Map.of("error", "RingManager not available (RabbitMQ absent)");

@@ -17,13 +17,14 @@ package io.github.hyshmily.zeta.endpoint;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.HeavyKeeper;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.reporting.KeyReporter;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
 import io.github.hyshmily.zeta.sharding.HealthView;
@@ -39,10 +40,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import lombok.Builder;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
+import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
 
 /**
  * Actuator {@code /actuator/hotkey} endpoint that exposes runtime diagnostics
@@ -55,31 +54,36 @@ import org.springframework.web.bind.annotation.RestController;
  * instance-level health. Each section is produced only
  * when the corresponding service is available in the current deployment mode.
  *
+ * <p>Runs on the management plane (port, exposure, and roles honored via the
+ * standard {@code management.*} configuration), unlike a plain MVC controller.
+ *
  * <p><b>Security:</b> This endpoint returns sensitive runtime data including
  * actual cache key names and cluster topology. Protect it via Spring Security
- * (e.g. {@code management.endpoint.zeta.roles=ADMIN}) to prevent information
+ * (e.g. {@code management.endpoint.hotkey.roles=ADMIN}) to prevent information
  * leakage in production environments.
  */
 @Internal
 @Builder
-@RestController
-@RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkey")
+@Endpoint(id = "hotkey")
 public class ZetaEndpoint {
 
   /** App-side TopK detector (HeavyKeeper) for local hot-key frequency tracking. */
   private final TopK hotKeyDetector;
   /** L1 Caffeine cache instance. */
-  private final Cache<String, Object> caffeineCache;
+  private final Cache<String, CacheEntry> caffeineCache;
   /** SingleFlight deduplication guard for concurrent L2 reads. */
   private final SingleFlight singleFlight;
-  /** HotKey configuration properties. */
-  private final ZetaProperties properties;
+  /** HotKey configuration view (live reads, per scrape). */
+  private final EndpointSettings properties;
   /** App-to-Worker reportToWorker aggregator. */
   private final KeyReporter hotKeyReporter;
   /** Blacklist/whitelist rule evaluator. */
   private final RuleMatcher ruleMatcher;
-  /** Cache TTL manager for soft/hard expiry. */
-  private final ExpireManager expireManager;
+  /** Entry lifecycle: guards, demotion, draft factory, TTL policy. */
+  private final EntryLifecycle entryLifecycle;
+
+  /** Background soft-expire refresh executor (limiter observability). */
+  private final BackgroundRefresher backgroundRefresher;
 
   /** Version tracking controller (Redis-backed, with local fallback). */
   @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
@@ -113,21 +117,24 @@ public class ZetaEndpoint {
    * </ul>
    * Each section is populated only when the required components are available.
    *
+   * @param limit maximum TopK entries per section; {@code null} (absent query
+   *              parameter) means the default of 100
    * @return a {@link LinkedHashMap} with identity fields and sectioned metrics
    */
-  @GetMapping
-  public Map<String, Object> hotKeyInfo(@RequestParam(defaultValue = "100") int limit) {
+  @ReadOperation
+  public Map<String, Object> hotKeyInfo(Integer limit) {
+    int topLimit = limit != null ? limit : 100;
     Map<String, Object> info = new LinkedHashMap<>();
 
     info.put("instanceId", InstanceIdGenerator.get());
     info.put("nodeId", InstanceIdGenerator.getNodeId());
 
-    Map<String, Object> local = buildLocalSection(limit);
+    Map<String, Object> local = buildLocalSection(topLimit);
     if (!local.isEmpty()) {
       info.put("local", local);
     }
 
-    Map<String, Object> worker = buildWorkerSection(limit);
+    Map<String, Object> worker = buildWorkerSection(topLimit);
     if (!worker.isEmpty()) {
       info.put("worker", worker);
     }
@@ -138,6 +145,12 @@ public class ZetaEndpoint {
       sync.put("dedupCacheSize", cacheSyncPublisher.getDedupCacheSize());
     }
     putDispatchStats(sync, syncListener == null ? null : syncListener.dispatcherStats());
+    if (syncListener != null) {
+      sync.put("foreignAppDrops", syncListener.foreignAppDrops());
+      if (syncListener.lastForeignApp() != null) {
+        sync.put("lastForeignApp", syncListener.lastForeignApp());
+      }
+    }
     if (!sync.isEmpty()) {
       info.put("sync", sync);
     }
@@ -191,15 +204,15 @@ private static void putDispatchStats(Map<String, Object> section, DispatcherStat
 
     if (caffeineCache != null) {
       local.put("cacheSize", caffeineCache.estimatedSize());
-      local.put("cacheMaxSize", properties.getCache().getMaxSize());
-      local.put("cacheMaxWeight", properties.getCache().getMaxWeight());
+      local.put("cacheMaxSize", properties.cacheMaxSize());
+      local.put("cacheMaxWeight", properties.cacheMaxWeight());
     }
 
     if (singleFlight != null) {
       local.put("inflightSize", singleFlight.estimatedInflightSize());
-      local.put("inflightMaxSize", properties.getInflightMaxSize());
-      local.put("inflightTtlSec", properties.getInflightTtlSeconds());
-      local.put("inflightTimeoutSec", properties.getInflightTimeoutSeconds());
+      local.put("inflightMaxSize", properties.inflightMaxSize());
+      local.put("inflightTtlSec", properties.inflightTtlSeconds());
+      local.put("inflightTimeoutSec", properties.inflightTimeoutSeconds());
     }
 
     if (hotKeyReporter != null) {
@@ -234,14 +247,14 @@ private static void putDispatchStats(Map<String, Object> section, DispatcherStat
       );
     }
 
-    if (expireManager != null) {
-      local.put("hardTtlMs", expireManager.ttlPolicy().getEffectiveHardTtlMs());
-      local.put("softTtlMs", expireManager.ttlPolicy().getEffectiveSoftTtlMs());
-      local.put("hotHardTtlMs", expireManager.ttlPolicy().getEffectiveHotHardTtlMs());
-      local.put("hotSoftTtlMs", expireManager.ttlPolicy().getEffectiveHotSoftTtlMs());
-      local.put("nullValueTtlSec", properties.getNullValueTtlSeconds());
-      if (expireManager.getRefreshLimiter() != null) {
-        local.put("refreshPoolAvailable", expireManager.getRefreshLimiter().availablePermits());
+    if (entryLifecycle != null) {
+      local.put("hardTtlMs", entryLifecycle.ttlPolicy().getEffectiveHardTtlMs());
+      local.put("softTtlMs", entryLifecycle.ttlPolicy().getEffectiveSoftTtlMs());
+      local.put("hotHardTtlMs", entryLifecycle.ttlPolicy().getEffectiveHotHardTtlMs());
+      local.put("hotSoftTtlMs", entryLifecycle.ttlPolicy().getEffectiveHotSoftTtlMs());
+      local.put("nullValueTtlSec", properties.nullValueTtlSeconds());
+      if (backgroundRefresher != null && backgroundRefresher.getRefreshLimiter() != null) {
+        local.put("refreshPoolAvailable", backgroundRefresher.getRefreshLimiter().availablePermits());
       }
     }
 
@@ -278,6 +291,10 @@ private static void putDispatchStats(Map<String, Object> section, DispatcherStat
 
     if (workerListener != null) {
       putDispatchStats(worker, workerListener.dispatcherStats());
+      worker.put("foreignAppDrops", workerListener.foreignAppDrops());
+      if (workerListener.lastForeignApp() != null) {
+        worker.put("lastForeignApp", workerListener.lastForeignApp());
+      }
     }
 
     return worker;

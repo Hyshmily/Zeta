@@ -16,25 +16,25 @@
 package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
 import jakarta.annotation.Nullable;
 
 /**
- * Thread-bound transport for the per-invocation {@link CachePolicy}, carrying
- * storage-side decisions from {@code CacheExtensionAspect} into
- * {@link ZetaSpringCache}.
+ * Thread-bound transport for the per-invocation read policy plus the
+ * broadcast flag, carrying storage-side decisions from
+ * {@code CacheExtensionAspect} into {@link ZetaSpringCache}.
  *
  * <p>This class is a <b>dumb transport</b>: it holds exactly one immutable
- * policy per thread and knows nothing about annotations, SpEL, or caching
+ * snapshot per thread and knows nothing about annotations, SpEL, or caching
  * semantics. The aspect (the <em>whether</em> layer) builds and pushes the
- * policy; {@link ZetaSpringCache} (the <em>how</em> layer) reads it.
+ * snapshot; {@link ZetaSpringCache} (the <em>how</em> layer) reads it.
  *
  * <p>Usage pattern (in aspect):
  *
  * <pre>{@code
- * CachePolicy prev = ZetaCacheContext.get().snapshot();
+ * ZetaCacheContext.Snapshot prev = ZetaCacheContext.get().snapshot();
  * try {
- *   ZetaCacheContext.get().push(policy);
+ *   ZetaCacheContext.get().push(policy, skipBroadcast);
  *   // proceed to Spring's CacheInterceptor
  * } finally {
  *   ZetaCacheContext.get().restore(prev);
@@ -42,17 +42,38 @@ import jakarta.annotation.Nullable;
  * }</pre>
  *
  * <p>The snapshot/restore pair makes nested {@code @Cacheable} invocations on
- * the same thread safe: an inner method always sees its own policy (never the
- * outer one), and the outer policy is restored afterwards.
+ * the same thread safe: an inner method always sees its own snapshot (never
+ * the outer one), and the outer snapshot is restored afterwards.
+ *
+ * <p>The holder is deliberately a <b>plain</b> {@link ThreadLocal}, not an
+ * inheritable one. Making it inheritable was tried and reverted: a policy
+ * pushed on a caller thread would be silently copied into every thread born
+ * from it, and under pooled executors (the common case for async loads) a
+ * pooled thread inherits the policy of whichever task happened to create it
+ * first and then keeps it across unrelated tasks — cross-invocation leakage,
+ * which is strictly worse than the visible fallback-to-defaults it was meant
+ * to fix. {@code ZetaCacheContextTest#threadIsolation} pins this contract.
+ * A loader dispatched to another thread therefore runs with
+ * {@link ReadPolicy#defaults()}; if a caller needs its policy carried across
+ * an async boundary it must pass a {@link ReadPolicy} explicitly.
  *
  * @see ZetaSpringCache
- * @see CachePolicy
+ * @see ReadPolicy
  * @see NullValue
  */
 @Internal
 public final class ZetaCacheContext {
 
-  private static final ThreadLocal<CachePolicy> HOLDER = new ThreadLocal<>();
+  /**
+   * One thread's pushed state: the read policy plus the broadcast flag. A
+   * record (not two thread-locals) so snapshot/restore stay atomic.
+   *
+   * @param readPolicy    the read policy for this invocation
+   * @param skipBroadcast whether cross-instance sync is suppressed
+   */
+  public record Snapshot(ReadPolicy readPolicy, boolean skipBroadcast) {}
+
+  private static final ThreadLocal<Snapshot> HOLDER = new ThreadLocal<>();
   private static final ZetaCacheContext INSTANCE = new ZetaCacheContext();
 
   private ZetaCacheContext() {}
@@ -67,38 +88,60 @@ public final class ZetaCacheContext {
   }
 
   /**
-   * Pushes the given policy for the current thread's cache operation.
-   * A {@code null} policy clears the thread-local slot.
+   * Pushes the given read policy with broadcast enabled for the current
+   * thread's cache operation.
    *
-   * @param policy the policy to install (may be {@code null} to clear)
+   * @param policy the read policy to install (may be {@code null} to clear)
    */
-  public void push(@Nullable CachePolicy policy) {
+  public void push(@Nullable ReadPolicy policy) {
+    push(policy, false);
+  }
+
+  /**
+   * Pushes the given read policy and broadcast flag for the current thread's
+   * cache operation. A {@code null} policy clears the thread-local slot.
+   *
+   * @param policy        the read policy to install (may be {@code null} to clear)
+   * @param skipBroadcast whether cross-instance sync is suppressed
+   */
+  public void push(@Nullable ReadPolicy policy, boolean skipBroadcast) {
     if (policy == null) {
       HOLDER.remove();
     } else {
-      HOLDER.set(policy);
+      HOLDER.set(new Snapshot(policy, skipBroadcast));
     }
   }
 
   /**
-   * Returns the current thread's policy, or the shared
-   * {@link CachePolicy#defaults() defaults} when none is active.
+   * Returns the current thread's read policy, or the shared
+   * {@link ReadPolicy#defaults() defaults} when none is active.
    * Never returns {@code null}.
    *
-   * @return the active policy, or defaults
+   * @return the active read policy, or defaults
    */
-  public CachePolicy current() {
-    CachePolicy policy = HOLDER.get();
-    return policy != null ? policy : CachePolicy.defaults();
+  public ReadPolicy current() {
+    Snapshot snapshot = HOLDER.get();
+    return snapshot != null ? snapshot.readPolicy() : ReadPolicy.defaults();
   }
 
   /**
-   * Captures the current thread's policy for later restoration.
+   * Returns whether the current thread's invocation suppresses
+   * cross-instance sync ({@code false} when no snapshot is active).
    *
-   * @return the active policy, or {@code null} when none is active
+   * @return the active skip-broadcast flag
+   */
+  public boolean skipBroadcast() {
+    Snapshot snapshot = HOLDER.get();
+    return snapshot != null && snapshot.skipBroadcast();
+  }
+
+  /**
+   * Captures the current thread's snapshot for later restoration.
+   *
+   * @return the active snapshot, or {@code null} when none is active
    */
   @Nullable
-  public CachePolicy snapshot() {
+  public Snapshot snapshot() {
     return HOLDER.get();
   }
 
@@ -108,7 +151,11 @@ public final class ZetaCacheContext {
    *
    * @param snapshot the snapshot to restore (may be {@code null})
    */
-  public void restore(@Nullable CachePolicy snapshot) {
-    push(snapshot);
+  public void restore(@Nullable Snapshot snapshot) {
+    if (snapshot == null) {
+      HOLDER.remove();
+    } else {
+      HOLDER.set(snapshot);
+    }
   }
 }

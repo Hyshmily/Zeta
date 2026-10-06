@@ -19,9 +19,11 @@ import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.cache.CentralDispatcher;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
 import io.github.hyshmily.zeta.cache.cachesupport.RefaultAdmission;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
@@ -111,7 +113,8 @@ public class ZetaRedisAutoConfiguration {
    * @param hotKeyDetector     the app-side TopK detector for hot-key frequency tracking
    * @param hotLocalCache      the L1 Caffeine cache (shared across all keys)
    * @param singleFlight       the deduplication layer for concurrent cache-load requests
-   * @param expireManager      the soft/hard expiration manager for TTL control
+   * @param entryLifecycle     the entry lifecycle manager for TTL control
+   * @param backgroundRefresher the background soft-expire refresh executor
    * @param hotKeyExecutor     the dedicated HotKey async executor
    * @param centralDispatcher  the central dispatcher for reporting and broadcasting
    * @param redisTemplateProvider optional provider for StringRedisTemplate (version tracking);
@@ -126,9 +129,10 @@ public class ZetaRedisAutoConfiguration {
   @ConditionalOnBean({ RedisTemplate.class, HotKeyDetector.class })
   public HotKeyCache hotKeyCache(
     @Qualifier("hotKeyDetector") HotKeyDetector hotKeyDetector,
-    Cache<String, Object> hotLocalCache,
+    Cache<String, CacheEntry> hotLocalCache,
     SingleFlight singleFlight,
-    ExpireManager expireManager,
+    EntryLifecycle entryLifecycle,
+    BackgroundRefresher backgroundRefresher,
     @Qualifier("hotKeyExecutor") Executor hotKeyExecutor,
     CentralDispatcher centralDispatcher,
     ObjectProvider<StringRedisTemplate> redisTemplateProvider,
@@ -143,7 +147,8 @@ public class ZetaRedisAutoConfiguration {
       hotKeyDetector,
       hotLocalCache,
       singleFlight,
-      expireManager,
+      entryLifecycle,
+      backgroundRefresher,
       hotKeyExecutor,
       centralDispatcher,
       ruleMatcher,

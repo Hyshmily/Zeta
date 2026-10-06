@@ -33,6 +33,21 @@
       <artifactId>zeta</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <!--
+      Compile-only view of common's OPTIONAL dependencies: several benchmarked
+      classes expose optional types (e.g. StringRedisTemplate) in their public
+      constructor signatures, so javac needs them on the classpath even though
+      no benchmark ever touches Redis (all such collaborators stay empty).
+      Never published, never shaded into user artifacts.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-amqp</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.openjdk.jmh</groupId>
       <artifactId>jmh-core</artifactId>

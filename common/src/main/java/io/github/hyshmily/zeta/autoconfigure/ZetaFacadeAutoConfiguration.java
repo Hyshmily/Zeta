@@ -17,8 +17,10 @@ package io.github.hyshmily.zeta.autoconfigure;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.DefaultZeta;
 import io.github.hyshmily.zeta.cache.HotKeyCache;
 import io.github.hyshmily.zeta.cache.loader.ZetaLoaderRegistry;
+import io.github.hyshmily.zeta.rule.RuleService;
 import io.github.hyshmily.zeta.constants.ZetaConstants;
 import io.github.hyshmily.zeta.endpoint.ZetaEndpoint;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
@@ -160,13 +162,15 @@ public class ZetaFacadeAutoConfiguration {
     ObjectProvider<HotKeyCache> hotKeyCacheProvider,
     @Qualifier("hotKeyDetector") ObjectProvider<HotKeyDetector> appTopKProvider,
     ObjectProvider<LockProvider> lockProvider,
-    ObjectProvider<ZetaLoaderRegistry> loaderRegistryProvider
+    ObjectProvider<ZetaLoaderRegistry> loaderRegistryProvider,
+    ObjectProvider<RuleService> ruleServiceProvider
   ) {
-    return new Zeta(
+    return new DefaultZeta(
       hotKeyCacheProvider.getIfAvailable(),
       appTopKProvider.getIfAvailable(),
       lockProvider.getIfAvailable(),
-      loaderRegistryProvider.getIfAvailable()
+      loaderRegistryProvider.getIfAvailable(),
+      ruleServiceProvider.getIfAvailable()
     );
   }
 }

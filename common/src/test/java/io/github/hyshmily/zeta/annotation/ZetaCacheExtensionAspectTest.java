@@ -22,8 +22,8 @@ import static org.mockito.Mockito.*;
 
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheContext;
-import io.github.hyshmily.zeta.model.CachePolicy;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
+import io.github.hyshmily.zeta.model.ReadPolicy;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,18 +44,18 @@ import org.springframework.cache.annotation.Cacheable;
 class ZetaCacheExtensionAspectTest {
 
   private Zeta zeta;
-  private ZetaProperties properties;
-  private ZetaProperties.SpringCache springCache;
+  private Zeta.DetectorAdmin detectorAdmin;
+  private SpringCacheSettings settings;
   private CacheExtensionAspect aspect;
 
   @BeforeEach
   void setUp() {
     zeta = mock(Zeta.class);
-    properties = mock(ZetaProperties.class);
-    springCache = new ZetaProperties.SpringCache();
-    springCache.setKeySeparator("::");
-    when(properties.getSpringCache()).thenReturn(springCache);
-    aspect = new CacheExtensionAspect(zeta, properties);
+    detectorAdmin = mock(Zeta.DetectorAdmin.class);
+    when(zeta.detector()).thenReturn(detectorAdmin);
+    settings = mock(SpringCacheSettings.class);
+    when(settings.keySeparator()).thenReturn("::");
+    aspect = new CacheExtensionAspect(zeta, settings);
   }
 
   @AfterEach
@@ -282,7 +282,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
-    when(zeta.isLocalHotKey("test::myId")).thenReturn(true);
+    when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(true);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -303,7 +303,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
-    when(zeta.isLocalHotKey("test::myId")).thenReturn(true);
+    when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(true);
     when(zeta.peek("test::myId")).thenReturn(Optional.of("cached-value"));
 
     Object result = aspect.aroundCacheable(pjp);
@@ -326,7 +326,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    when(zeta.isLocalHotKey("test::myId")).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(false);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -349,7 +349,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
-    when(zeta.isLocalHotKey("test::myId")).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(false);
     when(zeta.peek("test::myId")).thenReturn(Optional.of("cached-value"));
 
     Object result = aspect.aroundCacheable(pjp);
@@ -371,7 +371,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
-    when(zeta.isLocalHotKey("test::myId")).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(false);
     when(zeta.peek("test::myId")).thenReturn(Optional.empty());
 
     Object result = aspect.aroundCacheable(pjp);
@@ -393,7 +393,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
-    when(zeta.isLocalHotKey("test::myId")).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(false);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -404,7 +404,7 @@ class ZetaCacheExtensionAspectTest {
   @Test
   @DisplayName("context is restored after proceed in finally block")
   void contextRestoredAfterProceed() throws Throwable {
-    ZetaCacheContext.get().push(CachePolicy.of(999L, 888L, true, false));
+    ZetaCacheContext.get().push(ReadPolicy.of(999L, 888L));
 
     Method method = TestService.class.getMethod("find", String.class);
     Cacheable cacheable = method.getAnnotation(Cacheable.class);
@@ -461,7 +461,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("from-method"));
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -482,7 +482,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("from-method"));
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
       .isInstanceOf(RuntimeException.class)
@@ -502,7 +502,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new Error("fatal"));
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     // Even with @Fallback present, an Error must propagate — the fallback
     // path swallows Exception only, so fatal JVM failures surface.
@@ -664,7 +664,7 @@ class ZetaCacheExtensionAspectTest {
       return "result-myId";
     });
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     aspect.aroundCacheable(pjp);
   }
@@ -687,11 +687,11 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
       return "result-myId";
     });
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     aspect.aroundCacheable(pjp);
   }
@@ -711,7 +711,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
       return "result-myId";
     });
 
@@ -733,7 +733,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().current().skipBroadcast()).isTrue();
+      assertThat(ZetaCacheContext.get().skipBroadcast()).isTrue();
       return null;
     });
 
@@ -755,7 +755,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenAnswer(invocation -> {
-      assertThat(ZetaCacheContext.get().current().skipBroadcast()).isFalse();
+      assertThat(ZetaCacheContext.get().skipBroadcast()).isFalse();
       return "result-myId";
     });
 
@@ -784,7 +784,7 @@ class ZetaCacheExtensionAspectTest {
       return "result-myId";
     });
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     aspect.aroundCacheable(pjp);
   }
@@ -919,7 +919,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getTarget()).thenReturn(new SpelFallbackService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
 
-    when(zeta.isLocalHotKey("test::myId")).thenReturn(true);
+    when(detectorAdmin.isLocalHotKey("test::myId")).thenReturn(true);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -944,7 +944,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("error"));
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -968,7 +968,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("error"));
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -992,7 +992,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenThrow(new RuntimeException("original-error"));
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     assertThatThrownBy(() -> aspect.aroundCacheable(pjp))
       .isInstanceOf(IllegalArgumentException.class)
@@ -1016,7 +1016,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     Object result = aspect.aroundCacheable(pjp);
 
@@ -1038,7 +1038,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
     when(zeta.peek(anyString())).thenReturn(Optional.empty());
 
     // Exceed qps by calling 6 times (threshold = 5)
@@ -1066,7 +1066,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     // Exceed qps by calling 6 times (threshold = 5)
     Object ignored;
@@ -1092,7 +1092,7 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getSignature()).thenReturn(signature);
     when(pjp.getTarget()).thenReturn(new TestService());
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
     when(zeta.peek(anyString())).thenReturn(Optional.of("cached-value"));
 
     CountDownLatch enterLatch = new CountDownLatch(2);
@@ -1147,11 +1147,11 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     aspect.aroundCacheable(pjp);
 
-    verify(zeta).notifyLocalDetectorDirect(
+    verify(detectorAdmin).notifyLocalDetectorDirect(
       Map.of(
         "test::preload-key-a", (long) Integer.MAX_VALUE,
         "test::preload-key-b", (long) Integer.MAX_VALUE
@@ -1174,11 +1174,11 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myDynamicKey" });
     when(pjp.proceed()).thenReturn("result-myDynamicKey");
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     aspect.aroundCacheable(pjp);
 
-    verify(zeta).notifyLocalDetectorDirect("test::myDynamicKey", Integer.MAX_VALUE);
+    verify(detectorAdmin).notifyLocalDetectorDirect("test::myDynamicKey", Integer.MAX_VALUE);
   }
 
   @Test
@@ -1196,13 +1196,13 @@ class ZetaCacheExtensionAspectTest {
     when(pjp.getArgs()).thenReturn(new Object[] { "myId" });
     when(pjp.proceed()).thenReturn("result-myId");
 
-    when(zeta.isLocalHotKey(anyString())).thenReturn(false);
+    when(detectorAdmin.isLocalHotKey(anyString())).thenReturn(false);
 
     // Call twice — notifyLocalDetectorDirect should only be called once per key
     aspect.aroundCacheable(pjp);
     aspect.aroundCacheable(pjp);
 
-    verify(zeta, times(1)).notifyLocalDetectorDirect(
+    verify(detectorAdmin, times(1)).notifyLocalDetectorDirect(
       Map.of(
         "test::preload-key-a", (long) Integer.MAX_VALUE,
         "test::preload-key-b", (long) Integer.MAX_VALUE

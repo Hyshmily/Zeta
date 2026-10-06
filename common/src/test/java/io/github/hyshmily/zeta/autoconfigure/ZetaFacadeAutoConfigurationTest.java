@@ -51,7 +51,7 @@ class ZetaFacadeAutoConfigurationTest {
   void hotKeyBeanIsCreatedWithMinimalDependencies() {
     runner.run(ctx -> {
       assertThat(ctx).hasSingleBean(Zeta.class);
-      assertThat(ctx.getBean(Zeta.class).returnLocalHotKeys()).isEmpty();
+      assertThat(ctx.getBean(Zeta.class).detector().localTopKeys()).isEmpty();
     });
   }
 

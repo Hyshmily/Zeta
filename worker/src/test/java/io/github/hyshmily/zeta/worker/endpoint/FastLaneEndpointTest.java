@@ -42,8 +42,8 @@ class FastLaneEndpointTest {
   }
 
   @Test
-  void addRule_shouldAddAndBroadcast() {
-    Map<String, Object> result = endpoint.addRule(Map.of("keyPattern", "flash:*", "threshold", 200));
+  void putRule_shouldAddAndBroadcastWhenAbsent() {
+    Map<String, Object> result = endpoint.putRule("flash:*", 200L);
     assertThat(result.get("status")).isEqualTo("added");
     assertThat(result.get("keyPattern")).isEqualTo("flash:*");
     assertThat(ruleManager.match("flash:deal")).isNotNull();
@@ -51,53 +51,45 @@ class FastLaneEndpointTest {
   }
 
   @Test
-  void addRule_shouldRejectMissingPattern() {
-    assertThatThrownBy(() -> endpoint.addRule(Map.of("threshold", 200)))
+  void putRule_shouldRejectNullPattern() {
+    assertThatThrownBy(() -> endpoint.putRule(null, 200L))
       .isInstanceOf(ResponseStatusException.class)
       .hasFieldOrPropertyWithValue("status", HttpStatus.BAD_REQUEST);
   }
 
   @Test
-  void addRule_shouldRejectBlankPattern() {
-    assertThatThrownBy(() -> endpoint.addRule(Map.of("keyPattern", "  ", "threshold", 200)))
+  void putRule_shouldRejectBlankPattern() {
+    assertThatThrownBy(() -> endpoint.putRule("  ", 200L))
       .isInstanceOf(ResponseStatusException.class)
       .hasFieldOrPropertyWithValue("status", HttpStatus.BAD_REQUEST);
   }
 
   @Test
-  void addRule_shouldRejectMissingThreshold() {
-    assertThatThrownBy(() -> endpoint.addRule(Map.of("keyPattern", "x:*")))
+  void putRule_shouldRejectNullThreshold() {
+    assertThatThrownBy(() -> endpoint.putRule("x:*", null))
       .isInstanceOf(ResponseStatusException.class)
       .hasFieldOrPropertyWithValue("status", HttpStatus.BAD_REQUEST);
   }
 
   @Test
-  void addRule_shouldRejectNonPositiveThreshold() {
-    assertThatThrownBy(() -> endpoint.addRule(Map.of("keyPattern", "x:*", "threshold", 0)))
+  void putRule_shouldRejectNonPositiveThreshold() {
+    assertThatThrownBy(() -> endpoint.putRule("x:*", 0L))
       .isInstanceOf(ResponseStatusException.class)
       .hasFieldOrPropertyWithValue("status", HttpStatus.BAD_REQUEST);
   }
 
   @Test
-  void addRule_shouldRejectNullBody() {
-    assertThatThrownBy(() -> endpoint.addRule(null))
-      .isInstanceOf(ResponseStatusException.class)
-      .hasFieldOrPropertyWithValue("status", HttpStatus.BAD_REQUEST);
-  }
-
-  @Test
-  void updateRule_shouldUpdateAndBroadcastWhenFound() {
-    Map<String, Object> result = endpoint.updateRule(Map.of("keyPattern", "product:*", "threshold", 999));
+  void putRule_shouldUpdateAndBroadcastWhenPresent() {
+    Map<String, Object> result = endpoint.putRule("product:*", 999L);
     assertThat(result.get("status")).isEqualTo("updated");
     Mockito.verify(broadcaster).broadcastNow();
   }
 
   @Test
-  void updateRule_shouldNotBroadcastWhenNotFound() {
+  void putRule_shouldBroadcastOnEveryMutation() {
     Mockito.reset(broadcaster);
-    Map<String, Object> result = endpoint.updateRule(Map.of("keyPattern", "nonexistent:*", "threshold", 999));
-    assertThat(result.get("status")).isEqualTo("not-found");
-    Mockito.verifyNoInteractions(broadcaster);
+    endpoint.putRule("fresh:*", 100L);
+    Mockito.verify(broadcaster).broadcastNow();
   }
 
   @Test
@@ -114,18 +106,6 @@ class FastLaneEndpointTest {
     Map<String, Object> result = endpoint.removeRule("nonexistent:*");
     assertThat(result.get("status")).isEqualTo("not-found");
     Mockito.verifyNoInteractions(broadcaster);
-  }
-
-  @Test
-  void updateRule_shouldRejectNullBody() {
-    assertThatThrownBy(() -> endpoint.updateRule(null))
-      .isInstanceOf(ResponseStatusException.class);
-  }
-
-  @Test
-  void updateRule_shouldRejectBlankPattern() {
-    assertThatThrownBy(() -> endpoint.updateRule(Map.of("keyPattern", "", "threshold", 100)))
-      .isInstanceOf(ResponseStatusException.class);
   }
 
   @Test
