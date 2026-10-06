@@ -18,7 +18,9 @@ package io.github.hyshmily.zeta.endpoint;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.detection.ZetaBayesianSM;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
+import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
+import org.springframework.boot.actuate.endpoint.annotation.WriteOperation;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -32,17 +34,23 @@ import java.util.concurrent.atomic.AtomicLong;
  * (see {@code AMQP_HEADER_HEARTBEAT_CONFIG_FP} / {@code hbConfigFp} in
  * {@code WorkerHeartbeatProducer}).
  *
- * <p>Endpoint path: {@code /actuator/hotkey/worker/state}.
+ * <p>Endpoint path: {@code /actuator/hotkey-worker-state} (an endpoint id
+ * cannot nest like the former {@code /actuator/hotkey/worker/state} MVC path;
+ * the read shape is unchanged, the write takes typed fields instead of a
+ * string map — see {@link #set}).
  *
- * <p><b>Security:</b> The {@code POST} endpoint allows callers to modify
+ * <p>Runs on the management plane (port, exposure, and roles honored via the
+ * standard {@code management.*} configuration): the runtime config mutation
+ * no longer sits on the application port.
+ *
+ * <p><b>Security:</b> The write operation allows callers to modify
  * detection thresholds ({@code confirmCount}, {@code coolCount},
  * {@code preCoolGraceCount}) at runtime. Protect it via Spring Security
- * (e.g. {@code management.endpoint.hotkeyworkerstate.roles=ADMIN}) to
+ * (e.g. {@code management.endpoint.hotkey-worker-state.roles=ADMIN}) to
  * prevent unauthorised configuration changes in production environments.
  */
 @Internal
-@RestController
-@RequestMapping("${management.endpoints.web.base-path:/actuator}/hotkey/worker/state")
+@Endpoint(id = "hotkey-worker-state")
 public class StateMachineEndpoint {
 
   /** Hot-key state machine whose config is being exposed/modified. */
@@ -76,7 +84,7 @@ public class StateMachineEndpoint {
    * @return a map containing {@code confirmCount}, {@code coolCount},
    *         {@code preCoolGraceCount}, and {@code trackedKeys}
    */
-  @GetMapping
+  @ReadOperation
   public Map<String, Object> get() {
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("confirmCount", stateMachine.getConfirmCount());
@@ -93,52 +101,29 @@ public class StateMachineEndpoint {
    * {@code WorkerHeartbeatProducer} to include the updated config
    * fingerprint in the next heartbeat message).</p>
    *
-   * <p>Accepts a JSON body with optional integer fields:
-   * <ul>
-   *   <li>{@code confirmCount}
-   *   <li>{@code coolCount}
-   *   <li>{@code preCoolGraceCount}
-   * </ul>
-   *
-   * <p>The POST-applied combination must satisfy the same invariant the
+   * <p>Each field is optional ({@code null} keeps the current value); the
+   * applied combination must satisfy the same invariant the
    * config-negotiation layer enforces on heartbeat gossip
    * ({@code confirmCount >= 1, preCoolGraceCount >= 1, coolCount > preCoolGraceCount}):
-   * without the check, a malformed POST would be applied locally but rejected
+   * without the check, a malformed write would be applied locally but rejected
    * by every peer's gossip validation, leaving the originating Worker on a
-   * permanently divergent config with no reconciliation path.</p>
+   * permanently divergent config with no reconciliation path. Malformed
+   * (non-numeric) input never reaches this method — the actuator framework
+   * rejects it with a 400 before dispatch.</p>
    *
-   * @param body a map of parameter names to string values
+   * @param confirmCount      the new confirm count, or {@code null} to keep it
+   * @param coolCount         the new cool count, or {@code null} to keep it
+   * @param preCoolGraceCount the new pre-cool grace count, or {@code null} to keep it
    * @return a status map confirming the applied changes
    */
-  @PostMapping
-  public Map<String, Object> set(@RequestBody Map<String, String> body) {
-    int confirmCount = stateMachine.getConfirmCount();
-    int coolCount = stateMachine.getCoolCount();
-    int preCoolGraceCount = stateMachine.getPreCoolGraceCount();
-    boolean anyProvided = false;
-    try {
-      if (body.containsKey("confirmCount")) {
-        confirmCount = Integer.parseInt(body.get("confirmCount"));
-        anyProvided = true;
-      }
-      if (body.containsKey("coolCount")) {
-        coolCount = Integer.parseInt(body.get("coolCount"));
-        anyProvided = true;
-      }
-      if (body.containsKey("preCoolGraceCount")) {
-        preCoolGraceCount = Integer.parseInt(body.get("preCoolGraceCount"));
-        anyProvided = true;
-      }
-    } catch (NumberFormatException e) {
-      return Map.of("status", "error", "message", "Invalid number format: " + e.getMessage());
-    }
-
+  @WriteOperation
+  public Map<String, Object> set(Integer confirmCount, Integer coolCount, Integer preCoolGraceCount) {
     // Nothing requested: pure no-op — no rewrite, no timestamp bump.
-    if (!anyProvided) {
+    if (confirmCount == null && coolCount == null && preCoolGraceCount == null) {
       return Map.of("status", "ok");
     }
 
-    // Serialize snapshot-validate-apply: two concurrent POSTs that each
+    // Serialize snapshot-validate-apply: two concurrent writes that each
     // validate against their own starting snapshot can interleave their
     // setters and land a combination that is individually-invalid (e.g.
     // coolCount <= preCoolGraceCount) — the divergent-config state this
@@ -146,14 +131,12 @@ public class StateMachineEndpoint {
     // (taken inside) through the last setter, so the validated combination
     // and the applied combination are always the same.
     synchronized (configWriteLock) {
-      int effConfirm = body.containsKey("confirmCount") ? confirmCount : stateMachine.getConfirmCount();
-      int effCool = body.containsKey("coolCount") ? coolCount : stateMachine.getCoolCount();
-      int effGrace = body.containsKey("preCoolGraceCount")
-        ? preCoolGraceCount
-        : stateMachine.getPreCoolGraceCount();
+      int effConfirm = confirmCount != null ? confirmCount : stateMachine.getConfirmCount();
+      int effCool = coolCount != null ? coolCount : stateMachine.getCoolCount();
+      int effGrace = preCoolGraceCount != null ? preCoolGraceCount : stateMachine.getPreCoolGraceCount();
 
       // Mirror of the WorkerConfigNegotiator gossip predicate — validate the
-      // POST-APPLIED combination (provided fields override, others keep their
+      // applied combination (provided fields override, others keep their
       // current values) before mutating anything, so the endpoint can never
       // mint a config the cluster would refuse to adopt. The predicate itself
       // is defined once on {@link ZetaBayesianSM#isValidConfig} so the two
@@ -164,23 +147,23 @@ public class StateMachineEndpoint {
           "error",
           "message",
           "Config rejected: confirmCount >= 1, preCoolGraceCount >= 1 and " +
-            "coolCount > preCoolGraceCount are required (confirmCount=" +
-            effConfirm +
-            ", coolCount=" +
-            effCool +
-            ", preCoolGraceCount=" +
-            effGrace +
-            ")"
+          "coolCount > preCoolGraceCount are required (confirmCount=" +
+          effConfirm +
+          ", coolCount=" +
+          effCool +
+          ", preCoolGraceCount=" +
+          effGrace +
+          ")"
         );
       }
 
-      if (body.containsKey("confirmCount")) {
+      if (confirmCount != null) {
         stateMachine.setConfirmCount(effConfirm);
       }
-      if (body.containsKey("coolCount")) {
+      if (coolCount != null) {
         stateMachine.setCoolCount(effCool);
       }
-      if (body.containsKey("preCoolGraceCount")) {
+      if (preCoolGraceCount != null) {
         stateMachine.setPreCoolGraceCount(effGrace);
       }
       var counter = configTimestampCounter.getIfAvailable();

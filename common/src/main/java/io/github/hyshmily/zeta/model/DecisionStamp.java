@@ -23,7 +23,7 @@ import jakarta.annotation.Nullable;
  * decision metadata.
  *
  * <p>This is the single value type for decision metadata across the entry
- * pipeline: {@code ExpireManager.decisionOf} extracts it from a raw cache
+ * pipeline: {@code EntryLifecycle.decisionOf} extracts it from a raw cache
  * value, {@link EntryDraft#decision(DecisionStamp)} applies it to a draft, and
  * the sync/worker handlers pass it between read and write sites. A {@code null}
  * stamp is equivalent to the all-zero local origin

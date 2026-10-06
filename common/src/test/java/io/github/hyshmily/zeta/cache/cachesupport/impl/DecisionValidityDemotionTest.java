@@ -38,7 +38,7 @@ import org.junit.jupiter.api.Test;
  */
 class DecisionValidityDemotionTest {
 
-  private Cache<String, Object> caffeineCache;
+  private Cache<String, CacheEntry> caffeineCache;
   private ZetaProperties ttlConfig;
   private HealthView healthView;
 
@@ -49,12 +49,28 @@ class DecisionValidityDemotionTest {
     healthView = mock(HealthView.class);
   }
 
-  private ExpireManagerImpl expireManager() {
-    return new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, healthView);
+  private EntryLifecycleImpl entryLifecycle() {
+    return new EntryLifecycleImpl(caffeineCache, ttlConfig, CacheCompressor.NONE, healthView);
   }
 
-  private ExpireManagerImpl expireManagerWithoutHealthView() {
-    return new ExpireManagerImpl(caffeineCache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
+  private EntryLifecycleImpl entryLifecycleWithoutHealthView() {
+    return new EntryLifecycleImpl(caffeineCache, ttlConfig, CacheCompressor.NONE, null);
+  }
+
+  private CacheEntry normalEntry() {
+    long now = System.currentTimeMillis();
+    return CacheEntry.builder()
+      .value("v")
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(now + 300_000)
+      .softTtlMs(0)
+      .softExpireAtMs(0)
+      .keyState(KeyState.NORMAL)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(0)
+      .build();
   }
 
   private CacheEntry hotEntry(
@@ -91,8 +107,8 @@ class DecisionValidityDemotionTest {
     mockWorker("w1", false, 5L);
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
-    ExpireManagerImpl em = expireManager();
-    Object raw = caffeineCache.getIfPresent("k");
+    EntryLifecycleImpl em = entryLifecycle();
+    CacheEntry raw = caffeineCache.getIfPresent("k");
     boolean demoted = em.demoteIfDecisionInvalid("k", raw);
 
     assertThat(demoted).isTrue();
@@ -114,7 +130,7 @@ class DecisionValidityDemotionTest {
     mockWorker("w1", true, 5L);
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     boolean demoted = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
     assertThat(demoted).isFalse();
@@ -128,7 +144,7 @@ class DecisionValidityDemotionTest {
     mockWorker("w1", true, 6L);
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     boolean demoted = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
     assertThat(demoted).isTrue();
@@ -142,7 +158,7 @@ class DecisionValidityDemotionTest {
     mockWorker("w1", false, HealthView.UNKNOWN_EPOCH);
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     boolean demoted = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
     assertThat(demoted).isTrue();
@@ -156,7 +172,7 @@ class DecisionValidityDemotionTest {
       hotEntry(null, 0L, 60_000, 15_000)
     );
 
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     boolean demoted = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
     assertThat(demoted).isFalse();
@@ -169,7 +185,7 @@ class DecisionValidityDemotionTest {
     CacheEntry cool = EntryDraft.of(hotEntry("w1", 5L, 60_000, 15_000)).keyState(KeyState.COOL).build();
     caffeineCache.put("k", cool);
 
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     boolean demoted = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
     assertThat(demoted).isFalse();
@@ -177,22 +193,22 @@ class DecisionValidityDemotionTest {
   }
 
   @Test
-  void bareValue_neverDemoted() {
+  void localNormalEntry_neverDemoted() {
     mockWorker("w1", false, 5L);
-    caffeineCache.put("k", "bare");
+    caffeineCache.put("k", normalEntry());
 
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     boolean demoted = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
     assertThat(demoted).isFalse();
-    assertThat(caffeineCache.getIfPresent("k")).isEqualTo("bare");
+    assertThat(caffeineCache.getIfPresent("k").getKeyState()).isEqualTo(KeyState.NORMAL);
   }
 
   @Test
   void noHealthView_disablesDemotion() {
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
-    ExpireManagerImpl em = expireManagerWithoutHealthView();
+    EntryLifecycleImpl em = entryLifecycleWithoutHealthView();
     boolean demoted = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
     assertThat(demoted).isFalse();
@@ -209,7 +225,7 @@ class DecisionValidityDemotionTest {
     caffeineCache.put("k", hotEntry("w2", 9L, 60_000, 15_000));
 
     CacheEntry staleRaw = hotEntry("w1", 5L, 60_000, 15_000);
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     boolean demoted = em.demoteIfDecisionInvalid("k", staleRaw);
 
     assertThat(demoted).isFalse();
@@ -223,7 +239,7 @@ class DecisionValidityDemotionTest {
     mockWorker("w1", false, 5L);
     caffeineCache.put("k", hotEntry("w1", 5L, 60_000, 15_000));
 
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
     boolean second = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
@@ -236,7 +252,7 @@ class DecisionValidityDemotionTest {
     mockWorker("w1", false, 5L);
     caffeineCache.put("k", hotEntry("w1", 5L, 0, 0));
 
-    ExpireManagerImpl em = expireManager();
+    EntryLifecycleImpl em = entryLifecycle();
     boolean demoted = em.demoteIfDecisionInvalid("k", caffeineCache.getIfPresent("k"));
 
     assertThat(demoted).isTrue();

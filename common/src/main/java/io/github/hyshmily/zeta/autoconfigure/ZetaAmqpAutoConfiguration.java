@@ -57,7 +57,6 @@ import org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
-import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
@@ -288,9 +287,10 @@ public class ZetaAmqpAutoConfiguration {
     }
 
     /**
-     * Create the {@link MessageConverter} for serializing reportToWorker messages.
+     * Create the {@link MessageConverter} for serializing report messages.
      * <p>
-     * JSON by default (Jackson, cross-version compatible); when
+     * JSON by default (Jackson, cross-version compatible — unknown fields are
+     * ignored, see ADR-0091); when
      * {@code zeta.local.report-encoding=compact}, {@link ReportMessage}
      * payloads are sent in the compact binary varint format (ADR-0074).
      * The decode side of the returned converter always accepts both formats
@@ -298,13 +298,12 @@ public class ZetaAmqpAutoConfiguration {
      * Apps flip to compact.
      *
      * @param properties the HotKey configuration properties
-     * @return a {@link CompactAwareReportMessageConverter} over a Jackson delegate
+     * @return a {@link CompactAwareReportMessageConverter} over a forward-compatible Jackson delegate
      */
     @Bean("zetaReportMessageConverter")
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
     public MessageConverter reportMessageConverter(ZetaProperties properties) {
-      return new CompactAwareReportMessageConverter(
-        new Jackson2JsonMessageConverter(),
+      return CompactAwareReportMessageConverter.forwardCompatible(
         properties.getReportEncoding() == ZetaProperties.ReportEncoding.COMPACT
       );
     }

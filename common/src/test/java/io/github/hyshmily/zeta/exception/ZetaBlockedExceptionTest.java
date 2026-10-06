@@ -28,7 +28,10 @@ class ZetaBlockedExceptionTest {
   @Test
   void logMessageShouldContainTimestampAndSource() {
     var ex = new ZetaBlockedException("Blocker", "test-key");
-    assertThat(ex.getMessage()).contains("Blocker");
+    // The source class and timestamp live in the log message only;
+    // getMessage() is the stable raw detail (no timestamp prefix).
+    assertThat(ex.getLogMessage()).contains("Blocker");
+    assertThat(ex.getLogMessage()).contains("test-key");
     assertThat(ex.getMessage()).contains("test-key");
   }
 

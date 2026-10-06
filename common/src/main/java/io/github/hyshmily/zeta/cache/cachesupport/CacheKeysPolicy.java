@@ -63,14 +63,13 @@ public final class CacheKeysPolicy {
    * Check whether an existing cache entry is managed by the Worker (HOT or COOL).
    * Worker-managed entries preserve their original normal TTLs through writes.
    *
-   * @param existing the existing cache entry (maybe {@code null} or a raw value)
-   * @return {@code true} if the entry is a {@link CacheEntry} with state HOT or
-   *         COOL
+   * @param existing the existing L1 entry (may be {@code null})
+   * @return {@code true} if the entry state is HOT or COOL
    */
-  public static boolean isWorkerManaged(Object existing) {
+  public static boolean isWorkerManaged(@Nullable CacheEntry existing) {
     return (
-      existing instanceof CacheEntry entry &&
-      (entry.getKeyState() == KeyState.HOT || entry.getKeyState() == KeyState.COOL)
+      existing != null &&
+      (existing.getKeyState() == KeyState.HOT || existing.getKeyState() == KeyState.COOL)
     );
   }
 

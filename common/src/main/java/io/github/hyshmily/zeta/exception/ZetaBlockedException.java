@@ -28,8 +28,8 @@ import lombok.Getter;
  * Blacklisted keys are typically high-QPS keys and this exception is
  * constructed per read, so it is built <b>without a stack trace</b>
  * ({@code writableStackTrace=false}, ADR-0063): the throw sites are fixed
- * guards inside {@code HotKeyCache} and {@link #getSourceClass()},
- * {@link #getCacheKey()} and {@link #getTimestamp()} already carry the full
+ * guards inside {@code HotKeyCache} and {@code getSourceClass()},
+ * {@code getCacheKey()} and {@code getTimestamp()} already carry the full
  * diagnostics. {@code getStackTrace()} returns an empty array by design.
  */
 @Getter

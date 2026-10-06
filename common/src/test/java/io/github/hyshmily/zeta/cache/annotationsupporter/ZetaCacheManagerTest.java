@@ -20,8 +20,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.github.hyshmily.zeta.Zeta;
+import io.github.hyshmily.zeta.annotation.annotationsupporter.SpringCacheSettings;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.ZetaCacheManager;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,17 +33,17 @@ import org.springframework.cache.Cache;
 class ZetaCacheManagerTest {
 
   private Zeta zeta;
-  private ZetaProperties properties;
+  private SpringCacheSettings settings;
   private ZetaCacheManager manager;
 
   @BeforeEach
   void setUp() {
     zeta = mock(Zeta.class);
-    properties = mock(ZetaProperties.class);
-    // ZetaSpringCache captures the key prefix from the nested config at
-    // construction — stub the nested object the real properties always carry.
-    when(properties.getSpringCache()).thenReturn(new ZetaProperties.SpringCache());
-    manager = new ZetaCacheManager(zeta, properties);
+    settings = mock(SpringCacheSettings.class);
+    // ZetaSpringCache captures the key prefix from settings at
+    // construction — stub the separator the real properties always carry.
+    when(settings.keySeparator()).thenReturn("::");
+    manager = new ZetaCacheManager(zeta, settings);
   }
 
   @Test
@@ -146,7 +146,7 @@ class ZetaCacheManagerTest {
   @Test
   @DisplayName("getCache returns null when getMissingCache returns null")
   void getCache_whenGetMissingCacheNull_returnsNull() {
-    ZetaCacheManager nullManager = new ZetaCacheManager(zeta, properties) {
+    ZetaCacheManager nullManager = new ZetaCacheManager(zeta, settings) {
       @Override
       public Cache getMissingCache(String name) {
         return null;

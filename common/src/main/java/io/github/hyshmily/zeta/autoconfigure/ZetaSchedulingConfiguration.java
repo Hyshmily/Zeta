@@ -20,6 +20,7 @@ import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import jakarta.annotation.PostConstruct;
 import java.util.ArrayList;
 import java.util.List;
@@ -70,12 +71,12 @@ public class ZetaSchedulingConfiguration {
 
   private final List<TopK> topKInstances;
   private final ScheduledExecutorService scheduler;
-  private final Optional<Cache<String, Object>> l1Cache;
+  private final Optional<Cache<String, CacheEntry>> l1Cache;
 
   public ZetaSchedulingConfiguration(
     List<TopK> topKInstances,
     @Qualifier("hotKeyScheduler") ScheduledExecutorService scheduler,
-    Optional<Cache<String, Object>> l1Cache
+    Optional<Cache<String, CacheEntry>> l1Cache
   ) {
     // HotKeyDetector implements TopK by delegating every call — fading() and
     // expelled() included — to its wrapped HeavyKeeper bean, which is itself
@@ -167,7 +168,7 @@ public class ZetaSchedulingConfiguration {
    * expiration idea — at the cost of an incremental maintenance pass every
    * interval (Caffeine maintenance is amortized O(1) per entry).
    *
-   * <p>No-op when no L1 {@code Cache<String, Object>} bean is present (e.g. a
+   * <p>No-op when no L1 {@code Cache<String, CacheEntry>} bean is present (e.g. a
    * consumer substituted the cache with their own bean type).
    */
   void cleanUpExpiredEntries() {

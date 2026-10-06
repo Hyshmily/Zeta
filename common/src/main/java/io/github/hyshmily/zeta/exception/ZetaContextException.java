@@ -89,7 +89,9 @@ public class ZetaContextException extends RuntimeException {
   /**
    * Returns the log-formatted message
    * ({@code "yyyy-MM-dd HH:mm:ss.SSS [sourceClass] message"}), built lazily on
-   * first access and memoized.
+   * first access and memoized. Use this for log lines; use
+   * {@link #getMessage()} for the stable detail message (monitoring and
+   * callers must never match on a timestamp-prefixed string).
    *
    * @return the formatted log message
    */
@@ -100,10 +102,5 @@ public class ZetaContextException extends RuntimeException {
       logMessage = lm;
     }
     return lm;
-  }
-
-  @Override
-  public String getMessage() {
-    return getLogMessage();
   }
 }

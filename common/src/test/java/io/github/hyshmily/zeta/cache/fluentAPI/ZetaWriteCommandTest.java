@@ -22,7 +22,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -44,8 +44,8 @@ class ZetaWriteCommandTest {
    * non-zero TTLs — each {@code ttlSupplier(long)} call allocates a fresh
    * lambda).
    */
-  private CachePolicy capturedWritePolicy() {
-    ArgumentCaptor<CachePolicy> captor = ArgumentCaptor.forClass(CachePolicy.class);
+  private WritePolicy capturedWritePolicy() {
+    ArgumentCaptor<WritePolicy> captor = ArgumentCaptor.forClass(WritePolicy.class);
     verify(zeta).putThrough(any(), any(), any(Runnable.class), captor.capture());
     return captor.getValue();
   }

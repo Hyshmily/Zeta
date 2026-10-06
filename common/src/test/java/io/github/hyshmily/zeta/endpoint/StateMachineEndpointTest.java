@@ -57,7 +57,7 @@ class StateMachineEndpointTest {
     AtomicLong counter = new AtomicLong(5);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "8"));
+    Map<String, Object> result = endpoint.set(8, null, null);
 
     assertThat(result).containsEntry("status", "ok");
     verify(stateMachine).setConfirmCount(8);
@@ -69,7 +69,7 @@ class StateMachineEndpointTest {
     AtomicLong counter = new AtomicLong(5);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    Map<String, Object> result = endpoint.set(Map.of("coolCount", "20"));
+    Map<String, Object> result = endpoint.set(null, 20, null);
 
     assertThat(result).containsEntry("status", "ok");
     verify(stateMachine).setCoolCount(20);
@@ -81,7 +81,7 @@ class StateMachineEndpointTest {
     AtomicLong counter = new AtomicLong(5);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    Map<String, Object> result = endpoint.set(Map.of("preCoolGraceCount", "8"));
+    Map<String, Object> result = endpoint.set(null, null, 8);
 
     assertThat(result).containsEntry("status", "ok");
     verify(stateMachine).setPreCoolGraceCount(8);
@@ -93,7 +93,7 @@ class StateMachineEndpointTest {
     AtomicLong counter = new AtomicLong(5);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    Map<String, Object> result = endpoint.set(Map.of());
+    Map<String, Object> result = endpoint.set(null, null, null);
 
     assertThat(result).containsEntry("status", "ok");
     // The current config is read for the combination validation, but nothing
@@ -110,7 +110,7 @@ class StateMachineEndpointTest {
     AtomicLong counter = mock(AtomicLong.class);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    endpoint.set(Map.of("confirmCount", "5"));
+    endpoint.set(5, null, null);
 
     verify(counter).incrementAndGet();
   }
@@ -120,7 +120,7 @@ class StateMachineEndpointTest {
     stubCurrentConfig(3, 10, 4);
     when(configTimestampCounter.getIfAvailable()).thenReturn(null);
 
-    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "3"));
+    Map<String, Object> result = endpoint.set(3, null, null);
 
     assertThat(result).containsEntry("status", "ok");
   }
@@ -131,7 +131,7 @@ class StateMachineEndpointTest {
     AtomicLong counter = new AtomicLong(5);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "7", "coolCount", "15", "preCoolGraceCount", "5"));
+    Map<String, Object> result = endpoint.set(7, 15, 5);
 
     assertThat(result).containsEntry("status", "ok");
     verify(stateMachine).setConfirmCount(7);
@@ -145,23 +145,36 @@ class StateMachineEndpointTest {
     AtomicLong counter = mock(AtomicLong.class);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    endpoint.set(Map.of("confirmCount", "7", "coolCount", "15", "preCoolGraceCount", "5"));
+    endpoint.set(7, 15, 5);
 
     // Counter should be incremented once (after all params are applied)
     verify(counter, times(1)).incrementAndGet();
   }
 
+  /**
+   * Typed write parameters move malformed-input rejection into the actuator
+   * framework (non-numeric JSON never dispatches — HTTP 400 before this
+   * method runs). The null-means-absent contract this test pins instead: a
+   * partial update keeps the other fields at their current values.
+   */
   @Test
-  void set_withInvalidNumber_shouldReturnError() {
+  void set_withPartialUpdate_shouldKeepOtherFields() {
     stubCurrentConfig(3, 10, 4);
-    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "abc"));
-    assertThat(result).containsEntry("status", "error");
+    AtomicLong counter = new AtomicLong(5);
+    when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
+
+    Map<String, Object> result = endpoint.set(null, 20, null);
+
+    assertThat(result).containsEntry("status", "ok");
+    verify(stateMachine).setCoolCount(20);
+    verify(stateMachine, never()).setConfirmCount(anyInt());
+    verify(stateMachine, never()).setPreCoolGraceCount(anyInt());
   }
 
   @Test
   void set_withNegativeConfirmCount_shouldReturnError() {
     stubCurrentConfig(3, 10, 4);
-    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "-1"));
+    Map<String, Object> result = endpoint.set(-1, null, null);
     assertThat(result).containsEntry("status", "error");
     verify(stateMachine, never()).setConfirmCount(anyInt());
   }
@@ -169,7 +182,7 @@ class StateMachineEndpointTest {
   @Test
   void set_withNegativeCoolCount_shouldReturnError() {
     stubCurrentConfig(3, 10, 4);
-    Map<String, Object> result = endpoint.set(Map.of("coolCount", "-5"));
+    Map<String, Object> result = endpoint.set(null, -5, null);
     assertThat(result).containsEntry("status", "error");
     verify(stateMachine, never()).setCoolCount(anyInt());
   }
@@ -177,7 +190,7 @@ class StateMachineEndpointTest {
   @Test
   void set_withNegativePreCoolGraceCount_shouldReturnError() {
     stubCurrentConfig(3, 10, 4);
-    Map<String, Object> result = endpoint.set(Map.of("preCoolGraceCount", "-3"));
+    Map<String, Object> result = endpoint.set(null, null, -3);
     assertThat(result).containsEntry("status", "error");
     verify(stateMachine, never()).setPreCoolGraceCount(anyInt());
   }
@@ -191,7 +204,7 @@ class StateMachineEndpointTest {
   @Test
   void set_withZeroValues_shouldBeRejected() {
     stubCurrentConfig(3, 10, 4);
-    Map<String, Object> result = endpoint.set(Map.of("confirmCount", "0", "coolCount", "0", "preCoolGraceCount", "0"));
+    Map<String, Object> result = endpoint.set(0, 0, 0);
     assertThat(result).containsEntry("status", "error");
     verify(stateMachine, never()).setConfirmCount(anyInt());
     verify(stateMachine, never()).setCoolCount(anyInt());
@@ -206,7 +219,7 @@ class StateMachineEndpointTest {
   @Test
   void set_withCoolCountBelowGraceCount_shouldBeRejected() {
     stubCurrentConfig(3, 10, 4);
-    Map<String, Object> result = endpoint.set(Map.of("coolCount", "2"));
+    Map<String, Object> result = endpoint.set(null, 2, null);
     assertThat(result).containsEntry("status", "error");
     verify(stateMachine, never()).setCoolCount(anyInt());
   }
@@ -217,8 +230,8 @@ class StateMachineEndpointTest {
     AtomicLong counter = mock(AtomicLong.class);
     when(configTimestampCounter.getIfAvailable()).thenReturn(counter);
 
-    endpoint.set(Map.of("confirmCount", "5"));
-    endpoint.set(Map.of("coolCount", "10"));
+    endpoint.set(5, null, null);
+    endpoint.set(null, 10, null);
 
     verify(counter, times(2)).incrementAndGet();
   }

@@ -16,7 +16,7 @@
 package io.github.hyshmily.zeta.cache.fluentAPI;
 
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.springframework.util.Assert;
 
@@ -90,7 +90,7 @@ public class ZetaWriteCommand<T> {
    */
   public void putThrough(T value, Runnable writer) {
     beginExecution();
-    zeta.putThrough(cacheKey, value, writer, CachePolicy.of(hardTtlMs, softTtlMs));
+    zeta.putThrough(cacheKey, value, writer, WritePolicy.of(hardTtlMs, softTtlMs));
   }
 
   /**
@@ -98,8 +98,14 @@ public class ZetaWriteCommand<T> {
    * Next {@code get()} will re-fetch from the reader.
    *
    * @param mutation the mutation to execute
+   * @throws IllegalStateException when {@link #withHardTtl(long)} or
+   *     {@link #withSoftTtl(long)} was called on this command: those overrides
+   *     are consumed only by {@link #putThrough(Object, Runnable)}, and a
+   *     builder that silently ignores a setter is a bug factory — fail fast
+   *     instead (ADR-0086).
    */
   public void invalidateAfterMutation(Runnable mutation) {
+    assertNoUnusedTtl("invalidateAfterMutation");
     beginExecution();
     zeta.invalidateAfterPut(cacheKey, mutation);
   }
@@ -107,10 +113,33 @@ public class ZetaWriteCommand<T> {
   /**
    * Invalidate L1 and send an invalidation to peers.
    * Next {@code get()} will re-fetch from the reader.
+   *
+   * @throws IllegalStateException when {@link #withHardTtl(long)} or
+   *     {@link #withSoftTtl(long)} was called on this command — see
+   *     {@link #invalidateAfterMutation(Runnable)}.
    */
   public void invalidate() {
+    assertNoUnusedTtl("invalidate");
     beginExecution();
     zeta.invalidate(cacheKey);
+  }
+
+  /**
+   * Fail fast when TTL overrides were set but the chosen terminal method cannot
+   * honour them. {@code withHardTtl}/{@code withSoftTtl} are read only by the
+   * {@link #putThrough(Object, Runnable)} path; the invalidation family has no
+   * entry to carry a TTL, so a silently ignored override would look like it
+   * worked. A builder's value is "what you see is what runs".
+   *
+   * @param terminal the terminal method being executed, for the message
+   */
+  private void assertNoUnusedTtl(String terminal) {
+    if (hardTtlMs != 0 || softTtlMs != 0) {
+      throw new IllegalStateException(
+        "withHardTtl/withSoftTtl apply only to putThrough(); this " + terminal
+          + "() call would silently drop the requested TTL override"
+      );
+    }
   }
 
   /**

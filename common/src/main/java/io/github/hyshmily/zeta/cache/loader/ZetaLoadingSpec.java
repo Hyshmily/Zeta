@@ -15,7 +15,7 @@
  */
 package io.github.hyshmily.zeta.cache.loader;
 
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
 import io.github.hyshmily.zeta.model.StalePolicy;
 import java.util.Objects;
 import java.util.function.Supplier;
@@ -35,7 +35,7 @@ import org.springframework.util.Assert;
  *       ({@link StalePolicy#SOFT_REFRESH} default).</li>
  * </ul>
  *
- * <p>The TTL / null-caching knobs follow the {@link CachePolicy} contract: the
+  * <p>The TTL / null-caching knobs follow the {@link ReadPolicy} contract: the
  * spec values are per-namespace overrides, {@code 0} means "use the configured
  * global default", and a plain hit never evaluates anything.
  *
@@ -121,8 +121,8 @@ public final class ZetaLoadingSpec<V> {
    * <p>
    * This is the intended companion for call sites that need a different data
    * source for keys governed by this spec: derive a policy from the copy via
-   * {@link #toPolicy(String)} (optionally with a {@link StalePolicy}
-   * override) and hand it to the {@link CachePolicy}-taking facade overload.
+   * {@link #toReadPolicy(String)} (optionally with a {@link StalePolicy}
+   * override) and hand it to the {@link ReadPolicy}-taking facade overload.
    * Passing a bare reader to a facade overload instead would bypass the
    * registry entirely and fall back to global defaults, silently dropping
    * this spec's TTL overrides and {@code failOnError}.
@@ -146,7 +146,7 @@ public final class ZetaLoadingSpec<V> {
   }
 
   /**
-   * Wrap this spec's loader into a {@link CachePolicy} for the given cache key,
+   * Wrap this spec's loader into a {@link ReadPolicy} for the given cache key,
    * carrying the spec's TTL overrides, null-caching, reporting, stale policy,
    * and failure semantics. The returned policy is what feeds the existing
    * {@code Zeta.get(key, policy)} chain, so SingleFlight deduplication, circuit
@@ -155,22 +155,22 @@ public final class ZetaLoadingSpec<V> {
    * @param cacheKey the key being read (captured by the reader lambda)
    * @return a policy that loads through this spec
    */
-  public CachePolicy toPolicy(String cacheKey) {
-    return toPolicy(cacheKey, stalePolicy);
+  public ReadPolicy toReadPolicy(String cacheKey) {
+    return toReadPolicy(cacheKey, stalePolicy);
   }
 
   /**
-   * Variant of {@link #toPolicy(String)} with a per-call {@link StalePolicy}
+   * Variant of {@link #toReadPolicy(String)} with a per-call {@link StalePolicy}
    * override.
    *
    * @param cacheKey       the key being read
    * @param stalePolicyOverride the stale policy to apply instead of the spec's
    * @return a policy that loads through this spec
    */
-  public CachePolicy toPolicy(String cacheKey, StalePolicy stalePolicyOverride) {
+  public ReadPolicy toReadPolicy(String cacheKey, StalePolicy stalePolicyOverride) {
     Objects.requireNonNull(stalePolicyOverride, "stalePolicyOverride must not be null");
     Supplier<Object> reader = () -> loader.load(cacheKey);
-    CachePolicy policy = CachePolicy.of(reader, hardTtlMs, softTtlMs, nullCaching, reportEnabled, stalePolicyOverride);
+    ReadPolicy policy = ReadPolicy.of(reader, hardTtlMs, softTtlMs, nullCaching, reportEnabled, stalePolicyOverride);
     return failOnError ? policy.withFailOnError() : policy;
   }
 
@@ -239,7 +239,7 @@ public final class ZetaLoadingSpec<V> {
 
     /**
      * Set whether {@code null} loader results may be cached (default
-     * {@code true}, matching {@link CachePolicy#nullCaching()}).
+     * {@code true}, matching {@link ReadPolicy#nullCaching()}).
      *
      * <p>{@code true}: a {@code null} loader result is stored as a short-TTL
      * {@code NullValue} sentinel (cache-penetration protection). {@code false}:

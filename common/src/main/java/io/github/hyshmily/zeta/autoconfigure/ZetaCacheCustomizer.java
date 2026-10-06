@@ -16,6 +16,7 @@
 package io.github.hyshmily.zeta.autoconfigure;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.github.hyshmily.zeta.model.CacheEntry;
 
 /**
  * Callback interface for customizing the L1 Caffeine cache builder before the
@@ -25,7 +26,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
  * <p>Declaring one or more {@code ZetaCacheCustomizer} beans lets applications
  * tune the L1 cache (add a {@code removalListener}, set a {@code scheduler} or
  * {@code executor}, adjust capacity) <b>without</b> replacing the whole
- * {@code Cache<String, Object>} bean — a replacement that would otherwise have
+ * {@code Cache<String, CacheEntry>} bean — a replacement that would otherwise have
  * to re-implement Zeta's {@code hardExpireAtMs}-driven {@code Expiry}, stats
  * recording, and weigher wiring by hand.
  *
@@ -58,5 +59,5 @@ public interface ZetaCacheCustomizer {
    *
    * @param builder the Caffeine builder pre-configured by Zeta, about to be built
    */
-  void customize(Caffeine<Object, Object> builder);
+  void customize(Caffeine<String, CacheEntry> builder);
 }

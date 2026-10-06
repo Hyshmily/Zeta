@@ -17,7 +17,6 @@ package io.github.hyshmily.zeta.annotation.annotationsupporter;
 
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.Zeta;
-import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,17 +47,17 @@ public class ZetaCacheManager implements CacheManager {
 
   private final ConcurrentMap<String, Cache> cacheMap = new ConcurrentHashMap<>();
   private final Zeta zeta;
-  private final ZetaProperties properties;
+  private final SpringCacheSettings settings;
 
   /**
    * Create a new {@code ZetaCacheManager}.
    *
    * @param zeta     the HotKey facade
-   * @param properties the HotKey configuration properties
+   * @param settings the Spring-Cache configuration view
    */
-  public ZetaCacheManager(Zeta zeta, ZetaProperties properties) {
+  public ZetaCacheManager(Zeta zeta, SpringCacheSettings settings) {
     this.zeta = zeta;
-    this.properties = properties;
+    this.settings = settings;
   }
 
   /**
@@ -99,7 +98,7 @@ public class ZetaCacheManager implements CacheManager {
    * @return a new {@link ZetaSpringCache} that allows null values
    */
   public Cache getMissingCache(String name) {
-    return new ZetaSpringCache(name, zeta, properties, true);
+    return new ZetaSpringCache(name, zeta, settings, true);
   }
 
   /**

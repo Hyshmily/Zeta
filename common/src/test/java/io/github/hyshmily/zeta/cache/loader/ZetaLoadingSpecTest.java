@@ -18,7 +18,7 @@ package io.github.hyshmily.zeta.cache.loader;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
 import io.github.hyshmily.zeta.model.StalePolicy;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -49,7 +49,7 @@ class ZetaLoadingSpecTest {
     CacheLoader<Object> syncLoader = key -> key.startsWith("user:") ? "U" : null;
     ZetaLoadingSpec<Object> spec = ZetaLoadingSpec.of(syncLoader);
     assertThat(spec.loader().load("user:42")).isEqualTo("U");
-    assertThat(spec.toPolicy("user:42").reader().get()).isEqualTo("U");
+    assertThat(spec.toReadPolicy("user:42").reader().get()).isEqualTo("U");
   }
 
   @Test
@@ -85,7 +85,7 @@ class ZetaLoadingSpecTest {
   }
 
   @Test
-  void toPolicy_carriesTtlsAndKnobsIntoPolicy() {
+  void toReadPolicy_carriesTtlsAndKnobsIntoPolicy() {
     ZetaLoadingSpec<String> spec = ZetaLoadingSpec.<String>builder()
       .loader(key -> "v")
       .hardTtl(5_000)
@@ -93,7 +93,7 @@ class ZetaLoadingSpecTest {
       .nullCaching(false)
       .failOnError()
       .build();
-    CachePolicy policy = spec.toPolicy("k");
+    ReadPolicy policy = spec.toReadPolicy("k");
     assertThat(policy.hardTtlMs().getAsLong()).isEqualTo(5_000);
     assertThat(policy.softTtlMs().getAsLong()).isEqualTo(1_000);
     assertThat(policy.nullCaching()).isFalse();
@@ -103,23 +103,23 @@ class ZetaLoadingSpecTest {
   }
 
   @Test
-  void toPolicy_readerDelegatesToLoaderWithCapturedKey() {
+  void toReadPolicy_readerDelegatesToLoaderWithCapturedKey() {
     ZetaLoadingSpec<String> spec = ZetaLoadingSpec.of(key -> "loaded:" + key);
-    CachePolicy policy = spec.toPolicy("user:42");
+    ReadPolicy policy = spec.toReadPolicy("user:42");
     assertThat(policy.reader().get()).isEqualTo("loaded:user:42");
   }
 
   @Test
-  void toPolicy_stalePolicyOverrideReplacesSpecPolicy() {
+  void toReadPolicy_stalePolicyOverrideReplacesSpecPolicy() {
     ZetaLoadingSpec<String> spec = ZetaLoadingSpec.<String>builder().loader(key -> "v").stalePolicy(StalePolicy.RETURN).build();
-    assertThat(spec.toPolicy("k").stalePolicy()).isEqualTo(StalePolicy.RETURN);
-    assertThat(spec.toPolicy("k", StalePolicy.REVALIDATE).stalePolicy()).isEqualTo(StalePolicy.REVALIDATE);
+    assertThat(spec.toReadPolicy("k").stalePolicy()).isEqualTo(StalePolicy.RETURN);
+    assertThat(spec.toReadPolicy("k", StalePolicy.REVALIDATE).stalePolicy()).isEqualTo(StalePolicy.REVALIDATE);
   }
 
   @Test
-  void toPolicy_nullStaleOverrideThrows() {
+  void toReadPolicy_nullStaleOverrideThrows() {
     ZetaLoadingSpec<String> spec = ZetaLoadingSpec.of(key -> "v");
-    assertThatThrownBy(() -> spec.toPolicy("k", null)).isInstanceOf(NullPointerException.class);
+    assertThatThrownBy(() -> spec.toReadPolicy("k", null)).isInstanceOf(NullPointerException.class);
   }
 
   @Test
@@ -183,27 +183,27 @@ class ZetaLoadingSpecTest {
       .loader(key -> "orig")
       .hardTtl(5_000)
       .build();
-    CachePolicy policy = spec.withLoader(key -> "swapped:" + key).toPolicy("user:42");
+    ReadPolicy policy = spec.withLoader(key -> "swapped:" + key).toReadPolicy("user:42");
     assertThat(policy.reader().get()).isEqualTo("swapped:user:42");
     assertThat(policy.hardTtlMs().getAsLong()).isEqualTo(5_000);
   }
 
   /**
-   * Pins the reader contract of {@link ZetaLoadingSpec#toPolicy(String)}: the
+   * Pins the reader contract of {@link ZetaLoadingSpec#toReadPolicy(String)}: the
    * loader is collapsed into a key-only {@link java.util.function.Supplier},
    * which is the sole channel from a registered loader into the cache. Misses
    * and soft-expire refreshes both travel through that same zero-argument
    * reader — one load per invocation, no other loader method involved.
    */
   @Test
-  void toPolicy_reader_invokesLoadPerCall() {
+  void toReadPolicy_reader_invokesLoadPerCall() {
     AtomicInteger loads = new AtomicInteger();
     CacheLoader<String> loader = cacheKey -> {
       loads.incrementAndGet();
       return "v:" + cacheKey;
     };
 
-    CachePolicy policy = ZetaLoadingSpec.<String>builder().loader(loader).build().toPolicy("user:42");
+    ReadPolicy policy = ZetaLoadingSpec.<String>builder().loader(loader).build().toReadPolicy("user:42");
     assertThat(policy.reader().get()).isEqualTo("v:user:42");
     assertThat(policy.reader().get()).isEqualTo("v:user:42");
 

@@ -170,6 +170,26 @@ public interface ZetaConstants {
     long VERSION_DEFAULT = 0L;
   }
 
+  /** Shared capacity defaults for the library's auxiliary bounded caches. */
+  @Internal
+  interface Cache {
+    /**
+     * Default {@code maximumSize} for the auxiliary per-key memo/lookup caches
+     * (the rule decision memo, the version floor cache, and the Worker's
+     * fast-lane match cache).
+     *
+     * <p>One shared value rather than three identical literals: every one of
+     * them is a pure acceleration structure whose miss falls back to a cheap
+     * recomputation (an ordered rule scan, one {@code INCR} comparison, an
+     * O(rules) glob scan), so the cap is a memory bound and not a correctness
+     * bound — a single knob is the honest shape, and a re-tune is a one-line
+     * change. 10k keeps the three structures together at a few MB while a
+     * high-cardinality key space degrades to the recomputation instead of
+     * growing without bound.
+     */
+    int DEFAULT_DEDUP_SIZE = 10_000;
+  }
+
   /** Increment value applied to the local TopK frequency counter on each access. */
   int TOPK_INCR = 1;
 

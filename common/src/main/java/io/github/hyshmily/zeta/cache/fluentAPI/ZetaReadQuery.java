@@ -18,8 +18,9 @@ package io.github.hyshmily.zeta.cache.fluentAPI;
 import io.github.hyshmily.zeta.Zeta;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.exception.ZetaBlockedException;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
 import io.github.hyshmily.zeta.model.StalePolicy;
+import io.github.hyshmily.zeta.model.WritePolicy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -43,11 +44,12 @@ import org.springframework.util.Assert;
  *       .withHardTtl(30_000)
  *       .withSoftTtl(10_000)
  *       .allowBroadcast()
- *       .executeOrNull();
+ *       .orNull();
  * </pre>
  *
  * <p>Created via {@link Zeta#read(String)}. Instances are single-use;
- * call {@link #execute()} or {@link #executeOrNull()} exactly once.
+ * call {@link #execute()}, {@link #orNull()} or {@link #orElse(Object)}
+ * exactly once.
  */
 public class ZetaReadQuery<T> {
 
@@ -181,7 +183,7 @@ public class ZetaReadQuery<T> {
 
   /**
    * Set whether {@code null} reader results may be cached (default
-   * {@code true}, matching {@link CachePolicy#nullCaching()}).
+   * {@code true}, matching {@link ReadPolicy#nullCaching()}).
    *
    * <p>{@code true}: when the primary reader or a fallback reader returns
    * {@code null}, a sentinel value ({@link NullValue#INSTANCE}) is cached with
@@ -225,23 +227,19 @@ public class ZetaReadQuery<T> {
    * Execute the read query and return the resolved value, or {@code null} if no
    * value is available.
    *
-   * <p>Convenience terminal method that preserves compile-time type inference
-   * in simple {@code return} statements, avoiding the need to unwrap an
-   * {@link Optional}.
-   *
    * @return the resolved value, or {@code null} if empty
    * @throws ZetaBlockedException if the key matches a block rule
    * @throws IllegalStateException if this query has already been executed
    */
-  public T executeOrNull() {
+  public T orNull() {
     return execute().orElse(null);
   }
 
   /**
    * Execute the read query and return the resolved value, or the given
-   * {@code defaultValue} if all readers return {@code null}.
+   * {@code defaultValue} if empty.
    *
-   * <p>The default value is <b>not</b> cached.  It is returned only for this
+   * <p>The default value is <b>not</b> cached. It is returned only for this
    * single invocation.
    *
    * @param defaultValue the value to return if all readers return {@code null}
@@ -249,7 +247,7 @@ public class ZetaReadQuery<T> {
    * @throws ZetaBlockedException if the key matches a block rule
    * @throws IllegalStateException if this query has already been executed
    */
-  public T executeOrNull(T defaultValue) {
+  public T orElse(T defaultValue) {
     return execute().orElse(defaultValue);
   }
 
@@ -281,7 +279,7 @@ public class ZetaReadQuery<T> {
     // inside the cache layer, which stores a short-TTL NullValue sentinel
     // (when null caching is allowed) or leaves no entry at all (when
     // disallowed via nullCaching(false)).
-    CachePolicy policy = CachePolicy.of(
+    ReadPolicy policy = ReadPolicy.of(
       primaryReader, hardTtlMs, softTtlMs, nullCaching, true, stalePolicy
     );
 
@@ -300,9 +298,9 @@ public class ZetaReadQuery<T> {
 
         if (val != null) {
           if (isAllowBroadcast) {
-            zeta.putThrough(cacheKey, val, NOOP_WRITER, CachePolicy.of(hardTtlMs, softTtlMs));
+            zeta.putThrough(cacheKey, val, NOOP_WRITER, WritePolicy.of(hardTtlMs, softTtlMs));
           } else {
-            zeta.putLocal(cacheKey, val, CachePolicy.of(hardTtlMs, softTtlMs));
+            zeta.putLocal(cacheKey, val, WritePolicy.of(hardTtlMs, softTtlMs));
           }
           return Optional.of(val);
         }
@@ -320,7 +318,7 @@ public class ZetaReadQuery<T> {
         // later successful fallback overwrites any sentinel), and the common
         // case — the primary read already stored its sentinel — pays one hit
         // instead of one full read path per null fallback.
-        zeta.get(cacheKey, CachePolicy.of(() -> null, 0L, 0L, true, false, StalePolicy.RETURN));
+        zeta.get(cacheKey, ReadPolicy.of(() -> null, 0L, 0L, true, false, StalePolicy.RETURN));
       }
     }
 

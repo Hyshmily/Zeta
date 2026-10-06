@@ -24,19 +24,23 @@ class ZetaContextExceptionTest {
   @Test
   void logMessageShouldContainFormattedTimestamp() {
     var ex = new ZetaContextException("Src", "hello", null);
-    assertThat(ex.getMessage()).matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3} \\[Src\\] hello");
+    assertThat(ex.getLogMessage()).matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3} \\[Src\\] hello");
   }
 
   @Test
-  void getMessageShouldReturnLogMessage() {
+  void getMessageShouldReturnStableDetailMessage() {
+    // getMessage() is the raw detail (stable for monitoring matching);
+    // the timestamp-prefixed form lives in getLogMessage() only.
     var ex = new ZetaContextException("Src", "detail", null);
-    assertThat(ex.getMessage()).endsWith("[Src] detail");
+    assertThat(ex.getMessage()).isEqualTo("detail");
+    assertThat(ex.getLogMessage()).endsWith("[Src] detail");
   }
 
   @Test
   void defaultDetailMessageShouldBeNullWhenNotProvided() {
     var ex = new ZetaContextException("Src", null, null);
-    assertThat(ex.getMessage()).contains("[Src] null");
+    assertThat(ex.getMessage()).isNull();
+    assertThat(ex.getLogMessage()).contains("[Src] null");
   }
 
   @Test
@@ -44,21 +48,23 @@ class ZetaContextExceptionTest {
     var cause = new IllegalArgumentException("inner");
     var ex = new ZetaContextException("Src", "outer", cause);
     assertThat(ex.getCause()).isSameAs(cause);
-    assertThat(ex.getMessage()).contains("[Src] outer");
+    assertThat(ex.getMessage()).isEqualTo("outer");
+    assertThat(ex.getLogMessage()).contains("[Src] outer");
   }
 
   @Test
   void logMessageWithCauseShouldNotContainCauseString() {
     var cause = new RuntimeException("inner");
     var ex = new ZetaContextException("Src", "outer", cause);
-    assertThat(ex.getMessage()).contains("[Src] outer");
-    assertThat(ex.getMessage()).doesNotContain("inner");
+    assertThat(ex.getLogMessage()).contains("[Src] outer");
+    assertThat(ex.getLogMessage()).doesNotContain("inner");
   }
 
   @Test
-  void getMessageReturnsFormattedLogMessage() {
+  void getMessageReturnsRawMessageNotLogMessage() {
     var ex = new ZetaContextException("MyClass", "my message", null);
-    assertThat(ex.getMessage()).isEqualTo(ex.getLogMessage());
+    assertThat(ex.getMessage()).isEqualTo("my message");
+    assertThat(ex.getLogMessage()).endsWith("[MyClass] my message");
   }
 
   @Test
@@ -68,7 +74,7 @@ class ZetaContextExceptionTest {
     var ex = new ZetaContextException("Src", "hello", null);
     var first = ex.getLogMessage();
     assertThat(ex.getLogMessage()).isSameAs(first);
-    assertThat(ex.getMessage()).isSameAs(first);
+    assertThat(ex.getMessage()).isEqualTo("hello");
   }
 
   @Test

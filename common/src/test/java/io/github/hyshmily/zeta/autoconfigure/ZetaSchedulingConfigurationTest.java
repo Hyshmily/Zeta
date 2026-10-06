@@ -21,6 +21,7 @@ import static org.mockito.Mockito.*;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.Item;
 import io.github.hyshmily.zeta.hotkeydetector.heavykeeper.TopK;
+import io.github.hyshmily.zeta.model.CacheEntry;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -172,7 +173,7 @@ class ZetaSchedulingConfigurationTest {
   @Test
   void cleanUpExpiredEntries_shouldCleanUpL1Cache() {
     @SuppressWarnings("unchecked")
-    com.github.benmanes.caffeine.cache.Cache<String, Object> l1Cache = mock(
+    com.github.benmanes.caffeine.cache.Cache<String, CacheEntry> l1Cache = mock(
       com.github.benmanes.caffeine.cache.Cache.class
     );
     ZetaSchedulingConfiguration config = new ZetaSchedulingConfiguration(List.of(), scheduler, Optional.of(l1Cache));
