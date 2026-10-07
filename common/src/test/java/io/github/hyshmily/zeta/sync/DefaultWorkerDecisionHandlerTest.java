@@ -27,7 +27,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.codec.Lz4CacheCompressor;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
@@ -37,8 +37,8 @@ import io.github.hyshmily.zeta.sync.worker.HotSkipReason;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHandler;
 import io.github.hyshmily.zeta.sync.worker.WorkerDecisionHook;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
-import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
 import io.github.hyshmily.zeta.model.EntryDraft;
+import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -52,18 +52,18 @@ import org.springframework.amqp.core.MessageProperties;
 
 class DefaultWorkerDecisionHandlerTest {
 
-  private Cache<String, Object> cache;
+  private Cache<String, CacheEntry> cache;
   private DefaultWorkerDecisionHandler handler;
   private CacheLoader loader;
-  private ExpireManagerImpl expireManager;
+  private EntryLifecycleImpl entryLifecycle;
 
   @BeforeEach
   void setUp() {
     cache = Caffeine.newBuilder().maximumSize(100).build();
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
+    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
     loader = k -> "fresh";
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, Collections.emptyList());
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, Collections.emptyList());
   }
 
   private static WorkerMessage workerMessage(String key, String type, long dv) {
@@ -98,7 +98,7 @@ class DefaultWorkerDecisionHandlerTest {
   void handleHot_shouldInvokeAfterHotPromotionHook() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(hook));
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
 
@@ -142,10 +142,10 @@ class DefaultWorkerDecisionHandlerTest {
 
   @Test
   void handleHot_sreThrottled_shouldInvokeOnHotSkippedSre() {
-    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    SreRateLimiter limiter = mock(SreRateLimiter.class);
     when(limiter.tryAcquire()).thenReturn(false);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, limiter, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, limiter, null, List.of(hook));
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
 
@@ -156,7 +156,7 @@ class DefaultWorkerDecisionHandlerTest {
   void handleHot_staleVersion_shouldInvokeOnHotSkippedStale() {
     cache.put("key1", entry(5, KeyState.NORMAL));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(hook));
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 3L));
 
@@ -166,7 +166,7 @@ class DefaultWorkerDecisionHandlerTest {
   @Test
   void handleHot_valueNotFound_shouldInvokeOnHotSkippedValueNotFound() {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, null, null, List.of(hook));
 
     handler.handleHot(workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
 
@@ -181,10 +181,10 @@ class DefaultWorkerDecisionHandlerTest {
    */
   @Test
   void handleHot_cleanRedisMiss_shouldNotRecordSreFailure() {
-    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    SreRateLimiter limiter = mock(SreRateLimiter.class);
     when(limiter.tryAcquire()).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, limiter, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, limiter, null, List.of(hook));
 
     handler.handleHot(workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
 
@@ -200,13 +200,13 @@ class DefaultWorkerDecisionHandlerTest {
    */
   @Test
   void handleHot_redisErrorAbortsPromotion_shouldRecordSreFailure() {
-    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    SreRateLimiter limiter = mock(SreRateLimiter.class);
     when(limiter.tryAcquire()).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
     CacheLoader failingLoader = k -> {
       throw new RuntimeException("Redis down");
     };
-    handler = new DefaultWorkerDecisionHandler(cache, failingLoader, expireManager, limiter, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, failingLoader, entryLifecycle, limiter, null, List.of(hook));
 
     handler.handleHot(workerMessage("missing", WorkerMessage.TYPE_HOT, 1L));
 
@@ -224,7 +224,7 @@ class DefaultWorkerDecisionHandlerTest {
    */
   @Test
   void handleHot_innerGuardRejectsPromotion_shouldNotFireAfterHotPromotionHook() {
-    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    SreRateLimiter limiter = mock(SreRateLimiter.class);
     when(limiter.tryAcquire()).thenReturn(true);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
     cache.put("key1", entry(1, KeyState.NORMAL));
@@ -233,7 +233,7 @@ class DefaultWorkerDecisionHandlerTest {
       cache.put("key1", entry(10, KeyState.NORMAL));
       return "fresh";
     };
-    handler = new DefaultWorkerDecisionHandler(cache, bumpingLoader, expireManager, limiter, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, bumpingLoader, entryLifecycle, limiter, null, List.of(hook));
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
 
@@ -251,7 +251,7 @@ class DefaultWorkerDecisionHandlerTest {
   @Test
   void handleHot_shouldPassPromotedEntryFromComputeToHook() {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(hook));
 
     handler.handleHot(workerMessage("newkey", WorkerMessage.TYPE_HOT, 2L));
 
@@ -269,7 +269,7 @@ class DefaultWorkerDecisionHandlerTest {
   void handleHot_redisDown_shouldPromoteFromNormalL1Entry() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, null, null, List.of(hook));
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
 
@@ -290,10 +290,10 @@ class DefaultWorkerDecisionHandlerTest {
    */
   @Test
   void handleHot_redisDown_shouldNotReWrapStoredFallbackValue() {
-    // The setUp ExpireManagerImpl uses CacheCompressor.NONE; the envelope form
+    // The setUp EntryLifecycleImpl uses CacheCompressor.NONE; the envelope form
     // only exists under the real LZ4 codec (ADR-0015).
-    ExpireManagerImpl lz4Manager =
-        new ExpireManagerImpl(cache, Runnable::run, new ZetaProperties(), 10, new Lz4CacheCompressor(), null);
+    EntryLifecycleImpl lz4Manager =
+        new EntryLifecycleImpl(cache, new ZetaProperties(), new Lz4CacheCompressor(), null);
     String original = "zeta-fallback-value-".repeat(60); // ≥256 bytes — wrapped, not stored verbatim
     Object wrapped = lz4Manager.wrapValue(original);
     assertThat(wrapped).isInstanceOf(byte[].class);
@@ -321,7 +321,7 @@ class DefaultWorkerDecisionHandlerTest {
     CacheEntry degraded = entry(-1, KeyState.NORMAL);
     cache.put("key1", degraded);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, null, null, List.of(hook));
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
 
@@ -337,7 +337,7 @@ class DefaultWorkerDecisionHandlerTest {
     CacheEntry nullEntry = EntryDraft.of(entry(1, KeyState.NORMAL)).value(NullValue.INSTANCE).build();
     cache.put("key1", nullEntry);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, k -> null, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, k -> null, entryLifecycle, null, null, List.of(hook));
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
 
@@ -350,7 +350,7 @@ class DefaultWorkerDecisionHandlerTest {
   void handleCool_shouldInvokeAfterCoolDowngradeHook() {
     cache.put("key1", entry(5, KeyState.HOT));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(hook));
 
     handler.handleCool(workerMessage("key1", WorkerMessage.TYPE_COOL, 6L));
 
@@ -391,7 +391,7 @@ class DefaultWorkerDecisionHandlerTest {
   @Test
   void handleCool_noEntry_shouldInvokeOnCoolSkipped() {
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(hook));
 
     handler.handleCool(workerMessage("missing", WorkerMessage.TYPE_COOL, 1L));
 
@@ -424,7 +424,7 @@ class DefaultWorkerDecisionHandlerTest {
       .build();
     cache.put("key1", expired);
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(hook));
 
     handler.handleCool(workerMessage("key1", WorkerMessage.TYPE_COOL, 6L));
 
@@ -443,7 +443,7 @@ class DefaultWorkerDecisionHandlerTest {
   void handleCool_liveEntry_shouldStillCool() {
     cache.put("key1", entry(5, KeyState.HOT));
     WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(hook));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(hook));
 
     handler.handleCool(workerMessage("key1", WorkerMessage.TYPE_COOL, 6L));
 
@@ -452,12 +452,34 @@ class DefaultWorkerDecisionHandlerTest {
     verify(hook).afterCoolDowngrade(eq("key1"), any(), any());
   }
 
+  /**
+   * A {@link NullValue} sentinel must not be rewritten with the COOL
+   * protection defaults (120s/60s): the sentinel's short
+   * penetration-protection TTL is the whole point, and cooling it would
+   * extend the null block 12x (mirrors the HOT-path sentinel exclusion).
+   */
+  @Test
+  void handleCool_nullValueSentinel_shouldNotExtendTtl() {
+    CacheEntry nullEntry = EntryDraft.of(entry(1, KeyState.NORMAL)).value(NullValue.INSTANCE).build();
+    cache.put("key1", nullEntry);
+    WorkerDecisionHook hook = mock(WorkerDecisionHook.class);
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(hook));
+
+    handler.handleCool(workerMessage("key1", WorkerMessage.TYPE_COOL, 2L));
+
+    CacheEntry after = (CacheEntry) cache.getIfPresent("key1");
+    assertThat(after).isSameAs(nullEntry);
+    assertThat(after.getKeyState()).isEqualTo(KeyState.NORMAL);
+    verify(hook).onCoolSkipped(eq("key1"), any());
+    verify(hook, never()).afterCoolDowngrade(eq("key1"), any(), any());
+  }
+
   @Test
   void multipleHooks_shouldAllBeInvoked() {
     cache.put("key1", entry(1, KeyState.NORMAL));
     WorkerDecisionHook h1 = mock(WorkerDecisionHook.class);
     WorkerDecisionHook h2 = mock(WorkerDecisionHook.class);
-    handler = new DefaultWorkerDecisionHandler(cache, loader, expireManager, null, null, List.of(h1, h2));
+    handler = new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, null, null, List.of(h1, h2));
 
     handler.handleHot(workerMessage("key1", WorkerMessage.TYPE_HOT, 2L));
 
@@ -484,7 +506,7 @@ class DefaultWorkerDecisionHandlerTest {
     handler = new DefaultWorkerDecisionHandler(
       cache,
       loader,
-      expireManager,
+      entryLifecycle,
       null,
       null,
       List.of(failingHook, countingHook)
@@ -500,19 +522,36 @@ class DefaultWorkerDecisionHandlerTest {
     WorkerDecisionHandler custom = new WorkerDecisionHandler() {
       @Override
       public void handleHot(WorkerMessage wm) {
-        cache.put(wm.cacheKey(), "custom-hot");
+        cache.put(wm.cacheKey(), valuedEntry("custom-hot"));
       }
 
       @Override
       public void handleCool(WorkerMessage wm) {
-        cache.put(wm.cacheKey(), "custom-cool");
+        cache.put(wm.cacheKey(), valuedEntry("custom-cool"));
       }
     };
 
     custom.handleHot(workerMessage("k", WorkerMessage.TYPE_HOT, 1L));
-    assertThat(cache.getIfPresent("k")).isEqualTo("custom-hot");
+    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-hot");
 
     custom.handleCool(workerMessage("k", WorkerMessage.TYPE_COOL, 2L));
-    assertThat(cache.getIfPresent("k")).isEqualTo("custom-cool");
+    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-cool");
+  }
+
+  /** NORMAL entry carrying an identifiable value (F1: slots hold {@link CacheEntry} only). */
+  private static CacheEntry valuedEntry(String value) {
+    return CacheEntry.builder()
+      .value(value)
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(0)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(0)
+      .softExpireAtMs(0)
+      .keyState(KeyState.NORMAL)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(0)
+      .build();
   }
 }

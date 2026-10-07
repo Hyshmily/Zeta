@@ -171,28 +171,33 @@ class WorkerHeartbeatVerifierTest {
   }
 
   /**
-   * Regression: a connection exception during probing must engage the failure path
-   * (markVerificationFailed) instead of being swallowed by the outer catch and re-probed
-   * unboundedly every round.
+   * A connection-level exception means THIS instance cannot reach the broker —
+   * it says nothing about the Worker's health. Counting it as a Worker failure
+   * turned a brief app↔broker partition into false "confirmed dead" verdicts,
+   * a ring shrink and a lower minAlive threshold, followed by a flap back once
+   * the heartbeat rebuilt the record. The probe must skip the round entirely:
+   * no failure marking, no removal.
    */
   @Test
-  void shouldMarkVerificationFailedOnConnectException() {
+  void shouldNotCountTransportDownAgainstWorker() {
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenThrow(
       new AmqpConnectException("connection refused", new IOException("boom"))
     );
 
     verifier.verifySuspectedWorkers();
+    verifier.verifySuspectedWorkers();
 
-    verify(healthView).markVerificationFailed("w2");
-    verify(healthView).markVerificationFailed("w3");
+    verify(healthView, never()).markVerificationFailed(anyString());
+    verify(healthView, never()).removeRecord(anyString());
   }
 
   /**
-   * Regression: after a connection-exception failure, the Worker must enter exponential
-   * backoff so the next round does not immediately re-probe.
+   * While the transport is down the probe keeps running every round (there is no
+   * failure state to back off from), so recovery is detected on the first round
+   * after the broker comes back — bounded work, one PING per Worker per round.
    */
   @Test
-  void shouldBackoffAfterConnectExceptionFailure() {
+  void shouldStillProbeEachRoundWhileTransportDown() {
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenThrow(
       new AmqpConnectException("connection refused", new IOException("boom"))
     );
@@ -207,15 +212,19 @@ class WorkerHeartbeatVerifierTest {
     v.verifySuspectedWorkers();
     v.verifySuspectedWorkers();
 
-    verify(rabbitTemplate, times(2)).sendAndReceive(anyString(), anyString(), any());
+    // Probing continues (no failure state to back off from), across every
+    // suspected Worker — assert a floor, not an exact count, since the number
+    // of candidates per round is an implementation detail.
+    verify(rabbitTemplate, atLeast(2)).sendAndReceive(anyString(), anyString(), any());
   }
 
   /**
-   * Regression: connection-exception failures must count toward MAX_RETRY so a dead broker
-   * leads to bounded probing and Worker removal, not an endless reconnection storm.
+   * A dead broker must never translate into Worker removal: the Worker records
+   * stay intact, and the ring keeps its previous shape until the heartbeat
+   * view itself reports otherwise.
    */
   @Test
-  void shouldRemoveWorkerAfterMaxRetriesOnConnectException() throws Exception {
+  void shouldNeverRemoveWorkerWhileTransportDown() throws Exception {
     when(rabbitTemplate.sendAndReceive(anyString(), anyString(), any())).thenThrow(
       new AmqpConnectException("connection refused", new IOException("boom"))
     );
@@ -232,8 +241,7 @@ class WorkerHeartbeatVerifierTest {
       Thread.sleep(10);
     }
 
-    verify(healthView).removeRecord("w2");
-    verify(healthView).removeRecord("w3");
+    verify(healthView, never()).removeRecord(anyString());
   }
 
   /**

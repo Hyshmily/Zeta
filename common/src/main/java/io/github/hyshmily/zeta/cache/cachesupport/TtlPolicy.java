@@ -26,16 +26,16 @@ import org.jspecify.annotations.Nullable;
  * Pure TTL and expiry policy for {@link io.github.hyshmily.zeta.model.CacheEntry}
  * lifecycle arithmetic.
  *
- * <p>Deep module extracted from {@link ExpireManager}: every stateless
+ * <p>Deep module extracted from {@link EntryLifecycle}: every stateless
  * TTL computation — resolve (override vs default), compute (absolute
  * expire timestamps), getEffective (configured defaults), timestamp
  * conversion with jitter, and expiry predicates — lives here behind one
- * small interface. {@link ExpireManager} keeps only the stateful parts
+ * small interface. {@link EntryLifecycle} keeps only the stateful parts
  * (refresh scheduling, TOCTOU guards, entry factory) and exposes this
  * policy via {@code ttlPolicy()}.
  *
  * <p>The class also implements {@link EntryDraft.ExpiryArithmetic}: the draft
- * API ({@code ExpireManager.newEntry/editEntry}) delegates its computed
+ * API ({@code EntryLifecycle.newEntry/editEntry}) delegates its computed
  * expire timestamps to these {@code to*ExpireTimestamp} conversions — the
  * single duration-to-timestamp rule for the whole entry pipeline. The former
  * {@code applyXxx} entry transforms are folded into
@@ -285,9 +285,9 @@ public final class TtlPolicy implements EntryDraft.ExpiryArithmetic {
    * @return {@code true} if the entry's soft TTL is enabled and has expired,
    *         or the entry is absent
    */
-  public boolean isSoftExpired(@Nullable Object cacheEntry) {
-    if (cacheEntry instanceof CacheEntry ce) {
-      long expireAt = ce.getSoftExpireAtMs();
+  public boolean isSoftExpired(@Nullable CacheEntry cacheEntry) {
+    if (cacheEntry != null) {
+      long expireAt = cacheEntry.getSoftExpireAtMs();
       return expireAt > 0 && expireAt < TimeSource.currentTimeMillis();
     }
     return true;

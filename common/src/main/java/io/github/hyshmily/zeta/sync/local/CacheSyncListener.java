@@ -20,6 +20,7 @@ import static io.github.hyshmily.zeta.sync.local.SyncMessage.*;
 
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.sync.AppIsolationFilter;
 import io.github.hyshmily.zeta.sync.dispatcher.BatchAwareTask;
 import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
@@ -80,18 +81,29 @@ public class CacheSyncListener {
   private final SyncDecisionHandler decisionHandler;
 
   /**
-   * This application's {@code zeta.local.app-name}, used to drop sync messages that
-   * belong to a <em>different</em> application sharing the same broker (ADR-0068
-   * pattern). {@code null}/blank disables the filter — the pre-0068 behaviour, which
-   * legacy wiring and rolling upgrades still need.
+   * Shared-broker appName isolation (ADR-0068, see {@link AppIsolationFilter}):
+   * sync messages that belong to a <em>different</em> application sharing the
+   * same broker are dropped. {@code null}/blank disables the filter — the
+   * pre-0068 behaviour, which legacy wiring and rolling upgrades still need.
+   *
+   * <p>The sync exchange is a fanout whose name is a global constant, so on a
+   * shared broker every instance receives every application's INVALIDATE /
+   * REFRESH / INVALIDATE_ALL / RULES_SYNC. A foreign INVALIDATE_ALL would
+   * evict this application's entire L1 (and its dedup cache), stampeding this
+   * application's traffic back to the shared backend — hence the drop.
    */
-  private final String appName;
+  private final AppIsolationFilter isolation;
 
-  /* weight 1~ for 1KB(1024bits) */
+  /**
+   * Bit-shift divisor converting a message body length into ~1KB cost units
+   * for dispatcher admission weighting ({@code body.length >> 10} ≈ KBs).
+   */
   private static final int BYTE_WEIGHT = 10;
 
   /** Per-key FIFO dispatcher for ordered cache mutation execution. */
-  private PerKeyOrderedDispatcher dispatcher;
+  // volatile: written once from start() (container lifecycle thread), read from
+  // the AMQP consumer threads and Actuator threads.
+  private volatile PerKeyOrderedDispatcher dispatcher;
 
   /**
    * Creates a listener. {@code appName} may be {@code null}/blank to process
@@ -107,7 +119,7 @@ public class CacheSyncListener {
     this.properties = properties;
     this.scheduler = scheduler;
     this.decisionHandler = decisionHandler;
-    this.appName = appName;
+    this.isolation = new AppIsolationFilter(appName);
   }
 
   @PostConstruct
@@ -141,7 +153,7 @@ public class CacheSyncListener {
   /**
    * Snapshot of the sync plane's ordered-dispatcher gate and backlog (ADR-0072 D-1).
    *
-   * <p>The gate's capacity comes from {@link CacheSyncProperties#getMaxPendingUnits()}; the drops
+   * <p>The gate's capacity comes from {@code CacheSyncProperties#getMaxPendingUnits()}; the drops
    * and rejections counted here are the very events whose WARN logs are throttled (ADR-0037), so
    * this is the only way to observe how close the sync plane is to shedding messages without
    * waiting for a log line.
@@ -152,6 +164,28 @@ public class CacheSyncListener {
   public DispatcherStats dispatcherStats() {
     PerKeyOrderedDispatcher current = dispatcher;
     return current == null ? null : current.stats();
+  }
+
+  /**
+   * Cumulative foreign-app sync drops (ADR-0068). Non-zero means this instance
+   * is discarding another application's sync messages — or, when paired with
+   * missing cross-instance coherence, that the local {@code app-name} is
+   * misconfigured.
+   *
+   * @return the total foreign-app drop count since startup
+   */
+  public long foreignAppDrops() {
+    return isolation.drops();
+  }
+
+  /**
+   * The most recently observed foreign sender appName, or {@code null} when no
+   * foreign sync message has been dropped yet.
+   *
+   * @return the last foreign appName, or {@code null}
+   */
+  public String lastForeignApp() {
+    return isolation.lastForeignApp();
   }
 
   /**
@@ -186,10 +220,23 @@ public class CacheSyncListener {
   public void handleSyncMessage(Channel channel, Message msg) throws IOException {
     long tag = msg.getMessageProperties().getDeliveryTag();
     try {
-      if (isForeignApp(msg)) {
+      Object senderApp = msg.getMessageProperties().getHeader(HEADER_APP_NAME);
+      if (isolation.isForeign(senderApp)) {
         // Ack, not nack: the message is valid, it just is not ours. Nacking would
-        // requeue it into a poison loop.
-        if (log.isDebugEnabled()) {
+        // requeue it into a poison loop. senderApp is provably non-null here —
+        // isForeign is false without a declared header.
+        long total = isolation.noteDrop(senderApp.toString());
+        // Counted, not just DEBUG: a misconfigured app-name drops 100% of sync
+        // while the process looks healthy, so the mismatch needs a WARN
+        // (rate-limited) plus a counter/endpoint signal (ADR-0068).
+        if (isolation.tryLog()) {
+          log.warn(
+            "Dropped sync message from another application: senderApp={}, localApp={} ({} total drops, further warnings suppressed for 10s; check zeta.local.app-name)",
+            senderApp,
+            isolation.appName(),
+            total
+          );
+        } else if (log.isDebugEnabled()) {
           log.debug("Dropped sync message from another application (appName header mismatch, ADR-0068)");
         }
         channel.basicAck(tag, false);
@@ -210,32 +257,6 @@ public class CacheSyncListener {
       log.error("CacheSync processing failed: body={}", AmqpMessageReader.abbreviateBody(msg.getBody(), 256), e);
       channel.basicNack(tag, false, false);
     }
-  }
-
-  /**
-   * Whether the message was declared by a <em>different</em> application
-   * (ADR-0068 pattern, applied to the sync plane).
-   *
-   * <p>The sync exchange is a fanout whose name is a global constant, so on a shared
-   * broker every instance receives every application's INVALIDATE / REFRESH /
-   * INVALIDATE_ALL / RULES_SYNC. A foreign INVALIDATE_ALL evicts this application's
-   * entire L1 (and its dedup cache), so this application's traffic stampedes back to
-   * the shared backend; foreign INVALIDATE / REFRESH cost needless evictions and
-   * reloads. All of it is silent, because the messages are perfectly well-formed.
-   *
-   * <p>Three states, mirroring {@link #isOwnRefresh}'s compatibility contract:
-   * <ul>
-   *   <li>sender declared an appName that differs from ours → foreign (drop)</li>
-   *   <li>sender declared no appName (pre-0068 sender) → not foreign (process)</li>
-   *   <li>this instance declares no appName → not foreign (process everything)</li>
-   * </ul>
-   *
-   * @param msg the raw AMQP message
-   * @return {@code true} if the message belongs to another application
-   */
-  private boolean isForeignApp(Message msg) {
-    Object senderApp = msg.getMessageProperties().getHeader(HEADER_APP_NAME);
-    return (senderApp != null && appName != null && !appName.isBlank() && !appName.equals(senderApp.toString()));
   }
 
   /**

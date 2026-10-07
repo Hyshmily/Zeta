@@ -21,6 +21,7 @@ import static io.github.hyshmily.zeta.sync.worker.WorkerMessage.TYPE_HOT;
 
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.Internal;
+import io.github.hyshmily.zeta.sync.AppIsolationFilter;
 import io.github.hyshmily.zeta.sync.dispatcher.DispatcherStats;
 import io.github.hyshmily.zeta.sync.dispatcher.PerKeyOrderedDispatcher;
 import io.github.hyshmily.zeta.sync.local.CacheSyncListener;
@@ -73,17 +74,19 @@ public class WorkerListener {
   private final WorkerDecisionHandler decisionHandler;
 
   /**
-   * This application's appName (ADR-0068). When non-blank, decisions carrying a
-   * {@code appName} header that differs are dropped before dispatch — the fanout
-   * exchange ignores the routing key, so on a shared broker every bound queue
-   * receives every app's decisions. {@code null} or blank disables the filter
-   * (all decisions processed), preserving the pre-0068 behavior; decisions
-   * <em>without</em> the header (pre-0068 Workers) are always processed.
+   * Shared-broker appName isolation (ADR-0068, see {@link AppIsolationFilter}):
+   * decisions carrying a foreign {@code appName} header are dropped before
+   * dispatch. {@code null}/blank local appName disables the filter (all
+   * decisions processed); decisions <em>without</em> the header (pre-0068
+   * Workers) are always processed.
    */
-  private final String appName;
+  private final AppIsolationFilter isolation;
 
   /** Per-key FIFO dispatcher for ordered cache mutation execution. */
-  private PerKeyOrderedDispatcher dispatcher;
+  // volatile: written once from start() (container lifecycle thread), read from
+  // the AMQP consumer threads and Actuator threads — without it the consumer
+  // threads could observe the pre-initialisation null.
+  private volatile PerKeyOrderedDispatcher dispatcher;
 
   /**
    * Creates a listener. {@code appName} may be {@code null}/blank to disable
@@ -98,7 +101,7 @@ public class WorkerListener {
     this.properties = properties;
     this.scheduler = scheduler;
     this.decisionHandler = decisionHandler;
-    this.appName = appName;
+    this.isolation = new AppIsolationFilter(appName);
   }
 
   /**
@@ -151,7 +154,7 @@ public class WorkerListener {
    * Snapshot of the decision plane's ordered-dispatcher gate and backlog (ADR-0072 D-1).
    *
    * <p>The gate's capacity comes from
-   * {@link WorkerListenerProperties#getMaxPendingUnits()}; during a saturated dispatcher a dropped
+   * {@code WorkerListenerProperties#getMaxPendingUnits()}; during a saturated dispatcher a dropped
    * HOT is re-driven by the periodic rebroadcast (ADR-0024) whereas a dropped COOL is not (the
    * entry stays HOT until its hard TTL), which is why this counter is the signal that tells the two
    * budgets apart in production.
@@ -162,6 +165,27 @@ public class WorkerListener {
   public DispatcherStats dispatcherStats() {
     PerKeyOrderedDispatcher current = dispatcher;
     return current == null ? null : current.stats();
+  }
+
+  /**
+   * Cumulative foreign-app decision drops (ADR-0068). Non-zero means this
+   * instance is discarding another application's decisions — or, when paired
+   * with missing prewarming, that the local {@code app-name} is misconfigured.
+   *
+   * @return the total foreign-app drop count since startup
+   */
+  public long foreignAppDrops() {
+    return isolation.drops();
+  }
+
+  /**
+   * The most recently observed foreign sender appName, or {@code null} when no
+   * foreign decision has been dropped yet.
+   *
+   * @return the last foreign appName, or {@code null}
+   */
+  public String lastForeignApp() {
+    return isolation.lastForeignApp();
   }
 
   /**
@@ -212,24 +236,34 @@ public class WorkerListener {
       return;
     }
 
-    // ADR-0068 shared-broker isolation: the fanout exchange ignores the routing key,
-    // so a foreign app's decisions land in this queue too. Drop when the sender
-    // declared its appName (0068+ Workers) and it differs from ours; a message
-    // without the header (pre-0068 Worker, rolling upgrade) or a listener without
-    // a configured appName (legacy wiring) is always processed.
+    // ADR-0068 shared-broker isolation (see AppIsolationFilter): the fanout
+    // exchange ignores the routing key, so a foreign app's decisions land in
+    // this queue too. Drop when the sender declared its appName (0068+
+    // Workers) and it differs from ours; a message without the header
+    // (pre-0068 Worker, rolling upgrade) or a listener without a configured
+    // appName (legacy wiring) is always processed.
     Object senderApp = msg.getMessageProperties().getHeader(HEADER_APP_NAME);
-    if (senderApp != null
-      && appName != null
-      && !appName.isBlank()
-      && !appName.contentEquals(senderApp.toString())
-    ) {
-      log.debug(
-        "Dropped worker decision for foreign app: senderApp={}, localApp={}, key={}, type={}",
-        senderApp,
-        appName,
-        wm.cacheKey(),
-        wm.type()
-      );
+    if (isolation.isForeign(senderApp)) {
+      // Counted, not just DEBUG: a misconfigured app-name drops 100% of
+      // decisions while the process looks healthy, so the mismatch needs a
+      // WARN (rate-limited) plus a counter/endpoint signal (ADR-0068).
+      long total = isolation.noteDrop(senderApp.toString());
+      if (isolation.tryLog()) {
+        log.warn(
+          "Dropped worker decision for foreign app: senderApp={}, localApp={} ({} total drops, further warnings suppressed for 10s; check zeta.local.app-name vs zeta.worker.routing.app-name)",
+          senderApp,
+          isolation.appName(),
+          total
+        );
+      } else {
+        log.debug(
+          "Dropped worker decision for foreign app: senderApp={}, localApp={}, key={}, type={}",
+          senderApp,
+          isolation.appName(),
+          wm.cacheKey(),
+          wm.type()
+        );
+      }
       return;
     }
 

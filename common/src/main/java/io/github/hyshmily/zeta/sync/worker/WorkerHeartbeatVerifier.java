@@ -28,7 +28,9 @@ import java.util.Set;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
@@ -358,16 +360,69 @@ public class WorkerHeartbeatVerifier {
    */
   private void probeWorker(String workerId) {
     try {
-      boolean alive = sendPingAndWaitPong(workerId);
-      if (!alive) {
-        handleProbeFailure(workerId);
-      } else {
-        nextVerifyTime.remove(workerId);
-        healthView.recordPong(workerId);
+      switch (probeOutcome(workerId)) {
+        case PONG -> {
+          nextVerifyTime.remove(workerId);
+          healthView.recordPong(workerId);
+        }
+        case TRANSPORT_DOWN -> {
+          // ADR-0086: the broker is unreachable from THIS instance — the Worker
+          // on the other side may be perfectly healthy, and counting the probe
+          // as a Worker failure turned a brief app↔broker partition into five
+          // "confirmed dead" verdicts, a ring shrink, a lower minAlive threshold
+          // and a flap back the moment the heartbeat rebuilt the record. Skip
+          // this round entirely: no failure counting, no backoff, no removal.
+          // The next scheduled round retries once the transport recovers.
+          log.debug("Skipping verification of worker {}: AMQP transport unavailable from this instance", workerId);
+        }
+        case NO_RESPONSE -> handleProbeFailure(workerId);
       }
     } catch (Exception e) {
       log.error("Failed to probe worker {}", workerId, e);
       handleProbeFailure(workerId);
+    }
+  }
+
+  /** Outcome of one active verification probe. */
+  private enum ProbeOutcome {
+    /** A PONG arrived within the timeout — the Worker is alive. */
+    PONG,
+    /** No response within the timeout, or the target queue rejected the message. */
+    NO_RESPONSE,
+    /**
+     * This instance could not reach the broker at all. Says nothing about the
+     * Worker's health and must not count against it.
+     */
+    TRANSPORT_DOWN
+  }
+
+  /**
+   * Sends one PING and classifies the result.
+   *
+   * <p>Connection-level failures ({@link AmqpConnectException}, {@link AmqpIOException})
+   * are reported as {@link ProbeOutcome#TRANSPORT_DOWN}: they mean this instance's
+   * own channel to the broker is broken, not that the Worker failed to answer.
+   * Everything else — including a silent timeout and a missing/unreachable queue —
+   * is a {@link ProbeOutcome#NO_RESPONSE} and keeps the existing retry discipline.
+   *
+   * @param workerId the Worker to probe; must not be null
+   * @return the probe outcome, never {@code null}
+   */
+  private ProbeOutcome probeOutcome(String workerId) {
+    MessageProperties props = new MessageProperties();
+    props.setHeader(HEADER_VERIFY_TYPE, HEADER_VERIFY_PING);
+    props.setHeader(HEADER_VERIFY_APP_INSTANCE, appInstanceId);
+    props.setReplyTo("amq.rabbitmq.reply-to");
+
+    Message ping = new Message(new byte[0], props);
+
+    try {
+      Message pong = rabbitTemplate.sendAndReceive("", QUEUE_VERIFY_PING_PREFIX + workerId, ping);
+      return pong != null ? ProbeOutcome.PONG : ProbeOutcome.NO_RESPONSE;
+    } catch (AmqpConnectException | AmqpIOException e) {
+      return ProbeOutcome.TRANSPORT_DOWN;
+    } catch (AmqpException e) {
+      return ProbeOutcome.NO_RESPONSE;
     }
   }
 

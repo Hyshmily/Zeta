@@ -62,11 +62,11 @@ import org.springframework.util.Assert;
  * <p><b>Construction and modification.</b> The entry is immutable. Every
  * creation and every copy-on-write modification flows through the single
  * {@link EntryDraft} API: production code obtains drafts from
- * {@code ExpireManager.newEntry()} / {@code ExpireManager.editEntry(entry)}
+ * {@code EntryLifecycle.newEntry()} / {@code EntryLifecycle.editEntry(entry)}
  * (wired to the TTL arithmetic), tests and explicit-timestamp callers use
  * {@link EntryDraft#of(CacheEntry)}. The Lombok {@code @Builder} remains on the
  * package-private constructor for direct low-level construction (the generated
- * {@link #builder()} is the flat 14-field surface tests rely on); the former
+ * {@code builder()} is the flat 14-field surface tests rely on); the former
  * {@code withXxx()} copy family, {@code toBuilder()}, and the
  * {@code TtlPolicy.applyXxx()} transforms are all replaced by the draft.
  */
@@ -378,7 +378,7 @@ public class CacheEntry {
   }
 
   /**
-   * Whether {@link #getDataVersion()} was obtained from the local fallback
+   * Whether {@code getDataVersion()} was obtained from the local fallback
    * (node-local Snowflake) instead of Redis.
    *
    * <p>Derived from the sign bit rather than stored: degraded versions always
@@ -410,7 +410,7 @@ public class CacheEntry {
    * The Worker decision stamp carried by this entry, or {@code null} for a
    * local origin (no {@code decisionNodeId} — local promotion, cleared
    * demotion). The single extraction shape for decision metadata:
-   * {@code ExpireManager.decisionOf} delegates here, and callers that pass
+   * {@code EntryLifecycle.decisionOf} delegates here, and callers that pass
    * the result to {@link EntryDraft#decision} round-trip the fields exactly.
    *
    * @return the decision stamp, or {@code null} when the entry has no Worker origin

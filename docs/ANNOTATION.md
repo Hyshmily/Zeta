@@ -23,9 +23,9 @@ For the design rationale behind the three-layer model below, see [ADR-0023](adr/
 CacheExtensionAspect      WHETHER the method body runs:
    │                      @Intercept (trigger→fallback), @Fallback (exception),
    │                      @Preload (detector inflation), combination validation
-   │ builds ──► CachePolicy (immutable: lazy TTLs, nullCaching, skipBroadcast)
+   │ builds ──► ReadPolicy (immutable: lazy TTLs, nullCaching) + skipBroadcast flag
    ▼
-ZetaCacheContext          TRANSPORT only — one ThreadLocal<CachePolicy>
+ZetaCacheContext          TRANSPORT only — one ThreadLocal<Snapshot{ReadPolicy, skipBroadcast}>
    ▼
 ZetaSpringCache           HOW the result is stored:
    │                      TTL routing, null-sentinel decision, @CacheCondition
@@ -34,7 +34,7 @@ ZetaSpringCache           HOW the result is stored:
 Zeta / HotKeyCache
 ```
 
-`CachePolicy` TTL suppliers are evaluated **at most once per cache call** and only on miss / promotion / refresh — never on a plain cache hit, so SpEL TTL expressions are free on the hit path.
+`ReadPolicy` TTL suppliers are evaluated **at most once per cache call** and only on miss / promotion / refresh — never on a plain cache hit, so SpEL TTL expressions are free on the hit path.
 
 ---
 
@@ -104,7 +104,7 @@ The store-then-evict race window is bounded and accepted per ADR-0013.
 
 ### 4.5 Nested `@Cacheable` invocations
 
-The aspect pushes the resolved `CachePolicy` unconditionally and restores the previous one in `finally`, so an inner cached method never observes the outer method's policy. The transport is thread-bound: **do not** combine with `@Async` or any pattern that hops threads between the aspect and the cache adapter.
+The aspect pushes the resolved `ReadPolicy` (plus the broadcast flag) unconditionally and restores the previous snapshot in `finally`, so an inner cached method never observes the outer method's policy. The transport is thread-bound: **do not** combine with `@Async` or any pattern that hops threads between the aspect and the cache adapter.
 
 **Loader thread affinity:** on a cache miss the method body executes on the SingleFlight executor thread (`hotKeyExecutor`), not the caller thread — same as the direct `get()` path (ADR-0030). ThreadLocal state prepared by the caller (request context, transaction, security context) is **not visible** inside the method on a miss; the loader must not assume caller-thread affinity. On a hit the method body never runs.
 

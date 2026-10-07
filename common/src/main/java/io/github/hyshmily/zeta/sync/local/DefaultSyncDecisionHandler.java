@@ -22,7 +22,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
@@ -51,7 +51,7 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
 
   /** Local Caffeine L1 cache — target of invalidation and refresh operations.
    * Accessed atomically via {@code asMap().compute()} for thread-safe updates. */
-  private final Cache<String, Object> caffeineCache;
+  private final Cache<String, CacheEntry> caffeineCache;
 
   /** Loads the authoritative value for a key: a registered prefix routes to the
    * application's {@code CacheLoader}, an unregistered key falls back to the Redis
@@ -60,7 +60,7 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
   private final CacheLoader<Object> clusterLoader;
 
   /** Computes hard and soft expiry timestamps for refreshed entries. */
-  private final ExpireManager expireManager;
+  private final EntryLifecycle entryLifecycle;
 
   /** Hot-key rule matcher whose rule set is updated when a RULES_SYNC message arrives. */
   private final RuleMatcher ruleMatcher;
@@ -93,16 +93,16 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
    * collaborator is wired.
    */
   public DefaultSyncDecisionHandler(
-    Cache<String, Object> caffeineCache,
+    Cache<String, CacheEntry> caffeineCache,
     CacheLoader<Object> clusterLoader,
-    ExpireManager expireManager,
+    EntryLifecycle entryLifecycle,
     RuleMatcher ruleMatcher,
     List<SyncHook> syncHooks,
     @Nullable SingleFlight singleFlight
   ) {
     this.caffeineCache = caffeineCache;
     this.clusterLoader = clusterLoader;
-    this.expireManager = expireManager;
+    this.entryLifecycle = entryLifecycle;
     this.ruleMatcher = ruleMatcher;
     this.syncHooks = syncHooks != null ? syncHooks : Collections.emptyList();
     this.singleFlight = singleFlight;
@@ -165,8 +165,8 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
       .compute(sm.cacheKey(), (key, existing) -> {
         if (
           !unconditional &&
-          existing instanceof CacheEntry ce &&
-          VersionGuard.shouldSkipForSync(ce, sm.version(), sm.isVersionDegraded())
+          existing != null &&
+          VersionGuard.shouldSkipForSync(existing, sm.version(), sm.isVersionDegraded())
         ) {
           return existing;
         }
@@ -338,23 +338,23 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
     }
 
     // Compress BEFORE acquiring the Caffeine bin lock (write-side ADR-0030
-    // discipline, mirroring ExpireManagerImpl.applyRefreshTask: compression
+    // discipline, mirroring EntryLifecycleImpl.applyRefreshTask: compression
     // cost is linear in the value size and must not stall same-bin
     // reads/writes). The price is one wasted compression when the version
     // guard or the invalidation watermark inside the compute discards the
     // refresh.
-    Object wrappedValue = expireManager.wrapValue(value);
+    Object wrappedValue = entryLifecycle.wrapValue(value);
 
     boolean[] applied = new boolean[1];
-    Object computed = caffeineCache
+    CacheEntry computed = caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
         // DCL second check – atomic with to write. Same strict-newer guard as the
         // fast path (ADR-0066): an equal version applies and heals an over-stamped
         // entry (ADR-0033 probe-after-read).
         if (
-          existing instanceof CacheEntry ce &&
-          VersionGuard.shouldSkipForRefresh(ce, sm.version(), sm.isVersionDegraded())
+          existing != null &&
+          VersionGuard.shouldSkipForRefresh(existing, sm.version(), sm.isVersionDegraded())
         ) {
           return existing;
         }
@@ -369,16 +369,16 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
         clearInvalidation(key);
 
         applied[0] = true;
-        if (existing instanceof CacheEntry cacheEntry) {
+        if (existing != null) {
           // Refresh-in-place: fresh value + probed version, same TTL
           // durations, expiry re-armed from those durations. The draft's
           // to* semantics keep a disabled soft TTL (0) disabled — matching
           // the guard below it (ADR-0067).
-          return expireManager.editEntry(cacheEntry).value(wrappedValue).version(sm.version()).rearmExpiry().build();
+          return entryLifecycle.editEntry(existing).value(wrappedValue).version(sm.version()).rearmExpiry().build();
         }
-        long defaultHardTtlMs = expireManager.ttlPolicy().getEffectiveHardTtlMs();
-        long defaultSoftTtlMs = expireManager.ttlPolicy().getEffectiveSoftTtlMs();
-        return expireManager
+        long defaultHardTtlMs = entryLifecycle.ttlPolicy().getEffectiveHardTtlMs();
+        long defaultSoftTtlMs = entryLifecycle.ttlPolicy().getEffectiveSoftTtlMs();
+        return entryLifecycle
           .newEntry()
           .value(wrappedValue)
           .version(sm.version())
@@ -401,8 +401,8 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
     // Use the compute's own result instead of re-reading the cache: a
     // concurrent INVALIDATE/eviction between the compute and a getIfPresent
     // could otherwise deliver a stale or null entry to the hooks.
-    if (computed instanceof CacheEntry entry) {
-      fireAfterRefresh(cacheKey, sm, entry);
+    if (computed != null) {
+      fireAfterRefresh(cacheKey, sm, computed);
     }
   }
 
@@ -434,11 +434,11 @@ public class DefaultSyncDecisionHandler implements SyncDecisionHandler {
     caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
-        if (existing instanceof CacheEntry ce) {
-          if (isWorkerManaged(ce)) {
+        if (existing != null) {
+          if (isWorkerManaged(existing)) {
             return existing;
           }
-          if (VersionGuard.shouldSkipForRefresh(ce, sm.version(), sm.isVersionDegraded())) {
+          if (VersionGuard.shouldSkipForRefresh(existing, sm.version(), sm.isVersionDegraded())) {
             return existing;
           }
         }

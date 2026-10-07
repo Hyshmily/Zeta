@@ -28,7 +28,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreaker;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.cachesupport.impl.SingleFlightImpl;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
@@ -49,20 +49,20 @@ import org.springframework.amqp.core.MessageProperties;
 
 class DefaultSyncDecisionHandlerTest {
 
-  private Cache<String, Object> cache;
+  private Cache<String, CacheEntry> cache;
   private DefaultSyncDecisionHandler handler;
   private CacheLoader loader;
-  private ExpireManagerImpl expireManager;
+  private EntryLifecycleImpl entryLifecycle;
   private RuleMatcher ruleMatcher;
 
   @BeforeEach
   void setUp() {
     cache = Caffeine.newBuilder().maximumSize(100).build();
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
+    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
     loader = k -> "refreshed";
     ruleMatcher = mock(RuleMatcher.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, Collections.emptyList(), null);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
   }
 
   private static SyncMessage syncMessage(String key, String type, long version, boolean degraded) {
@@ -94,7 +94,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_shouldInvokeAfterRefreshHook() {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -112,7 +112,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_noValueInRedis_shouldFallBackToLocalInvalidation() {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList(), null);
+    handler = new DefaultSyncDecisionHandler(cache, nullLoader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -133,7 +133,7 @@ class DefaultSyncDecisionHandlerTest {
     handler = new DefaultSyncDecisionHandler(cache, k -> {
       loads.incrementAndGet();
       return "refreshed";
-    }, expireManager, ruleMatcher, List.of(hook), null);
+    }, entryLifecycle, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false), false);
 
@@ -156,7 +156,7 @@ class DefaultSyncDecisionHandlerTest {
     handler = new DefaultSyncDecisionHandler(cache, k -> {
       loads.incrementAndGet();
       return "refreshed";
-    }, expireManager, ruleMatcher, List.of(hook), null);
+    }, entryLifecycle, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false), true);
 
@@ -178,7 +178,7 @@ class DefaultSyncDecisionHandlerTest {
     handler = new DefaultSyncDecisionHandler(cache, k -> {
       loads.incrementAndGet();
       return "refreshed";
-    }, expireManager, ruleMatcher, Collections.emptyList(), null);
+    }, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -190,7 +190,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_staleVersion_shouldInvokeOnRefreshSkipped() {
     cache.put("key1", entry(5, false, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 3L, false));
 
@@ -207,7 +207,7 @@ class DefaultSyncDecisionHandlerTest {
   @Test
   void handleRefresh_blockedByInvalidationWatermark_shouldInvokeOnRefreshSkipped() {
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
 
     // INVALIDATE with version 5 records the watermark (the entry is removed).
     handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 5L, false));
@@ -229,7 +229,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_nullValue_shouldInvokeOnRefreshSkipped() {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, k -> null, expireManager, ruleMatcher, List.of(hook), null);
+    handler = new DefaultSyncDecisionHandler(cache, k -> null, entryLifecycle, ruleMatcher, List.of(hook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -240,7 +240,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleLocalInvalidate_shouldInvokeAfterInvalidateHook() {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
 
     handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 2L, false));
 
@@ -297,7 +297,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleLocalInvalidate_unconditional_onWorkerManaged_shouldNotFireHook() {
     cache.put("key1", entry(5, false, KeyState.HOT));
     SyncHook hook = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(hook), null);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(hook), null);
 
     handler.handleLocalInvalidate(syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 0L, false));
 
@@ -340,7 +340,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_equalVersion_overstampedEntry_shouldApplyAndHeal() {
     cache.put("key1", entry(5, false, KeyState.NORMAL));
     CacheLoader freshLoader = k -> "fresh-v5";
-    handler = new DefaultSyncDecisionHandler(cache, freshLoader, expireManager, ruleMatcher, Collections.emptyList(), null);
+    handler = new DefaultSyncDecisionHandler(cache, freshLoader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, false));
 
@@ -359,7 +359,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_fallback_strictlyNewerLocalWrite_shouldBePreserved() {
     cache.put("key1", entry(6, false, KeyState.NORMAL));
     CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList(), null);
+    handler = new DefaultSyncDecisionHandler(cache, nullLoader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 5L, false));
 
@@ -377,7 +377,7 @@ class DefaultSyncDecisionHandlerTest {
   void handleRefresh_fallback_shouldPreserveWorkerManagedEntry() {
     cache.put("key1", entry(1, false, KeyState.HOT));
     CacheLoader nullLoader = k -> null;
-    handler = new DefaultSyncDecisionHandler(cache, nullLoader, expireManager, ruleMatcher, Collections.emptyList(), null);
+    handler = new DefaultSyncDecisionHandler(cache, nullLoader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -411,7 +411,7 @@ class DefaultSyncDecisionHandlerTest {
     cache.put("key1", entry(1, false, KeyState.NORMAL));
     SyncHook h1 = mock(SyncHook.class);
     SyncHook h2 = mock(SyncHook.class);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(h1, h2), null);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(h1, h2), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -429,7 +429,7 @@ class DefaultSyncDecisionHandlerTest {
     SyncHook countingHook = new SyncHook() {
       @Override public void afterRefresh(String k, SyncMessage sm, CacheEntry e) { count.incrementAndGet(); }
     };
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, List.of(failingHook, countingHook), null);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, List.of(failingHook, countingHook), null);
 
     handler.handleRefresh(syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
 
@@ -440,30 +440,47 @@ class DefaultSyncDecisionHandlerTest {
   void customHandler_shouldReplaceDefaultBehavior() {
     SyncDecisionHandler custom = new SyncDecisionHandler() {
       @Override public void handleRefresh(SyncMessage sm) {
-        cache.put(sm.cacheKey(), "custom-refresh");
+        cache.put(sm.cacheKey(), valuedEntry("custom-refresh"));
       }
       @Override public void handleLocalInvalidate(SyncMessage sm) {
-        cache.put(sm.cacheKey(), "custom-invalidate");
+        cache.put(sm.cacheKey(), valuedEntry("custom-invalidate"));
       }
       @Override public void handleLocalInvalidateAll(SyncMessage sm) {
-        cache.put("batch", "custom-batch");
+        cache.put("batch", valuedEntry("custom-batch"));
       }
       @Override public void handleRulesSync(SyncMessage sm) {
-        cache.put("rules", "custom-rules");
+        cache.put("rules", valuedEntry("custom-rules"));
       }
     };
 
     custom.handleRefresh(syncMessage("k", SyncMessage.TYPE_REFRESH, 1L, false));
-    assertThat(cache.getIfPresent("k")).isEqualTo("custom-refresh");
+    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-refresh");
 
     custom.handleLocalInvalidate(syncMessage("k", SyncMessage.TYPE_INVALIDATE, 1L, false));
-    assertThat(cache.getIfPresent("k")).isEqualTo("custom-invalidate");
+    assertThat(cache.getIfPresent("k").getValue()).isEqualTo("custom-invalidate");
 
     custom.handleLocalInvalidateAll(syncMessage("[]", SyncMessage.TYPE_INVALIDATE_ALL, 0L, false));
-    assertThat(cache.getIfPresent("batch")).isEqualTo("custom-batch");
+    assertThat(cache.getIfPresent("batch").getValue()).isEqualTo("custom-batch");
 
     custom.handleRulesSync(syncMessage("rules", SyncMessage.TYPE_RULES_SYNC, 0L, false));
-    assertThat(cache.getIfPresent("rules")).isEqualTo("custom-rules");
+    assertThat(cache.getIfPresent("rules").getValue()).isEqualTo("custom-rules");
+  }
+
+  /** NORMAL entry carrying an identifiable value (F1: slots hold {@link CacheEntry} only). */
+  private static CacheEntry valuedEntry(String value) {
+    return CacheEntry.builder()
+      .value(value)
+      .dataVersion(1)
+      .isVersionDegraded(false)
+      .decisionVersion(0)
+      .hardTtlMs(300_000)
+      .hardExpireAtMs(Long.MAX_VALUE)
+      .softTtlMs(0)
+      .softExpireAtMs(0)
+      .keyState(KeyState.NORMAL)
+      .normalHardTtlMs(300_000)
+      .normalSoftTtlMs(0)
+      .build();
   }
 
   /**
@@ -478,7 +495,7 @@ class DefaultSyncDecisionHandlerTest {
     when(breaker.isOpen()).thenReturn(false);
     when(breaker.allowRequest()).thenReturn(true);
     SingleFlight singleFlight = new SingleFlightImpl(1000, 5, 5, Runnable::run, breaker);
-    handler = new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, Collections.emptyList(), singleFlight);
+    handler = new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, Collections.emptyList(), singleFlight);
 
     AtomicInteger loads = new AtomicInteger();
     singleFlight.load("key1", () -> {
@@ -508,7 +525,7 @@ class DefaultSyncDecisionHandlerTest {
     when(breaker.isOpen()).thenReturn(false);
     when(breaker.allowRequest()).thenReturn(true);
     SingleFlight singleFlight = new SingleFlightImpl(1000, 5, 5, Runnable::run, breaker);
-    handler = new DefaultSyncDecisionHandler(cache, k -> null, expireManager, ruleMatcher, Collections.emptyList(), singleFlight);
+    handler = new DefaultSyncDecisionHandler(cache, k -> null, entryLifecycle, ruleMatcher, Collections.emptyList(), singleFlight);
 
     AtomicInteger loads = new AtomicInteger();
     singleFlight.load("key1", () -> {

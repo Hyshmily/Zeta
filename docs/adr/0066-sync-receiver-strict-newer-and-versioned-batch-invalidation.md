@@ -153,6 +153,13 @@ entry TTL, on exactly the concurrent-write hot keys the library targets:
   staleness is bounded by the hot hard TTL and is now documented as such in
   `WorkerListener` instead of being misattributed to the heartbeat cycle.
 
+## Amendment 2026-10-06 — L1 type closure (ADR-0090)
+
+The "bare values are skipped" clause in the 2026-09-13 amendment is spent: L1
+slots hold `CacheEntry` only, so `refreshSoftExpire` takes a `CacheEntry` and
+the bare-value skip branch is deleted, not merely bypassed. Sentinels still
+never reach the method (unchanged).
+
 ## Verification
 
 The full suite is green after the change: 1949 common + 313 worker tests.

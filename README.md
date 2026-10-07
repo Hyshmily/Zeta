@@ -84,10 +84,12 @@ This version comparison mechanism ensures eventual coherency without the overhea
 
 ![docs/png/Zeta.drawio.svg](docs/png/Zeta.drawio.svg)
 
-Benchmarks:
+Benchmarks (`HotHitBenchmark`/`RuleBenchmark`, Intel Ultra 9 285H, JDK 26):
 
-- peek ~16M ops/s (pure Caffeine lookup, no side effects)
-- get (L1 hit) ~15M ops/s (full path including TopK + Reporter)
+- peek ~70M ops/s (Caffeine lookup + unwrap, no side effects)
+- get (L1 hit) ~28M ops/s single-thread, ~59M aggregate at 8 threads (full path incl. TopK + Reporter)
+- get (L1 hit, 10-rule matcher) ~17M ops/s (+24ns memo probe per hit)
+- get (L1 hit, 1KB LZ4 values) ~29M ops/s (decompress cost fully hidden in hit cost)
 
 Inspired by JD.com's [hotkey](https://gitee.com/jd-platform-opensource/hotkey) project; algorithm support from [Aegis](https://github.com/go-kratos/aegis)、[neural](https://github.com/yu120/neural/tree/master)
 
@@ -303,7 +305,7 @@ User user = zeta
   .withHardTtl(30_000)
   .withSoftTtl(10_000)
   .allowBroadcast()
-  .executeOrNull();
+  .orNull();
 ```
 
 **Registered Loaders** (LoadingCache style — register once, read anywhere)
@@ -331,50 +333,46 @@ Optional<User> fresh = zeta.getWithSoftExpire("user:42"); // force serve-stale +
 > - Cluster bonus: Worker HOT warm-up and peer REFRESH also load through the registered loader, so hot keys can be warmed from your real data source (e.g. a database) without a Redis value channel.
 > - Unregistered keys fail fast with `IllegalStateException` instead of returning silent empties. Capacity (`maximumSize`) remains a global L1 knob (`zeta.local.cache.max-size` / `max-weight`), not per-prefix. See [ADR-0070](docs/adr/0070-prefix-loader-registry-and-cache-customizers.md).
 
-**CachePolicy API** (named options object for per-invocation control)
+**Policy API** (closed per-family options objects)
 
-Every operation family exposes two positional forms: the common-case convenience form and a full-control form taking a `CachePolicy`. Intermediate per-parameter overloads (TTLs, booleans) do not exist — customize through `with*` chains.
+Every operation family exposes two positional forms: the common-case convenience form and a full-control form taking the family's closed policy record (`ReadPolicy`, `WritePolicy`, `InvalidatePolicy`). Intermediate per-parameter overloads (TTLs, booleans) do not exist — customize through `with*` chains.icy record — `ReadPolicy` (reads), `WritePolicy` (writes), `InvalidatePolicy` (invalidations). Each record carries exactly the knobs its family honors, so a mis-scoped knob is a compile error instead of a silent no-op.
 
 ```java
-// P. get with CachePolicy — lazy TTL evaluation, null-caching, stale-policy
-CachePolicy policy = CachePolicy.of(userRepo::findById)
+// P. get with ReadPolicy — lazy TTL evaluation, null-caching, stale-policy
+ReadPolicy policy = ReadPolicy.of(userRepo::findById)
     .withHardTtl(30_000L)
     .withSoftTtl(10_000L);
 
 Optional<User> user = zeta.get("user:123", policy);
 
-// Q. computeIfAbsentWithSoftExpire with CachePolicy
-Optional<User> user = zeta.computeIfAbsentWithSoftExpire(
+// Q. computeIfAbsentWithSoftExpireOptional with ReadPolicy
+Optional<User> user = zeta.computeIfAbsentWithSoftExpireOptional(
   "user:123",
-  CachePolicy.of(() -> loadUser(123))
+  ReadPolicy.of(() -> loadUser(123))
     .withHardTtl(60_000L)
     .withSoftTtl(30_000L)
     .withNullCaching(false)
 );
-```
-
-**Write Operations**
-
 ```java
 // R. putThrough — write-through + broadcast
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue));
 
 // S. putThrough with explicit broadcast control
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue),
-    CachePolicy.defaults().withSkipBroadcast(true)); // stay local
+    WritePolicy.of(0, 0, true)); // stay local
 
 // T. putThrough with explicit hard TTL
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue),
-    CachePolicy.of(60_000L, 0));
+    WritePolicy.of(60_000L, 0));
 
 // U. invalidateAfterPut — mutate then invalidate (collection types)
 zeta.invalidateAfterPut(key, () -> redisTemplate.opsForSet().add(key, members));
 
 // V. putLocal — local write only, no broadcast, no version bump
-zeta.putLocal("user:123", cachedValue, CachePolicy.of(hardTtlMs, softTtlMs)); // custom TTL
+zeta.putLocal("user:123", cachedValue, WritePolicy.of(hardTtlMs, softTtlMs)); // custom TTL
 
 // W. refresh — local evict then load and cache
-zeta.refresh("user:123", () -> loadUser(123), CachePolicy.of(hardTtlMs, softTtlMs)); // with TTL override
+zeta.refresh("user:123", () -> loadUser(123), WritePolicy.of(hardTtlMs, softTtlMs)); // with TTL override
 
 // X. Fluent write API
 zeta.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
@@ -393,33 +391,21 @@ Zeta uses **differentiated TTLs**: hot keys and normal keys have independent def
 ```java
 // 5 min hard TTL + 30s soft TTL
 Optional<String> shopJson = zeta.get("shop:" + shopId,
-    CachePolicy.of(() -> redisTemplate.opsForValue().get("shop:" + shopId))
+    ReadPolicy.of(() -> redisTemplate.opsForValue().get("shop:" + shopId))
         .withHardTtl(TimeUnit.MINUTES.toMillis(5))
         .withSoftTtl(TimeUnit.SECONDS.toMillis(30)));
 
 // 30s hard TTL, soft TTL uses default
 zeta.putThrough("weather:" + city, weatherData,
     () -> redisTemplate.opsForValue().set("weather:" + city, weatherData),
-    CachePolicy.of(TimeUnit.SECONDS.toMillis(30), 0));
+    WritePolicy.of(TimeUnit.SECONDS.toMillis(30), 0));
 ```
 
 > [!NOTE]
 > **Cache avalanche protection:** `ExpireManager` applies a uniform random offset via `DelayUtil.computeTtlJitter()` to every expiration timestamp (default ±5%). A 5-minute hard TTL actually expires between 4.75 ~ 5.25 minutes under the default offset. Controlled by `zeta.local.ttl-jitter-ratio` (ratio, default `0.05` = ±5%, `0` to disable).
 
 > [!TIP]
-> Per-call TTL semantics: passing `0` uses the configured default for that key state. For pure logical expiration (hard TTL never evicts, soft expire only): pass `hardTtlMs = Long.MAX_VALUE` via `getWithSoftExpire(key, CachePolicy.of(reader).withHardTtl(Long.MAX_VALUE).withSoftTtl(softTtlMs))` — the entry permanently resides in Caffeine. This usage is explicitly supported by Caffeine's `Expiry` JavaDoc: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
-
-**CAS-style operations** (`compareAndSet` / `compareAndInvalidate`) — conditional swap / conditional invalidation against the current L1 value:
-
-```java
-// Atomic swap only if the current cached value equals expected
-boolean swapped = zeta.compareAndSet("stock:42", oldValue, newValue);
-
-// Invalidate only if the current cached value equals expected
-boolean removed = zeta.compareAndInvalidate("stock:42", staleValue);
-```
-
-Both operations are delegation-based: the caller is responsible for re-reading or re-writing after a successful CAS. There is no L2 lock — the guard is the L1 cache entry's current value at the time of call. Returns `true` if the condition matched and the operation was applied; `false` otherwise.
+> Per-call TTL semantics: passing `0` uses the configured default for that key state. For pure logical expiration (hard TTL never evicts, soft expire only): pass `hardTtlMs = Long.MAX_VALUE` via `getWithSoftExpire(key, ReadPolicy.of(reader).withHardTtl(Long.MAX_VALUE).withSoftTtl(softTtlMs))` — the entry permanently resides in Caffeine. This usage is explicitly supported by Caffeine's `Expiry` JavaDoc: _"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([source](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
 
 ## Worker Mode
 

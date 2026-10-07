@@ -15,6 +15,7 @@
  */
 package io.github.hyshmily.zeta.rule.impl;
 
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Cache.DEFAULT_DEDUP_SIZE;
 import static io.github.hyshmily.zeta.constants.ZetaConstants.Redis.KEY_RULES;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -167,6 +168,27 @@ public class RuleMatcherImpl implements RuleMatcher {
   private final LogThrottle casRejectLogThrottle = LogThrottle.perDefaultWindow();
 
   /**
+   * Cumulative count of local rule mutations that reached the in-memory
+   * snapshot but never reached Redis and/or the sibling broadcast — i.e. the
+   * mutations that leave the cluster's rule sets diverged until the next
+   * mutation or {@link #broadcastAllLocalRulesManually()} repairs them.
+   *
+   * <p>Why a counter and not only a log line: the failure is silent to every
+   * other node. A node that accepted the mutation keeps blocking (or not) on a
+   * rule its peers have never seen, and nothing in the cluster's telemetry
+   * moves — the only evidence was one {@code ERROR} line on the failing node,
+   * which is exactly what an operator does not read during the incident the
+   * divergence causes. The counter makes the failure scrapeable (see
+   * {@link #getRulesPersistFailures()}); the accompanying log line follows the
+   * ADR-0037 convention (one full ERROR per window, DEBUG in between) so a
+   * permanently broken Redis cannot flood the log at mutation rate.
+   */
+  private final AtomicLong rulesPersistFailures = new AtomicLong(0L);
+
+  /** One full persist-failure ERROR per window, tallying the suppressed ones (ADR-0037 convention). */
+  private final LogThrottle.Counting persistFailureLogThrottle = new LogThrottle.Counting();
+
+  /**
    * Memoized evaluation result: the exact snapshot the action was computed from, plus the
    * action. Holding the snapshot reference — never mutated in place, every mutation builds
    * a fresh array — makes the stamp self-invalidating: a mutation swaps in a new array and
@@ -185,7 +207,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * mutation, which is discouraged (mutate through {@link RuleMatcher} instead) but possible.
    */
   private final Cache<String, MemoEntry> decisionCache = Caffeine.newBuilder()
-    .maximumSize(10_000)
+    .maximumSize(DEFAULT_DEDUP_SIZE)
     .expireAfterWrite(30, TimeUnit.SECONDS)
     .build();
 
@@ -596,7 +618,7 @@ public class RuleMatcherImpl implements RuleMatcher {
    * or pin the sync dispatcher thread).
    *
    * @return the staged payload, or {@code null} when serialization failed
-   *         (already logged — the caller then skips the I/O)
+   *         (already counted and logged — the caller then skips the I/O)
    */
   private StagedRules stagePersist() {
     try {
@@ -604,9 +626,77 @@ public class RuleMatcherImpl implements RuleMatcher {
       String json = serializeRules(List.of(rulesSnapshot), version);
       return new StagedRules(json, version, rulesSnapshot.length);
     } catch (Exception e) {
-      log.error("Failed to serialize rules", e);
+      recordPersistFailure("serialization", e);
       return null;
     }
+  }
+
+  /**
+   * Count and log a rule mutation that never reached Redis and/or the sibling
+   * broadcast, so a silently diverged cluster is visible both as a counter
+   * ({@link #getRulesPersistFailures()}) and as a log line.
+   *
+   * <p>The log follows the ADR-0037 convention via {@link LogThrottle.Counting}:
+   * one full ERROR per window carrying the number of occurrences suppressed
+   * since the previous one, DEBUG for the suppressed remainder. A rule mutation
+   * is operator-driven and rare, but a broken Redis makes every mutation fail,
+   * and an unthrottled ERROR per failed mutation is precisely the log flood the
+   * convention exists to prevent.
+   *
+   * @param stage which step failed ({@code "serialization"} or
+   *              {@code "persist/broadcast"})
+   * @param e     the failure; never propagated — see
+   *              {@link #persistAndBroadcast(StagedRules)}
+   */
+  private void recordPersistFailure(String stage, Exception e) {
+    long total = rulesPersistFailures.incrementAndGet();
+    LogThrottle.Counting.Attempt attempt = persistFailureLogThrottle.record();
+    if (!attempt.admitted()) {
+      log.debug("Rule {} failed ({} in the current window): {}", stage, attempt.count(), e.toString());
+      return;
+    }
+    if (attempt.count() > 0) {
+      log.error(
+        "Rule {} failed — local rules are NOT persisted or broadcast, cluster rule sets may diverge " +
+          "({} suppressed in the last {}ms, total: {}): {}",
+        stage,
+        attempt.count(),
+        LogThrottle.DEFAULT_WINDOW_MS,
+        total,
+        e.toString(),
+        e
+      );
+    } else {
+      log.error(
+        "Rule {} failed — local rules are NOT persisted or broadcast, cluster rule sets may diverge (total: {}): {}",
+        stage,
+        total,
+        e.toString(),
+        e
+      );
+    }
+  }
+
+  /**
+   * Cumulative number of rule mutations that reached the in-memory snapshot but
+   * never reached Redis and/or the sibling broadcast — the divergence-count
+   * counterpart of {@link #getAllRules()}.
+   *
+   * <p>A non-zero value means at least one node in the cluster enforces a rule
+   * set its peers do not have; the durable repair is the next mutation (it
+   * re-stages the whole snapshot) or an explicit
+   * {@link #broadcastAllLocalRulesManually()}. Monotonic since startup — a
+   * scrape delta is the divergence rate.
+   *
+   * <p>Exposed as a getter rather than registered here: this class carries no
+   * {@code MeterRegistry} (the library's Micrometer wiring lives in
+   * {@code ZetaMicrometerAutoConfiguration}, which registers every business
+   * gauge from a component accessor exactly like this one).
+   *
+   * @return the number of persist/broadcast failures since startup
+   */
+  public long getRulesPersistFailures() {
+    return rulesPersistFailures.get();
   }
 
   /**

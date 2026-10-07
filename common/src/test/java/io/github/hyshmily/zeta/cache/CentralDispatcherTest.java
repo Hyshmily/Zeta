@@ -43,7 +43,7 @@ class CentralDispatcherTest {
   @Test
   void recordAccess_shouldAddToDetectorAndReport() {
     dispatcher = new CentralDispatcher(Optional.of(reporter), Optional.empty(), broadcastBuffer, detector);
-    dispatcher.report("key1", false);
+    dispatcher.recordAccess("key1", false);
     verify(detector).add("key1");
     verify(reporter).reportToWorker("key1");
   }
@@ -51,7 +51,7 @@ class CentralDispatcherTest {
   @Test
   void recordAccess_withSkipBroadcast_shouldNotReport() {
     dispatcher = new CentralDispatcher(Optional.of(reporter), Optional.empty(), broadcastBuffer, detector);
-    dispatcher.report("key2", true);
+    dispatcher.recordAccess("key2", true);
     verify(detector).add("key2");
     verifyNoInteractions(reporter);
   }
@@ -59,7 +59,7 @@ class CentralDispatcherTest {
   @Test
   void recordAccess_withoutReporter_shouldNotFail() {
     dispatcher = new CentralDispatcher(Optional.empty(), Optional.empty(), broadcastBuffer, detector);
-    assertThatCode(() -> dispatcher.report("key3", false)).doesNotThrowAnyException();
+    assertThatCode(() -> dispatcher.recordAccess("key3", false)).doesNotThrowAnyException();
     verify(detector).add("key3");
   }
 

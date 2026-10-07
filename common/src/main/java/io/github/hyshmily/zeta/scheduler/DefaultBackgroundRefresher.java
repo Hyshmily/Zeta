@@ -13,63 +13,50 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.github.hyshmily.zeta.cache.cachesupport.impl;
-
-import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
+package io.github.hyshmily.zeta.scheduler;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import io.github.hyshmily.zeta.Internal;
-import io.github.hyshmily.zeta.cache.cachesupport.CacheCoreSettings;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
 import io.github.hyshmily.zeta.cache.cachesupport.TtlPolicy;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.model.*;
-import io.github.hyshmily.zeta.sharding.HealthView;
 import io.github.hyshmily.zeta.util.InterruptingAsync;
 import io.github.hyshmily.zeta.util.TimeSource;
-import io.github.hyshmily.zeta.util.version.VersionGuard;
-import java.util.concurrent.*;
-import java.util.function.Supplier;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 
+import java.util.concurrent.*;
+import java.util.function.Supplier;
+
+import static io.github.hyshmily.zeta.constants.ZetaConstants.Version.VERSION_DEFAULT;
+
 /**
- * Manages hard and soft TTL computation for {@link CacheEntry} instances.
- * <p>
- * Hard TTL controls Caffeine eviction; soft TTL controls stale-while-revalidate background refresh.
- * Each has a normal-key and hot-key variant, with an optional override taking precedence over the default.
+ * Default {@link BackgroundRefresher}: soft-expire refresh scheduling with
+ * per-key dedup, a global refresh limiter, timeout protection, version-guarded
+ * merge, and lease-on-failure degradation (ADR-0036).
+ *
+ * <p>Extracted from the former {@code ExpireManagerImpl} so the entry
+ * lifecycle (factory, guards, demotion) and the background refresh executor
+ * each own their own state behind their own seam.
  */
 @Getter
 @Slf4j
 @Internal
-public class ExpireManagerImpl implements ExpireManager {
+public class DefaultBackgroundRefresher implements BackgroundRefresher {
 
   /** The underlying L1 Caffeine cache instance. */
-  private final Cache<String, Object> caffeineCache;
+  private final Cache<String, CacheEntry> caffeineCache;
   /** Async executor for background refresh tasks. */
   private final Executor executor;
-  /** TTL configuration providing normal and hot-key TTL values. */
-  private final CacheCoreSettings ttlConfig;
-  /** Pure TTL/expiry policy — all stateless lifecycle arithmetic lives here. */
+  /** Pure TTL/expiry policy — shared with the entry lifecycle. */
   private final TtlPolicy ttlPolicy;
+  /** Compressor for L1 cache values. */
+  private final CacheCompressor compressor;
   /** Semaphore limiting concurrent background refresh operations. */
   private final Semaphore refreshLimiter;
   /** Per-key dedup for background refreshes — prevents concurrent refresh for the same key. */
   private final ConcurrentHashMap<String, CompletableFuture<?>> pendingRefreshes = new ConcurrentHashMap<>();
-  /** Compressor for L1 cache values. */
-  private final CacheCompressor compressor;
-
-  /** Jitter ratio applied to TTLs to prevent cache stampedes (from config, default 0.05 = ±5%). */
-  private final double defaultTtlJitterRatio;
-
-  /**
-   * Cluster health view used for the Decision-Validity check
-   * (ADR-0035). {@code null} disables demotion (test doubles, consumers
-   * without a health view).
-   */
-  private final HealthView healthView;
 
   @SuppressWarnings("all")
   private static final long REFRESH_TIMEOUT_SECONDS = 30;
@@ -99,249 +86,48 @@ public class ExpireManagerImpl implements ExpireManager {
     static final SnapshotEntry DEFAULT = new SnapshotEntry(VERSION_DEFAULT, null, KeyState.NORMAL, Long.MAX_VALUE, 0L);
   }
 
-  private static SnapshotEntry snapshotEntry(Object raw) {
-    if (raw instanceof CacheEntry entry) {
+  private static SnapshotEntry snapshotEntry(CacheEntry raw) {
+    if (raw != null) {
       return new SnapshotEntry(
-        entry.getDataVersion(),
-        entry.decisionStamp(),
-        entry.getKeyState(),
-        entry.getHardExpireAtMs(),
-        entry.getHardTtlMs()
+        raw.getDataVersion(),
+        raw.decisionStamp(),
+        raw.getKeyState(),
+        raw.getHardExpireAtMs(),
+        raw.getHardTtlMs()
       );
     }
     return SnapshotEntry.DEFAULT;
   }
 
   /**
-   * Creates a ExpireManagerImpl with the given Caffeine cache, executor, TTL config,
-   * compressor, and cluster health view.
-   *
-   * <p>The {@link HealthView} powers the Decision-Validity demotion (ADR-0035):
-   * Worker-sourced HOT entries whose issuing Worker incarnation is dead or
-   * restarted are reverted to the NORMAL lifecycle on the read path. A
-   * {@code null} health view disables demotion.
+   * Creates a refresher over the given Caffeine cache, executor, TTL policy,
+   * compressor, and refresh pool bound.
    *
    * @param caffeineCache   the underlying L1 Caffeine cache
    * @param executor        async executor for background refresh
-   * @param ttlConfig       TTL configuration (normal and hot-key variants)
-   * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
+   * @param ttlPolicy       the pure TTL policy shared with the entry lifecycle
    * @param compressor      compressor for L1 cache values
-   * @param healthView      cluster health view for the Decision-Validity check, or {@code null}
+   * @param refreshMaxPools maximum concurrent background refreshes (capped at 100)
    */
-  public ExpireManagerImpl(
-    Cache<String, Object> caffeineCache,
+  public DefaultBackgroundRefresher(
+    Cache<String, CacheEntry> caffeineCache,
     Executor executor,
-    CacheCoreSettings ttlConfig,
-    int refreshMaxPools,
+    TtlPolicy ttlPolicy,
     CacheCompressor compressor,
-    HealthView healthView
-  ) {
-    this(caffeineCache, executor, ttlConfig, refreshMaxPools, ttlConfig.getTtlJitterRatio(), compressor, healthView);
-  }
-
-  /**
-   * Create a ExpireManagerImpl with explicit jitter ratio and health view (for testing).
-   *
-   * <p>The single constructor body: the public constructor delegates here, so
-   * the field wiring exists exactly once.
-   */
-  ExpireManagerImpl(
-    Cache<String, Object> caffeineCache,
-    Executor executor,
-    CacheCoreSettings ttlConfig,
-    int refreshMaxPools,
-    double defaultTtlJitterRatio,
-    CacheCompressor compressor,
-    HealthView healthView
+    int refreshMaxPools
   ) {
     this.caffeineCache = caffeineCache;
     this.executor = executor;
-    this.ttlConfig = ttlConfig;
+    this.ttlPolicy = ttlPolicy;
     this.compressor = compressor;
-    this.healthView = healthView;
     this.refreshLimiter = new Semaphore(refreshMaxPools > 0 ? refreshMaxPools : 100);
-    this.defaultTtlJitterRatio = defaultTtlJitterRatio;
-    this.ttlPolicy = new TtlPolicy(ttlConfig, defaultTtlJitterRatio);
   }
 
   /**
-   * Check whether the given raw cache value is a logically expired {@link CacheEntry}
-   * and, if so, invalidate it and return {@code true}.
-   * <p>Eliminates code duplication between {@link io.github.hyshmily.zeta.cache.HotKeyCache#get}
-   * and {@link io.github.hyshmily.zeta.cache.HotKeyCache#getWithSoftExpire},
-   * which both perform this check before and after side effects (TOCTOU guard).
-   *
-   * @param cacheKey the cache key to invalidate if expired
-   * @param raw      the raw value from the Caffeine cache
-   * @return {@code true} if the entry was expired and has been invalidated
-   */
-  @Override
-  public boolean invalidateIfIsLogicallyExpired(String cacheKey, Object raw) {
-    if (raw instanceof CacheEntry ce && ttlPolicy.isLogicallyExpired(ce)) {
-      // The snapshot the caller examined is expired, so the caller must reload.
-      // The removal itself is best-effort and identity-guarded: a concurrent
-      // write (broadcast, putThrough, refresh) may have replaced the snapshot
-      // with a fresh entry since it was read — that fresh entry must not be
-      // destroyed by this snapshot-based decision (the reload path replaces it
-      // with an equally fresh value instead).
-      caffeineCache.asMap().computeIfPresent(cacheKey, (k, existing) -> existing == raw ? null : existing);
-      log.debug("Cache entry logically expired during processing, reloading: {}", cacheKey);
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * Decision-Validity demotion (ADR-0035): revert a Worker-sourced HOT entry
-   * to the NORMAL lifecycle when its issuing Worker incarnation is no longer
-   * authoritative.
-   *
-   * <p>An entry's Worker decision is valid only while the issuing incarnation
-   * is alive and its epoch is unchanged: the Worker is the sole authority for
-   * cooling the key down, so a dead or restarted Worker leaves the entry with
-   * HOT TTLs but no one to revoke them. On the first read after invalidity is
-   * detected, the entry is rewritten in place — value preserved and still
-   * served, TTLs reverted to the normal baseline, decision stamp cleared —
-   * so it converges at the normal hard TTL and the local TopK re-decides on
-   * the next reload.
-   *
-   * <p>Runs on the read path; the predicate is a cheap O(1) health-view lookup
-   * and only fires for entries carrying a decision stamp. The predicate is
-   * re-verified inside the atomic {@code compute}, so a concurrent fresh
-   * broadcast (recovered Worker) is never clobbered. With no health view
-   * configured, demotion is disabled (no-op, {@code false}).
-   *
-   * @param cacheKey the cache key
-   * @param raw      the raw value from the Caffeine cache
-   * @return {@code true} if the entry was demoted
-   */
-  @Override
-  public boolean demoteIfDecisionInvalid(String cacheKey, Object raw) {
-    if (!(raw instanceof CacheEntry entry) || !decisionIsInvalid(entry)) {
-      return false;
-    }
-    DecisionStamp stamp = entry.decisionStamp();
-
-    boolean[] demoted = new boolean[1];
-    caffeineCache
-      .asMap()
-      .compute(cacheKey, (key, existing) -> {
-        if (!(existing instanceof CacheEntry current)) {
-          return existing;
-        }
-        // Re-verify inside the atomic write: the entry may have been
-        // re-stamped by a fresh broadcast (recovered Worker) or locally
-        // re-promoted since the outer check. The pure function judges the
-        // current entry independently — any now-invalid stamp is demoted.
-        CacheEntry corrected = demoteIfDecisionInvalidInPlace(current);
-        if (corrected != null) {
-          demoted[0] = true;
-          return corrected;
-        }
-        return existing;
-      });
-    if (demoted[0]) {
-      if (stamp != null) {
-        log.debug(
-          "Decision-Validity demotion: key={} nodeId={} epoch={} reverted to NORMAL lifecycle",
-          cacheKey,
-          stamp.decisionNodeId(),
-          stamp.decisionEpoch()
-        );
-      }
-    }
-    return demoted[0];
-  }
-
-  /**
-   * Pure Decision-Validity demotion: judge the entry and, when its issuing
-   * Worker incarnation is dead or restarted, return it rewritten to NORMAL
-   * (value preserved, normal TTLs, decision stamp cleared). {@code null} when
-   * no demotion applies. Side-effect-free — the caller provides atomicity.
-   *
-   * @param entry the Worker-sourced cache entry to inspect
-   * @return the demoted entry, or {@code null} if no demotion applies
-   */
-  @Override
-  @Nullable
-  public CacheEntry demoteIfDecisionInvalidInPlace(CacheEntry entry) {
-    if (!decisionIsInvalid(entry)) {
-      return null;
-    }
-
-    long normalHardTtlMs = ttlPolicy.resolveEffectiveHardTtl(entry.getNormalHardTtlMs());
-    long normalSoftTtlMs = ttlPolicy.resolveEffectiveSoftTtl(entry.getNormalSoftTtlMs());
-    // Single draft rewrite: normal TTLs + NORMAL state + decision stamp
-    // cleared in one copy — formerly a four-link withXxx() chain.
-    return editEntry(entry).ttl(normalHardTtlMs, normalSoftTtlMs).keyState(KeyState.NORMAL).clearDecision().build();
-  }
-
-  /**
-   * The Decision-Validity predicate (ADR-0035), shared by the read-path guard
-   * ({@link #demoteIfDecisionInvalid}) and the pure rewrite
-   * ({@link #demoteIfDecisionInvalidInPlace}): an entry needs demotion when it
-   * carries a Worker decision stamp on a HOT entry whose issuing incarnation
-   * is gone (no health record, dead, or restarted to a new epoch). A disabled
-   * health view and local-origin entries are never invalid — the Worker is the
-   * sole authority for cooling the key down, so only it can orphan a HOT stamp.
-   */
-  @SuppressWarnings("all")
-  private boolean decisionIsInvalid(CacheEntry entry) {
-    HealthView view = healthView;
-    if (view == null) {
-      return false;
-    }
-
-    DecisionStamp stamp = entry.decisionStamp();
-    if (stamp == null || entry.getKeyState() != KeyState.HOT) {
-      return false;
-    }
-    String nodeId = stamp.decisionNodeId();
-    // Authoritative only while the Worker is alive (same freshness judgment as
-    // the ring/report path) and its epoch is unchanged (no restart).
-    return !(view.isAlive(nodeId) && view.epochOf(nodeId) == stamp.decisionEpoch());
-  }
-
-  /**
-   * Entry factory for creating new entries — the single creation path. See
-   * {@link ExpireManager#newEntry()} for the draft contract (value discipline,
-   * TTL resolution semantics).
-   */
-  @Override
-  public EntryDraft newEntry() {
-    return EntryDraft.blank(ttlPolicy);
-  }
-
-  /**
-   * Entry factory for modifying existing entries — the single copy-on-write
-   * path. See {@link ExpireManager#editEntry(CacheEntry)}.
-   */
-  @Override
-  public EntryDraft editEntry(CacheEntry source) {
-    return EntryDraft.of(source, ttlPolicy);
-  }
-
-  @Override
-  public Object wrapValue(@Nullable Object rawValue) {
-    return compressor.wrap(rawValue);
-  }
-
-  /**
-   * The pure TTL and expiry policy backing this manager.
-   *
-   * @return the TTL policy; never null
-   */
-  @Override
-  public TtlPolicy ttlPolicy() {
-    return ttlPolicy;
-  }
-
-  /**
-   * Triggers an asynchronous background refresh for the given cache key if the
-   * current entry has reached its soft expiry threshold. The caller (typically
-   * {@link io.github.hyshmily.zeta.cache.HotKeyCache#getWithSoftExpire HotKeyCache.getWithSoftExpire}) has already returned the stale value to the
-   * client, so this method executes entirely in the background without blocking
-   * the caller.
+   * Triggers an asynchronous background refresh for the given cache key. The
+   * caller (typically the soft-expire read path) has already returned the
+   * stale value to the client, so this method executes entirely in the
+   * background without blocking the caller.
    *
    * <p><b>Concurrency:</b> a two-phase reservation. The {@link
    * ConcurrentHashMap#compute} on {@code pendingRefreshes} atomically decides
@@ -541,16 +327,16 @@ public class ExpireManagerImpl implements ExpireManager {
       .asMap()
       .compute(cacheKey, (key, existing) -> {
         if (
-          !(existing instanceof CacheEntry entry) ||
-          entry.getDataVersion() != snap.dataVersion() ||
-          entry.getHardExpireAtMs() != snap.hardExpireAtMs() ||
-          entry.getHardExpireAtMs() == Long.MAX_VALUE
+          existing == null ||
+          existing.getDataVersion() != snap.dataVersion() ||
+          existing.getHardExpireAtMs() != snap.hardExpireAtMs() ||
+          existing.getHardExpireAtMs() == Long.MAX_VALUE
         ) {
           return existing;
         }
 
         long now = TimeSource.currentTimeMillis();
-        long remainingMs = entry.getHardExpireAtMs() - now;
+        long remainingMs = existing.getHardExpireAtMs() - now;
         long leaseTtlMs = Math.max(LEASE_MIN_TTL_MS, Math.max(1, remainingMs) >> LEASE_DIVISOR);
         long leaseExpireAtMs = now + leaseTtlMs;
         // The soft timestamp sits at the midpoint of the lease: the entry spends
@@ -570,7 +356,7 @@ public class ExpireManagerImpl implements ExpireManager {
         // Provisional keep-alive: durations, value, and all metadata preserved
         // verbatim; only the two expire timestamps move (explicit lease
         // arithmetic — the draft's computed expiry must not run here).
-        return editEntry(entry).expiryAt(leaseExpireAtMs, leaseSoftExpireAtMs).build();
+        return EntryDraft.of(existing, ttlPolicy).expiryAt(leaseExpireAtMs, leaseSoftExpireAtMs).build();
       });
   }
 
@@ -582,19 +368,22 @@ public class ExpireManagerImpl implements ExpireManager {
    * <ol>
    *   <li>Extract version metadata and keyState from the snapshot taken at
    *       refresh-creation time.</li>
-   *   <li>Call {@link Caffeine compute} on the Caffeine map:
+   *   <li>Call Caffeine {@code compute} on the map:
    *       <ul>
-   *         <li><b>Stamped refresh (ADR-0033):</b> the result carries the
-   *             {@code dataVersion} probed from Redis after the value read.
-   *             Acceptance is decided by the shared 4-case comparison
-   *             ({@link VersionGuard#shouldSkipForSync}): a degraded entry is
-   *             never skipped (a normal probe overwrites degraded — case 4, so
-   *             a recovered Redis heals degraded entries), and both-normal
-   *             applies only when the entry is older than the probe. A numeric
-   *             comparison would be wrong here — a degraded (negative) entry
-   *             must not discard a normal probe just because the numbers say
-   *             so. Discarding keeps the entry unchanged, so the stamped
-   *             version can never regress L1.</li>
+    *       <li><b>Stamped refresh (ADR-0033):</b> the result carries the
+    *             {@code dataVersion} probed from Redis after the value read.
+    *             Acceptance is decided against the creation-time
+    *             <i>snapshot</i>, not the probe: the refresh applies unless
+    *             a newer write landed in flight (entry version strictly above
+    *             the snapshot, or the degraded boundary was crossed). A probe
+    *             comparison is wrong in both directions — equal-skip discards
+    *             every ordinary refresh (entry == probe with no concurrent
+    *             write, so SWR would never extend TTLs), while equal-apply
+    *             re-applies a stale value over a concurrent writer's fresh
+    *             entry when the probe was taken after the write. Same-version
+    *             apply also heals: a snapshot-degraded entry with no in-flight
+    *             write is overwritten by the normal probe (case 4 of the sync
+    *             matrix), so a recovered Redis heals degraded entries.</li>
    *         <li><b>Unstamped refresh (fail-open):</b> the probe was withheld.
    *             Legacy L1-internal guards apply: discard if the entry is
    *             degraded, or if its current {@code dataVersion} exceeds the
@@ -618,10 +407,9 @@ public class ExpireManagerImpl implements ExpireManager {
    * (ADR-0015 caps scratch residency at 1 MiB), and holding the Caffeine bin
    * lock for it would stall every same-bin read/write for the duration. The
    * price is one wasted compression when a version guard discards the result.
-   * This method is only called from
-   * {@link #createRefreshTask}'s {@code whenComplete} callback on the
-   * async-thread pool, so {@code compute} ensures safe atomic visibility
-   * under concurrent reads and writes.
+   * This method is only called from {@link #createRefreshTask}'s
+   * {@code whenComplete} callback on the async-thread pool, so {@code compute}
+   * ensures safe atomic visibility under concurrent reads and writes.
    *
    * @param cacheKey  the key whose value to update
    * @param vv        the freshly-loaded value paired with the probed
@@ -640,23 +428,40 @@ public class ExpireManagerImpl implements ExpireManager {
     caffeineCache
       .asMap()
       .compute(cacheKey, (key, existingEntry) -> {
-        if (existingEntry instanceof CacheEntry entry) {
+        if (existingEntry != null) {
+          CacheEntry entry = existingEntry;
           if (vv.stamped()) {
-            // ADR-0033 4-case guard against the probed version: applying the
-            // refresh would stamp a version L1 already surpassed (or regress
-            // a degraded entry's semantics), so discard — the existing entry
-            // wins. See the method Javadoc for the case-by-case rationale.
-            if (VersionGuard.shouldSkipForSync(entry, vv.dataVersion(), false)) {
-              log.debug(
-                "Async refresh discarded: entry version {} not below probe {} for key={}",
-                entry.getDataVersion(),
-                vv.dataVersion(),
-                cacheKey
-              );
+            // Snapshot guard (not probe guard): discard only when a newer
+            // write landed while the refresh was in flight. Comparing the
+            // entry against the PROBE version is wrong in both directions —
+            // with no concurrent write entry == probe, so an equal-skip
+            // (shouldSkipForSync) discards every ordinary refresh and SWR
+            // never extends TTLs; with equal-apply (shouldSkipForRefresh) a
+            // probe taken after a concurrent write re-applies the stale value
+            // over the writer's fresh entry. The snapshot taken at creation
+            // time is the correct baseline in both cases.
+            // Degraded states are derived from the version sign (negative =
+            // degraded, the CacheEntry invariant): crossing the boundary in
+            // flight means a write landed after the snapshot, so it wins.
+            boolean snapDegraded = snap.dataVersion() < 0;
+            if (entry.isVersionDegraded() != snapDegraded) {
+              log.debug("Async refresh discarded: degraded boundary crossed in flight for key={}", cacheKey);
               return entry;
             }
-            // Probe versions are non-negative, so the degraded flag is derived false.
-            return refreshedEntry(entry, wrappedValue, vv.dataVersion(), softTtlMs);
+            if (entry.getDataVersion() > snap.dataVersion()) {
+              log.debug("Async refresh discarded: newer version exists: {}", cacheKey);
+              return entry;
+            }
+            // Same-version apply also heals: a snapshot-degraded entry with
+            // no in-flight write is overwritten by the normal probe (case 4
+            // of the sync matrix), so a recovered Redis heals degraded
+            // entries through the refresh path. The stamp keeps version
+            // monotonicity: a probe older than the entry (version-key
+            // wraparound, ADR-0022 — the floor cache normally prevents this
+            // from ever reaching here) must not regress L1's watermark, so
+            // the entry's own version wins ties against the past while the
+            // fresh value and extended TTLs still apply.
+            return refreshedEntry(entry, wrappedValue, Math.max(entry.getDataVersion(), vv.dataVersion()), softTtlMs);
           }
           // Degraded version: a Redis-outage write occurred during refresh.
           // Discard the refresh result unconditionally — it is older than
@@ -698,7 +503,7 @@ public class ExpireManagerImpl implements ExpireManager {
    * @return the merged entry
    */
   private CacheEntry refreshedEntry(CacheEntry entry, Object wrappedValue, long dataVersion, long softTtlMs) {
-    EntryDraft refreshed = editEntry(entry).value(wrappedValue).version(dataVersion).softTtl(softTtlMs);
+    EntryDraft refreshed = EntryDraft.of(entry, ttlPolicy).value(wrappedValue).version(dataVersion).softTtl(softTtlMs);
     if (entry.getKeyState() == KeyState.COOL) {
       refreshed.keyState(KeyState.NORMAL);
     }
@@ -723,7 +528,7 @@ public class ExpireManagerImpl implements ExpireManager {
     // ADR-0033: stamp the probed version when present; fail-open
     // rebuilds with VERSION_DEFAULT.
     long stampedVersion = vv.stamped() ? vv.dataVersion() : VERSION_DEFAULT;
-    EntryDraft rebuilt = newEntry()
+    EntryDraft rebuilt = EntryDraft.blank(ttlPolicy)
       .value(wrappedValue)
       .version(stampedVersion)
       .ttl(effectiveHardTtl, softTtlMs, ttlPolicy.getEffectiveHardTtlMs(), ttlPolicy.getEffectiveSoftTtlMs())

@@ -14,8 +14,8 @@ The Zeta endpoints are plain Spring `@RestController`s, **not** Actuator `@Endpo
 | ----------------------------------------- | ------------------------------- |
 | App diagnostics (`ZetaEndpoint`)          | `/actuator/hotkey`              |
 | Hash-ring inspection (`RingEndpoint`, §3) | `/actuator/hotkeyring`          |
-| State-machine runtime config (Worker, §4) | `/actuator/hotkey/worker/state` |
-| FastLane rule management (Worker)         | `/actuator/hotkey/fastlane`     |
+| State-machine runtime config (Worker, §4) | `/actuator/hotkey-worker-state` |
+| FastLane rule management (Worker)         | `/actuator/hotkey-fastlane`     |
 
 Supports an optional `?limit=N` query parameter to cap the number of app-side TopK entries returned (default 100).
 
@@ -86,10 +86,16 @@ Supports an optional `?limit=N` query parameter to cap the number of app-side To
     "dispatchActiveKeys": 0,              // Keys whose worker holds work (running or queued)
     "dispatchBacklogged": false,          // Whether any submitted decision is still pending
     "dispatchDropped": 0,                 // Cumulative submissions dropped by the global gate
-    "dispatchRejected": 0                 // Cumulative submissions rejected by the per-key queue bound
+    "dispatchRejected": 0,                // Cumulative submissions rejected by the per-key queue bound
+
+    // ── Shared-broker appName isolation (ADR-0068) ──
+    "foreignAppDrops": 0,               // Cumulative HOT/COOL decisions dropped for appName mismatch (misconfigured zeta.local.app-name discards 100% here)
+    "lastForeignApp": "appB"            // Most recent foreign sender appName (present only after a drop)
   },
   "sync": {
     "dedupCacheSize": 20,                 // Broadcast dedup cache entry count
+    "foreignAppDrops": 0,                 // Cumulative sync messages dropped for appName mismatch
+    "lastForeignApp": "appB",             // Most recent foreign sender appName (present only after a drop)
 
     // ── Sync-plane dispatcher gate (capacity: zeta.sync.max-pending-units) ──
     "dispatchPendingUnits": 0,            // Weighted backlog currently charged to the gate
@@ -183,7 +189,7 @@ The ADR-0080 detection-plane meters — one gauge, two emission counters and one
 
 ## 3. Consistent Hash Ring Management
 
-When consistent hashing is enabled (`zeta.local.consistent-hashing.enabled=true`) and `spring-boot-starter-actuator` + `spring-boot-starter-web` are on the classpath, a REST controller (`RingEndpoint.java`) is registered at `/actuator/hotkeyring` for ring inspection.
+When consistent hashing is enabled (`zeta.local.consistent-hashing.enabled=true`) and `spring-boot-starter-actuator` is on the classpath, a standard Actuator endpoint (`RingEndpoint.java`, id `hotkeyring`, `@ReadOperation`s) is registered at `/actuator/hotkeyring` for ring inspection. It runs on the management plane (port, exposure, and roles via `management.*`), not the application port.
 
 | Method | Path                         | Description                          |
 | ------ | ---------------------------- | ------------------------------------ |
@@ -192,17 +198,17 @@ When consistent hashing is enabled (`zeta.local.consistent-hashing.enabled=true`
 
 ## 4. Worker State Machine Runtime Configuration
 
-When Worker mode is active (`zeta.worker.enabled=true`) and `spring-boot-starter-actuator` + `spring-boot-starter-web` are on the classpath, a REST controller (`StateMachineEndpoint.java`) is registered at `/actuator/hotkey/worker/state` for reading and updating the state-machine configuration at runtime.
+When Worker mode is active (`zeta.worker.enabled=true`) and `spring-boot-starter-actuator` is on the classpath, a standard Actuator endpoint (`StateMachineEndpoint.java`, id `hotkey-worker-state`) is registered at `/actuator/hotkey-worker-state` for reading and updating the state-machine configuration at runtime. It runs on the management plane (port, exposure, and roles via `management.*`): the runtime config mutation no longer sits on the application port. (An endpoint id cannot nest like the former `/actuator/hotkey/worker/state` MVC path; the read shape is unchanged.)
 
-| Method | Path                            | Description                                                                    |
-| ------ | ------------------------------- | ------------------------------------------------------------------------------ |
-| `GET`  | `/actuator/hotkey/worker/state` | Return current `confirmCount`, `coolCount`, `preCoolGraceCount`, `trackedKeys` |
-| `POST` | `/actuator/hotkey/worker/state` | Update one or more parameters (body: `{"confirmCount":"5"}`)                   |
+| Method | Path                             | Description                                                                    |
+| ------ | -------------------------------- | ------------------------------------------------------------------------------ |
+| `GET`  | `/actuator/hotkey-worker-state`  | Return current `confirmCount`, `coolCount`, `preCoolGraceCount`, `trackedKeys` |
+| `POST` | `/actuator/hotkey-worker-state`  | Update one or more parameters (body: `{"confirmCount":5,"coolCount":15}` — typed fields, absent means keep) |
 
 **Read current state:**
 
 ```bash
-curl http://localhost:8080/actuator/hotkey/worker/state
+curl http://localhost:8080/actuator/hotkey-worker-state
 ```
 
 **Example response:**
@@ -221,9 +227,9 @@ curl http://localhost:8080/actuator/hotkey/worker/state
 Changes are propagated to peer Workers via the heartbeat broadcast. Each POST increments an internal `configTimestampCounter` — receiving Workers apply the new values only if the timestamp is strictly newer than their own.
 
 ```bash
-curl -X POST http://localhost:8080/actuator/hotkey/worker/state \
+curl -X POST http://localhost:8080/actuator/hotkey-worker-state \
   -H "Content-Type: application/json" \
-  -d '{"confirmCount":"5","coolCount":"15"}'
+  -d '{"confirmCount":5,"coolCount":15}'
 ```
 
 **Example response:**
@@ -234,4 +240,4 @@ curl -X POST http://localhost:8080/actuator/hotkey/worker/state \
 }
 ```
 
-**Validation:** the POST-applied combination must satisfy the same invariant the config-negotiation layer enforces on heartbeat gossip — `confirmCount >= 1`, `preCoolGraceCount >= 1` and `coolCount > preCoolGraceCount` (provided fields override, the others keep their current values). A violating POST is rejected with `"status": "error"` and nothing is applied: a locally-accepted but gossip-rejected config would leave this Worker permanently divergent with no reconciliation path. A POST with no recognized fields is a pure no-op (no rewrite, no timestamp bump).
+**Validation:** the write-applied combination must satisfy the same invariant the config-negotiation layer enforces on heartbeat gossip — `confirmCount >= 1`, `preCoolGraceCount >= 1` and `coolCount > preCoolGraceCount` (provided fields override, the others keep their current values). A violating write is rejected with `"status": "error"` and nothing is applied: a locally-accepted but gossip-rejected config would leave this Worker permanently divergent with no reconciliation path. A write with no recognized fields is a pure no-op (no rewrite, no timestamp bump). Malformed (non-numeric) input never reaches the method — the actuator framework rejects it with a 400 before dispatch.

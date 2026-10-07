@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Tests for {@link TtlPolicy} — the pure TTL/expiry policy module behind
- * {@link io.github.hyshmily.zeta.cache.cachesupport.ExpireManager}.
+ * {@link io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle}.
  *
  * <p>Covers every stateless lifecycle computation: resolve (override vs
  * default), compute (absolute expire timestamps), getEffective (configured
@@ -99,15 +99,9 @@ class TtlPolicyTest {
   }
 
   /**
-   * Verifies that a non-CacheEntry plain value is considered soft-expired.
-   */
-  @Test
-  void isSoftExpired_shouldReturnTrueForNonCacheEntry() {
-    assertThat(ttlPolicy.isSoftExpired("not-a-cache-entry")).isTrue();
-  }
-
-  /**
-   * Verifies that a missing cache key is considered soft-expired.
+   * Verifies that a missing entry is considered soft-expired (F1 L1 type
+   * closure: slots hold {@link CacheEntry} only — the former non-entry
+   * fallback is gone, absence is the only non-entry shape).
    */
   @Test
   void isSoftExpired_shouldReturnTrueForMissingEntry() {

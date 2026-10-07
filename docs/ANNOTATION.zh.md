@@ -23,9 +23,9 @@ zeta:
 CacheExtensionAspect      决定方法体"是否"执行：
    │                      @Intercept（触发→兜底）、@Fallback（异常）、
    │                      @Preload（探测器注热）、组合校验
-   │ 构建 ──► CachePolicy（不可变：惰性 TTL、nullCaching、skipBroadcast）
+   │ 构建 ──► ReadPolicy（不可变：惰性 TTL、nullCaching）+ skipBroadcast 标志
    ▼
-ZetaCacheContext          仅做运输 —— 单个 ThreadLocal<CachePolicy>
+ZetaCacheContext          仅做运输 —— 单个 ThreadLocal<Snapshot{ReadPolicy, skipBroadcast}>
    ▼
 ZetaSpringCache           决定结果"如何"存储：
    │                      TTL 路由、null 哨兵决策、@CacheCondition 清除、
@@ -34,7 +34,7 @@ ZetaSpringCache           决定结果"如何"存储：
 Zeta / HotKeyCache
 ```
 
-`CachePolicy` 的 TTL supplier **每次缓存调用最多求值一次**，且仅在 miss / 提升 / 刷新时求值——普通缓存命中从不求值，因此 SpEL TTL 表达式在命中路径上零开销。
+`ReadPolicy` 的 TTL supplier **每次缓存调用最多求值一次**，且仅在 miss / 提升 / 刷新时求值——普通缓存命中从不求值，因此 SpEL TTL 表达式在命中路径上零开销。
 
 ---
 
@@ -102,7 +102,7 @@ Zeta / HotKeyCache
 
 ### 4.5 嵌套 `@Cacheable` 调用
 
-切面无条件推送解析后的 `CachePolicy`，并在 `finally` 中恢复前一个，因此内层缓存方法绝不会看到外层方法的策略。运输层绑定线程：**不要**与 `@Async` 或任何在切面与缓存适配器之间跨线程的模式联用。
+切面无条件推送解析后的 `ReadPolicy`（连同广播标志），并在 `finally` 中恢复前一个快照，因此内层缓存方法绝不会看到外层方法的策略。运输层绑定线程：**不要**与 `@Async` 或任何在切面与缓存适配器之间跨线程的模式联用。
 
 **loader 线程亲和性：** 缓存未命中时，方法体在 SingleFlight 执行器线程（`hotKeyExecutor`）上执行，而非调用方线程——与直接 `get()` 路径一致（ADR-0030）。调用方准备的 ThreadLocal 状态（请求上下文、事务、安全上下文）在未命中时**不可见**于方法体内；loader 不得依赖调用方线程亲和性。命中时方法体根本不会执行。
 

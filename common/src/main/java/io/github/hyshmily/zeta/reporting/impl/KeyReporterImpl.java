@@ -67,10 +67,14 @@ import lombok.extern.slf4j.Slf4j;
 @Internal
 public class KeyReporterImpl implements KeyReporter {
 
-  /** Maximum distinct keys in the counter before eager swap (legacy constant, kept for compat). */
+  /**
+   * Maximum distinct cold keys per delivery cycle, wired as the WaveCounter's
+   * soft reservoir cap (load-bearing: bounds burst memory; already-tracked
+   * keys keep counting past it).
+   */
   private static final int MAX_BUFFER_SIZE = 100_000;
 
-  /** Fraction of maxBufferSize that triggers an eager buffer swap (legacy, unused). */
+  /** Retained for the WaveCounter constructor's API-compat slot — ignored (no eager-swap in this design). */
   private static final double EAGER_SWAP_RATIO = 0.8;
 
   /** Double-buffered counter aggregating per-key access counts between flushes. */
@@ -107,7 +111,7 @@ public class KeyReporterImpl implements KeyReporter {
   /** Optional BBR adaptive rate limiter; null disables BBR gating. */
   @Setter
   @SuppressWarnings("java:S3077") // BBR is thread-safe
-  private volatile BbrRateLimiterImpl bbrRateLimiter;
+  private volatile BbrRateLimiter bbrRateLimiter;
 
   /**
    * Optional ADR-0078 feed-loop tuner for the flush cadence
@@ -158,6 +162,18 @@ public class KeyReporterImpl implements KeyReporter {
   /** Record the number of routing tasks dropped due to queue overflow. */
   private final AtomicLong routingDropCounter = new AtomicLong(0);
 
+  /**
+   * Count one displaced routing batch and surface it as a rate-limited WARN.
+   * The counter keeps the real cumulative total for metrics — it is never
+   * reset (ADR-0037 one-per-window convention).
+   */
+  private void noteRoutingDrop() {
+    long dropped = routingDropCounter.incrementAndGet();
+    if (routingDropLogThrottle.tryAcquire()) {
+      log.warn("routing queue full, dropping oldest report batch; totalDropped={}", dropped);
+    }
+  }
+
   /* Records whether the last error during publish has been logged.*/
   private final AtomicBoolean lastPublishErrorLogged = new AtomicBoolean(false);
 
@@ -205,11 +221,30 @@ public class KeyReporterImpl implements KeyReporter {
       new ArrayBlockingQueue<>(ROUTING_QUEUE_CAPACITY),
       new ZetaThreadFactory("zeta-report-routing"),
       (r, executor) -> {
-        long dropped = routingDropCounter.incrementAndGet();
-        // One WARN per window (ADR-0037 one-per-window convention). The counter
-        // keeps the real cumulative total for metrics — it is never reset.
-        if (routingDropLogThrottle.tryAcquire()) {
-          log.warn("routing queue full, dropping report batch; totalDropped={}", dropped);
+        // Drop-OLDEST, not newest: the queue holds whole flush batches and
+        // the producer is single-threaded (one WaveCounter tide deliverer per
+        // reporter — see onFlush), so freeing one slot guarantees the
+        // resubmit below is accepted. The freshest signal always wins; the
+        // displaced (stalest) batch is counted, never silently lost.
+        // Precondition: single-producer submit. A second producer would need
+        // an offer-retry loop here.
+        // Rejected alternative: merge-not-drop (fold the new counts into an
+        // overflow map for the next routing pass) — strictly better signal,
+        // but adds shared mutable state plus an O(keys) merge on the
+        // scheduler thread for a loss the Worker's sliding window already
+        // tolerates (one 50ms window, self-healed by the next tide).
+        if (executor.getQueue().poll() == null) {
+          // Lost a shutdown race (stop() drained the queue concurrently) —
+          // there is no slot to free, drop the new batch.
+          noteRoutingDrop();
+          return;
+        }
+        noteRoutingDrop();
+        try {
+          executor.execute(r);
+        } catch (RejectedExecutionException e) {
+          // Shutdown raced the resubmit — drop the new batch too.
+          noteRoutingDrop();
         }
       }
     );
@@ -349,7 +384,7 @@ public class KeyReporterImpl implements KeyReporter {
         return;
       }
 
-      BbrRateLimiterImpl limiter = bbrRateLimiter;
+      BbrRateLimiter limiter = bbrRateLimiter;
       if (limiter != null) {
         int currentCount = ringManager.nodeCount();
         if (currentCount != lastNodeCount) {
@@ -411,12 +446,7 @@ public class KeyReporterImpl implements KeyReporter {
    * Runs on {@link #routingExecutor} — off the shared scheduler thread.
    */
   @SuppressWarnings("all")
-  private void routeAndEnqueue(
-    Map<String, Long> keyCounts,
-    Set<String> aliveNodes,
-    long now,
-    BbrRateLimiterImpl limiter
-  ) {
+  private void routeAndEnqueue(Map<String, Long> keyCounts, Set<String> aliveNodes, long now, BbrRateLimiter limiter) {
     Map<String, Map<String, Long>> sharded = new HashMap<>();
     // One predicate per batch — the per-key routeNode(key, Set) overload would
     // allocate a capturing lambda for every key of every flush.
@@ -673,6 +703,8 @@ public class KeyReporterImpl implements KeyReporter {
     private final AtomicLong droppedCount = new AtomicLong();
     /** Timeout for a single publish call before we give up and treat it as dropped. */
     private static final long PUBLISH_TIMEOUT_MS = 5_000;
+    /** Queue wait after which a batch is discarded as stale instead of published. */
+    private static final long STALE_BATCH_MS = 5_000;
     /** Consumer thread pool draining the work queue. */
     private final ExecutorService consumers;
     /** Dedicated executor for timed publish calls. */
@@ -768,7 +800,7 @@ public class KeyReporterImpl implements KeyReporter {
       // so we must onConsumerDrop to keep BBR inFlight balanced. A shutdown drain
       // is a lifecycle event, not downstream saturation — LOCAL_REJECTED keeps it
       // out of the downstream-yield confirmation.
-      BbrRateLimiterImpl limiter = bbrRateLimiter;
+      BbrRateLimiter limiter = bbrRateLimiter;
       if (limiter != null) {
         List<ShardBatch> abandoned = new ArrayList<>();
         queue.drainTo(abandoned);
@@ -876,7 +908,7 @@ public class KeyReporterImpl implements KeyReporter {
           break;
         }
 
-        BbrRateLimiterImpl limiter = bbrRateLimiter;
+        BbrRateLimiter limiter = bbrRateLimiter;
 
         // Dead-worker guard — discard if target is no longer alive.
         // Covers the window between enqueue and consumption when a Worker dies.
@@ -886,7 +918,7 @@ public class KeyReporterImpl implements KeyReporter {
         // O(workers) cost per batch on the publish path.
         Set<String> aliveWorkers = healthView.getAliveWorkerIds();
         boolean deadTarget = !aliveWorkers.contains(batch.target());
-        boolean stale = currentTimeMillis() - batch.timestamp() > 5_000;
+        boolean stale = currentTimeMillis() - batch.timestamp() > STALE_BATCH_MS;
         if (deadTarget || stale) {
           (deadTarget ? expiredDeadTargetCount : expiredStaleCount).incrementAndGet();
           if (limiter != null) {
@@ -899,7 +931,7 @@ public class KeyReporterImpl implements KeyReporter {
 
         final ShardBatch fb = batch;
         final long dequeueTime = currentTimeMillis();
-        final BbrRateLimiterImpl capturedLimiter = limiter;
+        final BbrRateLimiter capturedLimiter = limiter;
         try {
           CompletableFuture.runAsync(
             () ->

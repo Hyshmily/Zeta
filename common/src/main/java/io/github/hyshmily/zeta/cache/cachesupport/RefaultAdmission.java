@@ -300,7 +300,7 @@ public final class RefaultAdmission {
    * @param key   the removed entry's key
    * @param cause the Caffeine removal cause
    */
-  public void onRemoval(Object key, RemovalCause cause) {
+  public void onRemoval(String key, RemovalCause cause) {
     onRemoval(key, null, cause);
   }
 
@@ -328,32 +328,32 @@ public final class RefaultAdmission {
    * executor, before the keeper sees any event.
    *
    * @param key   the removed entry's key (non-String keys are ignored — the L1 is a
-   *              {@code Cache<String, Object>}; the guard only defends against misuse)
+   *              {@code Cache<String, CacheEntry>}; the guard only defends against misuse)
    * @param value the removed entry's value; a {@link CacheEntry} flagged
    *              {@code soloFlight} marks its SIZE eviction as the gate's own
    *              churn (no clock advance). May be {@code null}
    * @param cause the Caffeine removal cause
    */
-  public void onRemoval(Object key, @Nullable Object value, RemovalCause cause) {
-    if (mode == Mode.OFF || !(key instanceof String cacheKey)) {
+  public void onRemoval(String key, @Nullable CacheEntry value, RemovalCause cause) {
+    if (mode == Mode.OFF || key == null) {
       return;
     }
 
     switch (cause) {
       case SIZE -> {
-        if (value instanceof CacheEntry entry && entry.isSoloFlight()) {
+        if (value != null && value.isSoloFlight()) {
           // The gate's own residue: re-stamp the anchor (the residency ended),
           // but the clock must not count churn the gate itself produced —
           // otherwise the reject rate inflates every distance and the gate
           // degenerates into rejecting everything it has ever seen leave.
-          stamp(cacheKey, evictionClock.get());
+          stamp(key, evictionClock.get());
         } else {
           long now = evictionClock.incrementAndGet();
-          stamp(cacheKey, now);
+          stamp(key, now);
         }
       }
-      case EXPIRED -> stamp(cacheKey, evictionClock.get());
-      case EXPLICIT -> SLOTS.setRelease(shadowSlots, hash(cacheKey), 0L);
+      case EXPIRED -> stamp(key, evictionClock.get());
+      case EXPLICIT -> SLOTS.setRelease(shadowSlots, hash(key), 0L);
       default -> {
         // REPLACED: the entry is still resident under the same key.
         // COLLECTED: no weak/soft refs in Zeta's L1 — cannot occur.

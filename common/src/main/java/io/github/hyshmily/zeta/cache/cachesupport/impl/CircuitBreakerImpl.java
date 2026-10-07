@@ -24,17 +24,16 @@ import io.github.hyshmily.zeta.cache.cachesupport.CircuitBreakerState;
 import io.github.hyshmily.zeta.util.executor.SafeScheduledExecutorService;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.util.Assert;
 
 /**
@@ -71,27 +70,28 @@ import org.springframework.util.Assert;
  * asymmetry): the HALF_OPEN probe quota is scaled by a persistent credit —
  * failed recovery episodes tighten it ×0.8, clean probe successes recover it
  * toward the 1.0 baseline (×1.25), a full recovery resets it to 1.0. Chronic
- * flapping therefore converges to single-probe episodes; see {@link #probeCredit}.
+ * flapping therefore converges to single-probe episodes; see {@link #probeCreditBits}.
  *
- * <p><b>False-sharing prevention:</b> Single {@code long[]} with stride-based
- * padding slots. success[i] and fail[i] are placed 8 longs apart (64 bytes =
- * one x86-64 cache line), and consecutive logical entries are 16 longs apart.
- * All access via {@link VarHandle} for atomic RMW semantics.
+ * <p><b>Contention control:</b> Successes use one {@link LongAdder} per bucket
+ * because every cache key records through the same breaker and would otherwise
+ * contend on one atomic array slot. Failures stay in a padded {@code long[]}
+ * because their rate is expected to be much lower.
  */
 @Slf4j
 @Internal
-public class CircuitBreakerImpl implements CircuitBreaker {
+public class CircuitBreakerImpl implements CircuitBreaker, InitializingBean {
 
   private static final VarHandle VH = MethodHandles.arrayElementVarHandle(long[].class);
 
   private static final int STRIDE = 16;
-  private static final int SUCCESS_OFFSET = 0;
   private static final int FAIL_OFFSET = 8;
 
   private final CircuitBreakerSettings config;
   private final int bucketSize;
-  private final long[] counts;
+  private final LongAdder[] successCounts;
+  private final long[] failureCounts;
   private final ScheduledExecutorService scheduler;
+  private final long slideMs;
   private volatile int currentIndex;
 
   private volatile CircuitBreakerState state = CircuitBreakerState.CLOSED;
@@ -99,6 +99,22 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   private final AtomicLong lastHalfOpenAttempt = new AtomicLong(0L);
   private final AtomicInteger consecutiveSuccessCounter = new AtomicInteger(0);
   private final AtomicInteger halfOpenInflight = new AtomicInteger(0);
+
+  /**
+   * HALF_OPEN episode generation attached to reservations. An old episode may
+   * finish after a failure has reset the in-flight count; tagging its callback
+   * prevents it from decrementing a newer episode's quota.
+   */
+  private final AtomicLong probeGeneration = new AtomicLong(0L);
+
+  /**
+   * HALF_OPEN slots reserved by calls on the current thread but not yet
+   * settled. Tracking reservations at the call boundary makes batch settlement
+   * idempotent: one admission releases one slot even when the batch reports one
+   * result per key, while a completed-future replay admitted in CLOSED cannot
+   * release a slot from a later HALF_OPEN episode.
+   */
+  private final ThreadLocal<ArrayDeque<Long>> probeReservations = ThreadLocal.withInitial(ArrayDeque::new);
 
   /**
    * Asymmetric probe-quota credit for HALF_OPEN recovery, adapted from
@@ -127,14 +143,15 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   private static final double PROBE_CREDIT_BASELINE = 1.0;
 
   /**
-   * Live probe-quota multiplier over {@code halfOpenMaxProbes}, always in
-   * {@code [PROBE_CREDIT_FLOOR, PROBE_CREDIT_BASELINE]}; concurrent probe
-   * settle-races may overshoot by one step (plain volatile write), an
-   * unbounded drift is impossible due to the clamps.
+   * Raw bits of the live probe-quota multiplier over {@code halfOpenMaxProbes},
+   * always in {@code [PROBE_CREDIT_FLOOR, PROBE_CREDIT_BASELINE]}. A CAS loop is
+   * required because multiple probes can settle concurrently; a volatile
+   * floating-point read-modify-write would lose penalties or rewards.
    */
-  private volatile double probeCredit = 1.0;
+  private final AtomicLong probeCreditBits = new AtomicLong(Double.doubleToLongBits(PROBE_CREDIT_BASELINE));
 
-  private final ScheduledFuture<?> slideFuture;
+  private final AtomicBoolean started = new AtomicBoolean(false);
+  private volatile ScheduledFuture<?> slideFuture;
 
   /**
    * @param config Circuit breaker configuration view (buckets, thresholds, exception lists);
@@ -143,8 +160,12 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   public CircuitBreakerImpl(CircuitBreakerSettings config) {
     this.config = config;
     this.bucketSize = config.getWindowBuckets();
-    this.counts = new long[bucketSize * STRIDE];
-    long slideMs = config.getWindowTimeMs() / bucketSize;
+    this.successCounts = new LongAdder[bucketSize];
+    for (int i = 0; i < bucketSize; i++) {
+      successCounts[i] = new LongAdder();
+    }
+    this.failureCounts = new long[bucketSize * STRIDE];
+    this.slideMs = config.getWindowTimeMs() / bucketSize;
     Assert.isTrue(
       slideMs >= 1,
       "window-time-ms (" + config.getWindowTimeMs() + ") must be >= window-buckets (" + bucketSize + ")"
@@ -157,7 +178,23 @@ public class CircuitBreakerImpl implements CircuitBreaker {
       t.setDaemon(true);
       return t;
     });
-    this.slideFuture = scheduler.scheduleAtFixedRate(this::slide, slideMs, slideMs, TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Starts the sliding-window clock after construction has safely published all
+   * final fields. Scheduling from the constructor would let the executor invoke
+   * {@link #slide()} through an escaped {@code this} before construction completes.
+   */
+  public void start() {
+    if (started.compareAndSet(false, true)) {
+      slideFuture = scheduler.scheduleAtFixedRate(this::slide, slideMs, slideMs, TimeUnit.MILLISECONDS);
+    }
+  }
+
+  /** Spring invokes this only after the bean has completed construction and dependency injection. */
+  @Override
+  public void afterPropertiesSet() {
+    start();
   }
 
   /**
@@ -199,9 +236,10 @@ public class CircuitBreakerImpl implements CircuitBreaker {
     }
 
     if (s == CircuitBreakerState.HALF_OPEN) {
-      // Credit-scaled quota (see probeCredit): min 1 probe even at the floor.
-      int maxProbes = Math.max(1, (int) (config.getHalfOpenMaxProbes() * probeCredit));
+      // Credit-scaled quota (see probeCreditBits): min 1 probe even at the floor.
+      int maxProbes = Math.max(1, (int) (config.getHalfOpenMaxProbes() * currentProbeCredit()));
       if (halfOpenInflight.incrementAndGet() <= maxProbes) {
+        reserveProbeForCurrentThread(probeGeneration.get());
         return true;
       }
       halfOpenInflight.decrementAndGet();
@@ -225,7 +263,9 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    * @return always {@code true} — the caller may emit its probe
    */
   private boolean transitionToHalfOpen(boolean firstProbe) {
+    long generation = probeGeneration.incrementAndGet();
     halfOpenInflight.incrementAndGet();
+    reserveProbeForCurrentThread(generation);
     state = CircuitBreakerState.HALF_OPEN;
     consecutiveSuccessCounter.set(0);
 
@@ -239,6 +279,20 @@ public class CircuitBreakerImpl implements CircuitBreaker {
     return true;
   }
 
+  private void reserveProbeForCurrentThread(long generation) {
+    probeReservations.get().addLast(generation);
+  }
+
+  /** Returns the reserved episode, or {@code Long.MIN_VALUE} when this call did not reserve a probe. */
+  private long consumeProbeReservation() {
+    ArrayDeque<Long> reservations = probeReservations.get();
+    Long generation = reservations.pollFirst();
+    if (reservations.isEmpty()) {
+      probeReservations.remove();
+    }
+    return generation != null ? generation : Long.MIN_VALUE;
+  }
+
   /**
    * Records a success. Increments the current success bucket.
    * In HALF_OPEN state, counts consecutive successes and transitions to CLOSED
@@ -247,30 +301,24 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   @Override
   @SuppressWarnings("all")
   public void onSuccess() {
+    long reservationGeneration = consumeProbeReservation();
     if (!config.isEnabled()) {
       return;
     }
 
-    VH.getAndAdd(counts, currentIndex * STRIDE + SUCCESS_OFFSET, 1L);
+    successCounts[currentIndex].increment();
 
     CircuitBreakerState s = state;
     if (s == CircuitBreakerState.CLOSED) {
       return;
     }
 
-    if (s == CircuitBreakerState.HALF_OPEN) {
-      // Floored at zero (same discipline as onAbandoned): a SingleFlight batch
-      // load reserves ONE probe slot via intercept() but settles per key, and
-      // a dedup-cache hit joins a future without ever having reserved — both
-      // release more than they reserved here. An unbounded decrement drifted
-      // the counter negative, which inflated the effective probe cap to
-      // (maxProbes + |drift|) against a sick upstream until the next failure
-      // or close reset it.
-      halfOpenInflight.updateAndGet(c -> Math.max(0, c - 1));
+    if (s == CircuitBreakerState.HALF_OPEN && reservationGeneration == probeGeneration.get()) {
+      halfOpenInflight.decrementAndGet();
       int consec = consecutiveSuccessCounter.incrementAndGet();
-      // Reward branch of the asymmetry (see probeCredit): every clean probe
+      // Reward branch of the asymmetry (see probeCreditBits): every clean probe
       // success recovers the credit toward the baseline, capped there.
-      probeCredit = Math.min(PROBE_CREDIT_BASELINE, probeCredit * K_PROBE_RECOVER_RATIO);
+      recoverProbeCredit();
 
       if (consec >= config.getConsecutiveSuccessThreshold()) {
         state = CircuitBreakerState.CLOSED;
@@ -279,7 +327,7 @@ public class CircuitBreakerImpl implements CircuitBreaker {
         resetAllBuckets();
         // Full recovery clears the tightening memory — the healed data source
         // starts its next failure cycle from the unmodified quota.
-        probeCredit = 1.0;
+        probeCreditBits.set(Double.doubleToLongBits(PROBE_CREDIT_BASELINE));
         if (config.isLogEnabled()) {
           log.info("CB CLOSED after {} consecutive successes", consec);
         }
@@ -294,22 +342,24 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   @Override
   @SuppressWarnings("all")
   public void onFailure() {
+    long reservationGeneration = consumeProbeReservation();
     if (!config.isEnabled()) {
       return;
     }
 
     CircuitBreakerState s = state;
     if (s == CircuitBreakerState.CLOSED) {
-      VH.getAndAdd(counts, currentIndex * STRIDE + FAIL_OFFSET, 1L);
+      VH.getAndAdd(failureCounts, currentIndex * STRIDE + FAIL_OFFSET, 1L);
       evaluateThreshold();
       return;
     }
 
-    if (s == CircuitBreakerState.HALF_OPEN) {
-      // Penalty branch of the asymmetry (see probeCredit): a failed recovery
+    if (s == CircuitBreakerState.HALF_OPEN && reservationGeneration == probeGeneration.get()) {
+      halfOpenInflight.decrementAndGet();
+      // Penalty branch of the asymmetry (see probeCreditBits): a failed recovery
       // episode tightens the NEXT episode's quota; the credit persists across
       // episodes, so chronic flapping converges to single-probe episodes.
-      probeCredit = Math.max(PROBE_CREDIT_FLOOR, probeCredit * K_PROBE_PENALTY_RATIO);
+      double probeCredit = penalizeProbeCredit();
       halfOpenInflight.set(0);
       consecutiveSuccessCounter.set(0);
       state = CircuitBreakerState.OPEN;
@@ -336,18 +386,19 @@ public class CircuitBreakerImpl implements CircuitBreaker {
 
   /**
    * Releases a request slot given up without an outcome (executor rejection
-   * before any data-source call). Only a HALF_OPEN reservation is returned —
-   * floored at zero because a concurrent probe failure resets the counter to
-   * 0 while another abandoned probe may still be releasing. CLOSED reserves
-   * nothing and OPEN has no live reservations, so both are no-ops.
+   * before any data-source call). The per-call reservation token prevents an
+   * unadmitted callback or an old HALF_OPEN episode from decrementing the live
+   * quota, so the paired release can use an exact decrement rather than hiding
+   * accounting defects behind a floor-at-zero clamp.
    */
   @Override
   public void onAbandoned() {
+    long reservationGeneration = consumeProbeReservation();
     if (!config.isEnabled()) {
       return;
     }
-    if (state == CircuitBreakerState.HALF_OPEN) {
-      halfOpenInflight.updateAndGet(c -> Math.max(0, c - 1));
+    if (state == CircuitBreakerState.HALF_OPEN && reservationGeneration == probeGeneration.get()) {
+      halfOpenInflight.decrementAndGet();
     }
   }
 
@@ -367,6 +418,34 @@ public class CircuitBreakerImpl implements CircuitBreaker {
     return state;
   }
 
+  private double currentProbeCredit() {
+    return Double.longBitsToDouble(probeCreditBits.get());
+  }
+
+  private void recoverProbeCredit() {
+    updateProbeCredit(K_PROBE_RECOVER_RATIO);
+  }
+
+  private double penalizeProbeCredit() {
+    return updateProbeCredit(K_PROBE_PENALTY_RATIO);
+  }
+
+  /**
+   * Atomically applies a reward or penalty so concurrent probe completions are
+   * all reflected instead of overwriting one another's volatile RMW result.
+   */
+  private double updateProbeCredit(double ratio) {
+    while (true) {
+      long currentBits = probeCreditBits.get();
+      double current = Double.longBitsToDouble(currentBits);
+      double updated = Math.max(PROBE_CREDIT_FLOOR, Math.min(PROBE_CREDIT_BASELINE, current * ratio));
+      long updatedBits = Double.doubleToLongBits(updated);
+      if (probeCreditBits.compareAndSet(currentBits, updatedBits)) {
+        return updated;
+      }
+    }
+  }
+
   /**
    * Advances the sliding window: moves to the next bucket (resetting it)
    * and re-evaluates the failure threshold.
@@ -377,8 +456,8 @@ public class CircuitBreakerImpl implements CircuitBreaker {
       next = 0;
     }
     int base = next * STRIDE;
-    VH.setVolatile(counts, base + SUCCESS_OFFSET, 0L);
-    VH.setVolatile(counts, base + FAIL_OFFSET, 0L);
+    successCounts[next].reset();
+    VH.setVolatile(failureCounts, base + FAIL_OFFSET, 0L);
     currentIndex = next;
     evaluateThreshold();
   }
@@ -397,8 +476,8 @@ public class CircuitBreakerImpl implements CircuitBreaker {
     long totalFail = 0;
 
     for (int i = 0; i < bucketSize; i++) {
-      totalSuccess += (long) VH.getVolatile(counts, i * STRIDE + SUCCESS_OFFSET);
-      totalFail += (long) VH.getVolatile(counts, i * STRIDE + FAIL_OFFSET);
+      totalSuccess += successCounts[i].sum();
+      totalFail += (long) VH.getVolatile(failureCounts, i * STRIDE + FAIL_OFFSET);
     }
 
     if (totalFail > 0 && totalSuccess + totalFail >= config.getRequestVolumeThreshold()) {
@@ -552,9 +631,8 @@ public class CircuitBreakerImpl implements CircuitBreaker {
   /** Zeros all success and failure buckets. Called when transitioning to CLOSED. */
   private void resetAllBuckets() {
     for (int i = 0; i < bucketSize; i++) {
-      int base = i * STRIDE;
-      VH.setVolatile(counts, base + SUCCESS_OFFSET, 0L);
-      VH.setVolatile(counts, base + FAIL_OFFSET, 0L);
+      successCounts[i].reset();
+      VH.setVolatile(failureCounts, i * STRIDE + FAIL_OFFSET, 0L);
     }
   }
 
@@ -565,7 +643,10 @@ public class CircuitBreakerImpl implements CircuitBreaker {
    */
   @Override
   public void close() {
-    slideFuture.cancel(false);
+    ScheduledFuture<?> future = slideFuture;
+    if (future != null) {
+      future.cancel(false);
+    }
     scheduler.shutdownNow();
   }
 }

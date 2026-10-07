@@ -15,18 +15,16 @@
  */
 package io.github.hyshmily.zeta.cache.cachesupport;
 
+import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.EntryDraft;
 import io.github.hyshmily.zeta.model.KeyState;
-import java.util.concurrent.Semaphore;
-import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Manages the stateful side of the {@link CacheEntry} lifecycle: background
- * refresh scheduling, TOCTOU invalidation guards, expiry extension, and the
- * entry factory.
+ * The stateful side of the {@link CacheEntry} lifecycle: TOCTOU invalidation
+ * guards, Decision-Validity demotion, the entry factory, and value wrapping.
  *
  * <p><b>Entry factory.</b> Every entry creation and modification flows through
  * the single {@link EntryDraft} API obtained here:
@@ -43,12 +41,15 @@ import org.jspecify.annotations.Nullable;
  * timestamp conversion with jitter / expiry predicates) lives in
  * {@link TtlPolicy}, exposed here via {@link #ttlPolicy()}.
  *
- * <p>Hard TTL controls Caffeine eviction; soft TTL controls stale-while-revalidate background refresh.
- * Each has a normal-key and hot-key variant, with an optional override taking precedence over the default.
+ * <p>Background soft-expire refresh scheduling lives behind the separate
+ * {@link io.github.hyshmily.zeta.scheduler.BackgroundRefresher} seam — this
+ * interface deliberately owns no executor and no scheduling state.
  */
-public interface ExpireManager {
+@Internal
+public interface EntryLifecycle {
+
   /**
-   * The pure TTL and expiry policy backing this manager: every stateless
+   * The pure TTL and expiry policy backing this lifecycle: every stateless
    * lifecycle computation (resolve vs default, expire timestamps, jitter,
    * predicates, TTL transforms) is performed through this module.
    *
@@ -57,10 +58,10 @@ public interface ExpireManager {
   TtlPolicy ttlPolicy();
 
   /**
-   * Check whether the given raw cache value is a logically expired {@link CacheEntry}
+   * Check whether the given L1 entry is logically expired
    * and, if so, invalidate it and return {@code true}.
    */
-  boolean invalidateIfIsLogicallyExpired(String cacheKey, Object raw);
+  boolean invalidateIfIsLogicallyExpired(String cacheKey, @Nullable CacheEntry raw);
 
   /**
    * Demote a Worker-sourced {@link KeyState#HOT} entry whose issuing Worker
@@ -79,10 +80,10 @@ public interface ExpireManager {
    * broadcast (recovered Worker) is never clobbered.
    *
    * @param cacheKey the cache key
-   * @param raw      the raw value from the Caffeine cache (may be {@link CacheEntry} or bare)
+   * @param raw      the L1 entry (may be {@code null})
    * @return {@code true} if the entry was demoted
    */
-  boolean demoteIfDecisionInvalid(String cacheKey, Object raw);
+  boolean demoteIfDecisionInvalid(String cacheKey, @Nullable CacheEntry raw);
 
   /**
    * Pure Decision-Validity demotion (ADR-0035): if the given Worker-sourced
@@ -102,8 +103,8 @@ public interface ExpireManager {
   CacheEntry demoteIfDecisionInvalidInPlace(CacheEntry entry);
 
   /**
-   * Extract the Worker decision stamp from a raw cache value, or {@code null}
-   * when the value carries no Worker origin — not a {@link CacheEntry}, or an
+   * Extract the Worker decision stamp from an L1 entry, or {@code null}
+   * when the value carries no Worker origin — {@code null} or an
    * entry without a {@code decisionNodeId} (local promotion). This is the
    * single source of the carry-forward semantics shared by the null-sentinel
    * and put-through rebuild paths: a rebuild must not erase a Worker decision
@@ -112,17 +113,16 @@ public interface ExpireManager {
    * an all-zero local stamp ({@code VERSION_DEFAULT} / 0), so the two shapes
    * are interchangeable.
    *
-   * @param existingRaw the raw value from the L1 cache (may be {@code null},
-   *                    bare, or a {@link CacheEntry})
+   * @param existing the L1 entry (may be {@code null})
    * @return the decision stamp, or {@code null} for a local origin
    */
-  static @Nullable DecisionStamp decisionOf(@Nullable Object existingRaw) {
-    return existingRaw instanceof CacheEntry ce ? ce.decisionStamp() : null;
+  static @Nullable DecisionStamp decisionOf(@Nullable CacheEntry existing) {
+    return existing == null ? null : existing.decisionStamp();
   }
 
   /**
    * A blank {@link EntryDraft} for creating a fresh {@link CacheEntry}, wired
-   * to this manager's TTL arithmetic — the single creation path. Shape the
+   * to this lifecycle's TTL arithmetic — the single creation path. Shape the
    * draft (value in stored form, version, decision, key state, TTLs) and
    * {@link EntryDraft#build} it.
    *
@@ -132,7 +132,7 @@ public interface ExpireManager {
 
   /**
    * An {@link EntryDraft} seeded from an existing entry, wired to this
-   * manager's TTL arithmetic — the single copy-on-write modification path.
+   * lifecycle's TTL arithmetic — the single copy-on-write modification path.
    * Untouched fields carry over from the source entry.
    *
    * @param source the entry to modify (not changed itself)
@@ -147,13 +147,4 @@ public interface ExpireManager {
    * Caffeine bin lock (write-side ADR-0030 discipline).
    */
   Object wrapValue(@Nullable Object rawValue);
-
-  /** Expose the refresh limiter semaphore for monitoring purposes. */
-  Semaphore getRefreshLimiter();
-
-  /**
-   * Triggers an asynchronous background refresh for the given cache key if the
-   * current entry has reached its soft expiry threshold.
-   */
-  void triggerBackgroundRefresh(String cacheKey, Supplier<?> reader, long softTtlMs);
 }

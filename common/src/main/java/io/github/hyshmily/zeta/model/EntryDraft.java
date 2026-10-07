@@ -23,13 +23,13 @@ import org.springframework.util.Assert;
  * {@link CacheEntry} is created and modified — one API replacing the former
  * {@code withXxx()} copy family, the hand-written {@code toBuilder()}, the
  * {@code TtlPolicy.applyXxx()} transforms, and the
- * {@code ExpireManager.buildEntry/buildWrappedEntry} factories.
+ * {@code EntryLifecycle.buildEntry/buildWrappedEntry} factories.
  *
  * <p><b>Entry points.</b>
  * <ul>
- *   <li>{@code ExpireManager.newEntry()} — creation: a blank draft wired to
+ *   <li>{@code EntryLifecycle.newEntry()} — creation: a blank draft wired to
  *       the manager's TTL arithmetic (production path).</li>
- *   <li>{@code ExpireManager.editEntry(entry)} — modification: a draft seeded
+ *   <li>{@code EntryLifecycle.editEntry(entry)} — modification: a draft seeded
  *       from an existing entry with the same arithmetic (production path). All
  *       untouched fields carry over.</li>
  *   <li>{@link #of(CacheEntry)} — arithmetic-free seeded draft for callers
@@ -46,7 +46,7 @@ import org.springframework.util.Assert;
  * <p><b>Value discipline (ADR-0030).</b> {@link #value} takes the value in its
  * <b>stored</b> (already compressed) form. Compression is linear in value size
  * and must run <i>outside</i> the Caffeine bin lock — wrap first via
- * {@code ExpireManager.wrapValue}, then hand the wrapped value to the draft.
+ * {@code EntryLifecycle.wrapValue}, then hand the wrapped value to the draft.
  * The draft never compresses, so building inside a {@code compute} callback is
  * always lock-safe.
  *
@@ -127,7 +127,7 @@ public final class EntryDraft {
 
   /**
    * A blank draft for creating a fresh entry. Production code goes through
-   * {@code ExpireManager.newEntry()} instead, which wires the TTL arithmetic.
+   * {@code EntryLifecycle.newEntry()} instead, which wires the TTL arithmetic.
    *
    * @param arithmetic the expiry arithmetic, or {@code null} to allow only
    *                   explicit timestamps
@@ -141,7 +141,7 @@ public final class EntryDraft {
    * A draft seeded from an existing entry, without expiry arithmetic: every
    * field starts as the source entry's, TTL durations may be set, and computed
    * expiry ({@link #ttl}/{@link #softTtl}/{@link #rearmExpiry}) is rejected.
-   * The manager-backed variant ({@code ExpireManager.editEntry}) is the
+   * The manager-backed variant ({@code EntryLifecycle.editEntry}) is the
    * production modification path.
    *
    * @param source the entry whose fields to seed from (not modified)
@@ -405,7 +405,7 @@ public final class EntryDraft {
   public CacheEntry build() {
     Assert.state(
       !hardExpiryPending && !softExpiryPending,
-      "Computed expiry requires an ExpiryArithmetic; use ExpireManager.newEntry/editEntry or set explicit timestamps"
+      "Computed expiry requires an ExpiryArithmetic; use EntryLifecycle.newEntry/editEntry or set explicit timestamps"
     );
     return new CacheEntry(
       value,

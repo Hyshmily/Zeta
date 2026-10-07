@@ -27,7 +27,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
@@ -37,7 +37,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import io.github.hyshmily.zeta.util.TimeSource;
-import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
+import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
@@ -57,11 +57,11 @@ import org.springframework.amqp.core.MessageProperties;
  */
 class WorkerListenerTest {
 
-  private Cache<String, Object> cache;
+  private Cache<String, CacheEntry> cache;
   private WorkerListener listener;
   private Channel channel;
   private ScheduledExecutorService scheduler;
-  private ExpireManagerImpl expireManager;
+  private EntryLifecycleImpl entryLifecycle;
 
   @BeforeEach
   void setUp() throws IOException {
@@ -70,7 +70,7 @@ class WorkerListenerTest {
     properties.setBroadcastJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
+    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
     WorkerDecisionHandler handler = handler(k -> "refreshed", null);
     listener = new WorkerListener(properties, scheduler, handler, null);
     listener.init();
@@ -85,8 +85,8 @@ class WorkerListenerTest {
     TimeSource.setTimeOffsetForTest(0, 0);
   }
 
-  private WorkerDecisionHandler handler(CacheLoader loader, SreRateLimiterImpl limiter) {
-    return new DefaultWorkerDecisionHandler(cache, loader, expireManager, limiter, null, Collections.emptyList());
+  private WorkerDecisionHandler handler(CacheLoader loader, SreRateLimiter limiter) {
+    return new DefaultWorkerDecisionHandler(cache, loader, entryLifecycle, limiter, null, Collections.emptyList());
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
@@ -167,7 +167,7 @@ class WorkerListenerTest {
    */
   @Test
   void handleWorkerMessage_hot_withSreThrottling_shouldSkip() throws IOException, InterruptedException {
-    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    SreRateLimiter limiter = mock(SreRateLimiter.class);
     when(limiter.tryAcquire()).thenReturn(false);
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
@@ -365,7 +365,7 @@ class WorkerListenerTest {
    */
   @Test
   void handleWorkerMessage_hot_withSreSuccess_shouldCallOnSuccess() throws IOException, InterruptedException {
-    SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+    SreRateLimiter limiter = mock(SreRateLimiter.class);
     when(limiter.tryAcquire()).thenReturn(true);
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
@@ -499,6 +499,34 @@ class WorkerListenerTest {
     props.setHeader(HEADER_VERSION, version);
     props.setHeader(HEADER_APP_NAME, appName);
     return new Message(key.getBytes(StandardCharsets.UTF_8), props);
+  }
+
+  /**
+   * A foreign-app drop is counted (not just DEBUG-logged): a misconfigured
+   * app-name discards 100% of decisions while the process looks healthy, so
+   * the mismatch needs a counter plus last-sender signal for the actuator
+   * endpoint. Matching-app and headerless messages never count.
+   */
+  @Test
+  void foreignAppDrops_shouldCountOnlyMismatches() throws IOException, InterruptedException {
+    WorkerListenerProperties props = new WorkerListenerProperties();
+    props.setBroadcastJitterMs(0);
+    ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+    WorkerListener isolated = new WorkerListener(props, sched, handler(k -> "v", null), "appA");
+    isolated.init();
+
+    assertThat(isolated.foreignAppDrops()).isZero();
+    assertThat(isolated.lastForeignApp()).isNull();
+
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k1", WorkerMessage.TYPE_HOT, 2L, "appB"));
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k2", WorkerMessage.TYPE_COOL, 3L, "appB"));
+    isolated.handleWorkerMessage(channel, workerMessageWithAppName("k3", WorkerMessage.TYPE_HOT, 4L, "appA"));
+    isolated.handleWorkerMessage(channel, workerMessage("k4", WorkerMessage.TYPE_HOT, 5L));
+    awaitWorkerTasks(sched);
+
+    assertThat(isolated.foreignAppDrops()).isEqualTo(2);
+    assertThat(isolated.lastForeignApp()).isEqualTo("appB");
+    sched.shutdown();
   }
 
   private static Message workerMessageWithNodeIdEpoch(

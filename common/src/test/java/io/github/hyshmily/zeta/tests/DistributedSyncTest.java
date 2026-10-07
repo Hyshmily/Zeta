@@ -12,8 +12,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
+import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
@@ -35,7 +35,7 @@ import io.github.hyshmily.zeta.sync.worker.WorkerListener;
 import io.github.hyshmily.zeta.sync.worker.WorkerListenerProperties;
 import io.github.hyshmily.zeta.sync.worker.WorkerMessage;
 import io.github.hyshmily.zeta.util.id.SnowflakeIdGenerator;
-import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
+import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -63,7 +63,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 class DistributedSyncTest {
 
   private ScheduledExecutorService scheduler;
-  private Cache<String, Object> cache;
+  private Cache<String, CacheEntry> cache;
   private Channel channel;
   private RuleMatcher ruleMatcher;
 
@@ -145,7 +145,7 @@ class DistributedSyncTest {
 
   private SyncDecisionHandler syncHandler(CacheLoader loader) {
     ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
+    EntryLifecycle expire = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
     return new DefaultSyncDecisionHandler(cache, loader, expire, ruleMatcher, List.of(), null);
   }
 
@@ -157,13 +157,13 @@ class DistributedSyncTest {
     return l;
   }
 
-  private WorkerDecisionHandler workerHandler(CacheLoader loader, SreRateLimiterImpl limiter) {
+  private WorkerDecisionHandler workerHandler(CacheLoader loader, SreRateLimiter limiter) {
     ZetaProperties ttlConfig = new ZetaProperties();
-    ExpireManager expire = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
+    EntryLifecycle expire = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
     return new DefaultWorkerDecisionHandler(cache, loader, expire, limiter, null, List.of());
   }
 
-  private WorkerListener createWorkerListener(CacheLoader loader, SreRateLimiterImpl limiter) {
+  private WorkerListener createWorkerListener(CacheLoader loader, SreRateLimiter limiter) {
     WorkerListenerProperties props = new WorkerListenerProperties();
     props.setBroadcastJitterMs(0);
     props.getSre().setEnabled(limiter != null);
@@ -389,6 +389,75 @@ class DistributedSyncTest {
       listener.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_INVALIDATE, 10L, true));
       awaitScheduler();
       assertThat(cache.getIfPresent("k")).isNotNull();
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // 2b. Duplicate and delayed REFRESH delivery (ADR-0066 receiver guard)
+  // ═══════════════════════════════════════════════════════════════
+
+  @Nested
+  @DisplayName("Duplicate and delayed REFRESH delivery")
+  class DuplicateDelayedRefreshTests {
+
+    @Test
+    @DisplayName("equal-version REFRESH applies (heals) instead of skipping")
+    void refresh_equalVersion_appliesAndHeals() throws Exception {
+      AtomicInteger loads = new AtomicInteger();
+      CacheSyncListener l = createListener(k -> {
+        loads.incrementAndGet();
+        return "fresh";
+      });
+      cache.put("k", entry(5, false, 0, null, 0, KeyState.NORMAL));
+
+      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+      awaitScheduler();
+
+      // Equal applies (ADR-0066 strict-newer guard): the authoritative value
+      // is re-fetched and stamped. A plain >= skip would leave loads at 0
+      // and pin the pre-existing value until TTL.
+      assertThat(loads.get()).isEqualTo(1);
+      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(5L);
+    }
+
+    @Test
+    @DisplayName("duplicate REFRESH(v5) re-applies idempotently without regressing")
+    void refresh_duplicateSameVersion_idempotent() throws Exception {
+      AtomicInteger loads = new AtomicInteger();
+      CacheSyncListener l = createListener(k -> {
+        loads.incrementAndGet();
+        return "fresh";
+      });
+      cache.put("k", entry(0, false, 0, null, 0, KeyState.NORMAL));
+
+      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+      awaitScheduler();
+      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+      awaitScheduler();
+
+      assertThat(loads.get()).isEqualTo(2);
+      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(5L);
+    }
+
+    @Test
+    @DisplayName("delayed stale REFRESH(v3) after REFRESH(v5) never regresses the entry")
+    void refresh_delayedStaleAfterNewer_neverRegresses() throws Exception {
+      AtomicInteger loads = new AtomicInteger();
+      CacheSyncListener l = createListener(k -> {
+        loads.incrementAndGet();
+        return "fresh";
+      });
+      cache.put("k", entry(0, false, 0, null, 0, KeyState.NORMAL));
+
+      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 5L, false));
+      awaitScheduler();
+      l.handleSyncMessage(channel, syncMessage("k", SyncMessage.TYPE_REFRESH, 3L, false));
+      awaitScheduler();
+
+      // Strictly-newer skip fires before the authoritative load: no second
+      // load happens and the version stays at 5.
+      assertThat(loads.get()).isEqualTo(1);
+      assertThat(((CacheEntry) cache.getIfPresent("k")).getDataVersion()).isEqualTo(5L);
     }
   }
 
@@ -1396,13 +1465,39 @@ class DistributedSyncTest {
       awaitScheduler();
       assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionEpoch()).isEqualTo(2L);
 
-      // Late message from lower epoch
-      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 99L, "w2", 1));
+      // Late message from a lower epoch of the SAME Worker. Epoch is a
+      // node-local incarnation counter, so this is the only regime in which the
+      // comparison is meaningful — cross-Worker messages never reach it
+      // (ADR-0085).
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 99L, "w1", 1));
       awaitScheduler();
 
       CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
       assertThat(ce.getDecisionEpoch()).isEqualTo(2L);
       assertThat(ce.getDecisionNodeId()).isEqualTo("w1");
+    }
+
+    @Test
+    @DisplayName("cross-Worker message applies on arrival even at a lower epoch (ADR-0085)")
+    void crossWorkerLowerEpoch_appliesOnArrival() throws Exception {
+      cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
+      WorkerListener wl = createWorkerListener(k -> "fresh", null);
+
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 50L, "w1", 2));
+      awaitScheduler();
+      assertThat(((CacheEntry) cache.getIfPresent("k")).getDecisionNodeId()).isEqualTo("w1");
+
+      // Different Worker, lower epoch: neither epoch nor decisionVersion is
+      // comparable across Workers, so arrival order (last-writer-wins) decides.
+      // Comparing epochs here used to mute every surviving Worker after a
+      // rolling restart until the entry expired.
+      wl.handleWorkerMessage(channel, workerMessage("k", WorkerMessage.TYPE_HOT, 99L, "w2", 1));
+      awaitScheduler();
+
+      CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
+      assertThat(ce.getDecisionNodeId()).isEqualTo("w2");
+      assertThat(ce.getDecisionEpoch()).isEqualTo(1L);
+      assertThat(ce.getDecisionVersion()).isEqualTo(99L);
     }
   }
 
@@ -1604,8 +1699,8 @@ class DistributedSyncTest {
     }
 
     @Test
-    @DisplayName("last-writer-wins: recording same key twice sends only latest")
-    void lastWriterWins() {
+    @DisplayName("normal-wins across the degraded boundary: a degraded record never displaces a pending normal one")
+    void normalWinsAcrossDegradedBoundary() {
       CacheSyncPublisher pub = mock(CacheSyncPublisher.class);
       BroadcastBuffer buf = new BroadcastBuffer(scheduler, Optional.of(pub), 5000, Math.max(5000, 2_000), null);
 
@@ -1614,7 +1709,10 @@ class DistributedSyncTest {
 
       buf.flush();
 
-      verify(pub).broadcastRefresh("k", 5L, true);
+      // The degraded REFRESH would be skipped by every normal-holding peer
+      // (case 2 of the sync matrix), so sending it would silently drop the
+      // normal update — the pending normal record is kept instead.
+      verify(pub).broadcastRefresh("k", 1L, false);
       verifyNoMoreInteractions(pub);
     }
 
@@ -1714,7 +1812,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("SRE throttled HOT skips promotion without calling onFailed")
     void sreThrottled_skipsPromotion() throws Exception {
-      SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+      SreRateLimiter limiter = mock(SreRateLimiter.class);
       when(limiter.tryAcquire()).thenReturn(false);
       cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
 
@@ -1729,7 +1827,7 @@ class DistributedSyncTest {
     @Test
     @DisplayName("SRE allowed HOT calls onSuccess")
     void sreAllowed_callsOnSuccess() throws Exception {
-      SreRateLimiterImpl limiter = mock(SreRateLimiterImpl.class);
+      SreRateLimiter limiter = mock(SreRateLimiter.class);
       when(limiter.tryAcquire()).thenReturn(true);
       cache.put("k", entry(1, false, 0, null, 0, KeyState.NORMAL));
 

@@ -27,7 +27,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.KeyState;
@@ -57,12 +57,12 @@ import org.springframework.amqp.core.MessageProperties;
  */
 class CacheSyncListenerTest {
 
-  private Cache<String, Object> cache;
+  private Cache<String, CacheEntry> cache;
   private CacheSyncListener listener;
   private Channel channel;
   private ScheduledExecutorService scheduler;
   private RuleMatcher ruleMatcher;
-  private ExpireManagerImpl expireManager;
+  private EntryLifecycleImpl entryLifecycle;
 
   @BeforeEach
   void setUp() throws IOException {
@@ -71,7 +71,7 @@ class CacheSyncListenerTest {
     properties.setWarmupJitterMs(0);
     scheduler = Executors.newSingleThreadScheduledExecutor();
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, Runnable::run, ttlConfig, 10, CacheCompressor.NONE, null);
+    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
     ruleMatcher = mock(RuleMatcher.class);
 
     SyncDecisionHandler handler = handler(k -> "refreshed");
@@ -81,7 +81,7 @@ class CacheSyncListenerTest {
   }
 
   private SyncDecisionHandler handler(CacheLoader loader) {
-    return new DefaultSyncDecisionHandler(cache, loader, expireManager, ruleMatcher, Collections.emptyList(), null);
+    return new DefaultSyncDecisionHandler(cache, loader, entryLifecycle, ruleMatcher, Collections.emptyList(), null);
   }
 
   private void awaitWorkerTasks() throws InterruptedException {
@@ -98,7 +98,7 @@ class CacheSyncListenerTest {
    */
   @Test
   void handleSyncMessage_invalidate_shouldAckAndRemove() throws IOException {
-    cache.put("key1", "value");
+    cache.put("key1", entry(1, false, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 1L, false));
     verify(channel).basicAck(anyLong(), eq(false));
   }
@@ -151,9 +151,8 @@ class CacheSyncListenerTest {
       long deadline = System.currentTimeMillis() + 5000;
       boolean applied = false;
       while (System.currentTimeMillis() < deadline) {
-        if (loads.get() > 0
-          && cache.getIfPresent("key1") instanceof CacheEntry ce
-          && ce.getDataVersion() == 4L) {
+        CacheEntry current = cache.getIfPresent("key1");
+        if (loads.get() > 0 && current != null && current.getDataVersion() == 4L) {
           applied = true;
           break;
         }
@@ -208,11 +207,12 @@ class CacheSyncListenerTest {
   }
 
   /**
-   * Verifies that the listener handles a plain string value (not a CacheEntry) in the cache gracefully.
+   * Verifies that the listener handles a plain NORMAL entry in the cache gracefully
+   * (F1 L1 type closure: slots hold {@link CacheEntry} only).
    */
   @Test
-  void handleSyncMessage_withStringValueInsteadOfCacheEntry_shouldNotCrash() throws IOException {
-    cache.put("key1", "plain-string");
+  void handleSyncMessage_withNormalEntry_shouldNotCrash() throws IOException {
+    cache.put("key1", entry(1, false, 0));
     listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_REFRESH, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
   }
@@ -256,12 +256,14 @@ class CacheSyncListenerTest {
   }
 
   /**
-   * Verifies that invalidating a key with a plain string value (not CacheEntry) does not throw.
+   * Verifies that invalidating a key holding a NORMAL entry does not throw and
+   * removes it when the incoming version is newer (F1 L1 type closure: slots
+   * hold {@link CacheEntry} only — version ordering applies).
    */
   @Test
-  void invalidate_whenExistingNotCacheEntry_shouldNotThrow() throws IOException, InterruptedException {
-    cache.put("key1", "plain-string");
-    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 1L, false));
+  void invalidate_withNormalEntry_shouldNotThrow() throws IOException, InterruptedException {
+    cache.put("key1", entry(1, false, 0));
+    listener.handleSyncMessage(channel, syncMessage("key1", SyncMessage.TYPE_INVALIDATE, 2L, false));
     verify(channel).basicAck(anyLong(), eq(false));
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).isNull();
@@ -291,9 +293,9 @@ class CacheSyncListenerTest {
    */
   @Test
   void handleSyncMessage_withInvalidateAll_shouldBatchInvalidate() throws IOException, InterruptedException {
-    cache.put("k1", "v1");
-    cache.put("k2", "v2");
-    cache.put("k3", "v3");
+    cache.put("k1", entry(1, false, 0));
+    cache.put("k2", entry(1, false, 0));
+    cache.put("k3", entry(1, false, 0));
     MessageProperties props = new MessageProperties();
     props.setHeader(HEADER_TYPE, SyncMessage.TYPE_INVALIDATE_ALL);
     Message msg = new Message("[\"k1\",\"k2\"]".getBytes(StandardCharsets.UTF_8), props);
@@ -582,5 +584,28 @@ class CacheSyncListenerTest {
 
     awaitWorkerTasks();
     assertThat(cache.getIfPresent("key1")).isNull();
+  }
+
+  /**
+   * A foreign-app drop is counted (not just DEBUG-logged): a misconfigured
+   * app-name drops 100% of sync while the process looks healthy, so the
+   * mismatch needs a counter plus last-sender signal for the actuator
+   * endpoint. Same-app and headerless messages never count.
+   */
+  @Test
+  void foreignAppDrops_shouldCountOnlyMismatches() throws IOException, InterruptedException {
+    cache.put("key1", entry(5, false, 0));
+    CacheSyncListener isolated = isolatedListener("appA");
+
+    assertThat(isolated.foreignAppDrops()).isZero();
+    assertThat(isolated.lastForeignApp()).isNull();
+
+    isolated.handleSyncMessage(channel, syncMessageFromApp("key1", SyncMessage.TYPE_INVALIDATE, 1L, false, "appB"));
+    isolated.handleSyncMessage(channel, syncMessageFromApp("key2", SyncMessage.TYPE_REFRESH, 1L, false, "appB"));
+    isolated.handleSyncMessage(channel, syncMessageFromApp("key1", SyncMessage.TYPE_INVALIDATE, 0L, false, "appA"));
+    awaitWorkerTasks();
+
+    assertThat(isolated.foreignAppDrops()).isEqualTo(2);
+    assertThat(isolated.lastForeignApp()).isEqualTo("appB");
   }
 }

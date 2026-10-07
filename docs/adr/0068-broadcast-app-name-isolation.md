@@ -23,3 +23,13 @@ accepted (2026-09-17). **This file was written into `docs/adr/` on 2026-09-29**,
 1. Messages without the header are processed unconditionally — the rolling-upgrade window (old Worker, new App or vice versa) degrades to the old receive-everything behavior rather than dropping decisions.
 2. The isolation is silent when misconfigured: a worker/app `app-name` mismatch discards every decision, observable only at DEBUG. Operators must keep `zeta.worker.routing.app-name` equal to `zeta.local.app-name`.
 3. Header-less senders keep working, so the header is an additive wire change with no ADR-0074-style format versioning.
+
+## 2026-10-05 note — predicate extraction (no semantic change)
+
+The two per-listener copies of the foreign-app check (`WorkerListener.processWorker`
+inline, `CacheSyncListener.isForeignApp`) were extracted into the shared
+`sync.AppIsolationFilter` (`isForeign` + drop counter + last-sender + log gate;
+both listeners keep delegating `foreignAppDrops()` / `lastForeignApp()` so the
+Actuator surface is unchanged). The three rules, the compatibility contract, and
+all log wording are byte-identical — the extraction only removes the divergence
+the two copies had already developed.

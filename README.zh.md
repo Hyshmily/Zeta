@@ -86,8 +86,12 @@ zeta.peek("product:123");
 
 基准测试：
 
-- `peek` **约 16M ops/s**（纯 Caffeine 查询，无副作用）
-- `get`（L1 命中）**约 15M ops/s**（全路径含 TopK + Reporter）
+基准测试（`HotHitBenchmark`/`RuleBenchmark`，Intel Ultra 9 285H，JDK 26）：
+
+- `peek` **约 70M ops/s**（Caffeine 查询 + 解包，无副作用）
+- `get`（L1 命中）单线程**约 28M ops/s**，8 线程聚合**约 59M ops/s**（全路径含 TopK + Reporter）
+- `get`（L1 命中，10 条规则）**约 17M ops/s**（每次命中 +24ns memo 探测）
+- `get`（L1 命中，1KB LZ4 值）**约 29M ops/s**（解压开销完全隐藏于命中成本中）
 
 HotKey受京东[hotkey](https://gitee.com/jd-platform-opensource/hotkey)项目启发,算法支持来自[Aegis](https://github.com/go-kratos/aegis)、[neural](https://github.com/yu120/neural/tree/master)
 
@@ -302,7 +306,7 @@ User user = zeta
   .withHardTtl(30_000)
   .withSoftTtl(10_000)
   .allowBroadcast()
-  .executeOrNull();
+  .orNull();
 ```
 
 **注册式 Loader**（LoadingCache 风格 —— 注册一次，处处读取）
@@ -330,20 +334,20 @@ Optional<User> fresh = zeta.getWithSoftExpire("user:42"); // 强制"回陈旧值
 > - 集群加成：Worker HOT 预热与 peer REFRESH 同样经注册 loader 取值，热 key 可以直接从真实数据源（如数据库）预热，无需 Redis 值通道。
 > - 未注册前缀的 key 会快速失败（`IllegalStateException`），而不是静默返回空。容量（`maximumSize`）仍是全局 L1 配置（`zeta.local.cache.max-size` / `max-weight`），不按前缀划分。详见 [ADR-0070](docs/adr/0070-prefix-loader-registry-and-cache-customizers.md)。
 
-**CachePolicy API**（命名选项对象，per-invocation 控制）
+**Policy API**（按调用族封闭的选项对象）
 
-每个操作族只暴露两个位置形态：常用形态 + 以 `CachePolicy` 收尾的全控制形态。中间的逐参数重载（TTL、布尔旗标）不复存在——通过 `with*` 链定制。
+每个操作族只暴露两个位置形态：常用形态 + 以该族封闭策略 record（`ReadPolicy` / `WritePolicy` / `InvalidatePolicy`）收尾的全控制形态。中间的逐参数重载（TTL、布尔旗标）不复存在——通过 `with*` 链定制。
 
 ```java
-// P. get 带 CachePolicy — 延迟 TTL 求值、空值缓存、陈旧策略
-CachePolicy policy = CachePolicy.of(userRepo::findById).withHardTtl(30_000L).withSoftTtl(10_000L);
+// P. get 带 ReadPolicy — 延迟 TTL 求值、空值缓存、陈旧策略
+ReadPolicy policy = ReadPolicy.of(userRepo::findById).withHardTtl(30_000L).withSoftTtl(10_000L);
 
 Optional<User> user = zeta.get("user:123", policy);
 
-// Q. computeIfAbsentWithSoftExpire 带 CachePolicy
-Optional<User> user = zeta.computeIfAbsentWithSoftExpire(
+// Q. computeIfAbsentWithSoftExpireOptional 带 ReadPolicy
+Optional<User> user = zeta.computeIfAbsentWithSoftExpireOptional(
   "user:123",
-  CachePolicy.of(() -> loadUser(123))
+  ReadPolicy.of(() -> loadUser(123))
     .withHardTtl(60_000L)
     .withSoftTtl(30_000L)
     .withNullCaching(false)
@@ -358,20 +362,20 @@ zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("use
 
 // S. putThrough 带显式广播控制
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue),
-    CachePolicy.defaults().withSkipBroadcast(true)); // 仅本地
+    WritePolicy.of(0, 0, true)); // 仅本地
 
 // T. putThrough 带显式硬 TTL
 zeta.putThrough("user:123", newValue, () -> redisTemplate.opsForValue().set("user:123", newValue),
-    CachePolicy.of(60_000L, 0));
+    WritePolicy.of(60_000L, 0));
 
 // U. invalidateAfterPut — 变异后失效（集合类型）
 zeta.invalidateAfterPut(key, () -> redisTemplate.opsForSet().add(key, members));
 
 // V. putLocal — 仅本地写，不广播、不 bump 版本
-zeta.putLocal("user:123", cachedValue, CachePolicy.of(hardTtlMs, softTtlMs)); // 指定 TTL
+zeta.putLocal("user:123", cachedValue, WritePolicy.of(hardTtlMs, softTtlMs)); // 指定 TTL
 
 // W. refresh — 本地驱逐后加载并缓存
-zeta.refresh("user:123", () -> loadUser(123), CachePolicy.of(hardTtlMs, softTtlMs)); // 带 TTL 覆盖
+zeta.refresh("user:123", () -> loadUser(123), WritePolicy.of(hardTtlMs, softTtlMs)); // 带 TTL 覆盖
 
 // X. 流式写 API
 zeta.write("user:42").withHardTtl(30_000).putThrough(newValue, dbWriter);
@@ -390,33 +394,21 @@ Zeta 使用**差异化 TTL**：热点 key 和普通 key 分别有独立默认值
 ```java
 // 5 分钟硬 TTL + 30 秒软 TTL
 Optional<String> shopJson = zeta.get("shop:" + shopId,
-    CachePolicy.of(() -> redisTemplate.opsForValue().get("shop:" + shopId))
+    ReadPolicy.of(() -> redisTemplate.opsForValue().get("shop:" + shopId))
         .withHardTtl(TimeUnit.MINUTES.toMillis(5))
         .withSoftTtl(TimeUnit.SECONDS.toMillis(30)));
 
 // 30 秒硬 TTL，软 TTL 用默认值
 zeta.putThrough("weather:" + city, weatherData,
     () -> redisTemplate.opsForValue().set("weather:" + city, weatherData),
-    CachePolicy.of(TimeUnit.SECONDS.toMillis(30), 0));
+    WritePolicy.of(TimeUnit.SECONDS.toMillis(30), 0));
 ```
 
 > [!NOTE]
 > **缓存雪崩防护：** `ExpireManager` 通过 `DelayUtil.computeTtlJitter()` 对每个过期时间戳施加均匀随机偏移（默认 ±5%）。5 分钟硬 TTL 在默认偏移下实际到期 4.75 ~ 5.25 分钟。通过 `zeta.local.ttl-jitter-ratio`（比例，默认 `0.05` = ±5%,`0`为禁用）控制。
 
 > [!TIP]
-> per-call TTL 语义：传入 `0` 表示使用该 key 状态的配置默认值。彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：通过 `getWithSoftExpire(key, CachePolicy.of(reader).withHardTtl(Long.MAX_VALUE).withSoftTtl(softTtlMs))` 传入 `hardTtlMs = Long.MAX_VALUE`，entry 永久驻留 Caffeine。此用法受 Caffeine `Expiry` JavaDoc 明确支持：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
-
-**CAS 风格操作**（`compareAndSet` / `compareAndInvalidate`）——基于当前 L1 值的条件替换 / 条件失效：
-
-```java
-// 仅当当前缓存值等于 expected 时原子替换
-boolean swapped = zeta.compareAndSet("stock:42", oldValue, newValue);
-
-// 仅当当前缓存值等于 expected 时失效
-boolean removed = zeta.compareAndInvalidate("stock:42", staleValue);
-```
-
-两个操作均为委托模式：调用方负责在 CAS 成功后重新读取或写入。无 L2 锁——守卫条件是调用时刻 L1 缓存 entry 的当前值。条件匹配且操作应用时返回 `true`，否则返回 `false`。
+> per-call TTL 语义：传入 `0` 表示使用该 key 状态的配置默认值。彻底逻辑过期（纯软过期，硬 TTL 永不淘汰）：通过 `getWithSoftExpire(key, ReadPolicy.of(reader).withHardTtl(Long.MAX_VALUE).withSoftTtl(softTtlMs))` 传入 `hardTtlMs = Long.MAX_VALUE`，entry 永久驻留 Caffeine。此用法受 Caffeine `Expiry` JavaDoc 明确支持：_"To indicate no expiration an entry may be given an excessively long period, such as `Long.MAX_VALUE`."_ ([源码](https://github.com/ben-manes/caffeine/blob/master/caffeine/src/main/java/com/github/benmanes/caffeine/cache/Expiry.java))
 
 ## Worker 模式
 

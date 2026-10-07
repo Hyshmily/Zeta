@@ -133,6 +133,12 @@
       "defaultValue": 10000
     },
     {
+      "name": "zeta.worker.state-machine.cool-rebroadcast-times",
+      "type": "java.lang.Integer",
+      "description": "Bounded COOL re-emission count (ADR-0087): repeats per COOL broadcast, spaced one rebroadcast-interval-ms apart with the same decision version. 0 restores single-send. Range [0, 5].",
+      "defaultValue": 2
+    },
+    {
       "name": "zeta.worker.global-qps-dynamic-threshold.qps-change-tolerance",
       "type": "java.lang.Double",
       "description": "QPS change tolerance before threshold update (±50%).",

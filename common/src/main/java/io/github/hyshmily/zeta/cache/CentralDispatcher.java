@@ -61,31 +61,33 @@ public class CentralDispatcher {
   private final HotKeyDetector hotKeyDetector;
 
   /**
-   * Increment the local hot-key detector counter and optionally reportToWorker
-   * the
-   * access to the Worker via the {@link KeyReporter}.
+   * Record a cache access: increment the local hot-key detector counter and
+   * optionally report the access to the Worker via the {@link KeyReporter}.
    *
-   * @param cacheKey      the accessed cache key
-   * @param skipBroadcast if {@code true}, skip reporting to Worker
+   * @param cacheKey   the accessed cache key
+   * @param skipReport if {@code true}, skip reporting to Worker (same
+   *                   vocabulary as {@code ReadPolicy.reportEnabled} inverted
+   *                   and {@link #recordAccess(String, boolean, boolean)}'s
+   *                   {@code skipReport})
    */
   @SuppressWarnings("java:S6213")
-  public void report(String cacheKey, boolean skipBroadcast) {
+  public void recordAccess(String cacheKey, boolean skipReport) {
     hotKeyDetector.add(cacheKey);
-    reportToWorkerIf(!skipBroadcast, cacheKey);
+    reportToWorkerIf(!skipReport, cacheKey);
   }
 
   /**
-   * Tag a cache key with fine-grained control over which operations are
-   * performed. Unlike {@link #report}, this method allows callers to
-   * independently skip the local HeavyKeeper count and/or the Worker
-   * report.
+   * Record a cache access with fine-grained control over which operations are
+   * performed. Unlike {@link #recordAccess(String, boolean)}, this overload
+   * allows callers to independently skip the local HeavyKeeper count and/or
+   * the Worker report.
    *
-   * @param cacheKey      the key to tag
+   * @param cacheKey      the key to record
    * @param skipDetection if {@code true}, skip the local HeavyKeeper
    *                      increment
    * @param skipReport    if {@code true}, skip the Worker report
    */
-  public void tag(String cacheKey, boolean skipDetection, boolean skipReport) {
+  public void recordAccess(String cacheKey, boolean skipDetection, boolean skipReport) {
     if (!skipDetection) {
       hotKeyDetector.add(cacheKey);
     }
@@ -93,12 +95,13 @@ public class CentralDispatcher {
   }
 
   /**
-   * Shared tail of {@link #report} and {@link #tag}: conditionally hand the
+   * Shared tail of {@link #recordAccess(String, boolean)} and
+   * {@link #recordAccess(String, boolean, boolean)}: conditionally hand the
    * key to the Worker reporter.
    *
    * <p>Direct {@code isPresent()}/ {@code get()} avoids the per-call lambda
    * allocation of {@code Optional.ifPresent} — this sits behind the ~15M ops/s
-   * read-path {@link #report} method. The detector buffer and the reporter
+   * read-path {@link #recordAccess(String, boolean)} method. The detector buffer and the reporter
    * buffer are two independent aggregation paths.
    *
    * @param shouldReport whether to report (caller's skip flag inverted)

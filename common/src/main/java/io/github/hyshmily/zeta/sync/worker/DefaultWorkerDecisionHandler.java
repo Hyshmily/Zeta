@@ -18,13 +18,13 @@ package io.github.hyshmily.zeta.sync.worker;
 import com.github.benmanes.caffeine.cache.Cache;
 import io.github.hyshmily.zeta.Internal;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.model.CacheEntry;
 import io.github.hyshmily.zeta.model.DecisionStamp;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.util.LogThrottle;
-import io.github.hyshmily.zeta.util.ratelimit.impl.SreRateLimiterImpl;
+import io.github.hyshmily.zeta.util.ratelimit.SreRateLimiter;
 import io.github.hyshmily.zeta.util.version.VersionController;
 import io.github.hyshmily.zeta.util.version.VersionGuard;
 import jakarta.annotation.Nullable;
@@ -44,7 +44,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
 
   /** Local Caffeine L1 cache — target for HOT promotion and COOL downgrade operations.
    * Accessed atomically via {@code asMap().compute()} for thread-safe updates. */
-  private final Cache<String, Object> caffeineCache;
+  private final Cache<String, CacheEntry> caffeineCache;
 
   /** Loads the authoritative value for a key: a registered prefix routes to the
    * application's {@code CacheLoader}, an unregistered key falls back to the Redis
@@ -53,12 +53,12 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
   private final CacheLoader<Object> clusterLoader;
 
   /** Computes hard and soft expiry timestamps for HOT-promoted and default-TTL entries. */
-  private final ExpireManager expireManager;
+  private final EntryLifecycle entryLifecycle;
 
   /** Optional SRE adaptive rate limiter for HOT decision processing.
    * When non-null, HOT promotions are probabilistically dropped during overload.
    * {@code null} disables rate limiting. */
-  private final SreRateLimiterImpl sreRateLimiter;
+  private final SreRateLimiter sreRateLimiter;
 
   /**
    * Optional version controller for reading the current {@code dataVersion}
@@ -92,16 +92,16 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
   private final LogThrottle.Counting loadFailureThrottle = new LogThrottle.Counting();
 
   public DefaultWorkerDecisionHandler(
-    Cache<String, Object> caffeineCache,
+    Cache<String, CacheEntry> caffeineCache,
     CacheLoader<Object> clusterLoader,
-    ExpireManager expireManager,
-    @Nullable SreRateLimiterImpl sreRateLimiter,
+    EntryLifecycle entryLifecycle,
+    @Nullable SreRateLimiter sreRateLimiter,
     @Nullable VersionController versionController,
     List<WorkerDecisionHook> workerHooks
   ) {
     this.caffeineCache = caffeineCache;
     this.clusterLoader = clusterLoader;
-    this.expireManager = expireManager;
+    this.entryLifecycle = entryLifecycle;
     this.sreRateLimiter = sreRateLimiter;
     this.versionController = versionController;
     this.workerHooks = workerHooks != null ? workerHooks : Collections.emptyList();
@@ -148,10 +148,10 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     // extra getIfPresent the old code paid after the Redis load; the probe decision may
     // then be one Redis-load stale in a rare concurrent create/evict race, which the
     // version-floor cache (ADR-0022) already bounds.
-    Object existingSnapshot = caffeineCache.getIfPresent(cacheKey);
+    CacheEntry existingSnapshot = caffeineCache.getIfPresent(cacheKey);
     if (
-      existingSnapshot instanceof CacheEntry snapshotEntry &&
-      VersionGuard.shouldSkipForWorker(snapshotEntry, wm.decisionVersion(), wm.nodeId(), wm.epoch())
+      existingSnapshot != null &&
+      VersionGuard.shouldSkipForWorker(existingSnapshot, wm.decisionVersion(), wm.nodeId(), wm.epoch())
     ) {
       log.debug("handleHot: HotKey already up-to-date in L1: {}", cacheKey);
       fireOnHotSkipped(cacheKey, wm, HotSkipReason.VERSION_STALE);
@@ -176,9 +176,9 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
       // wrapped form (the zeta envelope — flag byte + LZ4 payload for
       // compressible values): re-wrapping it would double-compress and
       // corrupt the format, so it bypasses the wrap below.
-      Object fallback = caffeineCache.getIfPresent(cacheKey);
-      if (fallback instanceof CacheEntry c && c.getValue() != null && !(c.getValue() instanceof NullValue)) {
-        value = c.getValue();
+      CacheEntry fallback = caffeineCache.getIfPresent(cacheKey);
+      if (fallback != null && fallback.getValue() != null && !(fallback.getValue() instanceof NullValue)) {
+        value = fallback.getValue();
         fallbackValuePreWrapped = true;
       }
     }
@@ -202,12 +202,12 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     // that could be evicted by a stale invalidation (see issue 4.11), and
     // any race window is bounded by the version-floor cache (ADR-0022).
     long actualDataVersion =
-      !(existingSnapshot instanceof CacheEntry) && versionController != null
+      existingSnapshot == null && versionController != null
         ? versionController.currentVersion(cacheKey).orElse(0L)
         : 0L;
 
     // Compress BEFORE acquiring the Caffeine bin lock (write-side ADR-0030
-    // discipline, mirroring ExpireManagerImpl.applyRefreshTask: compression
+    // discipline, mirroring EntryLifecycleImpl.applyRefreshTask: compression
     // cost is linear in the value size and must not stall same-bin
     // reads/writes). The price is one wasted compression when the version
     // guard inside the compute rejects the store. An L1-fallback value is
@@ -216,16 +216,16 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     // Effectively-final capture for the compute lambda below: value is
     // reassigned by the L1 fallback path above, so the lambda cannot capture
     // it directly.
-    Object resolvedValue = fallbackValuePreWrapped ? value : expireManager.wrapValue(value);
-    Object computed = caffeineCache
+    Object resolvedValue = fallbackValuePreWrapped ? value : entryLifecycle.wrapValue(value);
+    CacheEntry computed = caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
-        long defaultHotHardTtl = expireManager.ttlPolicy().getEffectiveHotHardTtlMs();
-        long defaultHotSoftTtl = expireManager.ttlPolicy().getEffectiveHotSoftTtlMs();
+        long defaultHotHardTtl = entryLifecycle.ttlPolicy().getEffectiveHotHardTtlMs();
+        long defaultHotSoftTtl = entryLifecycle.ttlPolicy().getEffectiveHotSoftTtlMs();
 
         // DCL second check – atomic with to write
-        if (existing instanceof CacheEntry ce) {
-          if (VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion(), wm.nodeId(), wm.epoch())) {
+        if (existing != null) {
+          if (VersionGuard.shouldSkipForWorker(existing, wm.decisionVersion(), wm.nodeId(), wm.epoch())) {
             return existing;
           }
 
@@ -235,8 +235,8 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
           // floor per TtlPolicy.resolveEffectiveHot*, so a configured 0
           // means disabled → the draft's to* semantics stamp it permanent,
           // matching computeHotHardExpireAt's documented contract).
-          return expireManager
-            .editEntry(ce)
+          return entryLifecycle
+            .editEntry(existing)
             .value(resolvedValue)
             .decision(new DecisionStamp(wm.decisionVersion(), wm.nodeId(), wm.epoch()))
             .keyState(KeyState.HOT)
@@ -249,7 +249,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
         // nodeId/epoch, VersionGuard.shouldSkipForWorker treats every
         // subsequent decision as cross-Worker (unconditional accept), so
         // out-of-order replayed messages could overwrite this entry.
-        return expireManager
+        return entryLifecycle
           .newEntry()
           .value(resolvedValue)
           .version(actualDataVersion)
@@ -257,8 +257,8 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
           .ttl(
             defaultHotHardTtl,
             defaultHotSoftTtl,
-            expireManager.ttlPolicy().getEffectiveHardTtlMs(),
-            expireManager.ttlPolicy().getEffectiveSoftTtlMs()
+            entryLifecycle.ttlPolicy().getEffectiveHardTtlMs(),
+            entryLifecycle.ttlPolicy().getEffectiveSoftTtlMs()
           )
           .keyState(KeyState.HOT)
           .build();
@@ -278,8 +278,8 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     if (sreRateLimiter != null) {
       sreRateLimiter.onSuccess();
     }
-    if (computed instanceof CacheEntry entry) {
-      fireAfterHotPromotion(cacheKey, wm, entry);
+    if (computed != null) {
+      fireAfterHotPromotion(cacheKey, wm, computed);
     }
   }
 
@@ -319,24 +319,32 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     String cacheKey = wm.cacheKey();
     boolean[] cooled = new boolean[1];
 
-    Object computed = caffeineCache
+    CacheEntry computed = caffeineCache
       .asMap()
       .compute(cacheKey, (key, existing) -> {
         if (
-          existing instanceof CacheEntry ce &&
-          VersionGuard.shouldSkipForWorker(ce, wm.decisionVersion(), wm.nodeId(), wm.epoch())
+          existing != null &&
+          VersionGuard.shouldSkipForWorker(existing, wm.decisionVersion(), wm.nodeId(), wm.epoch())
         ) {
           return existing;
         }
 
-        if (existing instanceof CacheEntry cacheEntry) {
+        if (existing != null) {
+          CacheEntry cacheEntry = existing;
           // A hard-expired entry is dead: the next read invalidates it and reloads
           // (ADR-0034 — the hard TTL is the absolute bound for every state). Cooling
           // it here would rewrite the stale value with fresh normal TTLs, resurrecting
           // data the hard TTL already condemned for a full normal-TTL lifetime — and
           // extend a NullValue sentinel far past its short penetration-protection
           // TTL. Leave it untouched so it dies on schedule; the reload re-decides.
-          if (expireManager.ttlPolicy().isLogicallyExpired(cacheEntry)) {
+          if (entryLifecycle.ttlPolicy().isLogicallyExpired(cacheEntry)) {
+            return existing;
+          }
+          // NullValue sentinels are excluded (mirroring handleHot): a 10s null
+          // marker must not be rewritten with the 120s/60s COOL protection
+          // defaults — the sentinel's short penetration-protection TTL is the
+          // whole point, and cooling it would extend the null block 12x.
+          if (cacheEntry.getValue() instanceof NullValue) {
             return existing;
           }
           long normalHardTtlMs = cacheEntry.getNormalHardTtlMs();
@@ -345,10 +353,10 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
           long hardTtlMsIfZero = normalHardTtlMs > 0 ? normalHardTtlMs : COOL_DEFAULT_PROTECTION_HARDTTL_TIME;
           long softTtlMsIfZero = normalSoftTtlMs > 0 ? normalSoftTtlMs : COOL_DEFAULT_PROTECTION_SOFTTTL_TIME;
 
-          long hardTtlExpireAtMs = expireManager
+          long hardTtlExpireAtMs = entryLifecycle
             .ttlPolicy()
             .toHardExpireTimestamp(hardTtlMsIfZero, COOL_DEFAULT_PROTECTION_HARDTTL_TIME_RATIO);
-          long softTtlExpireAtMs = expireManager
+          long softTtlExpireAtMs = entryLifecycle
             .ttlPolicy()
             .toSoftExpireTimestamp(softTtlMsIfZero, COOL_DEFAULT_PROTECTION_SOFTTTL_TIME_RATIO);
 
@@ -356,7 +364,7 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
           // Decision re-stamp + normal-lifecycle TTLs + COOL state in one
           // draft: the expire timestamps carry the COOL protection jitter
           // ratio, so they are set explicitly after the durations.
-          return expireManager
+          return entryLifecycle
             .editEntry(cacheEntry)
             .decision(new DecisionStamp(wm.decisionVersion(), wm.nodeId(), wm.epoch()))
             .ttl(hardTtlMsIfZero, softTtlMsIfZero)
@@ -376,9 +384,8 @@ public class DefaultWorkerDecisionHandler implements WorkerDecisionHandler {
     // path, which returns the rewritten CacheEntry.
     if (cooled[0]) {
       log.debug("HotKey cooled by Worker: {}", cacheKey);
-      if (computed instanceof CacheEntry entry) {
-        // only CacheEntry we hook.
-        fireAfterCoolDowngrade(cacheKey, wm, entry);
+      if (computed != null) {
+        fireAfterCoolDowngrade(cacheKey, wm, computed);
       }
     } else {
       fireOnCoolSkipped(cacheKey, wm);

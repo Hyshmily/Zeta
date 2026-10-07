@@ -14,8 +14,8 @@ Zeta 端点是普通的 Spring `@RestController`，**不是** Actuator `@Endpoin
 | ----------------------------------------- | ------------------------------- |
 | 应用诊断（`ZetaEndpoint`）                | `/actuator/hotkey`              |
 | 哈希环查询（`RingEndpoint`，见第 3 节）   | `/actuator/hotkeyring`          |
-| 状态机运行时配置（Worker，见第 4 节）     | `/actuator/hotkey/worker/state` |
-| FastLane 规则管理（Worker）               | `/actuator/hotkey/fastlane`     |
+| 状态机运行时配置（Worker，见第 4 节）     | `/actuator/hotkey-worker-state` |
+| FastLane 规则管理（Worker）               | `/actuator/hotkey-fastlane`     |
 
 支持可选的 `?limit=N` 查询参数限制返回的应用端 TopK 条目数（默认 100）。
 
@@ -165,7 +165,7 @@ ADR-0080 引入的这四个检测面指标，是评判任何 Worker 检测架构
 
 ## 3. 一致性哈希环管理
 
-当启用一致性哈希（`zeta.local.consistent-hashing.enabled=true`）且 classpath 中包含 `spring-boot-starter-actuator` 与 `spring-boot-starter-web` 时，会在 `/actuator/hotkeyring` 注册一个 REST 控制器（`RingEndpoint.java`），用于环查询。
+当启用一致性哈希（`zeta.local.consistent-hashing.enabled=true`）且 classpath 中包含 `spring-boot-starter-actuator` 时，会在 `/actuator/hotkeyring` 注册一个标准 Actuator 端点（`RingEndpoint.java`，id `hotkeyring`），用于环查询。它运行在管理平面（端口、暴露范围与角色走标准 `management.*` 配置），而非应用端口。
 
 | 方法  | 路径                         | 说明                        |
 | ----- | ---------------------------- | --------------------------- |
@@ -174,17 +174,17 @@ ADR-0080 引入的这四个检测面指标，是评判任何 Worker 检测架构
 
 ## 4. Worker 状态机运行时配置
 
-当启用 Worker 模式（`zeta.worker.enabled=true`）且 classpath 中包含 `spring-boot-starter-actuator` 与 `spring-boot-starter-web` 时，会在 `/actuator/hotkey/worker/state` 注册一个 REST 控制器（`StateMachineEndpoint.java`），用于运行时读取和更新状态机配置。
+当启用 Worker 模式（`zeta.worker.enabled=true`）且 classpath 中包含 `spring-boot-starter-actuator` 时，会在 `/actuator/hotkey-worker-state` 注册一个标准 Actuator 端点（`StateMachineEndpoint.java`，id `hotkey-worker-state`），用于运行时读取和更新状态机配置。它运行在管理平面：运行时配置变更不再位于应用端口。（端点 id 无法像原 `/actuator/hotkey/worker/state` MVC 路径那样嵌套；读取形态不变，写入改为类型化字段——见下。）
 
 | 方法   | 路径                            | 说明                                                                     |
 | ------ | ------------------------------- | ------------------------------------------------------------------------ |
-| `GET`  | `/actuator/hotkey/worker/state` | 返回当前 `confirmCount`、`coolCount`、`preCoolGraceCount`、`trackedKeys` |
-| `POST` | `/actuator/hotkey/worker/state` | 更新一个或多个参数（请求体：`{"confirmCount":"5"}`）                     |
+| `GET`  | `/actuator/hotkey-worker-state` | 返回当前 `confirmCount`、`coolCount`、`preCoolGraceCount`、`trackedKeys` |
+| `POST` | `/actuator/hotkey-worker-state` | 更新一个或多个参数（请求体：`{"confirmCount":5,"coolCount":15}`——类型化字段，缺失表示保持） |
 
 **读取当前状态：**
 
 ```bash
-curl http://localhost:8080/actuator/hotkey/worker/state
+curl http://localhost:8080/actuator/hotkey-worker-state
 ```
 
 **响应示例：**
@@ -203,9 +203,9 @@ curl http://localhost:8080/actuator/hotkey/worker/state
 变更通过心跳广播传播到对等 Worker。每次 POST 会递增内部的 `configTimestampCounter`——接收方 Worker 仅当时间戳严格更新于自身时才应用新值。
 
 ```bash
-curl -X POST http://localhost:8080/actuator/hotkey/worker/state \
+curl -X POST http://localhost:8080/actuator/hotkey-worker-state \
   -H "Content-Type: application/json" \
-  -d '{"confirmCount":"5","coolCount":"15"}'
+  -d '{"confirmCount":5,"coolCount":15}'
 ```
 
 **响应示例：**
@@ -216,4 +216,4 @@ curl -X POST http://localhost:8080/actuator/hotkey/worker/state \
 }
 ```
 
-**校验规则：** POST 应用后的参数组合必须满足与配置协商层对心跳 gossip 相同的不变量——`confirmCount >= 1`、`preCoolGraceCount >= 1` 且 `coolCount > preCoolGraceCount`（提供的字段覆盖，其余字段保持当前值）。违反不变量的 POST 会被拒绝并返回 `"status": "error"`，不做任何修改：本地接受但被 gossip 拒绝的配置会让该 Worker 永久偏离集群且无法自动收敛。不含任何可识别字段的 POST 是纯 no-op（不重写、不递增时间戳）。
+**校验规则：** 写入的参数组合必须满足与配置协商层对心跳 gossip 相同的不变量——`confirmCount >= 1`、`preCoolGraceCount >= 1` 且 `coolCount > preCoolGraceCount`（提供的字段覆盖，其余字段保持当前值）。违反不变量的写入会被拒绝并返回 `"status": "error"`，不做任何修改：本地接受但被 gossip 拒绝的配置会让该 Worker 永久偏离集群且无法自动收敛。不含任何可识别字段的写入是纯 no-op（不重写、不递增时间戳）。格式错误（非数字）输入到不了方法——actuator 框架在分发前以 400 拒绝。
