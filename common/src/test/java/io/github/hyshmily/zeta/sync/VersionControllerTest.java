@@ -394,4 +394,66 @@ class VersionControllerTest {
     assertThat(result.dataVersion()).isEqualTo(7L);
     assertThat(result.degraded()).isFalse();
   }
+
+  /**
+   * Probe fail-open (ADR-0033): a throwing value-GET withholds the stamp —
+   * repeated failures stay silent after the first WARN per window (E1).
+   */
+  @Test
+  void currentVersion_whenRedisThrows_returnsEmptyAndWarnsOncePerWindow() {
+    @SuppressWarnings("unchecked")
+    org.springframework.data.redis.core.ValueOperations<String, String> valueOps = mock(
+      org.springframework.data.redis.core.ValueOperations.class
+    );
+    when(redisTemplate.opsForValue()).thenReturn(valueOps);
+    when(valueOps.get(anyString())).thenThrow(new RuntimeException("down"));
+
+    CollectingAppender appender = new CollectingAppender();
+    ch.qos.logback.classic.Logger logbackLogger = ((LoggerContext) LoggerFactory.getILoggerFactory()).getLogger(
+      VersionControllerImpl.class
+    );
+    appender.start();
+    logbackLogger.addAppender(appender);
+    try {
+      assertThat(controller.currentVersion("k")).isEmpty();
+      assertThat(controller.currentVersion("k")).isEmpty();
+      long warns = appender.events.stream().filter(e -> e.getLevel() == Level.WARN).count();
+      assertThat(warns).isLessThanOrEqualTo(1);
+    } finally {
+      logbackLogger.detachAppender(appender);
+    }
+  }
+
+  /**
+   * Batch probe fail-open: a failed MGET maps every key to empty (E1).
+   */
+  @Test
+  void currentVersions_whenRedisThrows_mapsAllKeysToEmpty() {
+    @SuppressWarnings("unchecked")
+    org.springframework.data.redis.core.ValueOperations<String, String> valueOps = mock(
+      org.springframework.data.redis.core.ValueOperations.class
+    );
+    when(redisTemplate.opsForValue()).thenReturn(valueOps);
+    when(valueOps.multiGet(anyList())).thenThrow(new RuntimeException("down"));
+
+    assertThat(controller.currentVersions(java.util.List.of("a", "b"))).containsExactly(
+      java.util.Map.entry("a", Optional.empty()),
+      java.util.Map.entry("b", Optional.empty())
+    );
+  }
+
+  /**
+   * Malformed version values are treated as absent without throwing (E1).
+   */
+  @Test
+  void currentVersions_withMalformedValue_treatsAsAbsent() {
+    @SuppressWarnings("unchecked")
+    org.springframework.data.redis.core.ValueOperations<String, String> valueOps = mock(
+      org.springframework.data.redis.core.ValueOperations.class
+    );
+    when(redisTemplate.opsForValue()).thenReturn(valueOps);
+    when(valueOps.multiGet(anyList())).thenReturn(java.util.List.of("not-a-number"));
+
+    assertThat(controller.currentVersions(java.util.List.of("k")).get("k")).isEmpty();
+  }
 }

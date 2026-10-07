@@ -341,11 +341,15 @@ public final class FastMath {
       k1 *= M64_C1;
       k1 = Long.rotateLeft(k1, 31) * M64_C2;
       h1 ^= k1;
-      h1 = Long.rotateLeft(h1, 27) * 5 + 0x52dce729L + h2;
+      h1 = Long.rotateLeft(h1, 27);
+      h1 += h2;
+      h1 = h1 * 5 + 0x52dce729L;
       k2 *= M64_C2;
       k2 = Long.rotateLeft(k2, 33) * M64_C1;
       h2 ^= k2;
-      h2 = Long.rotateLeft(h2, 31) * 5 + 0x38495ab5L + h1;
+      h2 = Long.rotateLeft(h2, 31);
+      h2 += h1;
+      h2 = h2 * 5 + 0x38495ab5L;
     }
     long k1 = 0;
     long k2 = 0;

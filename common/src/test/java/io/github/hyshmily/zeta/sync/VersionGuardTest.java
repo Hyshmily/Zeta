@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Test;
  */
 class VersionGuardTest {
 
-  private Cache<String, Object> cache;
+  private Cache<String, CacheEntry> cache;
 
   @BeforeEach
   void setUp() {
@@ -183,23 +183,23 @@ class VersionGuardTest {
   }
 
   /**
-   * Verifies that when the cache contains a non-{@link CacheEntry} object, the worker guard
-   * returns false (do not skip).
+   * Verifies that when the cache has no entry for the key, the worker guard
+   * returns false (do not skip) — F1 L1 type closure: absence is the only
+   * non-entry shape.
    */
   @Test
-  void shouldSkipForWorker_withNonCacheEntryInCache_shouldNotSkip() {
-    cache.put("key", "not-a-cache-entry");
-    assertThat(VersionGuard.shouldSkipForWorker(cache, "key", 1, null, 0)).isFalse();
+  void shouldSkipForWorker_withAbsentKey_shouldNotSkip() {
+    assertThat(VersionGuard.shouldSkipForWorker(cache, "missing", 1, null, 0)).isFalse();
   }
 
   /**
-   * Verifies that when the cache contains a non-{@link CacheEntry} object, the sync guard
-   * returns false (do not skip).
+   * Verifies that when the cache has no entry for the key, the sync guard
+   * returns false (do not skip) — F1 L1 type closure: absence is the only
+   * non-entry shape.
    */
   @Test
-  void shouldSkipForSync_withNonCacheEntryInCache_shouldNotSkip() {
-    cache.put("key", "not-a-cache-entry");
-    assertThat(VersionGuard.shouldSkipForSync(cache, "key", 1, false)).isFalse();
+  void shouldSkipForSync_withAbsentKey_shouldNotSkip() {
+    assertThat(VersionGuard.shouldSkipForSync(cache, "missing", 1, false)).isFalse();
   }
 
   // ── shouldSkipForWorker with nodeId/epoch (P0-2) ──

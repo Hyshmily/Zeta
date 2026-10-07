@@ -54,7 +54,7 @@ import org.springframework.util.Assert;
  * <p>One-shot scheduling via {@link #schedule(Runnable, long, TimeUnit)} (and the callable
  * variant) is inherited unchanged from the JDK.
  *
- * <p>The returned {@link ScheduledFuture} tracks the chain: {@link #cancel(boolean)} stops all
+ * <p>The returned {@link ScheduledFuture} tracks the chain: {@link ScheduledFuture#cancel(boolean)} stops all
  * future runs and optionally interrupts the currently executing run — it returns {@code true}
  * once the chain is stopped, regardless of whether the link that happened to be executing at
  * that moment could be interrupted; {@code get()} and {@code isDone()} reflect the state of

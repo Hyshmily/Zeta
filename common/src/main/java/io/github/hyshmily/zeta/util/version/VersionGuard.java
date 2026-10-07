@@ -35,12 +35,26 @@ import lombok.extern.slf4j.Slf4j;
  *
  * <ul>
  *   <li><b>{@link #shouldSkipForWorker}</b> — Compares {@code decisionVersion}
- *       from Worker HOT/COOL broadcasts. Uses epoch (Worker incarnation,
- *       ADR-0010) and nodeId for cross-restart and cross-Worker ordering.
+ *       from Worker HOT/COOL broadcasts. Uses nodeId and epoch (Worker
+ *       incarnation, ADR-0010) for cross-restart and cross-Worker ordering.
  *       Unlike {@code shouldSkipForSync}, the Worker-path guard does not
  *       consider the {@code isVersionDegraded} flag: the epoch mechanism
  *       already provides the safety net during Redis outages, and the
- *       degraded flag belongs to the {@code dataVersion} domain only.</li>
+ *       degraded flag belongs to the {@code dataVersion} domain only.
+ *       <p><b>Node-locality invariant (ADR-0085).</b> Epoch and
+ *       {@code decisionVersion} are <em>per-Worker</em> quantities: epoch is a
+ *       restart counter seeded from that Worker's wall clock at boot, and
+ *       {@code decisionVersion} is a per-Worker counter starting at 0. Neither
+ *       is comparable across Workers, so both comparisons are scoped to
+ *       messages whose {@code nodeId} matches the entry's
+ *       {@code decisionNodeId}; every cross-Worker message is accepted on
+ *       arrival (last-writer-wins). Comparing epoch across Workers previously
+ *       made a rolling restart permanently mute the surviving Workers: the
+ *       restarted Worker stamped a higher epoch, and every later decision from
+ *       an older-epoch Worker was dropped until the entry expired. Arrival
+ *       order converges because the owning Worker re-broadcasts its decision
+ *       (ADR-0024), so a stale out-of-order decision is corrected by the next
+ *       broadcast instead of poisoning the entry for its whole TTL.</li>
  *   <li><b>{@link #shouldSkipForSync}</b> — Compares {@code dataVersion}
  *       from application-level data-mutation broadcasts. Uses a 4-case degraded
  *       comparison matrix:
@@ -73,14 +87,19 @@ public final class VersionGuard {
    * <p>Decision logic:
    * <ol>
    * <li>No existing entry → accept (return false)</li>
-   *   <li>Incoming epoch &gt; existing epoch → accept unconditionally
+   *   <li><b>Different nodeId → accept unconditionally.</b> Both the epoch
+   *       (a per-Worker restart counter seeded from that Worker's own wall
+   *       clock at boot) and the decisionVersion (a per-Worker counter starting
+   *       at 0) are <em>node-local</em> quantities; neither is comparable
+   *       across Workers, so arrival order — last-writer-wins — is the only
+   *       sound tie-break. See the class Javadoc for why this branch must be
+   *       evaluated <em>before</em> the epoch comparison.</li>
+   *   <li>Same nodeId, incoming epoch &gt; existing epoch → accept
    *       (Worker restart detected — ADR-0010)</li>
-   *   <li>Incoming epoch &lt; existing epoch → skip (stale incarnation message)</li>
-   *   <li>Same epoch, same nodeId → compare {@code decisionVersion}: skip if
+   *   <li>Same nodeId, incoming epoch &lt; existing epoch → skip (stale
+   *       incarnation message)</li>
+   *   <li>Same nodeId, same epoch → compare {@code decisionVersion}: skip if
    *       existing dv &gt;= incoming dv (same counter, directly comparable)</li>
-   *   <li>Same epoch, different nodeId → accept unconditionally (different
-   *       counters are not comparable; last-writer-wins converges via next
-   *       epoch or subsequent broadcasts)</li>
    * </ol>
    *
    * @param existing              the existing cache entry; may be null
@@ -99,12 +118,21 @@ public final class VersionGuard {
       return false;
     }
 
+    // Epoch and decisionVersion are node-local. Comparing them across Workers
+    // silently and permanently poisoned an entry: after a rolling restart, the
+    // surviving (older-epoch) Worker's decisions were dropped forever because
+    // the entry had been stamped by a freshly restarted Worker with a higher
+    // epoch. Ordering by arrival is the only cross-Worker order that exists.
+    if (!Objects.equals(incomingNodeId, existing.getDecisionNodeId())) {
+      return false;
+    }
+
+    // Same Worker: epoch is a monotone incarnation counter, so it is comparable.
     if (incomingEpoch > existing.getDecisionEpoch()) {
       return false;
     }
     if (incomingEpoch < existing.getDecisionEpoch()) {
-      // Stale message from an old Worker incarnation — the epoch comparison
-      // already ensures correct ordering regardless of magnitude.
+      // Stale message from an old Worker incarnation.
       log.debug(
         "Epoch rollback: existing={}, incoming={}, nodeId={} — skipping stale message",
         existing.getDecisionEpoch(),
@@ -114,14 +142,7 @@ public final class VersionGuard {
       return true;
     }
 
-    if (Objects.equals(incomingNodeId, existing.getDecisionNodeId())) {
-      return existing.getDecisionVersion() >= incomingDecisionVersion;
-    }
-
-    // Different nodeId at the same epoch — cross-Worker ownership transfer;
-    // accept unconditionally.  Counter values are not comparable across
-    // Workers; convergence happens via the next epoch.
-    return false;
+    return existing.getDecisionVersion() >= incomingDecisionVersion;
   }
 
   /**
@@ -142,7 +163,7 @@ public final class VersionGuard {
    *         is already up-to-date); {@code false} if the decision may need to be applied
    */
   public static boolean shouldSkipForWorker(
-    Cache<String, Object> cache,
+    Cache<String, CacheEntry> cache,
     String cacheKey,
     long incomingDecisionVersion,
     String incomingNodeId,
@@ -228,7 +249,12 @@ public final class VersionGuard {
    *                          skips (the plain {@code >=} matrix)
    * @return {@code true} if the incoming message should be skipped; {@code false} if it should be applied
    */
-  private static boolean compareDegraded(CacheEntry existing, long incomingVersion, boolean incomingDegraded, boolean equalApplies) {
+  private static boolean compareDegraded(
+    CacheEntry existing,
+    long incomingVersion,
+    boolean incomingDegraded,
+    boolean equalApplies
+  ) {
     if (existing == null) {
       return false;
     }
@@ -238,9 +264,7 @@ public final class VersionGuard {
     if (existingDegraded != incomingDegraded) {
       return incomingDegraded;
     }
-    return equalApplies
-      ? existing.getDataVersion() > incomingVersion
-      : existing.getDataVersion() >= incomingVersion;
+    return equalApplies ? existing.getDataVersion() > incomingVersion : existing.getDataVersion() >= incomingVersion;
   }
 
   /**
@@ -260,7 +284,7 @@ public final class VersionGuard {
    * @see #shouldSkipForRefresh(CacheEntry, long, boolean)
    */
   public static boolean shouldSkipForRefresh(
-    Cache<String, Object> cache,
+    Cache<String, CacheEntry> cache,
     String cacheKey,
     long incomingDataVersion,
     boolean incomingDegraded
@@ -286,7 +310,7 @@ public final class VersionGuard {
    *         {@code false} if the update may be needed
    */
   public static boolean shouldSkipForSync(
-    Cache<String, Object> cache,
+    Cache<String, CacheEntry> cache,
     String cacheKey,
     long incomingDataVersion,
     boolean incomingDegraded
@@ -297,15 +321,15 @@ public final class VersionGuard {
   /**
    * Cache-level fast path shared by both guard families: resolves the existing
    * {@link CacheEntry} for the key and applies {@code guard} to it. Absent keys
-   * and values that are not {@link CacheEntry} (raw user values) never skip.
+   * never skip.
    *
    * @param cache    the local Caffeine L1 cache; must not be null
    * @param cacheKey the cache key to look up; must not be null
    * @param guard    the entry-level guard to apply to the resolved entry
    * @return the guard's verdict, or {@code false} when no {@link CacheEntry} exists
    */
-  private static boolean shouldSkip(Cache<String, Object> cache, String cacheKey, Predicate<CacheEntry> guard) {
-    Object existing = cache.getIfPresent(cacheKey);
-    return existing instanceof CacheEntry entry && guard.test(entry);
+  private static boolean shouldSkip(Cache<String, CacheEntry> cache, String cacheKey, Predicate<CacheEntry> guard) {
+    CacheEntry existing = cache.getIfPresent(cacheKey);
+    return existing != null && guard.test(existing);
   }
 }

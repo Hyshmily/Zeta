@@ -16,8 +16,9 @@
 package io.github.hyshmily.zeta.reporting;
 
 import io.github.hyshmily.zeta.Internal;
-import org.jspecify.annotations.NonNull;
-import org.springframework.amqp.core.Message;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jspecify.annotations.NonNull;import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConversionException;
@@ -48,6 +49,27 @@ public class CompactAwareReportMessageConverter implements MessageConverter {
 
   private final Jackson2JsonMessageConverter jsonDelegate;
   private final boolean compactEncoding;
+
+  /**
+   * Builds a converter whose Jackson delegate ignores unknown JSON properties.
+   * <p>
+   * The only supported JSON evolution is adding fields: old receivers drop
+   * unknown fields and keep serving known ones (fail-open). Removing or
+   * retyping a field is a breaking change and needs a binary-format bump with
+   * a Workers-first rollout instead. Both AMQP bean sites
+   * ({@code zetaReportMessageConverter} on the App side,
+   * {@code reportMessageConverter} on the Worker side) must build through this
+   * factory so the two sides cannot drift apart (ADR-0091).
+   *
+   * @param compactEncoding whether {@link ReportMessage} payloads are
+   *                        <em>sent</em> in the compact format (decode is
+   *                        always dual-format regardless of this flag)
+   * @return a dual-format converter with a forward-compatible JSON delegate
+   */
+  public static CompactAwareReportMessageConverter forwardCompatible(boolean compactEncoding) {
+    ObjectMapper mapper = new ObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    return new CompactAwareReportMessageConverter(new Jackson2JsonMessageConverter(mapper), compactEncoding);
+  }
 
   /**
    * @param jsonDelegate    the Jackson converter used for the JSON format

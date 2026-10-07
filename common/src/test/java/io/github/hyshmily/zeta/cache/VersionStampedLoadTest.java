@@ -26,14 +26,16 @@ import com.rabbitmq.client.Channel;
 import io.github.hyshmily.zeta.annotation.annotationsupporter.NullValue;
 import io.github.hyshmily.zeta.autoconfigure.ZetaProperties;
 import io.github.hyshmily.zeta.cache.cachesupport.BroadcastBuffer;
-import io.github.hyshmily.zeta.cache.cachesupport.ExpireManager;
+import io.github.hyshmily.zeta.cache.cachesupport.EntryLifecycle;
 import io.github.hyshmily.zeta.cache.cachesupport.SingleFlight;
-import io.github.hyshmily.zeta.cache.cachesupport.impl.ExpireManagerImpl;
+import io.github.hyshmily.zeta.cache.cachesupport.impl.EntryLifecycleImpl;
+import io.github.hyshmily.zeta.scheduler.BackgroundRefresher;
+import io.github.hyshmily.zeta.scheduler.DefaultBackgroundRefresher;
 import io.github.hyshmily.zeta.cache.codec.CacheCompressor;
 import io.github.hyshmily.zeta.cache.loader.CacheLoader;
 import io.github.hyshmily.zeta.hotkeydetector.HotKeyDetector;
 import io.github.hyshmily.zeta.model.CacheEntry;
-import io.github.hyshmily.zeta.model.CachePolicy;
+import io.github.hyshmily.zeta.model.ReadPolicy;
 import io.github.hyshmily.zeta.model.KeyState;
 import io.github.hyshmily.zeta.model.StalePolicy;
 import io.github.hyshmily.zeta.rule.RuleMatcher;
@@ -86,9 +88,10 @@ class VersionStampedLoadTest {
   private final SnowflakeIdGenerator snowflakeIdGenerator = new SnowflakeIdGenerator(0, 1, 5L, false);
 
   private HotKeyDetector hotKeyDetector;
-  private Cache<String, Object> cache;
+  private Cache<String, CacheEntry> cache;
   private SingleFlight singleFlight;
-  private ExpireManager expireManager;
+  private EntryLifecycle entryLifecycle;
+  private BackgroundRefresher backgroundRefresher;
   private Executor executor;
   private VersionController versionController;
   private HotKeyCache hotKeyCache;
@@ -119,7 +122,8 @@ class VersionStampedLoadTest {
     });
     executor = Runnable::run;
     ZetaProperties ttlConfig = new ZetaProperties();
-    expireManager = new ExpireManagerImpl(cache, executor, ttlConfig, 10, CacheCompressor.NONE, null);
+    entryLifecycle = new EntryLifecycleImpl(cache, ttlConfig, CacheCompressor.NONE, null);
+    backgroundRefresher = new DefaultBackgroundRefresher(cache, executor, entryLifecycle.ttlPolicy(), CacheCompressor.NONE, 10);
     versionController = mock(VersionController.class);
     when(versionController.currentVersion(anyString())).thenReturn(Optional.empty());
     when(versionController.currentVersions(anyIterable())).thenReturn(new LinkedHashMap<>());
@@ -130,7 +134,8 @@ class VersionStampedLoadTest {
       hotKeyDetector,
       cache,
       singleFlight,
-      expireManager,
+      entryLifecycle,
+      backgroundRefresher,
       executor,
       new CentralDispatcher(
         Optional.empty(),
@@ -175,7 +180,7 @@ class VersionStampedLoadTest {
     SyncDecisionHandler handler = new DefaultSyncDecisionHandler(
       cache,
       loader,
-      expireManager,
+      entryLifecycle,
       mock(RuleMatcher.class),
       List.of()
     , null);
@@ -220,7 +225,7 @@ class VersionStampedLoadTest {
     when(versionController.currentVersion("k")).thenReturn(Optional.of(42L));
     CacheSyncListener listener = createListener(key -> "fresh");
 
-    assertThat(hotKeyCache.get("k", CachePolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains(
+    assertThat(hotKeyCache.get("k", ReadPolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains(
       "v"
     );
 
@@ -250,7 +255,7 @@ class VersionStampedLoadTest {
     when(versionController.currentVersion("k")).thenReturn(Optional.empty());
     CacheSyncListener listener = createListener(key -> "fresh");
 
-    assertThat(hotKeyCache.get("k", CachePolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains(
+    assertThat(hotKeyCache.get("k", ReadPolicy.of(() -> "v", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))).contains(
       "v"
     );
 
@@ -275,7 +280,7 @@ class VersionStampedLoadTest {
     assertThat(
       hotKeyCache.computeIfAbsentWithSoftExpire(
         "k",
-        CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE)
+        ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.REVALIDATE)
       )
     ).contains("fresh");
 
@@ -295,7 +300,7 @@ class VersionStampedLoadTest {
     CacheSyncListener listener = createListener(key -> "fresh");
 
     assertThat(
-      hotKeyCache.get("k", CachePolicy.of(() -> null, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
+      hotKeyCache.get("k", ReadPolicy.of(() -> null, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH))
     ).isEmpty();
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
@@ -327,7 +332,7 @@ class VersionStampedLoadTest {
     cache.put("k", softExpiredEntry("old", 5L, false, KeyState.HOT));
     when(versionController.currentVersion("k")).thenReturn(Optional.of(42L));
 
-    hotKeyCache.getWithSoftExpire("k", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getValue()).isEqualTo("fresh");
@@ -336,16 +341,37 @@ class VersionStampedLoadTest {
   }
 
   @Test
-  @DisplayName("refresh result is discarded when L1 advanced beyond the probed version")
+  @DisplayName("refresh result is discarded when L1 advanced beyond the trigger-time snapshot")
   void refreshTask_discardedWhenEntryAdvancedBeyondProbe() {
     cache.put("k", softExpiredEntry("old", 60L, false, KeyState.HOT));
-    // Redis already at 50: the entry (60) is newer than the probe.
+    // Probe older than the entry: with no concurrent write the refresh
+    // applies (see below); here the reader simulates a write landing while
+    // the refresh is in flight, advancing L1 beyond the snapshot.
     when(versionController.currentVersion("k")).thenReturn(Optional.of(50L));
 
-    hotKeyCache.getWithSoftExpire("k", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> {
+      cache.put("k", softExpiredEntry("newer", 70L, false, KeyState.HOT));
+      return "fresh";
+    }, 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
-    assertThat(ce.getValue()).isEqualTo("old");
+    assertThat(ce.getValue()).isEqualTo("newer");
+    assertThat(ce.getDataVersion()).isEqualTo(70L);
+  }
+
+  @Test
+  @DisplayName("refresh applies with max(entry, probe) version when no write landed in flight")
+  void refreshTask_appliesWithMaxVersionWhenNoConcurrentWrite() {
+    cache.put("k", softExpiredEntry("old", 60L, false, KeyState.HOT));
+    // Stale probe (version-key wraparound shape): the fresh value and
+    // extended TTLs still apply, but the entry's own version wins so the
+    // L1 watermark never regresses.
+    when(versionController.currentVersion("k")).thenReturn(Optional.of(50L));
+
+    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+
+    CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
+    assertThat(ce.getValue()).isEqualTo("fresh");
     assertThat(ce.getDataVersion()).isEqualTo(60L);
   }
 
@@ -355,7 +381,7 @@ class VersionStampedLoadTest {
     cache.put("k", softExpiredEntry("old", Long.MIN_VALUE | snowflakeIdGenerator.nextId(), true, KeyState.HOT));
     when(versionController.currentVersion("k")).thenReturn(Optional.of(42L));
 
-    hotKeyCache.getWithSoftExpire("k", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getValue()).isEqualTo("fresh");
@@ -369,7 +395,7 @@ class VersionStampedLoadTest {
     cache.put("k", softExpiredEntry("old", 60L, false, KeyState.HOT));
     when(versionController.currentVersion("k")).thenReturn(Optional.empty());
 
-    hotKeyCache.getWithSoftExpire("k", CachePolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
+    hotKeyCache.getWithSoftExpire("k", ReadPolicy.of(() -> "fresh", 0L, 0L, true, true, StalePolicy.SOFT_REFRESH));
 
     CacheEntry ce = (CacheEntry) cache.getIfPresent("k");
     assertThat(ce.getValue()).isEqualTo("fresh");

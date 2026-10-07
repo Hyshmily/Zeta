@@ -107,6 +107,16 @@ public class VersionControllerImpl implements VersionController {
    */
   private final LogThrottle wraparoundLogThrottle = LogThrottle.perDefaultWindow();
 
+  /**
+   * Process-wide gate for probe-failure alarms (E1, ADR-0037 convention): a
+   * Redis outage or poisoned version key would otherwise WARN once per L1 miss
+   * at miss rate. Probe outage is a process-wide condition, so one shared gate
+   * (not per instance) admits a single WARN per 10s window; the rest degrade
+   * to DEBUG. Shared (not per instance) also because {@link #parseVersion} is
+   * static and must not force a signature change.
+   */
+  private static final LogThrottle PROBE_WARN_THROTTLE = LogThrottle.perDefaultWindow();
+
   /** Holder for the Redis INCR script — lazily loaded to avoid {@code NoClassDefFoundError} when Redis is absent. */
   @SuppressWarnings("java:S3985")
   private static class IncrScriptHolder {
@@ -268,7 +278,11 @@ public class VersionControllerImpl implements VersionController {
           String v = t.opsForValue().get(VERSION_KEY_PREFIX + cacheKey);
           return v != null ? Optional.of(Long.parseLong(v)) : Optional.<Long>empty();
         } catch (Exception e) {
-          log.warn("Failed to read current version for key {}", cacheKey, e);
+          if (PROBE_WARN_THROTTLE.tryAcquire()) {
+            log.warn("Failed to read current version for key {}", cacheKey, e);
+          } else {
+            log.debug("Failed to read current version for key {} (suppressed)", cacheKey);
+          }
           return Optional.<Long>empty();
         }
       })
@@ -306,7 +320,11 @@ public class VersionControllerImpl implements VersionController {
           }
           return out;
         } catch (Exception e) {
-          log.warn("Failed to read current versions for {} keys", keys.size(), e);
+          if (PROBE_WARN_THROTTLE.tryAcquire()) {
+            log.warn("Failed to read current versions for {} keys", keys.size(), e);
+          } else {
+            log.debug("Failed to read current versions for {} keys (suppressed)", keys.size());
+          }
           return allEmpty(keys);
         }
       })
@@ -324,7 +342,11 @@ public class VersionControllerImpl implements VersionController {
     try {
       return Optional.of(Long.parseLong(raw));
     } catch (NumberFormatException e) {
-      log.warn("Malformed version value '{}', treated as absent (fail-open)", raw);
+      if (PROBE_WARN_THROTTLE.tryAcquire()) {
+        log.warn("Malformed version value: {}", raw, e);
+      } else {
+        log.debug("Malformed version value (suppressed): {}", raw);
+      }
       return Optional.empty();
     }
   }

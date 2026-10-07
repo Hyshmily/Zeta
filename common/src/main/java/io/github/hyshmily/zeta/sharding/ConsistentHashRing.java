@@ -107,9 +107,6 @@ public class ConsistentHashRing {
     new RingState(new int[0], new String[0], Collections.emptySet())
   );
 
-  /** Safety limit to prevent infinite-loop when the ring is corrupt or all nodes are dead. */
-  private static final int MAX_PROBES = 512;
-
   /**
    * Rate-limiter for the probe-exhaustion WARN: one per window (repo standard: never WARN
    * on the hot path). {@link #locateNode} runs on every routed key, so the per-key
@@ -189,27 +186,31 @@ public class ConsistentHashRing {
     }
 
     int idx = startIdx;
-    int probes = 0;
     do {
       String physicalNode = nodes[idx];
       if (isAlive.test(physicalNode)) {
         return physicalNode;
       }
       if (++idx >= len) idx = 0; // circular advancement
-      if (++probes > MAX_PROBES) {
-        // Hot path (every routed key): the per-key detail is DEBUG-only; the WARN is
-        // aggregated and rate-limited to one per window, never once per key.
-        log.debug(
-          "Exhausted {} probes in consistent hash ring for key '{}', " +
-            "all workers appear dead or ring is corrupt. Discarding this key.",
-          MAX_PROBES,
-          key
-        );
-        reportProbeExhaustion();
-        break;
-      }
     } while (idx != startIdx);
 
+    // A full cycle found no alive node. The former fixed cap of 512 probes
+    // aborted long before that on large rings — 100 workers x 500 vnodes is
+    // 50 000 slots, so 512 probes covered ~1% and a rolling restart (where the
+    // alive set and the ring nodes are momentarily disjoint) discarded every
+    // routed key even though some ring nodes were alive. The do-while above
+    // already terminates after exactly one full cycle, so no counter is needed:
+    // completing the cycle IS the proof that no alive node exists.
+    //
+    // Hot path (every routed key): the per-key detail is DEBUG-only; the WARN is
+    // aggregated and rate-limited to one per window, never once per key.
+    log.debug(
+      "Completed a full ring cycle ({} slots) for key '{}' without finding an alive node, " +
+        "all ring nodes appear dead or the ring is stale. Discarding this key.",
+      len,
+      key
+    );
+    reportProbeExhaustion();
     return null;
   }
 
@@ -228,10 +229,9 @@ public class ConsistentHashRing {
     }
     suppressedProbeExhaustions.addAndGet(-discarded);
     log.warn(
-      "Exhausted {} probes in consistent hash ring: every ring node failed the liveness " +
-        "predicate (rolling restart?) or the ring is corrupt. Discarded {} key routing(s) " +
+      "Exhausted a full ring cycle in the consistent hash ring: every ring node failed the " +
+        "liveness predicate (rolling restart?) or the ring is stale. Discarded {} key routing(s) " +
         "in the last window.",
-      MAX_PROBES,
       discarded
     );
   }
